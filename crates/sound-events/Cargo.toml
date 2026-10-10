@@ -1,0 +1,13 @@
+[package]
+name = "sound-events"
+version = "0.1.0"
+description = "Sans-I/O sound analysis for nvrview: a per-second loudness envelope and a smoke and CO alarm pattern detector (T3, T4) for 16 kHz mono audio"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
