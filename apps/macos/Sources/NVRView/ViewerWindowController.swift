@@ -43,14 +43,25 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     private let split = NSSplitViewController()
     private var sidebarItem: NSSplitViewItem!
     private var sidebarHost: NSView?
-    /// Whether the sidebar was open when the window entered full screen.
-    private var sidebarBeforeFullScreen: Bool?
+    /// The user's choice for the sidebar, saved with the window. Full
+    /// screen closes and reopens the sidebar on its own; that never changes
+    /// this.
+    private var sidebarCollapsedPreference = false
+    /// Set while this controller itself collapses or expands the sidebar.
+    private var changingSidebar = false
+    private var sidebarObservation: NSKeyValueObservation?
+    /// The edge reveal over the stage while the sidebar is collapsed.
+    private let overlay: SidebarOverlay
+    private let overlayHost: NSHostingView<SidebarView>
 
     init(model: AppModel, content: WindowContent, renderer: GridRenderer) {
         self.model = model
         state = WindowState(content: content, name: "", tree: .empty)
         stage = StageView(model: model, state: state, renderer: renderer)
         editBar = EditBar()
+        overlayHost = NSHostingView(rootView: SidebarView(model: model, window: nil, state: sidebar))
+        overlayHost.sizingOptions = []
+        overlay = SidebarOverlay(content: overlayHost)
 
         let window = ViewerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 700),
@@ -73,7 +84,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         sidebarItem.maximumThickness = 320
         sidebarItem.canCollapse = true
         split.addSplitViewItem(sidebarItem)
-        let stageVC = StageContainerController(stage: stage, editBar: editBar)
+        let stageVC = StageContainerController(stage: stage, editBar: editBar, overlay: overlay)
         split.addSplitViewItem(NSSplitViewItem(viewController: stageVC))
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1180, height: 700))
@@ -84,6 +95,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         window.toolbar = toolbar
         window.toolbarStyle = .unified
 
+        overlayHost.rootView = SidebarView(model: model, window: self, state: sidebar)
+        overlay.onPin = { [weak self] in self?.dockSidebar() }
+        overlay.isEditing = { [weak self] in self?.overlayIsEditing ?? false }
+        sidebarObservation = sidebarItem.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.sidebarCollapsedChanged() }
+        }
         stage.delegate = self
         editBar.controller = self
         token = model.subscribe { [weak self] in self?.modelChanged() }
@@ -290,7 +307,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         guard let responder = window?.firstResponder else { return .stage }
         // The field editor of a text field, or any text view.
         if responder is NSText { return .textEditing }
-        if let view = responder as? NSView, let sidebarHost, view.isDescendant(of: sidebarHost) { return .sidebar }
+        if let view = responder as? NSView {
+            if let sidebarHost, view.isDescendant(of: sidebarHost) { return .sidebar }
+            if view.isDescendant(of: overlayHost) { return .sidebar }
+        }
         return .stage
     }
 
@@ -304,6 +324,50 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         return ViewerKeys.shortcut(
             keyCode: event.keyCode, characters: event.charactersIgnoringModifiers, modifiers: modifiers,
             isRepeat: event.isARepeat, context: keyContext)
+    }
+
+    /// A text field in the overlay is being edited.
+    private var overlayIsEditing: Bool {
+        guard let text = window?.firstResponder as? NSText, let view = text.delegate as? NSView else { return false }
+        return view.isDescendant(of: overlayHost)
+    }
+
+    /// The overlay's pin: docks the sidebar (the stage resizes as usual).
+    private func dockSidebar() {
+        overlay.dismissNow()
+        sidebarItem.animator().isCollapsed = false
+    }
+
+    private func sidebarCollapsedChanged() {
+        let collapsed = sidebarItem.isCollapsed
+        overlay.setCollapsed(collapsed)
+        guard !changingSidebar else { return }
+        sidebarCollapsedPreference = collapsed
+        onChange()
+    }
+
+    var sidebarOverlay: SidebarOverlay { overlay }
+
+    /// The self-test collapses and docks the sidebar like the user would.
+    func setSidebarCollapsedForTest(_ collapsed: Bool) { sidebarItem.animator().isCollapsed = collapsed }
+
+    /// Applies the saved choice when a window is reopened.
+    func restoreSidebar(collapsed: Bool) {
+        sidebarCollapsedPreference = collapsed
+        if sidebarItem.isCollapsed != collapsed {
+            changingSidebar = true
+            sidebarItem.isCollapsed = collapsed
+            changingSidebar = false
+        }
+        overlay.setCollapsed(sidebarItem.isCollapsed)
+    }
+
+    /// Collapses or expands the sidebar without changing the saved choice.
+    private func setSidebarTransiently(collapsed: Bool) {
+        guard sidebarItem.isCollapsed != collapsed else { return }
+        changingSidebar = true
+        sidebarItem.isCollapsed = collapsed
+        changingSidebar = false
     }
 
     func perform(_ shortcut: ViewerShortcut) {
@@ -433,7 +497,9 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .scratch(let name, let root): content = .scratch(name: name, root: root)
         }
         let fullScreen = window.styleMask.contains(.fullScreen)
-        return SavedWindow(content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen)
+        return SavedWindow(
+            content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen,
+            sidebarCollapsed: sidebarCollapsedPreference)
     }
 
     func windowDidMove(_ notification: Notification) { onChange() }
@@ -446,8 +512,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     // resizes the video while in full screen except the user's own S.
     func windowWillEnterFullScreen(_ notification: Notification) {
         windowedFrame = window?.frame
-        sidebarBeforeFullScreen = !sidebarItem.isCollapsed
-        if !sidebarItem.isCollapsed { sidebarItem.isCollapsed = true }
+        overlay.dismissNow()
+        setSidebarTransiently(collapsed: true)
         stage.fullScreen = true
     }
 
@@ -455,8 +521,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     func windowWillExitFullScreen(_ notification: Notification) {
         stage.fullScreen = false
-        if sidebarBeforeFullScreen == true, sidebarItem.isCollapsed { sidebarItem.isCollapsed = false }
-        sidebarBeforeFullScreen = nil
+        overlay.dismissNow()
+        setSidebarTransiently(collapsed: sidebarCollapsedPreference)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
@@ -472,6 +538,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
+        sidebarObservation = nil
         if let token { model.unsubscribe(token) }
         stage.tearDown()
         model.leases.update(from: held, to: [:])
@@ -533,9 +600,12 @@ final class StageContainerController: NSViewController {
     private let stage: StageView
     private let editBar: EditBar
 
-    init(stage: StageView, editBar: EditBar) {
+    private let overlay: SidebarOverlay
+
+    init(stage: StageView, editBar: EditBar, overlay: SidebarOverlay) {
         self.stage = stage
         self.editBar = editBar
+        self.overlay = overlay
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -559,6 +629,7 @@ final class StageContainerController: NSViewController {
             stage.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stage.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        overlay.install(in: root)
         view = root
     }
 }

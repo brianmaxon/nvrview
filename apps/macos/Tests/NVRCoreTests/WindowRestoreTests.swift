@@ -24,6 +24,21 @@ import Testing
         #expect(!text.contains("password") && !text.contains("host"))
     }
 
+    @Test func sidebarStateRoundTripsAndOldFilesLoadOpen() throws {
+        let w = SavedWindow(
+            content: .layout(id: "layout-1"), frame: CGRect(x: 1, y: 2, width: 900, height: 600), sidebarCollapsed: true)
+        let back = try JSONDecoder().decode([SavedWindow].self, from: JSONEncoder().encode([w]))
+        #expect(back == [w])
+        #expect(back[0].sidebarCollapsed)
+        // A file from before the field: take a fresh encoding and strip the key.
+        let sample = try JSONEncoder().encode([SavedWindow(content: .layout(id: "layout-1"), frame: .zero)])
+        var obj = try #require(JSONSerialization.jsonObject(with: sample) as? [[String: Any]])
+        obj[0].removeValue(forKey: "sidebarCollapsed")
+        let stripped = try JSONSerialization.data(withJSONObject: obj)
+        let loaded = try JSONDecoder().decode([SavedWindow].self, from: stripped)
+        #expect(loaded.count == 1 && !loaded[0].sidebarCollapsed)
+    }
+
     @Test func keepsAFrameWhoseTitleBarIsOnAScreen() {
         let f = CGRect(x: 100, y: 100, width: 900, height: 600)
         #expect(SavedWindow.placement(of: f, screens: [screen], minSize: min) == f)
