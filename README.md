@@ -85,6 +85,23 @@ from a Mac, including uncommitted work:
 NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh
 ```
 
+Each run prints the computer's free disk space (and warns under 10 GB), then
+the seconds every step took. Parallel sessions give themselves a worker folder
+with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 2 GB of
+build output, so delete a finished one with
+`NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh --clean <name>`.
+The worker builds without debug information (`NVRVIEW_WORKER_DEBUGINFO=1`
+keeps it) and builds the release library and the C# projects in the
+background while the Rust tests run. Optionally, in an administrator
+PowerShell on that computer, exclude its build folders from Microsoft
+Defender real-time scanning, which slows builds:
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\nvrview", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:USERPROFILE\.nuget\packages"
+```
+
+That is your decision: it trades some protection for those folders for speed.
+
 ## Checks
 
 `scripts/check.sh` runs, in order and stopping at the first failure:
