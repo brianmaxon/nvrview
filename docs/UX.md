@@ -120,6 +120,14 @@ a glance across a wall of cameras.
 - Never an "all clear": no symbol means no current detection reported, not
   that nothing is there.
 - A tooltip or accessibility label names each symbol and its source.
+- **The same symbols appear on each camera's row in the sidebar,** after its
+  name, so activity shows for cameras that are not on screen. Device
+  detections arrive for every channel whether or not it is being watched
+  (the device pushes its alarm state for all channels after the session's
+  subscription; protocol.md "Detection events"); sound alarms exist only
+  for cameras whose audio is being decoded (open, or watched for sound). A
+  device row shows a compact summary of its cameras' activity when
+  collapsed.
 
 ## Digital zoom
 
