@@ -1,0 +1,24 @@
+[package]
+name = "recordings"
+version = "0.1.0"
+description = "Recorded video for nvrview: a local per-device index of recordings and events, incident grouping, and a resumable background download scheduler"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bc-protocol = { path = "../bc-protocol" }
+bc-session = { path = "../bc-session" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+mock-nvr = { path = "../../tools/mock-nvr" }
+tempfile = "3"
+tokio = { version = "1", features = ["time", "sync", "rt", "macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
