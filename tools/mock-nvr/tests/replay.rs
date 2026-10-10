@@ -1,19 +1,21 @@
-//! Replay over TCP: a synthetic recording written with the recording writer
-//! comes back record for record, at the recorded pace, accelerated, and
-//! looped.
+//! Replay: a synthetic recording written with the recording writer comes
+//! back record for record, at the recorded pace, accelerated, and looped.
+//! On a simulated clock, so the pace is measured in simulated time.
+
+mod common;
 
 use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Codec, Record};
 use bc_protocol::recording::{Writer, encode_record};
 use bc_protocol::session::{Event, Session};
 use bc_protocol::stream::StreamTier;
+use common::{Link, TestNvr};
+use mock_nvr::Config;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::replay::{Replay, ReplayConfig};
-use mock_nvr::{Config, MockNvr, spawn};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SPACING_US: u64 = 20_000;
 const VIDEOS: u64 = 25;
@@ -67,7 +69,7 @@ fn synthetic() -> (Vec<u8>, Vec<(u64, Vec<u8>)>) {
     (w.finish().unwrap(), records)
 }
 
-fn start(rep: Replay, speed: f64, looped: bool) -> MockNvr {
+fn start(rep: Replay, speed: f64, looped: bool) -> TestNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = Config::new(Fixture::load(&path).unwrap());
@@ -75,11 +77,11 @@ fn start(rep: Replay, speed: f64, looped: bool) -> MockNvr {
     rc.speed = speed;
     rc.looped = looped;
     cfg.replay = Some(rc);
-    spawn(cfg).unwrap()
+    TestNvr::sim(cfg)
 }
 
 struct Client {
-    tcp: TcpStream,
+    tcp: Link,
     dec: Decoder,
     session: Session,
 }
@@ -100,9 +102,8 @@ impl Client {
 
 /// Logs in, starts a preview, and collects media bytes (with the time each
 /// message arrived since the start request) until `want` bytes are in.
-fn receive(nvr: &MockNvr, want: usize) -> Vec<(Duration, Vec<u8>)> {
-    let tcp = TcpStream::connect(nvr.addr()).unwrap();
-    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+fn receive(nvr: &TestNvr, want: usize) -> Vec<(Duration, Vec<u8>)> {
+    let tcp = nvr.connect();
     let mut c = Client {
         tcp,
         dec: Decoder::new(),
@@ -117,17 +118,17 @@ fn receive(nvr: &MockNvr, want: usize) -> Vec<(Duration, Vec<u8>)> {
     let m = c.next();
     assert_eq!(c.session.handle(&m).unwrap(), Event::LoginOk);
     let (_, bytes) = c.session.start_preview(2, StreamTier::Main).unwrap();
-    let t0 = Instant::now();
+    let t0 = c.tcp.now();
     c.tcp.write_all(&bytes).unwrap();
     let mut out = Vec::new();
     let mut got = 0;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = c.tcp.now() + Duration::from_secs(20);
     while got < want {
-        assert!(Instant::now() < deadline, "timed out");
+        assert!(c.tcp.now() < deadline, "timed out");
         let m = c.next();
         if let Event::Media { data, .. } = c.session.handle(&m).unwrap() {
             got += data.len();
-            out.push((t0.elapsed(), data));
+            out.push((c.tcp.now() - t0, data));
         }
     }
     out
@@ -289,9 +290,8 @@ fn two_tiers() -> Vec<u8> {
     w.finish().unwrap()
 }
 
-fn login(nvr: &MockNvr) -> Client {
-    let tcp = TcpStream::connect(nvr.addr()).unwrap();
-    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+fn login(nvr: &TestNvr) -> Client {
+    let tcp = nvr.connect();
     let mut c = Client {
         tcp,
         dec: Decoder::new(),
@@ -321,14 +321,14 @@ fn a_tier_started_later_joins_the_shared_clock() {
     let mut c = login(&nvr);
     let (sub_id, bytes) = c.session.start_preview(0, StreamTier::Sub).unwrap();
     c.tcp.write_all(&bytes).unwrap();
-    let t0 = Instant::now();
+    let t0 = c.tcp.now();
     let (mut sub_demux, mut main_demux) = (Demuxer::new(), Demuxer::new());
     // (arrival since t0, record) per tier.
     let (mut sub, mut main) = (Vec::new(), Vec::new());
     let mut main_id = None;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = c.tcp.now() + Duration::from_secs(20);
     while main.len() < 40 {
-        assert!(Instant::now() < deadline, "timed out");
+        assert!(c.tcp.now() < deadline, "timed out");
         let m = c.next();
         let Event::Media { message_id, data } = c.session.handle(&m).unwrap() else {
             continue;
@@ -341,7 +341,7 @@ fn a_tier_started_later_joins_the_shared_clock() {
         };
         demux.push(&data);
         while let Some(r) = demux.next_record().unwrap() {
-            out.push((t0.elapsed(), r));
+            out.push((c.tcp.now() - t0, r));
         }
         // Start main once sub has shown the picture captured at 3.4 s
         // (replay time 3.42 s): main's latest keyframe then is the one

@@ -1,5 +1,7 @@
 //! The fake recording store, driven by the real `bc-protocol` client session.
 
+mod common;
+
 use bc_protocol::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
 };
@@ -7,11 +9,11 @@ use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Demuxer, Record};
 use bc_protocol::session::{Event, Session};
 use bc_protocol::stream::StreamTier;
+use common::{Link, TestNvr};
+use mock_nvr::Config;
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;
-use mock_nvr::{Config, MockNvr, spawn};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -19,7 +21,7 @@ fn d(day: u8, h: u8, m: u8, s: u8) -> DateTime {
     DateTime::new(2026, 10, day, h, m, s).unwrap()
 }
 
-fn start(tweak: impl FnOnce(&mut ArchiveConfig)) -> MockNvr {
+fn start(tweak: impl FnOnce(&mut ArchiveConfig)) -> TestNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = Config::new(Fixture::load(&path).unwrap());
@@ -27,19 +29,18 @@ fn start(tweak: impl FnOnce(&mut ArchiveConfig)) -> MockNvr {
     let mut a = ArchiveConfig::new(vec![d(1, 0, 0, 0), d(8, 0, 0, 0), d(9, 0, 0, 0)]);
     tweak(&mut a);
     cfg.archive = Some(a);
-    spawn(cfg).unwrap()
+    TestNvr::sim(cfg)
 }
 
 struct Client {
-    tcp: TcpStream,
+    tcp: Link,
     dec: Decoder,
     s: Session,
 }
 
 impl Client {
-    fn login(nvr: &MockNvr) -> Client {
-        let tcp = TcpStream::connect(nvr.addr()).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    fn login(nvr: &TestNvr) -> Client {
+        let tcp = nvr.connect();
         let mut c = Client {
             tcp,
             dec: Decoder::new(),

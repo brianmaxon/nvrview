@@ -1,15 +1,17 @@
 //! End-to-end tests: the real `bc-protocol` client session against the mock.
 
+mod common;
+
 use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Codec, Demuxer, Record};
 use bc_protocol::session::{Command, Event, Session};
 use bc_protocol::stream::StreamTier;
+use common::{Link, TestNvr};
+use mock_nvr::Config;
 use mock_nvr::fixture::Fixture;
-use mock_nvr::{Config, MockNvr, spawn};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const USER: &str = "example-user";
 const PASSWORD: &str = "example-password";
@@ -20,24 +22,23 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn start(tweak: impl FnOnce(&mut Config)) -> MockNvr {
+fn start(tweak: impl FnOnce(&mut Config)) -> TestNvr {
     let fix = Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
     let mut cfg = Config::new(fix);
     cfg.channels = 3;
     tweak(&mut cfg);
-    spawn(cfg).unwrap()
+    TestNvr::sim(cfg)
 }
 
 struct Client {
-    tcp: TcpStream,
+    tcp: Link,
     dec: Decoder,
     session: Session,
 }
 
 impl Client {
-    fn connect(nvr: &MockNvr, user: &str, password: &str) -> Client {
-        let tcp = TcpStream::connect(nvr.addr()).unwrap();
-        tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    fn connect(nvr: &TestNvr, user: &str, password: &str) -> Client {
+        let tcp = nvr.connect();
         Client {
             tcp,
             dec: Decoder::new(),
@@ -83,9 +84,13 @@ impl Client {
     }
 }
 
+/// Over real TCP, in real time: the TCP server itself.
 #[test]
 fn login_ok_pushes_channel_list_and_answers_queries() {
-    let nvr = start(|_| {});
+    let fix = Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
+    let mut cfg = Config::new(fix);
+    cfg.channels = 3;
+    let nvr = TestNvr::tcp(cfg);
     let mut c = Client::connect(&nvr, USER, PASSWORD);
     assert_eq!(c.login(), Event::LoginOk);
     match c.event() {
@@ -189,14 +194,14 @@ fn bad_credentials_get_401_and_lock_out() {
 
 fn read_until_video(c: &mut Client, id: u32, demux: &mut Demuxer, n: usize) -> Vec<Record> {
     let mut out = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = c.tcp.now() + Duration::from_secs(15);
     while out
         .iter()
         .filter(|r| matches!(r, Record::Video { .. }))
         .count()
         < n
     {
-        assert!(Instant::now() < deadline, "timed out waiting for video");
+        assert!(c.tcp.now() < deadline, "timed out waiting for video");
         if let Event::Media { message_id, data } = c.event() {
             assert_eq!(message_id, id);
             demux.push(&data);
@@ -269,9 +274,9 @@ fn preview_delivers_fixture_from_first_keyframe_then_stops() {
     // Stop: the reply arrives, and nothing media-like follows it.
     let stop = c.session.stop_preview(id).unwrap();
     c.tcp.write_all(&stop).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = c.tcp.now() + Duration::from_secs(10);
     loop {
-        assert!(Instant::now() < deadline, "no stop reply");
+        assert!(c.tcp.now() < deadline, "no stop reply");
         let m = c.next();
         if m.header.command == 4 {
             assert_eq!(m.header.status, 200);
@@ -307,10 +312,10 @@ fn login_limit_and_release() {
     assert_eq!(nvr.active_logins(), 2);
     // Closing a session frees its slot.
     drop(a);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = nvr.now() + Duration::from_secs(5);
     while nvr.active_logins() != 1 {
-        assert!(Instant::now() < deadline, "slot was not released");
-        std::thread::sleep(Duration::from_millis(20));
+        assert!(nvr.now() < deadline, "slot was not released");
+        nvr.sleep(Duration::from_millis(20));
     }
     let mut d = Client::connect(&nvr, USER, PASSWORD);
     assert_eq!(d.login(), Event::LoginOk);
@@ -355,10 +360,10 @@ fn audio_records_are_interleaved_like_a_device() {
     let (id, bytes) = c.session.start_preview(0, StreamTier::Sub).unwrap();
     c.tcp.write_all(&bytes).unwrap();
     let mut demux = Demuxer::new();
-    let started = Instant::now();
+    let started = c.tcp.now();
     // 2 s of stream.
     let recs = read_until_video(&mut c, id, &mut demux, 21);
-    let elapsed = started.elapsed();
+    let elapsed = c.tcp.now() - started;
 
     let mut last_pts: Option<u64> = None;
     let mut k = 0u64;
@@ -556,14 +561,14 @@ fn doorbell_talk_back_round_trip() {
         }
     ));
     drop(c);
-    let t0 = Instant::now();
+    let t0 = nvr.now();
     while nvr
         .talk_log()
         .last()
         .is_some_and(|t| t.end == TalkEnd::Open)
     {
-        assert!(t0.elapsed() < Duration::from_secs(5));
-        std::thread::sleep(Duration::from_millis(10));
+        assert!(nvr.now() - t0 < Duration::from_secs(5));
+        nvr.sleep(Duration::from_millis(10));
     }
     assert_eq!(nvr.talk_log()[1].end, TalkEnd::Disconnected);
 }

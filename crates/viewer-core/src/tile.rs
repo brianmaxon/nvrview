@@ -9,17 +9,17 @@
 //! results come in through a bounded channel that never blocks the sender.
 
 use crate::audio::{AudioFrame, AudioHub, TileAudio, TileAudioControl, TileAudioLink, TileConfig};
+use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
 use crate::sound::{SoundHub, TileSoundLink};
-use crate::{Callbacks, Clock, in_callback};
+use crate::{Callbacks, in_callback};
 use bc_protocol::media::{Codec as MediaCodec, Record};
 use bc_protocol::stream::StreamTier;
 use bc_session::{Item, Subscription};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -86,7 +86,10 @@ pub(crate) struct TileContext {
     pub(crate) callbacks: Arc<dyn Callbacks>,
     pub(crate) events: EventSink,
     pub(crate) pipeline: PipelineConfig,
-    pub(crate) clock: Clock,
+    pub(crate) clock: HostClock,
+    /// Each tile on a thread of its own (always, except on a test runtime:
+    /// [`crate::TestRuntime`], where tiles are tasks on that runtime).
+    pub(crate) tile_threads: bool,
     pub(crate) tick_interval: Duration,
     pub(crate) stats_interval: Duration,
     pub(crate) tier_switch_timeout: Duration,
@@ -148,7 +151,15 @@ pub(crate) struct TileHandle {
     stop: Arc<AtomicBool>,
     wake: Option<oneshot::Sender<()>>,
     commands: mpsc::Sender<TileCommand>,
-    thread: Option<JoinHandle<()>>,
+    runner: Option<Runner>,
+}
+
+/// What runs a tile.
+enum Runner {
+    /// A thread of its own (apps).
+    Thread(std::thread::JoinHandle<()>),
+    /// A task on a test runtime ([`crate::TestRuntime`]).
+    Task(tokio::task::JoinHandle<()>, Handle),
 }
 
 impl TileHandle {
@@ -171,8 +182,16 @@ impl TileHandle {
     /// previews on the device.
     pub(crate) fn stop_and_join(&mut self) {
         self.signal_stop();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        match self.runner.take() {
+            Some(Runner::Thread(t)) => {
+                let _ = t.join();
+            }
+            // On the runtime itself it cannot be waited for; the task sees
+            // the stop at its next step and ends on its own.
+            Some(Runner::Task(t, runtime)) if Handle::try_current().is_err() => {
+                let _ = runtime.block_on(t);
+            }
+            Some(Runner::Task(..)) | None => {}
         }
     }
 
@@ -253,9 +272,21 @@ pub(crate) fn spawn(
         next_generation: 1,
         stale_results: 0,
     };
-    let thread = std::thread::Builder::new()
-        .name(format!("nvrview-tile-{id}"))
-        .spawn(move || state.run(tier, sub, wake_rx, gate))?;
+    let runner = if state.ctx.tile_threads {
+        Runner::Thread(
+            std::thread::Builder::new()
+                .name(format!("nvrview-tile-{id}"))
+                .spawn(move || state.run(tier, sub, wake_rx, gate))?,
+        )
+    } else {
+        let runtime = state.ctx.runtime.clone();
+        let mut state = state;
+        let task = runtime.spawn(async move {
+            in_callback::mark_core_thread();
+            state.serve(tier, sub, wake_rx, gate).await;
+        });
+        Runner::Task(task, runtime)
+    };
     Ok((
         TileHandle {
             device,
@@ -267,7 +298,7 @@ pub(crate) fn spawn(
             stop,
             wake: Some(wake_tx),
             commands: cmd_tx,
-            thread: Some(thread),
+            runner: Some(runner),
         },
         ResultSink { tx, overflow },
     ))
@@ -790,7 +821,7 @@ impl TileThread {
         self.ctx
             .callbacks
             .on_action(self.id, old.generation, &Action::Reset);
-        let elapsed = crate::clock::now_ns().saturating_sub(st.requested_ns);
+        let elapsed = self.ctx.clock.now_ns().saturating_sub(st.requested_ns);
         info!(
             tile = self.id,
             generation = s.current.generation,
@@ -886,10 +917,7 @@ impl TileThread {
                     sequence: self.sequence,
                     after_video_pts_us: self.last_video_pts,
                     arrived_us: self.ctx.clock.now_us(),
-                    wall_clock_us: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .ok()
-                        .and_then(|d| i64::try_from(d.as_micros()).ok()),
+                    wall_clock_us: Some(self.ctx.clock.wall_now_us()).filter(|w| *w > 0),
                 };
                 if frame.is_talkback() {
                     self.talkback_ignored += 1;

@@ -1,20 +1,28 @@
 //! Second lenses found by a short `externStream` preview (docs/protocol.md,
-//! "Second lenses"; docs/FFI.md, `channels`), against the mock.
+//! "Second lenses"; docs/FFI.md, `channels`), against the mock, on a
+//! simulated clock: probe delays, quiet periods, and probe windows take
+//! simulated time.
 
 mod common;
 
 use common::*;
 use mock_nvr::ExternMode;
+use simtime::SimRuntime;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use viewer_core::{Core, CoreConfig, StreamTier};
 
 /// ch0 lists `externStream`, ch1 hides a second lens, ch2 answers with a
 /// stream-info record only, ch3 refuses (400), ch4 never answers, ch5 is a
 /// multi-lens camera the capabilities reveal.
-fn lens_mock(bind: Option<SocketAddr>, ch1_uid: &str, ch1: ExternMode) -> mock_nvr::MockNvr {
+fn lens_mock(
+    sim: &SimRuntime,
+    bind: Option<SocketAddr>,
+    ch1_uid: &str,
+    ch1: ExternMode,
+) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
@@ -33,25 +41,17 @@ fn lens_mock(bind: Option<SocketAddr>, ch1_uid: &str, ch1: ExternMode) -> mock_n
     cfg.lens_aitypes = vec![vec![], vec![], vec![], vec![], vec![], vec![3, 17]];
     cfg.uids = (0..6).map(|c| format!("UID-EXAMPLE-{c}")).collect();
     cfg.uids[1] = ch1_uid.into();
-    // Bind again right after the previous mock on this port closed.
-    let until = Instant::now() + Duration::from_secs(5);
-    loop {
-        match mock_nvr::spawn(cfg.clone()) {
-            Ok(n) => return n,
-            Err(e) if Instant::now() < until => {
-                let _ = e;
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => panic!("cannot bind the mock: {e}"),
-        }
-    }
+    sim_spawn(sim, cfg)
 }
 
-fn core_in(dir: &Path) -> (Arc<Core>, Arc<Recorder>) {
-    start(CoreConfig {
-        data_dir: Some(dir.to_owned()),
-        ..fast_config()
-    })
+fn core_in(sim: &SimRuntime, dir: &Path) -> (Arc<Core>, Arc<Recorder>) {
+    start(on_sim(
+        sim,
+        CoreConfig {
+            data_dir: Some(dir.to_owned()),
+            ..fast_config()
+        },
+    ))
 }
 
 fn add(core: &Core, nvr: &mock_nvr::MockNvr) -> u64 {
@@ -75,9 +75,9 @@ fn stored(dir: &Path) -> serde_json::Value {
 }
 
 /// Waits until every probe has run: each answered channel is in the file.
-fn wait_stored(dir: &Path, channels: &[&str]) -> serde_json::Value {
+fn wait_stored(sim: &SimRuntime, core: &Core, dir: &Path, channels: &[&str]) -> serde_json::Value {
     let mut v = serde_json::Value::Null;
-    wait_until("probe answers stored", 20, || {
+    sim_until(sim, core, "probe answers stored", 20, || {
         v = stored(dir);
         let devs = v["devices"].as_object().cloned().unwrap_or_default();
         devs.values()
@@ -88,16 +88,17 @@ fn wait_stored(dir: &Path, channels: &[&str]) -> serde_json::Value {
 
 #[test]
 fn probes_find_hidden_lenses_once_and_remember_them() {
+    let sim = SimRuntime::new();
     let dir = tempfile::tempdir().unwrap();
-    let nvr = lens_mock(None, "UID-EXAMPLE-1", ExternMode::Hidden);
+    let nvr = lens_mock(&sim, None, "UID-EXAMPLE-1", ExternMode::Hidden);
     let addr = nvr.addr();
-    let (core, rec) = core_in(dir.path());
+    let (core, rec) = core_in(&sim, dir.path());
     let dev = add(&core, &nvr);
-    let t0 = Instant::now();
+    let t0 = sim.now();
     // Never two probes at once: sample the mock's open previews meanwhile.
     let mut most = 0;
     let mut v = serde_json::Value::Null;
-    while t0.elapsed() < Duration::from_secs(20) {
+    while sim.now() - t0 < Duration::from_secs(20) {
         most = most.max(nvr.command_count(3) - nvr.command_count(4).min(nvr.command_count(3)));
         v = stored(dir.path());
         if v["devices"].as_object().is_some_and(|d| {
@@ -106,7 +107,7 @@ fn probes_find_hidden_lenses_once_and_remember_them() {
         }) {
             break;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        sim.advance(Duration::from_millis(5));
     }
     assert!(most <= 1, "{most} previews open at once");
     let key = core.device_key(dev).unwrap();
@@ -120,7 +121,9 @@ fn probes_find_hidden_lenses_once_and_remember_them() {
     // Not probed: the channel listing `externStream`, and the multi-lens
     // camera the capabilities reveal.
     assert!(chans.get("0").is_none() && chans.get("5").is_none(), "{v}");
-    wait_until("lenses in channels", 5, || channel(&rec, 1)["lenses"] == 2);
+    sim_until(&sim, &core, "lenses in channels", 5, || {
+        channel(&rec, 1)["lenses"] == 2
+    });
     let c1 = channel(&rec, 1);
     assert!(c1.get("lens_detects").is_none(), "{c1}");
     assert_eq!(c1["tiers"], serde_json::json!(["main", "sub"]));
@@ -131,58 +134,65 @@ fn probes_find_hidden_lenses_once_and_remember_them() {
     assert!(channel(&rec, 5).get("lens_detects").is_some());
     // One start per probe, each stopped, on the one login.
     assert_eq!(nvr.command_count(3), 4);
-    wait_until("every probe stopped", 5, || {
+    sim_until(&sim, &core, "every probe stopped", 5, || {
         nvr.command_count(4) == nvr.command_count(3)
     });
     assert_eq!(nvr.active_logins(), 1);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     nvr.shutdown();
 
     // The next run: the answers come from the file, no probe at all.
-    let nvr = lens_mock(Some(addr), "UID-EXAMPLE-1", ExternMode::Hidden);
-    let (core, rec) = core_in(dir.path());
+    let nvr = lens_mock(&sim, Some(addr), "UID-EXAMPLE-1", ExternMode::Hidden);
+    let (core, rec) = core_in(&sim, dir.path());
     let dev2 = add(&core, &nvr);
     assert_eq!(core.device_key(dev2).unwrap(), key);
-    wait_until("cached lens", 10, || channel(&rec, 1)["lenses"] == 2);
-    std::thread::sleep(Duration::from_secs(3));
+    sim_until(&sim, &core, "cached lens", 10, || {
+        channel(&rec, 1)["lenses"] == 2
+    });
+    sim.advance(Duration::from_secs(3));
     assert_eq!(nvr.command_count(3), 0, "a cached answer needs no probe");
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     nvr.shutdown();
 
     // Another camera on channel 1 (a new uid), without a second lens: it is
     // probed again, and the lens is gone.
-    let nvr = lens_mock(Some(addr), "UID-EXAMPLE-9", ExternMode::InfoOnly);
-    let (core, rec) = core_in(dir.path());
+    let nvr = lens_mock(&sim, Some(addr), "UID-EXAMPLE-9", ExternMode::InfoOnly);
+    let (core, rec) = core_in(&sim, dir.path());
     add(&core, &nvr);
-    wait_until("channel 1 probed again", 15, || {
+    sim_until(&sim, &core, "channel 1 probed again", 15, || {
         stored(dir.path())["devices"][&key]["1"]["uid"] == "UID-EXAMPLE-9"
     });
     assert_eq!(stored(dir.path())["devices"][&key]["1"]["lenses"], 1);
     assert_eq!(nvr.command_count(3), 1);
     assert!(channel(&rec, 1).get("lenses").is_none());
-    wait_until("probe stopped", 5, || nvr.command_count(4) == 1);
-    core.shutdown();
+    sim_until(&sim, &core, "probe stopped", 5, || {
+        nvr.command_count(4) == 1
+    });
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn a_tile_starting_on_the_channel_holds_the_probe_back() {
+    let sim = SimRuntime::new();
     let dir = tempfile::tempdir().unwrap();
-    let nvr = lens_mock(None, "UID-EXAMPLE-1", ExternMode::Hidden);
-    let (core, rec) = core_in(dir.path());
+    let nvr = lens_mock(&sim, None, "UID-EXAMPLE-1", ExternMode::Hidden);
+    let (core, rec) = core_in(&sim, dir.path());
     let dev = add(&core, &nvr);
     // A tile on the hidden-lens channel, opened as soon as the slot list
     // arrives (as an app restoring its layout would).
-    wait_until("slot list", 10, || !rec.events_of("channels").is_empty());
-    let opened = Instant::now();
+    sim_until(&sim, &core, "slot list", 10, || {
+        !rec.events_of("channels").is_empty()
+    });
+    let opened = sim.now();
     let t = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("tile decodes", 10, || rec.decodes(t) > 0);
-    wait_stored(dir.path(), &["1"]);
-    let found = opened.elapsed();
+    sim_until(&sim, &core, "tile decodes", 10, || rec.decodes(t) > 0);
+    wait_stored(&sim, &core, dir.path(), &["1"]);
+    let found = sim.now() - opened;
     assert!(
         found >= Duration::from_millis(2900),
         "probed {found:?} after the tile started"
     );
     // The tile kept playing throughout.
     assert!(rec.decodes(t) > 20);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }

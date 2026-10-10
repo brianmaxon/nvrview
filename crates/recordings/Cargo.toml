@@ -19,7 +19,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
 tempfile = "3"
-tokio = { version = "1", features = ["time", "sync", "rt", "macros", "rt-multi-thread"] }
+# test-util: the end-to-end tests run on a paused clock.
+tokio = { version = "1", features = ["time", "sync", "rt", "macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

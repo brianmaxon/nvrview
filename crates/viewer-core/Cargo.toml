@@ -30,6 +30,9 @@ windows-sys = { version = "0.61", features = ["Win32_System_Performance"] }
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
+# Tests that run the core on a simulated clock (`CoreConfig::test_runtime`).
+simtime = { path = "../../tools/simtime" }
+tokio = { version = "1", features = ["test-util"] }
 # Tests parse every event with a real JSON parser; the core itself writes
 # its few small events by hand (see src/json.rs).
 serde_json = "1"

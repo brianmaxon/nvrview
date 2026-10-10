@@ -1,23 +1,29 @@
 //! Listening end to end: the mock NVR interleaves real AAC records (the
 //! clicks fixture) with video; the core decodes, timestamps, and plays them
-//! into its renderer, which a thread here drives like an audio device on the
-//! host clock. Each click heard is compared with the moment its picture was
-//! shown (pictures are shown on arrival: the time the core delivered the
+//! into its renderer, which the test drives like an audio device on the
+//! core's clock. Each click heard is compared with the moment its picture
+//! was shown (pictures are shown on arrival: the time the core delivered the
 //! `Decode` with the same camera time) plus the playout delay the core
 //! reported. Also: taps, `audio_stats`, talk-back records, and the API's
 //! argument checks.
+//!
+//! The core and the mock run on a simulated clock (`simtime`): the device
+//! paces its records, the core stamps their arrival, and the test renders,
+//! all in simulated time, so the timing checks are exact and do not depend
+//! on how busy the machine is.
 
 mod common;
 
 use audio_pipeline::adts::split_frames;
 use audio_pipeline::decode::Decoder;
-use common::{PASSWORD, USER, wait_until};
+use common::{PASSWORD, USER, on_sim, sim_spawn, sim_until, wait_until};
+use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use viewer_core::audio::TapBlock;
-use viewer_core::{Action, Callbacks, Core, CoreConfig, CoreError, StreamTier, clock};
+use viewer_core::{Action, Callbacks, Core, CoreConfig, CoreError, StreamTier};
 
 const CLOCK_HZ: f64 = 16_000.0;
 const JITTER_MS: u32 = 30;
@@ -29,7 +35,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn mock(stream_index: u8) -> mock_nvr::MockNvr {
+fn mock(sim: &SimRuntime, stream_index: u8) -> mock_nvr::MockNvr {
     let video = mock_nvr::fixture::Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
     let mut cfg = mock_nvr::Config::new(video);
     cfg.channels = 1;
@@ -40,7 +46,7 @@ fn mock(stream_index: u8) -> mock_nvr::MockNvr {
     a.jitter_us = JITTER_MS * 1000;
     a.stream_index = stream_index;
     cfg.audio = Some(Arc::new(a));
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 /// Decoded-sample offsets of the clicks within one loop of the fixture.
@@ -80,14 +86,14 @@ struct Rec {
 
 impl Callbacks for Rec {
     fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>) {
-        if let Action::Decode { pts, .. } = *action {
+        if let Action::Decode { pts, .. } = *action
+            && let Some(c) = self.core.get().and_then(Weak::upgrade)
+        {
             self.shown
                 .lock()
                 .unwrap()
-                .push((pts, clock::now_ns() as f64 / 1e3));
-            if let Some(c) = self.core.get().and_then(Weak::upgrade) {
-                let _ = c.decoded(tile, generation, pts);
-            }
+                .push((pts, c.clock_now_ns() as f64 / 1e3));
+            let _ = c.decoded(tile, generation, pts);
         }
     }
 
@@ -116,15 +122,32 @@ impl Callbacks for Rec {
     }
 }
 
-fn start() -> (Arc<Core>, Arc<Rec>) {
+fn start(sim: &SimRuntime) -> (Arc<Core>, Arc<Rec>) {
     let rec = Arc::new(Rec::default());
-    let cfg = CoreConfig {
-        stats_interval: Duration::from_millis(200),
-        ..CoreConfig::default()
-    };
+    let cfg = on_sim(
+        sim,
+        CoreConfig {
+            stats_interval: Duration::from_millis(200),
+            ..CoreConfig::default()
+        },
+    );
     let core = Arc::new(Core::new(cfg, rec.clone()).unwrap());
     rec.core.set(Arc::downgrade(&core)).unwrap();
     (core, rec)
+}
+
+/// Stops the core, letting simulated time run while it closes.
+fn stop(sim: &SimRuntime, core: &Core) {
+    sim.run_free(|| core.shutdown());
+}
+
+/// Lets simulated time pass until the device would ask for the callback
+/// heard at `host` (each is asked for `lead_ns` before it is heard).
+fn wait_for_callback(sim: &SimRuntime, core: &Core, host: u64, lead_ns: u64) {
+    let now = core.clock_now_ns();
+    if now + lead_ns < host {
+        sim.advance(Duration::from_nanos(host - lead_ns - now));
+    }
 }
 
 fn audio_stats(rec: &Rec) -> Vec<serde_json::Value> {
@@ -140,21 +163,16 @@ fn audio_stats(rec: &Rec) -> Vec<serde_json::Value> {
 /// Drives the renderer like a 48 kHz stereo device: 10 ms callbacks, each
 /// called 10 ms before its first frame is heard. Returns the host times
 /// (µs) at which clicks were heard.
-fn play(core: &Core, seconds: f64) -> Vec<f64> {
+fn play(sim: &SimRuntime, core: &Core, seconds: f64) -> Vec<f64> {
     const FRAMES: usize = 480;
     const LEAD_NS: u64 = 10_000_000;
     let mut buf = vec![0.0f32; FRAMES * 2];
-    let start = clock::now_ns() + LEAD_NS;
+    let start = core.clock_now_ns() + LEAD_NS;
     let mut heard = Vec::new();
     let mut quiet = 0usize;
-    let mut k = 0u64;
-    let until = Instant::now() + Duration::from_secs_f64(seconds);
-    while Instant::now() < until {
+    for k in 0..(seconds * 100.0).round() as u64 {
         let host = start + k * 10_000_000;
-        let now = clock::now_ns();
-        if now + LEAD_NS < host {
-            std::thread::sleep(Duration::from_nanos(host - LEAD_NS - now));
-        }
+        wait_for_callback(sim, core, host, LEAD_NS);
         let _ = core.render_audio(&mut buf, 2, host);
         for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
             if f[0].abs() > THRESHOLD && quiet > 3000 {
@@ -162,39 +180,33 @@ fn play(core: &Core, seconds: f64) -> Vec<f64> {
             }
             quiet = if f[0].abs() > THRESHOLD { 0 } else { quiet + 1 };
         }
-        k += 1;
     }
     heard
 }
 
 /// Renders like [`play`] and returns the highest peak level the core
 /// reported for `tile` meanwhile.
-fn play_level(core: &Core, tile: u64, seconds: f64) -> f32 {
+fn play_level(sim: &SimRuntime, core: &Core, tile: u64, seconds: f64) -> f32 {
     let mut buf = vec![0.0f32; 480 * 2];
-    let start = clock::now_ns() + 10_000_000;
+    let start = core.clock_now_ns() + 10_000_000;
     let mut max = 0.0f32;
-    let until = Instant::now() + Duration::from_secs_f64(seconds);
-    let mut k = 0u64;
-    while Instant::now() < until {
+    for k in 0..(seconds * 100.0).round() as u64 {
         let host = start + k * 10_000_000;
-        let now = clock::now_ns();
-        if now + 10_000_000 < host {
-            std::thread::sleep(Duration::from_nanos(host - 10_000_000 - now));
-        }
+        wait_for_callback(sim, core, host, 10_000_000);
         let _ = core.render_audio(&mut buf, 2, host);
         let (peak, rms) = core.tile_audio_level(tile);
         assert!((0.0..=1.0).contains(&peak) && (0.0..=1.0).contains(&rms));
         assert!(rms <= peak + 1e-6);
         max = max.max(peak);
-        k += 1;
     }
     max
 }
 
 #[test]
 fn clicks_are_heard_their_playout_delay_after_their_picture() {
-    let nvr = mock(5);
-    let (core, rec) = start();
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim, 5);
+    let (core, rec) = start(&sim);
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -202,9 +214,12 @@ fn clicks_are_heard_their_playout_delay_after_their_picture() {
     core.set_audio_output(48_000, 2).unwrap();
     core.set_tile_audio(tile, true, 1.0).unwrap();
     core.set_tile_audio_tap(tile, true).unwrap();
-    let heard = play(&core, 25.0);
+    let heard = play(&sim, &core, 25.0);
+    core.flush_events();
 
     // Once the tap is attached, blocks arrive in order with camera times.
+    // (The tap thread delivers on its own schedule: wait for it.)
+    wait_until("tap blocks", 10, || rec.taps.lock().unwrap().len() > 200);
     let taps = rec.taps.lock().unwrap().clone();
     assert!(taps.len() > 200, "{} tap blocks", taps.len());
     assert!(taps[0].5, "the first block marks a discontinuity");
@@ -297,83 +312,86 @@ fn clicks_are_heard_their_playout_delay_after_their_picture() {
     // Turning the tap off stops deliveries once the call returns.
     core.set_tile_audio_tap(tile, false).unwrap();
     let n = rec.taps.lock().unwrap().len();
-    std::thread::sleep(Duration::from_millis(300));
+    sim.advance(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(20));
     assert_eq!(rec.taps.lock().unwrap().len(), n);
 
     // The meter sees the clicks, also while muted.
-    assert!(play_level(&core, tile, 3.0) > THRESHOLD);
+    assert!(play_level(&sim, &core, tile, 3.0) > THRESHOLD);
     core.set_tile_audio(tile, true, 0.0).unwrap();
-    assert!(play_level(&core, tile, 3.0) > THRESHOLD);
+    assert!(play_level(&sim, &core, tile, 3.0) > THRESHOLD);
     assert_eq!(core.tile_audio_level(tile + 100), (0.0, 0.0));
 
     // Silent: the slot is released, nothing more is heard; the meter still
     // shows the decoded audio.
     core.set_tile_audio(tile, false, 1.0).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(play(&core, 1.5).is_empty());
-    assert!(max_level(&core, tile, 1.5) > THRESHOLD);
-    core.shutdown();
+    sim.advance(Duration::from_millis(300));
+    assert!(play(&sim, &core, 1.5).is_empty());
+    assert!(max_level(&sim, &core, tile, 1.5) > THRESHOLD);
+    stop(&sim, &core);
     nvr.shutdown();
 }
 
 /// The highest peak level read for `tile` over `seconds`, at display rate.
-fn max_level(core: &Core, tile: u64, seconds: f64) -> f32 {
-    let until = Instant::now() + Duration::from_secs_f64(seconds);
+fn max_level(sim: &SimRuntime, core: &Core, tile: u64, seconds: f64) -> f32 {
     let mut max = 0.0f32;
-    while Instant::now() < until {
+    for _ in 0..(seconds * 1000.0 / 16.0).ceil() as u64 {
         let (peak, rms) = core.tile_audio_level(tile);
         assert!((0.0..=1.0).contains(&peak) && (0.0..=rms.max(peak)).contains(&rms));
         max = max.max(peak);
-        std::thread::sleep(Duration::from_millis(16));
+        sim.advance(Duration::from_millis(16));
     }
     max
 }
 
 #[test]
 fn a_tile_never_made_audible_shows_its_level_until_its_audio_stops() {
-    let nvr = mock(5);
-    let (core, _rec) = start();
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim, 5);
+    let (core, _rec) = start(&sim);
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
     let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
     // No output, never audible: the level comes from decoding (clicks
     // every half second, peak release 0.3 s).
-    assert!(max_level(&core, tile, 3.0) > THRESHOLD);
+    assert!(max_level(&sim, &core, tile, 3.0) > THRESHOLD);
     assert_eq!(core.tile_audio_level(tile + 100), (0.0, 0.0));
     // The stream stalls (the device goes away): the level falls to 0
     // instead of freezing.
     nvr.shutdown();
-    std::thread::sleep(Duration::from_millis(1_300));
+    sim.advance(Duration::from_millis(1_300));
     assert_eq!(core.tile_audio_level(tile), (0.0, 0.0));
-    core.shutdown();
+    stop(&sim, &core);
 }
 
 #[test]
 fn talkback_records_are_ignored() {
-    let nvr = mock(1);
-    let (core, rec) = start();
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim, 1);
+    let (core, rec) = start(&sim);
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
     let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
     core.set_audio_output(48_000, 2).unwrap();
     core.set_tile_audio(tile, true, 1.0).unwrap();
-    wait_until("talk-back counted", 10, || {
+    sim_until(&sim, &core, "talk-back counted", 10, || {
         audio_stats(&rec)
             .last()
             .is_some_and(|e| e["talkback_ignored"].as_u64().unwrap_or(0) > 20)
     });
     let last = audio_stats(&rec).last().unwrap().clone();
     assert_eq!(last["records"].as_u64(), Some(0), "{last}");
-    core.shutdown();
+    stop(&sim, &core);
     nvr.shutdown();
 }
 
 #[test]
 fn audio_arguments_and_reentry() {
-    let nvr = mock(5);
-    let (core, rec) = start();
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim, 5);
+    let (core, rec) = start(&sim);
     assert_eq!(core.set_audio_output(0, 2), Err(CoreError::InvalidArgument));
     assert_eq!(
         core.set_audio_output(48_000, 3),
@@ -411,6 +429,9 @@ fn audio_arguments_and_reentry() {
     // Calls from inside on_audio_tap are refused, not deadlocked.
     rec.try_reentry.store(true, Ordering::SeqCst);
     core.set_tile_audio_tap(tile, true).unwrap();
+    // Audio arrives in simulated time; the tap thread delivers it in real
+    // time.
+    sim.advance(Duration::from_secs(2));
     wait_until("a tap block", 10, || {
         !rec.tap_reentry.lock().unwrap().is_empty()
     });
@@ -421,13 +442,14 @@ fn audio_arguments_and_reentry() {
     // Closing the tile ends its tap; nothing for it arrives afterwards.
     core.close_tile(tile).unwrap();
     let n = rec.taps.lock().unwrap().len();
-    std::thread::sleep(Duration::from_millis(300));
+    sim.advance(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(20));
     assert_eq!(rec.taps.lock().unwrap().len(), n);
     assert_eq!(
         core.set_tile_audio(tile, true, 1.0),
         Err(CoreError::UnknownId)
     );
-    core.shutdown();
+    stop(&sim, &core);
     assert_eq!(core.render_audio(&mut buf, 1, 0), Err(CoreError::Closed));
     nvr.shutdown();
 }

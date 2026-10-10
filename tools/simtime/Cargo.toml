@@ -1,0 +1,15 @@
+[package]
+name = "simtime"
+version = "0.1.0"
+description = "Test support: a tokio runtime on a paused clock that a test thread steps, for code with a blocking interface"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "test-util"] }
+
+[lints]
+workspace = true

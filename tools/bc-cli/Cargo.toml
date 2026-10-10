@@ -17,6 +17,8 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 
 [dev-dependencies]
 mock-nvr = { path = "../mock-nvr" }
+# The tests run on a paused clock.
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 
 [lints]

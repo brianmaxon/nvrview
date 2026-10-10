@@ -1,32 +1,37 @@
 //! Ordering rules of docs/FFI.md: nothing about an object before its ID is
 //! published, close never waits on another tile's callback, and exactly one
-//! `tile_closed` per tile after its last action.
+//! `tile_closed` per tile after its last action. On a simulated clock,
+//! except the test of a slow `on_action`, which needs the core's own tile
+//! threads.
 
 mod common;
 
 use common::*;
+use simtime::SimRuntime;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use viewer_core::StreamTier;
 
 #[test]
 fn device_events_wait_for_the_id() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let pending = core
         .add_device_deferred("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
     let id = pending.id();
     // The session logs in meanwhile; its events are held back.
-    wait_until("login", 5, || nvr.active_logins() == 1);
-    std::thread::sleep(Duration::from_millis(300));
+    sim_until(&sim, &core, "login", 5, || nvr.active_logins() == 1);
+    sim.advance(Duration::from_millis(300));
+    core.flush_events();
     assert!(
         rec.events().iter().all(|e| e["device"] != id),
         "{:?}",
         rec.events()
     );
     assert_eq!(pending.publish(), id);
-    wait_until("channels after publishing", 5, || {
+    sim_until(&sim, &core, "channels after publishing", 5, || {
         !rec.events_of("channels").is_empty()
     });
     let states: Vec<_> = rec
@@ -35,42 +40,49 @@ fn device_events_wait_for_the_id() {
         .map(|e| e["state"].as_str().unwrap().to_owned())
         .collect();
     assert_eq!(states, ["connecting", "connected"]);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn tile_actions_wait_for_the_id() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
     let pending = core.open_tile_deferred(dev, 0, StreamTier::Sub).unwrap();
     let t = pending.id();
-    wait_until("the device connects", 5, || nvr.active_logins() == 1);
-    std::thread::sleep(Duration::from_millis(500));
+    sim_until(&sim, &core, "the device connects", 5, || {
+        nvr.active_logins() == 1
+    });
+    sim.advance(Duration::from_millis(500));
+    core.flush_events();
     assert!(rec.seen(t).is_empty(), "action before the ID was published");
     assert!(rec.events().iter().all(|e| e["tile"] != t));
     pending.publish();
-    wait_until("decodes after publishing", 5, || rec.decodes(t) >= 5);
+    sim_until(&sim, &core, "decodes after publishing", 5, || {
+        rec.decodes(t) >= 5
+    });
     let seen = rec.seen(t);
     check_protocol(&seen);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn a_dropped_pending_tile_is_released_not_stuck() {
-    let nvr = mock(1);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
     let pending = core.open_tile_deferred(dev, 0, StreamTier::Sub).unwrap();
     let t = pending.id();
     drop(pending);
-    wait_until("decodes", 5, || rec.decodes(t) >= 2);
+    sim_until(&sim, &core, "decodes", 5, || rec.decodes(t) >= 2);
     core.close_tile(t).unwrap();
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
@@ -119,9 +131,10 @@ fn opening_a_tile_never_waits_on_an_action() {
 
 #[test]
 fn tile_closed_is_sent_once_for_every_reason() {
-    let nvr = mock(4);
-    let bad = mock(1);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 4);
+    let bad = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -142,18 +155,18 @@ fn tile_closed_is_sent_once_for_every_reason() {
     ];
     let failed = core.open_tile(refused, 0, StreamTier::Sub).unwrap();
     for t in [closed, kept[0], kept[1], gone[0], gone[1]] {
-        wait_until("every tile plays", 10, || rec.decodes(t) >= 3);
+        sim_until(&sim, &core, "every tile plays", 10, || rec.decodes(t) >= 3);
     }
     core.close_tile(closed).unwrap();
     core.remove_device(removed).unwrap();
-    wait_until("the refused device's tile ends", 5, || {
+    sim_until(&sim, &core, "the refused device's tile ends", 5, || {
         rec.events_of("tile_closed")
             .iter()
             .any(|e| e["tile"] == failed)
     });
     // Closing a tile that already ended on its own sends nothing more.
     core.close_tile(failed).unwrap();
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     let after = rec.events_count.load(Ordering::SeqCst);
 
     let all = [closed, gone[0], gone[1], failed, kept[0], kept[1]];
@@ -169,6 +182,7 @@ fn tile_closed_is_sent_once_for_every_reason() {
             "core_shutdown"
         ]
     );
-    std::thread::sleep(Duration::from_millis(200));
+    sim.advance(Duration::from_millis(200));
+    core.flush_events();
     assert_eq!(rec.events_count.load(Ordering::SeqCst), after);
 }

@@ -3,7 +3,7 @@
 
 use bc_protocol::archive::DateTime;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, FnConnector, SessionConfig};
 use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::fixture::Fixture;
 use recordings::secs;
@@ -26,7 +26,7 @@ fn key(device: &str, from: DateTime, to: DateTime) -> ThumbKey {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn covers_are_fetched_once_then_served_from_the_bounded_cache() {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
@@ -35,10 +35,10 @@ async fn covers_are_fetched_once_then_served_from_the_bounded_cache() {
     let mut a = ArchiveConfig::new(vec![d(0, 0, 0)]);
     a.events_per_day = 0;
     cfg.archive = Some(a);
-    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let nvr = mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current());
     let mut sc = SessionConfig::new("example-user", "example-password");
     sc.query_timeout = Duration::from_secs(5);
-    let session = DeviceSession::spawn(TcpConnector::new(nvr.addr()), sc);
+    let session = DeviceSession::spawn(in_memory(&nvr), sc);
 
     let dir = tempfile::tempdir().unwrap();
     // Room for two covers (a few KB each in the mock) but not three.
@@ -96,4 +96,10 @@ async fn covers_are_fetched_once_then_served_from_the_bounded_cache() {
     }
     drop(cache);
     session.close().await;
+}
+
+/// Connects to `nvr` (on the test's runtime) through in-memory pipes.
+fn in_memory(nvr: &mock_nvr::MockNvr) -> impl bc_session::Connector + use<> {
+    let addr = nvr.addr();
+    FnConnector(move || mock_nvr::connect(addr))
 }

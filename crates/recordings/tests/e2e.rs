@@ -1,12 +1,14 @@
 //! End to end against two in-process mock NVRs with fake recording stores:
 //! index fill, search by type, incident grouping across cameras and
 //! devices, and incident downloads that survive stalls, disconnects, and a
-//! restart without fetching a completed chunk twice.
+//! restart without fetching a completed chunk twice. The devices run on the
+//! test's runtime and paused clock, reached through in-memory pipes, so
+//! stall timeouts and backoffs run in simulated time.
 
 use bc_protocol::archive::DateTime;
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, Item, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, FnConnector, Item, SessionConfig, TcpConnector};
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, DownloadLog, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;
 use recordings::chunk;
@@ -22,7 +24,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn d(day: u8, h: u8, m: u8, s: u8) -> DateTime {
     DateTime::new(2026, 10, day, h, m, s).unwrap()
@@ -52,7 +55,20 @@ fn events_b() -> Vec<MockEvent> {
     vec![ev(0, "vehicle", d(10, 7, 42, 45), d(10, 7, 43, 10))]
 }
 
+/// Where a test's devices and sessions run.
+#[derive(Clone, Copy, PartialEq)]
+enum Timing {
+    /// On the test's runtime and its paused clock, through in-memory pipes.
+    Simulated,
+    /// On the devices' own threads in real time, over TCP.
+    Real,
+}
+
 fn spawn_mock(events: Vec<MockEvent>, rate: Option<u64>) -> mock_nvr::MockNvr {
+    spawn_mock_on(Timing::Simulated, events, rate)
+}
+
+fn spawn_mock_on(clock: Timing, events: Vec<MockEvent>, rate: Option<u64>) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(Fixture::load(&path).unwrap());
@@ -62,16 +78,30 @@ fn spawn_mock(events: Vec<MockEvent>, rate: Option<u64>) -> mock_nvr::MockNvr {
     a.events = events;
     a.download_rate = rate;
     cfg.archive = Some(a);
-    mock_nvr::spawn(cfg).unwrap()
+    match clock {
+        Timing::Simulated => mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current()),
+        Timing::Real => mock_nvr::spawn(cfg).unwrap(),
+    }
 }
 
 fn session(nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
+    session_on(Timing::Simulated, nvr)
+}
+
+fn session_on(clock: Timing, nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.query_timeout = Duration::from_secs(5);
     cfg.download_stall_timeout = Duration::from_millis(700);
     cfg.backoff.initial = Duration::from_millis(50);
     cfg.backoff.jitter = 0.0;
-    Arc::new(DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg))
+    let addr = nvr.addr();
+    match clock {
+        Timing::Simulated => {
+            let connector = FnConnector(move || mock_nvr::connect(addr));
+            Arc::new(DeviceSession::spawn(connector, cfg))
+        }
+        Timing::Real => Arc::new(DeviceSession::spawn(TcpConnector::new(addr), cfg)),
+    }
 }
 
 fn fixed_clock(t: Arc<AtomicI64>) -> Clock {
@@ -115,7 +145,7 @@ async fn index_device(
     .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     let nvr = spawn_mock(events_a(), None);
     let s = session(&nvr);
@@ -195,7 +225,7 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     s.close_shared().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn events_from_two_devices_group_into_one_three_camera_incident() {
     let (a, b) = (spawn_mock(events_a(), None), spawn_mock(events_b(), None));
     let (sa, sb) = (session(&a), session(&b));
@@ -298,9 +328,63 @@ fn check_chunks(folder: &Path, parts: &str, n: usize) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_camera_download_survives_a_stall_and_a_disconnect() {
-    let (a, b) = (spawn_mock(vec![], None), spawn_mock(vec![], None));
+    three_camera_download(Timing::Simulated).await;
+}
+
+/// The same download, with live view throughout, in real time over TCP on
+/// a multi-threaded runtime while every core of the machine is kept busy:
+/// the live-gap limit (400 ms) under real load, which simulated time cannot
+/// show (there, disk work and CPU contention take no time). Opt-in, since
+/// it depends on the machine: `cargo test -p recordings --test e2e --
+/// --ignored`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real-time stress test; run with --ignored"]
+async fn three_camera_download_keeps_live_view_under_real_load() {
+    let _load = CpuLoad::start();
+    three_camera_download(Timing::Real).await;
+}
+
+/// Busy threads, one per core, until dropped.
+struct CpuLoad {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl CpuLoad {
+    fn start() -> CpuLoad {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let n = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let threads = (0..n)
+            .map(|_| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    let mut x = 0u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        x = std::hint::black_box(x.wrapping_mul(6_364_136_223_846_793_005) + 1);
+                    }
+                })
+            })
+            .collect();
+        CpuLoad { stop, threads }
+    }
+}
+
+impl Drop for CpuLoad {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
+async fn three_camera_download(clock: Timing) {
+    let (a, b) = (
+        spawn_mock_on(clock, vec![], None),
+        spawn_mock_on(clock, vec![], None),
+    );
     // Side (A ch 1) stalls in its second chunk; Gate (B ch 0) loses its
     // connection in its third.
     a.inject_download_fault(DownloadFault {
@@ -315,7 +399,7 @@ async fn three_camera_download_survives_a_stall_and_a_disconnect() {
         kind: FaultKind::Disconnect,
         skip: 2,
     });
-    let (sa, sb) = (session(&a), session(&b));
+    let (sa, sb) = (session_on(clock, &a), session_on(clock, &b));
     // Live view on device A runs throughout. The downloads start once its
     // first frame is in, and the worst gap between frames is measured from
     // then on: time to the first frame is stream startup, not a stall.
@@ -464,7 +548,7 @@ impl CloseShared for Arc<DeviceSession> {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_restart_resumes_from_the_first_missing_chunk() {
     // Throttled so a chunk (about 100 kB here) takes a while.
     let a = spawn_mock(vec![], Some(150_000));
@@ -564,7 +648,7 @@ async fn a_restart_resumes_from_the_first_missing_chunk() {
     sb.close_shared().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn pausing_stops_the_running_download_and_resuming_finishes() {
     let a = spawn_mock(vec![], Some(100_000));
     let sa = session(&a);
@@ -602,7 +686,8 @@ async fn pausing_stops_the_running_download_and_resuming_finishes() {
     assert!(
         p[0].cameras
             .iter()
-            .all(|c| c.state == CameraState::ChunksComplete)
+            .all(|c| c.state == CameraState::ChunksComplete),
+        "{p:#?}"
     );
     sched.shutdown().await;
     drop(sched);

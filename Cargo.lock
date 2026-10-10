@@ -329,6 +329,8 @@ name = "mock-nvr"
 version = "0.1.0"
 dependencies = [
  "bc-protocol",
+ "simtime",
+ "tokio",
 ]
 
 [[package]]
@@ -583,6 +585,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "simtime"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -596,6 +605,8 @@ dependencies = [
  "bc-protocol",
  "mock-nvr",
  "serde_json",
+ "simtime",
+ "tokio",
  "viewer-core",
 ]
 
@@ -804,6 +815,7 @@ dependencies = [
  "libc",
  "mock-nvr",
  "serde_json",
+ "simtime",
  "sound-events",
  "tempfile",
  "tokio",
@@ -818,6 +830,7 @@ name = "viewer-ffi"
 version = "0.1.0"
 dependencies = [
  "mock-nvr",
+ "simtime",
  "tempfile",
  "viewer-core",
 ]

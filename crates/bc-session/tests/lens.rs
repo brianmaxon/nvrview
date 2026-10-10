@@ -1,11 +1,15 @@
 //! The second-lens probe against the mock's channel kinds (docs/protocol.md,
 //! "Second lenses").
 
-use bc_session::{ConnState, DeviceSession, LensProbe, SessionConfig, TcpConnector};
+mod common;
+
+use bc_session::{ConnState, DeviceSession, FnConnector, LensProbe, SessionConfig};
+use common::mock_connector;
 use mock_nvr::ExternMode;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const WINDOW: Duration = Duration::from_millis(800);
 
@@ -21,12 +25,12 @@ fn spawn_mock() -> mock_nvr::MockNvr {
         ExternMode::Refused,
         ExternMode::Silent,
     ];
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 async fn connected(nvr: &mock_nvr::MockNvr) -> DeviceSession {
     let cfg = SessionConfig::new("example-user", "example-password");
-    let s = DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg);
+    let s = DeviceSession::spawn(mock_connector(nvr), cfg);
     let mut st = s.watch_state();
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -47,7 +51,7 @@ async fn all_stopped(nvr: &mock_nvr::MockNvr) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn each_kind_of_channel_gets_its_answer_and_every_probe_stops() {
     let nvr = spawn_mock();
     let s = connected(&nvr).await;
@@ -92,11 +96,14 @@ async fn each_kind_of_channel_gets_its_answer_and_every_probe_stops() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_session_that_is_not_logged_in_is_inconclusive() {
     let cfg = SessionConfig::new("example-user", "example-password");
-    // Nothing listens on this port (a documentation address).
-    let s = DeviceSession::spawn(TcpConnector::new("192.0.2.1:9".parse().unwrap()), cfg);
+    // Nothing listens: every connection attempt is refused.
+    let refused = FnConnector(|| {
+        Err::<tokio::io::DuplexStream, _>(std::io::ErrorKind::ConnectionRefused.into())
+    });
+    let s = DeviceSession::spawn(refused, cfg);
     assert_eq!(
         s.probe_second_lens(0, WINDOW).await,
         LensProbe::Inconclusive

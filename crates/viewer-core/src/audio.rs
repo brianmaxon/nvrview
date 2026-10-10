@@ -23,6 +23,7 @@
 //! `audio_stats`) and dropped. Every other index is camera audio and goes
 //! to the decoder, which picks the codec from it.
 
+use crate::clock::HostClock;
 use crate::in_callback;
 use crate::{Callbacks, CoreError};
 use audio_pipeline::{
@@ -258,6 +259,8 @@ pub(crate) struct AudioHub {
     generation: AtomicU64,
     controls: Mutex<HashMap<u64, Arc<TileAudioControl>>>,
     pub(crate) taps: TapHub,
+    /// The core's clock (render host times are on it).
+    clock: HostClock,
 }
 
 impl AudioHub {
@@ -267,8 +270,10 @@ impl AudioHub {
     pub(crate) fn new(
         callbacks: Arc<dyn Callbacks>,
         max_tiles: usize,
+        clock: HostClock,
     ) -> std::io::Result<AudioHub> {
         Ok(AudioHub {
+            clock,
             output: Mutex::new(None),
             handoff: RenderHandoff::new(),
             meters: (0..max_tiles.saturating_add(METER_SPARE))
@@ -329,7 +334,7 @@ impl AudioHub {
     /// its audio was decoded (decaying to 0 when none arrives). Zero for an
     /// unknown tile or one without audio. Lock-free and allocation-free.
     pub(crate) fn level(&self, tile: u64) -> (f32, f32) {
-        let now_ns = crate::clock::now_ns();
+        let now_ns = self.clock.now_ns();
         let rendered = self.handoff.rendered_ns.load(Ordering::Acquire);
         if rendered != 0 && now_ns <= rendered.saturating_add(RENDER_LEVEL_STALE_NS) {
             for c in self.handoff.levels.iter() {
@@ -617,7 +622,7 @@ mod tests {
     /// meter; an unknown tile reads 0.
     #[test]
     fn levels_come_from_the_render_or_from_decoding() {
-        let hub = AudioHub::new(Arc::new(NoCallbacks), 2).unwrap();
+        let hub = AudioHub::new(Arc::new(NoCallbacks), 2, HostClock::Host).unwrap();
         let (a, b) = (7, 8);
         let ca = hub.add_tile(a);
         let cb = hub.add_tile(b);
@@ -657,7 +662,7 @@ mod tests {
     /// many tiles at display rate.
     #[test]
     fn reading_levels_is_cheap() {
-        let hub = AudioHub::new(Arc::new(NoCallbacks), 256).unwrap();
+        let hub = AudioHub::new(Arc::new(NoCallbacks), 256, HostClock::Host).unwrap();
         for t in 1..=256 {
             hub.add_tile(t);
         }

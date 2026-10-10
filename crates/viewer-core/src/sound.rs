@@ -30,6 +30,7 @@
 //!   (`stop`) arrived, so a `start` is sent some seconds after its `at_ns`
 //!   (the detector needs two cycles: about 7.5 s for T3, 10 s for T4).
 
+use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
 use audio_pipeline::MonoBlock;
@@ -338,16 +339,18 @@ pub struct TileLoudness {
 pub(crate) struct SoundHub {
     settings: SoundSettings,
     events: EventSink,
+    clock: HostClock,
     /// Tiles reporting each active (device, channel, kind).
     active: Mutex<HashMap<(u64, u8, AlarmKind), u32>>,
     lanes: Mutex<HashMap<u64, Arc<Mutex<LoudnessRing>>>>,
 }
 
 impl SoundHub {
-    pub(crate) fn new(settings: SoundSettings, events: EventSink) -> SoundHub {
+    pub(crate) fn new(settings: SoundSettings, events: EventSink, clock: HostClock) -> SoundHub {
         SoundHub {
             settings,
             events,
+            clock,
             active: Mutex::new(HashMap::new()),
             lanes: Mutex::new(HashMap::new()),
         }
@@ -466,7 +469,8 @@ impl TileSoundLink {
     /// One record's 16 kHz mono block.
     pub(crate) fn push(&mut self, b: &MonoBlock<'_>) {
         let sink = Self::sink(&self.hub, &self.ring, self.device, self.channel);
-        self.analyzer.push(b, wall_now_us(), sink);
+        let wall_us = self.hub.clock.wall_now_us();
+        self.analyzer.push(b, wall_us, sink);
     }
 
     /// The tile's tick: ends episodes of a stalled stream.
@@ -478,7 +482,8 @@ impl TileSoundLink {
     /// The tile's stream restarted or ended: ends its episodes now.
     pub(crate) fn end(&mut self) {
         let sink = Self::sink(&self.hub, &self.ring, self.device, self.channel);
-        self.analyzer.flush(crate::clock::now_ns(), sink);
+        let now = self.hub.clock.now_ns();
+        self.analyzer.flush(now, sink);
     }
 }
 
@@ -489,14 +494,6 @@ impl Drop for TileSoundLink {
             lock(&self.hub.lanes).remove(&self.tile);
         }
     }
-}
-
-fn wall_now_us() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_micros()).ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! One device: its session and the task that turns session state into
 //! control events.
 
+use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
 use crate::lens::{self, Camera, LensContext, LensProbes, ProbeJob, TileStarts};
@@ -52,6 +53,8 @@ pub(crate) struct DeviceHandle {
     stop: Option<oneshot::Sender<()>>,
     watcher: Option<JoinHandle<()>>,
     tiles: Arc<TileStarts>,
+    /// The runtime the device runs on (its clock times tile starts).
+    runtime: Handle,
 }
 
 impl DeviceHandle {
@@ -65,6 +68,7 @@ impl DeviceHandle {
         events: EventSink,
         gate: oneshot::Receiver<()>,
         lens: LensContext,
+        clock: HostClock,
     ) -> DeviceHandle {
         let session = Arc::new(session);
         let tiles = Arc::new(TileStarts::default());
@@ -76,6 +80,7 @@ impl DeviceHandle {
             events,
             lens,
             tiles: tiles.clone(),
+            clock,
         };
         let watcher = tokio::spawn(watch(ctx, stop_rx, gate));
         DeviceHandle {
@@ -83,6 +88,7 @@ impl DeviceHandle {
             stop: Some(stop_tx),
             watcher: Some(watcher),
             tiles,
+            runtime: Handle::current(),
         }
     }
 
@@ -93,6 +99,7 @@ impl DeviceHandle {
     /// A tile is starting a stream on `channel` (opened, or switching
     /// tiers): a second-lens probe of that channel waits a little.
     pub(crate) fn tile_starting(&self, channel: u8) {
+        let _rt = self.runtime.enter();
         self.tiles.note(channel);
     }
 
@@ -503,6 +510,7 @@ struct WatchCtx {
     events: EventSink,
     lens: LensContext,
     tiles: Arc<TileStarts>,
+    clock: HostClock,
 }
 
 /// Turns session state into events until stopped: `device_state` on every
@@ -523,6 +531,7 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
         events,
         lens,
         tiles,
+        clock,
     } = ctx;
     let mut state_rx = session.watch_state();
     let mut channels_rx = session.watch_channels();
@@ -563,7 +572,7 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
             if *s != ConnState::Connected {
                 // Whatever was active is unknown now; the next connection's
                 // first push is a full snapshot.
-                send_all(detections.stop_all(id, crate::clock::now_ns()));
+                send_all(detections.stop_all(id, clock.now_ns()));
             }
             events.send(state_event(id, s), Priority::State);
             if *s == ConnState::Connected {
@@ -616,7 +625,7 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
         tokio::select! {
             _ = &mut stop => {
                 // The device is being removed: nothing stays active.
-                send_all(detections.stop_all(id, crate::clock::now_ns()));
+                send_all(detections.stop_all(id, clock.now_ns()));
                 break;
             }
             r = state_rx.changed(), if state_open => match r {
@@ -650,7 +659,7 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
                 Err(_) => channels_open = false,
             },
             r = alarms_rx.recv(), if alarms_open => match r {
-                Ok(push) => send_all(detections.push(id, &push, crate::clock::now_ns())),
+                Ok(push) => send_all(detections.push(id, &push, clock.now_ns())),
                 // Missed some pushes: the next one is a full snapshot.
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     debug!(device = id, missed = n, "alarm pushes skipped");

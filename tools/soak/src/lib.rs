@@ -6,7 +6,9 @@
 //!   stream at N times its recorded speed to a real `viewer_core::Core`,
 //!   whose platform decoder is a fake that answers every `Decode` at once.
 //!   Counts frames, drops, gating, and resets, and samples process memory
-//!   over the run to judge growth.
+//!   over the run to judge growth. With [`SoakConfig::simulated_clock`] the
+//!   device and the core run on a simulated clock instead (`simtime`): the
+//!   run takes the CPU time it needs, not wall time, and repeats exactly.
 //! - **Audio** ([`audio_sim`]): the same records through
 //!   `audio_pipeline::TileAudio` in simulated time, reporting the range of
 //!   its filtered A/V error.
@@ -21,13 +23,14 @@ pub mod synth;
 
 use mock_nvr::fixture::Fixture;
 use mock_nvr::replay::{Replay, ReplayConfig};
+use simtime::SimRuntime;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
-use viewer_core::{Action, Callbacks, Core, CoreConfig, StreamTier};
+use viewer_core::{Action, Callbacks, Core, CoreConfig, StreamTier, TestRuntime};
 
 /// Settings of a run.
 #[derive(Clone, Debug)]
@@ -44,6 +47,11 @@ pub struct SoakConfig {
     pub sample_every: Duration,
     /// Run the audio leg (simulated time, no wall-clock cost beyond CPU).
     pub audio: bool,
+    /// Run the video leg on a simulated clock (`simtime`) instead of the
+    /// wall clock: the device and the core see the same timing, but the
+    /// run takes only the CPU time it needs, and "wall" figures are
+    /// simulated. Off by default: a real soak measures real time.
+    pub simulated_clock: bool,
 }
 
 impl SoakConfig {
@@ -56,6 +64,7 @@ impl SoakConfig {
             tiles: 1,
             sample_every: Duration::from_secs(10),
             audio: true,
+            simulated_clock: false,
         }
     }
 }
@@ -97,7 +106,8 @@ pub struct Report {
     pub speed: f64,
     /// Simulated duration asked for.
     pub simulated: Duration,
-    /// Wall time the video leg took.
+    /// Wall time the video leg took (simulated time with
+    /// [`SoakConfig::simulated_clock`]).
     pub wall: Duration,
     /// Tiles.
     pub tiles: u8,
@@ -207,12 +217,25 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
         speed: cfg.speed,
         looped: true,
     });
-    let nvr = mock_nvr::spawn(mc).map_err(|e| format!("mock cannot listen: {e}"))?;
+    let sim = cfg.simulated_clock.then(SimRuntime::new);
+    let nvr = match &sim {
+        Some(sim) => mock_nvr::spawn_in(mc, sim.handle()),
+        None => mock_nvr::spawn(mc).map_err(|e| format!("mock cannot listen: {e}"))?,
+    };
     let addr = nvr.addr();
 
     let fake = Arc::new(Fake::default());
     let core_cfg = CoreConfig {
         stats_interval: Duration::from_millis(500),
+        test_runtime: sim.as_ref().map(|sim| TestRuntime {
+            runtime: sim.handle().clone(),
+            connect: Arc::new(|host: &str, port: u16| {
+                let ip = host
+                    .parse()
+                    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+                mock_nvr::connect(std::net::SocketAddr::new(ip, port))
+            }),
+        }),
         ..CoreConfig::default()
     };
     let core = Arc::new(Core::new(core_cfg, fake.clone()).map_err(|e| e.to_string())?);
@@ -236,11 +259,11 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
     }
 
     let wall_target = Duration::from_secs_f64(cfg.simulated.as_secs_f64() / cfg.speed);
-    let start = Instant::now();
+    let clock = Clock::new(sim.as_ref());
     let mut memory = Vec::new();
     let mut next = Duration::ZERO;
     loop {
-        let el = start.elapsed();
+        let el = clock.elapsed();
         if el >= next {
             if let Some(bytes) = memory::current_bytes() {
                 memory.push(MemSample {
@@ -254,18 +277,19 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
         if el >= wall_target {
             break;
         }
-        std::thread::sleep(
+        clock.sleep(
             (wall_target - el)
                 .min(next.saturating_sub(el))
                 .min(Duration::from_millis(200))
                 .max(Duration::from_millis(1)),
         );
     }
-    let wall = start.elapsed();
+    let wall = clock.elapsed();
     let decode_actions = fake.decodes.load(Ordering::Relaxed);
     // Let the last stats events arrive, then tear down in the same order an
     // app would.
-    std::thread::sleep(Duration::from_millis(700));
+    clock.sleep(Duration::from_millis(700));
+    core.flush_events();
     let video = fake
         .stats
         .lock()
@@ -285,8 +309,13 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
     }
     let _ = core.remove_device(device);
     let dropped_events = core.dropped_events();
-    core.shutdown();
+    match &sim {
+        Some(sim) => sim.run_free(|| core.shutdown()),
+        None => core.shutdown(),
+    }
     nvr.shutdown();
+    drop(core);
+    drop(sim);
 
     // The audio leg uses no wall clock; it runs after the video leg so it
     // cannot disturb its timing or memory samples.
@@ -325,6 +354,38 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
         audio,
         queue_high_water: None,
     })
+}
+
+/// The video leg's clock: the wall clock, or a simulated one.
+struct Clock<'a> {
+    sim: Option<&'a SimRuntime>,
+    start: Instant,
+    sim_start: Option<tokio::time::Instant>,
+}
+
+impl<'a> Clock<'a> {
+    fn new(sim: Option<&'a SimRuntime>) -> Clock<'a> {
+        Clock {
+            sim,
+            start: Instant::now(),
+            sim_start: sim.map(SimRuntime::now),
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        match (self.sim, self.sim_start) {
+            (Some(sim), Some(t0)) => sim.now() - t0,
+            _ => self.start.elapsed(),
+        }
+    }
+
+    fn sleep(&self, d: Duration) {
+        match self.sim {
+            // Whole milliseconds: the simulated clock's resolution.
+            Some(sim) => sim.advance(Duration::from_millis(d.as_millis().max(1) as u64)),
+            None => std::thread::sleep(d),
+        }
+    }
 }
 
 /// Loads a recording for [`SoakConfig::new`].

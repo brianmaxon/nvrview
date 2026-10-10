@@ -1,16 +1,21 @@
 //! The core against the in-process mock NVR and a fake platform decoder.
+//! Most tests run the core on a simulated clock; the ones about threads
+//! (answers from other threads, a slow `on_action`, calls from callbacks)
+//! keep the core's own runtime and tile threads, in real time.
 
 mod common;
 
 use common::*;
+use simtime::SimRuntime;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use viewer_core::{CoreConfig, CoreError, DecodeFailureKind, StreamTier, TileStatus};
 
 #[test]
 fn tiles_share_one_login_and_play() {
-    let nvr = mock(4);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 4);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let addr = nvr.addr();
     let dev = core
         .add_device(&addr.ip().to_string(), addr.port(), USER, PASSWORD)
@@ -22,7 +27,9 @@ fn tiles_share_one_login_and_play() {
     ];
     assert!(tiles.iter().all(|t| *t != 0 && *t != dev));
     for t in tiles {
-        wait_until("decodes on every tile", 10, || rec.decodes(t) >= 20);
+        sim_until(&sim, &core, "decodes on every tile", 10, || {
+            rec.decodes(t) >= 20
+        });
     }
     assert_eq!(nvr.active_logins(), 1, "one session carries every tile");
     for t in tiles {
@@ -51,7 +58,7 @@ fn tiles_share_one_login_and_play() {
         !rec.overlap.load(Ordering::SeqCst),
         "on_action overlapped for a tile"
     );
-    wait_until("tile_stats", 5, || {
+    sim_until(&sim, &core, "tile_stats", 5, || {
         rec.events_of("tile_stats")
             .iter()
             .any(|e| e["tile"] == tiles[0] && e["decoded"].as_u64() > Some(0))
@@ -74,13 +81,16 @@ fn tiles_share_one_login_and_play() {
         .collect();
     assert_eq!(states[..2], ["connecting", "connected"]);
 
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     let after = (
         rec.actions.load(Ordering::SeqCst),
         rec.events_count.load(Ordering::SeqCst),
     );
-    wait_until("the session to close", 5, || nvr.active_logins() == 0);
-    std::thread::sleep(Duration::from_millis(200));
+    sim_until(&sim, &core, "the session to close", 5, || {
+        nvr.active_logins() == 0
+    });
+    sim.advance(Duration::from_millis(200));
+    core.flush_events();
     assert_eq!(
         after,
         (
@@ -124,8 +134,9 @@ fn answers_from_other_threads_keep_tiles_playing() {
 
 #[test]
 fn failure_kinds_drive_recovery() {
-    let nvr = mock(4);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 4);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -160,19 +171,20 @@ fn failure_kinds_drive_recovery() {
             ..Behavior::default()
         },
     );
-    wait_until("flaky tile recovers", 15, || {
+    sim_until(&sim, &core, "flaky tile recovers", 15, || {
         let seen = rec.seen(flaky);
         seen.contains(&Seen::Flush)
             && seen.contains(&Seen::Status(TileStatus::Recovering))
             && rec.last_status(flaky) == Some(TileStatus::Playing)
     });
-    wait_until("rejected tile gives up", 10, || {
+    sim_until(&sim, &core, "rejected tile gives up", 10, || {
         rec.last_status(rejected) == Some(TileStatus::Undecodable)
     });
-    wait_until("transient tile plays", 15, || {
+    sim_until(&sim, &core, "transient tile plays", 15, || {
         rec.last_status(transient) == Some(TileStatus::Playing) && rec.decodes(transient) > 10
     });
-    std::thread::sleep(Duration::from_millis(500));
+    sim.advance(Duration::from_millis(500));
+    core.flush_events();
     for t in [flaky, rejected, transient] {
         check_protocol(&rec.seen(t));
     }
@@ -194,18 +206,19 @@ fn failure_kinds_drive_recovery() {
         .find(|e| e["tile"] == flaky)
         .unwrap();
     assert!(stats["failures"].as_u64() >= Some(2), "{stats}");
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn closing_a_tile_stops_its_preview_and_its_callbacks() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
-    let tap = Tap::new(nvr.addr());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let tap = Tap::sim(nvr.addr());
     let dev = core.add_device_with(tap.clone(), USER, PASSWORD).unwrap();
     let a = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
     let b = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("both tiles play", 10, || {
+    sim_until(&sim, &core, "both tiles play", 10, || {
         rec.decodes(a) >= 10 && rec.decodes(b) >= 10
     });
     assert_eq!(tap.count(3), 2, "two preview starts");
@@ -214,29 +227,33 @@ fn closing_a_tile_stops_its_preview_and_its_callbacks() {
     core.close_tile(a).unwrap();
     let seen_at_close = rec.seen(a).len();
     let b_at_close = rec.decodes(b);
-    wait_until("preview stop", 5, || tap.count(4) == 1);
-    std::thread::sleep(Duration::from_millis(300));
+    sim_until(&sim, &core, "preview stop", 5, || tap.count(4) == 1);
+    sim.advance(Duration::from_millis(300));
+    core.flush_events();
     assert_eq!(rec.seen(a).len(), seen_at_close, "no on_action after close");
     assert!(rec.decodes(b) > b_at_close, "the other tile keeps playing");
     assert_eq!(core.close_tile(a), Err(CoreError::UnknownId));
     assert_eq!(core.decoded(a, 0, 0), Err(CoreError::UnknownId));
-    wait_until("tile_closed", 5, || {
+    sim_until(&sim, &core, "tile_closed", 5, || {
         rec.events_of("tile_closed")
             .iter()
             .any(|e| e["tile"] == a && e["reason"] == "closed")
     });
     assert_eq!(nvr.active_logins(), 1);
     assert_eq!(tap.connects.load(Ordering::SeqCst), 1);
-    core.shutdown();
-    wait_until("the session to close", 5, || nvr.active_logins() == 0);
+    sim.run_free(|| core.shutdown());
+    sim_until(&sim, &core, "the session to close", 5, || {
+        nvr.active_logins() == 0
+    });
     assert_eq!(tap.count(4), 2, "shutdown stopped the remaining preview");
 }
 
 #[test]
 fn removing_a_device_closes_its_tiles_and_socket() {
-    let nvr = mock(2);
-    let other = mock(1);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let other = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -246,16 +263,20 @@ fn removing_a_device_closes_its_tiles_and_socket() {
     let t1 = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
     let t2 = core.open_tile(dev, 1, StreamTier::Main).unwrap();
     let t3 = core.open_tile(keep, 0, StreamTier::Sub).unwrap();
-    wait_until("tiles play", 10, || {
+    sim_until(&sim, &core, "tiles play", 10, || {
         [t1, t2, t3].iter().all(|t| rec.decodes(*t) >= 5)
     });
 
     core.remove_device(dev).unwrap();
     let (n1, n2, n3) = (rec.seen(t1).len(), rec.seen(t2).len(), rec.decodes(t3));
-    wait_until("the removed device's session to close", 5, || {
-        nvr.active_logins() == 0
-    });
-    wait_until("tile_closed for both tiles", 5, || {
+    sim_until(
+        &sim,
+        &core,
+        "the removed device's session to close",
+        5,
+        || nvr.active_logins() == 0,
+    );
+    sim_until(&sim, &core, "tile_closed for both tiles", 5, || {
         let closed = rec.events_of("tile_closed");
         [t1, t2].iter().all(|t| {
             closed
@@ -265,12 +286,13 @@ fn removing_a_device_closes_its_tiles_and_socket() {
     });
     // Events are asynchronous: the device logs out (freeing its slot on the
     // mock) before the core reports it closed.
-    wait_until("the device's closed event", 5, || {
+    sim_until(&sim, &core, "the device's closed event", 5, || {
         rec.events_of("device_state")
             .iter()
             .any(|e| e["device"] == dev && e["state"] == "closed")
     });
-    std::thread::sleep(Duration::from_millis(300));
+    sim.advance(Duration::from_millis(300));
+    core.flush_events();
     assert_eq!((rec.seen(t1).len(), rec.seen(t2).len()), (n1, n2));
     assert!(rec.decodes(t3) > n3, "the other device keeps playing");
     assert_eq!(other.active_logins(), 1);
@@ -280,21 +302,25 @@ fn removing_a_device_closes_its_tiles_and_socket() {
         Err(CoreError::UnknownId)
     );
     drop(core);
-    wait_until("dropping the core closes the rest", 5, || {
-        other.active_logins() == 0
-    });
+    sim.advance_until(
+        "dropping the core closes the rest",
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        || other.active_logins() == 0,
+    );
 }
 
 #[test]
 fn refused_login_is_reported_once_and_not_retried() {
-    let nvr = mock(1);
-    let (core, rec) = start(fast_config());
-    let tap = Tap::new(nvr.addr());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let tap = Tap::sim(nvr.addr());
     let dev = core
         .add_device_with(tap.clone(), USER, "wrong-password")
         .unwrap();
     let t = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
-    wait_until("login_failed", 10, || {
+    sim_until(&sim, &core, "login_failed", 10, || {
         rec.events_of("device_state")
             .iter()
             .any(|e| e["state"] == "login_failed")
@@ -308,7 +334,8 @@ fn refused_login_is_reported_once_and_not_retried() {
     assert_eq!(e["status"], 401);
     assert_eq!(e["remain_times"], 2);
     // Several backoff periods later: still one attempt, no new states.
-    std::thread::sleep(Duration::from_millis(800));
+    sim.advance(Duration::from_millis(800));
+    core.flush_events();
     assert_eq!(tap.connects.load(Ordering::SeqCst), 1);
     let states: Vec<_> = rec
         .events_of("device_state")
@@ -320,13 +347,14 @@ fn refused_login_is_reported_once_and_not_retried() {
     assert_eq!(nvr.active_logins(), 0);
     // The device's tiles end with it, and so does one opened afterward.
     let late = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("tile_closed for both tiles", 5, || {
+    sim_until(&sim, &core, "tile_closed for both tiles", 5, || {
         rec.events_of("tile_closed").len() == 2
     });
     // The app removes the device and adds it again with new credentials.
     core.remove_device(dev).unwrap();
     assert_eq!(core.close_tile(t), Err(CoreError::UnknownId));
-    std::thread::sleep(Duration::from_millis(100));
+    sim.advance(Duration::from_millis(100));
+    core.flush_events();
     assert_eq!(
         rec.check_closed_once(&[t, late]),
         ["login_failed", "login_failed"]
@@ -336,18 +364,21 @@ fn refused_login_is_reported_once_and_not_retried() {
         .unwrap();
     assert_ne!(again, dev);
     let t = core.open_tile(again, 0, StreamTier::Sub).unwrap();
-    wait_until("decodes after new credentials", 10, || rec.decodes(t) > 5);
-    core.shutdown();
+    sim_until(&sim, &core, "decodes after new credentials", 10, || {
+        rec.decodes(t) > 5
+    });
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn channels_and_device_info_events() {
-    let nvr = mock(3);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 3);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
-    wait_until("named channels", 10, || {
+    sim_until(&sim, &core, "named channels", 10, || {
         rec.events_of("channels")
             .iter()
             .any(|e| e["channels"][0].get("name").is_some())
@@ -366,14 +397,14 @@ fn channels_and_device_info_events() {
     }
     // The slot list came first, before any name was known.
     assert!(all[0]["channels"][0].get("name").is_none(), "{all:?}");
-    wait_until("device_info", 5, || {
+    sim_until(&sim, &core, "device_info", 5, || {
         !rec.events_of("device_info").is_empty()
     });
     let info = &rec.events_of("device_info")[0];
     assert_eq!(info["device"], dev);
     assert_eq!(info["name"], "Mock NVR");
     assert_eq!(info["model"], "MOCK-NVR");
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]

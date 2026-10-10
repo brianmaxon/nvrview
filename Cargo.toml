@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/bc-cli", "tools/mock-nvr", "tools/soak"]
+members = ["crates/*", "tools/bc-cli", "tools/mock-nvr", "tools/simtime", "tools/soak"]
 
 [workspace.package]
 edition = "2024"
@@ -27,4 +27,29 @@ opt-level = 2
 
 # The large-file test pushes a few GiB through the muxer.
 [profile.dev.package.mp4-remux]
+opt-level = 2
+
+# Sound analysis runs on every live tile with audio, and its detector tests
+# push minutes of synthetic audio through it.
+[profile.dev.package.sound-events]
+opt-level = 2
+
+# The mock encrypts and the session decrypts every media message; the
+# cipher's generic code is slow unoptimized.
+[profile.dev.package.aes]
+opt-level = 2
+
+[profile.dev.package.cfb-mode]
+opt-level = 2
+
+[profile.dev.package.cipher]
+opt-level = 2
+
+[profile.dev.package.crypto-common]
+opt-level = 2
+
+[profile.dev.package.hybrid-array]
+opt-level = 2
+
+[profile.dev.package.inout]
 opt-level = 2

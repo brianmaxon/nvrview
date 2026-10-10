@@ -23,6 +23,58 @@ use viewer_core::{
 pub const USER: &str = "example-user";
 pub const PASSWORD: &str = "example-password";
 
+/// A core configuration that runs on `sim`'s runtime and simulated clock,
+/// reaching devices added by host and port through in-memory pipes to mock
+/// NVRs started with [`sim_spawn`] (or `mock_nvr::spawn_in` on `sim`).
+pub fn on_sim(sim: &simtime::SimRuntime, config: CoreConfig) -> CoreConfig {
+    CoreConfig {
+        test_runtime: Some(viewer_core::TestRuntime {
+            runtime: sim.handle().clone(),
+            connect: Arc::new(|host: &str, port: u16| {
+                let ip = host
+                    .parse()
+                    .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                mock_nvr::connect(SocketAddr::new(ip, port))
+            }),
+        }),
+        ..config
+    }
+}
+
+/// Starts a mock NVR on `sim`'s runtime and clock.
+pub fn sim_spawn(sim: &simtime::SimRuntime, cfg: mock_nvr::Config) -> mock_nvr::MockNvr {
+    mock_nvr::spawn_in(cfg, sim.handle())
+}
+
+/// [`mock`] on `sim`'s runtime and clock.
+pub fn sim_mock(sim: &simtime::SimRuntime, channels: u8) -> mock_nvr::MockNvr {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+    cfg.channels = channels;
+    sim_spawn(sim, cfg)
+}
+
+/// Advances `sim` in 10 ms steps until `cond` holds, delivering the core's
+/// queued events before each check; panics after `secs` simulated seconds.
+pub fn sim_until(
+    sim: &simtime::SimRuntime,
+    core: &Core,
+    what: &str,
+    secs: u64,
+    mut cond: impl FnMut() -> bool,
+) {
+    sim.advance_until(
+        what,
+        Duration::from_secs(secs),
+        Duration::from_millis(10),
+        || {
+            core.flush_events();
+            cond()
+        },
+    );
+}
+
 pub fn mock(channels: u8) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
@@ -400,12 +452,24 @@ pub struct Tap {
     pub addr: Option<SocketAddr>,
     pub connects: Arc<AtomicUsize>,
     pub commands: Arc<Mutex<Vec<u32>>>,
+    /// Through in-memory pipes (`mock_nvr::connect`) instead of TCP.
+    pub in_memory: bool,
 }
 
 impl Tap {
+    /// Over TCP, to a mock started with `mock_nvr::spawn`.
     pub fn new(addr: SocketAddr) -> Tap {
         Tap {
             addr: Some(addr),
+            ..Tap::default()
+        }
+    }
+
+    /// Through in-memory pipes, to a mock on a simulated runtime.
+    pub fn sim(addr: SocketAddr) -> Tap {
+        Tap {
+            addr: Some(addr),
+            in_memory: true,
             ..Tap::default()
         }
     }
@@ -420,8 +484,12 @@ impl Tap {
     }
 }
 
+/// A connection of either kind.
+pub trait Io: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Io for T {}
+
 pub struct TapStream {
-    inner: TcpStream,
+    inner: Box<dyn Io>,
     dec: Decoder,
     commands: Arc<Mutex<Vec<u32>>>,
 }
@@ -434,7 +502,11 @@ impl viewer_core::Connector for Tap {
     ) -> Pin<Box<dyn std::future::Future<Output = io::Result<TapStream>> + Send + '_>> {
         Box::pin(async move {
             self.connects.fetch_add(1, Ordering::SeqCst);
-            let inner = TcpStream::connect(self.addr.unwrap()).await?;
+            let inner: Box<dyn Io> = if self.in_memory {
+                Box::new(mock_nvr::connect(self.addr.unwrap())?)
+            } else {
+                Box::new(TcpStream::connect(self.addr.unwrap()).await?)
+            };
             Ok(TapStream {
                 inner,
                 dec: Decoder::new(),
@@ -450,7 +522,7 @@ impl AsyncRead for TapStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        Pin::new(&mut *self.inner).poll_read(cx, buf)
     }
 }
 
@@ -461,7 +533,7 @@ impl AsyncWrite for TapStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = &mut *self;
-        let r = Pin::new(&mut this.inner).poll_write(cx, buf);
+        let r = Pin::new(&mut *this.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = &r {
             this.dec.push(&buf[..*n]);
             while let Ok(Some(m)) = this.dec.next_message() {
@@ -472,10 +544,10 @@ impl AsyncWrite for TapStream {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        Pin::new(&mut *self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        Pin::new(&mut *self.inner).poll_shutdown(cx)
     }
 }

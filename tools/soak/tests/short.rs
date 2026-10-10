@@ -1,6 +1,7 @@
 //! A short soak as a normal test: a synthetic stream for ten simulated
-//! minutes at 60x (ten seconds of wall time), checking nothing was lost to
-//! failures or resets and that the audio stays in sync.
+//! minutes at 60x, on a simulated clock (ten seconds of device time, run as
+//! fast as the CPU allows), checking nothing was lost to failures or resets
+//! and that the audio stays in sync. The real-time soak is the `soak` tool.
 
 use soak::{SoakConfig, run, synth};
 use std::time::Duration;
@@ -10,6 +11,7 @@ fn ten_simulated_minutes_at_60x() {
     let replay = synth::recording(&synth::fixtures_dir(), 120, 15).unwrap();
     let mut cfg = SoakConfig::new(replay, 60.0, Duration::from_secs(600));
     cfg.sample_every = Duration::from_millis(500);
+    cfg.simulated_clock = true;
     let r = run(&cfg).unwrap();
     println!("{}", r.to_markdown());
 

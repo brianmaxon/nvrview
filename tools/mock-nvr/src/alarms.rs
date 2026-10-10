@@ -14,8 +14,9 @@ use bc_protocol::crypto::SessionKey;
 use bc_protocol::framer::encode_message_with_status;
 use bc_protocol::header::Class;
 use bc_protocol::xml::XML_DECLARATION;
-use std::io::{self, Write};
-use std::sync::Mutex;
+use std::io;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 /// One channel slot's alarm state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -26,6 +27,7 @@ pub struct SlotState {
     pub ai_type: String,
 }
 
+#[derive(Clone)]
 struct Subscriber {
     conn: u64,
     writer: Writer,
@@ -37,6 +39,8 @@ struct Subscriber {
 pub(crate) struct Board {
     slots: Mutex<Vec<SlotState>>,
     subscribers: Mutex<Vec<Subscriber>>,
+    /// Snapshots to push, in order, by [`push_loop`].
+    pushes: mpsc::UnboundedSender<String>,
 }
 
 fn none_if_empty(s: &str) -> &str {
@@ -44,10 +48,11 @@ fn none_if_empty(s: &str) -> &str {
 }
 
 impl Board {
-    pub(crate) fn new(channels: u8) -> Board {
+    pub(crate) fn new(channels: u8, pushes: mpsc::UnboundedSender<String>) -> Board {
         Board {
             slots: Mutex::new(vec![SlotState::default(); usize::from(channels)]),
             subscribers: Mutex::new(Vec::new()),
+            pushes,
         }
     }
 
@@ -66,23 +71,30 @@ impl Board {
         s
     }
 
-    fn push_to(sub: &Subscriber, inner: &str) -> io::Result<()> {
+    async fn push_to(sub: &Subscriber, inner: &str) -> io::Result<()> {
         let mut body = format!("{XML_DECLARATION}\n<body>\n{inner}</body>\n").into_bytes();
         sub.key.encrypt(&mut body);
         let bytes = encode_message_with_status(33, sub.message_id, 200, Class::Device, &[], &body)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        lock(&sub.writer).write_all(&bytes)
+        sub.writer.write_all(&bytes).await
     }
 
     /// A session subscribed (192): it gets the current snapshot at once.
-    pub(crate) fn subscribe(&self, conn: u64, writer: Writer, key: SessionKey, message_id: u32) {
+    pub(crate) async fn subscribe(
+        &self,
+        conn: u64,
+        writer: Writer,
+        key: SessionKey,
+        message_id: u32,
+    ) {
         let sub = Subscriber {
             conn,
             writer,
             key,
             message_id,
         };
-        let _ = Self::push_to(&sub, &self.snapshot_xml());
+        let snapshot = self.snapshot_xml();
+        let _ = Self::push_to(&sub, &snapshot).await;
         let mut subs = lock(&self.subscribers);
         subs.retain(|s| s.conn != conn);
         subs.push(sub);
@@ -106,15 +118,31 @@ impl Board {
             }
             *slot = state;
         }
-        let xml = self.snapshot_xml();
-        // A subscriber whose connection failed is dropped; its session ends
-        // on its own.
-        lock(&self.subscribers).retain(|s| Self::push_to(s, &xml).is_ok());
+        // Pushed in order by `push_loop`, which outlives every caller.
+        let _ = self.pushes.send(self.snapshot_xml());
         true
     }
 
     /// Sessions currently subscribed.
     pub(crate) fn subscribers(&self) -> usize {
         lock(&self.subscribers).len()
+    }
+}
+
+/// Pushes each snapshot [`Board::set`] queued to every subscriber, in
+/// order. A subscriber whose connection failed is dropped; its session ends
+/// on its own.
+pub(crate) async fn push_loop(board: &Board, mut rx: mpsc::UnboundedReceiver<String>) {
+    while let Some(xml) = rx.recv().await {
+        let subs: Vec<Subscriber> = lock(&board.subscribers).clone();
+        let mut failed: Vec<Writer> = Vec::new();
+        for s in &subs {
+            if Board::push_to(s, &xml).await.is_err() {
+                failed.push(Arc::clone(&s.writer));
+            }
+        }
+        if !failed.is_empty() {
+            lock(&board.subscribers).retain(|s| !failed.iter().any(|f| Arc::ptr_eq(f, &s.writer)));
+        }
     }
 }

@@ -3,14 +3,20 @@
 //! passes `now + 10 ms` and sleeps 10 ms (so its calls come a little more
 //! than 10 ms apart while each renders 10 ms of frames). Neither may cause
 //! resyncs or silence (docs/AUDIO.md).
+//!
+//! On a simulated clock (`simtime`): the sleeping loop's overshoot is
+//! modeled (every fourth sleep lasts 11 ms instead of 10) rather than left
+//! to the machine, and the jitter comes from a seeded generator, so each
+//! run renders exactly the same calls.
 
 mod common;
 
-use common::{PASSWORD, USER, wait_until};
+use common::{PASSWORD, USER, on_sim, sim_spawn, sim_until};
+use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
-use viewer_core::{Action, Callbacks, Core, CoreConfig, StreamTier, clock};
+use std::time::Duration;
+use viewer_core::{Action, Callbacks, Core, CoreConfig, StreamTier};
 
 const THRESHOLD: f32 = 0.4;
 
@@ -20,7 +26,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn mock() -> mock_nvr::MockNvr {
+fn mock(sim: &SimRuntime) -> mock_nvr::MockNvr {
     let video = mock_nvr::fixture::Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
     let mut cfg = mock_nvr::Config::new(video);
     cfg.channels = 1;
@@ -30,7 +36,7 @@ fn mock() -> mock_nvr::MockNvr {
     a.jitter_us = 30_000;
     a.stream_index = 5;
     cfg.audio = Some(Arc::new(a));
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 #[derive(Default)]
@@ -68,7 +74,8 @@ impl Rec {
 
 #[derive(Clone, Copy, Debug)]
 enum HostClock {
-    /// `now + 10 ms`, then sleep 10 ms (like the C smoke test).
+    /// `now + 10 ms`, then sleep 10 ms (like the C smoke test); a sleep
+    /// overshoots, here by 1 ms every fourth call.
     Sleep,
     /// An exact 10 ms schedule, passed with up to ±5 ms of error.
     Jitter,
@@ -78,22 +85,23 @@ enum HostClock {
 /// highest level read for `tile` in the last `level_s` seconds and the
 /// longest stretch (s) the level stayed below the threshold after audio
 /// first showed.
-fn render(core: &Core, tile: u64, how: HostClock, seconds: f64) -> (f32, f64) {
+fn render(sim: &SimRuntime, core: &Core, tile: u64, how: HostClock, seconds: f64) -> (f32, f64) {
     let mut buf = vec![0.0f32; 480 * 2];
-    let t0 = Instant::now();
-    let start = clock::now_ns() + 10_000_000;
+    let t0 = sim.now();
+    let start = core.clock_now_ns() + 10_000_000;
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
-    let (mut max, mut quiet_since, mut longest) = (0.0f32, None::<Instant>, 0.0f64);
+    let (mut max, mut quiet_since, mut longest) = (0.0f32, None::<Duration>, 0.0f64);
     let mut heard = false;
     let mut k = 0u64;
-    while t0.elapsed().as_secs_f64() < seconds {
+    let elapsed = || (sim.now() - t0).as_secs_f64();
+    while elapsed() < seconds {
         let host = match how {
-            HostClock::Sleep => clock::now_ns() + 10_000_000,
+            HostClock::Sleep => core.clock_now_ns() + 10_000_000,
             HostClock::Jitter => {
                 let ideal = start + k * 10_000_000;
-                let now = clock::now_ns();
+                let now = core.clock_now_ns();
                 if now + 10_000_000 < ideal {
-                    std::thread::sleep(Duration::from_nanos(ideal - 10_000_000 - now));
+                    sim.advance(Duration::from_nanos(ideal - 10_000_000 - now));
                 }
                 seed ^= seed << 13;
                 seed ^= seed >> 7;
@@ -108,14 +116,16 @@ fn render(core: &Core, tile: u64, how: HostClock, seconds: f64) -> (f32, f64) {
             heard = true;
             quiet_since = None;
         } else if heard {
-            let since = *quiet_since.get_or_insert_with(Instant::now);
-            longest = longest.max(since.elapsed().as_secs_f64());
+            let now = sim.now() - t0;
+            let since = *quiet_since.get_or_insert(now);
+            longest = longest.max((now - since).as_secs_f64());
         }
-        if t0.elapsed().as_secs_f64() > seconds - 3.0 {
+        if elapsed() > seconds - 3.0 {
             max = max.max(peak);
         }
         if matches!(how, HostClock::Sleep) {
-            std::thread::sleep(Duration::from_millis(10));
+            let overshoot = u64::from(k % 4 == 3);
+            sim.advance(Duration::from_millis(10 + overshoot));
         }
         k += 1;
     }
@@ -125,14 +135,18 @@ fn render(core: &Core, tile: u64, how: HostClock, seconds: f64) -> (f32, f64) {
 #[test]
 fn a_jittery_or_sleeping_host_clock_causes_no_resyncs() {
     for how in [HostClock::Sleep, HostClock::Jitter] {
-        let nvr = mock();
+        let sim = SimRuntime::new();
+        let nvr = mock(&sim);
         let rec = Arc::new(Rec::default());
         let core = Arc::new(
             Core::new(
-                CoreConfig {
-                    stats_interval: Duration::from_millis(200),
-                    ..CoreConfig::default()
-                },
+                on_sim(
+                    &sim,
+                    CoreConfig {
+                        stats_interval: Duration::from_millis(200),
+                        ..CoreConfig::default()
+                    },
+                ),
                 rec.clone(),
             )
             .unwrap(),
@@ -144,9 +158,12 @@ fn a_jittery_or_sleeping_host_clock_causes_no_resyncs() {
         let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
         core.set_audio_output(48_000, 2).unwrap();
         core.set_tile_audio(tile, true, 1.0).unwrap();
-        wait_until("audio decoded", 10, || core.tile_audio_level(tile).0 > 0.0);
-        let (max, longest_quiet) = render(&core, tile, how, 15.0);
-        std::thread::sleep(Duration::from_millis(300));
+        sim_until(&sim, &core, "audio decoded", 10, || {
+            core.tile_audio_level(tile).0 > 0.0
+        });
+        let (max, longest_quiet) = render(&sim, &core, tile, how, 15.0);
+        sim.advance(Duration::from_millis(300));
+        core.flush_events();
         let stats = rec.last_audio_stats(tile).expect("audio_stats");
         println!("{how:?}: level {max:.2}, longest quiet {longest_quiet:.2} s; {stats}");
         // The first start is the only one: no resync, nothing not played.
@@ -155,7 +172,7 @@ fn a_jittery_or_sleeping_host_clock_causes_no_resyncs() {
         assert!(max > THRESHOLD, "{how:?}: level {max}");
         // The clicks in the fixture come well under 2 s apart.
         assert!(longest_quiet < 2.5, "{how:?}: quiet for {longest_quiet} s");
-        core.shutdown();
+        sim.run_free(|| core.shutdown());
         nvr.shutdown();
     }
 }

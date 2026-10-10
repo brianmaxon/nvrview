@@ -1,14 +1,16 @@
 //! Talk-back against the in-process mock NVR's doorbell model: permission,
 //! capability checks, rate limit, pacing, and the close on every exit path.
 
+mod common;
+
 use bc_protocol::talk::{AdpcmEncoder, RECORD_DURATION_US, SAMPLES_PER_RECORD, decode_record};
-use bc_session::{
-    DeviceSession, Refusal, SessionConfig, StopReason, Talk, TalkState, TcpConnector,
-};
+use bc_session::{DeviceSession, Refusal, SessionConfig, StopReason, Talk, TalkState};
+use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::talk::{TalkEnd, TalkLog};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// The doorbell's channel; channel 0 has no speaker.
 const BELL: u8 = 1;
@@ -19,14 +21,14 @@ fn spawn_mock() -> mock_nvr::MockNvr {
     let mut cfg = mock_nvr::Config::new(Fixture::load(&path).unwrap());
     cfg.channels = 3;
     cfg.talk_channels = vec![BELL];
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr, tweak: impl FnOnce(&mut SessionConfig)) -> DeviceSession {
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.query_timeout = Duration::from_secs(5);
     tweak(&mut cfg);
-    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+    DeviceSession::spawn(mock_connector(nvr), cfg)
 }
 
 fn tone(n: usize) -> Vec<i16> {
@@ -63,7 +65,7 @@ async fn ended(talk: &mut Talk) -> TalkState {
         .expect("talk did not end")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn refused_without_permission_and_nothing_reaches_the_device() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -75,7 +77,7 @@ async fn refused_without_permission_and_nothing_reaches_the_device() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_channel_without_a_speaker_is_refused_before_any_talk_command() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -85,7 +87,7 @@ async fn a_channel_without_a_speaker_is_refused_before_any_talk_command() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn audio_arrives_decodable_and_in_real_time_then_finishes_with_a_close() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -135,7 +137,7 @@ async fn audio_arrives_decodable_and_in_real_time_then_finishes_with_a_close() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_the_talk_sends_the_close() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -150,7 +152,7 @@ async fn dropping_the_talk_sends_the_close() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stop_and_session_close_both_send_the_close() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -180,7 +182,7 @@ async fn stop_and_session_close_both_send_the_close() {
     .await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_device_error_ends_the_talk_with_a_close() {
     let nvr = spawn_mock();
     nvr.set_talk_audio_status(500);
@@ -199,7 +201,7 @@ async fn a_device_error_ends_the_talk_with_a_close() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_open_reports_the_status() {
     let nvr = spawn_mock();
     nvr.set_talk_open_status(503);
@@ -210,7 +212,7 @@ async fn a_refused_open_reports_the_status() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn starts_are_rate_limited_per_channel() {
     let nvr = spawn_mock();
     let s = session(&nvr, |c| c.talk_starts_per_minute = 2);
@@ -232,7 +234,7 @@ async fn starts_are_rate_limited_per_channel() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn one_talk_per_channel() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -243,7 +245,7 @@ async fn one_talk_per_channel() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn withdrawing_permission_stops_the_talk() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -263,7 +265,7 @@ async fn withdrawing_permission_stops_the_talk() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_idle_talk_stops_and_the_buffer_is_bounded() {
     let nvr = spawn_mock();
     let s = session(&nvr, |c| {
@@ -288,7 +290,7 @@ async fn an_idle_talk_stops_and_the_buffer_is_bounded() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_lost_connection_ends_the_talk() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});
@@ -305,7 +307,7 @@ async fn a_lost_connection_ends_the_talk() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn microphone_style_pushes_go_out_as_they_fill_records() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});

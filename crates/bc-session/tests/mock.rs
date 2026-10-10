@@ -1,7 +1,10 @@
 //! Info queries and the channel list, against the in-process mock NVR.
 
+mod common;
+
 use bc_protocol::session::Command;
-use bc_session::{DeviceSession, QueryError, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, QueryError, SessionConfig};
+use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -15,16 +18,16 @@ fn fixture() -> Fixture {
 fn spawn_mock(channels: u8) -> mock_nvr::MockNvr {
     let mut cfg = mock_nvr::Config::new(fixture());
     cfg.channels = channels;
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr, password: &str) -> DeviceSession {
     let mut cfg = SessionConfig::new("example-user", password);
     cfg.query_timeout = Duration::from_secs(5);
-    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+    DeviceSession::spawn(mock_connector(nvr), cfg)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn queries_are_answered_and_the_channel_list_arrives() {
     let nvr = spawn_mock(3);
     let s = session(&nvr, "example-password");
@@ -65,7 +68,7 @@ async fn queries_are_answered_and_the_channel_list_arrives() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn non_query_commands_are_refused_locally() {
     let nvr = spawn_mock(1);
     let s = session(&nvr, "example-password");
@@ -84,7 +87,7 @@ async fn non_query_commands_are_refused_locally() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn queries_fail_when_the_login_is_refused() {
     let nvr = spawn_mock(1);
     let s = session(&nvr, "wrong-password");
@@ -104,11 +107,11 @@ async fn next(
         .expect("the session is open")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn detection_pushes_arrive_after_the_subscription() {
     let mut cfg = mock_nvr::Config::new(fixture());
     cfg.channels = 3;
-    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let nvr = mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current());
     let s = session(&nvr, "example-password");
     let mut alarms = s.alarms();
     // The first push after 192 is a full, idle snapshot.
@@ -132,19 +135,22 @@ async fn detection_pushes_arrive_after_the_subscription() {
     assert!(!nvr.set_alarm(9, "MD", ""));
     s.close().await;
     // The mock forgets the subscription when its side of the session ends.
-    let end = std::time::Instant::now() + Duration::from_secs(5);
+    let end = tokio::time::Instant::now() + Duration::from_secs(5);
     while nvr.alarm_subscribers() != 0 {
-        assert!(std::time::Instant::now() < end, "subscription not dropped");
+        assert!(
+            tokio::time::Instant::now() < end,
+            "subscription not dropped"
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn no_detection_subscription_when_turned_off() {
     let nvr = spawn_mock(1);
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.alarm_report = false;
-    let s = DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg);
+    let s = DeviceSession::spawn(mock_connector(&nvr), cfg);
     // A query round trip proves the session is logged in.
     s.query(Command::VersionInfo, None).await.unwrap();
     assert_eq!(nvr.command_count(192), 0);

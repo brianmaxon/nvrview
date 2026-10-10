@@ -41,3 +41,22 @@ impl Connector for TcpConnector {
         })
     }
 }
+
+/// Opens each connection by calling a function: for example an in-memory
+/// pipe to a test device (`mock_nvr::connect`), so a test can run a session
+/// on a paused tokio clock without real sockets.
+#[derive(Clone, Copy, Debug)]
+pub struct FnConnector<F>(pub F);
+
+impl<F, S> Connector for FnConnector<F>
+where
+    F: Fn() -> io::Result<S> + Send + Sync + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = S;
+
+    fn connect(&self) -> Pin<Box<dyn Future<Output = io::Result<S>> + Send + '_>> {
+        let r = (self.0)();
+        Box::pin(async move { r })
+    }
+}

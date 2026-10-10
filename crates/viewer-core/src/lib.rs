@@ -64,6 +64,7 @@ pub mod layout {
     pub use video_pipeline::{Rect, Size};
 }
 
+use clock::HostClock;
 use device::{DeviceHandle, HostConnector};
 use events::{EventThread, Priority};
 use std::collections::HashMap;
@@ -184,6 +185,35 @@ pub struct CoreConfig {
     /// patterns as `detection` events, and per-second loudness
     /// ([`Core::tile_loudness`]). See [`sound`].
     pub sound: sound::SoundSettings,
+    /// Test support: run on a test's runtime and clock instead of the
+    /// core's own runtime and the host clock. `None` (the default) in apps.
+    pub test_runtime: Option<TestRuntime>,
+}
+
+/// Test support ([`CoreConfig::test_runtime`]): the core runs every task,
+/// tiles included, on `runtime` (a current-thread runtime, usually with a
+/// paused clock that the test steps), reads that runtime's clock wherever
+/// it would read the host clock ([`Core::clock_now_ns`]), and reaches
+/// devices added by host and port through `connect` (in-memory pipes to
+/// mock devices on the same runtime). Timeouts, retries, pacing, and audio
+/// timing then run in the test's simulated time.
+///
+/// Tiles run as tasks on the runtime instead of threads of their own, so
+/// a slow `on_action` holds up the whole core: tests of the core's
+/// threading keep the default.
+#[derive(Clone)]
+pub struct TestRuntime {
+    /// Where the core runs. Must outlive the core.
+    pub runtime: tokio::runtime::Handle,
+    /// Opens a connection to the device at a host and port.
+    #[allow(clippy::type_complexity)]
+    pub connect: Arc<dyn Fn(&str, u16) -> std::io::Result<tokio::io::DuplexStream> + Send + Sync>,
+}
+
+impl fmt::Debug for TestRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestRuntime").finish_non_exhaustive()
+    }
 }
 
 impl Default for CoreConfig {
@@ -204,18 +234,8 @@ impl Default for CoreConfig {
             preview_wait_limit: Duration::from_secs(60),
             lens_probe_window: lens::ProbeTiming::default().window,
             sound: sound::SoundSettings::default(),
+            test_runtime: None,
         }
-    }
-}
-
-/// The pipelines' clock: microseconds on the host clock ([`clock`]), the
-/// clock of the audio callback's host times.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Clock;
-
-impl Clock {
-    pub(crate) fn now_us(&self) -> u64 {
-        clock::now_ns() / 1000
     }
 }
 
@@ -278,6 +298,8 @@ struct Registry {
 pub struct Core {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     handle: tokio::runtime::Handle,
+    /// The host clock, or a test runtime's ([`TestRuntime`]).
+    clock: HostClock,
     /// What exists. Held only to look up, insert, or take out entries (and
     /// across a subscribe request), never while joining a thread or closing
     /// a session, so no API call waits on another tile's `on_action`.
@@ -315,32 +337,47 @@ impl Core {
     /// [`CoreError::InvalidArgument`] if the log directory cannot be used,
     /// [`CoreError::Internal`] if a thread cannot start.
     pub fn new(config: CoreConfig, callbacks: Arc<dyn Callbacks>) -> Result<Core, CoreError> {
-        let started_ns = clock::now_ns();
         let log_guard = match &config.log {
             Some(l) => start_logging(l)?,
             None => None,
         };
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("nvrview-core")
-            .on_thread_start(in_callback::mark_core_thread)
-            .enable_all()
-            .build()
-            .map_err(|_| CoreError::Internal)?;
-        let handle = runtime.handle().clone();
+        let (runtime, handle, clock) = match &config.test_runtime {
+            None => {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("nvrview-core")
+                    .on_thread_start(in_callback::mark_core_thread)
+                    .enable_all()
+                    .build()
+                    .map_err(|_| CoreError::Internal)?;
+                let handle = runtime.handle().clone();
+                (Some(runtime), handle, HostClock::Host)
+            }
+            Some(t) => (
+                None,
+                t.runtime.clone(),
+                HostClock::runtime(t.runtime.clone()),
+            ),
+        };
+        let started_ns = clock.now_ns();
         let events = EventThread::spawn(callbacks.clone()).map_err(|_| CoreError::Internal)?;
         let audio = Arc::new(
-            audio::AudioHub::new(callbacks.clone(), config.max_tiles)
+            audio::AudioHub::new(callbacks.clone(), config.max_tiles, clock.clone())
                 .map_err(|_| CoreError::Internal)?,
         );
         let event_sink = events.sink();
-        let sound = Arc::new(sound::SoundHub::new(config.sound, event_sink.clone()));
+        let sound = Arc::new(sound::SoundHub::new(
+            config.sound,
+            event_sink.clone(),
+            clock.clone(),
+        ));
         let tile_ctx = TileContext {
             runtime: handle.clone(),
             callbacks,
             events: event_sink.clone(),
             pipeline: config.pipeline,
-            clock: Clock,
+            clock: clock.clone(),
+            tile_threads: config.test_runtime.is_none(),
             tick_interval: config.tick_interval.max(Duration::from_millis(1)),
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
             tier_switch_timeout: config.tier_switch_timeout,
@@ -360,8 +397,9 @@ impl Core {
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
         info!("core started");
         Ok(Core {
-            runtime: Mutex::new(Some(runtime)),
+            runtime: Mutex::new(runtime),
             handle,
+            clock,
             registry: Mutex::new(Registry::default()),
             sinks: Mutex::new(HashMap::new()),
             events: Mutex::new(Some(events)),
@@ -431,11 +469,20 @@ impl Core {
         if host.is_empty() || port == 0 {
             return Err(CoreError::InvalidArgument);
         }
-        let connector = HostConnector {
-            host: host.to_owned(),
-            port,
+        let p = match &self.config.test_runtime {
+            None => {
+                let connector = HostConnector {
+                    host: host.to_owned(),
+                    port,
+                };
+                self.add_device_inner(connector, user, password, Some((host, port)))?
+            }
+            Some(t) => {
+                let (connect, h) = (t.connect.clone(), host.to_owned());
+                let connector = bc_session::FnConnector(move || connect(&h, port));
+                self.add_device_inner(connector, user, password, Some((host, port)))?
+            }
         };
-        let p = self.add_device_inner(connector, user, password, Some((host, port)))?;
         debug!(device = p.id(), host, port, "device address");
         Ok(p)
     }
@@ -504,7 +551,15 @@ impl Core {
         let handle = {
             let _rt = self.handle.enter();
             let session = bc_session::DeviceSession::spawn(connector, cfg);
-            DeviceHandle::start(id, key.clone(), session, events, gate_rx, self.lens.clone())
+            DeviceHandle::start(
+                id,
+                key.clone(),
+                session,
+                events,
+                gate_rx,
+                self.lens.clone(),
+                self.clock.clone(),
+            )
         };
         reg.devices.insert(id, Device { handle, key });
         info!(device = id, "device added");
@@ -699,7 +754,7 @@ impl Core {
     /// [`CoreError::InvalidArgument`] from inside a callback.
     pub fn set_tile_tier(&self, tile: u64, tier: StreamTier) -> Result<(), CoreError> {
         self.check_api()?;
-        let requested_ns = clock::now_ns();
+        let requested_ns = self.clock.now_ns();
         let mut reg = lock(&self.registry);
         let (device, channel, current) = {
             let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
@@ -796,7 +851,7 @@ impl Core {
             },
         )?;
         if !self.first_picture.swap(true, Ordering::AcqRel) {
-            let ns = clock::now_ns().saturating_sub(self.started_ns);
+            let ns = self.clock.now_ns().saturating_sub(self.started_ns);
             info!(tile, ms = ns / 1_000_000, "first picture");
             self.event_sink.send(
                 json::Object::event("timing")
@@ -1032,6 +1087,23 @@ impl Core {
             return Err(CoreError::UnknownId);
         }
         Ok(())
+    }
+
+    /// Now on the core's clock, nanoseconds: the host clock ([`clock`]), or
+    /// a test runtime's simulated clock ([`TestRuntime`]). Render host
+    /// times ([`Core::render_audio`]) are on this clock.
+    pub fn clock_now_ns(&self) -> u64 {
+        self.clock.now_ns()
+    }
+
+    /// Waits until every event queued so far has been delivered (its
+    /// `on_event` returned). For tests; must not be called from a callback
+    /// (it returns at once there).
+    pub fn flush_events(&self) {
+        if in_callback::on_core_thread() {
+            return;
+        }
+        self.event_sink.flush();
     }
 
     /// True on threads the core owns (where callbacks run). The C interface

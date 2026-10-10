@@ -2,12 +2,16 @@
 //! previews answered with 400, then the stream on the message ID of a later
 //! start (docs/protocol.md, "Records as the official client reads them").
 
+mod common;
+
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, Item, SessionConfig, Subscription, TcpConnector};
+use bc_session::{DeviceSession, Item, SessionConfig, Subscription};
+use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn spawn_mock(refusals: u32) -> mock_nvr::MockNvr {
     let path =
@@ -18,14 +22,14 @@ fn spawn_mock(refusals: u32) -> mock_nvr::MockNvr {
     let mut tp = mock_nvr::ThirdPartyConfig::new(vec![1], refusals);
     tp.media_delay = Duration::from_millis(100);
     cfg.third_party = Some(tp);
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr, retry_ms: u64, limit_ms: u64) -> DeviceSession {
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.preview_retry_interval = Duration::from_millis(retry_ms);
     cfg.preview_wait_limit = Duration::from_millis(limit_ms);
-    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+    DeviceSession::spawn(mock_connector(nvr), cfg)
 }
 
 async fn recv(sub: &mut Subscription) -> Item {
@@ -35,7 +39,7 @@ async fn recv(sub: &mut Subscription) -> Item {
         .expect("subscription ended")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_stream_arrives_after_400s_and_restarts() {
     let nvr = spawn_mock(2);
     let s = session(&nvr, 200, 10_000);
@@ -70,7 +74,7 @@ async fn the_stream_arrives_after_400s_and_restarts() {
     assert_eq!(nvr.command_count(4), 3);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_channel_that_never_streams_is_refused_after_the_limit() {
     let nvr = spawn_mock(u32::MAX);
     let s = session(&nvr, 100, 800);
@@ -91,7 +95,7 @@ async fn a_channel_that_never_streams_is_refused_after_the_limit() {
     assert_eq!(nvr.command_count(3), starts);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn other_channels_play_while_one_waits() {
     let nvr = spawn_mock(u32::MAX);
     let s = session(&nvr, 100, 60_000);

@@ -15,7 +15,7 @@
 
 use bc_protocol::media::{Demuxer, Record};
 use bc_protocol::talk::{self, DecodedRecord, RECORD_PAYLOAD_LEN, TalkAudioError};
-use std::time::Instant;
+use tokio::time::Instant;
 
 /// The ability reply body (inside `<body>`), as observed.
 pub(crate) const ABILITY: &str = "<TalkAbility version=\"1.1\">\n<duplexList>\n<duplex>FDX</duplex>\n\
