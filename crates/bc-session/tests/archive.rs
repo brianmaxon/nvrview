@@ -227,6 +227,7 @@ async fn a_stalled_download_is_detected_and_cancel_sends_144() {
         channel: Some(2),
         after_bytes: 30_000,
         kind: FaultKind::Stall,
+        skip: 0,
     });
     let mut dl = s
         .download(&request(2, d(9, 1, 0, 0), d(9, 1, 0, 59)))
@@ -328,6 +329,7 @@ async fn a_disconnect_fails_the_download_and_the_session_recovers() {
         channel: None,
         after_bytes: 20_000,
         kind: FaultKind::Disconnect,
+        skip: 0,
     });
     let mut dl = s
         .download(&request(1, d(8, 22, 0, 0), d(8, 22, 0, 59)))

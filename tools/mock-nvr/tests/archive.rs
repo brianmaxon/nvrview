@@ -300,6 +300,7 @@ fn download_cover_and_faults() {
         channel: Some(1),
         after_bytes: 20_000,
         kind: FaultKind::Stall,
+        skip: 0,
     });
     let (id, b) =
         c.s.start_download(&request(1, d(9, 7, 0, 0), d(9, 7, 0, 59)))
@@ -324,6 +325,7 @@ fn download_cover_and_faults() {
         channel: None,
         after_bytes: 10_000,
         kind: FaultKind::Disconnect,
+        skip: 0,
     });
     let (id, b) =
         c.s.start_download(&request(0, d(9, 8, 0, 0), d(9, 8, 0, 59)))

@@ -51,6 +51,8 @@ pub struct DownloadFault {
     pub after_bytes: usize,
     /// What happens.
     pub kind: FaultKind,
+    /// Matching downloads to let through untouched first.
+    pub skip: u32,
 }
 
 /// One download the fake served, for test assertions.

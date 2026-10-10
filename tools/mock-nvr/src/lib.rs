@@ -924,9 +924,14 @@ impl Conn {
         }
         let fault = {
             let mut f = lock(&self.shared.faults);
-            f.iter()
-                .position(|x| x.channel.is_none_or(|c| c == ch))
-                .map(|i| f.remove(i))
+            match f.iter().position(|x| x.channel.is_none_or(|c| c == ch)) {
+                Some(i) if f[i].skip > 0 => {
+                    f[i].skip -= 1;
+                    None
+                }
+                Some(i) => Some(f.remove(i)),
+                None => None,
+            }
         };
         let key = self.key.clone().expect("logged in");
         let c = &self.shared.config;
