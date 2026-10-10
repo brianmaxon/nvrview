@@ -20,6 +20,9 @@ import Testing
         #expect(s.isTerminal)
         s.apply(.deviceState(device: 1, state: .loginFailed(status: nil, remainTimes: 1)))
         #expect(s.text.contains("1 attempt remaining"))
+        s.apply(.deviceState(
+            device: 1, state: .loginFailed(status: 407, remainTimes: 0, reason: "account locked", unlockSeconds: 301)))
+        #expect(s.text == "Login failed: account locked (status 407); the account is locked, try again in 6 min. Not retrying.")
         s.apply(.deviceState(device: 1, state: .closed))
         #expect(s.text == "Disconnected" && s.isTerminal)
     }

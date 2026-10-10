@@ -17,6 +17,10 @@ import VideoKit
         #expect(
             parse(#"{"type":"device_state","device":1,"state":"login_failed","status":401,"remain_times":2}"#)
                 == .deviceState(device: 1, state: .loginFailed(status: 401, remainTimes: 2)))
+        #expect(
+            parse(#"{"type":"device_state","device":1,"state":"login_failed","status":407,"reason":"account locked","remain_times":0,"unlock_s":300}"#)
+                == .deviceState(
+                    device: 1, state: .loginFailed(status: 407, remainTimes: 0, reason: "account locked", unlockSeconds: 300)))
         #expect(parse(#"{"type":"device_state","device":1,"state":"closed"}"#) == .deviceState(device: 1, state: .closed))
         #expect(
             parse(#"{"type":"device_info","device":1,"name":"NVR","model":"EXAMPLE-MODEL"}"#)

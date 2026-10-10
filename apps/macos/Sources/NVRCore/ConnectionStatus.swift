@@ -53,9 +53,14 @@ public struct ConnectionStatus: Sendable, Equatable {
             let seconds = Double(retry) / 1000
             let wait = seconds == seconds.rounded() ? "\(Int(seconds))" : String(format: "%.1f", seconds)
             return "Connection lost; attempt \(attempt) failed, retrying in \(wait) s"
-        case .loginFailed(let status, let remain):
+        case .loginFailed(let status, let remain, let reason, let unlock):
             var text = "Login failed"
+            if let reason { text += ": \(reason)" }
             if let status { text += " (status \(status))" }
+            if let unlock, unlock > 0 {
+                let minutes = (unlock + 59) / 60
+                return text + "; the account is locked, try again in \(minutes) min. Not retrying."
+            }
             if let remain { text += "; \(remain) attempt\(remain == 1 ? "" : "s") remaining before lockout" }
             return text + ". Not retrying; check the credentials."
         case .closed:

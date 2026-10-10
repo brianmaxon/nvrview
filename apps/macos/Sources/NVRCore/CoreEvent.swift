@@ -7,8 +7,9 @@ public enum DeviceState: Sendable, Equatable {
     /// Waiting before the next attempt; `retryMilliseconds` from now.
     case backoff(attempt: Int, retryMilliseconds: Int)
     /// Terminal: the core does not retry (accounts lock out). `remainTimes`
-    /// is how many further failures the device tolerates, when it says.
-    case loginFailed(status: Int?, remainTimes: Int?)
+    /// is how many further failures the device tolerates, `unlockSeconds`
+    /// how long a lockout lasts, and `reason` the status in words, when known.
+    case loginFailed(status: Int?, remainTimes: Int?, reason: String? = nil, unlockSeconds: Int? = nil)
     case closed
     /// A state this version does not know.
     case other(String)
@@ -81,6 +82,7 @@ public enum CoreEvent: Sendable, Equatable {
         var retry_ms: Int?
         var status: Int?
         var remain_times: Int?
+        var unlock_s: Int?
         var name: String?
         var model: String?
         var channels: [ChannelInfo]?
@@ -105,7 +107,9 @@ public enum CoreEvent: Sendable, Equatable {
             case "connecting": s = .connecting
             case "connected": s = .connected
             case "backoff": s = .backoff(attempt: w.attempt ?? 0, retryMilliseconds: w.retry_ms ?? 0)
-            case "login_failed": s = .loginFailed(status: w.status, remainTimes: w.remain_times)
+            case "login_failed":
+                s = .loginFailed(
+                    status: w.status, remainTimes: w.remain_times, reason: w.reason, unlockSeconds: w.unlock_s)
             case "closed": s = .closed
             default: s = .other(state)
             }
