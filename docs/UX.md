@@ -168,3 +168,63 @@ list is one setting so device alarms can be added later. When one starts:
   their times and counts; they are an aid for noticing and finding events,
   never a replacement for alarm systems or monitoring (see "Corner
   indicators": no alert never means "all clear").
+
+## Alert insets
+
+When something important happens on a camera that is not on screen (another
+camera is focused or full screen, or the camera is not in the current
+layout), its live video appears in an inset drawn above the current video,
+not in a separate system window.
+
+- **Triggers (defaults):** a doorbell press (the device's `visitor` alarm),
+  smoke and CO sound alarms, and person detections on cameras marked as
+  entrances. Other kinds (person or vehicle on any camera) can be turned on
+  per camera. A camera already visible gets its tile alert instead.
+- **The inset:** about 30% of the screen width, in a corner (opposite the
+  corner indicators by default; configurable), with a border colored by
+  severity (red for smoke and CO, a calmer accent for the doorbell and
+  detections) and a header with the reason, time, and count like the alert
+  header. It shows the sub-stream, so it appears quickly; it uses the same
+  shared tiles as everything else (no extra device login).
+- **Several at once** stack, newest on top, up to three; beyond that a
+  "+N more" chip. A repeat on the same camera updates its inset instead of
+  adding one.
+- **Swap:** clicking the inset (or Tab) swaps places: the inset's camera
+  goes full screen and the camera you were watching becomes the inset, so one
+  more click swaps back. Esc or the inset's close control dismisses it.
+- **Closing:** doorbell and detection insets close by themselves about 60 s
+  after the event ends unless hovered or used; smoke and CO insets stay until
+  dismissed, and dismissing one also dismisses its alert (see "Alerts").
+- Insets never take the keyboard focus or change what the user is listening
+  to, except for the doorbell rules below.
+
+## Doorbell calls
+
+A doorbell press opens the doorbell's inset as a call:
+
+- **Audio:** the doorbell becomes audible if the user was already listening
+  to a camera (that camera is muted meanwhile); a per-doorbell setting makes
+  it audible even when nothing was playing. Otherwise a large Unmute control
+  covers the whole inset (and the full-screen video when the doorbell is
+  swapped in), so one quick click anywhere on it unmutes.
+- **Talk back:** an always-visible Talk control in the call (push to talk,
+  or a toggle) sends the computer's microphone through the doorbell's
+  speaker. This is camera motion control (CLAUDE.md, docs/ARCHITECTURE.md
+  "Device commands"): available only on a doorbell where the user enabled
+  it, rate-limited, every use logged; the talk-back protocol facts go into
+  docs/protocol.md before any code sends them.
+- **Live transcript:** from the press, both sides are transcribed on this
+  computer (a local speech recognition model; nothing leaves the house): the
+  doorbell's audio and, while talking back, the microphone, labeled by side,
+  so the visitor can be read when the user cannot unmute (in a meeting, for
+  example). Shown live in the call; saved with the event only if the user
+  turned saving on (recording a conversation may need the other person's
+  consent in some places).
+- **Typed reply:** a text box in the call speaks what the user types through
+  the doorbell's speaker with the system's text-to-speech (the same Talk
+  permission and limits). Text comes only from what the user types or picks
+  from their own templates, never from the transcript, detected text, or any
+  other untrusted source (see docs/ARCHITECTURE.md "Doorbell text-to-speech").
+- The call ends when the user closes it or about 60 s after the last activity
+  (press, speech, talk-back), and is listed in the event log with its times
+  and, if saved, its transcript.
