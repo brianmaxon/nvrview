@@ -26,6 +26,12 @@ pub enum Error {
     UnsupportedAudioGap,
     /// `finish` was called before any video sample was written.
     NoVideo,
+    /// The video parameter sets changed and the caller asked for that to be
+    /// an error (see `ChangePolicy::Reject`). Nothing was consumed.
+    ParameterSetsChanged,
+    /// A fragmented file could not be read back (not written by this crate,
+    /// or damaged before its first complete fragment).
+    InvalidFragmentedFile(&'static str),
     /// A sample or table exceeded what the format can express.
     TooLarge,
 }
@@ -42,6 +48,8 @@ impl fmt::Display for Error {
             Error::AudioConfigChanged => write!(f, "audio configuration changed mid-stream"),
             Error::UnsupportedAudioGap => write!(f, "audio gap in a format without silence frames"),
             Error::NoVideo => write!(f, "no video samples were written"),
+            Error::ParameterSetsChanged => write!(f, "video parameter sets changed"),
+            Error::InvalidFragmentedFile(why) => write!(f, "invalid fragmented file: {why}"),
             Error::TooLarge => write!(f, "value too large for MP4"),
         }
     }

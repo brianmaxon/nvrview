@@ -160,7 +160,9 @@ pub struct BoxRef {
     pub header: usize,
 }
 
-const CONTAINERS: [&str; 7] = ["moov", "trak", "mdia", "minf", "stbl", "edts", "dinf"];
+const CONTAINERS: [&str; 11] = [
+    "moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "moof", "traf", "mvex", "mfra",
+];
 
 pub fn boxes_in(d: &[u8], from: usize, to: usize) -> Vec<BoxRef> {
     let mut v = Vec::new();

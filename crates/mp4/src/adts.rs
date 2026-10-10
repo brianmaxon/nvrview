@@ -29,6 +29,39 @@ impl AacConfig {
     }
 }
 
+impl AacConfig {
+    /// Reads the 2-byte AudioSpecificConfig this crate writes.
+    pub(crate) fn from_audio_specific_config(asc: [u8; 2]) -> Option<Self> {
+        let v = u16::from_be_bytes(asc);
+        let object_type = (v >> 11) as u8;
+        let sample_rate_index = ((v >> 7) & 0xf) as u8;
+        let channels = ((v >> 3) & 0xf) as u8;
+        let sample_rate = *RATES.get(usize::from(sample_rate_index))?;
+        (object_type != 0 && channels != 0).then_some(Self {
+            object_type,
+            sample_rate_index,
+            sample_rate,
+            channels,
+        })
+    }
+
+    /// Wraps a raw AAC payload in a single-block ADTS frame without CRC.
+    pub(crate) fn adts_frame(&self, payload: &[u8]) -> Vec<u8> {
+        let len = payload.len() + 7;
+        let mut v = vec![
+            0xff,
+            0xf1,
+            ((self.object_type - 1) << 6) | (self.sample_rate_index << 2) | (self.channels >> 2),
+            ((self.channels & 3) << 6) | ((len >> 11) as u8 & 3),
+            (len >> 3) as u8,
+            (((len & 7) as u8) << 5) | 0x1f,
+            0xfc,
+        ];
+        v.extend_from_slice(payload);
+        v
+    }
+}
+
 /// Parses one complete ADTS frame; returns the config and the raw AAC payload
 /// (header and optional CRC removed).
 pub fn parse_adts(frame: &[u8]) -> Result<(AacConfig, &[u8])> {
@@ -98,6 +131,15 @@ mod tests {
         assert_eq!(p, [1, 2, 3]);
         // AOT 2, index 8, channels 1 -> 0x1408
         assert_eq!(c.audio_specific_config(), [0x14, 0x08]);
+    }
+
+    #[test]
+    fn adts_round_trip() {
+        let f = frame(&[1, 2, 3], 8, 1);
+        let (c, p) = parse_adts(&f).unwrap();
+        assert_eq!(c.adts_frame(p), f);
+        let back = AacConfig::from_audio_specific_config(c.audio_specific_config()).unwrap();
+        assert_eq!(back, c);
     }
 
     #[test]
