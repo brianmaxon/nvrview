@@ -56,7 +56,7 @@ pub enum Record {
     Video {
         /// Codec named in the record header.
         codec: Codec,
-        /// True for `00dc`-`09dc` records.
+        /// True for keyframe records (`x0dc`: second character `0`).
         keyframe: bool,
         /// Timestamp in microseconds.
         pts_us: u64,
@@ -111,8 +111,9 @@ fn digits(a: u8, b: u8) -> Option<u8> {
 fn classify(magic: [u8; 4]) -> Option<Kind> {
     match &magic {
         b"1001" | b"1002" => Some(Kind::Info),
+        // `<stream index><frame type>dc`: type 0 is a keyframe, 1 a predicted frame.
         [a, b, b'd', b'c'] => digits(*a, *b).map(|_| Kind::Video {
-            keyframe: *a == b'0',
+            keyframe: *b == b'0',
         }),
         [a, b, b'w', b'b'] => digits(*a, *b).map(|index| Kind::Audio { index }),
         _ => None,
@@ -287,10 +288,11 @@ pub fn encode_info(width: u32, height: u32, fps: u8) -> Vec<u8> {
 }
 
 /// Encodes a video record with an optional extra header, padded to 8 bytes.
-/// `stream_index` is the two-digit index (`0..=9` keyframe, `10..=19`
-/// predicted by convention; only the first digit's value matters here).
+/// The magic is `<stream index><frame type>dc`: `stream` is the first digit
+/// (0-9), and the frame type is `0` for a keyframe and `1` otherwise.
 pub fn encode_video(
-    stream_index: u8,
+    stream: u8,
+    keyframe: bool,
     codec: Codec,
     pts_us: u64,
     extra_header: &[u8],
@@ -298,8 +300,8 @@ pub fn encode_video(
 ) -> Vec<u8> {
     let mut v = Vec::with_capacity(VIDEO_HEADER_LEN + extra_header.len() + data.len() + 8);
     v.extend_from_slice(&[
-        b'0' + stream_index / 10 % 10,
-        b'0' + stream_index % 10,
+        b'0' + stream % 10,
+        if keyframe { b'0' } else { b'1' },
         b'd',
         b'c',
     ]);
@@ -352,7 +354,7 @@ mod tests {
         };
         let k = nal(3, 1001);
         add(
-            encode_video(0, Codec::H265, 1_000, &[], &k),
+            encode_video(0, true, Codec::H265, 1_000, &[], &k),
             Record::Video {
                 codec: Codec::H265,
                 keyframe: true,
@@ -364,7 +366,7 @@ mod tests {
             let p = nal(5 + i as u8, len);
             let extra: &[u8] = if i == 2 { &[9u8; 8] } else { &[] };
             add(
-                encode_video(10, Codec::H265, 2_000 + i as u64, extra, &p),
+                encode_video(0, false, Codec::H265, 2_000 + i as u64, extra, &p),
                 Record::Video {
                     codec: Codec::H265,
                     keyframe: false,
@@ -383,7 +385,7 @@ mod tests {
         }
         let h = nal(9, 40);
         add(
-            encode_video(1, Codec::H264, 9, &[], &h),
+            encode_video(1, true, Codec::H264, 9, &[], &h),
             Record::Video {
                 codec: Codec::H264,
                 keyframe: true,
@@ -398,6 +400,31 @@ mod tests {
         while let Some(r) = d.next_record().unwrap() {
             out.push(r);
         }
+    }
+
+    /// The frame type is the second character of the magic: `01dc` is a
+    /// predicted frame and `10dc` a keyframe (stream index 1).
+    #[test]
+    fn frame_type_is_the_second_character() {
+        for (magic, keyframe) in [
+            (b"00dc", true),
+            (b"01dc", false),
+            (b"10dc", true),
+            (b"11dc", false),
+        ] {
+            let mut rec = encode_video(0, true, Codec::H264, 7, &[], &[0, 0, 0, 1, 0x65]);
+            rec[..4].copy_from_slice(magic);
+            let mut d = Demuxer::new();
+            d.push(&rec);
+            match d.next_record().unwrap() {
+                Some(Record::Video { keyframe: k, .. }) => assert_eq!(k, keyframe, "{magic:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(
+            &encode_video(1, false, Codec::H265, 0, &[], &[])[..4],
+            b"11dc"
+        );
     }
 
     #[test]
@@ -456,12 +483,12 @@ mod tests {
 
     #[test]
     fn bad_codec_and_sizes() {
-        let mut v = encode_video(0, Codec::H264, 0, &[], &[1, 2, 3]);
+        let mut v = encode_video(0, true, Codec::H264, 0, &[], &[1, 2, 3]);
         v[4..8].copy_from_slice(b"XXXX");
         let mut d = Demuxer::new();
         d.push(&v);
         assert!(matches!(d.next_record(), Err(DemuxError::UnknownCodec(_))));
-        let mut v = encode_video(0, Codec::H264, 0, &[], &[1, 2, 3]);
+        let mut v = encode_video(0, true, Codec::H264, 0, &[], &[1, 2, 3]);
         v[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
         let mut d = Demuxer::new();
         d.push(&v);

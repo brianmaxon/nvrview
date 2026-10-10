@@ -122,12 +122,17 @@ little-endian magic that reads as ASCII:
 | Magic (ASCII) | Record | Layout | Provenance |
 | --- | --- | --- | --- |
 | `1001`, `1002` | stream info | `+4` u32 record size, counted from the record start; `+8` u32 width; `+12` u32 height; `+17` u8 frame rate. Width and height can be 0 (seen on second-lens streams); take dimensions from the SPS instead. | observed |
-| `00dc`–`09dc` | keyframe | 24-byte header: `+4` codec (`H264` or `H265`), `+8` u32 payload size, `+12` u32 extra-header size (always a multiple of 8, 0–184 seen), `+16` u64 timestamp (µs); payload (Annex-B NAL units) follows the extra header; padded to 8. | observed |
-| `10dc`–`19dc` | predicted frame | as keyframe | observed |
+| `00dc`, `10dc` | keyframe | 24-byte header: `+4` codec (`H264` or `H265`), `+8` u32 payload size, `+12` u32 extra-header size (always a multiple of 8, 0–184 seen), `+16` u64 timestamp (µs); payload (Annex-B NAL units) follows the extra header; padded to 8. | observed |
+| `01dc`, `11dc` | predicted frame | as keyframe | observed |
 | `..wb` (`05wb`, `15wb`, …) | audio | `+4` u16 payload size, repeated at `+6`; payload follows the 8-byte header; padded to 8; no timestamp. | observed |
 
-The first two characters are a stream index, not a codec; any `..wb` record is
-audio and any `..dc` record is video. (observed)
+A video magic reads `<stream index><frame type>dc`: the second character is
+`0` for a keyframe (its payload starts with the parameter sets) and `1` for a
+predicted frame; the first character is a stream index (0 and 1 seen). This
+was checked by counting every video record in a live capture against the
+first NAL unit type of its payload. Audio records also start with a digit
+(`05wb`, `15wb`). Any `..wb` record is audio and any `..dc` record is video.
+(observed)
 
 Observed rates are lower than the advertised frame rate (about 4–15 fps on
 sub-streams, 12–15 fps on high tiers); use the timestamps, not the info record.

@@ -569,13 +569,7 @@ fn stream_media(
         }
         out.clear();
         let frame = &fix.frames()[index];
-        let record = encode_video(
-            if frame.keyframe { 0 } else { 10 },
-            fix.codec(),
-            pts_us,
-            &[],
-            &frame.data,
-        );
+        let record = encode_video(0, frame.keyframe, fix.codec(), pts_us, &[], &frame.data);
         media_message(key, id, &record, &mut out)?;
         index = fix.next_index(index);
         pts_us += period.as_micros() as u64;

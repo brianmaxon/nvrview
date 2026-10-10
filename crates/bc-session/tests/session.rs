@@ -220,13 +220,15 @@ fn handle(
             let mut stream = encode_info(1920, 1080, 15);
             stream.extend(encode_video(
                 0,
+                true,
                 Codec::H264,
                 channel * 1000,
                 &[],
                 &[0, 0, 0, 1, 0x65, 1],
             ));
             stream.extend(encode_video(
-                10,
+                0,
+                false,
                 Codec::H264,
                 channel * 1000 + 1,
                 &[],

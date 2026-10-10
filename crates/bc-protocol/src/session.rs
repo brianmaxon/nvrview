@@ -765,7 +765,7 @@ mod tests {
             fps: 25,
         }];
         let key_nal: Vec<u8> = (0..3000u32).map(|i| (i * 7 + 1) as u8).collect();
-        stream.extend(encode_video(0, Codec::H265, 100, &[], &key_nal));
+        stream.extend(encode_video(0, true, Codec::H265, 100, &[], &key_nal));
         expect.push(Record::Video {
             codec: Codec::H265,
             keyframe: true,
@@ -776,7 +776,7 @@ mod tests {
             let p: Vec<u8> = (0..(50 + i * 131) as usize)
                 .map(|x| (x as u64 * (i + 3)) as u8)
                 .collect();
-            stream.extend(encode_video(10, Codec::H265, 200 + i, &[], &p));
+            stream.extend(encode_video(0, false, Codec::H265, 200 + i, &[], &p));
             expect.push(Record::Video {
                 codec: Codec::H265,
                 keyframe: false,
