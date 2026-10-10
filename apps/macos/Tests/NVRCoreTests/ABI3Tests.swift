@@ -90,9 +90,13 @@ import VideoKit
 }
 
 @Suite struct TierSwitchTests {
-    private func rig(_ configure: (inout FakeCore.Options) -> Void = { _ in }) throws -> Rig {
+    private func rig(
+        clock: ManualViewerClock = ManualViewerClock(now: 1000), _ configure: (inout FakeCore.Options) -> Void = { _ in }
+    ) throws -> Rig {
         var o = FakeCore.Options(clips: [try Fixtures.clip("h264-basic.h264")])
         o.loop = true
+        // Tier timeouts and caps count on a manual clock: no test sleeps through them.
+        o.tierClock = { UInt64(clock.now * 1e9) }
         configure(&o)
         return try Rig(o)
     }
@@ -268,6 +272,32 @@ import VideoKit
         rig.fake.flushEvents()
     }
 
+    /// Steps until a tier switch from mid-clip shows the new tier.
+    private func stepsToSwitch(startingAtKeyframe: Bool) throws -> Int {
+        let rig = try rig { $0.newTierStartsAtKeyframe = startingAtKeyframe }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        var steps = 0
+        while tile.tierState.shown != .main, steps < 200 {
+            step(rig, tile)
+            steps += 1
+        }
+        #expect(tile.tierState.shown == .main)
+        #expect(rig.fake.violations.isEmpty)
+        return steps
+    }
+
+    @Test func aNewTierCanStartAtTheLatestKeyframe() throws {
+        // Joining mid-clip waits for the next keyframe; starting at the
+        // latest one decodes at once (the self-test's short switches).
+        let joined = try stepsToSwitch(startingAtKeyframe: false)
+        let keyed = try stepsToSwitch(startingAtKeyframe: true)
+        #expect(keyed <= 3)
+        #expect(joined > keyed + 5)
+    }
+
     @Test func mainAheadOfSubSwitchesAtOnce() throws {
         let rig = try rig { $0.tierPTSOffsetMicros = [.main: 100_000] }
         defer { rig.bridge.shutdown() }
@@ -284,7 +314,8 @@ import VideoKit
     }
 
     @Test func mainBehindSubHoldsThenSwitchesAtTheCap() throws {
-        let rig = try rig {
+        let clock = ManualViewerClock(now: 1000)
+        let rig = try rig(clock: clock) {
             $0.tierPTSOffsetMicros = [.main: -100_000]
             $0.tierAlignCap = .milliseconds(60)
         }
@@ -309,7 +340,7 @@ import VideoKit
         #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .starting, generation: 1))
         #expect(switchTiming(rig, tile) == nil)
 
-        Thread.sleep(forTimeInterval: 0.1)
+        clock.advance(by: 0.1)
         pumpToSwitch(rig, tile, to: .main, limit: 4)
         #expect(tile.tierState.shown == .main)
         let t = try #require(switchTiming(rig, tile))
@@ -375,14 +406,15 @@ import VideoKit
     }
 
     @Test func aSwitchThatNeverDecodesTimesOut() throws {
-        let rig = try rig { $0.tierSwitchTimeout = .milliseconds(50) }
+        let clock = ManualViewerClock(now: 1000)
+        let rig = try rig(clock: clock) { $0.tierSwitchTimeout = .milliseconds(50) }
         defer { rig.bridge.shutdown() }
         let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
         for _ in 0..<3 { step(rig, tile) }
         try rig.bridge.setTileTier(tile, .main)
         // Never answered: the new generation's actions are only executed, and
         // its decoder is kept from answering by pumping nothing for it.
-        Thread.sleep(forTimeInterval: 0.1)
+        clock.advance(by: 0.1)
         step(rig, tile)
         #expect(
             tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1, reason: "timeout"))

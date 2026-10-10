@@ -61,7 +61,10 @@ final class TileChromeView: NSView {
     private let outline = CALayer()
     private let drop = NSTextField(labelWithString: "Swap here")
     private let emptyHint = NSTextField(labelWithString: "Drag a camera here")
-    private var fadeTimer: Timer?
+    /// The clock the header's fade-out delay counts on (the stage's).
+    private let clock: any ViewerClock
+    /// When the header fades out, on `clock` (stepped by `tick`).
+    private var fadeAt: Double?
     private var tracking: NSTrackingArea?
     /// Where the pointer was (screen coordinates) at the last hover event.
     private var lastPointer: NSPoint?
@@ -74,7 +77,8 @@ final class TileChromeView: NSView {
 
     override var isFlipped: Bool { true }
 
-    init() {
+    init(clock: any ViewerClock) {
+        self.clock = clock
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = true
@@ -359,7 +363,7 @@ final class TileChromeView: NSView {
 
     /// Fades in at once; fades out a few seconds after the last movement.
     func showChrome() {
-        fadeTimer?.invalidate()
+        fadeAt = nil
         if header.alphaValue < 1 {
             NSAnimationContext.runAnimationGroup { ctx in
                 ctx.duration = 0
@@ -371,14 +375,17 @@ final class TileChromeView: NSView {
     }
 
     private func scheduleFade(after delay: TimeInterval) {
-        fadeTimer?.invalidate()
-        fadeTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.fadeOut() }
-        }
+        fadeAt = clock.now + delay
+    }
+
+    /// The stage's time step: fades the header out once its delay is up.
+    func tick(now: Double) {
+        guard let at = fadeAt, now >= at else { return }
+        fadeOut()
     }
 
     func fadeOut() {
-        fadeTimer?.invalidate()
+        fadeAt = nil
         guard !headerPinned else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.35
@@ -401,7 +408,7 @@ final class TileChromeView: NSView {
         guard pinned != headerPinned else { return }
         headerPinned = pinned
         if pinned {
-            fadeTimer?.invalidate()
+            fadeAt = nil
             header.alphaValue = 1
         } else {
             scheduleFade(after: Self.fadeOutAfterExit)
