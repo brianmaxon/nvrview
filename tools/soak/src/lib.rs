@@ -140,12 +140,12 @@ struct Fake {
 }
 
 impl Callbacks for Fake {
-    fn on_action(&self, tile: u64, action: &Action<'_>) {
+    fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>) {
         match action {
             Action::Decode { pts, .. } => {
                 self.decodes.fetch_add(1, Ordering::Relaxed);
                 if let Some(core) = self.core.get().and_then(Weak::upgrade) {
-                    let _ = core.decoded(tile, *pts);
+                    let _ = core.decoded(tile, generation, *pts);
                 }
             }
             Action::Configure { .. } => {

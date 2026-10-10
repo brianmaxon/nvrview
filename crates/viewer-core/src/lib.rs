@@ -42,6 +42,7 @@ pub mod clock;
 mod device;
 mod events;
 mod json;
+pub mod store;
 mod tile;
 
 pub use bc_protocol::stream::StreamTier;
@@ -64,15 +65,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
-use tile::{CloseReason, DecoderResult, ResultSink, TileContext, TileHandle};
+use tile::{
+    CloseReason, DecoderResult, ResultKind, ResultSink, TileCommand, TileContext, TileHandle,
+    TileStart,
+};
 use tracing::{debug, info, warn};
 
 /// What the app receives. Both methods run on threads the core owns and must
 /// return quickly.
 pub trait Callbacks: Send + Sync + 'static {
     /// One action for a tile's decoder or view, serialized per tile. Data in
-    /// `action` is borrowed for the duration of the call.
-    fn on_action(&self, tile: u64, action: &Action<'_>);
+    /// `action` is borrowed for the duration of the call. `generation`
+    /// names the tile's stream it belongs to (0 when opened, one more for
+    /// each tier switch, [`Core::set_tile_tier`]); answer with the same
+    /// generation.
+    fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>);
     /// One JSON object, serialized across the core.
     fn on_event(&self, json: &str);
     /// One block of a tapped tile's audio ([`Core::set_tile_audio_tap`]):
@@ -128,6 +135,9 @@ pub struct LogSettings {
 pub struct CoreConfig {
     /// File logging; `None` logs nothing to files.
     pub log: Option<LogSettings>,
+    /// The app's data directory, where the core keeps layouts and device
+    /// keys ([`store`]); `None` keeps them in memory only.
+    pub data_dir: Option<PathBuf>,
     /// Pipeline tunables for every tile.
     pub pipeline: PipelineConfig,
     /// Reconnect backoff for every device.
@@ -142,12 +152,16 @@ pub struct CoreConfig {
     pub tick_interval: Duration,
     /// How often each tile reports `tile_stats`.
     pub stats_interval: Duration,
+    /// How long a tier switch may take to decode its first picture before
+    /// it is abandoned (`tile_tier` `failed`, reason `timeout`).
+    pub tier_switch_timeout: Duration,
 }
 
 impl Default for CoreConfig {
     fn default() -> CoreConfig {
         CoreConfig {
             log: None,
+            data_dir: None,
             pipeline: PipelineConfig::default(),
             backoff: BackoffConfig::default(),
             queue_frames: 64,
@@ -155,6 +169,7 @@ impl Default for CoreConfig {
             max_tiles: 256,
             tick_interval: Duration::from_millis(100),
             stats_interval: Duration::from_secs(1),
+            tier_switch_timeout: Duration::from_secs(15),
         }
     }
 }
@@ -190,6 +205,8 @@ pub(crate) mod in_callback {
 
 struct Device {
     handle: DeviceHandle,
+    /// The device's stable key ([`store::DeviceKeys`]).
+    key: String,
 }
 
 /// A device or tile whose ID is known to the caller of a `*_deferred` call
@@ -240,6 +257,12 @@ pub struct Core {
     closing: AtomicBool,
     next_id: AtomicU64,
     log_guard: Mutex<Option<viewer_log::LogGuard>>,
+    /// When the core started, on its clock (for `timing` events).
+    started_ns: u64,
+    /// Set once the first picture of any tile has been reported decoded.
+    first_picture: AtomicBool,
+    layouts: Mutex<store::Layouts>,
+    device_keys: Mutex<store::DeviceKeys>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -254,6 +277,7 @@ impl Core {
     /// [`CoreError::InvalidArgument`] if the log directory cannot be used,
     /// [`CoreError::Internal`] if a thread cannot start.
     pub fn new(config: CoreConfig, callbacks: Arc<dyn Callbacks>) -> Result<Core, CoreError> {
+        let started_ns = clock::now_ns();
         let log_guard = match &config.log {
             Some(l) => start_logging(l)?,
             None => None,
@@ -278,8 +302,11 @@ impl Core {
             clock: Clock,
             tick_interval: config.tick_interval.max(Duration::from_millis(1)),
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
+            tier_switch_timeout: config.tier_switch_timeout,
             audio,
         };
+        let layouts = store::Layouts::open(config.data_dir.clone());
+        let device_keys = store::DeviceKeys::open(config.data_dir.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(Some(runtime)),
@@ -293,6 +320,10 @@ impl Core {
             closing: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             log_guard: Mutex::new(log_guard),
+            started_ns,
+            first_picture: AtomicBool::new(false),
+            layouts: Mutex::new(layouts),
+            device_keys: Mutex::new(device_keys),
         })
     }
 
@@ -327,13 +358,9 @@ impl Core {
         if host.is_empty() || port == 0 {
             return Err(CoreError::InvalidArgument);
         }
-        let connector = HostConnector {
-            host: host.to_owned(),
-            port,
-        };
-        let p = self.add_device_with_deferred(connector, user, password)?;
-        debug!(device = p.id(), host, port, "device address");
-        Ok(p.publish())
+        Ok(self
+            .add_device_deferred(host, port, user, password)?
+            .publish())
     }
 
     /// [`Core::add_device`], holding back the device's events until the
@@ -355,7 +382,7 @@ impl Core {
             host: host.to_owned(),
             port,
         };
-        let p = self.add_device_with_deferred(connector, user, password)?;
+        let p = self.add_device_inner(connector, user, password, Some((host, port)))?;
         debug!(device = p.id(), host, port, "device address");
         Ok(p)
     }
@@ -386,6 +413,18 @@ impl Core {
         user: &str,
         password: &str,
     ) -> Result<Pending, CoreError> {
+        self.add_device_inner(connector, user, password, None)
+    }
+
+    /// Adds a device; `address` (host and port) keys its stable device key.
+    /// A connector without an address gets a key for this run only.
+    fn add_device_inner<C: Connector>(
+        &self,
+        connector: C,
+        user: &str,
+        password: &str,
+        address: Option<(&str, u16)>,
+    ) -> Result<Pending, CoreError> {
         self.check_api()?;
         if user.is_empty() {
             return Err(CoreError::InvalidArgument);
@@ -398,6 +437,10 @@ impl Core {
             return Err(CoreError::Limit);
         }
         let id = self.new_id();
+        let key = match address {
+            Some((host, port)) => lock(&self.device_keys).key_for(host, port),
+            None => format!("run-{id}"),
+        };
         let mut cfg = bc_session::SessionConfig::new(user, password);
         cfg.backoff = self.config.backoff;
         cfg.queue_frames = self.config.queue_frames.max(1);
@@ -406,14 +449,87 @@ impl Core {
         let handle = {
             let _rt = self.handle.enter();
             let session = bc_session::DeviceSession::spawn(connector, cfg);
-            DeviceHandle::start(id, session, events, gate_rx)
+            DeviceHandle::start(id, key.clone(), session, events, gate_rx)
         };
-        reg.devices.insert(id, Device { handle });
+        reg.devices.insert(id, Device { handle, key });
         info!(device = id, "device added");
         Ok(Pending {
             id,
             gate: Some(gate_tx),
         })
+    }
+
+    /// The device's stable key: the same for the same address (host and
+    /// port) across runs while the data directory is kept. Layouts name
+    /// devices by it.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`].
+    pub fn device_key(&self, device: u64) -> Result<String, CoreError> {
+        lock(&self.registry)
+            .devices
+            .get(&device)
+            .map(|d| d.key.clone())
+            .ok_or(CoreError::UnknownId)
+    }
+
+    /// Every stored layout: `{"revision": n, "layouts": [...]}` (docs/FFI.md,
+    /// "Layouts").
+    pub fn layouts_json(&self) -> String {
+        lock(&self.layouts).to_json()
+    }
+
+    /// Inserts or replaces (by `id`) a layout given as JSON, validates it,
+    /// stores it, and returns the version the core gave it. Sends
+    /// `layouts_changed`.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for a layout that is not valid,
+    /// [`CoreError::Limit`] when [`store::MAX_LAYOUTS`] are stored,
+    /// [`CoreError::Internal`] when it cannot be written (nothing changes),
+    /// [`CoreError::Closed`].
+    pub fn put_layout(&self, json: &str) -> Result<u64, CoreError> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Closed);
+        }
+        let mut l = lock(&self.layouts);
+        let r = l.put(json);
+        let revision = l.revision();
+        drop(l);
+        match r {
+            Ok(version) => {
+                self.layouts_changed(revision);
+                Ok(version)
+            }
+            Err(e) => Err(layout_error(e)),
+        }
+    }
+
+    /// Deletes a layout. Sends `layouts_changed`.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`] for an unknown ID, [`CoreError::Internal`]
+    /// when the change cannot be written, [`CoreError::Closed`].
+    pub fn delete_layout(&self, id: &str) -> Result<(), CoreError> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Closed);
+        }
+        let mut l = lock(&self.layouts);
+        let r = l.delete(id);
+        let revision = l.revision();
+        drop(l);
+        r.map_err(layout_error)?;
+        self.layouts_changed(revision);
+        Ok(())
+    }
+
+    fn layouts_changed(&self, revision: u64) {
+        self.event_sink.send(
+            json::Object::event("layouts_changed")
+                .u64("revision", revision)
+                .finish(),
+            Priority::State,
+        );
     }
 
     /// Closes a device's tiles, then its session.
@@ -485,14 +601,19 @@ impl Core {
         let id = self.new_id();
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
         let control = self.tile_ctx.audio.add_tile(id);
-        let (tile, sink) =
-            match tile::spawn(id, device, sub, self.tile_ctx.clone(), control, gate_rx) {
-                Ok(t) => t,
-                Err(_) => {
-                    self.tile_ctx.audio.remove_tile(id);
-                    return Err(CoreError::Internal);
-                }
-            };
+        let start = TileStart {
+            id,
+            device,
+            channel,
+            tier,
+        };
+        let (tile, sink) = match tile::spawn(start, sub, self.tile_ctx.clone(), control, gate_rx) {
+            Ok(t) => t,
+            Err(_) => {
+                self.tile_ctx.audio.remove_tile(id);
+                return Err(CoreError::Internal);
+            }
+        };
         lock(&self.sinks).insert(id, sink);
         reg.tiles.insert(id, tile);
         info!(
@@ -506,6 +627,57 @@ impl Core {
             id,
             gate: Some(gate_tx),
         })
+    }
+
+    /// Asks a tile to show another stream tier (main on focus, sub back in
+    /// the grid). Returns at once. The tile keeps showing its current
+    /// stream while the new one starts as a new generation (its actions
+    /// carry the new generation number); once the new generation's first
+    /// picture is reported decoded, the old generation gets a final
+    /// `Reset` and its stream stops (unless another tile shows it).
+    /// Progress arrives as `tile_tier` events (`starting`, `active`,
+    /// `failed`) and a `timing` event (`tier_switch`). Asking for the tier
+    /// already requested changes nothing (and reports `active` again if
+    /// no switch is in progress).
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Limit`] when too many
+    /// requests are queued for the tile, [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn set_tile_tier(&self, tile: u64, tier: StreamTier) -> Result<(), CoreError> {
+        self.check_api()?;
+        let requested_ns = clock::now_ns();
+        let mut reg = lock(&self.registry);
+        let (device, channel, current) = {
+            let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+            (t.device, t.channel, t.tier)
+        };
+        if current == tier {
+            let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+            return if t.command(TileCommand::Reaffirm) {
+                Ok(())
+            } else {
+                Err(CoreError::Limit)
+            };
+        }
+        // Start the new stream first (shared with any tile already showing
+        // it); the old one stops once the switch is done.
+        let session = reg.devices.get(&device).and_then(|d| d.handle.session());
+        let sub = match session {
+            Some(s) => self.handle.block_on(s.subscribe(channel, tier)).ok(),
+            None => None,
+        };
+        let t = reg.tiles.get_mut(&tile).ok_or(CoreError::UnknownId)?;
+        if !t.command(TileCommand::Switch {
+            tier,
+            sub,
+            requested_ns,
+        }) {
+            return Err(CoreError::Limit);
+        }
+        t.tier = tier;
+        info!(tile, tier = device::tier_name(tier), "tier requested");
+        Ok(())
     }
 
     /// Closes a tile. No `on_action` for it runs after this returns.
@@ -549,22 +721,54 @@ impl Core {
         }
     }
 
-    /// The platform decoded the picture with this timestamp. Any thread;
-    /// never waits for the tile.
+    /// The platform decoded the picture with this timestamp, from the
+    /// tile's stream `generation` (the action's). Any thread; never waits
+    /// for the tile. The first one for any tile also reports the
+    /// `first_picture` timing.
     ///
     /// # Errors
     /// [`CoreError::UnknownId`] for a closed tile, [`CoreError::Closed`].
-    pub fn decoded(&self, tile: u64, pts_us: u64) -> Result<(), CoreError> {
-        self.send_result(tile, DecoderResult::Decoded(pts_us))
+    pub fn decoded(&self, tile: u64, generation: u32, pts_us: u64) -> Result<(), CoreError> {
+        self.send_result(
+            tile,
+            DecoderResult {
+                generation,
+                kind: ResultKind::Decoded(pts_us),
+            },
+        )?;
+        if !self.first_picture.swap(true, Ordering::AcqRel) {
+            let ns = clock::now_ns().saturating_sub(self.started_ns);
+            info!(tile, ms = ns / 1_000_000, "first picture");
+            self.event_sink.send(
+                json::Object::event("timing")
+                    .str("what", "first_picture")
+                    .u64("tile", tile)
+                    .u64("ns", ns)
+                    .finish(),
+                Priority::State,
+            );
+        }
+        Ok(())
     }
 
-    /// The platform could not carry out a `Configure` or a `Decode`. Any
-    /// thread; never waits for the tile.
+    /// The platform could not carry out a `Configure` or a `Decode` of the
+    /// tile's stream `generation`. Any thread; never waits for the tile.
     ///
     /// # Errors
     /// [`CoreError::UnknownId`] for a closed tile, [`CoreError::Closed`].
-    pub fn decode_failed(&self, tile: u64, kind: DecodeFailureKind) -> Result<(), CoreError> {
-        self.send_result(tile, DecoderResult::Failed(kind))
+    pub fn decode_failed(
+        &self,
+        tile: u64,
+        generation: u32,
+        kind: DecodeFailureKind,
+    ) -> Result<(), CoreError> {
+        self.send_result(
+            tile,
+            DecoderResult {
+                generation,
+                kind: ResultKind::Failed(kind),
+            },
+        )
     }
 
     /// Sets the app's audio output format: `sample_rate` frames per second
@@ -649,6 +853,19 @@ impl Core {
         }
     }
 
+    /// A tile's latest audio level: peak and RMS, 0 to 1, measured by
+    /// [`Core::render_audio`] before the tile's volume (peak with a 0.3 s
+    /// release, RMS over about 0.1 s). Both are 0 for a tile that is not
+    /// audible, an unknown tile, or before rendering starts. Lock-free and
+    /// allocation-free: callable from any thread (and from callbacks) at
+    /// display rate.
+    pub fn tile_audio_level(&self, tile: u64) -> (f32, f32) {
+        if tile == 0 {
+            return (0.0, 0.0);
+        }
+        self.tile_ctx.audio.level(tile)
+    }
+
     /// Render calls that found another in progress (and rendered silence),
     /// and renderers leaked rather than freed on the real-time thread.
     pub fn audio_render_counters(&self) -> (u64, u64) {
@@ -718,6 +935,18 @@ impl Drop for Core {
 impl fmt::Debug for Core {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Core").finish_non_exhaustive()
+    }
+}
+
+fn layout_error(e: store::LayoutError) -> CoreError {
+    match e {
+        store::LayoutError::Invalid(why) => {
+            debug!(%why, "layout refused");
+            CoreError::InvalidArgument
+        }
+        store::LayoutError::TooMany => CoreError::Limit,
+        store::LayoutError::Unknown => CoreError::UnknownId,
+        store::LayoutError::Io => CoreError::Internal,
     }
 }
 

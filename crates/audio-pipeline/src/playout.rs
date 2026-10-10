@@ -109,8 +109,8 @@ pub(crate) struct Playout {
 
 impl Playout {
     /// Claims a slot on `output`, or `None` when none is free.
-    pub fn new(output: &AudioOutput) -> Option<Playout> {
-        let lease = output.claim()?;
+    pub fn new(output: &AudioOutput, owner: u64) -> Option<Playout> {
+        let lease = output.claim(owner)?;
         let f = lease.format();
         Some(Playout {
             lease,

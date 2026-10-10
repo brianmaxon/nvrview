@@ -73,7 +73,14 @@ unsafe extern "C" fn on_action(context: *mut c_void, tile: u64, action: *const N
     let (ctx, a) = unsafe { (&*(context as *const Ctx), &*action) };
     if a.kind == NvActionKind::NV_ACTION_DECODE {
         // SAFETY: the core is live while it calls us.
-        unsafe { nv_tile_decoded(ctx.core.load(Ordering::SeqCst), tile, a.decode.pts_us) };
+        unsafe {
+            nv_tile_decoded(
+                ctx.core.load(Ordering::SeqCst),
+                tile,
+                a.generation,
+                a.decode.pts_us,
+            )
+        };
     }
 }
 

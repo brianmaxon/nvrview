@@ -3,11 +3,12 @@
 
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
+use bc_protocol::detection::{self, AlarmState};
 use bc_protocol::session::Command;
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, ChannelInfo, VersionInfo};
-use bc_session::{ConnState, DeviceSession};
-use std::collections::HashMap;
+use bc_session::{AlarmPush, ConnState, DeviceSession};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, warn};
 
@@ -56,13 +57,14 @@ impl DeviceHandle {
     /// none names the device before the app has its ID.
     pub(crate) fn start(
         id: u64,
+        key: String,
         session: DeviceSession,
         events: EventSink,
         gate: oneshot::Receiver<()>,
     ) -> DeviceHandle {
         let session = Arc::new(session);
         let (stop_tx, stop_rx) = oneshot::channel();
-        let watcher = tokio::spawn(watch(id, session.clone(), events, stop_rx, gate));
+        let watcher = tokio::spawn(watch(id, key, session.clone(), events, stop_rx, gate));
         DeviceHandle {
             session: Some(session),
             stop: Some(stop_tx),
@@ -167,14 +169,26 @@ pub(crate) fn closed_event(id: u64) -> String {
     state_event(id, &ConnState::Closed)
 }
 
-fn channels_event(id: u64, slots: &[ChannelInfo], names: &HashMap<u8, VersionInfo>) -> String {
+/// What each channel detects (from 199), once known.
+type Detects = HashMap<u8, Vec<&'static str>>;
+
+fn channels_event(
+    id: u64,
+    slots: &[ChannelInfo],
+    names: &HashMap<u8, VersionInfo>,
+    detects: Option<&Detects>,
+) -> String {
     let channels = slots.iter().map(|c| {
         let o = Object::new()
             .u64("channel", u64::from(c.channel))
             .bool("connected", c.connected)
             .strs("tiers", c.tiers.iter().map(|t| tier_name(*t)));
-        match names.get(&c.channel) {
+        let o = match names.get(&c.channel) {
             Some(v) => o.str("name", &v.name).str("model", &v.model),
+            None => o,
+        };
+        match detects {
+            Some(d) => o.strs("detects", d.get(&c.channel).into_iter().flatten().copied()),
             None => o,
         }
     });
@@ -187,6 +201,7 @@ fn channels_event(id: u64, slots: &[ChannelInfo], names: &HashMap<u8, VersionInf
 enum Info {
     Device(VersionInfo),
     Channels(Vec<VersionInfo>),
+    Detects(Detects),
 }
 
 async fn device_info(session: Arc<DeviceSession>) -> Option<Info> {
@@ -195,6 +210,22 @@ async fn device_info(session: Arc<DeviceSession>) -> Option<Info> {
         return None;
     }
     xml::parse_version_info(&r.xml).ok().map(Info::Device)
+}
+
+/// What each channel detects, from the `aitype` bits of the capabilities
+/// (command 199).
+async fn channel_detects(session: Arc<DeviceSession>) -> Option<Info> {
+    let r = session.query(Command::Support, None).await.ok()?;
+    if r.status != 200 && r.status != 300 {
+        debug!(status = r.status, "capabilities refused");
+        return None;
+    }
+    let ai = detection::parse_channel_ai(&r.xml).ok()?;
+    Some(Info::Detects(
+        ai.into_iter()
+            .map(|c| (c.channel, detection::ai_kinds(c.aitype)))
+            .collect(),
+    ))
 }
 
 /// Names and models of the given channels (command 318), one query at a
@@ -216,11 +247,164 @@ async fn channel_names(session: Arc<DeviceSession>, channels: Vec<u8>) -> Option
     Some(Info::Channels(found))
 }
 
+/// One detection-related event (docs/FFI.md, "Events").
+fn detection_event(
+    device: u64,
+    slot: (u8, u8),
+    what: Change<'_>,
+    start: bool,
+    at_ns: u64,
+) -> String {
+    let (kind_type, kind) = match what {
+        Change::Detection(k) => ("detection", Some(k)),
+        Change::Motion => ("motion", None),
+        Change::Alarm(k) => ("alarm", Some(k)),
+    };
+    let mut o = Object::event(kind_type)
+        .u64("device", device)
+        .u64("channel", u64::from(slot.0));
+    if slot.1 != 0 {
+        o = o.u64("lens", u64::from(slot.1));
+    }
+    if let Some(k) = kind {
+        o = o.str("kind", k);
+    }
+    o = o.str("state", if start { "start" } else { "stop" });
+    if matches!(what, Change::Detection(_)) {
+        o = o.str("source", "device");
+    }
+    o.u64("at_ns", at_ns).finish()
+}
+
+#[derive(Clone, Copy)]
+enum Change<'a> {
+    /// An `AItype` name (lowercase).
+    Detection(&'a str),
+    /// `MD` in `status`.
+    Motion,
+    /// Another `status` name, as the device wrote it.
+    Alarm(&'a str),
+}
+
+/// What is active on one slot, normalized for comparison.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SlotActive {
+    detections: Vec<String>,
+    motion: bool,
+    alarms: Vec<String>,
+}
+
+impl SlotActive {
+    fn from_state(s: &AlarmState) -> SlotActive {
+        SlotActive {
+            detections: s.ai_types.iter().map(|k| k.to_ascii_lowercase()).collect(),
+            motion: s.motion(),
+            alarms: s
+                .status
+                .iter()
+                .filter(|n| !n.eq_ignore_ascii_case("MD"))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        *self == SlotActive::default()
+    }
+}
+
+fn contains(list: &[String], name: &str) -> bool {
+    list.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// Turns the device's alarm-state snapshots (command 33) into start and stop
+/// events (docs/protocol.md, "How nvrview reads the pushes").
+#[derive(Default)]
+struct Detections {
+    connection: Option<u64>,
+    active: BTreeMap<(u8, u8), SlotActive>,
+}
+
+impl Detections {
+    /// Events for the differences between the last snapshot and `p`.
+    fn push(&mut self, device: u64, p: &AlarmPush, at_ns: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.connection != Some(p.connection) {
+            // A new connection's snapshot starts afresh.
+            out = self.stop_all(device, at_ns);
+            self.connection = Some(p.connection);
+        }
+        for st in &p.states {
+            let slot = (st.channel, st.sub_channel);
+            let new = SlotActive::from_state(st);
+            let old = self.active.get(&slot).cloned().unwrap_or_default();
+            if new == old {
+                continue;
+            }
+            Self::diff(device, slot, &old, &new, at_ns, &mut out);
+            if new.is_idle() {
+                self.active.remove(&slot);
+            } else {
+                self.active.insert(slot, new);
+            }
+        }
+        out
+    }
+
+    /// Stops everything active (the session dropped).
+    fn stop_all(&mut self, device: u64, at_ns: u64) -> Vec<String> {
+        let mut out = Vec::new();
+        for (slot, old) in std::mem::take(&mut self.active) {
+            Self::diff(device, slot, &old, &SlotActive::default(), at_ns, &mut out);
+        }
+        out
+    }
+
+    /// Stops first, then starts.
+    fn diff(
+        device: u64,
+        slot: (u8, u8),
+        old: &SlotActive,
+        new: &SlotActive,
+        at_ns: u64,
+        out: &mut Vec<String>,
+    ) {
+        let mut ev = |what, start| out.push(detection_event(device, slot, what, start, at_ns));
+        for k in old
+            .detections
+            .iter()
+            .filter(|k| !contains(&new.detections, k))
+        {
+            ev(Change::Detection(k), false);
+        }
+        if old.motion && !new.motion {
+            ev(Change::Motion, false);
+        }
+        for k in old.alarms.iter().filter(|k| !contains(&new.alarms, k)) {
+            ev(Change::Alarm(k), false);
+        }
+        for k in new
+            .detections
+            .iter()
+            .filter(|k| !contains(&old.detections, k))
+        {
+            ev(Change::Detection(k), true);
+        }
+        if new.motion && !old.motion {
+            ev(Change::Motion, true);
+        }
+        for k in new.alarms.iter().filter(|k| !contains(&old.alarms, k)) {
+            ev(Change::Alarm(k), true);
+        }
+    }
+}
+
 /// Turns session state into events until stopped: `device_state` on every
 /// change, `device_info` after each login, and `channels` whenever the
 /// device pushes its list, again once the channel names are known.
 async fn watch(
     id: u64,
+    key: String,
     session: Arc<DeviceSession>,
     events: EventSink,
     mut stop: oneshot::Receiver<()>,
@@ -233,39 +417,58 @@ async fn watch(
     }
     let mut state_rx = session.watch_state();
     let mut channels_rx = session.watch_channels();
+    let mut alarms_rx = session.alarms();
     let mut tasks: JoinSet<Option<Info>> = JoinSet::new();
     let mut slots: Option<Vec<ChannelInfo>> = None;
     let mut names: HashMap<u8, VersionInfo> = HashMap::new();
-    let (mut state_open, mut channels_open) = (true, true);
+    let mut detects: Option<Detects> = None;
+    let mut detections = Detections::default();
+    let (mut state_open, mut channels_open, mut alarms_open) = (true, true, true);
+    let send_all = |list: Vec<String>| {
+        for e in list {
+            events.send(e, Priority::State);
+        }
+    };
 
     // The session may publish the same state twice in a row; report changes.
     let mut last: Option<ConnState> = None;
-    let mut on_state = |s: &ConnState, tasks: &mut JoinSet<Option<Info>>| {
-        if last.as_ref() == Some(s) {
-            return;
-        }
-        last = Some(s.clone());
-        events.send(state_event(id, s), Priority::State);
-        if *s == ConnState::Connected {
-            tasks.spawn(device_info(session.clone()));
-        }
-    };
+    let mut on_state =
+        |s: &ConnState, tasks: &mut JoinSet<Option<Info>>, detections: &mut Detections| {
+            if last.as_ref() == Some(s) {
+                return;
+            }
+            last = Some(s.clone());
+            if *s != ConnState::Connected {
+                // Whatever was active is unknown now; the next connection's
+                // first push is a full snapshot.
+                send_all(detections.stop_all(id, crate::clock::now_ns()));
+            }
+            events.send(state_event(id, s), Priority::State);
+            if *s == ConnState::Connected {
+                tasks.spawn(device_info(session.clone()));
+                tasks.spawn(channel_detects(session.clone()));
+            }
+        };
     // Every device starts by connecting; report that even when the session
     // has already moved on by the time this task runs, so apps always see
     // `connecting` first.
     let first = state_rx.borrow_and_update().clone();
     if first != ConnState::Connecting {
-        on_state(&ConnState::Connecting, &mut tasks);
+        on_state(&ConnState::Connecting, &mut tasks, &mut detections);
     }
-    on_state(&first, &mut tasks);
+    on_state(&first, &mut tasks, &mut detections);
 
     loop {
         tokio::select! {
-            _ = &mut stop => break,
+            _ = &mut stop => {
+                // The device is being removed: nothing stays active.
+                send_all(detections.stop_all(id, crate::clock::now_ns()));
+                break;
+            }
             r = state_rx.changed(), if state_open => match r {
                 Ok(()) => {
                     let s = state_rx.borrow_and_update().clone();
-                    on_state(&s, &mut tasks);
+                    on_state(&s, &mut tasks, &mut detections);
                 }
                 Err(_) => state_open = false,
             },
@@ -273,18 +476,34 @@ async fn watch(
                 Ok(()) => {
                     let list = channels_rx.borrow_and_update().clone();
                     if let Some(list) = list {
-                        events.send(channels_event(id, &list, &names), Priority::State);
+                        events.send(
+                            channels_event(id, &list, &names, detects.as_ref()),
+                            Priority::State,
+                        );
                         let wanted = list.iter().filter(|c| c.connected).map(|c| c.channel).collect();
                         tasks.spawn(channel_names(session.clone(), wanted));
+                        // Cameras may have changed: read their abilities again.
+                        if slots.is_some() {
+                            tasks.spawn(channel_detects(session.clone()));
+                        }
                         slots = Some(list);
                     }
                 }
                 Err(_) => channels_open = false,
             },
+            r = alarms_rx.recv(), if alarms_open => match r {
+                Ok(push) => send_all(detections.push(id, &push, crate::clock::now_ns())),
+                // Missed some pushes: the next one is a full snapshot.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    debug!(device = id, missed = n, "alarm pushes skipped");
+                }
+                Err(broadcast::error::RecvError::Closed) => alarms_open = false,
+            },
             Some(done) = tasks.join_next(), if !tasks.is_empty() => match done {
                 Ok(Some(Info::Device(v))) => {
                     let mut o = Object::event("device_info")
                         .u64("device", id)
+                        .str("key", &key)
                         .str("name", &v.name)
                         .str("model", &v.model);
                     if let Some(f) = &v.firmware {
@@ -302,7 +521,21 @@ async fn watch(
                         }
                     }
                     if let (true, Some(list)) = (changed, &slots) {
-                        events.send(channels_event(id, list, &names), Priority::State);
+                        events.send(
+                            channels_event(id, list, &names, detects.as_ref()),
+                            Priority::State,
+                        );
+                    }
+                }
+                Ok(Some(Info::Detects(d))) => {
+                    if detects.as_ref() != Some(&d) {
+                        detects = Some(d);
+                        if let Some(list) = &slots {
+                            events.send(
+                                channels_event(id, list, &names, detects.as_ref()),
+                                Priority::State,
+                            );
+                        }
                     }
                 }
                 Ok(None) | Err(_) => {}
@@ -375,7 +608,7 @@ mod tests {
             },
         );
         let v: serde_json::Value =
-            serde_json::from_str(&channels_event(1, &slots, &names)).unwrap();
+            serde_json::from_str(&channels_event(1, &slots, &names, None)).unwrap();
         assert_eq!(v["type"], "channels");
         let c = &v["channels"];
         assert_eq!(c[0]["tiers"], serde_json::json!(["main", "sub", "extern"]));
@@ -383,5 +616,92 @@ mod tests {
         assert_eq!(c[0]["model"], "EXAMPLE-CAM");
         assert_eq!(c[1]["connected"], false);
         assert!(c[1].get("name").is_none());
+        assert!(c[0].get("detects").is_none());
+        let mut detects = HashMap::new();
+        detects.insert(0, vec!["people", "vehicle"]);
+        let v: serde_json::Value =
+            serde_json::from_str(&channels_event(1, &slots, &names, Some(&detects))).unwrap();
+        let c = &v["channels"];
+        assert_eq!(c[0]["detects"], serde_json::json!(["people", "vehicle"]));
+        assert_eq!(c[1]["detects"], serde_json::json!([]));
+    }
+
+    fn push(connection: u64, states: Vec<(u8, u8, &str, &str)>) -> AlarmPush {
+        let text = |v: &str| {
+            v.split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        AlarmPush {
+            connection,
+            states: states
+                .into_iter()
+                .map(|(channel, sub_channel, status, ai)| AlarmState {
+                    channel,
+                    sub_channel,
+                    status: text(status),
+                    ai_types: text(ai),
+                })
+                .collect(),
+        }
+    }
+
+    fn parsed(list: Vec<String>) -> Vec<serde_json::Value> {
+        list.iter()
+            .map(|e| serde_json::from_str(e).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn snapshots_become_starts_and_stops() {
+        let mut d = Detections::default();
+        assert!(
+            d.push(1, &push(1, vec![(0, 0, "", ""), (1, 0, "", "")]), 5)
+                .is_empty()
+        );
+        // Motion, then a person while motion continues (an observed order).
+        let e = parsed(d.push(1, &push(1, vec![(0, 0, "", ""), (1, 0, "MD", "")]), 10));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["type"], "motion");
+        assert_eq!(e[0]["device"], 1);
+        assert_eq!(e[0]["channel"], 1);
+        assert_eq!(e[0]["state"], "start");
+        assert_eq!(e[0]["at_ns"], 10);
+        assert!(e[0].get("lens").is_none());
+        let e = parsed(d.push(1, &push(1, vec![(1, 0, "MD", "People")]), 20));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["type"], "detection");
+        assert_eq!(e[0]["kind"], "people");
+        assert_eq!(e[0]["source"], "device");
+        assert_eq!(e[0]["state"], "start");
+        // A slot left out of a push keeps its state.
+        assert!(d.push(1, &push(1, vec![(0, 0, "", "")]), 25).is_empty());
+        // Motion ends but the person stays; then the person goes.
+        let e = parsed(d.push(1, &push(1, vec![(1, 0, "", "people")]), 30));
+        assert_eq!(
+            (e.len(), &e[0]["type"], &e[0]["state"]),
+            (1, &"motion".into(), &"stop".into())
+        );
+        let e = parsed(d.push(1, &push(1, vec![(1, 0, "", "")]), 40));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["kind"], "people");
+        assert_eq!(e[0]["state"], "stop");
+        // Second lens, two kinds and a doorbell press at once.
+        let e = parsed(d.push(1, &push(1, vec![(2, 1, "visitor", "dog_cat,people")]), 50));
+        assert_eq!(e.len(), 3);
+        assert!(e.iter().all(|v| v["lens"] == 1 && v["state"] == "start"));
+        assert_eq!(e[2]["type"], "alarm");
+        assert_eq!(e[2]["kind"], "visitor");
+        // A new connection: what was active stops, then the new snapshot.
+        let e = parsed(d.push(1, &push(2, vec![(2, 1, "", "people")]), 60));
+        let stops = e.iter().filter(|v| v["state"] == "stop").count();
+        let starts = e.iter().filter(|v| v["state"] == "start").count();
+        assert_eq!((stops, starts), (3, 1));
+        let e = parsed(d.stop_all(1, 70));
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0]["kind"], "people");
+        assert_eq!(e[0]["state"], "stop");
+        assert!(d.stop_all(1, 80).is_empty());
     }
 }

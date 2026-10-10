@@ -21,6 +21,11 @@
 //! - optionally, a recorded stream instead (`NVRREC01`): the records are sent
 //!   as recorded, at their recorded times, optionally accelerated or looped
 //!   ([`replay`]).
+//! - detection events ([`alarms`]): the alarm-report subscription (192)
+//!   and alarm-state pushes (33) whenever a test changes a channel's state
+//!   ([`MockNvr::set_alarm`]) or a scripted cycle does
+//!   ([`Config::detection_cycle`]); per-channel `aitype` capabilities in
+//!   the 199 reply ([`Config::aitypes`]);
 //! - optionally, a fake recording store ([`archive`]): day records (142),
 //!   file search (14–16), event search (272–274), cover images (298), and
 //!   download by time range (143, stopped by 144), with injectable download
@@ -29,6 +34,7 @@
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
+pub mod alarms;
 pub mod archive;
 pub mod audio;
 pub mod fixture;
@@ -47,7 +53,7 @@ use replay::{ReplayConfig, Step};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -91,6 +97,14 @@ pub struct Config {
     /// If set, the device has recordings: see [`archive`]. Without it, the
     /// recording commands are answered with status 400.
     pub archive: Option<ArchiveConfig>,
+    /// Each channel's `aitype` capability bits in the 199 reply, by channel
+    /// (missing channels report 0: no AI). For example 7 is AI with people
+    /// and vehicles, 23 adds dogs and cats (docs/protocol.md).
+    pub aitypes: Vec<u32>,
+    /// If set, a scripted detection moves through the channels: each period
+    /// one channel reports motion and `people` for the first half of the
+    /// period, then returns to idle, and the next channel follows.
+    pub detection_cycle: Option<Duration>,
 }
 
 impl Config {
@@ -111,6 +125,8 @@ impl Config {
             audio: None,
             replay: None,
             archive: None,
+            aitypes: Vec::new(),
+            detection_cycle: None,
         }
     }
 }
@@ -124,6 +140,8 @@ struct Shared {
     faults: Mutex<Vec<DownloadFault>>,
     download_log: Mutex<VecDeque<DownloadLog>>,
     command_counts: Mutex<HashMap<u32, u64>>,
+    alarms: alarms::Board,
+    next_conn: AtomicU64,
 }
 
 /// Most downloads remembered for [`MockNvr::download_log`].
@@ -135,6 +153,7 @@ pub struct MockNvr {
     addr: SocketAddr,
     shared: Arc<Shared>,
     accept: Option<JoinHandle<()>>,
+    cycle: Option<JoinHandle<()>>,
 }
 
 /// Starts a server on its own threads and returns once it is listening.
@@ -142,6 +161,7 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
     let listener = TcpListener::bind(config.bind)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
+    let alarms = alarms::Board::new(config.channels);
     let shared = Arc::new(Shared {
         config,
         shutdown: AtomicBool::new(false),
@@ -151,13 +171,20 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         faults: Mutex::new(Vec::new()),
         download_log: Mutex::new(VecDeque::new()),
         command_counts: Mutex::new(HashMap::new()),
+        alarms,
+        next_conn: AtomicU64::new(1),
     });
     let s = Arc::clone(&shared);
     let accept = thread::spawn(move || accept_loop(listener, s));
+    let cycle = shared.config.detection_cycle.map(|period| {
+        let s = Arc::clone(&shared);
+        thread::spawn(move || detection_cycle(&s, period))
+    });
     Ok(MockNvr {
         addr,
         shared,
         accept: Some(accept),
+        cycle,
     })
 }
 
@@ -192,6 +219,25 @@ impl MockNvr {
             .unwrap_or(0)
     }
 
+    /// Sets one channel's alarm state (`status` such as `MD`, `ai_type`
+    /// such as `people`; empty strings mean `none`) and, if it changed,
+    /// pushes a snapshot of every channel to each subscribed session.
+    /// Returns false for a channel the mock does not have.
+    pub fn set_alarm(&self, channel: u8, status: &str, ai_type: &str) -> bool {
+        self.shared.alarms.set(
+            channel,
+            alarms::SlotState {
+                status: status.to_owned(),
+                ai_type: ai_type.to_owned(),
+            },
+        )
+    }
+
+    /// Sessions subscribed to alarm pushes (command 192) right now.
+    pub fn alarm_subscribers(&self) -> usize {
+        self.shared.alarms.subscribers()
+    }
+
     /// Stops the server and waits for its threads.
     pub fn shutdown(mut self) {
         self.stop();
@@ -202,12 +248,49 @@ impl MockNvr {
         if let Some(h) = self.accept.take() {
             let _ = h.join();
         }
+        if let Some(h) = self.cycle.take() {
+            let _ = h.join();
+        }
     }
 }
 
 impl Drop for MockNvr {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// The scripted detection of [`Config::detection_cycle`].
+fn detection_cycle(shared: &Shared, period: Duration) {
+    let channels = shared.config.channels.max(1);
+    let half = period / 2;
+    let mut ch = 0u8;
+    let sleep = |d: Duration| {
+        let end = Instant::now() + d;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            if shared.shutdown.load(Ordering::SeqCst) {
+                return false;
+            }
+            thread::sleep(left.min(POLL));
+        }
+        !shared.shutdown.load(Ordering::SeqCst)
+    };
+    loop {
+        shared.alarms.set(
+            ch,
+            alarms::SlotState {
+                status: "MD".into(),
+                ai_type: "people".into(),
+            },
+        );
+        if !sleep(half) {
+            return;
+        }
+        shared.alarms.set(ch, alarms::SlotState::default());
+        if !sleep(period - half) {
+            return;
+        }
+        ch = (ch + 1) % channels;
     }
 }
 
@@ -250,6 +333,8 @@ struct Stream {
 }
 
 struct Conn {
+    /// Identifies this connection (for its alarm subscription).
+    id: u64,
     shared: Arc<Shared>,
     writer: Writer,
     state: State,
@@ -277,6 +362,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
     stream.set_nodelay(true)?;
     let mut reader = stream.try_clone()?;
     let mut conn = Conn {
+        id: shared.next_conn.fetch_add(1, Ordering::SeqCst),
         shared: Arc::clone(&shared),
         writer: Arc::new(Mutex::new(stream)),
         state: State::Fresh,
@@ -323,6 +409,7 @@ impl Conn {
     }
 
     fn close(&mut self) {
+        self.shared.alarms.unsubscribe(self.id);
         for (_, s) in self.streams.drain().chain(self.downloads.drain()) {
             s.stop.store(true, Ordering::SeqCst);
             let _ = s.join.join();
@@ -475,15 +562,16 @@ impl Conn {
                 "<VersionInfo version=\"1.1\">\n<name>Mock NVR</name>\n<type>MOCK-NVR</type>\n\
                  <firmwareVersion>mock-1.0</firmwareVersion>\n</VersionInfo>\n",
             ),
-            199 => self.reply_xml(
-                199,
-                id,
-                200,
-                &format!(
-                    "<Support version=\"1.1\">\n<channelNum>{}</channelNum>\n</Support>\n",
-                    cfg.channels
-                ),
-            ),
+            199 => self.reply_xml(199, id, 200, &self.support()),
+            // Alarm report: an empty reply, then state pushes (33).
+            192 => {
+                self.reply_xml(192, id, 200, "")?;
+                let key = self.key.clone().expect("logged in");
+                self.shared
+                    .alarms
+                    .subscribe(self.id, Arc::clone(&self.writer), key, id);
+                Ok(())
+            }
             145 => self.reply_xml(145, id, 200, &self.channel_info_list()),
             // Real devices answer 146 with status 300 and a full body.
             146 => self.reply_xml(146, id, 300, &self.stream_info_list()),
@@ -520,6 +608,24 @@ impl Conn {
             4 => self.stop_preview(m),
             other => self.reply_xml(other, id, 400, ""),
         }
+    }
+
+    /// Capabilities (199): the channel count and one `item` per channel
+    /// with its `aitype`.
+    fn support(&self) -> String {
+        let cfg = &self.shared.config;
+        let mut s = format!(
+            "<Support version=\"1.1\">\n<channelNum>{}</channelNum>\n",
+            cfg.channels
+        );
+        for c in 0..cfg.channels {
+            let ai = cfg.aitypes.get(usize::from(c)).copied().unwrap_or(0);
+            s.push_str(&format!(
+                "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n</item>\n"
+            ));
+        }
+        s.push_str("</Support>\n");
+        s
     }
 
     fn channel_info_list(&self) -> String {

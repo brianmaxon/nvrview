@@ -283,6 +283,7 @@ Reply details:
 | Fact | Provenance |
 | --- | --- |
 | The 146 reply carries status **300**, not 200, together with a complete body (seen on two NVRs). Treat 300 as success for this command. | observed |
+| The newer-firmware NVR also answered 199 with status 300 and a complete body (the older one with 200). Treat 300 as success for 199 too. | observed |
 | `StreamInfoList` holds one `StreamInfo` per distinct stream configuration, not one per channel. Its `channelBits` is a bitmask of the channels that share it (bit *n* = channel *n*), and it contains one `encodeTable` per tier with `type` (`mainStream`, `subStream`), `resolution/width`, `resolution/height`, `videoEncType`, `defaultFramerate`, `defaultBitrate`, `defaultGop`, `framerateTable`, `bitrateTable`. | observed |
 | `videoEncType` takes the values 0 and 1. | observed |
 | The official client ignores `videoEncType` in the 146 reply; it reads only `channelBits` and, per `encodeTable`, `type`, resolution, the defaults and the two tables. `type` can also be `externStream` or `mobileStream`. | reported (client) |
@@ -348,10 +349,21 @@ message ID.
 | 600 (`yoloWorldEventList`, with `range`) also arrives with the 192 message ID, on connect and about 1 s before each channel-list push (145); entries (`channel`, `subChannel`, `YoloWorldType`/`type`) belong to the user-defined object detection the client calls "YOLO world". Only empty lists were seen. | observed (empty); fields reported (client) |
 | Bounding boxes are not in 33. Live detection boxes travel inside the video stream: the extension data after the first 8 bytes of a video record's extra header (see "Records as the official client reads them") is parsed as tag-length-value detection data, possibly LZ4-compressed. Its layout has not been traced. | reported (client) |
 
+How nvrview reads the pushes: it keeps the last snapshot per session and
+compares each new one with it, slot by slot (`channelId` and `subChannel`).
+Each name in `AItype` that appears is a detection start and each that
+disappears a stop; `MD` appearing or disappearing in `status` is motion
+starting or stopping; other `status` names (doorbell press, video loss,
+and so on) start and stop the same way as alarms. A snapshot that leaves a
+slot out changes nothing for that slot (a `range` may cover only part of
+the slots). When the session drops, everything active is stopped, since
+the next session's first push is a fresh snapshot.
+
 ### Which channels detect what
 
 | Fact | Provenance |
 | --- | --- |
+| `Support` (199) lists one `item` per channel slot, numbered by `chnID` from 0 (the same numbering as `channelId` in 145 and 33; one item for each of the `channelNum` slots, empty slots included with `aitype` 0). On the newer-firmware NVR, the item of a multi-lens camera also holds one `subItem` per lens, each with its own `chnID` (0 and 1, apparently the lens that 33 calls `subChannel`), `aitype`, and PTZ fields; the item's own `chnID` and `aitype` come before them. | observed |
 | `Support` (199) gives each channel `item` an integer `aitype`, which the client reads as a bitmask: bit 0 AI present, 1 people, 2 vehicle, 3 face, 4 dog/cat, 6 other, 17 package, 22 baby cry, 23 user-defined (YOLO world) objects. Other bits are configuration features (5 detection area, 7 AI tracking, 8 stay time, 9 sensitivity, 10 target size, 24 always-on video, 25 tamper alarm). | reported (client); the copy from `aitype` to the client's bitfield was not traced, medium confidence |
 | The bitmask fits the captures: `AiCfg` (299) listed `dog_cat` in `detectType` on exactly the channels with bit 4, and left out `vehicle` on a channel without bit 2. Channels with `aitype` 7 (AI, people, vehicle) produced `people` events. | observed |
 | A separate per-channel `aiAnimalType` (0 or 1) marks support for the wildlife subtypes below. Other per-channel fields seen: `smartAI`, `eventTypeVersion`, `thumbnail`. | observed (fields); meaning of `aiAnimalType` reported (client) |

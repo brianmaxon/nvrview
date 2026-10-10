@@ -36,11 +36,11 @@ public final class CCore: CoreAPI {
         // log_dir is copied by nv_core_new before it returns.
         if let logDirectory {
             status = logDirectory.withCString { dir in
-                var config = NvConfig(log_dir: dir, log_max_files: 0, log_max_total_bytes: 0)
+                var config = NvConfig(log_dir: dir, log_max_files: 0, log_max_total_bytes: 0, data_dir: nil)
                 return CoreStatus(nv_core_new(&config, callbacks, &out))
             }
         } else {
-            var config = NvConfig(log_dir: nil, log_max_files: 0, log_max_total_bytes: 0)
+            var config = NvConfig(log_dir: nil, log_max_files: 0, log_max_total_bytes: 0, data_dir: nil)
             status = CoreStatus(nv_core_new(&config, callbacks, &out))
         }
         guard status.isOK, let out else {
@@ -86,14 +86,16 @@ public final class CCore: CoreAPI {
         // Held across the call so `free` cannot run underneath it; the call never blocks.
         handle.withLock { h in
             guard let c = h.core else { return .closed }
-            return CoreStatus(nv_tile_decoded(c, tile, ptsMicros))
+            // Generation 0: this bridge never switches a tile's tier, so every
+            // action it receives belongs to the tile's first generation.
+            return CoreStatus(nv_tile_decoded(c, tile, 0, ptsMicros))
         }
     }
 
     public func tileDecodeFailed(_ tile: UInt64, kind: CoreDecodeFailure) -> CoreStatus {
         handle.withLock { h in
             guard let c = h.core else { return .closed }
-            return CoreStatus(nv_tile_decode_failed(c, tile, NvDecodeFailure(kind)))
+            return CoreStatus(nv_tile_decode_failed(c, tile, 0, NvDecodeFailure(kind)))
         }
     }
 

@@ -18,6 +18,7 @@ viewer-core = { path = "../viewer-core" }
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
+tempfile = "3"
 
 [lints]
 workspace = true

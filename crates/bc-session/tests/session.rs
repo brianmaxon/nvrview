@@ -565,7 +565,8 @@ async fn close_stops_previews_before_closing_the_socket() {
     wait_until("socket closed", || fake.active.load(Ordering::SeqCst) == 0).await;
     assert_eq!(fake.stops_for(1), 1);
     assert_eq!(fake.stops_for(4), 1);
-    // Stops come after the starts and nothing else was sent.
+    // Stops come after the starts and nothing else was sent but the
+    // detection subscription (192) after login.
     let cmds: Vec<u32> = fake
         .seen
         .lock()
@@ -573,7 +574,10 @@ async fn close_stops_previews_before_closing_the_socket() {
         .iter()
         .map(|s| s.command)
         .collect();
-    assert!(cmds.iter().all(|c| [2, 3, 4, 93].contains(c)), "{cmds:?}");
+    assert!(
+        cmds.iter().all(|c| [2, 3, 4, 93, 192].contains(c)),
+        "{cmds:?}"
+    );
     // After close the queue drains and then ends; it must not hang.
     while a.recv().await.is_some() {}
 }

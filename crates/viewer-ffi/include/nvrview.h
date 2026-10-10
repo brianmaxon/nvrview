@@ -16,7 +16,7 @@
 /**
  * Bumped on any incompatible change; apps compare it with nv_abi_version().
  */
-#define NV_ABI_VERSION 2
+#define NV_ABI_VERSION 3
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -36,10 +36,14 @@ typedef enum NvStatus {
    */
   NV_ERR_CLOSED = -3,
   /**
-   * too many devices or tiles
+   * too many devices, tiles, layouts, or queued requests
    */
   NV_ERR_LIMIT = -4,
   NV_ERR_INTERNAL = -5,
+  /**
+   * the output buffer is too small; *len holds the size needed
+   */
+  NV_ERR_BUFFER_TOO_SMALL = -6,
 } NvStatus;
 
 typedef enum NvActionKind {
@@ -116,6 +120,11 @@ typedef struct NvConfig {
    * 0 = default
    */
   uint64_t log_max_total_bytes;
+  /**
+   * The app's data directory (UTF-8, NUL-terminated), where the core keeps
+   * layouts and device keys; NULL = in memory only.
+   */
+  const char *data_dir;
 } NvConfig;
 
 /**
@@ -186,6 +195,12 @@ typedef struct NvAction {
   struct NvConfigure configure;
   struct NvDecode decode;
   enum NvTileStatus status;
+  /**
+   * The tile's stream this action belongs to: 0 when opened, one more
+   * for each tier switch (nv_tile_set_tier). Each generation has its own
+   * platform decoder; answer with the action's generation.
+   */
+  uint32_t generation;
 } NvAction;
 
 /**
@@ -338,15 +353,33 @@ enum NvStatus nv_tile_open(struct NvCore *core,
 enum NvStatus nv_tile_close(struct NvCore *core, uint64_t tile);
 
 /**
- * Decoder results. Every Decode not discarded by a later Flush, Reset, or
- * Configure gets exactly one of these; a failed Configure gets one
- * nv_tile_decode_failed. Callable from any thread, including inside
- * on_action; they never block.
+ * Asks the tile to show `tier` (for example main on focus, sub back in the
+ * grid). The tile keeps presenting its current stream until the new one's
+ * first picture has been decoded, then switches in one step: no gap, no
+ * black frame. The new stream's actions carry the next generation; the
+ * switch is the old generation's final NV_ACTION_RESET (and a tile_tier
+ * event). Returns at once; progress arrives as events. Asking for the tier
+ * already requested changes nothing.
  *
  * # Safety
  * `core` is a live handle.
  */
-enum NvStatus nv_tile_decoded(struct NvCore *core, uint64_t tile, int64_t pts_us);
+enum NvStatus nv_tile_set_tier(struct NvCore *core, uint64_t tile, NvStreamTier tier);
+
+/**
+ * Decoder results, for the generation of the action they answer. Every
+ * Decode not discarded by a later Flush, Reset, or Configure gets exactly
+ * one of these; a failed Configure gets one nv_tile_decode_failed.
+ * Results for a generation that has ended are ignored. Callable from any
+ * thread, including inside on_action; they never block.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_tile_decoded(struct NvCore *core,
+                              uint64_t tile,
+                              uint32_t generation,
+                              int64_t pts_us);
 
 /**
  * See nv_tile_decoded.
@@ -354,7 +387,10 @@ enum NvStatus nv_tile_decoded(struct NvCore *core, uint64_t tile, int64_t pts_us
  * # Safety
  * `core` is a live handle.
  */
-enum NvStatus nv_tile_decode_failed(struct NvCore *core, uint64_t tile, NvDecodeFailure kind);
+enum NvStatus nv_tile_decode_failed(struct NvCore *core,
+                                    uint64_t tile,
+                                    uint32_t generation,
+                                    NvDecodeFailure kind);
 
 /**
  * Now on the core's clock, nanoseconds: the platform host clock (macOS:
@@ -416,6 +452,66 @@ enum NvStatus nv_tile_audio_set(struct NvCore *core, uint64_t tile, bool audible
  * `core` is a live handle.
  */
 enum NvStatus nv_tile_audio_tap(struct NvCore *core, uint64_t tile, bool enabled);
+
+/**
+ * Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
+ * last measured it, before the tile's volume (peak with a 0.3 s release,
+ * RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
+ * known, and before rendering starts. Lock-free and allocation-free;
+ * callable from any thread, including callbacks, at display rate.
+ *
+ * # Safety
+ * `core` is a live handle; `peak` and `rms` are valid for one write each.
+ */
+enum NvStatus nv_tile_audio_level(struct NvCore *core, uint64_t tile, float *peak, float *rms);
+
+/**
+ * The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,
+ * NUL-terminated, `*len` bytes without the NUL. The same address (host and
+ * port) gets the same key in every run while the data directory is kept.
+ * NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap` <= `*len`.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+ * `len` is valid for one write.
+ */
+enum NvStatus nv_device_key(struct NvCore *core,
+                            uint64_t device,
+                            char *out,
+                            size_t cap,
+                            size_t *len);
+
+/**
+ * Every stored layout as JSON, `{"revision":N,"layouts":[...]}`, into `out`
+ * (NUL-terminated; `*len` bytes without the NUL). NV_ERR_BUFFER_TOO_SMALL
+ * (with `*len` set) when `cap` <= `*len`: call again with a larger buffer.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+ * `len` is valid for one write.
+ */
+enum NvStatus nv_layouts_get(struct NvCore *core, char *out, size_t cap, size_t *len);
+
+/**
+ * Inserts or replaces (by "id") one layout given as JSON. The core
+ * validates it (NV_ERR_INVALID_ARGUMENT if not a valid split tree), sets
+ * its "version", stores it atomically, and sends layouts_changed.
+ * NV_ERR_LIMIT when the store is full, NV_ERR_INTERNAL when it cannot be
+ * written (nothing changes).
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_layout_put(struct NvCore *core, const char *json);
+
+/**
+ * Deletes a layout by id and sends layouts_changed. NV_ERR_UNKNOWN_ID if
+ * there is none.
+ *
+ * # Safety
+ * `core` is a live handle; `id` is a NUL-terminated string.
+ */
+enum NvStatus nv_layout_delete(struct NvCore *core, const char *id);
 
 /**
  * Grid layout (pure; no core needed). Fills `out` (tile_count entries) with

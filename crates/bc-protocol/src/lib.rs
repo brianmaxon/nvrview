@@ -13,6 +13,8 @@
 //! - [`archive`]: recorded video on the device: day, file, and event
 //!   searches, cover images, and download by time range (bodies and reply
 //!   parsers; the session builds the messages).
+//! - [`detection`]: detection events (the alarm-state pushes of command 33)
+//!   and which channels detect what (the `aitype` bits of command 199).
 //! - [`recording`]: a file format for a received stream with arrival times,
 //!   for replaying real streams in development.
 //! - [`crypto`], [`xml`], [`stream`]: the building blocks used by the above.
@@ -21,6 +23,7 @@
 
 pub mod archive;
 pub mod crypto;
+pub mod detection;
 pub mod framer;
 pub mod header;
 pub mod media;
