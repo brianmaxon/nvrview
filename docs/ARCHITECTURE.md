@@ -252,6 +252,28 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | Multi-factor automation | triggers over several signals: facial recognition, expected activity (schedules, past patterns), presence of known devices on the local network | actions fire only when the signals agree (for example an unknown face, outside expected hours, with no household phone at home); every signal and rule stays local; presence detection only observes the local network. |
 | Doorbell text-to-speech | camera motion control (doorbell speaker), triggers, templates | speaks a message through a doorbell (for example "Leave the package by the door"). Text comes only from user-written templates with a few typed slots (time, camera name); untrusted text (transcripts, detected text, anything a visitor says or shows, other devices' payloads) is never spoken and never instructs an agent. An agent may only pick a template and fill typed slots, with the user's grant; rate-limited and logged. |
 
+## Mobile (later)
+
+Not planned; recorded so the core and the local API keep it cheap.
+
+- **iOS**: the core builds as one more slice of the XCFramework, and
+  VideoKit's VideoToolbox, Metal, and AVAudioEngine code runs on iOS almost
+  unchanged; the new work is a touch interface. iOS suspends background apps,
+  so live sessions last only while the app is open.
+- **Android**: the core builds as a native library reached through JNI
+  (bindings could be generated, for example with UniFFI); the platform layer
+  is new, as for Windows: MediaCodec decoding, SurfaceView or OpenGL ES/Vulkan
+  drawing, AAudio playback, and a Kotlin interface.
+- **Companion app (the likely first step)**: a phone app that talks only to
+  the local API of a headless nvrview service at home (the core, index,
+  triggers, and transcription running on a home server or a Mac). The phone
+  then never uses one of a device's scarce logins, background limits matter
+  less, and notifications come from the service's own triggers. The local API
+  should be designed with such a client in mind: authenticated, and centered
+  on incidents and clips.
+- **Away from home**: local-network only by design; reach the home network
+  through a VPN (WireGuard or similar) rather than a vendor relay.
+
 ## Build and CI
 
 - `cargo build` targets `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
