@@ -302,7 +302,7 @@ pub fn run_with(
             pcm.fill(0.0);
             for (i, s) in pcm.iter_mut().enumerate() {
                 let n = k * 1024 + i as u64;
-                if n % cfg.click_every == 0 && n > 0 {
+                if n.is_multiple_of(cfg.click_every) && n > 0 {
                     *s = 0.9;
                     clicks_sent += 1;
                 }

@@ -29,7 +29,9 @@ fn decode_all(file: &str) -> (Vec<f32>, usize, u32) {
 
 fn reference(file: &str) -> Vec<f32> {
     fixture(file)
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
         .collect()
 }

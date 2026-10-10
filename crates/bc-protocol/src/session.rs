@@ -420,10 +420,10 @@ impl Session {
 
     /// Plain or XOR-obfuscated XML text of a pre-encryption message, if any.
     fn clear_text(body: &[u8], message_id: u32) -> Option<String> {
-        if let Ok(s) = std::str::from_utf8(body) {
-            if looks_like_xml(s) {
-                return Some(s.to_owned());
-            }
+        if let Ok(s) = std::str::from_utf8(body)
+            && looks_like_xml(s)
+        {
+            return Some(s.to_owned());
         }
         let mut v = body.to_vec();
         xor_obfuscate(message_id, &mut v);

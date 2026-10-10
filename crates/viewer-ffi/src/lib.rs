@@ -462,18 +462,18 @@ pub unsafe extern "C" fn nv_core_new(
         };
         let mut cfg = CoreConfig::default();
         // SAFETY: the caller promises `config` is null or valid to read.
-        if let Some(c) = unsafe { config.as_ref() } {
-            if !c.log_dir.is_null() {
-                // SAFETY: non-null and NUL-terminated per the caller.
-                let Some(dir) = (unsafe { string(c.log_dir) }) else {
-                    return NvStatus::NV_ERR_INVALID_ARGUMENT;
-                };
-                cfg.log = Some(LogSettings {
-                    dir: PathBuf::from(dir),
-                    max_files: c.log_max_files as usize,
-                    max_total_bytes: c.log_max_total_bytes,
-                });
-            }
+        if let Some(c) = unsafe { config.as_ref() }
+            && !c.log_dir.is_null()
+        {
+            // SAFETY: non-null and NUL-terminated per the caller.
+            let Some(dir) = (unsafe { string(c.log_dir) }) else {
+                return NvStatus::NV_ERR_INVALID_ARGUMENT;
+            };
+            cfg.log = Some(LogSettings {
+                dir: PathBuf::from(dir),
+                max_files: c.log_max_files as usize,
+                max_total_bytes: c.log_max_total_bytes,
+            });
         }
         let cb = Arc::new(FfiCallbacks {
             context: Context(callbacks.context),

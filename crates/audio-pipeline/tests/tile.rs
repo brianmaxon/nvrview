@@ -23,7 +23,7 @@ fn tap_blocks_are_timestamped_and_a_slow_consumer_only_loses_old_blocks() {
         |t, _| {
             // A consumer that wakes up every 4 s and reads what is queued.
             let k = (t / (1024.0 / cfg.audio_rate)).round() as u64;
-            if k % 62 != 0 {
+            if !k.is_multiple_of(62) {
                 return;
             }
             let mut c = checked.borrow_mut();

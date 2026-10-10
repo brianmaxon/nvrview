@@ -201,10 +201,10 @@ fn records(xml: &str, record: &str) -> Result<Vec<Vec<(String, String)>>, XmlErr
             Event::End(e) => {
                 if e.local_name().as_ref() == record.as_bytes() {
                     out.extend(current.take());
-                } else if let (Some(fields), Some((name, text))) = (current.as_mut(), leaf.take()) {
-                    if !fields.iter().any(|(n, _)| *n == name) {
-                        fields.push((name, text.trim().to_owned()));
-                    }
+                } else if let (Some(fields), Some((name, text))) = (current.as_mut(), leaf.take())
+                    && !fields.iter().any(|(n, _)| *n == name)
+                {
+                    fields.push((name, text.trim().to_owned()));
                 }
             }
             Event::Eof => return Ok(out),

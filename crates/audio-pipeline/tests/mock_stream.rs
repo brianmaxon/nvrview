@@ -87,7 +87,7 @@ fn clicks_from_the_mock_stream_play_at_their_camera_time() {
         while next_cb_us <= arrival {
             let start_us = next_cb_us + 8_000.0;
             renderer.render(&mut buf, (start_us * 1e3) as u64);
-            for (k, f) in buf.chunks_exact(2).enumerate() {
+            for (k, f) in buf.as_chunks::<2>().0.iter().enumerate() {
                 if f[0].abs() > THRESHOLD && quiet > 3000 {
                     heard.push(start_us + k as f64 * 1e6 / 48_000.0);
                 }

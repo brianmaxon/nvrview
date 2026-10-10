@@ -290,10 +290,10 @@ impl Callbacks for Recorder {
         if let (Some(a), false) = (answer, b.silent) {
             self.answer(tile, a, b.answer_from_thread);
         }
-        if self.try_reentry.load(Ordering::SeqCst) {
-            if let Some(core) = self.core() {
-                self.reentrant.lock().unwrap().push(core.close_tile(tile));
-            }
+        if self.try_reentry.load(Ordering::SeqCst)
+            && let Some(core) = self.core()
+        {
+            self.reentrant.lock().unwrap().push(core.close_tile(tile));
         }
         self.timeline.lock().unwrap().push(Entry::ActionDone(tile));
         busy.store(false, Ordering::SeqCst);
@@ -306,10 +306,10 @@ impl Callbacks for Recorder {
         assert!(v["type"].is_string(), "{json}");
         self.timeline.lock().unwrap().push(Entry::Event(v.clone()));
         self.events.lock().unwrap().push(v);
-        if self.try_reentry.load(Ordering::SeqCst) {
-            if let Some(core) = self.core() {
-                self.reentrant.lock().unwrap().push(core.remove_device(1));
-            }
+        if self.try_reentry.load(Ordering::SeqCst)
+            && let Some(core) = self.core()
+        {
+            self.reentrant.lock().unwrap().push(core.remove_device(1));
         }
     }
 }
