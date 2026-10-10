@@ -177,7 +177,8 @@ audio records across both stream indexes, sub and high tiers).
 | The ADTS headers say AAC-LC, 16 kHz, mono, one raw data block per frame: 1024 samples, 64 ms per record. | observed |
 | Frame sizes vary (variable bit rate); about 250 to 520 bytes were common. | observed |
 | Audio records carry no timestamp. They are interleaved with video records (about 15.6 audio records per second against 4–15 video frames), so a record's position between video frames is the only timing information in the stream. | observed |
-| Counting samples against the video timestamps over about 64 s gave 16,005 to 16,013 samples per second of video time, not exactly 16,000: the cameras' audio and video clocks differ slightly, and a player that plays audio at a local 16 kHz drifts by seconds per hour. | observed |
+| Over 10 minutes of one camera's sub-stream (9,371 audio and 2,644 video records, no gaps), the audio ran at 16,000.33 samples per second of the camera's video time (about 20 ppm) and 16,000.06 per second of the receiving computer's clock; the camera's video clock and the computer's differed by about 8 ppm. A player at exactly 16 kHz would drift only about 0.07 s per hour from clock rates alone. (Earlier estimates of 16,005 to 16,013 from 64 s spans were dominated by measurement noise.) | observed |
+| Audio records arrive with jitter: arrival times deviated from a steady rate by 67 ms (standard deviation), from 131 ms early to 177 ms late, over those 10 minutes on a wired LAN. | observed |
 
 ### Records as the official client reads them
 

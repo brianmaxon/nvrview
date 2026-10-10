@@ -10,10 +10,17 @@ hours, and a clean feed of the same audio for local speech recognition
 - One ADTS AAC-LC frame per audio record: 16 kHz, mono, 1024 samples (64 ms).
 - **No audio timestamps.** Only the record's position between timestamped
   video frames.
-- The camera's audio clock is not exactly 16 kHz in video time (16,005 to
-  16,013 samples per second were measured). Playing it at a local 16 kHz
-  drifts by seconds per hour, which is what the official client appears to
-  do: its audio slides out of sync over long sessions.
+- The camera's audio clock is close to, but not exactly, 16 kHz in video
+  time (about 20 ppm off over a 10-minute measurement: 0.07 s per hour), and
+  the output device's clock differs from both by its own small error.
+- Arrival jitter is large by comparison: about 67 ms standard deviation,
+  peaks near ±150 ms on a wired LAN. The playout buffer must absorb that.
+- The official client plays audio by a local clock with no drift correction
+  (reported), and its audio slides far out of sync over long sessions. Clock
+  rates alone explain only a fraction of a second per hour, so the likely
+  cause is latency that accumulates in its buffer after network stalls and is
+  never removed (a hypothesis). The design below removes both: it steers the
+  buffer back to its target continuously and resyncs after stalls.
 
 ## Principles
 
