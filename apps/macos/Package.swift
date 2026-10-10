@@ -10,8 +10,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "VideoKit"),
-        .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit"]),
-        .testTarget(name: "VideoKitTests", dependencies: ["VideoKit"]),
+        // Temporary: drives VideoKit until the Rust video pipeline does (M2).
+        // Tests and the demo only; never a dependency of the app.
+        .target(name: "PipelineStandIn", dependencies: ["VideoKit"]),
+        .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit", "PipelineStandIn"]),
+        .testTarget(name: "VideoKitTests", dependencies: ["VideoKit", "PipelineStandIn"]),
     ],
     swiftLanguageModes: [.v6]
 )
