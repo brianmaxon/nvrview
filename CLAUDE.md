@@ -72,6 +72,7 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 
 - Commit identity must be a GitHub noreply address (the pre-commit hook
   enforces it). Run `scripts/setup-dev.sh` in a fresh clone.
-- Commit only when asked. Never push or create releases without explicit
-  approval.
+- Commit as work completes, in small focused commits, after the local checks
+  above pass. Push to `main` once those checks pass. Never create releases or
+  tags without explicit approval.
 - Never bypass the pre-commit hook (`--no-verify`).
