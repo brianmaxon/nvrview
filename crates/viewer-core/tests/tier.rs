@@ -1,9 +1,12 @@
 //! Switching a tile's stream tier with generations (docs/FFI.md, "Switching
-//! a tile's stream tier"), against the in-process mock NVR.
+//! a tile's stream tier"), against the in-process mock NVR, on a simulated
+//! clock: switch timeouts and the alignment cap are measured in simulated
+//! time.
 
 mod common;
 
 use common::*;
+use simtime::SimRuntime;
 use std::time::Duration;
 use viewer_core::{CoreConfig, CoreError, StreamTier};
 
@@ -33,16 +36,19 @@ fn add(core: &viewer_core::Core, nvr: &mock_nvr::MockNvr) -> u64 {
 
 #[test]
 fn a_tile_switches_to_main_without_a_gap_and_back() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = add(&core, &nvr);
     let t = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("sub-stream pictures", 10, || rec.decodes(t) >= 10);
+    sim_until(&sim, &core, "sub-stream pictures", 10, || {
+        rec.decodes(t) >= 10
+    });
     let starts_before = nvr.command_count(3);
     let stops_before = nvr.command_count(4);
 
     core.set_tile_tier(t, StreamTier::Main).unwrap();
-    wait_until("the switch", 10, || {
+    sim_until(&sim, &core, "the switch", 10, || {
         tier_events(&rec, t).contains(&("main".into(), "active".into(), 1))
     });
     assert_eq!(
@@ -66,16 +72,22 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
     // generation 0 got a final Reset and nothing after it.
     // (The new generation may decode several pictures before it is shown,
     // while it catches up with the picture on screen.)
-    wait_until("main-stream pictures after the switch", 10, || {
-        let seen = rec.seen_gen(t);
-        position(&seen, |(g, s)| *g == 0 && *s == Seen::Reset).is_some_and(|r| {
-            seen[r..]
-                .iter()
-                .filter(|(g, s)| *g == 1 && matches!(s, Seen::Decode { .. }))
-                .count()
-                >= 5
-        })
-    });
+    sim_until(
+        &sim,
+        &core,
+        "main-stream pictures after the switch",
+        10,
+        || {
+            let seen = rec.seen_gen(t);
+            position(&seen, |(g, s)| *g == 0 && *s == Seen::Reset).is_some_and(|r| {
+                seen[r..]
+                    .iter()
+                    .filter(|(g, s)| *g == 1 && matches!(s, Seen::Decode { .. }))
+                    .count()
+                    >= 5
+            })
+        },
+    );
     check_protocol(&rec.seen_of(t, 1));
     let seen = rec.seen_gen(t);
     let first_new = position(&seen, |(g, s)| *g == 1 && matches!(s, Seen::Decode { .. })).unwrap();
@@ -88,7 +100,7 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
     assert_eq!(seen.last().unwrap().0, 1);
 
     // Start the new stream, then stop the old one; still one login.
-    wait_until("the sub-stream stop", 5, || {
+    sim_until(&sim, &core, "the sub-stream stop", 5, || {
         nvr.command_count(4) == stops_before + 1
     });
     assert_eq!(nvr.command_count(3), starts_before + 1);
@@ -97,10 +109,10 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
 
     // And back to the sub-stream: generation 2.
     core.set_tile_tier(t, StreamTier::Sub).unwrap();
-    wait_until("the switch back", 10, || {
+    sim_until(&sim, &core, "the switch back", 10, || {
         tier_events(&rec, t).contains(&("sub".into(), "active".into(), 2))
     });
-    wait_until("sub-stream pictures again", 10, || {
+    sim_until(&sim, &core, "sub-stream pictures again", 10, || {
         rec.seen_of(t, 2)
             .iter()
             .filter(|s| matches!(s, Seen::Decode { .. }))
@@ -109,7 +121,7 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
     });
     check_protocol(&rec.seen_of(t, 2));
     assert!(rec.seen_of(t, 1).contains(&Seen::Reset));
-    wait_until("tile_stats of generation 2", 5, || {
+    sim_until(&sim, &core, "tile_stats of generation 2", 5, || {
         rec.events_of("tile_stats")
             .iter()
             .any(|e| e["tile"] == t && e["generation"] == 2 && e["tier"] == "sub")
@@ -117,7 +129,7 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
 
     // Asking for the tier already shown reports it active again.
     core.set_tile_tier(t, StreamTier::Sub).unwrap();
-    wait_until("reaffirmed", 5, || {
+    sim_until(&sim, &core, "reaffirmed", 5, || {
         tier_events(&rec, t)
             .iter()
             .filter(|e| **e == ("sub".to_owned(), "active".to_owned(), 2))
@@ -129,47 +141,49 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
         Err(CoreError::UnknownId)
     );
     core.close_tile(t).unwrap();
-    wait_until("tile_closed", 5, || {
+    sim_until(&sim, &core, "tile_closed", 5, || {
         !rec.events_of("tile_closed").is_empty()
     });
     assert_eq!(rec.check_closed_once(&[t]), ["closed"]);
-    core.shutdown();
-    wait_until("logged out", 5, || nvr.active_logins() == 0);
+    sim.run_free(|| core.shutdown());
+    sim_until(&sim, &core, "logged out", 5, || nvr.active_logins() == 0);
 }
 
 #[test]
 fn a_switch_shares_a_stream_another_tile_already_shows() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = add(&core, &nvr);
     let grid = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
     let big = core.open_tile(dev, 0, StreamTier::Main).unwrap();
     for t in [grid, big] {
-        wait_until("pictures", 10, || rec.decodes(t) >= 5);
+        sim_until(&sim, &core, "pictures", 10, || rec.decodes(t) >= 5);
     }
     let (starts, stops) = (nvr.command_count(3), nvr.command_count(4));
     core.set_tile_tier(grid, StreamTier::Main).unwrap();
-    wait_until("the switch", 10, || {
+    sim_until(&sim, &core, "the switch", 10, || {
         tier_events(&rec, grid).contains(&("main".into(), "active".into(), 1))
     });
     // The main stream was already running: no new start; the sub-stream
     // had no other viewer: stopped.
-    wait_until("the sub-stream stop", 5, || {
+    sim_until(&sim, &core, "the sub-stream stop", 5, || {
         nvr.command_count(4) == stops + 1
     });
     assert_eq!(nvr.command_count(3), starts);
     // The other tile never noticed.
     assert!(rec.seen_gen(big).iter().all(|(g, _)| *g == 0));
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn a_newer_request_replaces_a_switch_in_progress() {
-    let nvr = mock(1);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = add(&core, &nvr);
     let t = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
-    wait_until("pictures", 10, || rec.decodes(t) >= 5);
+    sim_until(&sim, &core, "pictures", 10, || rec.decodes(t) >= 5);
     // A decoder that stops answering: the new generation never shows.
     rec.set_behavior(
         t,
@@ -179,13 +193,13 @@ fn a_newer_request_replaces_a_switch_in_progress() {
         },
     );
     core.set_tile_tier(t, StreamTier::Main).unwrap();
-    wait_until("main decodes submitted", 10, || {
+    sim_until(&sim, &core, "main decodes submitted", 10, || {
         rec.seen_of(t, 1)
             .iter()
             .any(|s| matches!(s, Seen::Decode { .. }))
     });
     core.set_tile_tier(t, StreamTier::Sub).unwrap();
-    wait_until("back to the sub-stream", 5, || {
+    sim_until(&sim, &core, "back to the sub-stream", 5, || {
         tier_events(&rec, t).contains(&("sub".into(), "active".into(), 0))
     });
     let failed: Vec<_> = rec
@@ -197,19 +211,23 @@ fn a_newer_request_replaces_a_switch_in_progress() {
     assert_eq!(failed[0]["generation"], 1);
     assert_eq!(failed[0]["reason"], "superseded");
     assert_eq!(rec.seen_of(t, 1).last(), Some(&Seen::Reset));
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn a_switch_that_shows_nothing_in_time_fails_and_the_old_stream_stays() {
-    let nvr = mock(1);
-    let (core, rec) = start(CoreConfig {
-        tier_switch_timeout: Duration::from_millis(500),
-        ..fast_config()
-    });
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 1);
+    let (core, rec) = start(on_sim(
+        &sim,
+        CoreConfig {
+            tier_switch_timeout: Duration::from_millis(500),
+            ..fast_config()
+        },
+    ));
     let dev = add(&core, &nvr);
     let t = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
-    wait_until("pictures", 10, || rec.decodes(t) >= 5);
+    sim_until(&sim, &core, "pictures", 10, || rec.decodes(t) >= 5);
     let stops = nvr.command_count(4);
     rec.set_behavior(
         t,
@@ -219,7 +237,7 @@ fn a_switch_that_shows_nothing_in_time_fails_and_the_old_stream_stays() {
         },
     );
     core.set_tile_tier(t, StreamTier::Main).unwrap();
-    wait_until("the timeout", 5, || {
+    sim_until(&sim, &core, "the timeout", 5, || {
         tier_events(&rec, t).contains(&("main".into(), "failed".into(), 1))
     });
     let failed = rec
@@ -231,7 +249,7 @@ fn a_switch_that_shows_nothing_in_time_fails_and_the_old_stream_stays() {
     assert_eq!(rec.seen_of(t, 1).last(), Some(&Seen::Reset));
     assert!(!rec.seen_of(t, 0).contains(&Seen::Reset));
     // The abandoned main stream is stopped; the sub-stream keeps running.
-    wait_until("the main-stream stop", 5, || {
+    sim_until(&sim, &core, "the main-stream stop", 5, || {
         nvr.command_count(4) == stops + 1
     });
     assert!(
@@ -239,18 +257,21 @@ fn a_switch_that_shows_nothing_in_time_fails_and_the_old_stream_stays() {
             .iter()
             .any(|e| e["what"] == "tier_switch")
     );
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn the_first_picture_is_timed_once() {
-    let nvr = mock(2);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = sim_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    // The core has been running a while when the app opens its tiles.
+    sim.advance(Duration::from_millis(250));
     let dev = add(&core, &nvr);
     let a = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
     let b = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
     for t in [a, b] {
-        wait_until("pictures", 10, || rec.decodes(t) >= 3);
+        sim_until(&sim, &core, "pictures", 10, || rec.decodes(t) >= 3);
     }
     let first: Vec<_> = rec
         .events_of("timing")
@@ -259,8 +280,9 @@ fn the_first_picture_is_timed_once() {
         .collect();
     assert_eq!(first.len(), 1, "{first:?}");
     assert!(first[0]["tile"] == a || first[0]["tile"] == b);
-    assert!(first[0]["ns"].as_u64().unwrap() > 0);
-    core.shutdown();
+    // Timed from the core's start, on its clock.
+    assert!(first[0]["ns"].as_u64().unwrap() >= 250_000_000, "{first:?}");
+    sim.run_free(|| core.shutdown());
 }
 
 // --- Alignment of a switch between tiers of one camera ---------------------
@@ -366,7 +388,7 @@ fn alignment_recording(
     w.finish().unwrap()
 }
 
-fn replay_mock(recording: &[u8]) -> mock_nvr::MockNvr {
+fn replay_mock(sim: &SimRuntime, recording: &[u8]) -> mock_nvr::MockNvr {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
@@ -374,19 +396,22 @@ fn replay_mock(recording: &[u8]) -> mock_nvr::MockNvr {
     cfg.replay = Some(mock_nvr::replay::ReplayConfig::new(
         mock_nvr::replay::Replay::from_reader(recording).unwrap(),
     ));
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 /// The `tier_switch` timing event of a switch from sub to `tier`, after
 /// checking that the old generation kept decoding until its Reset.
 fn switch_with(recording: &[u8], tier: viewer_core::StreamTier) -> (serde_json::Value, usize) {
-    let nvr = replay_mock(recording);
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = replay_mock(&sim, recording);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = add(&core, &nvr);
     let t = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
-    wait_until("sub-stream pictures", 10, || rec.decodes(t) >= 5);
+    sim_until(&sim, &core, "sub-stream pictures", 10, || {
+        rec.decodes(t) >= 5
+    });
     core.set_tile_tier(t, tier).unwrap();
-    wait_until("the switch", 10, || {
+    sim_until(&sim, &core, "the switch", 10, || {
         rec.events_of("timing")
             .iter()
             .any(|e| e["what"] == "tier_switch")
@@ -408,7 +433,7 @@ fn switch_with(recording: &[u8], tier: viewer_core::StreamTier) -> (serde_json::
         .filter(|(g, s)| *g == 0 && matches!(s, Seen::Decode { .. }))
         .count();
     check_protocol(&rec.seen_of(t, 1));
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     (timing, old_meanwhile)
 }
 

@@ -29,11 +29,15 @@ pub(crate) enum Priority {
 struct Queue {
     items: VecDeque<String>,
     closed: bool,
+    /// An `on_event` is running.
+    delivering: bool,
 }
 
 struct Inner {
     queue: Mutex<Queue>,
     ready: Condvar,
+    /// Signaled when the queue empties after a delivery ([`EventSink::flush`]).
+    idle: Condvar,
     dropped: AtomicU64,
 }
 
@@ -77,6 +81,15 @@ impl EventSink {
     pub(crate) fn dropped(&self) -> u64 {
         self.0.dropped.load(Ordering::Relaxed)
     }
+
+    /// Waits until every event queued so far has been delivered (or the
+    /// thread has stopped).
+    pub(crate) fn flush(&self) {
+        let mut q = self.0.lock();
+        while (!q.items.is_empty() || q.delivering) && !(q.closed && q.items.is_empty()) {
+            q = self.0.idle.wait(q).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
 }
 
 /// The delivery thread. Dropping it without [`EventThread::stop`] also stops
@@ -91,6 +104,7 @@ impl EventThread {
         let sink = EventSink(Arc::new(Inner {
             queue: Mutex::new(Queue::default()),
             ready: Condvar::new(),
+            idle: Condvar::new(),
             dropped: AtomicU64::new(0),
         }));
         let inner = sink.0.clone();
@@ -103,6 +117,7 @@ impl EventThread {
                         let mut q = inner.lock();
                         loop {
                             if let Some(j) = q.items.pop_front() {
+                                q.delivering = true;
                                 break Some(j);
                             }
                             if q.closed {
@@ -111,9 +126,16 @@ impl EventThread {
                             q = inner.ready.wait(q).unwrap_or_else(PoisonError::into_inner);
                         }
                     };
-                    match json {
-                        Some(j) => callbacks.on_event(&j),
-                        None => return,
+                    let Some(j) = json else {
+                        inner.idle.notify_all();
+                        return;
+                    };
+                    callbacks.on_event(&j);
+                    let mut q = inner.lock();
+                    q.delivering = false;
+                    if q.items.is_empty() {
+                        drop(q);
+                        inner.idle.notify_all();
                     }
                 }
             })?;

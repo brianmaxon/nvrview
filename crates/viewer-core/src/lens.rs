@@ -10,7 +10,9 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// tokio's Instant: the runtime's clock, simulated on a test runtime.
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 const LENSES_FILE: &str = "lenses.json";

@@ -790,6 +790,7 @@ dependencies = [
  "libc",
  "mock-nvr",
  "serde_json",
+ "simtime",
  "sound-events",
  "tempfile",
  "tokio",

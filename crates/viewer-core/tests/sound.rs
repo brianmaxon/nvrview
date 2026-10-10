@@ -3,17 +3,19 @@
 //! aac-smoke-t3.aac) or a steady two-tone signal (aac-tone.aac) with its
 //! video, on every channel; the core decodes it and reports alarms as
 //! `detection` events with `source` `local_audio`, keeping per-second
-//! loudness for each tile.
+//! loudness for each tile. On a simulated clock (`simtime`): the fixtures'
+//! seconds of audio take simulated time, not real time.
 
 mod common;
 
-use common::{PASSWORD, Recorder, USER, start, wait_until};
+use common::{PASSWORD, Recorder, USER, on_sim, sim_spawn, sim_until, start};
 use serde_json::Value;
+use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use viewer_core::sound::SoundSettings;
-use viewer_core::{Core, CoreConfig, CoreError, StreamTier, clock};
+use viewer_core::{Core, CoreConfig, CoreError, StreamTier};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +23,7 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn mock(audio: &str, channels: u8) -> mock_nvr::MockNvr {
+fn mock(sim: &SimRuntime, audio: &str, channels: u8) -> mock_nvr::MockNvr {
     let video = mock_nvr::fixture::Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
     let mut cfg = mock_nvr::Config::new(video);
     cfg.channels = channels;
@@ -30,7 +32,7 @@ fn mock(audio: &str, channels: u8) -> mock_nvr::MockNvr {
     );
     a.jitter_us = 30_000;
     cfg.audio = Some(Arc::new(a));
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 fn sound_events(rec: &Recorder) -> Vec<Value> {
@@ -48,12 +50,13 @@ fn of_channel(rec: &Recorder, channel: u64) -> Vec<Value> {
 }
 
 fn setup(
+    sim: &SimRuntime,
     audio: &str,
     channels: u8,
     config: CoreConfig,
 ) -> (mock_nvr::MockNvr, Arc<Core>, Arc<Recorder>, u64) {
-    let nvr = mock(audio, channels);
-    let (core, rec) = start(config);
+    let nvr = mock(sim, audio, channels);
+    let (core, rec) = start(on_sim(sim, config));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -65,8 +68,12 @@ fn setup(
 /// tile of the channel closes; loudness is kept per tile.
 #[test]
 fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
-    let (_nvr, core, rec, dev) = setup("aac-smoke-t3.aac", 2, CoreConfig::default());
-    let opened_ns = clock::now_ns();
+    let sim = SimRuntime::new();
+    // The core's wall clock starts at the real time and moves with the
+    // simulated clock.
+    let (wall0, t0) = (SystemTime::now(), sim.now());
+    let (_nvr, core, rec, dev) = setup(&sim, "aac-smoke-t3.aac", 2, CoreConfig::default());
+    let opened_ns = core.clock_now_ns();
     core.set_audio_output(48_000, 2).unwrap();
     let main0 = core.open_tile(dev, 0, StreamTier::Main).unwrap();
     let sub0 = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
@@ -74,10 +81,10 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
     // Audible but muted; the others stay silent.
     core.set_tile_audio(main0, true, 0.0).unwrap();
 
-    wait_until("an alarm start on both channels", 30, || {
+    sim_until(&sim, &core, "an alarm start on both channels", 30, || {
         !of_channel(&rec, 0).is_empty() && !of_channel(&rec, 1).is_empty()
     });
-    let started_ns = clock::now_ns();
+    let started_ns = core.clock_now_ns();
     // Two cycles are needed (8 s of the fixture), plus start-up.
     for ch in [0, 1] {
         let e = of_channel(&rec, ch);
@@ -104,8 +111,8 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
             .iter()
             .any(|p| p.db().is_some_and(|d| (-13..=-7).contains(&d)))
     );
-    let now_s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now_s = (wall0 + (sim.now() - t0))
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let newest = l.start_s + l.peak.len() as u64 - 1;
@@ -118,10 +125,24 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
     // Closing one of channel 0's tiles stops nothing; the last one does,
     // before its `tile_closed`.
     core.close_tile(main0).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    sim.advance(Duration::from_millis(300));
+    core.flush_events();
     assert_eq!(of_channel(&rec, 0).len(), 1);
     core.close_tile(sub0).unwrap();
-    wait_until("channel 0 stops", 5, || of_channel(&rec, 0).len() == 2);
+    // Both events, not just the stop: the order is checked below.
+    sim_until(
+        &sim,
+        &core,
+        "channel 0 stops and its tile closes",
+        5,
+        || {
+            of_channel(&rec, 0).len() == 2
+                && rec
+                    .events_of("tile_closed")
+                    .iter()
+                    .any(|e| e["tile"] == sub0)
+        },
+    );
     let stop = &of_channel(&rec, 0)[1];
     assert_eq!(stop["state"], "stop");
     assert_eq!(stop["kind"], "smoke_alarm");
@@ -143,27 +164,27 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
 
     // The device going away ends channel 1's tile, and its episode.
     core.remove_device(dev).unwrap();
-    wait_until("channel 1 stops", 5, || of_channel(&rec, 1).len() == 2);
+    sim_until(&sim, &core, "channel 1 stops", 5, || {
+        of_channel(&rec, 1).len() == 2
+    });
     assert_eq!(of_channel(&rec, 1)[1]["state"], "stop");
     let _ = main1;
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     assert_eq!(sound_events(&rec).len(), 4);
 }
 
 /// A steady signal is loud but no alarm.
 #[test]
 fn steady_tone_reports_loudness_but_no_alarm() {
-    let (_nvr, core, rec, dev) = setup("aac-tone.aac", 1, CoreConfig::default());
+    let sim = SimRuntime::new();
+    let (_nvr, core, rec, dev) = setup(&sim, "aac-tone.aac", 1, CoreConfig::default());
     let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
-    let end = Instant::now() + Duration::from_secs(14);
-    while Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    sim.advance(Duration::from_secs(14));
     let l = core.tile_loudness(tile).unwrap();
     assert!(l.peak.len() >= 10, "{l:?}");
     assert!(l.peak.iter().filter(|p| p.is_some()).count() >= 10);
     core.close_tile(tile).unwrap();
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     assert!(sound_events(&rec).is_empty(), "{:?}", sound_events(&rec));
 }
 
@@ -178,15 +199,17 @@ fn alarms_can_be_switched_off() {
         },
         ..CoreConfig::default()
     };
-    let (_nvr, core, rec, dev) = setup("aac-smoke-t3.aac", 1, config);
+    let sim = SimRuntime::new();
+    let (_nvr, core, rec, dev) = setup(&sim, "aac-smoke-t3.aac", 1, config);
     let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
-    std::thread::sleep(Duration::from_secs(14));
+    sim.advance(Duration::from_secs(14));
+    core.flush_events();
     assert!(
         rec.events_of("audio_stats")
             .iter()
             .any(|e| e["decoded"].as_u64() > Some(100))
     );
     assert_eq!(core.tile_loudness(tile).unwrap().peak.len(), 0);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
     assert!(sound_events(&rec).is_empty());
 }

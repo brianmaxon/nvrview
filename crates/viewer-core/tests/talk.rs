@@ -1,25 +1,27 @@
 //! Talk-back through the core against the mock NVR's doorbell: the
 //! per-camera permission, `talk` events, the app's 48 kHz float audio
 //! arriving at the device as decodable 16 kHz ADPCM, and the close on stop,
-//! tile close, and permission withdrawal.
+//! tile close, and permission withdrawal. On a simulated clock: the talk's
+//! pacing and the device's acknowledgments take simulated time.
 
 mod common;
 
-use common::{PASSWORD, USER, fast_config, start, wait_until};
+use common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use mock_nvr::talk::TalkEnd;
+use simtime::SimRuntime;
 use std::path::PathBuf;
 use viewer_core::{CoreError, StreamTier};
 
 /// The doorbell's channel; channel 0 has no speaker.
 const BELL: u8 = 1;
 
-fn mock() -> mock_nvr::MockNvr {
+fn mock(sim: &SimRuntime) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
     cfg.channels = 2;
     cfg.talk_channels = vec![BELL];
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 fn tone(rate: u32, freq: f64, n: usize) -> Vec<f32> {
@@ -46,8 +48,9 @@ fn states(rec: &common::Recorder, tile: u64) -> Vec<String> {
 
 #[test]
 fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
-    let nvr = mock();
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -55,7 +58,9 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
 
     // Off by default: refused with a clear status, nothing sent.
     assert_eq!(core.talk_start(tile), Err(CoreError::NotPermitted));
-    wait_until("refused event", 5, || states(&rec, tile) == ["refused"]);
+    sim_until(&sim, &core, "refused event", 5, || {
+        states(&rec, tile) == ["refused"]
+    });
     assert_eq!(talk_events(&rec, tile)[0]["reason"], "not_permitted");
     assert_eq!(nvr.command_count(201), 0);
     assert_eq!(nvr.command_count(10), 0);
@@ -70,7 +75,7 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
     // Audio pushed while starting is kept and sent once active.
     let src = tone(48_000, 500.0, 48_000);
     core.talk_push(tile, &src[..9600], 48_000).unwrap();
-    wait_until("active", 10, || {
+    sim_until(&sim, &core, "active", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("active")
     });
     assert_eq!(states(&rec, tile), ["refused", "starting", "active"]);
@@ -82,12 +87,12 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
         Err(CoreError::InvalidArgument)
     );
     core.talk_stop(tile, true).unwrap();
-    wait_until("stopped", 10, || {
+    sim_until(&sim, &core, "stopped", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("stopped")
     });
     let last = talk_events(&rec, tile).pop().unwrap();
     assert_eq!(last["reason"], "finished");
-    wait_until("closed at the device", 5, || {
+    sim_until(&sim, &core, "closed at the device", 5, || {
         nvr.talk_log()
             .first()
             .is_some_and(|t| t.end == TalkEnd::Closed)
@@ -114,7 +119,7 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
     let other = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
     core.set_talk_permission(dev, 0, true).unwrap();
     core.talk_start(other).unwrap();
-    wait_until("not supported", 10, || {
+    sim_until(&sim, &core, "not supported", 10, || {
         states(&rec, other).last().map(String::as_str) == Some("refused")
     });
     assert_eq!(
@@ -122,13 +127,14 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
         "not_supported"
     );
     assert_eq!(nvr.command_count(201), 1);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
-    let nvr = mock();
-    let (core, rec) = start(fast_config());
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
     let dev = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
@@ -136,13 +142,13 @@ fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
 
     let tile = core.open_tile(dev, BELL, StreamTier::Sub).unwrap();
     core.talk_start(tile).unwrap();
-    wait_until("active", 10, || {
+    sim_until(&sim, &core, "active", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("active")
     });
     core.talk_push(tile, &tone(16_000, 300.0, 8000), 16_000)
         .unwrap();
     core.close_tile(tile).unwrap();
-    wait_until("closed at the device", 5, || {
+    sim_until(&sim, &core, "closed at the device", 5, || {
         nvr.talk_log()
             .first()
             .is_some_and(|t| t.end == TalkEnd::Closed)
@@ -163,20 +169,20 @@ fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
 
     let tile = core.open_tile(dev, BELL, StreamTier::Sub).unwrap();
     core.talk_start(tile).unwrap();
-    wait_until("active again", 10, || {
+    sim_until(&sim, &core, "active again", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("active")
     });
     core.talk_push(tile, &tone(16_000, 300.0, 8000), 16_000)
         .unwrap();
     core.set_talk_permission(dev, BELL, false).unwrap();
-    wait_until("stopped on revoke", 10, || {
+    sim_until(&sim, &core, "stopped on revoke", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("stopped")
     });
     assert_eq!(
         talk_events(&rec, tile).pop().unwrap()["reason"],
         "permission_revoked"
     );
-    wait_until("second closed", 5, || {
+    sim_until(&sim, &core, "second closed", 5, || {
         nvr.talk_log()
             .get(1)
             .is_some_and(|t| t.end == TalkEnd::Closed)
@@ -186,11 +192,11 @@ fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
     // Shutting down with a talk open closes it too.
     core.set_talk_permission(dev, BELL, true).unwrap();
     core.talk_start(tile).unwrap();
-    wait_until("active a third time", 10, || {
+    sim_until(&sim, &core, "active a third time", 10, || {
         states(&rec, tile).last().map(String::as_str) == Some("active")
     });
-    core.shutdown();
-    wait_until("third closed", 5, || {
+    sim.run_free(|| core.shutdown());
+    sim_until(&sim, &core, "third closed", 5, || {
         nvr.talk_log()
             .get(2)
             .is_some_and(|t| t.end == TalkEnd::Closed)

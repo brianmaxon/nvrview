@@ -1,16 +1,18 @@
 //! Tiles of a third-party (ONVIF) camera channel behind an NVR: the device
 //! answers each preview with 400 and its stream may follow (docs/protocol.md,
 //! "Records as the official client reads them"). Against the mock NVR's
-//! third-party mode.
+//! third-party mode, on a simulated clock: retry intervals and wait limits
+//! take simulated time.
 
 mod common;
 
 use common::*;
+use simtime::SimRuntime;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use viewer_core::{CoreConfig, StreamTier, TileStatus};
 
-fn third_party_mock(refusals: u32) -> mock_nvr::MockNvr {
+fn third_party_mock(sim: &SimRuntime, refusals: u32) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
@@ -18,7 +20,7 @@ fn third_party_mock(refusals: u32) -> mock_nvr::MockNvr {
     let mut tp = mock_nvr::ThirdPartyConfig::new(vec![1], refusals);
     tp.media_delay = Duration::from_millis(100);
     cfg.third_party = Some(tp);
-    mock_nvr::spawn(cfg).unwrap()
+    sim_spawn(sim, cfg)
 }
 
 fn config(retry_ms: u64, limit_ms: u64) -> CoreConfig {
@@ -39,12 +41,13 @@ fn waiting_states(rec: &Recorder, tile: u64) -> Vec<String> {
 
 #[test]
 fn a_tile_plays_after_the_device_answers_400() {
-    let nvr = third_party_mock(2);
-    let (core, rec) = start(config(200, 10_000));
-    let tap = Tap::new(nvr.addr());
+    let sim = SimRuntime::new();
+    let nvr = third_party_mock(&sim, 2);
+    let (core, rec) = start(on_sim(&sim, config(200, 10_000)));
+    let tap = Tap::sim(nvr.addr());
     let dev = core.add_device_with(tap.clone(), USER, PASSWORD).unwrap();
     let tile = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("decodes", 10, || rec.decodes(tile) >= 20);
+    sim_until(&sim, &core, "decodes", 10, || rec.decodes(tile) >= 20);
     let seen = rec.seen(tile);
     check_protocol(&seen);
     let first_decode = seen
@@ -70,59 +73,68 @@ fn a_tile_plays_after_the_device_answers_400() {
     // Two refused starts, each stopped and restarted, then the stream.
     assert_eq!(tap.count(3), 3);
     assert_eq!(tap.count(4), 2);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn a_tile_whose_device_never_streams_reports_start_rejected() {
-    let nvr = third_party_mock(u32::MAX);
-    let (core, rec) = start(config(100, 800));
-    let tap = Tap::new(nvr.addr());
+    let sim = SimRuntime::new();
+    let nvr = third_party_mock(&sim, u32::MAX);
+    let (core, rec) = start(on_sim(&sim, config(100, 800)));
+    let tap = Tap::sim(nvr.addr());
     let dev = core.add_device_with(tap.clone(), USER, PASSWORD).unwrap();
-    let t0 = Instant::now();
+    let t0 = sim.now();
     let tile = core.open_tile(dev, 1, StreamTier::Main).unwrap();
-    wait_until("tile_error", 10, || {
+    sim_until(&sim, &core, "tile_error", 10, || {
         rec.events_of("tile_error")
             .iter()
             .any(|e| e["tile"] == tile && e["reason"] == "start_rejected" && e["status"] == 400)
     });
-    assert!(t0.elapsed() >= Duration::from_millis(700));
+    assert!(sim.now() - t0 >= Duration::from_millis(700));
     assert_eq!(waiting_states(&rec, tile), ["waiting"]);
     assert_eq!(rec.decodes(tile), 0);
     let starts = tap.count(3);
     assert!((4..=9).contains(&starts), "{starts} starts");
-    wait_until("every start stopped", 5, || tap.count(4) == starts);
+    sim_until(&sim, &core, "every start stopped", 5, || {
+        tap.count(4) == starts
+    });
     // Refused for good: no more starts.
-    std::thread::sleep(Duration::from_millis(400));
+    sim.advance(Duration::from_millis(400));
+    core.flush_events();
     assert_eq!(tap.count(3), starts);
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
 
 #[test]
 fn closing_a_waiting_tile_stops_its_preview() {
-    let nvr = third_party_mock(u32::MAX);
-    let (core, rec) = start(config(100, 60_000));
-    let tap = Tap::new(nvr.addr());
+    let sim = SimRuntime::new();
+    let nvr = third_party_mock(&sim, u32::MAX);
+    let (core, rec) = start(on_sim(&sim, config(100, 60_000)));
+    let tap = Tap::sim(nvr.addr());
     let dev = core.add_device_with(tap.clone(), USER, PASSWORD).unwrap();
     let tile = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("waiting", 10, || {
+    sim_until(&sim, &core, "waiting", 10, || {
         waiting_states(&rec, tile) == ["waiting"] && tap.count(3) >= 2
     });
     core.close_tile(tile).unwrap();
-    wait_until("the stop", 5, || tap.count(4) == tap.count(3));
+    sim_until(&sim, &core, "the stop", 5, || tap.count(4) == tap.count(3));
     let starts = tap.count(3);
-    std::thread::sleep(Duration::from_millis(400));
+    sim.advance(Duration::from_millis(400));
+    core.flush_events();
     assert_eq!(tap.count(3), starts, "no restart after the close");
     assert_eq!(tap.count(4), starts);
     assert_eq!(nvr.active_logins(), 1);
-    core.shutdown();
-    wait_until("the session to close", 5, || nvr.active_logins() == 0);
+    sim.run_free(|| core.shutdown());
+    sim_until(&sim, &core, "the session to close", 5, || {
+        nvr.active_logins() == 0
+    });
 }
 
 #[test]
 fn a_tier_switch_waits_for_the_device_too() {
-    let nvr = third_party_mock(1);
-    let (core, rec) = start(config(200, 10_000));
+    let sim = SimRuntime::new();
+    let nvr = third_party_mock(&sim, 1);
+    let (core, rec) = start(on_sim(&sim, config(200, 10_000)));
     let dev = core
         .add_device(
             &nvr.addr().ip().to_string(),
@@ -132,9 +144,9 @@ fn a_tier_switch_waits_for_the_device_too() {
         )
         .unwrap();
     let tile = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
-    wait_until("decodes", 10, || rec.decodes(tile) >= 10);
+    sim_until(&sim, &core, "decodes", 10, || rec.decodes(tile) >= 10);
     core.set_tile_tier(tile, StreamTier::Main).unwrap();
-    wait_until("the switch", 10, || {
+    sim_until(&sim, &core, "the switch", 10, || {
         rec.events_of("tile_tier")
             .iter()
             .any(|e| e["tile"] == tile && e["state"] == "active" && e["generation"] == 1)
@@ -151,5 +163,5 @@ fn a_tier_switch_waits_for_the_device_too() {
             .iter()
             .all(|e| e["state"] != "failed")
     );
-    core.shutdown();
+    sim.run_free(|| core.shutdown());
 }
