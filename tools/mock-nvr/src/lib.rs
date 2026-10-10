@@ -1,8 +1,13 @@
 //! A fake Reolink-style NVR for tests and development.
 //!
-//! [`spawn`] starts a server on a TCP port (use port 0 in tests and read the
-//! real address from [`MockNvr::addr`]). It speaks the subset of the protocol
-//! in `docs/protocol.md` that a viewer needs:
+//! [`spawn`] starts a server on a TCP port in real time (use port 0 and read
+//! the real address from [`MockNvr::addr`]); the command line tool and the C
+//! and C# smoke tests use it. [`spawn_in`] runs the same server on a test's
+//! tokio runtime, reached through in-memory connections ([`connect`]), so
+//! on a paused clock its frame pacing, replay schedules, download rates, and
+//! other delays run in simulated time: tests run as fast as the CPU allows
+//! and do not depend on real time. It speaks the subset of the protocol in
+//! `docs/protocol.md` that a viewer needs:
 //!
 //! - handshake (nonce) and login with one configured user name and password;
 //!   a wrong credential is answered with status 401, and the number of
@@ -69,19 +74,29 @@ use bc_protocol::xml::{self, XML_DECLARATION};
 use fixture::Fixture;
 use replay::{ReplayConfig, Step};
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::thread;
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
+use tokio::runtime::Handle;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep_until, timeout};
 
 /// Bytes of a frame-start payload that are encrypted.
 const ENCRYPT_LEN: usize = 1024;
 /// Largest payload of one media message.
 const CHUNK: usize = 32 * 1024;
-/// How often blocking loops check for shutdown.
-const POLL: Duration = Duration::from_millis(50);
+/// A write that cannot complete for this long fails (the client stopped
+/// reading), as with a TCP send timeout.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Buffer of each direction of an in-memory connection ([`MockNvr::connect`]),
+/// about what a loopback TCP connection buffers.
+const PIPE_BUF: usize = 256 * 1024;
 
 /// Server settings.
 #[derive(Clone, Debug)]
@@ -236,7 +251,8 @@ impl Config {
 
 struct Shared {
     config: Config,
-    shutdown: AtomicBool,
+    /// Set once to stop the server; every task watches it.
+    shutdown: watch::Sender<bool>,
     logins: AtomicUsize,
     failed: AtomicU32,
     nonce_counter: AtomicU32,
@@ -256,6 +272,36 @@ struct Shared {
     talk_open_status: AtomicU32,
     /// Status for talk audio replies (202); 200 accepts.
     talk_audio_status: AtomicU32,
+    /// The runtime every task of this server runs on.
+    runtime: Handle,
+    /// Connection tasks, for a clean shutdown.
+    conns: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl Shared {
+    fn is_shutdown(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
+    /// Resolves once the server is stopping.
+    async fn stopping(&self) {
+        let mut rx = self.shutdown.subscribe();
+        let _ = rx.wait_for(|s| *s).await;
+    }
+
+    /// Serves one connection on a task of its own.
+    fn serve_conn<S>(self: &Arc<Self>, stream: S)
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let s = Arc::clone(self);
+        let task = self.runtime.spawn(async move {
+            let _ = serve(stream, s).await;
+        });
+        let mut conns = lock(&self.conns);
+        conns.retain(|h| !h.is_finished());
+        conns.push(task);
+    }
 }
 
 /// Most downloads remembered for [`MockNvr::download_log`].
@@ -263,22 +309,89 @@ const DOWNLOAD_LOG_LEN: usize = 10_000;
 
 /// A running mock NVR. Dropping it (or calling [`MockNvr::shutdown`]) stops
 /// the server and closes every connection.
+///
+/// Two kinds: [`spawn`] serves TCP in real time on threads of its own (the
+/// command line tool, and tests that need a real socket); [`spawn_in`]
+/// runs on the caller's tokio runtime and its clock, reached only through
+/// in-memory connections ([`MockNvr::connect`], [`connect`]), so tests on
+/// a paused clock run the device in simulated time, deterministically and
+/// without waiting.
 pub struct MockNvr {
     addr: SocketAddr,
     shared: Arc<Shared>,
-    accept: Option<JoinHandle<()>>,
-    cycle: Option<JoinHandle<()>>,
+    /// The thread running the server's own runtime ([`spawn`] only).
+    thread: Option<thread::JoinHandle<()>>,
 }
 
-/// Starts a server on its own threads and returns once it is listening.
+/// Starts a TCP server in real time on threads of its own and returns once
+/// it is listening.
 pub fn spawn(config: Config) -> io::Result<MockNvr> {
-    let listener = TcpListener::bind(config.bind)?;
+    let listener = std::net::TcpListener::bind(config.bind)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
-    let alarms = alarms::Board::new(config.channels);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("mock-nvr")
+        .enable_all()
+        .build()?;
+    let shared = new_shared(config, runtime.handle().clone());
+    register(addr, &shared);
+    let listener = {
+        let _guard = runtime.enter();
+        tokio::net::TcpListener::from_std(listener)?
+    };
+    let s = Arc::clone(&shared);
+    let thread = thread::Builder::new()
+        .name("mock-nvr".into())
+        .spawn(move || {
+            runtime.block_on(async move {
+                start_tasks(&s);
+                accept_loop(listener, &s).await;
+                finish(&s).await;
+            });
+            // Tasks still running (none should be) stop here.
+            runtime.shutdown_timeout(Duration::from_secs(1));
+        })?;
+    Ok(MockNvr {
+        addr,
+        shared,
+        thread: Some(thread),
+    })
+}
+
+/// Starts a server on `runtime` (and its clock) that is reached only
+/// through in-memory connections: [`MockNvr::connect`], or [`connect`] with
+/// its [`MockNvr::addr`]. Nothing listens on that address; its port is
+/// [`Config::bind`]'s if not 0 (so a test can restart a device at the same
+/// address), else a made-up one unique in this process.
+///
+/// On a paused clock (`tokio::time::pause`, or a runtime built with
+/// `start_paused`), every delay the device keeps (frame pacing, replay
+/// schedules, download rates, third-party delays, detection cycles) runs in
+/// simulated time.
+pub fn spawn_in(config: Config, runtime: &Handle) -> MockNvr {
+    let addr = if config.bind.port() == 0 {
+        static NEXT_PORT: AtomicU16 = AtomicU16::new(20_000);
+        SocketAddr::from((config.bind.ip(), NEXT_PORT.fetch_add(1, Ordering::Relaxed)))
+    } else {
+        config.bind
+    };
+    let shared = new_shared(config, runtime.clone());
+    register(addr, &shared);
+    start_tasks(&shared);
+    MockNvr {
+        addr,
+        shared,
+        thread: None,
+    }
+}
+
+fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
+    let (alarm_tx, alarm_rx) = mpsc::unbounded_channel();
+    let alarms = alarms::Board::new(config.channels, alarm_tx);
     let shared = Arc::new(Shared {
         config,
-        shutdown: AtomicBool::new(false),
+        shutdown: watch::Sender::new(false),
         logins: AtomicUsize::new(0),
         failed: AtomicU32::new(0),
         nonce_counter: AtomicU32::new(0),
@@ -292,25 +405,85 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         talks: Mutex::new(Vec::new()),
         talk_open_status: AtomicU32::new(200),
         talk_audio_status: AtomicU32::new(200),
+        runtime,
+        conns: Mutex::new(Vec::new()),
     });
     let s = Arc::clone(&shared);
-    let accept = thread::spawn(move || accept_loop(listener, s));
-    let cycle = shared.config.detection_cycle.map(|period| {
-        let s = Arc::clone(&shared);
-        thread::spawn(move || detection_cycle(&s, period))
+    shared.runtime.spawn(async move {
+        tokio::select! {
+            () = s.stopping() => {}
+            () = alarms::push_loop(&s.alarms, alarm_rx) => {}
+        }
     });
-    Ok(MockNvr {
-        addr,
-        shared,
-        accept: Some(accept),
-        cycle,
-    })
+    shared
+}
+
+/// The server's own background tasks.
+fn start_tasks(shared: &Arc<Shared>) {
+    if let Some(period) = shared.config.detection_cycle {
+        let s = Arc::clone(shared);
+        shared.runtime.spawn(async move {
+            tokio::select! {
+                () = s.stopping() => {}
+                () = detection_cycle(&s, period) => {}
+            }
+        });
+    }
+}
+
+/// Waits for every connection to close after a shutdown.
+async fn finish(shared: &Shared) {
+    let conns: Vec<JoinHandle<()>> = lock(&shared.conns).drain(..).collect();
+    for c in conns {
+        let _ = c.await;
+    }
+}
+
+/// Servers reachable through [`connect`], by address.
+fn registry() -> &'static Mutex<HashMap<SocketAddr, Weak<Shared>>> {
+    static SERVERS: OnceLock<Mutex<HashMap<SocketAddr, Weak<Shared>>>> = OnceLock::new();
+    SERVERS.get_or_init(Mutex::default)
+}
+
+fn register(addr: SocketAddr, shared: &Arc<Shared>) {
+    let mut r = lock(registry());
+    r.retain(|_, s| s.strong_count() > 0);
+    r.insert(addr, Arc::downgrade(shared));
+}
+
+/// Opens an in-memory connection to the running server at `addr` (from
+/// [`MockNvr::addr`]); fails with `ConnectionRefused` if none runs there.
+/// What a test's connector calls where a real client would open TCP.
+pub fn connect(addr: SocketAddr) -> io::Result<DuplexStream> {
+    let shared = lock(registry()).get(&addr).and_then(Weak::upgrade);
+    match shared {
+        Some(s) => open_pipe(&s),
+        None => Err(io::ErrorKind::ConnectionRefused.into()),
+    }
+}
+
+fn open_pipe(shared: &Arc<Shared>) -> io::Result<DuplexStream> {
+    if shared.is_shutdown() {
+        return Err(io::ErrorKind::ConnectionRefused.into());
+    }
+    let (client, server) = tokio::io::duplex(PIPE_BUF);
+    shared.serve_conn(server);
+    Ok(client)
 }
 
 impl MockNvr {
-    /// The address the server listens on (with the real port).
+    /// The address the server listens on (with the real port), or for a
+    /// server started with [`spawn_in`], the address [`connect`] knows it by.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Opens an in-memory connection to this server, served like a TCP one.
+    ///
+    /// # Errors
+    /// `ConnectionRefused` once the server is shutting down.
+    pub fn connect(&self) -> io::Result<DuplexStream> {
+        open_pipe(&self.shared)
     }
 
     /// Number of sessions that are currently logged in.
@@ -379,17 +552,25 @@ impl MockNvr {
         self.shared.alarms.subscribers()
     }
 
-    /// Stops the server and waits for its threads.
+    /// Stops the server. A [`spawn`]ed server is waited for: every
+    /// connection is closed when this returns. A server on the caller's
+    /// runtime ([`spawn_in`]) closes its connections as that runtime runs
+    /// (this may be called on it, so it does not wait); new connections
+    /// are refused at once.
     pub fn shutdown(mut self) {
         self.stop();
     }
 
     fn stop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::SeqCst);
-        if let Some(h) = self.accept.take() {
-            let _ = h.join();
+        self.shared.shutdown.send_replace(true);
+        let mut r = lock(registry());
+        if r.get(&self.addr)
+            .is_some_and(|s| s.as_ptr() == Arc::as_ptr(&self.shared))
+        {
+            r.remove(&self.addr);
         }
-        if let Some(h) = self.cycle.take() {
+        drop(r);
+        if let Some(h) = self.thread.take() {
             let _ = h.join();
         }
     }
@@ -402,20 +583,10 @@ impl Drop for MockNvr {
 }
 
 /// The scripted detection of [`Config::detection_cycle`].
-fn detection_cycle(shared: &Shared, period: Duration) {
+async fn detection_cycle(shared: &Shared, period: Duration) {
     let channels = shared.config.channels.max(1);
     let half = period / 2;
     let mut ch = 0u8;
-    let sleep = |d: Duration| {
-        let end = Instant::now() + d;
-        while let Some(left) = end.checked_duration_since(Instant::now()) {
-            if shared.shutdown.load(Ordering::SeqCst) {
-                return false;
-            }
-            thread::sleep(left.min(POLL));
-        }
-        !shared.shutdown.load(Ordering::SeqCst)
-    };
     loop {
         shared.alarms.set(
             ch,
@@ -424,38 +595,74 @@ fn detection_cycle(shared: &Shared, period: Duration) {
                 ai_type: "people".into(),
             },
         );
-        if !sleep(half) {
-            return;
-        }
+        tokio::time::sleep(half).await;
         shared.alarms.set(ch, alarms::SlotState::default());
-        if !sleep(period - half) {
-            return;
-        }
+        tokio::time::sleep(period - half).await;
         ch = (ch + 1) % channels;
     }
 }
 
-fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
-    let mut conns: Vec<JoinHandle<()>> = Vec::new();
-    while !shared.shutdown.load(Ordering::SeqCst) {
-        match listener.accept() {
+async fn accept_loop(listener: tokio::net::TcpListener, shared: &Arc<Shared>) {
+    loop {
+        let accepted = tokio::select! {
+            () = shared.stopping() => return,
+            a = listener.accept() => a,
+        };
+        match accepted {
             Ok((stream, _)) => {
-                let s = Arc::clone(&shared);
-                conns.push(thread::spawn(move || {
-                    let _ = serve(stream, s);
-                }));
-                conns.retain(|h| !h.is_finished());
+                let _ = stream.set_nodelay(true);
+                shared.serve_conn(stream);
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
-            Err(_) => thread::sleep(POLL),
+            // A failed accept (out of descriptors, an aborted handshake):
+            // try again shortly, as the thread-per-connection server did.
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
-    }
-    for h in conns {
-        let _ = h.join();
     }
 }
 
-type Writer = Arc<Mutex<TcpStream>>;
+/// The sending half of one connection, shared by the connection's task and
+/// its stream tasks. Each message is written whole under the lock.
+pub(crate) struct ConnWriter {
+    out: tokio::sync::Mutex<Option<Pin<Box<dyn AsyncWrite + Send>>>>,
+    /// Set when the server ends the connection on its own (a download
+    /// fault); the connection's task then closes.
+    closed: watch::Sender<bool>,
+}
+
+pub(crate) type Writer = Arc<ConnWriter>;
+
+/// The locked sending half: `None` once shut down.
+pub(crate) type Out<'a> = tokio::sync::MutexGuard<'a, Option<Pin<Box<dyn AsyncWrite + Send>>>>;
+
+impl ConnWriter {
+    pub(crate) async fn lock(&self) -> Out<'_> {
+        self.out.lock().await
+    }
+
+    pub(crate) async fn write_all(&self, bytes: &[u8]) -> io::Result<()> {
+        let mut out = self.lock().await;
+        write_locked(&mut out, bytes).await
+    }
+
+    /// Ends the connection: no more writes, and the connection's task
+    /// stops reading.
+    async fn shutdown(&self) {
+        let mut out = self.lock().await;
+        if let Some(mut w) = out.take() {
+            let _ = timeout(WRITE_TIMEOUT, w.shutdown()).await;
+        }
+        self.closed.send_replace(true);
+    }
+}
+
+/// Writes one message through a locked writer.
+pub(crate) async fn write_locked(out: &mut Out<'_>, bytes: &[u8]) -> io::Result<()> {
+    let w = out.as_mut().ok_or(io::ErrorKind::NotConnected)?;
+    match timeout(WRITE_TIMEOUT, w.write_all(bytes)).await {
+        Ok(r) => r,
+        Err(_) => Err(io::ErrorKind::TimedOut.into()),
+    }
+}
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -471,7 +678,21 @@ enum State {
 struct Stream {
     stop: Arc<AtomicBool>,
     /// `None` for a third-party start that sends nothing.
-    join: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Stream {
+    /// Ends the stream's task (its `stop` is already set) and waits for it.
+    async fn end(self) {
+        if let Some(t) = self.task {
+            t.abort();
+            let _ = t.await;
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.task.as_ref().is_none_or(JoinHandle::is_finished)
+    }
 }
 
 struct Conn {
@@ -495,20 +716,18 @@ struct Conn {
     open_talks: HashMap<u8, usize>,
 }
 
-fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
-    // The listener is non-blocking, and on Windows and macOS an accepted
-    // socket inherits that: reads would spin instead of waiting `POLL`, and
-    // a write into a full send buffer would fail with `WouldBlock` (ending a
-    // download or live stream mid-way) instead of waiting for the client.
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(POLL))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_nodelay(true)?;
-    let mut reader = stream.try_clone()?;
+async fn serve<S>(stream: S, shared: Arc<Shared>) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (mut reader, writer) = tokio::io::split(stream);
     let mut conn = Conn {
         id: shared.next_conn.fetch_add(1, Ordering::SeqCst),
         shared: Arc::clone(&shared),
-        writer: Arc::new(Mutex::new(stream)),
+        writer: Arc::new(ConnWriter {
+            out: tokio::sync::Mutex::new(Some(Box::pin(writer))),
+            closed: watch::Sender::new(false),
+        }),
         state: State::Fresh,
         nonce: String::new(),
         key: None,
@@ -520,40 +739,42 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
         next_event_handle: 1,
         open_talks: HashMap::new(),
     };
-    let result = conn.run(&mut reader);
-    conn.close();
+    let result = conn.run(&mut reader).await;
+    conn.close().await;
     result
 }
 
 impl Conn {
-    fn run(&mut self, reader: &mut TcpStream) -> io::Result<()> {
+    async fn run(&mut self, reader: &mut (impl AsyncRead + Unpin)) -> io::Result<()> {
         let mut dec = Decoder::new();
-        let mut buf = [0u8; 8192];
-        while !self.shared.shutdown.load(Ordering::SeqCst) {
+        let mut buf = vec![0u8; 8192];
+        let shared = Arc::clone(&self.shared);
+        let mut closed = self.writer.closed.subscribe();
+        loop {
             loop {
                 match dec.next_message() {
-                    Ok(Some(m)) => self.handle(&m)?,
+                    Ok(Some(m)) => self.handle(&m).await?,
                     Ok(None) => break,
                     Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 }
+                if *closed.borrow() {
+                    return Ok(());
+                }
             }
-            match reader.read(&mut buf) {
-                Ok(0) => return Ok(()),
-                Ok(n) => dec.push(&buf[..n]),
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(e) => return Err(e),
+            tokio::select! {
+                () = shared.stopping() => return Ok(()),
+                _ = closed.wait_for(|c| *c) => return Ok(()),
+                r = reader.read(&mut buf) => match r {
+                    Ok(0) => return Ok(()),
+                    Ok(n) => dec.push(&buf[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                },
             }
         }
-        Ok(())
     }
 
-    fn close(&mut self) {
+    async fn close(&mut self) {
         self.shared.alarms.unsubscribe(self.id);
         if !self.open_talks.is_empty() {
             let mut talks = lock(&self.shared.talks);
@@ -564,31 +785,42 @@ impl Conn {
                 }
             }
         }
-        for (_, s) in self.streams.drain().chain(self.downloads.drain()) {
+        let streams: Vec<Stream> = self
+            .streams
+            .drain()
+            .chain(self.downloads.drain())
+            .map(|(_, s)| s)
+            .collect();
+        for s in streams {
             s.stop.store(true, Ordering::SeqCst);
-            if let Some(j) = s.join {
-                let _ = j.join();
-            }
+            s.end().await;
         }
         if self.holds_login {
             self.holds_login = false;
             self.shared.logins.fetch_sub(1, Ordering::SeqCst);
         }
-        let _ = lock(&self.writer).shutdown(Shutdown::Both);
+        self.writer.shutdown().await;
     }
 
-    fn send_raw(&self, bytes: &[u8]) -> io::Result<()> {
-        lock(&self.writer).write_all(bytes)
+    async fn send_raw(&self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes).await
     }
 
-    fn reply(&self, cmd: u32, id: u32, status: u16, class: Class, body: &[u8]) -> io::Result<()> {
+    async fn reply(
+        &self,
+        cmd: u32,
+        id: u32,
+        status: u16,
+        class: Class,
+        body: &[u8],
+    ) -> io::Result<()> {
         let bytes = encode_message_with_status(cmd, id, status, class, &[], body)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        self.send_raw(&bytes)
+        self.send_raw(&bytes).await
     }
 
     /// Replies after login: XML encrypted with the session key.
-    fn reply_xml(&self, cmd: u32, id: u32, status: u16, inner: &str) -> io::Result<()> {
+    async fn reply_xml(&self, cmd: u32, id: u32, status: u16, inner: &str) -> io::Result<()> {
         let mut body = if inner.is_empty() {
             Vec::new()
         } else {
@@ -597,10 +829,10 @@ impl Conn {
         if let Some(k) = &self.key {
             k.encrypt(&mut body);
         }
-        self.reply(cmd, id, status, Class::Device, &body)
+        self.reply(cmd, id, status, Class::Device, &body).await
     }
 
-    fn handle(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn handle(&mut self, m: &RawMessage) -> io::Result<()> {
         let h = m.header;
         match (&self.state, h.class, h.command) {
             (State::Fresh | State::NonceSent, Class::ClientHandshake, 1) => {
@@ -616,12 +848,13 @@ impl Conn {
                 )
                 .into_bytes();
                 xor_obfuscate(h.message_id, &mut body);
-                self.reply(1, h.message_id, 200, Class::DeviceHandshake, &body)?;
+                self.reply(1, h.message_id, 200, Class::DeviceHandshake, &body)
+                    .await?;
                 self.state = State::NonceSent;
                 Ok(())
             }
-            (State::NonceSent, Class::Client, 1) => self.login(m),
-            (State::LoggedIn, Class::Client, _) => self.command(m),
+            (State::NonceSent, Class::Client, 1) => self.login(m).await,
+            (State::LoggedIn, Class::Client, _) => self.command(m).await,
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unexpected message",
@@ -629,7 +862,7 @@ impl Conn {
         }
     }
 
-    fn reject(&mut self, id: u32, status: u16, remain: Option<u32>) -> io::Result<()> {
+    async fn reject(&mut self, id: u32, status: u16, remain: Option<u32>) -> io::Result<()> {
         let mut body = match remain {
             Some(r) => format!(
                 "{XML_DECLARATION}\n<body>\n<LoginErrInfo>\n<remainTimes>{r}</remainTimes>\n</LoginErrInfo>\n</body>\n"
@@ -639,10 +872,10 @@ impl Conn {
         };
         xor_obfuscate(id, &mut body);
         self.state = State::Fresh;
-        self.reply(1, id, status, Class::Device, &body)
+        self.reply(1, id, status, Class::Device, &body).await
     }
 
-    fn login(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn login(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
         let cfg = &self.shared.config;
         let mut body = m.body.clone();
@@ -652,26 +885,28 @@ impl Conn {
         let pass = xml::find_text(&text, "password").ok().flatten();
         let failed = self.shared.failed.load(Ordering::SeqCst);
         if failed >= cfg.max_failed_logins {
-            return self.reject(id, 401, Some(0));
+            return self.reject(id, 401, Some(0)).await;
         }
         let ok = user.as_deref() == Some(credential_hash(&cfg.user, &self.nonce).as_str())
             && pass.as_deref() == Some(credential_hash(&cfg.password, &self.nonce).as_str());
         if !ok {
             let n = self.shared.failed.fetch_add(1, Ordering::SeqCst) + 1;
-            return self.reject(id, 401, Some(cfg.max_failed_logins.saturating_sub(n)));
+            return self
+                .reject(id, 401, Some(cfg.max_failed_logins.saturating_sub(n)))
+                .await;
         }
         // Take a login slot, or give it back if the cap is exceeded.
         if self.shared.logins.fetch_add(1, Ordering::SeqCst) >= cfg.max_logins {
             self.shared.logins.fetch_sub(1, Ordering::SeqCst);
-            return self.reject(id, 400, None);
+            return self.reject(id, 400, None).await;
         }
         self.holds_login = true;
         self.shared.failed.store(0, Ordering::SeqCst);
         self.key = Some(SessionKey::derive(&self.nonce, &cfg.password));
         self.state = State::LoggedIn;
-        self.reply(1, id, 200, Class::Device, &[])?;
+        self.reply(1, id, 200, Class::Device, &[]).await?;
         // Devices push the channel list unprompted.
-        self.reply_xml(145, 0, 200, &self.channel_info_list())
+        self.reply_xml(145, 0, 200, &self.channel_info_list()).await
     }
 
     /// The request's XML text (extension if present, else body), decrypted.
@@ -697,7 +932,7 @@ impl Conn {
         String::from_utf8_lossy(&v).into_owned()
     }
 
-    fn command(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn command(&mut self, m: &RawMessage) -> io::Result<()> {
         *lock(&self.shared.command_counts)
             .entry(m.header.command)
             .or_insert(0) += 1;
@@ -705,32 +940,42 @@ impl Conn {
             m.header.command,
             14 | 15 | 16 | 142 | 143 | 144 | 272 | 273 | 274 | 298
         ) {
-            return self.archive_command(m);
+            return self.archive_command(m).await;
         }
         let cfg = &self.shared.config;
         let id = m.header.message_id;
         match m.header.command {
-            93 => self.reply_xml(93, id, 200, "<LinkType>\n<type>LAN</type>\n</LinkType>\n"),
-            80 => self.reply_xml(
-                80,
-                id,
-                200,
-                "<VersionInfo version=\"1.1\">\n<name>Mock NVR</name>\n<type>MOCK-NVR</type>\n\
+            93 => {
+                self.reply_xml(93, id, 200, "<LinkType>\n<type>LAN</type>\n</LinkType>\n")
+                    .await
+            }
+            80 => {
+                self.reply_xml(
+                    80,
+                    id,
+                    200,
+                    "<VersionInfo version=\"1.1\">\n<name>Mock NVR</name>\n<type>MOCK-NVR</type>\n\
                  <firmwareVersion>mock-1.0</firmwareVersion>\n</VersionInfo>\n",
-            ),
-            199 => self.reply_xml(199, id, 200, &self.support()),
+                )
+                .await
+            }
+            199 => self.reply_xml(199, id, 200, &self.support()).await,
             // Alarm report: an empty reply, then state pushes (33).
             192 => {
-                self.reply_xml(192, id, 200, "")?;
+                self.reply_xml(192, id, 200, "").await?;
                 let key = self.key.clone().expect("logged in");
                 self.shared
                     .alarms
-                    .subscribe(self.id, Arc::clone(&self.writer), key, id);
+                    .subscribe(self.id, Arc::clone(&self.writer), key, id)
+                    .await;
                 Ok(())
             }
-            145 => self.reply_xml(145, id, 200, &self.channel_info_list()),
+            145 => {
+                self.reply_xml(145, id, 200, &self.channel_info_list())
+                    .await
+            }
             // Real devices answer 146 with status 300 and a full body.
-            146 => self.reply_xml(146, id, 300, &self.stream_info_list()),
+            146 => self.reply_xml(146, id, 300, &self.stream_info_list()).await,
             318 => {
                 let text = self.request_text(m);
                 match xml::find_text(&text, "channelId")
@@ -739,31 +984,34 @@ impl Conn {
                     .and_then(|s| s.parse::<u8>().ok())
                     .filter(|c| *c < cfg.channels)
                 {
-                    Some(c) => self.reply_xml(
-                        318,
-                        id,
-                        200,
-                        &format!(
-                            "<VersionInfo version=\"1.1\">\n<channelId>{c}</channelId>\n\
+                    Some(c) => {
+                        self.reply_xml(
+                            318,
+                            id,
+                            200,
+                            &format!(
+                                "<VersionInfo version=\"1.1\">\n<channelId>{c}</channelId>\n\
                              <name>Channel {}</name>\n<type>MOCK-CAM</type>\n</VersionInfo>\n",
-                            u32::from(c) + 1
-                        ),
-                    ),
-                    None => self.reply_xml(318, id, 400, ""),
+                                u32::from(c) + 1
+                            ),
+                        )
+                        .await
+                    }
+                    None => self.reply_xml(318, id, 400, "").await,
                 }
             }
             // Logout: answer, then free the login slot and end the session.
             // (A real client closes TCP after the reply; ending it here too is
             // the mock's choice.)
             2 => {
-                self.reply_xml(2, id, 200, "")?;
-                self.close();
+                self.reply_xml(2, id, 200, "").await?;
+                self.close().await;
                 Ok(())
             }
-            3 => self.start_preview(m),
-            4 => self.stop_preview(m),
-            10 | 11 | 201 | 202 => self.talk_command(m),
-            other => self.reply_xml(other, id, 400, ""),
+            3 => self.start_preview(m).await,
+            4 => self.stop_preview(m).await,
+            10 | 11 | 201 | 202 => self.talk_command(m).await,
+            other => self.reply_xml(other, id, 400, "").await,
         }
     }
 
@@ -776,51 +1024,53 @@ impl Conn {
     }
 
     /// Talk-back (10, 201, 202, 11): see [`talk`].
-    fn talk_command(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn talk_command(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
         let cmd = m.header.command;
         let channel = self
             .ext_channel(m)
             .filter(|c| self.shared.config.talk_channels.contains(c));
         match (cmd, channel) {
-            (10, Some(_)) => self.reply_xml(10, id, 200, talk::ABILITY),
+            (10, Some(_)) => self.reply_xml(10, id, 200, talk::ABILITY).await,
             (201, Some(ch)) => {
                 let body = self.payload_text(m);
                 let ok = bc_protocol::talk::parse_open_body(&body)
                     .is_ok_and(|(c, _, audio)| c == ch && audio.is_supported());
                 let status = self.shared.talk_open_status.load(Ordering::SeqCst) as u16;
                 if !ok || self.open_talks.contains_key(&ch) {
-                    return self.reply_xml(201, id, 400, "");
+                    return self.reply_xml(201, id, 400, "").await;
                 }
                 if status != 200 {
-                    return self.reply_xml(201, id, status, "");
+                    return self.reply_xml(201, id, status, "").await;
                 }
-                let mut talks = lock(&self.shared.talks);
-                talks.push(talk::TalkLog {
-                    channel: ch,
-                    connection: self.id,
-                    opened: Instant::now(),
-                    ended: None,
-                    end: talk::TalkEnd::Open,
-                    records: Vec::new(),
-                });
-                self.open_talks.insert(ch, talks.len() - 1);
-                drop(talks);
-                self.reply_xml(201, id, 200, "")
+                let index = {
+                    let mut talks = lock(&self.shared.talks);
+                    talks.push(talk::TalkLog {
+                        channel: ch,
+                        connection: self.id,
+                        opened: Instant::now(),
+                        ended: None,
+                        end: talk::TalkEnd::Open,
+                        records: Vec::new(),
+                    });
+                    talks.len() - 1
+                };
+                self.open_talks.insert(ch, index);
+                self.reply_xml(201, id, 200, "").await
             }
             (202, Some(ch)) => {
                 let at = Instant::now();
                 let Some(&i) = self.open_talks.get(&ch) else {
-                    return self.reply_xml(202, 0, 400, "");
+                    return self.reply_xml(202, 0, 400, "").await;
                 };
                 let Some(recs) = talk::records(m.payload(), at) else {
-                    return self.reply_xml(202, 0, 400, "");
+                    return self.reply_xml(202, 0, 400, "").await;
                 };
                 if let Some(t) = lock(&self.shared.talks).get_mut(i) {
                     t.records.extend(recs);
                 }
                 let status = self.shared.talk_audio_status.load(Ordering::SeqCst) as u16;
-                self.reply_xml(202, 0, status, "")
+                self.reply_xml(202, 0, status, "").await
             }
             (11, Some(ch)) => match self.open_talks.remove(&ch) {
                 Some(i) => {
@@ -828,12 +1078,12 @@ impl Conn {
                         t.end = talk::TalkEnd::Closed;
                         t.ended = Some(Instant::now());
                     }
-                    self.reply_xml(11, id, 200, "")
+                    self.reply_xml(11, id, 200, "").await
                 }
-                None => self.reply_xml(11, id, 400, ""),
+                None => self.reply_xml(11, id, 400, "").await,
             },
-            (202, None) => self.reply_xml(202, 0, 400, ""),
-            _ => self.reply_xml(cmd, id, 400, ""),
+            (202, None) => self.reply_xml(202, 0, 400, "").await,
+            _ => self.reply_xml(cmd, id, 400, "").await,
         }
     }
 
@@ -936,29 +1186,29 @@ impl Conn {
         (ch == tag_ch && ch < self.shared.config.channels).then_some((handle, ch, tier))
     }
 
-    fn start_preview(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn start_preview(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
         let Some((handle, channel, tier)) = self.preview_target(m) else {
-            return self.reply_xml(3, id, 400, "");
+            return self.reply_xml(3, id, 400, "").await;
         };
         if self.streams.contains_key(&handle) {
-            return self.reply_xml(3, id, 400, "");
+            return self.reply_xml(3, id, 400, "").await;
         }
         let stop = Arc::new(AtomicBool::new(false));
         if matches!(tier, StreamTier::Extern | StreamTier::Mobile) {
             match self.shared.config.extern_mode(channel) {
                 ExternMode::Listed | ExternMode::Hidden => {}
-                ExternMode::Refused => return self.reply_xml(3, id, 400, ""),
+                ExternMode::Refused => return self.reply_xml(3, id, 400, "").await,
                 ExternMode::Silent => {
-                    self.streams.insert(handle, Stream { stop, join: None });
+                    self.streams.insert(handle, Stream { stop, task: None });
                     return Ok(());
                 }
                 ExternMode::InfoOnly => {
                     let key = self.key.clone().expect("logged in");
                     let mut out = Vec::new();
                     media_message(&key, id, &encode_info(0, 0, 25), &mut out)?;
-                    lock(&self.writer).write_all(&out)?;
-                    self.streams.insert(handle, Stream { stop, join: None });
+                    self.writer.write_all(&out).await?;
+                    self.streams.insert(handle, Stream { stop, task: None });
                     return Ok(());
                 }
             }
@@ -975,9 +1225,9 @@ impl Conn {
             };
             // Every start of a third-party channel is answered 400; the
             // stream, if any, follows on the same message ID.
-            self.reply_xml(3, id, 400, "")?;
+            self.reply_xml(3, id, 400, "").await?;
             if n <= tp.refusals {
-                self.streams.insert(handle, Stream { stop, join: None });
+                self.streams.insert(handle, Stream { stop, task: None });
                 return Ok(());
             }
             delay = tp.media_delay;
@@ -987,47 +1237,41 @@ impl Conn {
         let (cfg_shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
         // Like a real device, send no separate reply: the first media message
         // (status 200) is the answer.
-        let join = thread::spawn(move || {
-            let until = Instant::now() + delay;
-            while let Some(left) = until.checked_duration_since(Instant::now()) {
-                if stop2.load(Ordering::SeqCst) || cfg_shared.shutdown.load(Ordering::SeqCst) {
-                    return;
-                }
-                thread::sleep(left.min(POLL));
+        let task = self.shared.runtime.spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
             }
-            let _ = stream_media(&cfg_shared, &writer, &key, id, channel, tier, &stop2);
+            let _ = stream_media(&cfg_shared, &writer, &key, id, channel, tier, &stop2).await;
         });
         self.streams.insert(
             handle,
             Stream {
                 stop,
-                join: Some(join),
+                task: Some(task),
             },
         );
         Ok(())
     }
 
-    fn stop_preview(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn stop_preview(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
         let Some((handle, _, _)) = self.preview_target(m) else {
-            return self.reply_xml(4, id, 400, "");
+            return self.reply_xml(4, id, 400, "").await;
         };
         let Some(s) = self.streams.remove(&handle) else {
-            return self.reply_xml(4, id, 400, "");
+            return self.reply_xml(4, id, 400, "").await;
         };
-        // Set the flag while holding the write lock: the stream thread checks
+        // Set the flag while holding the write lock: the stream task checks
         // it under the same lock, so no media follows the stop reply.
-        {
-            let mut w = lock(&self.writer);
+        let written = {
+            let mut w = self.writer.lock().await;
             s.stop.store(true, Ordering::SeqCst);
             let bytes = encode_message_with_status(4, id, 200, Class::Device, &[], &[])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            w.write_all(&bytes)?;
-        }
-        if let Some(j) = s.join {
-            let _ = j.join();
-        }
-        Ok(())
+            write_locked(&mut w, &bytes).await
+        };
+        s.end().await;
+        written
     }
 }
 
@@ -1057,7 +1301,7 @@ fn media_message(key: &SessionKey, id: u32, record: &[u8], out: &mut Vec<u8>) ->
 /// Sends the info record and then the looping fixtures (video, and audio if
 /// configured) on the schedule a device would use, until stopped or the
 /// connection fails.
-fn stream_media(
+async fn stream_media(
     shared: &Shared,
     writer: &Writer,
     key: &SessionKey,
@@ -1068,7 +1312,7 @@ fn stream_media(
 ) -> io::Result<()> {
     let cfg = &shared.config;
     if let Some(r) = &cfg.replay {
-        return stream_replay(shared, writer, key, id, tier, stop, r);
+        return stream_replay(shared, writer, key, id, tier, stop, r).await;
     }
     // A third-party camera's video magics start with `:` (`:0dc`, `:1dc`).
     let first = if cfg
@@ -1100,11 +1344,11 @@ fn stream_media(
     let mut due = start;
     for (item, send_us) in schedule {
         {
-            let mut w = lock(writer);
-            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+            let mut w = writer.lock().await;
+            if stop.load(Ordering::SeqCst) || shared.is_shutdown() {
                 return Ok(());
             }
-            w.write_all(&out)?;
+            write_locked(&mut w, &out).await?;
         }
         out.clear();
         let record = match item {
@@ -1125,12 +1369,7 @@ fn stream_media(
         let at =
             start + Duration::from_micros(send_us as u64) + Duration::from_micros(jitter.next_us());
         due = due.max(at);
-        while let Some(left) = due.checked_duration_since(Instant::now()) {
-            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            thread::sleep(left.min(POLL));
-        }
+        sleep_until(due).await;
     }
     Ok(())
 }
@@ -1140,7 +1379,7 @@ fn stream_media(
 /// recording ends (unless looping), or the connection fails. An `NVRREC01`
 /// recording plays from its start on a clock that starts now; an `NVRREC02`
 /// one joins the server's shared replay clock (see [`replay`]).
-fn stream_replay(
+async fn stream_replay(
     shared: &Shared,
     writer: &Writer,
     key: &SessionKey,
@@ -1163,11 +1402,11 @@ fn stream_replay(
         };
         if let Some(info) = join.info {
             media_message(key, id, info, &mut out)?;
-            let mut w = lock(writer);
-            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+            let mut w = writer.lock().await;
+            if stop.load(Ordering::SeqCst) || shared.is_shutdown() {
                 return Ok(());
             }
-            w.write_all(&out)?;
+            write_locked(&mut w, &out).await?;
         }
         (epoch, join.playback)
     } else {
@@ -1176,19 +1415,14 @@ fn stream_replay(
     for (at_us, step) in playback {
         let Step::Record(record) = step else { continue };
         let due = start + Duration::from_secs_f64(at_us as f64 / speed / 1e6);
-        while let Some(left) = due.checked_duration_since(Instant::now()) {
-            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
-                return Ok(());
-            }
-            thread::sleep(left.min(POLL));
-        }
+        sleep_until(due).await;
         out.clear();
         media_message(key, id, &record, &mut out)?;
-        let mut w = lock(writer);
-        if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+        let mut w = writer.lock().await;
+        if stop.load(Ordering::SeqCst) || shared.is_shutdown() {
             return Ok(());
         }
-        w.write_all(&out)?;
+        write_locked(&mut w, &out).await?;
     }
     Ok(())
 }
@@ -1196,25 +1430,25 @@ fn stream_replay(
 impl Conn {
     /// The recording commands (docs/protocol.md, "Recordings: search and
     /// download"). Without an [`ArchiveConfig`], each is refused with 400.
-    fn archive_command(&mut self, m: &RawMessage) -> io::Result<()> {
+    async fn archive_command(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
         let cmd = m.header.command;
         let Some(cfg) = self.shared.config.archive.clone() else {
-            return self.reply_xml(cmd, id, 400, "");
+            return self.reply_xml(cmd, id, 400, "").await;
         };
         let channels = self.shared.config.channels;
         match cmd {
             142 => match archive::day_records_reply(&cfg, channels, &self.request_text(m)) {
-                Some(body) => self.reply_xml(142, id, 200, &body),
-                None => self.reply_xml(142, id, 400, ""),
+                Some(body) => self.reply_xml(142, id, 200, &body).await,
+                None => self.reply_xml(142, id, 400, "").await,
             },
             14 => {
                 let r = archive::read_req(&self.request_text(m), "FileInfo");
                 let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
-                    return self.reply_xml(14, id, 400, "");
+                    return self.reply_xml(14, id, 400, "").await;
                 };
                 if ch >= channels {
-                    return self.reply_xml(14, id, 400, "");
+                    return self.reply_xml(14, id, 400, "").await;
                 }
                 let files = archive::files(&cfg, ch, start, end);
                 // Handles are reused once closed, as devices do.
@@ -1223,35 +1457,35 @@ impl Conn {
                     .unwrap_or(0);
                 let body = archive::file_search_summary(ch, handle, &files, start, end);
                 self.file_searches.insert(handle, (files, 0));
-                self.reply_xml(14, id, 200, &body)
+                self.reply_xml(14, id, 200, &body).await
             }
             15 => {
                 let r = archive::read_req(&self.request_text(m), "FileInfo");
                 let Some((files, next)) = r.handle.and_then(|h| self.file_searches.get_mut(&h))
                 else {
-                    return self.reply_xml(15, id, 400, "");
+                    return self.reply_xml(15, id, 400, "").await;
                 };
                 let end = next.saturating_add(cfg.file_page.max(1)).min(files.len());
                 let page = files[*next..end].to_vec();
                 *next = end;
                 let body = archive::file_page(r.handle.unwrap_or(0), &page);
-                self.reply_xml(15, id, 200, &body)
+                self.reply_xml(15, id, 200, &body).await
             }
             16 => {
                 let r = archive::read_req(&self.request_text(m), "FileInfo");
                 match r.handle.and_then(|h| self.file_searches.remove(&h)) {
-                    Some(_) => self.reply_xml(16, id, 200, ""),
-                    None => self.reply_xml(16, id, 400, ""),
+                    Some(_) => self.reply_xml(16, id, 200, "").await,
+                    None => self.reply_xml(16, id, 400, "").await,
                 }
             }
             272 => {
                 // The body travels as the payload after a channel extension.
                 let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
                 let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
-                    return self.reply_xml(272, id, 400, "");
+                    return self.reply_xml(272, id, 400, "").await;
                 };
                 if ch >= channels || m.extension().is_empty() {
-                    return self.reply_xml(272, id, 400, "");
+                    return self.reply_xml(272, id, 400, "").await;
                 }
                 let handle = self.next_event_handle;
                 self.next_event_handle = self.next_event_handle.wrapping_add(1).max(1);
@@ -1266,14 +1500,15 @@ impl Conn {
                          <fileHandle>{handle}</fileHandle>\n</findAlarmVideo>\n"
                     ),
                 )
+                .await
             }
             273 => {
                 let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
                 let Some(handle) = r.handle else {
-                    return self.reply_xml(273, id, 400, "");
+                    return self.reply_xml(273, id, 400, "").await;
                 };
                 let Some((ch, events, next)) = self.event_searches.get_mut(&handle) else {
-                    return self.reply_xml(273, id, 400, "");
+                    return self.reply_xml(273, id, 400, "").await;
                 };
                 let end = next.saturating_add(cfg.event_page.max(1)).min(events.len());
                 let page = events[*next..end].to_vec();
@@ -1281,17 +1516,17 @@ impl Conn {
                 let finished = end >= events.len();
                 let ch = *ch;
                 let body = archive::event_page(&cfg, ch, handle, &page, finished);
-                self.reply_xml(273, id, 200, &body)
+                self.reply_xml(273, id, 200, &body).await
             }
             274 => {
                 let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
                 match r.handle.and_then(|h| self.event_searches.remove(&h)) {
-                    Some(_) => self.reply_xml(274, id, 200, ""),
-                    None => self.reply_xml(274, id, 400, ""),
+                    Some(_) => self.reply_xml(274, id, 200, "").await,
+                    None => self.reply_xml(274, id, 400, "").await,
                 }
             }
-            298 => self.cover(m, &cfg),
-            143 => self.start_download(m, cfg),
+            298 => self.cover(m, &cfg).await,
+            143 => self.start_download(m, cfg).await,
             144 => {
                 // Stop the download this ID names; if none, any running one.
                 let key = if self.downloads.contains_key(&id) {
@@ -1300,34 +1535,34 @@ impl Conn {
                     self.downloads.keys().next().copied()
                 };
                 let stream = key.and_then(|k| self.downloads.remove(&k));
-                {
-                    let mut w = lock(&self.writer);
+                let written = {
+                    let mut w = self.writer.lock().await;
                     if let Some(s) = &stream {
                         s.stop.store(true, Ordering::SeqCst);
                     }
                     let bytes = encode_message_with_status(144, id, 200, Class::Device, &[], &[])
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-                    w.write_all(&bytes)?;
+                    write_locked(&mut w, &bytes).await
+                };
+                if let Some(s) = stream {
+                    s.end().await;
                 }
-                if let Some(j) = stream.and_then(|s| s.join) {
-                    let _ = j.join();
-                }
-                Ok(())
+                written
             }
-            _ => self.reply_xml(cmd, id, 400, ""),
+            _ => self.reply_xml(cmd, id, 400, "").await,
         }
     }
 
     /// 298: an empty acknowledgment, then the stream info and one keyframe
     /// (`EncryptLen`, capital E, as observed), then an empty status-300 end.
-    fn cover(&mut self, m: &RawMessage, cfg: &ArchiveConfig) -> io::Result<()> {
+    async fn cover(&mut self, m: &RawMessage, cfg: &ArchiveConfig) -> io::Result<()> {
         let id = m.header.message_id;
         let r = archive::read_req(&self.request_text(m), "CoverPreview");
         let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
-            return self.reply_xml(298, id, 400, "");
+            return self.reply_xml(298, id, 400, "").await;
         };
         if ch >= self.shared.config.channels {
-            return self.reply_xml(298, id, 400, "");
+            return self.reply_xml(298, id, 400, "").await;
         }
         let key = self.key.clone().expect("logged in");
         let c = &self.shared.config;
@@ -1346,19 +1581,19 @@ impl Conn {
             encode_message_with_status(298, id, 300, Class::Device, &[], &[])
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
         );
-        self.send_raw(&out)
+        self.send_raw(&out).await
     }
 
     /// 143: a size estimate, the media, and an empty status-300 end, sent by
     /// a thread of its own so 144 and other commands are served meanwhile.
-    fn start_download(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
+    async fn start_download(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
         let id = m.header.message_id;
         let r = archive::read_req(&self.request_text(m), "FileInfo");
         let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
-            return self.reply_xml(143, id, 400, "");
+            return self.reply_xml(143, id, 400, "").await;
         };
         if ch >= self.shared.config.channels || end < start || self.downloads.contains_key(&id) {
-            return self.reply_xml(143, id, 400, "");
+            return self.reply_xml(143, id, 400, "").await;
         }
         {
             let mut log = lock(&self.shared.download_log);
@@ -1390,18 +1625,18 @@ impl Conn {
         let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
         let (shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
         let rate = cfg.download_rate;
-        let join = thread::spawn(move || {
+        let task = self.shared.runtime.spawn(async move {
             let _ = serve_download(
                 &shared, &writer, &key, id, &recs, estimate, &stop2, fault, rate,
-            );
+            )
+            .await;
         });
-        self.downloads
-            .retain(|_, s| s.join.as_ref().is_some_and(|j| !j.is_finished()));
+        self.downloads.retain(|_, s| !s.is_finished());
         self.downloads.insert(
             id,
             Stream {
                 stop,
-                join: Some(join),
+                task: Some(task),
             },
         );
         Ok(())
@@ -1457,7 +1692,7 @@ fn transfer_message(
 /// second if set), and the end. Stops silently once `stop` is set (a 144
 /// arrived); applies `fault` when its byte count is reached.
 #[allow(clippy::too_many_arguments)]
-fn serve_download(
+async fn serve_download(
     shared: &Shared,
     writer: &Writer,
     key: &SessionKey,
@@ -1469,7 +1704,7 @@ fn serve_download(
     rate: Option<u64>,
 ) -> io::Result<()> {
     let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
-    let stopped = || stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst);
+    let stopped = || stop.load(Ordering::SeqCst) || shared.is_shutdown();
     let mut body = format!(
         "{XML_DECLARATION}\n<body>\n<FileInfoList version=\"1.1\">\n<FileInfo>\n<FileCount>1</FileCount>\n\
          <sizeL>{}</sizeL>\n<sizeH>{}</sizeH>\n</FileInfo>\n</FileInfoList>\n</body>\n",
@@ -1479,14 +1714,16 @@ fn serve_download(
     .into_bytes();
     key.encrypt(&mut body);
     {
-        let mut w = lock(writer);
+        let mut w = writer.lock().await;
         if stopped() {
             return Ok(());
         }
-        w.write_all(
+        write_locked(
+            &mut w,
             &encode_message_with_status(143, id, 200, Class::Device, &[], &body)
                 .map_err(enc_err)?,
-        )?;
+        )
+        .await?;
     }
     let start = Instant::now();
     let mut sent: usize = 0;
@@ -1496,14 +1733,11 @@ fn serve_download(
             && sent >= f.after_bytes
         {
             match f.kind {
-                FaultKind::Stall => {
-                    while !stopped() {
-                        thread::sleep(POLL);
-                    }
-                    return Ok(());
-                }
+                // The task ends when the download is stopped (144) or the
+                // connection closes.
+                FaultKind::Stall => std::future::pending::<()>().await,
                 FaultKind::Disconnect => {
-                    let _ = lock(writer).shutdown(Shutdown::Both);
+                    writer.shutdown().await;
                     return Ok(());
                 }
             }
@@ -1511,28 +1745,24 @@ fn serve_download(
         out.clear();
         transfer_message(key, 143, id, *kind, rec, false, &mut out)?;
         {
-            let mut w = lock(writer);
+            let mut w = writer.lock().await;
             if stopped() {
                 return Ok(());
             }
-            w.write_all(&out)?;
+            write_locked(&mut w, &out).await?;
         }
         sent += rec.len();
         if let Some(rate) = rate.filter(|r| *r > 0) {
-            let due = start + Duration::from_secs_f64(sent as f64 / rate as f64);
-            while let Some(left) = due.checked_duration_since(Instant::now()) {
-                if stopped() {
-                    return Ok(());
-                }
-                thread::sleep(left.min(POLL));
-            }
+            sleep_until(start + Duration::from_secs_f64(sent as f64 / rate as f64)).await;
         }
     }
-    let mut w = lock(writer);
+    let mut w = writer.lock().await;
     if stopped() {
         return Ok(());
     }
-    w.write_all(
+    write_locked(
+        &mut w,
         &encode_message_with_status(143, id, 300, Class::Device, &[], &[]).map_err(enc_err)?,
     )
+    .await
 }

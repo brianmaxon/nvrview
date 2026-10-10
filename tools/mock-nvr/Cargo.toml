@@ -10,6 +10,9 @@ publish = false
 
 [dependencies]
 bc-protocol = { path = "../../crates/bc-protocol" }
+# The server runs on tokio: on a runtime of its own in real time, or on a
+# test's runtime and (paused) clock (`spawn_in`).
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
