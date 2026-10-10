@@ -21,18 +21,23 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
     public var tiers: [String]
     public var name: String?
     public var model: String?
+    /// What the camera itself detects (ABI 3: the `ai` bits of the channel's
+    /// capabilities, in the device's names: `people`, `vehicle`, `dog_cat`,
+    /// ...). Empty when the camera has no detection of its own.
+    public var detects: [String]
 
-    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model }
+    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects }
 
     public init(
         channel: Int, connected: Bool = false, tiers: [String] = [], name: String? = nil,
-        model: String? = nil
+        model: String? = nil, detects: [String] = []
     ) {
         self.channel = channel
         self.connected = connected
         self.tiers = tiers
         self.name = name
         self.model = model
+        self.detects = detects
     }
 
     public init(from decoder: any Decoder) throws {
@@ -42,6 +47,7 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
         tiers = try c.decodeIfPresent([String].self, forKey: .tiers) ?? []
         name = try c.decodeIfPresent(String.self, forKey: .name)
         model = try c.decodeIfPresent(String.self, forKey: .model)
+        detects = (try? c.decodeIfPresent([String].self, forKey: .detects)) ?? []
     }
 }
 
@@ -73,6 +79,14 @@ public enum CoreEvent: Sendable, Equatable {
     case tileStats(tile: UInt64, stats: TileStats)
     case tileClosed(tile: UInt64, reason: String?)
     case audioStats(tile: UInt64, stats: AudioStatsEvent)
+    /// ABI 3: progress of `nv_tile_set_tier` (docs/FFI-ABI3.md section 1).
+    case tileTier(tile: UInt64, tier: StreamTier?, state: TierSwitchState, generation: UInt32)
+    /// ABI 3: a detection started or stopped on a channel (section 2).
+    case detection(DetectionEvent)
+    /// ABI 3: the stored layouts changed (section 4); read them again.
+    case layoutsChanged
+    /// ABI 3: a timing hook for the budgets (section 5), nanoseconds.
+    case timing(what: String, tile: UInt64?, nanos: UInt64)
 
     private struct Wire: Decodable {
         var type: String
@@ -106,6 +120,14 @@ public enum CoreEvent: Sendable, Equatable {
         var underruns: Int?
         var resyncs: Int?
         var tap_dropped: Int?
+        var channel: Int?
+        var tier: String?
+        var generation: UInt32?
+        var kind: String?
+        var source: String?
+        var at_ns: UInt64?
+        var what: String?
+        var ns: UInt64?
     }
 
     struct ChannelList: Decodable {
@@ -165,8 +187,95 @@ public enum CoreEvent: Sendable, Equatable {
             a.resyncs = w.resyncs ?? 0
             a.tapDropped = w.tap_dropped ?? 0
             return .audioStats(tile: tile, stats: a)
+        case "tile_tier":
+            guard let tile = w.tile, let state = w.state, let tier = w.tier else { return nil }
+            return .tileTier(
+                tile: tile, tier: StreamTier(name: tier), state: TierSwitchState(state),
+                generation: w.generation ?? 0)
+        case "detection":
+            guard let device = w.device, let channel = w.channel, let kind = w.kind, let state = w.state else {
+                return nil
+            }
+            return .detection(
+                DetectionEvent(
+                    device: device, channel: channel, kind: kind, active: state == "start",
+                    source: DetectionSource(w.source ?? "device"), atNanos: w.at_ns))
+        case "motion":
+            guard let device = w.device, let channel = w.channel, let state = w.state else { return nil }
+            return .detection(
+                DetectionEvent(
+                    device: device, channel: channel, kind: DetectionEvent.motionKind, active: state == "start",
+                    source: .device, atNanos: w.at_ns))
+        case "layouts_changed":
+            return .layoutsChanged
+        case "timing":
+            guard let what = w.what, let ns = w.ns else { return nil }
+            return .timing(what: what, tile: w.tile, nanos: ns)
         default:
             return nil
         }
+    }
+}
+
+/// Where a tile's stream-tier switch stands (`tile_tier` events).
+public enum TierSwitchState: Sendable, Equatable {
+    /// The new tier's stream and pipeline are starting; the old one shows.
+    case starting
+    /// The new generation's first picture decoded; it is the one shown now.
+    case active
+    /// The new tier could not start; the old one keeps showing.
+    case failed
+    case other(String)
+
+    public init(_ s: String) {
+        switch s {
+        case "starting": self = .starting
+        case "active": self = .active
+        case "failed": self = .failed
+        default: self = .other(s)
+        }
+    }
+}
+
+/// Who detected something: the camera's own AI, or a model on this Mac.
+public enum DetectionSource: Sendable, Equatable, Hashable {
+    case device
+    case local
+    case other(String)
+
+    public init(_ s: String) {
+        switch s {
+        case "device": self = .device
+        case "local": self = .local
+        default: self = .other(s)
+        }
+    }
+}
+
+/// One `detection` (or `motion`) event: a kind of object started or stopped
+/// being detected on a channel. `motion` events use the kind `motion`.
+public struct DetectionEvent: Sendable, Equatable {
+    public static let motionKind = "motion"
+
+    public var device: UInt64
+    public var channel: Int
+    /// The device's name for it (`people`, `vehicle`, `dog_cat`, `face`,
+    /// `package`, ...), passed through when unknown.
+    public var kind: String
+    public var active: Bool
+    public var source: DetectionSource
+    /// The core clock at arrival; the pushes carry no usable time.
+    public var atNanos: UInt64?
+
+    public init(
+        device: UInt64, channel: Int, kind: String, active: Bool, source: DetectionSource = .device,
+        atNanos: UInt64? = nil
+    ) {
+        self.device = device
+        self.channel = channel
+        self.kind = kind
+        self.active = active
+        self.source = source
+        self.atNanos = atNanos
     }
 }

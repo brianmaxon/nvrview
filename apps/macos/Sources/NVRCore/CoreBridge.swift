@@ -50,12 +50,16 @@ public final class CoreBridge: Sendable {
         }
 
         func core(didDeliver action: CoreAction, tile id: UInt64) {
+            core(didDeliver: action, tile: id, generation: 0)
+        }
+
+        func core(didDeliver action: CoreAction, tile id: UInt64, generation: UInt32) {
             guard let tile = registry.withLock({ $0.byID[id] }) else { return }
-            tile.perform(action)
+            tile.perform(action, generation: generation)
         }
 
         func core(didReject failure: CoreDecodeFailure, tile id: UInt64) {
-            registry.withLock { $0.byID[id] }?.reject(failure)
+            registry.withLock { $0.byID[id] }?.reject(failure, generation: 0)
         }
 
         func core(didEmit json: UnsafeRawBufferPointer) {
@@ -66,20 +70,26 @@ public final class CoreBridge: Sendable {
                 // not allowed here).
                 registry.withLock { $0.byID[id] }?.markClosed()
             }
+            if case .tileTier(let id, let tier, let state, let generation) = event {
+                // Applied here, on the core's thread, so the tile shows the
+                // new generation from the next refresh on, whatever the app's
+                // main thread is doing.
+                registry.withLock { $0.byID[id] }?.applyTier(tier, state: state, generation: generation)
+            }
             onEvent(event)
         }
 
         func reportDecoded(link: CoreTile.TileLink, tile: UInt64, ptsMicros: Int64) {
             gate.withLock { g in
                 guard !g.closing, !link.closed.load(ordering: .acquiring) else { return }
-                g.core?.tileDecoded(tile, ptsMicros: ptsMicros)
+                g.core?.tileDecoded(tile, generation: link.generation, ptsMicros: ptsMicros)
             }
         }
 
         func reportFailed(link: CoreTile.TileLink, tile: UInt64, _ kind: CoreDecodeFailure) {
             gate.withLock { g in
                 guard !g.closing, !link.closed.load(ordering: .acquiring) else { return }
-                g.core?.tileDecodeFailed(tile, kind: kind)
+                g.core?.tileDecodeFailed(tile, generation: link.generation, kind: kind)
             }
         }
     }
@@ -158,6 +168,37 @@ public final class CoreBridge: Sendable {
     /// The tiles currently registered (open and not yet closed by the app).
     public var tiles: [CoreTile] { router.registry.withLock { Array($0.byID.values) } }
 
+    /// ABI 3 `nv_tile_set_tier`: the tile keeps showing its current stream
+    /// until the new tier's first picture has decoded, then switches (the
+    /// `tile_tier` event; `CoreTile.tierState` follows it).
+    public func setTileTier(_ tile: CoreTile, _ tier: StreamTier) throws(CoreStatus) {
+        let c = try live()
+        tile.noteRequested(tier)
+        do throws(CoreStatus) {
+            try c.tileSetTier(tile.id, tier: tier)
+        } catch {
+            tile.noteRequested(tile.tier)
+            throw error
+        }
+    }
+
+    /// ABI 3 `nv_tile_audio_level`, or nil when the core cannot say.
+    public func audioLevel(_ tile: CoreTile) -> AudioLevel? {
+        guard let c = core.withLock({ $0 }) else { return nil }
+        return try? c.tileAudioLevel(tile.id)
+    }
+
+    // MARK: Layouts (ABI 3)
+
+    /// `nv_layouts_get`: every stored layout as JSON.
+    public func layoutsJSON() throws(CoreStatus) -> String { try live().layoutsGet() }
+
+    /// `nv_layout_put`: inserts or replaces one layout by its id.
+    public func putLayout(json: String) throws(CoreStatus) { try live().layoutPut(json: json) }
+
+    /// `nv_layout_delete`.
+    public func deleteLayout(id: String) throws(CoreStatus) { try live().layoutDelete(id: id) }
+
     /// `nv_grid_layout`; empty after `shutdown`.
     public func gridLayout(viewport: PixelSize, gap: UInt32, pictureSizes: [PixelSize], fill: Bool = false)
         -> [TileLayout]
@@ -226,7 +267,7 @@ public final class CoreBridge: Sendable {
         }
         for tile in tiles {
             tile.markClosed()
-            tile.decoder.waitForPendingFrames()
+            tile.waitForPendingFrames()
         }
     }
 }

@@ -153,7 +153,7 @@ final class LiveSession {
             if let device, d != device { return }
         case .tileClosed(let t, _):
             if let tile, t != tile.id { return }
-        case .tileStats:
+        case .tileStats, .tileTier, .detection, .layoutsChanged, .timing:
             return
         case .audioStats(let t, _):
             if let tile, t != tile.id { return }
