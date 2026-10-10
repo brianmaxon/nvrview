@@ -347,5 +347,6 @@ added audio: `on_audio_tap` at the end of `NvCallbacks`, `NvAudioBlock`,
 
 - macOS: a static library per architecture, packaged as an XCFramework with
   the header and a module map (`import NVRViewCore` in Swift).
-- Windows: a DLL plus import library; C# bindings come later (M4).
+- Windows: a DLL plus import library; C# bindings in `apps/windows`
+  (`NvrView.Interop`), checked by a smoke test in CI.
 - Linux: built and tested in CI so the core stays portable.

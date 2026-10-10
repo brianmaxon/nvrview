@@ -242,6 +242,9 @@ the focused channel. The Rust core ships as an XCFramework.
 **Windows** (later): C# with WinUI 3, Media Foundation or Direct3D 11 video
 decoding into a swap chain. H.265 may require the HEVC Video Extensions; the
 fallback is FFmpeg with D3D11VA.
+The groundwork is in `apps/windows`: C# bindings for the C interface
+(blittable structs checked against the C compiler's layout of the header)
+and a console smoke test that CI runs on Windows against mock-nvr.
 
 Shared across both through Rust: credential storage (the `keyring` crate maps
 to Keychain and Windows Credential Manager), logging, settings format.
