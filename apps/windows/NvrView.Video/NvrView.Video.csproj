@@ -11,6 +11,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+    <!-- The fisheye dewarp constants (pure, no platform API). -->
+    <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
     <!-- MIT; raw COM interop for D3D11, DXGI, Media Foundation, and the
          HLSL compiler, with no managed wrapper objects per call. -->
     <PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6" />
