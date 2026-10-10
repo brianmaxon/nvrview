@@ -6,6 +6,8 @@ import QuartzCore
 struct TileChromeContent: Equatable {
     var title: String
     var subtitle: String?
+    /// The frame-rate readout, when the user turned it on.
+    var rates: String?
     var badges: [Badge] = []
     var veil: TileVeil?
     var hasCamera: Bool
@@ -40,6 +42,7 @@ final class TileChromeView: NSView {
     private let headerGradient = CAGradientLayer()
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
+    private let rates = NSTextField(labelWithString: "")
     private let speaker = NSButton()
     private let badges = NSStackView()
     private let veil = NSView()
@@ -68,7 +71,7 @@ final class TileChromeView: NSView {
         header.alphaValue = 0
         addSubview(header)
 
-        for label in [title, subtitle, veilTitle, veilDetail, drop, emptyHint] {
+        for label in [title, subtitle, rates, veilTitle, veilDetail, drop, emptyHint] {
             label.textColor = .white
             label.lineBreakMode = .byTruncatingTail
             label.shadow = {
@@ -82,8 +85,12 @@ final class TileChromeView: NSView {
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         subtitle.font = .systemFont(ofSize: 10)
         subtitle.textColor = NSColor.white.withAlphaComponent(0.75)
+        rates.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        rates.textColor = NSColor.white.withAlphaComponent(0.75)
+        rates.isHidden = true
         header.addSubview(title)
         header.addSubview(subtitle)
+        header.addSubview(rates)
 
         speaker.isBordered = false
         speaker.bezelStyle = .shadowlessSquare
@@ -156,6 +163,11 @@ final class TileChromeView: NSView {
         title.stringValue = c.title
         subtitle.stringValue = c.subtitle ?? ""
         subtitle.isHidden = c.subtitle == nil
+        rates.stringValue = c.rates ?? ""
+        if rates.isHidden != (c.rates == nil) {
+            rates.isHidden = c.rates == nil
+            needsLayout = true
+        }
         speaker.isHidden = !c.hasCamera
         speaker.image = NSImage(
             systemSymbolName: c.audible ? "speaker.wave.2.fill" : "speaker.slash.fill",
@@ -223,7 +235,7 @@ final class TileChromeView: NSView {
     override func layout() {
         super.layout()
         let w = bounds.width, h = bounds.height
-        let headerHeight: CGFloat = subtitle.isHidden ? 30 : 40
+        let headerHeight: CGFloat = (subtitle.isHidden ? 30 : 40) + (rates.isHidden ? 0 : 14)
         header.frame = CGRect(x: 0, y: 0, width: w, height: min(headerHeight, h))
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -240,6 +252,7 @@ final class TileChromeView: NSView {
         let titleRight = (badges.arrangedSubviews.isEmpty ? badgeRight : badges.frame.minX) - 6
         title.frame = CGRect(x: 10, y: 7, width: max(titleRight - 10, 0), height: 16)
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
+        rates.frame = CGRect(x: 10, y: subtitle.isHidden ? 22 : 36, width: max(w - 20, 0), height: 14)
         veil.frame = bounds
         veilTitle.frame = CGRect(x: 8, y: h / 2 - 18, width: max(w - 16, 0), height: 18)
         veilDetail.frame = CGRect(x: 8, y: h / 2 + 2, width: max(w - 16, 0), height: 16)

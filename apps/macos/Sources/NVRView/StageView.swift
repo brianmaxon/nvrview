@@ -68,6 +68,8 @@ final class StageView: NSView {
     }
     private var gesture: Gesture?
     private var dropTarget: NodePath?
+    /// The leaf each of the renderer's tiles draws, in its order.
+    private var renderedPaths: [NodePath] = []
 
     var gap: CGFloat { state.editing ? 6 : 2 }
 
@@ -184,9 +186,27 @@ final class StageView: NSView {
         detail.append(model.hasCameraAI(camera) ? "detection: camera AI" : "detection: this Mac")
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
-            title: model.name(of: camera), subtitle: detail.joined(separator: " · "), badges: badges,
+            title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
+            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil, badges: badges,
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
+    }
+
+    /// The rate the first tile showing `camera` drew new pictures at.
+    func shownRate(of camera: CameraRef) -> Double? {
+        guard let path = frames.leaves.first(where: { $0.camera == camera })?.path,
+            let i = renderedPaths.firstIndex(of: path)
+        else { return nil }
+        return grid.renderer.shownRate(ofTile: i)
+    }
+
+    /// "Device 15.0 fps · Shown 15.0 fps · 120 Hz": what the camera sends
+    /// (camera timestamps), what this tile actually drew, and the display.
+    private func rateText(_ path: NodePath, _ camera: CameraRef) -> String {
+        let device = model.leases.tile(for: camera)?.deviceRate
+        let shown = renderedPaths.firstIndex(of: path).flatMap { grid.renderer.shownRate(ofTile: $0) }
+        let hz = window?.screen?.maximumFramesPerSecond ?? 0
+        return FrameRateText.make(device: device, shown: shown, displayHz: hz)
     }
 
     static func color(for kind: String) -> NSColor {
@@ -220,8 +240,10 @@ final class StageView: NSView {
         let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
         var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [])
         var tiles: [GridTile] = []
+        var paths: [NodePath] = []
         for leaf in currentLeaves {
             guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
+            paths.append(leaf.path)
             let cell = leaf.rect.pixels(scaleX: scaleX, scaleY: scaleY)
             let snapshot = tile.snapshot
             let picture = tile.latestPicture()
@@ -261,6 +283,7 @@ final class StageView: NSView {
         if key != lastKey || renderer.tiles.count != tiles.count {
             lastKey = key
             renderer.tiles = tiles
+            renderedPaths = paths
         }
     }
 

@@ -56,6 +56,14 @@ final class SelfTest {
             print("windows: \(app.windows.count), first at \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))")
         }
         if playing == 0 { problems.append("no tile is playing") }
+        if let first = cameras.first(where: { model.leases.tile(for: $0) != nil }), let tile = model.leases.tile(for: first) {
+            let shown = window.stage.shownRate(of: first)
+            print("rates: " + FrameRateText.make(
+                device: tile.deviceRate, shown: shown, displayHz: window.window?.screen?.maximumFramesPerSecond ?? 0))
+            // The fake sends 20 pictures per second of camera time.
+            if model.fake != nil, abs((tile.deviceRate ?? 0) - 20) > 1 { problems.append("device rate not measured") }
+            if shown == nil { problems.append("shown rate not measured") }
+        }
         capture("grid") { [self] in resizeStep() }
     }
 

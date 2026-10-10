@@ -219,7 +219,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         settings?.window?.makeKeyAndOrderFront(nil)
     }
 
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { true }
+    @objc func toggleFrameRates(_ sender: Any?) { model?.showFrameRates.toggle() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
+        return true
+    }
 
     private func buildMenu() {
         let main = NSMenu()
@@ -271,6 +276,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         submenu("View", [
             item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]),
             item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+            .separator(),
+            item("Show Frame Rates", #selector(toggleFrameRates(_:))),
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.

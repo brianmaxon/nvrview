@@ -152,6 +152,34 @@ import VideoKit
         #expect(rig.fake.violations.isEmpty)
     }
 
+    /// The device's rate comes from the camera timestamps (the fake sends
+    /// one picture per 50 ms, however fast the test pumps), and a tier
+    /// switch starts it over with the new generation's own decoder.
+    @Test func deviceRateFromTimestampsStartsOverOnASwitch() throws {
+        let rig = try rig()
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        step(rig, tile)
+        #expect(tile.deviceRate == nil)
+        for _ in 0..<30 { step(rig, tile) }
+        #expect(abs((tile.deviceRate ?? 0) - 20) < 0.5)
+        let before = tile.decoder
+        try rig.bridge.setTileTier(tile, .main)
+        var steps = 0
+        while tile.tierState.shown != .main, steps < 400 {
+            step(rig, tile)
+            steps += 1
+        }
+        #expect(tile.tierState.shown == .main)
+        #expect(tile.decoder !== before)
+        // Only the new generation's pictures count: few so far, but never a
+        // rate made of two streams' timestamps.
+        let decoded = Int(tile.decoder.stats.decoded)
+        if decoded < 2 { #expect(tile.deviceRate == nil) } else { #expect(abs((tile.deviceRate ?? 0) - 20) < 0.5) }
+        for _ in 0..<30 { step(rig, tile) }
+        #expect(abs((tile.deviceRate ?? 0) - 20) < 0.5)
+    }
+
     @Test func aFailedSwitchKeepsTheOldTier() throws {
         let rig = try rig { $0.tierSwitchFails = true }
         defer { rig.bridge.shutdown() }

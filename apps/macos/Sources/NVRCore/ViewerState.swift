@@ -162,3 +162,13 @@ public struct TileVeil: Sendable, Equatable {
         }
     }
 }
+
+/// The frame-rate readout of a tile header.
+public enum FrameRateText {
+    public static func make(device: Double?, shown: Double?, displayHz: Int) -> String {
+        func fps(_ v: Double?) -> String { v.map { String(format: "%.1f fps", $0) } ?? "– fps" }
+        var parts = ["Device \(fps(device))", "Shown \(fps(shown))"]
+        if displayHz > 0 { parts.append("\(displayHz) Hz") }
+        return parts.joined(separator: " · ")
+    }
+}

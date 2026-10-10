@@ -73,6 +73,15 @@ final class AppModel {
     private(set) var timings: [String: UInt64] = [:]
     /// A message for the user (shown in the sidebar footer), if any.
     var notice: String?
+    /// Tile headers show the device's and the shown frame rate (View menu;
+    /// remembered in the user's defaults, off by default).
+    var showFrameRates = UserDefaults.standard.bool(forKey: AppModel.showFrameRatesKey) {
+        didSet {
+            UserDefaults.standard.set(showFrameRates, forKey: Self.showFrameRatesKey)
+            notify()
+        }
+    }
+    static let showFrameRatesKey = "showFrameRates"
 
     /// Gives the core's event thread a way back to the model on the main queue.
     private final class Target: @unchecked Sendable {

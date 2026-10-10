@@ -27,3 +27,10 @@ import Testing
         #expect(s.text == "Disconnected" && s.isTerminal)
     }
 }
+
+@Suite struct FrameRateTextTests {
+    @Test func words() {
+        #expect(FrameRateText.make(device: 15, shown: 14.96, displayHz: 120) == "Device 15.0 fps · Shown 15.0 fps · 120 Hz")
+        #expect(FrameRateText.make(device: nil, shown: nil, displayHz: 0) == "Device – fps · Shown – fps")
+    }
+}
