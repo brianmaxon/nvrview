@@ -149,22 +149,36 @@ Core ML on macOS, ONNX Runtime/DirectML on Windows). Results come back as
 timestamped text that the UI can align with video. A Rust-side engine can
 replace this later without changing the tap. Nothing leaves the machine.
 
-## C interface (planned, ABI 2)
+## C interface (ABI 2)
 
-Sketch, to be finalized when implemented:
+Specified in [FFI.md](FFI.md#audio) and [nvrview.h](nvrview.h):
 
 - `nv_audio_set_output(core, sample_rate, channels)`
-- `nv_tile_audio_enable(core, tile, enabled, volume)`
-- `nv_audio_render(core, float *out, frames, host_time_ns)`: called from the
-  app's real-time audio callback; mixes audible tiles; never blocks, locks,
-  or allocates. `host_time_ns` is when `out[0]` will be heard, on the same
-  clock as the core's arrival times (the core must define that clock for the
-  app, or convert).
-- `nv_tile_audio_tap(core, tile, enabled)` plus an `on_audio_tap` callback
-  delivering borrowed 16 kHz mono blocks with timestamps.
-- `audio_stats` events: buffer level, rate estimate, A/V offset, ratio
-  deviation, resyncs, underruns, overflow, records decoded, concealed, and
-  rejected, tap drops.
+- `nv_audio_render(core, out, frames, channels, host_time_ns)`: called from
+  the app's real-time callback; mixes audible tiles; never blocks, locks,
+  allocates, or frees. It takes the channel count the buffer was sized for
+  (unlike the first sketch), so a callback still running in the old format
+  after `nv_audio_set_output` gets silence instead of an overrun.
+- `host_time_ns` is on the core's clock, which is the platform host clock
+  (`nv_clock_now_ns`; on macOS `mach_absolute_time` in nanoseconds, the
+  unit of `AudioTimeStamp.mHostTime`), so arrival times and render times
+  need no conversion between clocks.
+- `nv_tile_audio_set(core, tile, audible, volume)` (audible and volume in
+  one call; volume 0 is the mute that keeps the slot).
+- `nv_tile_audio_tap(core, tile, enabled)` plus the `on_audio_tap` callback
+  delivering borrowed 16 kHz mono `NvAudioBlock`s with camera time, arrival
+  wall-clock time, epoch, and a discontinuity flag.
+- `audio_stats` events: buffer level, rate estimate, A/V error, playout
+  delay and its target, ratio deviation, resyncs, underruns, overflow,
+  records decoded, concealed, rejected, and talk-back records ignored, tap
+  blocks and drops.
+
+In viewer-core each tile thread owns its `TileAudio`; the core owns the
+`AudioOutput`, and the `Renderer` changes hands between the control thread
+(which replaces it on a format change) and the real-time thread through two
+lock-free single-slot queues, so a replaced renderer is always freed off the
+real-time thread. Records with stream index 1 (`01wb`, the client's
+talk-back form, reported) are counted and never played.
 
 ## Tests
 
@@ -182,6 +196,13 @@ In `crates/audio-pipeline` unless noted.
   ±40 ms of its target after the first minute, and the 10-minute mean offset
   shows no trend. Also: resync after a 3 s audio gap and a 6 s stall, and a
   check that the ratio correction stays small under jitter.
+- viewer-core, end to end against mock-nvr (AAC clicks, 30 ms jitter): the
+  core's renderer, driven like a device on the host clock, plays each click
+  within a few ms of its picture's arrival plus the reported playout delay;
+  taps, talk-back, and argument checks. viewer-ffi: `nv_audio_render` from
+  its own thread under a counting allocator while the app changes format,
+  volume, audibility, and taps: no allocation. The C smoke test renders
+  from a pthread.
 - Decoder accuracy against FFmpeg; fuzzed records through the decoder and a
   whole tile never panic; taps drop oldest and never disturb playout; the
   render path, under a counting allocator, never allocates or frees, through

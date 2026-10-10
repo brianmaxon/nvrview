@@ -16,7 +16,7 @@
 /**
  * Bumped on any incompatible change; apps compare it with nv_abi_version().
  */
-#define NV_ABI_VERSION 1
+#define NV_ABI_VERSION 2
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -189,11 +189,13 @@ typedef struct NvAction {
 } NvAction;
 
 /**
- * Callbacks. Both arrive on threads the core owns and must return quickly.
+ * Callbacks. All arrive on threads the core owns and must return quickly.
  * on_action: serialized per tile, never concurrent for the same tile, never
  *   re-entrant. Pointers inside `action` are valid only during the call.
  * on_event: serialized across the whole core. `json` is UTF-8, not
  *   NUL-terminated, valid only during the call.
+ * on_audio_tap: may be NULL (no taps). Serialized across the core; `block`
+ *   and its samples are valid only during the call.
  * From inside a callback an app may call nv_tile_decoded and
  * nv_tile_decode_failed, and nothing else.
  * No event names a device before nv_device_add returns its ID, and no
@@ -203,10 +205,51 @@ typedef void (*NvActionCallback)(void *context, uint64_t tile, const struct NvAc
 
 typedef void (*NvEventCallback)(void *context, const char *json, size_t len);
 
+/**
+ * One block of a tile's tapped audio: 16 kHz mono, borrowed for the
+ * duration of on_audio_tap.
+ */
+typedef struct NvAudioBlock {
+  /**
+   * samples in -1..1
+   */
+  const float *samples;
+  size_t sample_count;
+  /**
+   * always 16000
+   */
+  uint32_t sample_rate;
+  /**
+   * numbering and camera times restart with each epoch
+   */
+  uint32_t epoch;
+  /**
+   * number of the first sample in this epoch, at 16 kHz
+   */
+  uint64_t first_sample;
+  /**
+   * camera time (video timestamp units) of the first sample, if has_camera_time
+   */
+  int64_t camera_time_us;
+  /**
+   * arrival of the record that completed the block (microseconds since the Unix epoch), if has_wall_clock
+   */
+  int64_t wall_clock_us;
+  bool has_camera_time;
+  bool has_wall_clock;
+  /**
+   * audio is missing or restarted before this block
+   */
+  bool discontinuity;
+} NvAudioBlock;
+
+typedef void (*NvAudioTapCallback)(void *context, uint64_t tile, const struct NvAudioBlock *block);
+
 typedef struct NvCallbacks {
   void *context;
   NvActionCallback on_action;
   NvEventCallback on_event;
+  NvAudioTapCallback on_audio_tap;
 } NvCallbacks;
 
 /**
@@ -312,6 +355,67 @@ enum NvStatus nv_tile_decoded(struct NvCore *core, uint64_t tile, int64_t pts_us
  * `core` is a live handle.
  */
 enum NvStatus nv_tile_decode_failed(struct NvCore *core, uint64_t tile, NvDecodeFailure kind);
+
+/**
+ * Now on the core's clock, nanoseconds: the platform host clock (macOS:
+ * mach_absolute_time() in ns, which AudioTimeStamp.mHostTime counts;
+ * Windows: QueryPerformanceCounter in ns; Linux: CLOCK_MONOTONIC).
+ * nv_audio_render's host_time_ns is on this clock.
+ */
+uint64_t nv_clock_now_ns(void);
+
+/**
+ * Sets the audio output format the app renders: sample_rate frames per
+ * second (8000 to 384000) and 1 or 2 interleaved channels. Call again after
+ * the output device or its rate changes; audible tiles move to the new
+ * output and resync.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_audio_set_output(struct NvCore *core, uint32_t sample_rate, uint32_t channels);
+
+/**
+ * Fills `out` (frames x channels floats, interleaved) with the mix of the
+ * audible tiles. host_time_ns is when out's first frame will be heard, on
+ * the core's clock (nv_clock_now_ns). Real-time safe: never blocks, locks,
+ * allocates, or frees. Writes silence and returns NV_ERR_INVALID_ARGUMENT
+ * when `channels` differs from nv_audio_set_output's (as during a format
+ * change), and NV_ERR_CLOSED before an output is set or while another
+ * thread renders. Render from one thread at a time, and stop rendering
+ * before nv_core_free.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is valid for writing `frames * channels`
+ * floats.
+ */
+enum NvStatus nv_audio_render(struct NvCore *core,
+                              float *out,
+                              uint32_t frames,
+                              uint32_t channels,
+                              uint64_t host_time_ns);
+
+/**
+ * Makes a tile audible (it claims one of eight playout slots) or silent
+ * (it releases its slot), at `volume` from 0 (muted, keeping its slot and
+ * timing) to 1 (more amplifies). Tiles start silent.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_tile_audio_set(struct NvCore *core, uint64_t tile, bool audible, float volume);
+
+/**
+ * Starts or stops a tile's audio tap: on_audio_tap receives its decoded
+ * audio as 16 kHz mono blocks (64 ms each), audible or not. A slow
+ * consumer loses the oldest blocks (counted in audio_stats). No block for
+ * the tile arrives after a call that stops it returns. NV_ERR_INVALID_ARGUMENT
+ * if on_audio_tap was NULL.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_tile_audio_tap(struct NvCore *core, uint64_t tile, bool enabled);
 
 /**
  * Grid layout (pure; no core needed). Fills `out` (tile_count entries) with

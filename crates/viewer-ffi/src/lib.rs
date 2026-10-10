@@ -19,13 +19,14 @@ use std::ffi::{CStr, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
+use viewer_core::audio::TapBlock;
 use viewer_core::{
     Action, Callbacks, Codec, ColorMatrix, Core, CoreConfig, CoreError, DecodeFailureKind,
-    LogSettings, StreamTier, TileStatus,
+    LogSettings, StreamTier, TileStatus, clock,
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
-pub const NV_ABI_VERSION: u32 = 1;
+pub const NV_ABI_VERSION: u32 = 2;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -176,11 +177,37 @@ pub struct NvAction {
     pub status: NvTileStatus,
 }
 
-/// Callbacks. Both arrive on threads the core owns and must return quickly.
+/// One block of a tile's tapped audio: 16 kHz mono, borrowed for the
+/// duration of on_audio_tap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NvAudioBlock {
+    /// samples in -1..1
+    pub samples: *const f32,
+    pub sample_count: usize,
+    /// always 16000
+    pub sample_rate: u32,
+    /// numbering and camera times restart with each epoch
+    pub epoch: u32,
+    /// number of the first sample in this epoch, at 16 kHz
+    pub first_sample: u64,
+    /// camera time (video timestamp units) of the first sample, if has_camera_time
+    pub camera_time_us: i64,
+    /// arrival of the record that completed the block (microseconds since the Unix epoch), if has_wall_clock
+    pub wall_clock_us: i64,
+    pub has_camera_time: bool,
+    pub has_wall_clock: bool,
+    /// audio is missing or restarted before this block
+    pub discontinuity: bool,
+}
+
+/// Callbacks. All arrive on threads the core owns and must return quickly.
 /// on_action: serialized per tile, never concurrent for the same tile, never
 ///   re-entrant. Pointers inside `action` are valid only during the call.
 /// on_event: serialized across the whole core. `json` is UTF-8, not
 ///   NUL-terminated, valid only during the call.
+/// on_audio_tap: may be NULL (no taps). Serialized across the core; `block`
+///   and its samples are valid only during the call.
 /// From inside a callback an app may call nv_tile_decoded and
 /// nv_tile_decode_failed, and nothing else.
 /// No event names a device before nv_device_add returns its ID, and no
@@ -189,6 +216,8 @@ pub type NvActionCallback =
     Option<unsafe extern "C" fn(context: *mut c_void, tile: u64, action: *const NvAction)>;
 pub type NvEventCallback =
     Option<unsafe extern "C" fn(context: *mut c_void, json: *const c_char, len: usize)>;
+pub type NvAudioTapCallback =
+    Option<unsafe extern "C" fn(context: *mut c_void, tile: u64, block: *const NvAudioBlock)>;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -196,6 +225,7 @@ pub struct NvCallbacks {
     pub context: *mut c_void,
     pub on_action: NvActionCallback,
     pub on_event: NvEventCallback,
+    pub on_audio_tap: NvAudioTapCallback,
 }
 
 #[repr(C)]
@@ -221,7 +251,12 @@ pub struct NvTileLayout {
 /// The core. Opaque to C.
 pub struct NvCore {
     core: Core,
+    /// The app passed an on_audio_tap.
+    taps: bool,
 }
+
+/// Most frames one nv_audio_render call fills.
+const MAX_RENDER_FRAMES: u32 = 1 << 20;
 
 /// Most tiles `nv_grid_layout` lays out in one call.
 const MAX_LAYOUT_TILES: u32 = 65_536;
@@ -264,6 +299,7 @@ struct FfiCallbacks {
     context: Context,
     on_action: unsafe extern "C" fn(*mut c_void, u64, *const NvAction),
     on_event: unsafe extern "C" fn(*mut c_void, *const c_char, usize),
+    on_audio_tap: Option<unsafe extern "C" fn(*mut c_void, u64, *const NvAudioBlock)>,
 }
 
 fn codec(c: Codec) -> NvCodec {
@@ -388,6 +424,26 @@ impl Callbacks for FfiCallbacks {
         // is valid UTF-8 for `json.len()` bytes until the call returns.
         unsafe { (self.on_event)(self.context.0, json.as_ptr().cast(), json.len()) };
     }
+
+    fn on_audio_tap(&self, tile: u64, b: &TapBlock) {
+        let Some(f) = self.on_audio_tap else { return };
+        let block = NvAudioBlock {
+            samples: b.samples.as_ptr(),
+            sample_count: b.samples.len(),
+            sample_rate: viewer_core::audio::TAP_RATE,
+            epoch: b.epoch,
+            first_sample: b.first_sample,
+            camera_time_us: b.camera_time_us.map_or(0, |t| t.round() as i64),
+            wall_clock_us: b.wall_clock_us.unwrap_or(0),
+            has_camera_time: b.camera_time_us.is_some(),
+            has_wall_clock: b.wall_clock_us.is_some(),
+            discontinuity: b.discontinuity,
+        };
+        // SAFETY: `f` is the app's function pointer with the contract's
+        // signature; `block` and the samples it points to live until the
+        // call returns.
+        unsafe { f(self.context.0, tile, &block) };
+    }
 }
 
 fn flatten(m: &[[f32; 4]; 3]) -> [f32; 12] {
@@ -479,10 +535,12 @@ pub unsafe extern "C" fn nv_core_new(
             context: Context(callbacks.context),
             on_action,
             on_event,
+            on_audio_tap: callbacks.on_audio_tap,
         });
+        let taps = callbacks.on_audio_tap.is_some();
         match Core::new(cfg, cb) {
             Ok(core) => {
-                let handle = Box::into_raw(Box::new(NvCore { core }));
+                let handle = Box::into_raw(Box::new(NvCore { core, taps }));
                 // SAFETY: `out` is non-null and valid for one write per the
                 // caller.
                 unsafe { put(out, handle) };
@@ -674,6 +732,124 @@ pub unsafe extern "C" fn nv_tile_decode_failed(
             Some(k) => status(c.decode_failed(tile, k)),
             None => NvStatus::NV_ERR_INVALID_ARGUMENT,
         }
+    })
+}
+
+/// Now on the core's clock, nanoseconds: the platform host clock (macOS:
+/// mach_absolute_time() in ns, which AudioTimeStamp.mHostTime counts;
+/// Windows: QueryPerformanceCounter in ns; Linux: CLOCK_MONOTONIC).
+/// nv_audio_render's host_time_ns is on this clock.
+#[unsafe(no_mangle)]
+pub extern "C" fn nv_clock_now_ns() -> u64 {
+    clock::now_ns()
+}
+
+/// Sets the audio output format the app renders: sample_rate frames per
+/// second (8000 to 384000) and 1 or 2 interleaved channels. Call again after
+/// the output device or its rate changes; audible tiles move to the new
+/// output and resync.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_audio_set_output(
+    core: *mut NvCore,
+    sample_rate: u32,
+    channels: u32,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.set_audio_output(sample_rate, channels)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Fills `out` (frames x channels floats, interleaved) with the mix of the
+/// audible tiles. host_time_ns is when out's first frame will be heard, on
+/// the core's clock (nv_clock_now_ns). Real-time safe: never blocks, locks,
+/// allocates, or frees. Writes silence and returns NV_ERR_INVALID_ARGUMENT
+/// when `channels` differs from nv_audio_set_output's (as during a format
+/// change), and NV_ERR_CLOSED before an output is set or while another
+/// thread renders. Render from one thread at a time, and stop rendering
+/// before nv_core_free.
+///
+/// # Safety
+/// `core` is a live handle; `out` is valid for writing `frames * channels`
+/// floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_audio_render(
+    core: *mut NvCore,
+    out: *mut f32,
+    frames: u32,
+    channels: u32,
+    host_time_ns: u64,
+) -> NvStatus {
+    guarded(|| {
+        if out.is_null() || frames > MAX_RENDER_FRAMES || !(1..=2).contains(&channels) {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        // SAFETY: non-null and, per the caller, valid for this many floats
+        // until the call returns.
+        let out = unsafe { std::slice::from_raw_parts_mut(out, (frames * channels) as usize) };
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            out.fill(0.0);
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        match c.render_audio(out, channels as usize, host_time_ns) {
+            Ok(()) => NvStatus::NV_OK,
+            Err(e) => error_status(e),
+        }
+    })
+}
+
+/// Makes a tile audible (it claims one of eight playout slots) or silent
+/// (it releases its slot), at `volume` from 0 (muted, keeping its slot and
+/// timing) to 1 (more amplifies). Tiles start silent.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_tile_audio_set(
+    core: *mut NvCore,
+    tile: u64,
+    audible: bool,
+    volume: f32,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.set_tile_audio(tile, audible, volume)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Starts or stops a tile's audio tap: on_audio_tap receives its decoded
+/// audio as 16 kHz mono blocks (64 ms each), audible or not. A slow
+/// consumer loses the oldest blocks (counted in audio_stats). No block for
+/// the tile arrives after a call that stops it returns. NV_ERR_INVALID_ARGUMENT
+/// if on_audio_tap was NULL.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_tile_audio_tap(
+    core: *mut NvCore,
+    tile: u64,
+    enabled: bool,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(nv) = (unsafe { core.as_ref() }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if enabled && !nv.taps {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        status(nv.core.set_tile_audio_tap(tile, enabled))
     })
 }
 

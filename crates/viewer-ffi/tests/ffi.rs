@@ -95,6 +95,7 @@ fn callbacks(ctx: &Ctx) -> NvCallbacks {
         context: ctx as *const Ctx as *mut c_void,
         on_action: Some(on_action),
         on_event: Some(on_event),
+        on_audio_tap: None,
     }
 }
 
@@ -117,7 +118,7 @@ fn mock() -> mock_nvr::MockNvr {
 #[test]
 fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
-    assert_eq!(NV_ABI_VERSION, 1);
+    assert_eq!(NV_ABI_VERSION, 2);
 }
 
 #[test]
@@ -314,6 +315,54 @@ fn invalid_arguments_are_refused() {
             nv_tile_close(ptr::null_mut(), tile),
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
+
+        // Audio.
+        let mut buf = [1.0f32; 64];
+        assert_eq!(
+            nv_audio_render(core, buf.as_mut_ptr(), 32, 2, 0),
+            NvStatus::NV_ERR_CLOSED,
+            "no output yet"
+        );
+        assert!(buf.iter().all(|&x| x == 0.0), "silence written");
+        assert_eq!(
+            nv_audio_set_output(core, 1000, 2),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_audio_set_output(core, 48_000, 0),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(nv_audio_set_output(core, 48_000, 2), NvStatus::NV_OK);
+        assert_eq!(
+            nv_audio_render(core, ptr::null_mut(), 32, 2, 0),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_audio_render(core, buf.as_mut_ptr(), 64, 1, 0),
+            NvStatus::NV_ERR_INVALID_ARGUMENT,
+            "channel count differs from the output's"
+        );
+        assert_eq!(
+            nv_audio_render(core, buf.as_mut_ptr(), 32, 2, 0),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_tile_audio_set(core, tile, true, -0.5),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_tile_audio_set(core, tile + 1000, true, 1.0),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(nv_tile_audio_set(core, tile, true, 0.5), NvStatus::NV_OK);
+        assert_eq!(
+            nv_tile_audio_tap(core, tile, true),
+            NvStatus::NV_ERR_INVALID_ARGUMENT,
+            "no on_audio_tap callback"
+        );
+        assert_eq!(nv_tile_audio_tap(core, tile, false), NvStatus::NV_OK);
+        let a = nv_clock_now_ns();
+        assert!(nv_clock_now_ns() >= a && a > 0);
         nv_core_free(core);
         nv_core_free(ptr::null_mut());
     }

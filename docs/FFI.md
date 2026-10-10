@@ -25,8 +25,9 @@ stream once per tile (sharing one stream is a later optimization).
   other tiles or the session's socket: media reaches each tile through a
   bounded queue, and the pipeline's backpressure policy drops to the next
   keyframe when the app falls behind.
-- `on_action` is serialized per tile; `on_event` is serialized across the core.
-- From inside either callback an app may call only `nv_tile_decoded` and
+- `on_action` is serialized per tile; `on_event` is serialized across the
+  core; `on_audio_tap` is serialized across the core on its own thread.
+- From inside any callback an app may call only `nv_tile_decoded` and
   `nv_tile_decode_failed`. Everything else (`nv_tile_close`,
   `nv_device_remove`, `nv_core_free`, ...) must be called from outside, or it
   could wait on the thread it runs on.
@@ -35,8 +36,15 @@ stream once per tile (sharing one stream is a later optimization).
 - **Nothing about an object before its ID exists.** No event names a device
   until `nv_device_add` has returned its ID, and no `on_action` for a tile
   runs until `nv_tile_open` has returned its ID. (The core holds them back.)
-- After `nv_tile_close` returns, no `on_action` for that tile is running or
-  will run. After `nv_core_free` returns, no callback at all.
+- After `nv_tile_close` returns, no `on_action` or `on_audio_tap` for that
+  tile is running or will run; the same holds for `on_audio_tap` after
+  `nv_tile_audio_tap(..., false)` returns. After `nv_core_free` returns, no
+  callback at all.
+- `nv_audio_render` is for the app's real-time audio thread: callable from
+  any one thread at a time (a second concurrent caller gets silence), it
+  never blocks, locks, allocates, or frees (tested with a counting
+  allocator through this interface). Stop rendering (on macOS, stop the
+  audio engine) before `nv_core_free`.
 
 ## Memory
 
@@ -90,6 +98,7 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":0,"connected":true,"tiers":["main","sub"],"name":"Channel 1","model":"EXAMPLE-CAM"}]}
 {"type":"tile_stats","tile":7,"received":120,"decoded":118,"gated":0,"dropped":2,"failures":0,"resets":0}
 {"type":"tile_closed","tile":7,"reason":"device_removed"}
+{"type":"audio_stats","tile":7,"records":386,"bytes":26722,"decoded":386,"concealed":0,"rejected":0,"talkback_ignored":0,"epoch":0,"audible":true,"volume":1,"tapped":true,"no_free_slot":false,"playout_delay_ms":223.76,"outliers":0,"timestamp_resets":0,"codec":"aac","sample_rate":16000,"channels":1,"rate_estimate":15999.93,"playout_delay_target_ms":100,"av_offset_ms":0.092,"buffered_ms":199.104,"correction_ppm":1.819,"resyncs":0,"starts":1,"underruns":0,"underrun_frames":0,"overflow_frames":0,"blocks_not_played":0,"tap_blocks":386,"tap_dropped":0}
 ```
 
 - `login_failed` is terminal for that device: the core does not retry (devices
@@ -104,6 +113,53 @@ change.
   `closed`, `device_removed`, `login_failed`, `core_shutdown`).
 - `tile_stats` arrives about once a second per tile while it is open, for
   diagnostics overlays; apps may ignore it.
+- `audio_stats` arrives about once a second for each tile whose stream has
+  carried audio. Fields that are not known yet are left out: `codec`,
+  `sample_rate`, `channels` and `rate_estimate` until a record decodes,
+  `playout_delay_target_ms` until about 10 s of audio has been seen, the
+  playout fields (`av_offset_ms` through `blocks_not_played`) while the
+  tile is not audible, and `tap_*` while it has no tap. `av_offset_ms` is
+  the filtered error against the target (audio heard at its picture's time
+  plus `playout_delay_ms`), not the delay itself.
+
+## Audio
+
+Listening, as designed in [AUDIO.md](AUDIO.md). The core decodes,
+timestamps, and drift-corrects every tile's audio; the app only plays what
+`nv_audio_render` gives it.
+
+1. At startup and after every output device or sample-rate change, call
+   `nv_audio_set_output(core, rate, channels)` with the format the app's
+   real-time callback renders (1 or 2 interleaved channels; on macOS the
+   app renders interleaved stereo at the output device's rate).
+2. In the real-time callback, call `nv_audio_render(core, out, frames,
+   channels, host_time_ns)`, where `host_time_ns` is when `out[0]` will be
+   heard on the core's clock. During a format change the callback may
+   briefly render with the old channel count: it then gets silence and
+   `NV_ERR_INVALID_ARGUMENT`, never an overrun.
+3. `nv_tile_audio_set(core, tile, audible, volume)`: tiles start silent.
+   Audible tiles claim one of eight playout slots; silent tiles release
+   theirs; volume 0 mutes while keeping the slot and its timing. Policy
+   (such as only the focused tile audible) is the app's.
+4. `nv_tile_audio_tap(core, tile, enabled)` sends a tile's decoded audio,
+   16 kHz mono in 64 ms blocks with camera time, arrival wall-clock time,
+   epoch, and a discontinuity flag, to `on_audio_tap` (which must not be
+   NULL to enable a tap). Each tile's tap queue holds 64 blocks (about 4 s)
+   and drops the oldest for a slow consumer, counted as `tap_dropped`.
+
+**The clock.** The core's clock *is* the platform host clock in
+nanoseconds, so the app passes the time its audio API reports without any
+offset estimate: on macOS `AudioTimeStamp.mHostTime` (mach ticks) converted
+to nanoseconds (`AudioConvertHostTimeToNanos`, or the mach timebase), plus
+the output's presentation latency; on Windows WASAPI's QPC position (in
+100 ns units) times 100; on Linux the monotonic clock. `nv_clock_now_ns()`
+returns it. A private clock with an offset the app estimates was the
+alternative; two reads cannot be paired exactly, and the offset would break
+if the two clocks counted sleep differently.
+
+**Talk-back records** (stream index 1, `01wb`, the form the official client
+sends its own talk-back in) are never played: they are counted as
+`talkback_ignored` in `audio_stats`.
 
 ## Logging
 
@@ -113,7 +169,10 @@ addresses redacted. Apps keep their own logs; nothing is printed to stdout.
 
 ## Versioning
 
-`NV_ABI_VERSION` changes on any incompatible change to the header. Apps check
+`NV_ABI_VERSION` changes on any incompatible change to the header. ABI 2
+added audio: `on_audio_tap` at the end of `NvCallbacks`, `NvAudioBlock`,
+`nv_clock_now_ns`, `nv_audio_set_output`, `nv_audio_render`,
+`nv_tile_audio_set`, and `nv_tile_audio_tap`. Apps check
 `nv_abi_version()` at startup and refuse to run on a mismatch.
 
 ## Builds

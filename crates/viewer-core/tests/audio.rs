@@ -155,7 +155,7 @@ fn play(core: &Core, seconds: f64) -> Vec<f64> {
         if now + LEAD_NS < host {
             std::thread::sleep(Duration::from_nanos(host - LEAD_NS - now));
         }
-        core.render_audio(&mut buf, 2, host);
+        let _ = core.render_audio(&mut buf, 2, host);
         for (i, f) in buf.as_chunks::<2>().0.iter().enumerate() {
             if f[0].abs() > THRESHOLD && quiet > 3000 {
                 heard.push(host as f64 / 1e3 + i as f64 * 1e6 / 48_000.0);
@@ -321,7 +321,7 @@ fn audio_arguments_and_reentry() {
     assert_eq!(core.set_tile_audio_tap(99, true), Err(CoreError::UnknownId));
     // Rendering before any output is silence.
     let mut buf = vec![1.0f32; 64];
-    assert!(!core.render_audio(&mut buf, 2, 0));
+    assert_eq!(core.render_audio(&mut buf, 2, 0), Err(CoreError::Closed));
     assert!(buf.iter().all(|&s| s == 0.0));
 
     let dev = core
@@ -337,8 +337,11 @@ fn audio_arguments_and_reentry() {
         Err(CoreError::InvalidArgument)
     );
     core.set_audio_output(44_100, 1).unwrap();
-    assert!(!core.render_audio(&mut buf, 2, 0), "channel mismatch");
-    assert!(core.render_audio(&mut buf, 1, 0));
+    assert_eq!(
+        core.render_audio(&mut buf, 2, 0),
+        Err(CoreError::InvalidArgument)
+    );
+    assert_eq!(core.render_audio(&mut buf, 1, 0), Ok(()));
 
     // Calls from inside on_audio_tap are refused, not deadlocked.
     rec.try_reentry.store(true, Ordering::SeqCst);
@@ -360,6 +363,6 @@ fn audio_arguments_and_reentry() {
         Err(CoreError::UnknownId)
     );
     core.shutdown();
-    assert!(!core.render_audio(&mut buf, 1, 0), "silence after shutdown");
+    assert_eq!(core.render_audio(&mut buf, 1, 0), Err(CoreError::Closed));
     nvr.shutdown();
 }

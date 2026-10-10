@@ -23,8 +23,8 @@
 //! `audio_stats`) and dropped. Every other index is camera audio and goes
 //! to the decoder, which picks the codec from it.
 
-use crate::Callbacks;
 use crate::in_callback;
+use crate::{Callbacks, CoreError};
 use audio_pipeline::{
     AudioOutput, AudioRecord, OutputConfig, OutputFormat, TapReceiver, TapSender,
 };
@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
 
-pub use audio_pipeline::{AudioStats, Renderer, TapBlock, TileAudio, TileConfig};
+pub use audio_pipeline::{AudioStats, Renderer, TAP_RATE, TapBlock, TileAudio, TileConfig};
 
 /// Stream index of talk-back records (`01wb`), which are never played.
 pub const TALKBACK_STREAM_INDEX: u8 = 1;
@@ -137,6 +137,7 @@ pub(crate) struct RenderHandoff {
     retired: ArrayQueue<Renderer>,
     leaked: AtomicU64,
     busy: AtomicU64,
+    installed: AtomicBool,
 }
 
 impl RenderHandoff {
@@ -146,12 +147,14 @@ impl RenderHandoff {
             retired: ArrayQueue::new(4),
             leaked: AtomicU64::new(0),
             busy: AtomicU64::new(0),
+            installed: AtomicBool::new(false),
         }
     }
 
     /// Control side: installs `r` (or removes the renderer with `None`).
     fn install(&self, r: Option<Renderer>) {
         while self.retired.pop().is_some() {}
+        self.installed.store(r.is_some(), Ordering::Release);
         drop(self.current.pop());
         if let Some(r) = r {
             // Only control calls (serialized by the caller) push here; a
@@ -161,20 +164,25 @@ impl RenderHandoff {
     }
 
     /// Real-time side. Fills `out` with the mix, or with silence when there
-    /// is no output, its channel count differs, or another thread is
-    /// rendering. Returns true when it rendered.
-    fn render(&self, out: &mut [f32], channels: usize, host_time_ns: u64) -> bool {
+    /// is no output or another thread is rendering
+    /// ([`CoreError::Closed`]), or its channel count differs
+    /// ([`CoreError::InvalidArgument`]).
+    fn render(&self, out: &mut [f32], channels: usize, host_time_ns: u64) -> Result<(), CoreError> {
         let Some(mut r) = self.current.pop() else {
-            self.busy.fetch_add(1, Ordering::Relaxed);
+            if self.installed.load(Ordering::Acquire) {
+                // Another render holds it (or an install is mid-swap).
+                self.busy.fetch_add(1, Ordering::Relaxed);
+            }
             out.fill(0.0);
-            return false;
+            return Err(CoreError::Closed);
         };
-        let ok = r.format().channels == channels;
-        if ok {
+        let ok = if r.format().channels == channels {
             r.render(out, host_time_ns);
+            Ok(())
         } else {
             out.fill(0.0);
-        }
+            Err(CoreError::InvalidArgument)
+        };
         if let Err(r) = self.current.push(r)
             && let Err(r) = self.retired.push(r)
         {
@@ -238,7 +246,12 @@ impl AudioHub {
         self.bump();
     }
 
-    pub(crate) fn render(&self, out: &mut [f32], channels: usize, host_time_ns: u64) -> bool {
+    pub(crate) fn render(
+        &self,
+        out: &mut [f32],
+        channels: usize,
+        host_time_ns: u64,
+    ) -> Result<(), CoreError> {
         self.handoff.render(out, channels, host_time_ns)
     }
 
@@ -435,12 +448,16 @@ mod tests {
     fn handoff_renders_replaces_and_never_frees_on_the_render_side() {
         let h = RenderHandoff::new();
         let mut buf = vec![1.0f32; 960];
-        assert!(!h.render(&mut buf, 2, 0), "nothing installed");
+        assert_eq!(
+            h.render(&mut buf, 2, 0),
+            Err(CoreError::Closed),
+            "nothing installed"
+        );
         assert!(buf.iter().all(|&s| s == 0.0));
         h.install(Some(renderer(2)));
-        assert!(h.render(&mut buf, 2, 0));
+        assert!(h.render(&mut buf, 2, 0).is_ok());
         buf.fill(1.0);
-        assert!(!h.render(&mut buf, 1, 0), "channel mismatch is silence");
+        assert_eq!(h.render(&mut buf, 1, 0), Err(CoreError::InvalidArgument));
         assert!(buf.iter().all(|&s| s == 0.0));
 
         // An install while a render holds the renderer: the render retires
@@ -451,7 +468,7 @@ mod tests {
             h.retired.push(r).ok().unwrap();
         }
         assert_eq!(h.retired.len(), 1);
-        assert!(h.render(&mut buf[..480], 1, 0));
+        assert!(h.render(&mut buf[..480], 1, 0).is_ok());
         h.install(None);
         assert!(h.retired.is_empty() && h.current.is_empty());
         assert_eq!(h.leaked.load(Ordering::Relaxed), 0);

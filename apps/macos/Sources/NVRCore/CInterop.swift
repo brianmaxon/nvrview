@@ -120,7 +120,8 @@ public enum CCallbacks {
                 guard let context, let json, length > 0 else { return }
                 let sink = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue().sink
                 sink.core(didEmit: UnsafeRawBufferPointer(start: json, count: length))
-            })
+            },
+            on_audio_tap: nil)
         return (callbacks, context)
     }
 }

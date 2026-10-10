@@ -595,10 +595,19 @@ impl Core {
     /// audible tiles; `host_time_ns` is when `out`'s first frame will be
     /// heard, on the host clock ([`clock`]). For the app's real-time audio
     /// callback: it never blocks, takes no lock, and never allocates or
-    /// frees. Writes silence (and returns false) before an output is set,
-    /// when `channels` differs from it, or while another thread is
-    /// rendering (render from one thread at a time).
-    pub fn render_audio(&self, out: &mut [f32], channels: usize, host_time_ns: u64) -> bool {
+    /// frees.
+    ///
+    /// # Errors
+    /// Writes silence and returns [`CoreError::InvalidArgument`] when
+    /// `channels` differs from the output's (as during a format change), or
+    /// [`CoreError::Closed`] before an output is set, after shutdown, or
+    /// while another thread renders (render from one thread at a time).
+    pub fn render_audio(
+        &self,
+        out: &mut [f32],
+        channels: usize,
+        host_time_ns: u64,
+    ) -> Result<(), CoreError> {
         self.tile_ctx.audio.render(out, channels, host_time_ns)
     }
 
