@@ -2,9 +2,11 @@
 // core's grid layout (nv_grid_layout) and each picture's color matrix
 // (docs/RENDERING.md). One draw per tile: four vertices as a triangle strip
 // whose corners come from the vertex ID and the tile's constants, NV12 as
-// two views (R8 luma, R8G8 chroma). The same pass will draw into a swap
-// chain's back buffer in the app; here it draws offscreen and can read the
-// result back, which is how the self-test checks real pixels.
+// two views (R8 luma, R8G8 chroma). Render() lays tiles out as a grid and
+// draws offscreen (the headless demo reads the result back to check real
+// pixels); Draw() takes rectangles the caller computed (the app's animated
+// focus and digital zoom) and any render target, such as a swap chain's
+// buffer (SwapChainTarget).
 
 using System.Runtime.InteropServices;
 using NvrView.Interop;
@@ -34,6 +36,26 @@ public sealed class RenderedImage(int width, int height, byte[] bgra)
         int i = (y * Width + x) * 4;
         return (Bgra[i + 2], Bgra[i + 1], Bgra[i]);
     }
+}
+
+/// <summary>
+/// One tile to draw: its destination in render-target pixels and the part
+/// of its visible picture to sample, in visible-picture pixels (a smaller
+/// source than the picture is a crop or a digital zoom).
+/// </summary>
+public struct TileDraw
+{
+    /// <summary>The tile whose shown picture is drawn; null draws nothing.</summary>
+    public VideoTile? Tile;
+
+    /// <summary>Destination, render-target pixels.</summary>
+    public float DestX, DestY, DestWidth, DestHeight;
+
+    /// <summary>Source, visible-picture pixels.</summary>
+    public float SrcX, SrcY, SrcWidth, SrcHeight;
+
+    /// <summary>The caller's own reference (which of its tiles this is); not used for drawing.</summary>
+    public object? Tag;
 }
 
 /// <summary>The grid pass (see the file comment).</summary>
@@ -93,12 +115,17 @@ public sealed unsafe class GridRenderer : IDisposable
     private ID3D11RasterizerState* _rasterizer;
     private NvSize[] _sizes = new NvSize[16];
     private NvTileLayout[] _layout = new NvTileLayout[16];
+    private TileDraw[] _draws = new TileDraw[16];
     private int _count;
 
-    /// <summary>A renderer drawing <paramref name="width"/> x <paramref name="height"/> pixels.</summary>
+    /// <summary>
+    /// A renderer with an offscreen target of <paramref name="width"/> x
+    /// <paramref name="height"/> pixels for <see cref="Render"/>; 0 x 0 for
+    /// one that only draws into targets given to <see cref="Draw"/>.
+    /// </summary>
     /// <param name="gpu">The shared device.</param>
-    /// <param name="width">Render target width.</param>
-    /// <param name="height">Render target height.</param>
+    /// <param name="width">Offscreen target width (0: none).</param>
+    /// <param name="height">Offscreen target height (0: none).</param>
     /// <param name="gap">Pixels between grid cells.</param>
     /// <param name="fill">Crop to fill each cell instead of letterboxing.</param>
     public GridRenderer(GpuDevice gpu, uint width, uint height, uint gap = 4, bool fill = false)
@@ -151,13 +178,17 @@ public sealed unsafe class GridRenderer : IDisposable
         {
             throw new ArgumentException("one sequence per tile", nameof(sequences));
         }
+        if (_targetView == null)
+        {
+            throw new InvalidOperationException("this renderer has no offscreen target");
+        }
         if (_sizes.Length < tiles.Length)
         {
             _sizes = new NvSize[tiles.Length];
             _layout = new NvTileLayout[tiles.Length];
+            _draws = new TileDraw[tiles.Length];
         }
         _count = tiles.Length;
-        ID3D11DeviceContext* ctx = _gpu.Context;
         using DeviceLock held = _gpu.Lock();
         for (int i = 0; i < tiles.Length; i++)
         {
@@ -168,13 +199,51 @@ public sealed unsafe class GridRenderer : IDisposable
         {
             NvCore.GridLayout(new NvSize(Width, Height), Gap, _sizes.AsSpan(0, _count), Fill, _layout.AsSpan(0, _count));
         }
+        for (int i = 0; i < tiles.Length; i++)
+        {
+            NvTileLayout l = _layout[i];
+            _draws[i] = new TileDraw
+            {
+                Tile = _sizes[i].Width == 0 ? null : tiles[i],
+                DestX = l.Dest.X,
+                DestY = l.Dest.Y,
+                DestWidth = l.Dest.Width,
+                DestHeight = l.Dest.Height,
+                SrcX = l.Source.X,
+                SrcY = l.Source.Y,
+                SrcWidth = l.Source.Width,
+                SrcHeight = l.Source.Height,
+            };
+        }
+        Draw(_targetView, Width, Height, _draws.AsSpan(0, _count), sequences);
+    }
 
-        ID3D11RenderTargetView* rtv = _targetView;
-        ctx->OMSetRenderTargets(1, &rtv, null);
-        D3D11_VIEWPORT viewport = new() { TopLeftX = 0, TopLeftY = 0, Width = Width, Height = Height, MinDepth = 0, MaxDepth = 1 };
+    /// <summary>
+    /// Draws one frame into <paramref name="target"/> (<paramref name="width"/>
+    /// x <paramref name="height"/> pixels): clears it to black, then draws each
+    /// tile's shown picture in order (later ones on top). <paramref name="sequences"/>
+    /// (one per draw) receives the sequence number of each picture drawn, 0 for
+    /// none. Takes the device lock; allocates nothing.
+    /// </summary>
+    public void Draw(ID3D11RenderTargetView* target, uint width, uint height, ReadOnlySpan<TileDraw> draws, Span<ulong> sequences)
+    {
+        if (sequences.Length < draws.Length)
+        {
+            throw new ArgumentException("one sequence per draw", nameof(sequences));
+        }
+        ID3D11DeviceContext* ctx = _gpu.Context;
+        using DeviceLock held = _gpu.Lock();
+        ctx->OMSetRenderTargets(1, &target, null);
+        D3D11_VIEWPORT viewport = new() { TopLeftX = 0, TopLeftY = 0, Width = width, Height = height, MinDepth = 0, MaxDepth = 1 };
         ctx->RSSetViewports(1, &viewport);
-        float* black = stackalloc float[4] { 0, 0, 0, 1 };
-        ctx->ClearRenderTargetView(rtv, black);
+        // Element by element: a stackalloc initializer of floats allocates
+        // an array on the heap each time (measured).
+        float* black = stackalloc float[4];
+        black[0] = 0;
+        black[1] = 0;
+        black[2] = 0;
+        black[3] = 1;
+        ctx->ClearRenderTargetView(target, black);
         ctx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY.D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         ctx->IASetInputLayout(null);
         ctx->VSSetShader(_vs, null, 0);
@@ -187,35 +256,35 @@ public sealed unsafe class GridRenderer : IDisposable
         ctx->PSSetConstantBuffers(0, 1, &cb);
 
         ID3D11ShaderResourceView** views = stackalloc ID3D11ShaderResourceView*[2];
-        for (int i = 0; i < tiles.Length; i++)
+        for (int i = 0; i < draws.Length; i++)
         {
-            TilePicture? p = tiles[i]?.ShownPicture;
-            if (p is null || !p.HasPicture || p.LumaView == null || _sizes[i].Width == 0)
+            ref readonly TileDraw d = ref draws[i];
+            TilePicture? p = d.Tile?.ShownPicture;
+            if (p is null || !p.HasPicture || p.LumaView == null)
             {
                 sequences[i] = 0;
                 continue;
             }
             sequences[i] = p.Sequence;
-            NvTileLayout l = _layout[i];
-            if (l.Dest.Width == 0 || l.Dest.Height == 0)
+            if (d.DestWidth <= 0 || d.DestHeight <= 0 || d.SrcWidth <= 0 || d.SrcHeight <= 0)
             {
                 continue;
             }
             D3D11_MAPPED_SUBRESOURCE mapped;
             GpuDevice.Check(ctx->Map((ID3D11Resource*)cb, 0, D3D11_MAP.D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Map(constants)");
             var c = (TileConstants*)mapped.pData;
-            c->DestLeft = l.Dest.X / (float)Width * 2 - 1;
-            c->DestRight = (l.Dest.X + l.Dest.Width) / (float)Width * 2 - 1;
-            c->DestTop = 1 - l.Dest.Y / (float)Height * 2;
-            c->DestBottom = 1 - (l.Dest.Y + l.Dest.Height) / (float)Height * 2;
+            c->DestLeft = d.DestX / width * 2 - 1;
+            c->DestRight = (d.DestX + d.DestWidth) / width * 2 - 1;
+            c->DestTop = 1 - d.DestY / height * 2;
+            c->DestBottom = 1 - (d.DestY + d.DestHeight) / height * 2;
             // Source rectangles are in visible-picture pixels; the textures
             // may hold the coded picture, with the visible one inside.
             float tw = p.TextureWidth, th = p.TextureHeight;
             NvRect v = p.Visible;
-            c->SrcLeft = (v.X + l.Source.X) / tw;
-            c->SrcRight = (v.X + l.Source.X + l.Source.Width) / tw;
-            c->SrcTop = (v.Y + l.Source.Y) / th;
-            c->SrcBottom = (v.Y + l.Source.Y + l.Source.Height) / th;
+            c->SrcLeft = (v.X + d.SrcX) / tw;
+            c->SrcRight = (v.X + d.SrcX + d.SrcWidth) / tw;
+            c->SrcTop = (v.Y + d.SrcY) / th;
+            c->SrcBottom = (v.Y + d.SrcY + d.SrcHeight) / th;
             for (int k = 0; k < 12; k++)
             {
                 c->Matrix[k] = p.Color.M[k];
@@ -237,16 +306,29 @@ public sealed unsafe class GridRenderer : IDisposable
     /// <summary>Reads back the last frame (waits for the GPU). For tests; allocates.</summary>
     public RenderedImage ReadBack()
     {
-        ID3D11DeviceContext* ctx = _gpu.Context;
-        byte[] pixels = new byte[Width * Height * 4];
-        using DeviceLock held = _gpu.Lock();
-        ctx->CopyResource((ID3D11Resource*)_staging, (ID3D11Resource*)_target);
+        if (_target == null)
+        {
+            throw new InvalidOperationException("this renderer has no offscreen target");
+        }
+        return ReadTexture(_gpu, _target, _staging, Width, Height);
+    }
+
+    /// <summary>
+    /// Copies a BGRA texture into <paramref name="staging"/> (same size, CPU
+    /// readable) and reads it out. Waits for the GPU; allocates.
+    /// </summary>
+    public static RenderedImage ReadTexture(GpuDevice gpu, ID3D11Texture2D* source, ID3D11Texture2D* staging, uint width, uint height)
+    {
+        ID3D11DeviceContext* ctx = gpu.Context;
+        byte[] pixels = new byte[width * height * 4];
+        using DeviceLock held = gpu.Lock();
+        ctx->CopyResource((ID3D11Resource*)staging, (ID3D11Resource*)source);
         D3D11_MAPPED_SUBRESOURCE mapped;
-        GpuDevice.Check(ctx->Map((ID3D11Resource*)_staging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(readback)");
+        GpuDevice.Check(ctx->Map((ID3D11Resource*)staging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(readback)");
         try
         {
-            int row = (int)Width * 4;
-            for (int y = 0; y < Height; y++)
+            int row = (int)width * 4;
+            for (int y = 0; y < height; y++)
             {
                 new ReadOnlySpan<byte>((byte*)mapped.pData + y * mapped.RowPitch, row)
                     .CopyTo(pixels.AsSpan(y * row, row));
@@ -254,14 +336,23 @@ public sealed unsafe class GridRenderer : IDisposable
         }
         finally
         {
-            ctx->Unmap((ID3D11Resource*)_staging, 0);
+            ctx->Unmap((ID3D11Resource*)staging, 0);
         }
-        return new RenderedImage((int)Width, (int)Height, pixels);
+        return new RenderedImage((int)width, (int)height, pixels);
     }
 
     private void Create()
     {
         ID3D11Device* device = _gpu.Device;
+        if (Width > 0 && Height > 0)
+        {
+            CreateOffscreen(device);
+        }
+        CreatePipeline(device);
+    }
+
+    private void CreateOffscreen(ID3D11Device* device)
+    {
         D3D11_TEXTURE2D_DESC desc = new()
         {
             Width = Width,
@@ -286,7 +377,10 @@ public sealed unsafe class GridRenderer : IDisposable
         ID3D11Texture2D* staging = null;
         GpuDevice.Check(device->CreateTexture2D(&desc, null, &staging), "CreateTexture2D(staging)");
         _staging = staging;
+    }
 
+    private void CreatePipeline(ID3D11Device* device)
+    {
         using (ShaderBlob vs = Compile("vs"u8, "vs_4_0"u8))
         {
             ID3D11VertexShader* shader = null;

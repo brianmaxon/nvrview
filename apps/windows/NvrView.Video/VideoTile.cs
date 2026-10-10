@@ -60,7 +60,7 @@ public sealed class VideoTile : IDisposable
 {
     private const int MaxGenerations = 4;
 
-    private readonly GpuDevice _gpu;
+    private GpuDevice _gpu;
     private readonly NvCore _core;
     private readonly bool _allowHardware;
     private readonly Generation?[] _generations = new Generation?[MaxGenerations];
@@ -108,6 +108,15 @@ public sealed class VideoTile : IDisposable
 
     /// <summary>Why the last Configure failed, if it did.</summary>
     public string? ConfigureError { get; private set; }
+
+    /// <summary>
+    /// The codec of the last Configure when it failed because no decoder for
+    /// it is installed (H.265 without the HEVC Video Extension); null otherwise.
+    /// </summary>
+    public NvCodec? MissingDecoder { get; private set; }
+
+    /// <summary>Decoders rebuilt after a GPU device change.</summary>
+    public long Rebuilds { get; private set; }
 
     /// <summary>
     /// The picture to draw: the shown generation's. Read it only under the
@@ -177,10 +186,13 @@ public sealed class VideoTile : IDisposable
         g.Decoder?.Dispose();
         g.Decoder = new MfDecoder(_gpu, g.Picture, _allowHardware);
         int length = AnnexB.Join(c.ParameterSetSpan, ref _parameterSets);
+        g.Remember(c.Codec, _parameterSets.AsSpan(0, length), c.CodedSize);
         NvDecodeFailure? failure = g.Decoder.Configure(c.Codec, _parameterSets.AsSpan(0, length), c.CodedSize);
+        MissingDecoder = failure is not null && g.Decoder.NoDecoderInstalled ? c.Codec : null;
         if (failure is { } kind)
         {
             ConfigureError = g.Decoder.ConfigureError;
+            g.Configured = false;
             g.Decoder.Dispose();
             g.Decoder = null;
             Count(ref _counters.ConfigureFailures);
@@ -188,6 +200,8 @@ public sealed class VideoTile : IDisposable
             return;
         }
         g.LastName = g.Decoder.Name;
+        g.Configured = true;
+        ConfigureError = null;
         using (_gpu.Lock())
         {
             g.Picture.Visible = c.VisibleRect;
@@ -199,6 +213,19 @@ public sealed class VideoTile : IDisposable
     {
         long start = Stopwatch.GetTimestamp();
         Count(ref _counters.Decodes);
+        if (g.Decoder is null && g.Rebuild)
+        {
+            // The GPU device was replaced (ReplaceDevice): a new decoder on
+            // the new device from the generation's last Configure. It can
+            // start only at a keyframe; failing a non-keyframe makes the
+            // core flush and wait for one (docs/RENDERING.md, "Recovery").
+            g.Rebuild = false;
+            if (!RebuildDecoder(g) || !d.Keyframe)
+            {
+                g.Failed(NvDecodeFailure.DecodeError);
+                return;
+            }
+        }
         if (g.Decoder is null)
         {
             g.Failed(NvDecodeFailure.NotConfigured);
@@ -217,10 +244,67 @@ public sealed class VideoTile : IDisposable
         }
     }
 
+    private bool RebuildDecoder(Generation g)
+    {
+        Rebuilds++;
+        g.Decoder = new MfDecoder(_gpu, g.Picture, _allowHardware);
+        if (g.Decoder.Configure(g.SavedCodec, g.SavedSets.AsSpan(0, g.SavedSetsLength), g.SavedCoded) is not null)
+        {
+            ConfigureError = g.Decoder.ConfigureError;
+            g.Decoder.Dispose();
+            g.Decoder = null;
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Moves the tile to a new GPU device after the old one was lost. The
+    /// caller makes sure no action for this tile runs meanwhile (it holds
+    /// back the core's actions) and that nothing draws. Pictures in flight
+    /// are answered DecodeError (the core flushes and waits for a keyframe);
+    /// each generation gets an empty picture on the new device, and its
+    /// decoder is rebuilt from its last Configure at the next Decode.
+    /// </summary>
+    public void ReplaceDevice(GpuDevice gpu)
+    {
+        foreach (Generation? g in _generations)
+        {
+            if (g?.Decoder is { } decoder)
+            {
+                decoder.AbandonHeld(g, NvDecodeFailure.DecodeError);
+                decoder.Dispose();
+                g.Decoder = null;
+                g.Rebuild = g.Configured;
+            }
+        }
+        using (_gpu.Lock())
+        {
+            foreach (Generation? g in _generations)
+            {
+                g?.Picture.Dispose();
+            }
+        }
+        _gpu = gpu;
+        using (gpu.Lock())
+        {
+            foreach (Generation? g in _generations)
+            {
+                if (g is not null)
+                {
+                    var picture = new TilePicture(gpu) { Visible = g.Picture.Visible, Color = g.Picture.Color };
+                    g.Picture = picture;
+                }
+            }
+        }
+    }
+
     private void Reset(Generation g)
     {
         g.Decoder?.Dispose();
         g.Decoder = null;
+        g.Rebuild = false;
+        g.Configured = false;
         if (g != _shown)
         {
             return;
@@ -351,10 +435,31 @@ public sealed class VideoTile : IDisposable
     private sealed class Generation(VideoTile tile, uint number, TilePicture picture) : IDecodeResults
     {
         public readonly uint Number = number;
-        public readonly TilePicture Picture = picture;
+        public TilePicture Picture = picture;
         public MfDecoder? Decoder;
         public string? LastName;
         public DecoderKind LastKind;
+
+        // The last Configure, to rebuild the decoder on a new device.
+        public bool Configured;
+        public bool Rebuild;
+        public NvCodec SavedCodec;
+        public byte[] SavedSets = [];
+        public int SavedSetsLength;
+        public NvSize SavedCoded;
+
+        public void Remember(NvCodec codec, ReadOnlySpan<byte> sets, NvSize coded)
+        {
+            SavedCodec = codec;
+            if (SavedSets.Length < sets.Length)
+            {
+                SavedSets = new byte[sets.Length];
+            }
+            sets.CopyTo(SavedSets);
+            SavedSetsLength = sets.Length;
+            SavedCoded = coded;
+            Rebuild = false;
+        }
 
         public void Decoded(long ptsUs)
         {

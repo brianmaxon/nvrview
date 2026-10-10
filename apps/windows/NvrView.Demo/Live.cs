@@ -21,7 +21,8 @@ internal static class Live
             "--channels", o.Channels.ToString(CultureInfo.InvariantCulture), "--fixture", o.Fixture!, "--fps", fps);
         using GpuDevice gpu = GpuDevice.Create(o.Gpu);
         Console.WriteLine($"device: {gpu.Describe()}");
-        Console.WriteLine($"stream: {Path.GetFileName(o.Fixture)} at {fps} fps, {o.Channels} tiles, {o.Tier} tier, render {o.Width}x{o.Height} at 30 fps");
+        Console.WriteLine($"stream: {Path.GetFileName(o.Fixture)} at {fps} fps, {o.Channels} tiles, {o.Tier} tier, render {o.Width}x{o.Height} at 30 fps, " +
+            $"decoder samples {DecoderSettings.OutputSamples}, limit coded size {DecoderSettings.LimitCodedSize}");
         using var session = new Session(gpu, o.Width, o.Height, !o.Software, Program.Password);
         ulong device = session.AddDevice(mock.Host, mock.Port);
         for (int ch = 0; ch < o.Channels; ch++)
