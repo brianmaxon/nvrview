@@ -21,10 +21,16 @@
 //   has CoreHost replace the device once (other windows' render threads see
 //   the new device and rebuild their own swap chains), and starts again; the
 //   UI thread attaches the new swap chain to the panel.
+// - Fisheye: a tile in a dewarped view (StageTile.Fisheye) fills its whole
+//   cell and is drawn through the dewarp shader with constants computed
+//   here when its view, circle or size changes (docs/RENDERING.md "Fisheye
+//   dewarping"); until its camera's circle is found, this thread hands a
+//   copy of the luma plane to FisheyeCircles a few times.
 
 using System.Diagnostics;
 using NvrView.Interop;
 using NvrView.Shell;
+using NvrView.Tiles;
 using NvrView.Video;
 using static TerraFX.Interop.DirectX.DXGI;
 
@@ -147,6 +153,12 @@ internal sealed unsafe class StageRenderer : IDisposable
         get => Volatile.Read(ref _focus);
         set => Volatile.Write(ref _focus, value);
     }
+
+    /// <summary>Tiles drawn through the dewarp shader by the current renderer (self-test).</summary>
+    public long DewarpDraws => _renderer?.DewarpDraws ?? 0;
+
+    /// <summary>Where fisheye cameras' circles are kept (set once by the UI thread).</summary>
+    public FisheyeCircles? Circles { get; set; }
 
     /// <summary>The tiles and cells to draw (set by the UI thread).</summary>
     public StageLayout Layout
@@ -413,15 +425,61 @@ internal sealed unsafe class StageRenderer : IDisposable
             t.PictureHeight = ph;
             Rect c = cells[k];
             var cell = new Rect(c.X * kx, c.Y * ky, c.Width * kx, c.Height * ky);
-            Rect dest = LayoutGeometry.Fit(pw, ph, cell);
+            // A dewarped view fills its whole cell (the views are laid out for its shape).
+            FisheyeChoice? fisheye = pw > 0 && t.Fisheye is { } f && f.Mode.Dewarps() ? f : null;
+            Rect dest = fisheye is null ? LayoutGeometry.Fit(pw, ph, cell) : cell;
             if (k == focused)
             {
-                dest = Rect.Lerp(dest, LayoutGeometry.Fit(pw, ph, new Rect(0, 0, dipW, dipH)), progress);
+                Rect stage = new(0, 0, dipW, dipH);
+                dest = Rect.Lerp(dest, fisheye is null ? LayoutGeometry.Fit(pw, ph, stage) : stage, progress);
             }
             bool hidden = focused >= 0 && k != focused && progress >= 1;
             Draw(ref _draws[n], t, dest, pw, ph, hidden, bx, by);
+            _draws[n].Dewarp = false;
+            if (fisheye is not null && !hidden)
+            {
+                Dewarp(ref _draws[n], t, fisheye, p!, pw, ph, now);
+            }
             n++;
         }
+    }
+
+    // The tile's dewarp constants, recomputed only when what they depend on
+    // changes; and a try at finding the camera's circle while it is unknown.
+    private void Dewarp(ref TileDraw d, StageTile t, FisheyeChoice fisheye, TilePicture p, int pw, int ph, long now)
+    {
+        CameraRef camera = t.Camera;
+        FisheyeCircles? circles = Circles;
+        FisheyeCircle? found = circles?.Circle(camera);
+        if (found is null && circles is not null)
+        {
+            double seconds = now / (double)Stopwatch.Frequency;
+            if (circles.TryBegin(camera, seconds))
+            {
+                byte[]? luma = null;
+                int w = 0, h = 0;
+                try
+                {
+                    luma = p.ReadLuma(out w, out h);
+                }
+                catch (VideoException e)
+                {
+                    AppLog.Limited("fisheye-read", 3, $"fisheye: reading the picture failed: {e.Message}");
+                }
+                circles.Measure(camera, luma, w, h, seconds);
+            }
+        }
+        FisheyeCircle circle = found ?? FisheyeCircle.Inscribed(pw, ph);
+        int dw = (int)Math.Round(d.DestWidth), dh = (int)Math.Round(d.DestHeight);
+        var key = (fisheye, circle, dw, dh, pw, ph);
+        if (t.DewarpKey is not ValueTuple<FisheyeChoice, FisheyeCircle, int, int, int, int> old || !old.Equals(key))
+        {
+            var lens = new FisheyeLens(circle, pw / (double)Math.Max(ph, 1));
+            t.DewarpRows = FisheyeDewarp.Of(lens, fisheye.Mount, fisheye.Mode, fisheye.Aim, Math.Max(dw, 1), Math.Max(dh, 1)).Constants();
+            t.DewarpKey = key;
+        }
+        d.Dewarp = true;
+        d.DewarpRows = t.DewarpRows;
     }
 
     private static void Draw(ref TileDraw d, StageTile t, Rect dest, int pw, int ph, bool hidden, float bx, float by)
