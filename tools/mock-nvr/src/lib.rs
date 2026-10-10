@@ -18,11 +18,16 @@
 //!   was sent, with a configurable audio clock skew and arrival jitter
 //!   ([`audio`]).
 //!
+//! - optionally, a recorded stream instead (`NVRREC01`): the records are sent
+//!   as recorded, at their recorded times, optionally accelerated or looped
+//!   ([`replay`]).
+//!
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
 pub mod audio;
 pub mod fixture;
+pub mod replay;
 
 use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
@@ -32,6 +37,7 @@ use bc_protocol::media::{encode_audio, encode_info, encode_video};
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, XML_DECLARATION};
 use fixture::Fixture;
+use replay::{ReplayConfig, Step};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -73,6 +79,9 @@ pub struct Config {
     pub fixture: Arc<Fixture>,
     /// Interleaved audio, if any.
     pub audio: Option<Arc<AudioConfig>>,
+    /// If set, every preview serves this recording instead of the fixture
+    /// (and `audio`): see [`replay`].
+    pub replay: Option<ReplayConfig>,
 }
 
 impl Config {
@@ -91,6 +100,7 @@ impl Config {
             height: 240,
             fixture: Arc::new(fixture),
             audio: None,
+            replay: None,
         }
     }
 }
@@ -455,7 +465,12 @@ impl Conn {
         let cfg = &self.shared.config;
         // 0 = H.264 and 1 = H.265 is unconfirmed (docs/protocol.md); clients
         // must take the codec from the media records.
-        let enc_type = match cfg.fixture.codec() {
+        let codec = cfg
+            .replay
+            .as_ref()
+            .and_then(|r| r.replay.codec())
+            .unwrap_or_else(|| cfg.fixture.codec());
+        let enc_type = match codec {
             bc_protocol::media::Codec::H264 => 0,
             bc_protocol::media::Codec::H265 => 1,
         };
@@ -564,6 +579,9 @@ fn stream_media(
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let cfg = &shared.config;
+    if let Some(r) = &cfg.replay {
+        return stream_replay(shared, writer, key, id, stop, r);
+    }
     let fix = &cfg.fixture;
     let fps = cfg.fps.max(1);
     let audio = cfg.audio.as_deref();
@@ -615,6 +633,44 @@ fn stream_media(
             }
             thread::sleep(left.min(POLL));
         }
+    }
+    Ok(())
+}
+
+/// Sends a recording: each record in a message of its own (chunked like any
+/// other), at its recorded time divided by the speed, until stopped, the
+/// recording ends (unless looping), or the connection fails.
+fn stream_replay(
+    shared: &Shared,
+    writer: &Writer,
+    key: &SessionKey,
+    id: u32,
+    stop: &AtomicBool,
+    r: &ReplayConfig,
+) -> io::Result<()> {
+    let speed = if r.speed.is_finite() && r.speed > 0.0 {
+        r.speed
+    } else {
+        1.0
+    };
+    let start = Instant::now();
+    let mut out = Vec::new();
+    for (at_us, step) in r.replay.playback(r.looped) {
+        let Step::Record(record) = step else { continue };
+        let due = start + Duration::from_secs_f64(at_us as f64 / speed / 1e6);
+        while let Some(left) = due.checked_duration_since(Instant::now()) {
+            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            thread::sleep(left.min(POLL));
+        }
+        out.clear();
+        media_message(key, id, &record, &mut out)?;
+        let mut w = lock(writer);
+        if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        w.write_all(&out)?;
     }
     Ok(())
 }
