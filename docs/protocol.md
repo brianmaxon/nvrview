@@ -45,14 +45,19 @@ bytes followed by the payload. When zero, the whole body is the payload.
 
 ## Login
 
-1. Client sends command 1, empty body, class `0x1465`. (observed)
+1. Client sends command 1, empty body, class `0x1465`, message ID 0, status
+   `0xdc12` (bytes `12 dc`). (observed)
 2. Device replies (class `0x1466`) with
    `<Encryption><type>md5</type><nonce>…</nonce></Encryption>`, obfuscated
    with the fixed XOR scheme below. (observed)
-3. Client sends command 1 with a `<LoginUser>` body (salted hashes of user name
-   and password, `<userVer>1</userVer>`) and `<LoginNet><type>LAN</type>`,
-   XOR-obfuscated. (observed)
-4. Device replies status 200 on success. On failure, status 401, sometimes with
+3. Client sends command 1, class `0x1464` (24-byte header, payload offset 0),
+   message ID 0, status 0, with a `<LoginUser version="1.1">` body (salted
+   hashes of user name and password, `<userVer>1</userVer>`) and
+   `<LoginNet version="1.1"><type>LAN</type><udpPort>0</udpPort></LoginNet>`,
+   XOR-obfuscated with message ID 0. (observed)
+4. Every later client message has status 0; message IDs start at 1 after login
+   and increase. (observed)
+5. Device replies status 200 on success. On failure, status 401, sometimes with
    `<LoginErrInfo><remainTimes>N</remainTimes>`: devices count failed
    attempts and lock out after too many. (observed)
 
@@ -115,10 +120,10 @@ little-endian magic that reads as ASCII:
 
 | Magic (ASCII) | Record | Layout | Provenance |
 | --- | --- | --- | --- |
-| `1001`, `1002` | stream info | `+4` u32 header size (skip this many bytes); `+8` u32 width; `+12` u32 height; `+17` u8 frame rate. Width and height can be 0 (seen on second-lens streams); take dimensions from the SPS instead. | observed |
-| `00dc`–`09dc` | keyframe | 24-byte header: `+4` codec (`H264` or `H265`), `+8` u32 payload size, `+12` u32 extra-header size, `+16` u64 timestamp (µs); payload (Annex-B NAL units) follows the extra header; padded to 8. | observed |
+| `1001`, `1002` | stream info | `+4` u32 record size, counted from the record start; `+8` u32 width; `+12` u32 height; `+17` u8 frame rate. Width and height can be 0 (seen on second-lens streams); take dimensions from the SPS instead. | observed |
+| `00dc`–`09dc` | keyframe | 24-byte header: `+4` codec (`H264` or `H265`), `+8` u32 payload size, `+12` u32 extra-header size (always a multiple of 8, 0–184 seen), `+16` u64 timestamp (µs); payload (Annex-B NAL units) follows the extra header; padded to 8. | observed |
 | `10dc`–`19dc` | predicted frame | as keyframe | observed |
-| `..wb` (`05wb`, `15wb`, …) | audio | `+4` u16 payload size; payload follows an 8-byte header; padded to 8; no timestamp. | observed |
+| `..wb` (`05wb`, `15wb`, …) | audio | `+4` u16 payload size, repeated at `+6`; payload follows the 8-byte header; padded to 8; no timestamp. | observed |
 
 The first two characters are a stream index, not a codec; any `..wb` record is
 audio and any `..dc` record is video. (observed)
