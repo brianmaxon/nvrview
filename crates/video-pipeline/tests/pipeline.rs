@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use video_pipeline::{
-    AccessUnit, Codec, DecodeFailure, ParameterSets, PipelineConfig, Rect, Size, TileStatus,
+    AccessUnit, Codec, DecodeFailureKind, ParameterSets, PipelineConfig, Rect, Size, TileStatus,
     VideoFormat,
 };
 
@@ -150,7 +150,7 @@ fn intermittent_failures_flush_without_resets() {
         // Every 7th submitted picture fails.
         let mut h = Harness::new(PipelineConfig::default()).with_decoder(|_, n| {
             if n % 7 == 6 {
-                Answer::Fail(DecodeFailure::Corrupt)
+                Answer::Fail(DecodeFailureKind::DecodeError)
             } else {
                 Answer::Ok
             }
@@ -172,7 +172,8 @@ fn persistent_failures_escalate_boundedly_then_give_up() {
     for (_, codec) in CODECS {
         let (_, aus) = load(&name("basic", codec));
         let config = PipelineConfig::default();
-        let mut h = Harness::new(config).with_decoder(|_, _| Answer::Fail(DecodeFailure::Corrupt));
+        let mut h =
+            Harness::new(config).with_decoder(|_, _| Answer::Fail(DecodeFailureKind::DecodeError));
         // Ten simulated minutes of the same stream.
         let rounds = 10 * 60 * 20 / 60;
         for round in 0..rounds as u64 {
@@ -208,7 +209,7 @@ fn persistent_failures_escalate_boundedly_then_give_up() {
         // A thousand more failure reports with nothing in flight are ignored.
         let actions_before = h.events.len();
         for _ in 0..1000 {
-            h.p.decode_failed(DecodeFailure::Corrupt);
+            h.p.decode_failed(DecodeFailureKind::DecodeError);
             h.drain();
         }
         assert_eq!(h.events.len(), actions_before);
@@ -220,33 +221,6 @@ fn persistent_failures_escalate_boundedly_then_give_up() {
         feed_all(&mut h, codec, &resize[40..], 1_000_000_000_000);
         assert_eq!(h.p.status(), TileStatus::Playing);
         assert_eq!(h.p.stats().decoded, 40);
-    }
-}
-
-#[test]
-fn every_failure_kind_is_bounded() {
-    for kind in [
-        DecodeFailure::Corrupt,
-        DecodeFailure::DecoderLost,
-        DecodeFailure::Unsupported,
-    ] {
-        let (_, aus) = load("h264-basic.h264");
-        let config = PipelineConfig::default();
-        let mut h = Harness::new(config).with_decoder(move |_, _| Answer::Fail(kind));
-        for round in 0..200u64 {
-            feed_all(&mut h, Codec::H264, &aus, round * 60 * FRAME_US);
-        }
-        let s = h.p.stats();
-        assert!(
-            s.resets <= u64::from(config.max_resets_per_window),
-            "{kind:?}"
-        );
-        assert!(s.configures <= 1 + u64::from(config.max_resets_per_window));
-        assert_eq!(h.p.status(), TileStatus::Undecodable);
-        if kind == DecodeFailure::Unsupported {
-            assert_eq!(s.failures, 1);
-            assert_eq!(s.resets, 0);
-        }
     }
 }
 
@@ -489,4 +463,129 @@ fn keyframe_flag_disagreement_is_counted_not_trusted() {
     let s = h.p.stats();
     assert_eq!(s.gated, 19);
     assert!(s.keyframe_flag_mismatches >= 19);
+}
+
+#[test]
+fn failed_configure_is_bounded_and_never_decodes() {
+    for (kind, resets) in [
+        (DecodeFailureKind::SessionCreateFailed, 3),
+        (DecodeFailureKind::InvalidParameterSets, 0),
+    ] {
+        let (_, aus) = load("h265-basic.h265");
+        let config = PipelineConfig::default();
+        let mut h = Harness::new(config);
+        h.configure = Box::new(move |_| Some(kind));
+        for round in 0..100u64 {
+            feed_all(&mut h, Codec::H265, &aus, round * 60 * FRAME_US);
+        }
+        let s = h.p.stats();
+        assert_eq!(s.resets, resets, "{kind:?}");
+        assert_eq!(s.configures, 1 + resets);
+        assert_eq!(s.decoded, 0);
+        assert_eq!(h.count(|e| matches!(e, Event::Decode { .. })), 0);
+        assert_eq!(h.p.status(), TileStatus::Undecodable);
+
+        // Rejected parameter sets wait for new ones; then it plays.
+        h.configure = Box::new(|_| None);
+        let (_, resize) = load("h265-resize.h265");
+        feed_all(&mut h, Codec::H265, &resize[40..], 1_000_000_000_000);
+        assert_eq!(h.p.stats().decoded, 40, "{kind:?}");
+    }
+}
+
+#[test]
+fn configure_recovers_after_a_transient_session_failure() {
+    let (_, aus) = load("h264-basic.h264");
+    let mut h = Harness::new(PipelineConfig::default());
+    h.configure = Box::new(|n| (n == 0).then_some(DecodeFailureKind::SessionCreateFailed));
+    feed_all(&mut h, Codec::H264, &aus, 0);
+    let s = h.p.stats();
+    assert_eq!(s.resets, 1);
+    assert_eq!(s.configures, 2);
+    // The first keyframe was lost to the failure and the 1 s cooldown; the
+    // keyframe at 1 s (frame 20) plays.
+    assert_eq!(s.decoded, 40);
+    assert_eq!(h.p.status(), TileStatus::Playing);
+}
+
+#[test]
+fn pictures_discarded_by_reconfigure_do_not_stall() {
+    for (_, codec) in CODECS {
+        let (_, aus) = load(&name("resize", codec));
+        let config = PipelineConfig {
+            max_in_flight: 8,
+            ..PipelineConfig::default()
+        };
+        // Frames 37..40 never get a result: still in flight when the format
+        // changes at frame 40, then discarded by Reset + Configure.
+        let mut h = Harness::new(config).with_decoder(|pts, _| {
+            if (37..40).contains(&(pts / FRAME_US)) {
+                Answer::Silent
+            } else {
+                Answer::Ok
+            }
+        });
+        feed_all(&mut h, codec, &aus, 0);
+        h.advance(2 * config.stall_timeout_us);
+        let s = h.p.stats();
+        assert_eq!(s.stalls, 0);
+        assert_eq!(s.failures, 0);
+        assert_eq!(s.decoded, 77);
+        assert_eq!(s.format_changes, 1);
+    }
+}
+
+#[test]
+fn no_picture_results_are_tolerated_then_bounded() {
+    let (_, aus) = load("h264-basic.h264");
+    let config = PipelineConfig::default();
+    // Occasional dropped pictures: no flush, no failure.
+    let mut h = Harness::new(config).with_decoder(|_, n| {
+        if n % 5 == 0 {
+            Answer::Fail(DecodeFailureKind::NoPicture)
+        } else {
+            Answer::Ok
+        }
+    });
+    feed_all(&mut h, Codec::H264, &aus, 0);
+    let s = h.p.stats();
+    assert_eq!(s.no_pictures, 12);
+    assert_eq!(s.failures + s.flushes, 0);
+
+    // Nothing but dropped pictures: eventually a failure, and bounded.
+    let mut h =
+        Harness::new(config).with_decoder(|_, _| Answer::Fail(DecodeFailureKind::NoPicture));
+    for round in 0..100u64 {
+        feed_all(&mut h, Codec::H264, &aus, round * 60 * FRAME_US);
+    }
+    let s = h.p.stats();
+    assert!(s.failures > 0);
+    assert!(s.resets <= u64::from(config.max_resets_per_window));
+    assert_eq!(h.p.status(), TileStatus::Undecodable);
+}
+
+#[test]
+fn every_platform_failure_kind_is_bounded() {
+    use DecodeFailureKind::*;
+    for kind in [
+        NotConfigured,
+        InvalidAccessUnit,
+        SubmitFailed,
+        DecodeError,
+        NoPicture,
+    ] {
+        let (_, aus) = load("h264-basic.h264");
+        let config = PipelineConfig::default();
+        let mut h = Harness::new(config).with_decoder(move |_, _| Answer::Fail(kind));
+        for round in 0..200u64 {
+            feed_all(&mut h, Codec::H264, &aus, round * 60 * FRAME_US);
+        }
+        let s = h.p.stats();
+        assert!(
+            s.resets <= u64::from(config.max_resets_per_window),
+            "{kind:?}"
+        );
+        assert!(s.configures <= 1 + u64::from(config.max_resets_per_window));
+        assert_eq!(h.p.status(), TileStatus::Undecodable, "{kind:?}");
+    }
 }

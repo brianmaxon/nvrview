@@ -36,6 +36,6 @@ pub use nal::{
     AccessUnitInfo, Codec, NalUnits, ParameterSetKind, RandomAccess, analyze, nal_units,
 };
 pub use pipeline::{
-    AccessUnit, Action, ActionKind, DecodeFailure, PipelineConfig, TilePipeline, TileStats,
+    AccessUnit, Action, ActionKind, DecodeFailureKind, PipelineConfig, TilePipeline, TileStats,
     TileStatus,
 };

@@ -5,8 +5,8 @@ mod common;
 
 use common::*;
 use video_pipeline::{
-    AccessUnit, Codec, DecodeFailure, ParameterSets, PipelineConfig, VideoFormat, analyze, h264,
-    h265, nal_units,
+    AccessUnit, Codec, DecodeFailureKind, ParameterSets, PipelineConfig, VideoFormat, analyze,
+    h264, h265, nal_units,
 };
 
 struct Rng(u64);
@@ -110,12 +110,24 @@ fn random_inputs_never_break_the_protocol() {
         };
         let mut h = Harness::new(config);
         let mut answers = Rng(seed);
-        h.decide = Box::new(move |_, _| match answers.below(10) {
-            0 => Answer::Fail(DecodeFailure::Corrupt),
-            1 if answers.below(20) == 0 => Answer::Fail(DecodeFailure::DecoderLost),
-            2 if answers.below(50) == 0 => Answer::Fail(DecodeFailure::Unsupported),
-            3 => Answer::Silent,
-            _ => Answer::Ok,
+        h.decide = Box::new(move |_, _| {
+            use DecodeFailureKind::*;
+            match answers.below(12) {
+                0 => Answer::Fail(DecodeError),
+                1 => Answer::Fail(NoPicture),
+                2 if answers.below(10) == 0 => Answer::Fail(SubmitFailed),
+                3 if answers.below(10) == 0 => Answer::Fail(InvalidAccessUnit),
+                4 if answers.below(20) == 0 => Answer::Fail(NotConfigured),
+                5 => Answer::Silent,
+                _ => Answer::Ok,
+            }
+        });
+        h.strict_in_flight = false;
+        let mut configure_answers = Rng(seed ^ 0x5555);
+        h.configure = Box::new(move |_| match configure_answers.below(30) {
+            0 => Some(DecodeFailureKind::SessionCreateFailed),
+            1 => Some(DecodeFailureKind::InvalidParameterSets),
+            _ => None,
         });
         for _ in 0..4000 {
             match rng.below(20) {
@@ -130,11 +142,17 @@ fn random_inputs_never_break_the_protocol() {
                     h.drain();
                 }
                 15 => {
+                    // Spurious reports of every kind at random times.
+                    use DecodeFailureKind::*;
                     let kind = [
-                        DecodeFailure::Corrupt,
-                        DecodeFailure::DecoderLost,
-                        DecodeFailure::Unsupported,
-                    ][rng.below(3) as usize];
+                        InvalidParameterSets,
+                        SessionCreateFailed,
+                        NotConfigured,
+                        InvalidAccessUnit,
+                        SubmitFailed,
+                        DecodeError,
+                        NoPicture,
+                    ][rng.below(7) as usize];
                     h.p.decode_failed(kind);
                     h.drain();
                 }

@@ -27,13 +27,13 @@ Inputs:
   decoder, possibly late and from another thread (the caller serializes them).
   A `Configure` that fails is reported as `decode_failed` too. Pictures still
   in flight when `Flush`, `Reset`, or `Configure` runs are discarded with no
-  result, so not every `Decode` gets one.
+  result, so not every `Decode` gets one; every other `Decode` gets exactly
+  one, including pictures the decoder drops (`noPicture`). The failure kinds
+  are shared: `invalidParameterSets` and `sessionCreateFailed` answer a
+  `Configure`; `notConfigured`, `invalidAccessUnit`, `submitFailed`,
+  `decodeError`, and `noPicture` answer the oldest `Decode` in flight.
 - `tick(now)`: drives time-based policy (recovery cooldowns, stall detection).
 - `discontinuity()`: the stream restarted (reconnect); flush and gate.
-
-Every `Decode` must be answered by exactly one `decoded(pts)` or
-`decode_failed(kind)`, including pictures the decoder drops; an unanswered
-picture counts against the in-flight limit until it times out as a stall.
 
 Actions, drained in order with `next_action()`:
 
