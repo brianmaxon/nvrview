@@ -369,6 +369,18 @@ a third of one core out of 14, and no GPU.
 
 ## Open questions
 
+- **Several frames instead of one.** Live video gives what stills cannot:
+  run RT-DETR on consecutive sampled frames (for example 2–4 fps for a few
+  seconds after motion) and decide per event, not per picture. Expected
+  gains: precision, by requiring the class in k of n frames with boxes that
+  agree (IoU tracking), which drops one-frame flukes such as foliage "birds"
+  and glare; recall, since a small or half-hidden figure missed in one frame
+  is often found in the next; and moving versus parked, from box motion
+  across frames, feeding the static-scene memory. To measure on recorded
+  clips around events (labels from device AI pushes, checked by eye): event
+  recall and false events per hour for k-of-n rules (1 of 1, 2 of 3, 3 of 5),
+  with and without tiles, and the time to first detection; then pick the
+  default that may make the optional verifier unnecessary.
 - **Recall on video.** Picture-level recall on stills is measured above, for
   Vision, RT-DETR, and three vision-language models. Event-level recall
   needs recordings with real events. The cheapest ground truth
