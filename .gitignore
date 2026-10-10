@@ -24,6 +24,7 @@ apps/windows/**/obj/
 
 # Swift package
 apps/macos/.build/
+tools/vision-lab/.build/
 
 # Agent worktrees
 /.worktrees/
