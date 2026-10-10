@@ -280,12 +280,82 @@ Reply details:
 | `ChannelInfoList` (145) is pushed with message ID 0 and lists every channel slot. Each `ChannelInfo` has `channelId`, `state` (`connect` for a slot with a camera, `none` for an empty one), `changed`, `uid`, `streamSupport` (a comma-separated tier list such as `mainStream,subStream,externStream`), `abilityChanged`, `wifiState`. It has no channel name; names come from 318. | observed |
 
 Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
-192, 299, 511, 527–551, 574 (configuration and capability queries), and 14–16,
-142, 272–274 (recording search; see "Recordings: search and download").
-Pushed by the device with message ID 0 or 4 and not needed for live view: 33
-(alarm states), 291, 600, 623, 677, 723, 727. Each time the device pushed
-145, the official client read 151, 146, 199, and the per-channel 44, 10, 318
-and 299 again. (observed)
+299, 511, 527–551, 574 (configuration and capability queries), 192 (event
+subscription; see "Detection events"), and 14–16, 142, 272–274 (recording
+search; see "Recordings: search and download"). Pushed by the device and not
+needed for live view: 33 and 600 (detection events, with the message ID of
+the 192 request), and 291, 623, 677, 723, 727 (message ID 0). Each time the
+device pushed 145, the official client read 151, 146, 199, and the per-channel
+44, 10, 318 and 299 again. (observed)
+
+## Detection events
+
+How a logged-in client learns, live, that a camera saw motion or a person,
+vehicle, animal, and so on. Everything here is read-only: it subscribes this
+session to pushes and changes no settings. Viewing tier. Observed in both
+client captures (each with two NVRs of different firmware families; about
+2.5 and 4 minutes of live view, playback and camera control); type names
+and capability bits not seen there are reported (client).
+
+### Subscribing: command 192
+
+| Fact | Provenance |
+| --- | --- |
+| Right after login, on every NVR session, the client sends **192** (start alarm report) with an empty body and gets an empty status-200 reply. It carried message ID 4 on every session in both captures. | observed |
+| The device's event pushes (33, and 600 below) then carry **the 192 request's message ID**, not 0. Other status pushes (291 floodlight, 623 sleep, 677 I/O, 723, 727) carry message ID 0. | observed |
+| The first 33 arrived 40–250 ms after the 192 reply: a full snapshot of every channel's state. | observed |
+| 193 (stop alarm report) exists but was never sent; the client simply logs out. Whether a device pushes 33 to a session that never sent 192 is unknown. | observed (not sent); open |
+
+nvrview sends 192 once per session after login (viewing tier: it only asks
+for pushes on our own session) and keys the pushes by command number, not by
+message ID.
+
+### Event state: command 33
+
+```xml
+<AlarmEventList version="1.1">
+  <AlarmEvent version="1.1">
+    <channelId>N</channelId>
+    <status>MD</status>
+    <AItype>people</AItype>
+    <recording>0</recording>
+    <timeStamp>0</timeStamp>
+  </AlarmEvent>
+  <!-- one AlarmEvent per channel slot -->
+  <range><start>0</start><end>…</end></range>
+</AlarmEventList>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| 33 is a **state snapshot, not an event**: every push lists every channel slot of the NVR, idle ones included (`status` `none`, `AItype` `none`). A start is a channel's values leaving `none`; a stop is them returning to `none` in a later push. | observed |
+| Pushes come only on change: of about 90 pushes, all but one differed from the previous push on that session. Gaps ranged from 0.2 s to about 60 s; no periodic refresh was seen. | observed |
+| A multi-lens camera has one entry per lens, told apart by `subChannel` (0, 1). The newer-firmware NVR also sends `subChannel` and a trailing `range` (`start`, `end`: the slot range this push covers); the older one sent neither. | observed |
+| `status` values seen: `none`, `MD`. `AItype` values seen: `none`, `people`, `dog_cat`. | observed |
+| `AItype` is independent of `status`: one channel's pushes during a `people` detection went `MD`/`none`, `MD`/`people`, `MD`/`none`, `MD`/`people`, …, `none`/`people`, `none`/`none`; a `dog_cat` detection showed as `none`/`dog_cat` with no `MD` at all. So a detection's span is the span of its `AItype`, not of `MD`. | observed |
+| `timeStamp` was always 0 and `recording` always 0 on both NVRs, so event times must be taken from the arrival time. | observed |
+| The client matches `status` and `AItype` by case-insensitive substring, so a value may hold several names (comma lists of the form `IO,MD` appear among its constants). `status` names: `MD`, `videoLoss`, `blind`, `IOAlarm`, `visitor` (doorbell press), `package`, `answer`, `tamper`, `lmsg` (left message). `AItype` names: `people`, `vehicle`, `face`, `dog_cat`, `package`, `cry`. An optional `smartAiTypeList` of `smartAiType`/`type` carries `crossline`, `intrusion`, `loitering`, `legacy` (left object), `loss` (missing object). | reported (client) |
+| 600 (`yoloWorldEventList`, with `range`) also arrives with the 192 message ID, on connect and about 1 s before each channel-list push (145); entries (`channel`, `subChannel`, `YoloWorldType`/`type`) belong to the user-defined object detection the client calls "YOLO world". Only empty lists were seen. | observed (empty); fields reported (client) |
+| Bounding boxes are not in 33. Live detection boxes travel inside the video stream: the extension data after the first 8 bytes of a video record's extra header (see "Records as the official client reads them") is parsed as tag-length-value detection data, possibly LZ4-compressed. Its layout has not been traced. | reported (client) |
+
+### Which channels detect what
+
+| Fact | Provenance |
+| --- | --- |
+| `Support` (199) gives each channel `item` an integer `aitype`, which the client reads as a bitmask: bit 0 AI present, 1 people, 2 vehicle, 3 face, 4 dog/cat, 6 other, 17 package, 22 baby cry, 23 user-defined (YOLO world) objects. Other bits are configuration features (5 detection area, 7 AI tracking, 8 stay time, 9 sensitivity, 10 target size, 24 always-on video, 25 tamper alarm). | reported (client); the copy from `aitype` to the client's bitfield was not traced, medium confidence |
+| The bitmask fits the captures: `AiCfg` (299) listed `dog_cat` in `detectType` on exactly the channels with bit 4, and left out `vehicle` on a channel without bit 2. Channels with `aitype` 7 (AI, people, vehicle) produced `people` events. | observed |
+| A separate per-channel `aiAnimalType` (0 or 1) marks support for the wildlife subtypes below. Other per-channel fields seen: `smartAI`, `eventTypeVersion`, `thumbnail`. | observed (fields); meaning of `aiAnimalType` reported (client) |
+| `AiCfg` (299, read per channel at login) has `detectType` (comma list such as `people,vehicle,dog_cat`) and AI tracking settings. Read-only use is viewing tier; 300 writes it (configuration, never sent). | observed |
+| `AbilityInfo` (151) has no AI-specific entries; its `alarm` module holds only permissions such as `motion_rw`. | observed |
+
+### Animal type names
+
+| Name | Where | Provenance |
+| --- | --- | --- |
+| `dog_cat` | 33 `AItype`, 299 `detectType`, and the 272 search request | observed |
+| `dog_cat`, also `dog`, `cat` | recognized in recording-file `recordType` and event-search types | reported (client) |
+| `dogCat`, `animal`, `pet` | the client's own JSON and UI names (`petCount` in 519) | reported (client); not wire names |
+| `other`, `buck`, `bear`, `boar`, `fox`, `female_deer`, `raccoon`, `turkey`, `wolf` | wildlife subtypes: `animalTypes` in the paged search 492, `animalType` in its results, `detectedAnimalTypes` in a recording file's `FileInfo` | reported (client) |
 
 ## Camera motion control
 
@@ -559,9 +629,63 @@ ordinary (encrypted) body with no extension. (observed)
 | Each `alarmVideo` has `fileName`, `bHasRecFile`, `bEncrypted`, `alarmType` (`md`, `vehicle`, `people` seen), `fileId` (the `Id` of the recording file from command 15 that contains the event), `startTime`, `endTime`. Events were about 10 to 25 s long. | observed |
 | Command 274 with `channelId` and `fileHandle` closes the search; empty reply, status 200. | observed |
 | The client also knows `destination` in the 272 request and `bDeleted` and `score` in `alarmVideo`. | reported (client) |
+| The full `alarmType` list the client sent was `md, pir, other, package, io, people, face, vehicle, dog_cat, visitor, cry, crossline, intrude, loitering, legacy, loss, answer`, and `eventAlarmType` added `nonmotorveh`, `tamper`, `lmsg` (and dropped `package`). Results seen: `md`, `people`, `vehicle`. | observed |
+| A 272 search covers one channel (one lens, chosen by `streamType`) and one day; the playback tab runs one per channel it shows. There is no cross-channel form. | observed (requests); reported (client) |
 
 These three searches give a playback UI what it needs: a calendar (142), a timeline of
 continuous recording (14–16), and event markers (272–274).
+
+### Event log and AI search: commands 516–519, 759, 653
+
+The client's NVR "event log" window and its "AI video search" (search by
+type, or by a typed phrase) do not use 272–274. They use the event-log
+commands, which search **all chosen channels in one search**. None of them
+appeared in either capture; everything here is reported (client) and read
+from the client's request builders and reply parsers. All are viewing tier.
+
+| Command | Use | Body (request → reply) |
+| --- | --- | --- |
+| 516 | open a search | `findEventLog` → a search `handle` |
+| 517 | fetch the next page | `findEventLog` with `handle`, `maxEventCount` → `handle`, `bFinished`, `eventLogList` of `eventLog` |
+| 518 | close the search | `handle` |
+| 519 | counts per type | `EventLogBrief` with `logType`, `startTime`, `endTime` → `mdCount`, `peopleCount`, `vehicleCount`, `petCount`, `visitorCount`, `packageCount`, `cryCount`, … and `dailyEventCounts` |
+| 759 | one hit's detail | `EventLogDesc` with `descId` → `detailId`, a text description, `structInfoList` of `structInfo` (`trackId`, `clipInfo`, `imageName`) |
+| 653 | one hit's cover image | `exportCoverPic` with `channelId`, `pts`, `startTime`, `endTime`, apparently sent after a channel extension like the channel queries → `fileSize`, then the image data |
+
+**516 request** (`findEventLog version="1.1"`), the elements the client can
+write:
+
+- `logTypeBits`, `notSearchVideo`, `onlySearchCluster`, `desc` (sort
+  order), `mode`, `startTime`, `endTime` (time blocks as above);
+- `alarmType` (comma list) and `eventAlarmType` with `<i>` items: `md`,
+  `pir`, `other`, `package`, `io`, `people`, `face`, `vehicle`, `dog_cat`,
+  `visitor`, `cry`, `crossline`, `intrude`, `loitering`, `legacy`, `loss`,
+  `answer`, `nonmotorveh`, `IPCInputOutput`;
+- `devices` with one `deviceInfo` per channel (`uid` and `logicChnBitmap`,
+  or a `channelID`): the channels to search;
+- for text search: `encoderVersion`, `similarity`, `textFeature` (a
+  base64 feature vector of the typed phrase), `filterList` of `item`
+  (`text`, `feature`), `textOfPicture`;
+- also `category`, `yoloWorldTypeList`/`subType`, `dangerLevelList`
+  (`normal`, `attention`, `potentialDanger`, `danger`) and `trackList`/
+  `trackItem`/`trackId` (following one tracked object across cameras).
+
+**Each hit** (`eventLog`) has `uid`, `channelID`, `logicChn`, `fileName`,
+`bHasRecFile`, `bDeleted`, `bEncrypted`, `alarmType`, `startTime`,
+`endTime` (and `newStartTime`, `newEndTime`), `score`, `pts`, `offset`,
+`typeExtension`, `yoloWorldType`, `dangerLevel`, `detailId`, `passid`,
+`linkage`, `source`, `linkageType`, and a `trackList`. There are no bounding
+boxes in a hit; the closest are `structInfo` entries of the 759 detail.
+
+| Fact | Provenance |
+| --- | --- |
+| Support is advertised per NVR as a set of bits (event log as a whole, and per type: motion, people, vehicle, animal, package, visitor, cry, crossline, nonmotorized vehicle, tamper, …), most likely the 199 `eventLogVersion`, which only the newer-firmware NVR sent. The mapping from that element to the bits was not traced. | reported (client); `eventLogVersion` observed |
+| The desktop event-log window opens one search for every channel with the selected types ORed into one set, `notSearchVideo` 1 and `desc` 0, then calls 517 until `bFinished`, dropping duplicate hits (same camera, channel, start and end). | reported (client) |
+| The client allows **120 s for each 517 page** (25 s for open, close and 519; 30 s in the newer search screen; the desktop values are timeout arguments, presumably seconds), which suggests the device can take long to answer. | reported (client) |
+| Text search: the typed phrase is turned into a feature vector on the computer by a downloaded text-encoder model, or, when a vendor feature flag is on, by the vendor's server (which can also record search texts). The vector, not the text, goes to the NVR in 516, with a `similarity` threshold. If the NVR reports a feature-version conflict (`version`, `text`), the client re-encodes with the other model version. | reported (client) |
+| Thumbnails: the newer search screen (the client's "AI video search") fetches one 653 cover per hit with a recording, through a queue that runs **one request at a time**, and its summary card loads the first 12 hits. The older desktop window instead asks 298 (cover preview, sub-stream, one frame over the hit's time range, 16 s timeout) per row. Per-hit, one-at-a-time image fetches are the clearest reason the client's AI search feels slow. | reported (client) |
+| The paged search 492–494 (`paginationSearch`: `channel`, `order`, `fileType`, `photoReplay`, `alarmInTypes`, `animalTypes`, `startTime`, `endTime`; items with `recordType`, `animalType`, `thumb`, `Id`, `fileSize`) carries thumbnails and wildlife subtypes; it appears to serve snapshot-based cameras and was not traced further. | reported (client) |
+| Nearby commands that are not viewing tier and are never sent: 300 (write `AiCfg`), 343 (write AI detection settings), 765 (set user-defined object labels). The client's "set text feature" step during a text search was not traced to a wire command; it stays off the allowlist until it is. | reported (client) |
 
 ### Playback
 
@@ -692,6 +816,20 @@ serves live view only, and ONVIF offered no replay service. (observed)
   official client's did not; the playback commands 381 and 383 (unused by
   the client so far) and why it sends 382 at quit; how a 143 error (bad
   stream name, no disk) is reported.
+- Detection events: 192 → 33 and the type names `people` and `dog_cat` are
+  observed. Still open: whether a device pushes 33 without 192; how
+  `vehicle`, `face`, `package`, a doorbell press (`visitor`) and two types
+  at once look in a push (the client expects comma lists); whether
+  `timeStamp` is ever non-zero (a camera logged in directly, rather than
+  through an NVR, may differ); the layout of the in-stream detection data
+  (boxes) in video extra headers; what non-empty 600 lists hold; and the
+  meaning of `aitype` bits not named above.
+- Event log and AI search (516–519, 759, 653): not yet seen on the wire.
+  Open: whether the NVRs observed so far accept them (only the newer one advertises
+  `eventLogVersion`), the page size and how long a page takes, whether
+  hits include the NVR's own detections for cameras without AI, the cover
+  image format, and the wire command behind the client's "set text
+  feature" step.
 - How many sessions an NVR accepts. Its HTTP API refused new connections
   after six logins without logout (observed); the limit for port 9000
   sessions is not measured.
