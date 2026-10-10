@@ -250,13 +250,14 @@ In `crates/audio-pipeline` unless noted.
   check that the ratio correction stays small under jitter, and no resync
   or silence with host times jittering ±5 ms per call or from 10, 12.2,
   and 15.6 ms timer loops rendering 10 ms per call.
-- viewer-core, end to end against mock-nvr (AAC clicks, 30 ms jitter): the
-  core's renderer, driven like a device on the host clock, plays each click
-  within a few ms of its picture's arrival plus the reported playout delay;
-  taps, talk-back, and argument checks. viewer-ffi: `nv_audio_render` from
-  its own thread under a counting allocator while the app changes format,
-  volume, audibility, and taps: no allocation. The C smoke test renders
-  from a pthread.
+- viewer-core, end to end against mock-nvr (AAC clicks, 30 ms jitter), on a
+  simulated clock: the core's renderer, driven like a device on the core's
+  clock, plays each click within a few ms of its picture's arrival plus the
+  reported playout delay, with the same numbers every run; taps, talk-back,
+  and argument checks. viewer-ffi: `nv_audio_render` from its own thread,
+  in lockstep with the simulated clock, under a counting allocator while
+  the app changes format, volume, audibility, and taps: no allocation. The
+  C smoke test renders from a pthread in real time.
 - Decoder accuracy against FFmpeg; fuzzed records through the decoder and a
   whole tile never panic; taps drop oldest and never disturb playout; the
   render path, under a counting allocator, never allocates or frees, through

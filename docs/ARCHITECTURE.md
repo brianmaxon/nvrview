@@ -103,7 +103,10 @@ tools/
                  timing (docs/STREAM-TIMING.md)
   mock-nvr/      a fake device that serves synthetic sessions or replays
                  recordings (one stream, or several tiers on one shared
-                 replay clock), so apps and tests run without a real NVR
+                 replay clock), so apps and tests run without a real NVR;
+                 over TCP in real time, or in-process on a test's clock
+  simtime/       test support: a paused tokio runtime that a test thread
+                 steps, for code with a blocking interface
   soak/          accelerated soak runs against a replayed recording
   fixture-gen/   generates fixtures/synthetic/ from made-up credentials
 apps/
@@ -361,6 +364,39 @@ Not planned; recorded so the core and the local API keep it cheap.
   `cargo test` and `clippy` on Linux and Windows, so the core stays portable
   before a Windows app exists. The macOS app is built locally (or on a
   self-hosted runner) since hosted macOS images can lag the current OS.
+
+### Tests do not wait on real time
+
+Timeouts, retries, backoff, keepalives, frame pacing, probe windows, and
+audio timing are tested on a simulated clock, so tests run as fast as the
+CPU allows and give the same result on a busy machine:
+
+- The device and the code under test share one clock. `mock_nvr::spawn_in`
+  runs the mock on the test's tokio runtime, reached through in-memory
+  pipes (`mock_nvr::connect`, and `bc_session::FnConnector` on the client
+  side), so its pacing, replay schedules, download rates, and delays use
+  that runtime's timers.
+- Async tests (`bc-session`, `recordings`, `bc-cli`) use tokio's paused
+  clock (`#[tokio::test(start_paused = true)]`): it moves only when every
+  task waits for a timer, straight to the next one.
+- Code with a blocking interface (`viewer-core`, the C interface, `soak`)
+  runs on a `simtime::SimRuntime` through `CoreConfig::test_runtime`: the
+  core's tasks, tiles included, run on that runtime, and its host clock
+  reads the simulated one. The test holds the clock still while it calls
+  and checks, and moves it with `advance` (every timer in between fires in
+  order). Work on tokio's blocking threads (`spawn_blocking`, such as chunk
+  writes) holds a paused clock still while it runs, so disk work is never
+  overtaken by a timeout; keep such tasks short-lived.
+- Production builds do not change: without `test_runtime` the core reads
+  the host clock (one branch) and keeps its own runtime and tile threads.
+
+Some tests stay in real time on purpose: the core's threading (answers from
+other threads, a slow `on_action`, calls from callbacks), the C interface
+end to end on the production configuration, the TCP server's behavior with
+a full socket buffer, the log writer's thread, the host clock itself, and
+the C and C# smoke tests and Linux Docker run. A real-load stress test of
+live view during downloads is opt-in (`cargo test -p recordings --test e2e
+-- --ignored`).
 
 ## Milestones
 
