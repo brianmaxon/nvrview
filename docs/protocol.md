@@ -250,11 +250,22 @@ All reported (client).
 | --- | --- |
 | The client never reads the first character of a `..dc` or `..wb` magic; when it resynchronizes after lost data it accepts any character from `0` to `@` there. Which stream a record belongs to comes only from the command-3 message ID, never from the magic. What the first character denotes remains unknown. | reported (client) |
 | A third-party (ONVIF) camera behind an NVR on newer firmware sent its video records as `:0dc` (keyframe) and `:1dc` (predicted frame): first character `:` (0x3A), not a digit. With the first character taken from `0` to `@`, its sub and main streams parsed completely (8 keyframes and 442 predicted frames on main; H.264 High, progressive); a parser that required a digit lost sync after the first record. A native camera's stream in the same capture used `00dc`, `01dc`, and `05wb`. What the character means is still unknown (it is not the channel number). Parsers must accept `0` to `@` there. | observed (client capture) |
-| For that camera, the NVR answered the official client's preview (3) with status 400 and an empty body, repeatedly; the client sent the same preview again about every 6 s, and after one of those 400s the NVR started sending media on the same message ID (0.8 s to 3.9 s later, three times in 90 s). So a 400 to a preview of a third-party camera is not final: the stream may follow on that message ID, and the client keeps retrying. Our own client's previews of that channel got the same 400. Media on that channel used `encryptLen` 1024 like native cameras. | observed (client capture); observed |
+| For that camera, the NVR answered the official client's preview (3) with status 400 and an empty body, repeatedly; the client sent the same preview again about every 6 s (each time a stop (4) for the previous start, then a new start (3) with a new message ID), and after one of those 400s the NVR started sending media on the same message ID (0.8 s to 3.9 s later, three times in 90 s). So a 400 to a preview of a third-party camera is not final: the stream may follow on that message ID, and the client keeps retrying. Our own client's previews of that channel got the same 400. Media on that channel used `encryptLen` 1024 like native cameras. | observed (client capture); observed |
 | Video second character: `0` keyframe, `1` predicted frame, as observed. A third value, `e`, is also accepted as a video record of a separate kind whose use is unknown. | reported (client) |
 | When resynchronizing, the client also requires the codec field to read `H264` or `H265`; it takes the codec from each record, not from any query reply. | reported (client) |
 | Video extra header, when at least 8 bytes: bytes 0–3 are a u32 little-endian count of seconds (apparently the device's wall clock). At the first keyframe after a stream (re)starts, the client takes that value × 1,000,000 as the frame's absolute time in µs and dates later frames by adding their timestamp difference from that keyframe. Bytes 4–5 can encode a resolution code; byte 6 holds flags. Bytes after the first 8 carry tag-length-value data that the client parses as detection metadata. | reported (client) |
 | A record's size in the stream is the 8-byte-aligned payload size plus the extra-header size, after the 24-byte header. | reported (client) |
+
+**How nvrview handles these.** The demuxer accepts any first character
+from `0` to `@` in video and audio magics (resynchronization too) and gives
+it no meaning. A preview answered with 400 is kept open, so media that
+follows on its message ID is delivered; until media arrives, the session
+stops it and sends the same start again (with a new message ID, as the
+official client does) 6 s after each 400, and gives up
+(reporting the refusal) 60 s after the first one. Both times are settings
+(`SessionConfig::preview_retry_interval`, `preview_wait_limit`). Other
+refusal statuses stay final at once. The wait is reported to apps as
+`tile_waiting` (docs/FFI.md).
 
 ### Audio in the official client
 
