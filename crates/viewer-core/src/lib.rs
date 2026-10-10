@@ -42,6 +42,7 @@ pub mod clock;
 mod device;
 mod events;
 mod json;
+mod lens;
 pub mod sound;
 pub mod store;
 mod tile;
@@ -283,6 +284,8 @@ pub struct Core {
     first_picture: AtomicBool,
     layouts: Mutex<store::Layouts>,
     device_keys: Mutex<store::DeviceKeys>,
+    /// Second-lens probe answers, shared by every device.
+    lens: lens::LensContext,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -332,6 +335,10 @@ impl Core {
         };
         let layouts = store::Layouts::open(config.data_dir.clone());
         let device_keys = store::DeviceKeys::open(config.data_dir.clone());
+        let lens = lens::LensContext {
+            cache: Arc::new(Mutex::new(lens::LensCache::open(config.data_dir.clone()))),
+            timing: lens::ProbeTiming::default(),
+        };
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(Some(runtime)),
@@ -349,6 +356,7 @@ impl Core {
             first_picture: AtomicBool::new(false),
             layouts: Mutex::new(layouts),
             device_keys: Mutex::new(device_keys),
+            lens,
         })
     }
 
@@ -476,7 +484,7 @@ impl Core {
         let handle = {
             let _rt = self.handle.enter();
             let session = bc_session::DeviceSession::spawn(connector, cfg);
-            DeviceHandle::start(id, key.clone(), session, events, gate_rx)
+            DeviceHandle::start(id, key.clone(), session, events, gate_rx, self.lens.clone())
         };
         reg.devices.insert(id, Device { handle, key });
         info!(device = id, "device added");
@@ -610,15 +618,12 @@ impl Core {
     ) -> Result<Pending, CoreError> {
         self.check_api()?;
         let mut reg = lock(&self.registry);
-        let session = reg
-            .devices
-            .get(&device)
-            .ok_or(CoreError::UnknownId)?
-            .handle
-            .session();
+        let handle = &reg.devices.get(&device).ok_or(CoreError::UnknownId)?.handle;
+        let session = handle.session();
         if reg.tiles.len() >= self.config.max_tiles {
             return Err(CoreError::Limit);
         }
+        handle.tile_starting(channel);
         // A session that has ended (refused login) yields a tile that ends at
         // once with `login_failed`, once the app has its ID.
         let sub = match session {
@@ -689,7 +694,10 @@ impl Core {
         }
         // Start the new stream first (shared with any tile already showing
         // it); the old one stops once the switch is done.
-        let session = reg.devices.get(&device).and_then(|d| d.handle.session());
+        let session = reg.devices.get(&device).and_then(|d| {
+            d.handle.tile_starting(channel);
+            d.handle.session()
+        });
         let sub = match session {
             Some(s) => self.handle.block_on(s.subscribe(channel, tier)).ok(),
             None => None,

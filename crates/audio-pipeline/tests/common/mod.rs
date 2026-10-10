@@ -15,6 +15,11 @@
 //! `1 / device_skew` host seconds; callbacks of `callback_frames`; the host
 //! time passed to the renderer is the callback time plus `output_latency_us`.
 //!
+//! Host clock ([`HostClock`]): by default the host time passed is exact; it
+//! can also jitter around the device's schedule, or come from an app that
+//! renders a fixed number of frames per timer tick (host time from its
+//! clock, ticks a little longer than the frames they render).
+//!
 //! Measurement: the source has a single-sample impulse every `click_every`
 //! samples. The renderer's output is scanned for peaks; for each, the
 //! latency is the host time it is heard minus the host time at which its
@@ -61,6 +66,22 @@ impl Jitter {
     }
 }
 
+/// How the host time handed to the renderer relates to the frames rendered.
+#[derive(Clone, Copy, Debug)]
+pub enum HostClock {
+    /// Exactly the device's schedule.
+    Exact,
+    /// The device's schedule plus a uniform deviation of up to ±`us` per
+    /// call.
+    Jitter { us: f64 },
+    /// A timer loop: render `callback_frames`, then sleep `period_us` plus
+    /// an overshoot uniform in `0..overshoot_us`; the host time passed is
+    /// the time of the call plus the output latency (as an app computing
+    /// `now + latency` does). The frames rendered then fall behind host
+    /// time by the overshoot.
+    Sleep { period_us: f64, overshoot_us: f64 },
+}
+
 pub struct SimConfig {
     pub audio_rate: f64,
     pub nominal_rate: u32,
@@ -81,6 +102,7 @@ pub struct SimConfig {
     /// (start, length) in camera seconds: nothing arrives until the end.
     pub stalls: Vec<(f64, f64)>,
     pub seed: u64,
+    pub host_clock: HostClock,
 }
 
 impl Default for SimConfig {
@@ -105,6 +127,7 @@ impl Default for SimConfig {
             audio_gaps: Vec::new(),
             stalls: Vec::new(),
             seed: 0x1234_5678_9ABC_DEF1,
+            host_clock: HostClock::Exact,
         }
     }
 }
@@ -175,6 +198,10 @@ pub struct SimResult {
     /// Jitter deviations generated (for reporting).
     pub jitter_sd_us: f64,
     pub jitter_range_us: (f64, f64),
+    /// Render calls whose renderer level for the tile was (near) 0, after
+    /// the first call with a level, and the longest run of them in seconds.
+    pub silent_calls: u64,
+    pub longest_silence_s: f64,
 }
 
 impl SimResult {
@@ -267,6 +294,10 @@ pub fn run_with(
     let mut delays = Vec::new();
 
     let cb_start = HOST0_US + 50_000.0;
+    let mut clock_rng = Rng(cfg.seed ^ 0x5DEE_CE66);
+    let mut sleep_cb = cb_start;
+    let (mut silent_calls, mut silent_run, mut longest_silence_s) = (0u64, 0.0f64, 0.0f64);
+    let mut had_level = false;
     loop {
         let t_video = next_video as f64 * frame_s;
         let t_audio = (next_audio + 1) as f64 * rec_s;
@@ -288,12 +319,37 @@ pub fn run_with(
 
         // Render every callback due before this arrival.
         loop {
-            let cb_time = cb_start + next_cb as f64 * cfg.callback_frames as f64 * us_per_frame;
+            let cb_time = match cfg.host_clock {
+                HostClock::Sleep { .. } => sleep_cb,
+                _ => cb_start + next_cb as f64 * cfg.callback_frames as f64 * us_per_frame,
+            };
             if cb_time > arrival {
                 break;
             }
             let start_us = cb_time + cfg.output_latency_us;
-            renderer.render(&mut buf, (start_us * 1e3) as u64);
+            let passed_us = match cfg.host_clock {
+                HostClock::Jitter { us } => start_us + (clock_rng.unit() * 2.0 - 1.0) * us,
+                _ => start_us,
+            };
+            if let HostClock::Sleep {
+                period_us,
+                overshoot_us,
+            } = cfg.host_clock
+            {
+                sleep_cb += period_us + clock_rng.unit() * overshoot_us;
+            }
+            renderer.render(&mut buf, (passed_us * 1e3) as u64);
+            let level = renderer.levels().next().map_or(0.0, |l| l.peak);
+            // A click every second keeps the peak (0.3 s release) above
+            // this while audio plays.
+            if level > 0.01 {
+                had_level = true;
+                silent_run = 0.0;
+            } else if had_level {
+                silent_calls += 1;
+                silent_run += cfg.callback_frames as f64 * us_per_frame / 1e6;
+                longest_silence_s = longest_silence_s.max(silent_run);
+            }
             detector.scan(&buf, cfg.out_channels, start_us, us_per_frame, |host_us| {
                 heard.push(host_us);
             });
@@ -370,6 +426,8 @@ pub fn run_with(
         delays,
         jitter_sd_us: sd,
         jitter_range_us: (sorted[0], sorted[sorted.len() - 1]),
+        silent_calls,
+        longest_silence_s,
     }
 }
 

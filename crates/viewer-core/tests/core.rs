@@ -360,7 +360,7 @@ fn channels_and_device_info_events() {
     for (i, c) in list.iter().enumerate() {
         assert_eq!(c["channel"], i);
         assert_eq!(c["connected"], true);
-        assert_eq!(c["tiers"], serde_json::json!(["main", "sub"]));
+        assert_eq!(c["tiers"], serde_json::json!(["main", "sub", "extern"]));
         assert_eq!(c["name"], format!("Channel {}", i + 1));
         assert_eq!(c["model"], "MOCK-CAM");
     }

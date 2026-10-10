@@ -23,6 +23,10 @@
 //!   recorded, at their recorded times, optionally accelerated or looped;
 //!   with several tiers, all previews share one replay clock, so a tier
 //!   started later joins at the same capture moment ([`replay`]).
+//! - per channel, whether the channel list names `externStream` and how a
+//!   preview of the second-lens tiers is answered ([`ExternMode`]): served,
+//!   a second lens the list does not reveal, a stream-info record only,
+//!   refused, or silence;
 //! - optionally, third-party (ONVIF) camera channels ([`ThirdPartyConfig`]):
 //!   every preview start is answered with status 400 and the first few
 //!   send nothing; a later one streams on the message ID of its 400, with
@@ -121,6 +125,36 @@ pub struct Config {
     pub detection_cycle: Option<Duration>,
     /// If set, these channels behave like third-party cameras behind an NVR.
     pub third_party: Option<ThirdPartyConfig>,
+    /// By channel, whether the channel list (145) names `externStream` and
+    /// how the second-lens tiers (`externStream`, `mobileStream`) answer.
+    /// Missing channels: [`ExternMode::Listed`], except a multi-lens camera
+    /// ([`Config::lens_aitypes`]), which is [`ExternMode::Hidden`] as
+    /// observed (docs/protocol.md, "Second lenses").
+    pub extern_modes: Vec<ExternMode>,
+    /// By channel, the camera's `uid` in the channel list (145); missing or
+    /// empty: no `uid` element.
+    pub uids: Vec<String>,
+}
+
+/// How a channel's camera treats the second-lens tiers (`externStream` and
+/// `mobileStream`), after the cameras described in docs/protocol.md,
+/// "Second lenses".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ExternMode {
+    /// Lists `externStream` and serves it with video, like most single-lens
+    /// cameras (a third quality tier of the same lens).
+    #[default]
+    Listed,
+    /// Does not list `externStream` but serves it with video: a second lens
+    /// the channel list does not reveal.
+    Hidden,
+    /// Does not list it and answers a preview of it with one stream-info
+    /// record (size 0x0) and no video, like a camera without a second lens.
+    InfoOnly,
+    /// Does not list it and refuses a preview of it with status 400.
+    Refused,
+    /// Does not list it and never answers a preview of it.
+    Silent,
 }
 
 /// Third-party (ONVIF) camera channels: each preview start is answered with
@@ -174,6 +208,18 @@ impl Config {
             lens_aitypes: Vec::new(),
             detection_cycle: None,
             third_party: None,
+            extern_modes: Vec::new(),
+            uids: Vec::new(),
+        }
+    }
+
+    /// How `channel` treats its second-lens tiers ([`Config::extern_modes`]).
+    pub fn extern_mode(&self, channel: u8) -> ExternMode {
+        let c = usize::from(channel);
+        match self.extern_modes.get(c) {
+            Some(m) => *m,
+            None if self.lens_aitypes.get(c).is_some_and(|l| l.len() >= 2) => ExternMode::Hidden,
+            None => ExternMode::Listed,
         }
     }
 }
@@ -693,11 +739,21 @@ impl Conn {
     }
 
     fn channel_info_list(&self) -> String {
+        let cfg = &self.shared.config;
         let mut s = String::from("<ChannelInfoList version=\"1.1\">\n");
-        for c in 0..self.shared.config.channels {
+        for c in 0..cfg.channels {
+            let uid = match cfg.uids.get(usize::from(c)) {
+                Some(u) if !u.is_empty() => format!("<uid>{u}</uid>\n"),
+                _ => String::new(),
+            };
+            let tiers = if cfg.extern_mode(c) == ExternMode::Listed {
+                "mainStream,subStream,externStream"
+            } else {
+                "mainStream,subStream"
+            };
             s.push_str(&format!(
-                "<ChannelInfo>\n<channelId>{c}</channelId>\n<state>connect</state>\n\
-                 <streamSupport>mainStream,subStream</streamSupport>\n</ChannelInfo>\n"
+                "<ChannelInfo>\n<channelId>{c}</channelId>\n<state>connect</state>\n{uid}\
+                 <streamSupport>{tiers}</streamSupport>\n</ChannelInfo>\n"
             ));
         }
         s.push_str("</ChannelInfoList>\n");
@@ -763,6 +819,24 @@ impl Conn {
             return self.reply_xml(3, id, 400, "");
         }
         let stop = Arc::new(AtomicBool::new(false));
+        if matches!(tier, StreamTier::Extern | StreamTier::Mobile) {
+            match self.shared.config.extern_mode(channel) {
+                ExternMode::Listed | ExternMode::Hidden => {}
+                ExternMode::Refused => return self.reply_xml(3, id, 400, ""),
+                ExternMode::Silent => {
+                    self.streams.insert(handle, Stream { stop, join: None });
+                    return Ok(());
+                }
+                ExternMode::InfoOnly => {
+                    let key = self.key.clone().expect("logged in");
+                    let mut out = Vec::new();
+                    media_message(&key, id, &encode_info(0, 0, 25), &mut out)?;
+                    lock(&self.writer).write_all(&out)?;
+                    self.streams.insert(handle, Stream { stop, join: None });
+                    return Ok(());
+                }
+            }
+        }
         let mut delay = Duration::ZERO;
         if let Some(tp) = &self.shared.config.third_party
             && tp.channels.contains(&channel)

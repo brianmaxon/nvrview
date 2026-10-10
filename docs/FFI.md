@@ -237,12 +237,30 @@ change.
   AI. For a multi-lens camera it is every kind of the camera (the
   channel's own `aitype` and all its lenses' together). It may arrive in a
   later `channels` event than the slot list.
-- `lenses` (with `detects`) is the number of lenses of a multi-lens camera,
-  present only when it has two or more: the 199 item of such a camera
-  holds one sub-item per lens (newer NVR firmware; docs/protocol.md "Which
-  channels detect what"). `lens_detects` then lists each lens's detection
-  kinds, lens 0 first. The `tiers` a channel advertises do not tell a
-  second lens apart (single-lens cameras can advertise `extern` too).
+- `lenses` is the number of lenses of a multi-lens camera, present only
+  when it has two or more. The core knows it in one of two ways:
+  - the 199 item of such a camera holds one sub-item per lens (newer NVR
+    firmware; docs/protocol.md "Which channels detect what"). `lenses`
+    then comes with `detects`, and `lens_detects` lists each lens's
+    detection kinds, lens 0 first;
+  - otherwise, for a connected channel whose `tiers` do not include
+    `extern`, the core runs a one-time probe: a short `extern` preview on
+    the device's session (no extra login), stopped again after its first
+    picture or about 2 s. A picture means a second lens. Such a `lenses`
+    has **no `lens_detects`** (what each lens detects is unknown), and may
+    come without `detects` (when 199 could not be read). Probes run one at
+    a time per device, after the channel list, names, and capabilities are
+    in, and wait (up to 15 s) while a tile is starting on the channel, so
+    on a device's first connection `lenses` can appear in a `channels`
+    event seconds after the others. Each answer, lens or not, is kept per
+    device key and channel in `lenses.json` in the data directory and
+    reused on later connections and runs, until the channel's camera
+    changes (its `uid` from the channel list, or else its name and model);
+    a cached lens is reported once the names are in.
+
+  The `tiers` a channel advertises do not tell a second lens apart
+  (single-lens cameras can advertise `extern` too; channels that do are
+  never probed).
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from
@@ -354,10 +372,11 @@ the machine (and later the web viewer) shares them.
   The per-run device IDs are not stable and never go into a layout. A
   device whose address changes gets a new key (rekeying by device identity
   is future work).
-- Storage: `layouts.json` and `devices.json` in `NvConfig.data_dir`, each
-  rewritten whole and atomically (temporary file, flush, rename). An
-  unreadable file is renamed to `*.unreadable` and the store starts empty.
-  With no `data_dir` both live in memory for the run.
+- Storage: `layouts.json`, `devices.json`, and `lenses.json` (second-lens
+  probe answers, see `channels`) in `NvConfig.data_dir`, each rewritten
+  whole and atomically (temporary file, flush, rename). An unreadable file
+  is renamed to `*.unreadable` and the store starts empty. With no
+  `data_dir` they live in memory for the run.
 - Strings come back through `out`/`cap`/`len`: `*len` always receives the
   length without the NUL; when `out` is NULL or `cap` <= `*len` the call
   returns `NV_ERR_BUFFER_TOO_SMALL` and the app calls again with a buffer of

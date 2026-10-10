@@ -5,7 +5,7 @@ use bc_protocol::archive::DateTime;
 use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::audio::{AudioConfig, AudioFixture};
 use mock_nvr::replay::{Replay, ReplayConfig};
-use mock_nvr::{Config, fixture::Fixture, spawn};
+use mock_nvr::{Config, ExternMode, fixture::Fixture, spawn};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -15,9 +15,12 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
-    \x20               [--multi-lens CH:BITS,BITS]\n\
+    \x20               [--multi-lens CH:BITS,BITS] [--extern CH:MODE,CH:MODE]\n\
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
+    --extern sets how channel CH lists and answers externStream/mobileStream: listed\n\
+    (default), hidden (not listed, served: a second lens), info-only (not listed, one\n\
+    0x0 stream-info record and no video), refused (400), or silent (no answer).\n\
     --third-party makes channels behave like third-party cameras behind an NVR: every\n\
     preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
     later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
@@ -37,6 +40,7 @@ fn run() -> Result<(), String> {
     let mut recording_days = 0u32;
     let mut aitype = 0u32;
     let mut multi_lens: Option<(u8, Vec<u32>)> = None;
+    let mut extern_modes: Vec<(u8, ExternMode)> = Vec::new();
     let mut detections: Option<f64> = None;
     let mut third_party: Vec<u8> = Vec::new();
     let (mut third_party_refusals, mut third_party_delay_ms) = (2u32, 200u64);
@@ -86,6 +90,21 @@ fn run() -> Result<(), String> {
                     return Err(bad());
                 }
                 multi_lens = Some((ch.parse().map_err(|_| bad())?, bits));
+            }
+            "--extern" => {
+                for item in v.split(',') {
+                    let bad = || format!("bad value for {a}: {item} (CH:MODE)");
+                    let (ch, mode) = item.split_once(':').ok_or_else(bad)?;
+                    let mode = match mode {
+                        "listed" => ExternMode::Listed,
+                        "hidden" => ExternMode::Hidden,
+                        "info-only" => ExternMode::InfoOnly,
+                        "refused" => ExternMode::Refused,
+                        "silent" => ExternMode::Silent,
+                        _ => return Err(bad()),
+                    };
+                    extern_modes.push((ch.parse().map_err(|_| bad())?, mode));
+                }
             }
             "--third-party" => {
                 third_party = v
@@ -156,6 +175,15 @@ fn run() -> Result<(), String> {
         }
         cfg.lens_aitypes = vec![Vec::new(); usize::from(channels)];
         cfg.lens_aitypes[usize::from(ch)] = bits;
+    }
+    if !extern_modes.is_empty() {
+        cfg.extern_modes = (0..channels).map(|c| cfg.extern_mode(c)).collect();
+        for (ch, mode) in extern_modes {
+            if ch >= channels {
+                return Err(format!("--extern channel {ch} is not below --channels"));
+            }
+            cfg.extern_modes[usize::from(ch)] = mode;
+        }
     }
     if let Some(secs) = detections {
         if !(secs.is_finite() && secs > 0.0) {

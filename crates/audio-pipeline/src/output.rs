@@ -39,6 +39,20 @@ const SKIP_FRAME_MASK: u64 = (1 << SKIP_FRAME_BITS) - 1;
 pub(crate) const FADE_FRAMES: usize = 64;
 /// Volume changes ramp over this many seconds.
 const GAIN_RAMP_S: f32 = 0.01;
+/// Render clock: the share of each call's host-time error taken into the
+/// estimate of when its first frame plays, once settled (the frame
+/// period's share follows from it, critically damped). The first calls
+/// after a start take larger shares, so the clock locks within a few
+/// dozen calls.
+const CLOCK_PHASE_GAIN: f64 = 0.05;
+/// A host time this far from the estimate is a real jump (rendering
+/// stopped, or the host clock was reset): the estimate starts over there.
+const CLOCK_JUMP_NS: f64 = 50_000_000.0;
+/// The estimated frame period stays within these multiples of nominal: a
+/// timer loop's calls can come well over the frames they render apart
+/// (a 10 ms sleep was measured at 12.2 ms on macOS, and a Windows timer
+/// tick is 15.6 ms).
+const CLOCK_PERIOD_RANGE: (f64, f64) = (0.5, 2.0);
 
 /// The app's output stream format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,12 +156,16 @@ impl Ring {
 }
 
 /// Where the consumer was at the start of its last render call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Snapshot {
     /// Ring frame that plays at `host_ns`.
     pub read: u64,
-    /// Host time (ns) at which frame `read` plays.
+    /// Host time (ns) at which frame `read` plays, from the renderer's
+    /// smoothed clock ([`RenderClock`]).
     pub host_ns: u64,
+    /// Host nanoseconds per frame, as the renderer measures its calls
+    /// (nominally `1e9 / sample_rate`).
+    pub ns_per_frame: f64,
     /// Frames the call rendered.
     pub frames: u64,
     /// Generation of the last skip request the consumer carried out.
@@ -167,6 +185,7 @@ pub(crate) struct Slot {
     snap_read: AtomicU64,
     snap_host: AtomicU64,
     snap_frames: AtomicU64,
+    snap_ns_per_frame: AtomicU64,
     snap_skip_gen: AtomicU64,
     skip_gen: AtomicU64,
     underruns: AtomicU64,
@@ -186,6 +205,7 @@ impl Slot {
             snap_read: AtomicU64::new(0),
             snap_host: AtomicU64::new(0),
             snap_frames: AtomicU64::new(0),
+            snap_ns_per_frame: AtomicU64::new(0),
             snap_skip_gen: AtomicU64::new(0),
             skip_gen: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
@@ -201,6 +221,8 @@ impl Slot {
         self.snap_read.store(s.read, Ordering::Relaxed);
         self.snap_host.store(s.host_ns, Ordering::Relaxed);
         self.snap_frames.store(s.frames, Ordering::Relaxed);
+        self.snap_ns_per_frame
+            .store(s.ns_per_frame.to_bits(), Ordering::Relaxed);
         self.snap_skip_gen
             .store(u64::from(s.skip_gen), Ordering::Relaxed);
         self.seq.store(seq + 2, Ordering::Release);
@@ -218,6 +240,7 @@ impl Slot {
                 read: self.snap_read.load(Ordering::Relaxed),
                 host_ns: self.snap_host.load(Ordering::Relaxed),
                 frames: self.snap_frames.load(Ordering::Relaxed),
+                ns_per_frame: f64::from_bits(self.snap_ns_per_frame.load(Ordering::Relaxed)),
                 skip_gen: self.snap_skip_gen.load(Ordering::Relaxed) as u16,
             };
             fence(Ordering::Acquire);
@@ -275,7 +298,11 @@ pub fn output(format: OutputFormat, config: OutputConfig) -> (AudioOutput, Rende
         AudioOutput {
             shared: Arc::clone(&shared),
         },
-        Renderer { shared, local },
+        Renderer {
+            shared,
+            local,
+            clock: RenderClock::new(format.sample_rate),
+        },
     )
 }
 
@@ -435,10 +462,77 @@ pub const LEVEL_PEAK_RELEASE_S: f32 = 0.3;
 /// Time constant of the RMS level's smoothing.
 pub const LEVEL_RMS_WINDOW_S: f32 = 0.1;
 
+/// When each render call's first frame plays, smoothed: the host times an
+/// app passes can jitter by milliseconds per call (timestamps taken in a
+/// callback, or `now + latency` in a timer loop), and a timer loop may
+/// render fewer frames than the time between its calls. A second-order
+/// loop follows the host times with the frames rendered as its clock:
+/// jitter averages out, a steady rate difference becomes the frame period,
+/// and a jump beyond [`CLOCK_JUMP_NS`] restarts it (a real gap). Arithmetic
+/// only: real-time safe.
+#[derive(Clone, Copy, Debug)]
+struct RenderClock {
+    nominal_ns: f64,
+    /// Estimated host time of the last call's first frame; `None` before
+    /// the first call.
+    at_ns: Option<f64>,
+    ns_per_frame: f64,
+    /// Frames rendered since `at_ns`.
+    frames: u64,
+    /// Updates since the clock (re)started.
+    updates: u32,
+}
+
+impl RenderClock {
+    fn new(sample_rate: u32) -> RenderClock {
+        let nominal_ns = 1e9 / f64::from(sample_rate.max(1));
+        RenderClock {
+            nominal_ns,
+            at_ns: None,
+            ns_per_frame: nominal_ns,
+            frames: 0,
+            updates: 0,
+        }
+    }
+
+    /// Takes a call's host time and frame count; returns the estimated host
+    /// time of its first frame.
+    fn update(&mut self, host_ns: u64, frames: usize) -> f64 {
+        let host = host_ns as f64;
+        let at = match self.at_ns {
+            Some(prev) if self.frames > 0 => {
+                let predicted = prev + self.frames as f64 * self.ns_per_frame;
+                let e = host - predicted;
+                if e.abs() > CLOCK_JUMP_NS {
+                    self.updates = 0;
+                    host
+                } else {
+                    let a = (2.0 / (f64::from(self.updates) + 2.0)).max(CLOCK_PHASE_GAIN);
+                    self.updates = self.updates.saturating_add(1);
+                    self.ns_per_frame = (self.ns_per_frame + a * a / 4.0 * e / self.frames as f64)
+                        .clamp(
+                            self.nominal_ns * CLOCK_PERIOD_RANGE.0,
+                            self.nominal_ns * CLOCK_PERIOD_RANGE.1,
+                        );
+                    predicted + a * e
+                }
+            }
+            Some(prev) => prev,
+            None => host,
+        };
+        if self.at_ns.is_none() || self.frames > 0 || frames > 0 {
+            self.at_ns = Some(at);
+        }
+        self.frames = frames as u64;
+        at
+    }
+}
+
 /// The real-time side: mixes every playing slot into the app's buffer.
 pub struct Renderer {
     shared: Arc<Shared>,
     local: Box<[SlotState]>,
+    clock: RenderClock,
 }
 
 impl std::fmt::Debug for Renderer {
@@ -473,13 +567,16 @@ impl Renderer {
     /// Fills `out` (interleaved, `channels` per frame) with the mix of every
     /// playing tile. `host_time_ns` is the host time at which `out`'s first
     /// frame will be heard, on the same clock as the arrival times given to
-    /// the tiles. See the module documentation for the real-time guarantees.
+    /// the tiles; it may jitter by milliseconds per call, and calls may
+    /// come further apart than the frames they render ([`RenderClock`]).
+    /// See the module documentation for the real-time guarantees.
     pub fn render(&mut self, out: &mut [f32], host_time_ns: u64) {
         let fmt = self.shared.format;
         let ch = fmt.channels;
         let frames = out.len() / ch;
         out.fill(0.0);
-        let ns_per_frame = 1e9 / f64::from(fmt.sample_rate);
+        let start_ns = self.clock.update(host_time_ns, frames);
+        let ns_per_frame = self.clock.ns_per_frame;
         let gain_step = 1.0 / (GAIN_RAMP_S * fmt.sample_rate as f32);
         for (slot, st) in self.shared.slots.iter().zip(self.local.iter_mut()) {
             if !slot.playing.load(Ordering::Acquire) {
@@ -542,8 +639,9 @@ impl Renderer {
             // frame (after any fade-out).
             slot.publish(Snapshot {
                 read: r + st.owed,
-                host_ns: host_time_ns + (i as f64 * ns_per_frame) as u64,
+                host_ns: (start_ns + i as f64 * ns_per_frame).max(0.0) as u64,
                 frames: frames as u64,
+                ns_per_frame,
                 skip_gen: st.skip_gen,
             });
 
@@ -634,6 +732,43 @@ mod tests {
         assert_eq!(s.read, 480);
         assert_eq!(s.host_ns, 1_010_000_000);
         assert_eq!(lease.ring().queued(), 4800 - 960);
+    }
+
+    #[test]
+    fn the_render_clock_smooths_jitter_and_follows_jumps() {
+        let mut c = RenderClock::new(48_000);
+        let mut seed = 7u64;
+        let mut unit = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // 480 frames per call, host times jittering by up to ±5 ms.
+        let mut worst = 0.0f64;
+        for k in 0..2000u64 {
+            let ideal = 1e9 + k as f64 * 10e6;
+            let at = c.update((ideal + (unit() * 2.0 - 1.0) * 5e6) as u64, 480);
+            if k > 200 {
+                worst = worst.max((at - ideal).abs());
+            }
+        }
+        assert!(worst < 2e6, "estimate off by {worst} ns");
+        assert!((c.ns_per_frame * 48_000.0 - 1e9).abs() < 1e6);
+        // A timer loop: 480 frames per 15.6 ms of host time. The clock
+        // locks without a jump.
+        let mut c = RenderClock::new(48_000);
+        let mut worst = 0.0f64;
+        for k in 0..2000u64 {
+            let host = 1_000_000_000 + k * 15_600_000;
+            let at = c.update(host, 480);
+            worst = worst.max((at - host as f64).abs());
+        }
+        assert!(worst < CLOCK_JUMP_NS / 2.0, "worst {worst} ns");
+        assert!((c.ns_per_frame * 480.0 - 15.6e6).abs() < 1e3);
+        // A real gap: rendering stopped for a second.
+        let host = 1_000_000_000u64 + 2000 * 15_600_000 + 1_000_000_000;
+        assert_eq!(c.update(host, 480), host as f64);
     }
 
     #[test]

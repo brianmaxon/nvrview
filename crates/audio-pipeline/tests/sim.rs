@@ -269,3 +269,59 @@ fn playout_delay_adapts_to_the_jitter() {
         );
     }
 }
+
+/// Host time that jitters around the frames rendered (a few ms per call),
+/// or a timer loop whose ticks run a little longer than the frames they
+/// render, must not cause resyncs or silence: only real gaps do.
+#[test]
+fn host_clock_jitter_causes_no_resyncs() {
+    for (name, clock) in [
+        ("jitter ±5 ms", HostClock::Jitter { us: 5_000.0 }),
+        (
+            "10 ms timer",
+            HostClock::Sleep {
+                period_us: 10_000.0,
+                overshoot_us: 1_000.0,
+            },
+        ),
+        // A 10 ms sleep as measured on macOS (about 12.2 ms) and a Windows
+        // timer tick.
+        (
+            "12.2 ms timer",
+            HostClock::Sleep {
+                period_us: 12_000.0,
+                overshoot_us: 500.0,
+            },
+        ),
+        (
+            "15.6 ms timer",
+            HostClock::Sleep {
+                period_us: 15_600.0,
+                overshoot_us: 200.0,
+            },
+        ),
+    ] {
+        let cfg = SimConfig {
+            duration_s: 120.0,
+            callback_frames: 480,
+            host_clock: clock,
+            seed: 21,
+            ..SimConfig::default()
+        };
+        let r = run(&cfg, |_, _| {});
+        report(name, &r);
+        let p = r.tile.stats().playout.unwrap();
+        println!(
+            "{name}: silent calls {}, longest silence {:.2} s",
+            r.silent_calls, r.longest_silence_s
+        );
+        assert_eq!(p.resyncs, 0, "{name}: {p:?}");
+        assert_eq!(p.starts, 1, "{name}: {p:?}");
+        assert!(
+            r.longest_silence_s < 0.5,
+            "{name}: level 0 for {} s",
+            r.longest_silence_s
+        );
+        assert!(r.tile.stats().playout.unwrap().overflow_frames == 0);
+    }
+}
