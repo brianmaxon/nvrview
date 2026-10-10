@@ -17,8 +17,10 @@ use bc_session::{ConnState, DeviceSession, Item, QueryError};
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// tokio's Instant (the runtime's clock), so a paused test clock covers it.
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 use tokio::time::timeout;
 
 /// Why a command failed.
@@ -280,7 +282,7 @@ pub async fn record<W: Write>(
         .map_err(|_| CliError::SessionEnded)?;
     let mut stats = RecordStats::default();
     let mut first_pts = None;
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let arrival = || started.elapsed().as_micros() as u64;
     tokio::pin!(stop);
     loop {
@@ -554,7 +556,7 @@ pub async fn capture<W: Write>(
                         None => return Err(ended(session)),
                     }
                 }
-                () = tokio::time::sleep_until(wake.into()) => {}
+                () = tokio::time::sleep_until(wake) => {}
             }
             if Instant::now() >= flush_at {
                 out.flush()?;

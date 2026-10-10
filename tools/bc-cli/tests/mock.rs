@@ -1,10 +1,13 @@
-//! bc-cli's library against the in-process mock NVR.
+//! bc-cli's library against the in-process mock NVR, on tokio's paused
+//! clock: the device runs on the test's runtime (`mock_nvr::spawn_in`),
+//! reached through in-memory pipes, so captures, stagger, restarts, and
+//! timeouts take simulated time.
 
 use bc_cli::{
     CliError, RecordLimits, info_command, info_query, list_channels, record, wait_logged_in,
 };
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, FnConnector, SessionConfig};
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,17 +24,20 @@ fn spawn_mock(fixture: &str, channels: u8) -> mock_nvr::MockNvr {
     let mut cfg = mock_nvr::Config::new(Fixture::load(&fixture_path(fixture)).unwrap());
     cfg.channels = channels;
     cfg.fps = 100;
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
+}
+
+/// Connects to `nvr` through in-memory pipes.
+fn connector(nvr: &mock_nvr::MockNvr) -> impl bc_session::Connector + use<> {
+    let addr = nvr.addr();
+    FnConnector(move || mock_nvr::connect(addr))
 }
 
 fn session(nvr: &mock_nvr::MockNvr, password: &str) -> DeviceSession {
-    DeviceSession::spawn(
-        TcpConnector::new(nvr.addr()),
-        SessionConfig::new("example-user", password),
-    )
+    DeviceSession::spawn(connector(nvr), SessionConfig::new("example-user", password))
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn lists_channels_with_names() {
     let nvr = spawn_mock("h264-basic.h264", 3);
     let s = session(&nvr, "example-password");
@@ -92,17 +98,17 @@ async fn records_fixture(name: &str) {
     assert!(out == expected, "recorded bytes differ from the fixture");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn records_h264_from_the_first_keyframe() {
     records_fixture("h264-leading-p.h264").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn records_h265_from_the_first_keyframe() {
     records_fixture("h265-leading-p.h265").await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stops_when_asked() {
     let nvr = spawn_mock("h264-basic.h264", 1);
     let s = session(&nvr, "example-password");
@@ -124,7 +130,7 @@ async fn stops_when_asked() {
     assert_eq!(out.len() as u64, stats.bytes);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn refused_login_is_reported_and_not_retried() {
     let nvr = spawn_mock("h264-basic.h264", 1);
     let s = session(&nvr, "wrong-password");
@@ -190,7 +196,7 @@ fn two_tier_recording() -> Vec<u8> {
 /// Capture sub and main from a mock replaying a two-tier recording, with
 /// main restarted, then analyze the capture: one clock, main about 120 ms
 /// behind sub, a start sample per main run.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn captures_tiers_and_analyzes_them() {
     use bc_cli::analyze::Analysis;
     use bc_cli::{CaptureConfig, Restart, capture};
@@ -201,7 +207,7 @@ async fn captures_tiers_and_analyzes_them() {
     cfg.replay = Some(ReplayConfig::new(
         Replay::from_reader(&two_tier_recording()[..]).unwrap(),
     ));
-    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let nvr = mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current());
     let s = session(&nvr, "example-password");
     wait_logged_in(&s, LIMIT).await.unwrap();
     let mut out = TierWriter::new(Vec::new()).unwrap();
@@ -248,7 +254,7 @@ async fn captures_tiers_and_analyzes_them() {
     assert!(burst >= 5, "{row}\n{md}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn info_queries_return_the_reply_body() {
     let nvr = spawn_mock("h264-basic.h264", 2);
     let s = session(&nvr, "example-password");
@@ -278,16 +284,16 @@ fn spawn_third_party_mock() -> mock_nvr::MockNvr {
     let mut tp = mock_nvr::ThirdPartyConfig::new(vec![1], 1);
     tp.media_delay = Duration::from_millis(100);
     cfg.third_party = Some(tp);
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn quick_retry_session(nvr: &mock_nvr::MockNvr) -> DeviceSession {
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.preview_retry_interval = Duration::from_millis(200);
-    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+    DeviceSession::spawn(connector(nvr), cfg)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn records_a_channel_whose_preview_is_answered_400() {
     let nvr = spawn_third_party_mock();
     let s = quick_retry_session(&nvr);
@@ -315,7 +321,7 @@ async fn records_a_channel_whose_preview_is_answered_400() {
     assert_eq!(nvr.command_count(3), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn captures_a_channel_whose_preview_is_answered_400() {
     use bc_cli::{CaptureConfig, capture};
     use bc_protocol::recording::TierWriter;
