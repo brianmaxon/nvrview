@@ -1,7 +1,7 @@
 //! bc-cli: log in to an NVR or camera, list its channels, record one live
 //! channel to a raw `.h264`/`.h265` file that ffplay and VLC can open,
-//! capture several tiers of a channel for timing analysis, or analyze such a
-//! capture.
+//! capture several tiers of a channel for timing analysis, analyze such a
+//! capture, or search the local network for devices (`discover`).
 //!
 //! The password is never taken from the command line (it would end up in
 //! shell history and process listings): it comes from the environment
@@ -22,6 +22,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+mod discover;
+
 const USAGE: &str = "\
 usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] channels
@@ -38,6 +40,7 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] talk
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli analyze FILE.nvrrec
+  bc-cli discover --help
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
 The password comes from NVRVIEW_PASSWORD or, on macOS, from the Keychain
@@ -681,7 +684,16 @@ fn analyze(path: &std::path::Path) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args(std::env::args().skip(1)) {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("discover") {
+        if argv.iter().any(|a| a == "-h" || a == "--help") {
+            eprintln!("usage:\n{}", discover::USAGE);
+            return ExitCode::from(2);
+        }
+        init_logging();
+        return discover::main(&argv[1..]);
+    }
+    let args = match parse_args(argv.into_iter()) {
         Ok(Parsed::Device(a)) => a,
         Ok(Parsed::Analyze(path)) => return analyze(&path),
         Err(e) => {
@@ -692,13 +704,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("NVRVIEW_LOG")
-                .unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
+    init_logging();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => {
@@ -713,4 +719,14 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("NVRVIEW_LOG")
+                .unwrap_or_else(|_| "warn".into()),
+        )
+        .init();
 }

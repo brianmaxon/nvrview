@@ -1,7 +1,7 @@
 [package]
 name = "bc-cli"
 version = "0.1.0"
-description = "Command-line client: log in to an NVR, list its channels, and record one live channel to an Annex-B file"
+description = "Command-line client: find devices on the LAN, log in to an NVR, list its channels, and record one live channel to an Annex-B file"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 bc-protocol = { path = "../../crates/bc-protocol" }
 bc-session = { path = "../../crates/bc-session" }
+discovery = { path = "../../crates/discovery" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
 
