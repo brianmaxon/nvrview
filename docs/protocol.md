@@ -192,6 +192,20 @@ Observed rates are lower than the advertised frame rate (about 4–15 fps on
 sub-streams, 12–15 fps on high tiers); use the timestamps, not the info record.
 (observed)
 
+#### Sub and main of one camera
+
+Measured with `bc-cli capture` and `bc-cli analyze` (docs/STREAM-TIMING.md):
+one camera behind an NVR, sub and main on one session for 120 s, main stopped
+and started again every 30 s (4 starts).
+
+| Fact | Provenance |
+| --- | --- |
+| Sub and main share one timestamp clock. The sub-stream carried every third main picture: all 464 sub pictures had a main picture with the identical µs timestamp. | observed |
+| Rates and GOPs: sub 4.17 fps with a keyframe every 40 pictures (9.6 s), main 12.5 fps with a keyframe every 24 pictures (1.92 s), against 10 and 30 fps advertised in the stream info. | observed |
+| For pictures of the same moment, main arrived a median 36 ms *earlier* than sub (p10 157 ms earlier, p90 68 ms later). | observed |
+| Starting main while sub plays: the first record came 24–65 ms after the request and the first picture, always a keyframe, 125–217 ms after it (median 215 ms), with no burst of buffered older pictures: the device starts a preview at a fresh keyframe. Sub's single start took 346 ms. | observed |
+| Every video picture of both tiers carried the wall-clock seconds in its extra header. The µs timestamps are not Unix time (they differ from seconds × 10⁶ by a large constant). How tightly the two follow each other was not yet measured. | observed |
+
 ### Audio payloads
 
 All observed in a live capture of several cameras on one NVR (about 6,500
