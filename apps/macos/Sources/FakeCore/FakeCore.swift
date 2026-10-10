@@ -73,9 +73,16 @@ public struct FakeDeviceSpec: Sendable {
 /// ABI 3, modeled exactly as the contract says:
 /// - tier switches: `tileSetTier` starts a second pipeline (a new
 ///   `generation`, its pictures continuing the camera's timestamps), both
-///   pipelines' actions flow until the new one's first Decode is answered,
-///   then the old one ends with a final Reset and `tile_tier` `active` and a
-///   `tier_switch` timing follow; a generation that never shows ends with
+///   pipelines' actions flow until the switch, then the old one ends with a
+///   final Reset and `tile_tier` `active` and a `tier_switch` timing
+///   (`delta_ms`, `held_ms`, `capped`) follow. Between main and sub the
+///   switch waits for the new generation's first picture whose timestamp is
+///   at or after the old generation's latest decoded one, and happens anyway
+///   `Options.tierAlignCap` (300 ms) after the new generation's first decoded
+///   picture (not at all aligned when the timestamps are more than 5 s
+///   apart, or nothing of the old one was decoded); other tier pairs switch
+///   at the first decoded picture. `Options.tierPTSOffsetMicros` makes a
+///   tier's timestamps run ahead of or behind the others'. A generation that never shows ends with
 ///   its own Reset and `failed` with a reason (superseded, start_rejected,
 ///   undecodable, timeout); asking for the tier already shown reports
 ///   `active` again;
@@ -127,6 +134,15 @@ public final class FakeCore: CoreAPI {
         /// A new tier that has decoded nothing after this long fails
         /// (reason `timeout`), as in the core.
         public var tierSwitchTimeout: Duration = .seconds(15)
+        /// Added to the timestamps of a tier's pictures (microseconds): a
+        /// positive offset puts the tier ahead of the camera's other tiers, a
+        /// negative one behind. The tiers' pictures otherwise advance in step,
+        /// so a tier behind never catches up.
+        public var tierPTSOffsetMicros: [StreamTier: Int64] = [:]
+        /// How long a main/sub switch holds the old picture, counted from the
+        /// new generation's first decoded picture, waiting for the new one to
+        /// reach the old one's timestamp (the real core: 300 ms).
+        public var tierAlignCap: Duration = .milliseconds(300)
         /// In real-time pacing, each tile's channel reports a detection (or,
         /// without camera AI, motion) every this many seconds, for 3 s.
         public var detectionDemo: Double?
@@ -691,6 +707,9 @@ private final class FakeTile: Sendable {
         var pendingFailures = 0
         var status: TileStatus?
         var answeredDecode = false
+        /// The latest picture answered as decoded, and when the first was.
+        var lastDecodedPTS: Int64?
+        var firstDecodedAt: UInt64?
         var startedAt = HostClock.nowNanos()
 
         init(generation: UInt32, tier: StreamTier, clip: FakeClip, cursor: Int) {
@@ -864,6 +883,13 @@ private final class FakeTile: Sendable {
                         #"{"type":"tile_tier","tile":\#(id),"tier":"\#(lane.tier.name)","state":"failed","generation":\#(lane.generation),"reason":"timeout"}"#)
                     timedOut = true
                 }
+                // A main/sub switch that waited the cap switches anyway.
+                if let n = s.lanes.firstIndex(where: { $0.generation > s.shown && $0.answeredDecode }),
+                    let ready = Self.switchReady(&s, new: n, now: now, cap: owner.options.tierAlignCap), ready.ready
+                {
+                    completeSwitch(&s, index: n, now: now, capped: ready.capped)
+                    timedOut = true
+                }
                 var steps: [(UInt32, [StandInAction])] = []
                 for i in s.lanes.indices {
                     let clip = s.lanes[i].clip
@@ -872,6 +898,7 @@ private final class FakeTile: Sendable {
                     let unit = clip.units[s.lanes[i].cursor % clip.units.count]
                     // Every tier of a camera carries the same camera time.
                     let pts = Int64(s.lanes[i].cursor) * 50_000
+                        + (owner.options.tierPTSOffsetMicros[s.lanes[i].tier] ?? 0)
                     s.lanes[i].cursor += 1
                     var actions: [StandInAction] = []
                     if s.lanes[i].pendingFailures > 0 {
@@ -1050,6 +1077,50 @@ private final class FakeTile: Sendable {
         }
     }
 
+    /// Whether the pending generation at `new` is ready to be shown: at its
+    /// first decoded picture, except between main and sub, where it must not
+    /// step back in time (at or after the old generation's latest decoded
+    /// timestamp), or has waited `cap` since its first decoded picture.
+    private static func switchReady(
+        _ s: inout State, new: Int, now: UInt64, cap: Duration
+    ) -> (ready: Bool, capped: Bool)? {
+        guard let old = s.lanes.first(where: { $0.generation == s.shown }), let latest = s.lanes[new].lastDecodedPTS,
+            let first = s.lanes[new].firstDecodedAt
+        else { return nil }
+        let pair = Set([old.tier, s.lanes[new].tier]) == [.main, .sub]
+        guard pair, let oldPTS = old.lastDecodedPTS else { return (true, false) }
+        let delta = latest - oldPTS
+        if delta >= 0 || abs(delta) > 5_000_000 { return (true, false) }
+        if now &- first >= UInt64(cap / .nanoseconds(1)) { return (true, true) }
+        return (false, false)
+    }
+
+    /// The switch: the old pipeline stops here (its final Reset follows at
+    /// the next turn), nothing more is owed for it, and the new one is the
+    /// only one left. Emits `tile_tier` `active` and the `tier_switch` timing.
+    private func completeSwitch(_ s: inout State, index: Int, now: UInt64, capped: Bool) {
+        let generation = s.lanes[index].generation
+        let tier = s.lanes[index].tier
+        let held = (now &- (s.lanes[index].firstDecodedAt ?? now)) / 1_000_000
+        var delta = ""
+        if let old = s.lanes.first(where: { $0.generation == s.shown })?.lastDecodedPTS,
+            let new = s.lanes[index].lastDecodedPTS
+        {
+            delta = #","delta_ms":\#((new - old) / 1000)"#
+        }
+        for old in s.lanes where old.generation < generation {
+            s.retired.insert(old.generation)
+            s.finalResets.append(old.generation)
+        }
+        s.lanes.removeAll { $0.generation < generation }
+        s.shown = generation
+        s.queued.append(
+            #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"active","generation":\#(generation)}"#)
+        s.queued.append(
+            #"{"type":"timing","what":"tier_switch","tile":\#(id),"ns":\#(now &- s.switchStartedAt)\#(delta),"held_ms":\#(held),"capped":\#(capped)}"#
+        )
+    }
+
     func answered(_ answer: Answer, generation: UInt32) {
         let now = HostClock.nowNanos()
         let problem = state.withLock { s -> String? in
@@ -1071,24 +1142,16 @@ private final class FakeTile: Sendable {
                 s.lanes[i].outstanding -= 1
                 let first = !s.lanes[i].answeredDecode
                 s.lanes[i].answeredDecode = true
+                s.lanes[i].lastDecodedPTS = pts
+                if first { s.lanes[i].firstDecodedAt = now }
                 if first, generation == 0 || generation == s.shown, owner.claimFirstPicture() {
                     s.queued.append(
                         #"{"type":"timing","what":"first_picture","tile":\#(id),"ns":\#(now &- owner.createdAt)}"#)
                 }
-                if first, generation > s.shown {
-                    // The switch: the old pipeline stops here, nothing more
-                    // is owed for it, and the new one is the only one left.
-                    let tier = s.lanes[i].tier
-                    for old in s.lanes where old.generation < generation {
-                        s.retired.insert(old.generation)
-                        s.finalResets.append(old.generation)
-                    }
-                    s.lanes.removeAll { $0.generation < generation }
-                    s.shown = generation
-                    s.queued.append(
-                        #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"active","generation":\#(generation)}"#)
-                    s.queued.append(
-                        #"{"type":"timing","what":"tier_switch","tile":\#(id),"ns":\#(now &- s.switchStartedAt)}"#)
+                if generation > s.shown,
+                    let ready = Self.switchReady(&s, new: i, now: now, cap: owner.options.tierAlignCap), ready.ready
+                {
+                    completeSwitch(&s, index: i, now: now, capped: ready.capped)
                 }
             case .failed(let kind):
                 s.answers.failures.append(kind)

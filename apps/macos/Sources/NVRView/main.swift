@@ -220,9 +220,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc func toggleFrameRates(_ sender: Any?) { model?.showFrameRates.toggle() }
+    @objc func toggleHideOffline(_ sender: Any?) { model?.hideOfflineChannels.toggle() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
+        if item.action == #selector(toggleHideOffline(_:)) { item.state = model?.hideOfflineChannels == true ? .on : .off }
         return true
     }
 
@@ -278,6 +280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
             .separator(),
             item("Show Frame Rates", #selector(toggleFrameRates(_:))),
+            item("Hide Offline Channels", #selector(toggleHideOffline(_:))),
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.

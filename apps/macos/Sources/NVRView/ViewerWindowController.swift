@@ -442,6 +442,7 @@ final class EditBar: NSView, NSTextFieldDelegate {
     private let hint = NSTextField(labelWithString: "Drag a divider to resize · drag a tile onto another to swap · double-click a divider to even it out · drag cameras in from the sidebar")
     private let done = NSButton(title: "Done", target: nil, action: #selector(ViewerWindowController.toggleEditing(_:)))
     private var height: NSLayoutConstraint!
+    private let stack = NSStackView()
 
     init() {
         super.init(frame: .zero)
@@ -464,7 +465,7 @@ final class EditBar: NSView, NSTextFieldDelegate {
         done.keyEquivalent = "\r"
         for b in [splitRow, splitCol, remove, saveAs, done] { b.bezelStyle = .push; b.controlSize = .small }
         presets.controlSize = .small
-        let stack = NSStackView(views: [name, splitRow, splitCol, remove, presets, saveAs, hint, done])
+        for v in [name, splitRow, splitCol, remove, presets, saveAs, hint, done] { stack.addArrangedSubview(v) }
         stack.orientation = .horizontal
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
@@ -472,9 +473,17 @@ final class EditBar: NSView, NSTextFieldDelegate {
         stack.setHuggingPriority(.defaultLow, for: .horizontal)
         addSubview(stack)
         height = heightAnchor.constraint(equalToConstant: 0)
+        // The bar is as wide as the window, which is 0 wide until the window
+        // is sized, and the stack's content (a 180 pt name field, buttons)
+        // cannot shrink to that: an equal-width pin at required priority is
+        // an unsatisfiable constraint then, which AppKit logs. The trailing
+        // pin is a strong preference instead, and the bar clips what does
+        // not fit.
+        let trailing = stack.trailingAnchor.constraint(equalTo: trailingAnchor)
+        trailing.priority = .defaultHigh
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            trailing,
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             height,
         ])
@@ -487,6 +496,7 @@ final class EditBar: NSView, NSTextFieldDelegate {
 
     func update(state: WindowState, model: AppModel) {
         isHidden = !state.editing
+        stack.isHidden = !state.editing
         height.constant = state.editing ? 38 : 0
         if name.currentEditor() == nil { name.stringValue = state.name }
         let canSplit = state.selected != nil || state.tree.leafCount == 1

@@ -249,11 +249,19 @@ final class TileChromeView: NSView {
         box.addSubview(label)
         label.translatesAutoresizingMaskIntoConstraints = false
         box.translatesAutoresizingMaskIntoConstraints = false
+        // The badges' stack is placed by frame, and has a zero frame until
+        // the tile's first layout; the far-side insets are strong preferences
+        // so that a zero-size stack never makes the set unsatisfiable (which
+        // AppKit logs).
+        let trailing = label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -6)
+        let bottom = label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1)
+        trailing.priority = .defaultHigh
+        bottom.priority = .defaultHigh
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -6),
+            trailing,
             label.topAnchor.constraint(equalTo: box.topAnchor, constant: 1),
-            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1),
+            bottom,
         ])
         return box
     }

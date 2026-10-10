@@ -165,10 +165,13 @@ public struct TileVeil: Sendable, Equatable {
 
 /// The frame-rate readout of a tile header.
 public enum FrameRateText {
-    public static func make(device: Double?, shown: Double?, displayHz: Int) -> String {
+    /// `switchNote` (`TierSwitchTiming.note`) is the last tier switch, while
+    /// it is recent.
+    public static func make(device: Double?, shown: Double?, displayHz: Int, switchNote: String? = nil) -> String {
         func fps(_ v: Double?) -> String { v.map { String(format: "%.1f fps", $0) } ?? "– fps" }
         var parts = ["Device \(fps(device))", "Shown \(fps(shown))"]
         if displayHz > 0 { parts.append("\(displayHz) Hz") }
+        if let switchNote { parts.append(switchNote) }
         return parts.joined(separator: " · ")
     }
 }
@@ -208,4 +211,20 @@ public enum LevelMeterMode: Sendable, Equatable {
     /// Whether to read the tile's level this refresh: only for meters on
     /// screen, so hidden tiles cost nothing.
     public func polls(headerShown: Bool) -> Bool { visible(headerShown: headerShown) }
+}
+
+/// The sidebar's "Hide Offline Channels" filter: an NVR advertises every
+/// slot it has, most of them empty on a large unit. Only the sidebar list is
+/// filtered; layouts and groups refer to cameras by device and channel, so
+/// they keep working whatever is hidden.
+public enum ChannelFilter {
+    public static func visible(_ channels: [ChannelInfo], hideOffline: Bool) -> [ChannelInfo] {
+        hideOffline ? channels.filter(\.connected) : channels
+    }
+
+    /// "16" when all are listed, "4 of 16" when some are hidden, nil without channels.
+    public static func countText(shown: Int, total: Int) -> String? {
+        guard total > 0 else { return nil }
+        return shown == total ? "\(total)" : "\(shown) of \(total)"
+    }
 }

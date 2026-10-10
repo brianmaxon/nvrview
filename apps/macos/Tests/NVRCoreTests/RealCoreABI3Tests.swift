@@ -79,7 +79,7 @@ import Testing
             for e in events.get() { if case .tileTier = e { print("  \(e)") } }
         }
         #expect(back)
-        print("real core tier switch: \(tiers), timings \(events.get().compactMap { e -> String? in if case .timing(let w, _, let ns) = e { return "\(w) \(ns / 1_000_000) ms" }; return nil })")
+        print("real core tier switch: \(tiers), timings \(events.get().compactMap { e -> String? in if case .timing(let w, _, let ns, _) = e { return "\(w) \(ns / 1_000_000) ms" }; return nil })")
 
         // Layouts: the app's JSON round-trips; the core versions it.
         let layout = SavedLayout(
