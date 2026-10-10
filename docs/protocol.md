@@ -29,7 +29,7 @@ All integers little-endian.
 | 8 | 4 | body length (bytes after the header) |
 | 12 | 4 | message ID, chosen by the client; replies echo it |
 | 16 | 2 | status (replies: 200 OK, 300, 400, 401 …) |
-| 18 | 2 | message class |
+| 18 | 2 | message class, **big-endian** unlike every other field: class `0x1465` is the bytes `14 65` (observed) |
 | 20 | 4 | payload offset (only for classes `0x1464` and `0x0000`) |
 
 | Class | Header size | Used for | Provenance |

@@ -124,7 +124,9 @@ impl Header {
         out.extend_from_slice(&self.body_len.to_le_bytes());
         out.extend_from_slice(&self.message_id.to_le_bytes());
         out.extend_from_slice(&self.status.to_le_bytes());
-        out.extend_from_slice(&self.class.value().to_le_bytes());
+        // Unlike every other field, the class is big-endian: `0x1465` is the
+        // byte sequence `14 65` on the wire (docs/protocol.md).
+        out.extend_from_slice(&self.class.value().to_be_bytes());
         if self.class.has_payload_offset() {
             out.extend_from_slice(&self.payload_offset.unwrap_or(0).to_le_bytes());
         }
@@ -146,7 +148,7 @@ impl Header {
         }
         let u32_at = |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
         let u16_at = |o: usize| u16::from_le_bytes([buf[o], buf[o + 1]]);
-        let raw_class = u16_at(18);
+        let raw_class = u16::from_be_bytes([buf[18], buf[19]]);
         let class = Class::from_value(raw_class).ok_or(HeaderError::UnknownClass(raw_class))?;
         let len = class.header_len();
         if buf.len() < len {
@@ -179,6 +181,27 @@ mod tests {
         }
     }
 
+    /// The 20 bytes the official client sent to start a session (fixed
+    /// header only; nothing session-specific).
+    #[test]
+    fn handshake_header_matches_the_wire() {
+        let h = Header {
+            command: 1,
+            body_len: 0,
+            message_id: 0,
+            status: 0xdc12,
+            class: Class::ClientHandshake,
+            payload_offset: None,
+        };
+        let mut out = Vec::new();
+        h.encode_into(&mut out);
+        let wire = [
+            0xf0, 0xde, 0xbc, 0x0a, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0xdc, 0x14, 0x65,
+        ];
+        assert_eq!(out, wire);
+        assert_eq!(Header::decode(&wire).unwrap().0, h);
+    }
+
     #[test]
     fn round_trip_all_classes() {
         for class in [
@@ -200,7 +223,7 @@ mod tests {
         let mut buf = Vec::new();
         sample(Class::Client).encode_into(&mut buf);
         let expected: [u8; 24] = [
-            0xf0, 0xde, 0xbc, 0x0a, 3, 0, 0, 0, 77, 0, 0, 0, 4, 3, 2, 1, 200, 0, 0x64, 0x14, 5, 0,
+            0xf0, 0xde, 0xbc, 0x0a, 3, 0, 0, 0, 77, 0, 0, 0, 4, 3, 2, 1, 200, 0, 0x14, 0x64, 5, 0,
             0, 0,
         ];
         assert_eq!(buf, expected);

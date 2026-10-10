@@ -580,7 +580,7 @@ mod tests {
         assert_eq!(
             hs_bytes,
             [
-                0xf0, 0xde, 0xbc, 0x0a, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0xdc, 0x65, 0x14
+                0xf0, 0xde, 0xbc, 0x0a, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0xdc, 0x14, 0x65
             ]
         );
         let hs = decode_one(&hs_bytes);
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(login_bytes[4..8], 1u32.to_le_bytes());
         assert_eq!(login_bytes[8..12], (login.body.len() as u32).to_le_bytes());
         assert_eq!(login_bytes[12..16], [0, 0, 0, 0]);
-        assert_eq!(login_bytes[16..24], [0, 0, 0x64, 0x14, 0, 0, 0, 0]);
+        assert_eq!(login_bytes[16..24], [0, 0, 0x14, 0x64, 0, 0, 0, 0]);
         assert_eq!(login.header.message_id, 0);
         let mut body = login.body.clone();
         xor_obfuscate(login.header.message_id, &mut body);
