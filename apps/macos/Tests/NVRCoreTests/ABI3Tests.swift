@@ -244,6 +244,136 @@ import VideoKit
         #expect(rig.fake.generations(tile: tile.id)?.running == [0])
     }
 
+    // MARK: Aligned switches (docs/FFI.md, "Switching a tile's stream tier")
+
+    private func switchTiming(_ rig: Rig, _ tile: CoreTile) -> TierSwitchTiming? {
+        rig.events.get().compactMap { e -> TierSwitchTiming? in
+            if case .timing("tier_switch", tile.id, _, let detail) = e { return detail }
+            return nil
+        }.last
+    }
+
+    /// Pumps until the tile shows `tier`, checking that it always has a
+    /// picture and, while the old generation is shown, that the picture is
+    /// the old generation's (never a new-generation one before the final Reset).
+    private func pumpToSwitch(_ rig: Rig, _ tile: CoreTile, to tier: StreamTier, limit: Int = 200) {
+        var steps = 0
+        while tile.tierState.shown != tier, steps < limit {
+            step(rig, tile)
+            steps += 1
+            if tile.tierState.shownGeneration == 0, tile.decoders.count == 2 {
+                #expect(tile.latestPicture()?.ptsMicros == tile.decoders[0].latestPicture()?.ptsMicros)
+            }
+        }
+        rig.fake.flushEvents()
+    }
+
+    @Test func mainAheadOfSubSwitchesAtOnce() throws {
+        let rig = try rig { $0.tierPTSOffsetMicros = [.main: 100_000] }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        pumpToSwitch(rig, tile, to: .main)
+        #expect(tile.tierState.shown == .main)
+        let t = try #require(switchTiming(rig, tile))
+        #expect((t.deltaMs ?? 0) >= 100)
+        #expect(t.heldMs == 0)
+        #expect(!t.capped)
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    @Test func mainBehindSubHoldsThenSwitchesAtTheCap() throws {
+        let rig = try rig {
+            $0.tierPTSOffsetMicros = [.main: -100_000]
+            $0.tierAlignCap = .milliseconds(60)
+        }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        // Held: the new generation decodes but is never presented, however
+        // many pictures it has decoded.
+        // (The new stream waits for its first keyframe first.)
+        var steps = 0
+        while (tile.decoders.count < 2 || tile.decoders[1].stats.decoded < 3), steps < 400 {
+            step(rig, tile)
+            steps += 1
+        }
+        #expect(tile.tierState.shown == .sub)
+        #expect(tile.tierState.shownGeneration == 0)
+        #expect(tile.decoders.count == 2)
+        #expect((tile.decoders[1].stats.decoded) > 0)
+        #expect(tile.latestPicture()?.ptsMicros == tile.decoders[0].latestPicture()?.ptsMicros)
+        #expect(tile.latestPicture()?.ptsMicros != tile.decoders[1].latestPicture()?.ptsMicros)
+        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .starting, generation: 1))
+        #expect(switchTiming(rig, tile) == nil)
+
+        Thread.sleep(forTimeInterval: 0.1)
+        pumpToSwitch(rig, tile, to: .main, limit: 4)
+        #expect(tile.tierState.shown == .main)
+        let t = try #require(switchTiming(rig, tile))
+        #expect(t.capped)
+        #expect(t.heldMs >= 60)
+        #expect((t.deltaMs ?? 0) < 0)
+        #expect(rig.fake.lastActions(tile: tile.id).contains { $0 == "reset@0" })
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    @Test func mainFarBehindSubIsNotOneClock() throws {
+        let rig = try rig { $0.tierPTSOffsetMicros = [.main: -6_000_000] }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        pumpToSwitch(rig, tile, to: .main, limit: 400)
+        #expect(tile.tierState.shown == .main)
+        let t = try #require(switchTiming(rig, tile))
+        #expect(!t.capped)
+        #expect(t.heldMs == 0)
+        #expect((t.deltaMs ?? 0) < -5000)
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    @Test func otherTierPairsSwitchAtTheFirstPicture() throws {
+        let rig = try rig { $0.tierPTSOffsetMicros = [.mobile: -100_000] }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .mobile)
+        pumpToSwitch(rig, tile, to: .mobile, limit: 400)
+        #expect(tile.tierState.shown == .mobile)
+        let t = try #require(switchTiming(rig, tile))
+        #expect(!t.capped)
+        #expect(t.heldMs == 0)
+        #expect((t.deltaMs ?? 0) < 0)  // stepped back, and allowed to
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    /// The new generation's pictures are decoded while the old one is held,
+    /// and the tile presents none of them until the old generation's final
+    /// Reset: the Reset is what moves the tile to the new generation.
+    @Test func newPicturesAreNotPresentedBeforeTheFinalReset() throws {
+        let rig = try rig { $0.tierPTSOffsetMicros = [.main: 100_000] }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<6 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        var steps = 0
+        while rig.fake.generations(tile: tile.id)?.shown != 1, steps < 50 {
+            step(rig, tile)
+            steps += 1
+        }
+        // The core switched; its final Reset and event are not sent yet.
+        #expect(tile.tierState.shownGeneration == 0)
+        #expect(tile.decoders.count == 2)
+        #expect(tile.decoders[1].latestPicture() != nil)
+        #expect(tile.latestPicture()?.ptsMicros == tile.decoders[0].latestPicture()?.ptsMicros)
+        rig.fake.deliverFinalResetsOnly(tile: tile.id)
+        #expect(tile.tierState.shownGeneration == 1)
+        #expect(tile.latestPicture()?.ptsMicros == tile.decoders[0].latestPicture()?.ptsMicros)
+    }
+
     @Test func aSwitchThatNeverDecodesTimesOut() throws {
         let rig = try rig { $0.tierSwitchTimeout = .milliseconds(50) }
         defer { rig.bridge.shutdown() }
