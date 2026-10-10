@@ -207,6 +207,27 @@ and started again every 30 s (4 starts).
 | Every video picture of both tiers had an extra header of at least 8 bytes, but only keyframes carried the wall-clock seconds in bytes 0–3; every predicted frame of both tiers carried the same other value there (`0x09000006`), not seconds. The µs timestamps are not Unix time (they differ from seconds × 10⁶ by a large constant). | observed |
 | Over the keyframes, *pts − seconds × 10⁶* spread over 0.83 s (sub, 13 keyframes) and 0.99 s (main, 60 keyframes): one constant plus the truncated fraction of a second, so the µs timestamps follow the wall-clock seconds to within their 1 s resolution. One constant fits both tiers' keyframes; main's pin it to a window of about 15 ms. | observed |
 
+#### Second lenses
+
+Measured on an NVR on newer firmware with `bc-cli channels`, `bc-cli query
+199`, and `bc-cli capture`/`analyze` of all four tiers (sub, main, mobile,
+extern) of two multi-lens cameras: camera A with two fixed lenses, and
+camera B with a wide lens and a pan-tilt-zoom telephoto lens (120 s and 30 s).
+
+| Fact | Provenance |
+| --- | --- |
+| `streamSupport` (145) does not tell lenses apart. Most single-lens cameras on both NVRs listed `mainStream,subStream,externStream` (for them `externStream` is most likely a third quality tier of the same lens), while both multi-lens cameras listed only `mainStream,subStream`. | observed |
+| Both multi-lens cameras nevertheless served `externStream` and `mobileStream` with full video when asked: the second lens. The official client opened camera B's second lens with `handle` 1028 (`externStream` on its channel). | observed; observed (client capture) |
+| Cameras without a second lens that do not list `externStream` (a dual-sensor camera that stitches one panoramic picture, and a single-lens camera) answered an `externStream` or `mobileStream` preview with one stream-info record (size 0×0) and no video within 12 s. | observed |
+| `Support` (199) gave camera A one `subItem` per lens (lens 1 with `ptzType` 3), but camera B, on older camera firmware behind the same NVR, no `subItem` at all; its item had `ptzType` 3 and a `channelType` other than `ipc`. So 199 identifies some multi-lens cameras, not all. | observed |
+| Each tier pair of one lens shares one clock (sub/main: 2213 of 2213 and 557 of 557 matched pictures with identical timestamps). The second lens has timestamps of its own: none identical to the first lens's; camera A's second lens sat about 100 ms from the first lens with no measurable drift over 2 minutes (−20 to −28 ± 25 ppm) and ran at 20.17 fps against 20.02, camera B's within 4–16 ms. | observed |
+| Stream info gave the second lens's size as 0×0 (dimensions come from the SPS). Starts: camera A's `mobileStream` took 2.05 s to its first picture (one sample), its `externStream` 160 ms; camera B's four tiers each 136–213 ms. Camera A's main sometimes began with a burst of 3–10 buffered pictures (camera B and the earlier single-lens camera: none). | observed |
+
+How nvrview detects a second lens (ours, from the facts above): two or more
+`subItem`s in 199; otherwise, for a channel that does not list
+`externStream`, one short `externStream` preview: video within about 2 s
+means a second lens. The answer is kept per device key and channel.
+
 ### Audio payloads
 
 All observed in a live capture of several cameras on one NVR (about 6,500
