@@ -329,8 +329,9 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
     let listener = std::net::TcpListener::bind(config.bind)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
+    // One worker per core (tokio's default): streams spread over the cores
+    // much as the thread-per-stream server they replaced did.
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
         .thread_name("mock-nvr")
         .enable_all()
         .build()?;
