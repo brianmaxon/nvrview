@@ -11,10 +11,11 @@ import Foundation
 ///
 /// The second lens of a multi-lens camera (`CameraRef.lens` 1) is its own
 /// camera here, with its own tile, on the same channel's lens-2 tiers:
-/// `mobile` in a grid and `extern` when focused. Its tile opens on
-/// `extern`, which the device is known to serve, and switches to `mobile`
-/// for the grid; if that switch fails (the device does not serve `mobile`),
-/// the camera stays on `extern` for the rest of the run.
+/// `mobile` in a grid and `extern` when focused. Like every tile it opens
+/// on the stream it should show, so a grid tile starts on the low tier
+/// (`mobile`), never on the high one; if the device refuses `mobile` (the
+/// start or a later switch fails), the camera uses `extern` for the rest of
+/// the run and its tile is reopened on it.
 ///
 /// Use from one thread (the main thread in the app): every call here may
 /// open or close tiles, which must not happen inside a core callback.
@@ -23,6 +24,8 @@ public final class TileLeases {
         var tile: CoreTile?
         var leases = 0
         var focus = 0
+        /// The tier the tile was opened on.
+        var openedTier: StreamTier?
     }
 
     private let bridge: CoreBridge
@@ -129,6 +132,21 @@ public final class TileLeases {
         applyTier(camera)
     }
 
+    /// A tile could not start its stream (`tile_error`). A second lens whose
+    /// `mobile` start was refused uses `extern` from now on: its tile is
+    /// closed and reopened on it. Other failures are left to the device's
+    /// reconnect handling.
+    public func startFailed(tile id: UInt64, reason: String?) {
+        guard let camera = camera(forTile: id), camera.lens > 0, reason == "start_rejected",
+            entries[camera]?.openedTier == .mobile, let tile = entries[camera]?.tile
+        else { return }
+        noMobile.insert(camera)
+        bridge.closeTile(tile)
+        entries[camera]?.tile = nil
+        onTileChange(camera, nil)
+        open(camera)
+    }
+
     /// Closes a device's tiles (it is being removed or re-added); their
     /// leases stay, so `reopen` brings them back.
     public func closeTiles(device key: String) {
@@ -170,16 +188,15 @@ public final class TileLeases {
         guard let e = entries[camera] else { return nil }
         if let tile = e.tile { return tile }
         guard let device = resolve(camera.device), (0...255).contains(camera.channel) else { return nil }
-        let wanted = wantedTier(camera)
-        // A second lens opens on `extern` (served whether or not `mobile`
-        // is), then switches if the grid wants `mobile`.
-        let tier = camera.lens > 0 ? StreamTier.extern : wanted
+        // Open on the tier the camera should show now: the low tier in a
+        // grid (sub, or a second lens's mobile), never the high one first.
+        let tier = wantedTier(camera)
         guard let tile = try? bridge.openTile(device: device, channel: UInt8(camera.channel), tier: tier) else {
             return nil
         }
         entries[camera]?.tile = tile
+        entries[camera]?.openedTier = tier
         onTileChange(camera, tile)
-        if wanted != tier { try? bridge.setTileTier(tile, wanted) }
         return tile
     }
 

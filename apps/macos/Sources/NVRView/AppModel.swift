@@ -566,6 +566,8 @@ final class AppModel {
             }
         case .tileClosed(let tile, _):
             leases.tileEnded(tile)
+        case .tileError(let tile, let reason, _):
+            leases.startFailed(tile: tile, reason: reason)
         case .detection(let d):
             guard let key = key(forDevice: d.device) else { return }
             detections.apply(d, camera: d.camera(deviceKey: key))

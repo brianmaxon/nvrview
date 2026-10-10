@@ -86,6 +86,9 @@ public enum CoreEvent: Sendable, Equatable {
     case channels(device: UInt64, channels: [ChannelInfo])
     case tileStats(tile: UInt64, stats: TileStats)
     case tileClosed(tile: UInt64, reason: String?)
+    /// The tile's stream could not start (`tile_error`, reason such as
+    /// `start_rejected`, with the device's status when it gave one).
+    case tileError(tile: UInt64, reason: String?, status: Int?)
     case audioStats(tile: UInt64, stats: AudioStatsEvent)
     /// ABI 3: progress of `nv_tile_set_tier` (docs/FFI-ABI3.md section 1).
     /// `reason` comes with `failed` (`superseded`, `timeout`,
@@ -188,6 +191,9 @@ public enum CoreEvent: Sendable, Equatable {
         case "tile_closed":
             guard let tile = w.tile else { return nil }
             return .tileClosed(tile: tile, reason: w.reason)
+        case "tile_error":
+            guard let tile = w.tile else { return nil }
+            return .tileError(tile: tile, reason: w.reason, status: w.status)
         case "audio_stats":
             guard let tile = w.tile else { return nil }
             var a = AudioStatsEvent()

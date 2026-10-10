@@ -131,6 +131,10 @@ public final class FakeCore: CoreAPI {
         /// Tier switches fail (`tile_tier` `failed`, reason `start_rejected`;
         /// the old tier keeps showing).
         public var tierSwitchFails = false
+        /// Tiles opened on these tiers never stream: the open succeeds and a
+        /// `tile_error` (`start_rejected`, status 400) follows, as when a
+        /// device refuses a stream.
+        public var startRejectedTiers: Set<StreamTier> = []
         /// A new tier that has decoded nothing after this long fails
         /// (reason `timeout`), as in the core.
         public var tierSwitchTimeout: Duration = .seconds(15)
@@ -311,6 +315,10 @@ public final class FakeCore: CoreAPI {
             w.devices[device] = d
             w.tiles[id] = tile
             return (id, tile)
+        }
+        if options.startRejectedTiers.contains(tier) {
+            emitEvent(#"{"type":"tile_error","tile":\#(id),"reason":"start_rejected","status":400}"#)
+            return id
         }
         if case .realtime(let fps) = options.pacing, !tile.silent { tile.start(fps: fps) }
         return id

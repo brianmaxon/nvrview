@@ -119,8 +119,8 @@ import Testing
         #expect(leases.tiers(for: lens0) == (.sub, .main))
         #expect(leases.tiers(for: lens1) == (.mobile, .extern))
         let tile = try #require(leases.acquire(lens1))
-        // Opens on extern, then asks for mobile for the grid.
-        #expect(tile.openedTier == .extern)
+        // Opens on the grid's low tier directly, never on extern first.
+        #expect(tile.openedTier == .mobile)
         #expect(tile.tierState.requested == .mobile)
         settle(rig, tile) { tile.tierState.shown == .mobile }
         #expect(tile.tierState.shown == .mobile)
@@ -134,31 +134,41 @@ import Testing
     }
 
     @Test func withoutMobileTheSecondLensStaysOnExtern() throws {
-        let (rig, leases) = try rig { $0.tierSwitchFails = true }
+        let (rig, leases) = try rig { $0.startRejectedTiers = [.mobile] }
         defer { rig.bridge.shutdown() }
-        let tile = try #require(leases.acquire(lens1))
-        #expect(tile.tierState.requested == .mobile)
-        // The fake fails the switch (start_rejected) at its next turn; the
-        // app forwards the event to the leases.
-        rig.fake.pump(tile: tile.id, count: 1)
-        tile.waitForPendingFrames()
-        let failed = rig.events.get().contains {
-            if case .tileTier(tile.id, .mobile, .failed, _, _) = $0 { return true }
+        let first = try #require(leases.acquire(lens1))
+        #expect(first.openedTier == .mobile)
+        // The device refuses mobile at the start (tile_error); the app
+        // forwards it to the leases, which reopen the tile on extern.
+        let refused = rig.events.get().contains {
+            if case .tileError(first.id, "start_rejected", 400) = $0 { return true }
             return false
         }
-        #expect(failed)
-        leases.tierFailed(tile: tile.id, tier: .mobile, reason: "start_rejected")
+        #expect(refused)
+        leases.startFailed(tile: first.id, reason: "start_rejected")
         #expect(leases.tiers(for: lens1) == (.extern, .extern))
-        #expect(tile.tierState.shown == .extern)
+        let reopened = try #require(leases.tile(for: lens1))
+        #expect(reopened !== first)
+        #expect(reopened.openedTier == .extern)
         // Focus no longer switches anything; the first lens is unaffected.
         leases.setFocused(lens1, true)
-        #expect(tile.tierState.shown == .extern)
+        #expect(leases.wantedTier(lens1) == .extern)
         #expect(leases.tiers(for: lens0) == (.sub, .main))
-        // A superseded switch is not a failure of mobile.
-        let (rig2, leases2) = try self.rig()
+        // Another refusal reason, or a first lens, changes nothing.
+        let (rig2, leases2) = try self.rig { $0.startRejectedTiers = [.mobile] }
         defer { rig2.bridge.shutdown() }
         let t2 = try #require(leases2.acquire(lens1))
-        leases2.tierFailed(tile: t2.id, tier: .mobile, reason: "superseded")
+        leases2.startFailed(tile: t2.id, reason: "session_closed")
         #expect(leases2.tiers(for: lens1) == (.mobile, .extern))
+        #expect(leases2.tile(for: lens1) === t2)
+        // A switch to mobile that fails later (not superseded) also falls
+        // back, as before.
+        let (rig3, leases3) = try self.rig()
+        defer { rig3.bridge.shutdown() }
+        let t3 = try #require(leases3.acquire(lens1))
+        leases3.tierFailed(tile: t3.id, tier: .mobile, reason: "superseded")
+        #expect(leases3.tiers(for: lens1) == (.mobile, .extern))
+        leases3.tierFailed(tile: t3.id, tier: .mobile, reason: "start_rejected")
+        #expect(leases3.tiers(for: lens1) == (.extern, .extern))
     }
 }
