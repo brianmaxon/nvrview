@@ -56,8 +56,17 @@ final class KeychainCredentials: CredentialStore {
 
     func password(for key: String) -> String? {
         if let cached = cache[key] { return cached }
-        let read = KeychainPassword(service: service, account: key).read()
-        if let read { cache[key] = read }
+        let item = KeychainPassword(service: service, account: key)
+        guard let read = item.read() else { return nil }
+        cache[key] = read
+        // An item saved by an earlier build may trust only that build, so
+        // reading it asks every launch. Re-create it once as this app's own
+        // (see KeychainPassword.save); only a flag is remembered, never the
+        // password.
+        let flag = "keychain-owned.\(service).\(key)"
+        if !UserDefaults.standard.bool(forKey: flag), item.save(read) == errSecSuccess {
+            UserDefaults.standard.set(true, forKey: flag)
+        }
         return read
     }
 
@@ -67,12 +76,16 @@ final class KeychainCredentials: CredentialStore {
 
     func setPassword(_ password: String, for key: String) -> Bool {
         let ok = KeychainPassword(service: service, account: key).save(password) == errSecSuccess
-        if ok { cache[key] = password }
+        if ok {
+            cache[key] = password
+            UserDefaults.standard.set(true, forKey: "keychain-owned.\(service).\(key)")
+        }
         return ok
     }
 
     func deletePassword(for key: String) {
         cache[key] = nil
+        UserDefaults.standard.removeObject(forKey: "keychain-owned.\(service).\(key)")
         KeychainPassword(service: service, account: key).delete()
     }
 }

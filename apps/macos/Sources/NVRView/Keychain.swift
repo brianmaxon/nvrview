@@ -11,7 +11,6 @@ struct KeychainPassword {
         [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account]
     }
 
-    /// The stored password, or nil when there is none (or it cannot be read).
     /// Whether the item exists, from its attributes only: the secret is not
     /// read, so this never shows a Keychain permission prompt.
     func exists() -> Bool {
@@ -22,6 +21,7 @@ struct KeychainPassword {
         return SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess
     }
 
+    /// The stored password, or nil when there is none (or it cannot be read).
     func read() -> String? {
         var q = query
         q[kSecReturnData] = true
@@ -33,14 +33,17 @@ struct KeychainPassword {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Stores or replaces the password.
+    /// Stores or replaces the password by deleting any existing item and
+    /// adding a new one. Updating in place would keep the old item's access
+    /// list, which trusts only the build that created it; a new item is
+    /// created by this app, and the Keychain trusts its creator (and later
+    /// builds with the same signing identity) without asking.
     @discardableResult
     func save(_ password: String) -> OSStatus {
-        let data = Data(password.utf8)
-        let update = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
-        if update != errSecItemNotFound { return update }
+        let removed = SecItemDelete(query as CFDictionary)
+        if removed != errSecSuccess && removed != errSecItemNotFound { return removed }
         var add = query
-        add[kSecValueData] = data
+        add[kSecValueData] = Data(password.utf8)
         return SecItemAdd(add as CFDictionary, nil)
     }
 
