@@ -102,16 +102,30 @@ the crate's `Renderer`.
   every later frame still plays at its time. Latency never grows by the
   length of an underrun; this is the opposite of a player that resumes where
   it stopped, whose latency ratchets up with every stall.
-- **Playout delay**: 280 ms after the median delivery by default. It must
-  cover one record (64 ms: a record is sent only after its last sample) plus
-  the late tail of the jitter (177 ms above median measured). Note that with
-  pictures shown on arrival the video itself jitters by the same ±67 ms, and
-  audio lags the typical picture by the playout delay, more than lip-sync
-  tolerances (tens of ms). **Decision: video is never delayed** (live view,
-  above all full screen, shows the newest picture), so audio trails the
-  picture by its playout delay. The delay therefore adapts to the measured
-  jitter of each stream (a high percentile of recent delivery delay, bounded)
-  instead of a fixed 280 ms, so it is as short as the network allows.
+- **Playout delay**: how long after its picture each sample is heard. Video
+  is never delayed (live view, above all full screen, shows the newest
+  picture), so audio trails the picture by this delay, and it adapts to
+  each stream to be as short as its network allows (`crates/audio-pipeline`
+  `delay.rs`). It must cover a record's length (64 ms: a record is sent only
+  after its last sample), its lateness against the presentation reference,
+  and the output's lead (the renderer reads about 20 ms ahead of the time
+  it is heard). The target is the 99th percentile, over the last 300 s, of
+  the *per-second maximum* lateness, plus those two, kept within
+  100–500 ms: every record arrives in time in all but about one second in
+  a hundred, and a stall (a second or two of late records) every few
+  minutes does not raise it. (A plain 99th percentile of records underran
+  every few seconds in the simulation: late records come singly, spread
+  over many seconds.) The floor is a record plus the lead plus slack; the
+  ceiling is where audio stops feeling like the picture's sound and a
+  network needing more is stalling, which resyncs handle. The delay starts
+  at 250 ms, moves toward the target at most 2 ms per second (approaching
+  it with a 10 s time constant), and playout feeds that rate forward into
+  its resampling ratio, so a change is a 0.2% tempo change (3.5 cents),
+  never a jump. In simulation: 100 ms on a clean network (0–10 ms jitter),
+  about 270 ms under the measured LAN jitter (188 underruns in 3 h), about
+  400 ms under jitter half again as large; every click stays within ±40 ms
+  of its moving target. A caller can still fix the delay
+  (`TileConfig::playout_delay_us`).
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the

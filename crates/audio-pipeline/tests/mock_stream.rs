@@ -69,11 +69,13 @@ fn clicks_from_the_mock_stream_play_at_their_camera_time() {
     let mut seed = 77u64;
     let mut last_arrival = 0.0f64;
     let mut last_pts = None;
-    let mut delays = Vec::new();
+    let mut arrivals = Vec::new();
     let mut next_cb_us = host0;
     let mut buf = vec![0.0f32; 2 * 480];
     let mut quiet = 0usize;
     let mut heard = Vec::new();
+    // (decoded sample number of a record's start, playout delay it got)
+    let mut delays: Vec<(f64, f64)> = Vec::new();
     for (item, send_us) in schedule {
         if send_us > SECONDS * 1e6 {
             break;
@@ -98,8 +100,9 @@ fn clicks_from_the_mock_stream_play_at_their_camera_time() {
         match item {
             Item::Video { pts_us, .. } => last_pts = Some(pts_us),
             Item::Audio { k } => {
-                delays.push(arrival - host0 - send_us);
+                arrivals.push(arrival - host0 - send_us);
                 let f = frames[(k as usize) % frames.len()];
+                delays.push(((k * 1024) as f64, tile.stats().playout_delay_us));
                 tile.push(AudioRecord {
                     stream_index: 5,
                     data: f,
@@ -117,18 +120,35 @@ fn clicks_from_the_mock_stream_play_at_their_camera_time() {
 
     // Every click that should be heard, by decoded sample number, and its
     // target: camera time (sample / clock) on the host clock plus the median
-    // delivery delay plus the playout delay.
-    delays.sort_by(f64::total_cmp);
-    let median = delays[delays.len() / 2];
-    let latency = median + TileConfig::default().playout_delay_us;
+    // delivery delay plus the playout delay its record was played with
+    // (adaptive: it shrinks from its initial value toward what this
+    // stream's jitter needs).
+    let mut sorted = arrivals.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let delay_of = |sample: f64| {
+        let i = delays.partition_point(|&(s, _)| s <= sample).max(1) - 1;
+        delays[i].1
+    };
     let mut targets = Vec::new();
     let mut base = 0usize;
     while (base as f64) < SECONDS * CLOCK_HZ {
         for o in &onsets {
-            targets.push(host0 + (base + o) as f64 / CLOCK_HZ * 1e6 + latency);
+            let n = (base + o) as f64;
+            targets.push(host0 + n / CLOCK_HZ * 1e6 + median + delay_of(n));
         }
         base += loop_samples;
     }
+    let (first_delay, last_delay) = (delays[0].1, delays[delays.len() - 1].1);
+    println!(
+        "playout delay {:.0} ms at the start, {:.0} ms after {SECONDS} s (target {:?} ms); median delivery {:.1} ms",
+        first_delay / 1e3,
+        last_delay / 1e3,
+        s.playout_delay_target_us.map(|t| (t / 1e3).round()),
+        median / 1e3
+    );
+    // 40 ms of uniform jitter needs far less than the initial delay.
+    assert!(last_delay < first_delay - 50_000.0);
     let mut worst = 0.0f64;
     let mut n = 0;
     for h in &heard {

@@ -1,6 +1,7 @@
 //! One tile's audio: decode, timestamp, play out, tap.
 
 use crate::decode::{AudioCodec, DecodeError, Decoder, PcmFormat};
+use crate::delay::DelayControl;
 use crate::output::AudioOutput;
 use crate::playout::{Block, Playout, PlayoutStats};
 use crate::presentation::{PresentationEstimator, PresentationMap};
@@ -9,27 +10,17 @@ use crate::tap::{TAP_RATE, TapBlock, TapSender, TapStats};
 use crate::timestamp::{Stamp, Timeline, TimestampStats, Timestamper};
 
 /// Settings of a tile.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TileConfig {
     /// How long after its picture is shown each sample is heard, µs: with the
     /// estimated presentation map, after the *median* delivery of what the
-    /// camera sent at that moment. It must cover the audio record length (a
-    /// record is sent only once its last sample is captured: 64 ms for
-    /// device AAC) plus the late tail of the delivery jitter, or late records
-    /// cause underruns (which drop the late audio and keep the timing).
-    /// The default, 280 ms, covers the measured LAN jitter (late by up to
-    /// 177 ms against the median) with a margin. If the caller delays video
-    /// in a jitter buffer and supplies that as the presentation map, this
-    /// can be much smaller.
-    pub playout_delay_us: f64,
-}
-
-impl Default for TileConfig {
-    fn default() -> Self {
-        TileConfig {
-            playout_delay_us: 280_000.0,
-        }
-    }
+    /// camera sent at that moment. `None` (the default) adapts it to the
+    /// stream: a high percentile of recent delivery lateness plus the record
+    /// length, bounded and changing slowly ([`crate::delay`]). A fixed value
+    /// must cover the record length (64 ms for device AAC) plus the late
+    /// tail of the delivery jitter, or late records cause underruns (which
+    /// drop the late audio and keep the timing).
+    pub playout_delay_us: Option<f64>,
 }
 
 /// One audio record with the timing context the stream gives it.
@@ -75,6 +66,10 @@ pub struct AudioStats {
     pub timestamps: TimestampStats,
     /// Playout state, while the tile is audible.
     pub playout: Option<PlayoutStats>,
+    /// The playout delay in use, µs (see [`TileConfig::playout_delay_us`]).
+    pub playout_delay_us: f64,
+    /// The playout delay it is moving to, once enough has been observed.
+    pub playout_delay_target_us: Option<f64>,
     /// True when the tile should be audible but every output slot is taken.
     pub no_free_slot: bool,
     /// Tap counters, while a tap is attached.
@@ -91,13 +86,13 @@ struct TapState {
 /// The per-tile audio pipeline. Lives on the tile's thread; every call is
 /// non-blocking and bounded.
 pub struct TileAudio {
-    config: TileConfig,
     decoder: Decoder,
     format: Option<PcmFormat>,
     timestamper: Option<Timestamper>,
     explicit_map: Option<PresentationMap>,
     estimator: PresentationEstimator,
     estimator_settled: bool,
+    delay: DelayControl,
     output: Option<AudioOutput>,
     audible: bool,
     volume: f32,
@@ -121,13 +116,13 @@ impl TileAudio {
     /// taps once an output or tap is attached.
     pub fn new(config: TileConfig) -> TileAudio {
         TileAudio {
-            config,
             decoder: Decoder::new(),
             format: None,
             timestamper: None,
             explicit_map: None,
             estimator: PresentationEstimator::new(),
             estimator_settled: false,
+            delay: DelayControl::new(config.playout_delay_us),
             output: None,
             audible: false,
             volume: 1.0,
@@ -216,18 +211,33 @@ impl TileAudio {
         if stamp.reset {
             self.estimator.reset();
             self.estimator_settled = false;
+            self.delay.reset();
         }
+        let mut sent = None;
         if let Some(tl) = stamp.timeline {
             // The first second's timeline is rough; start the delay envelope
             // over once it has settled.
             if !self.estimator_settled && stamp.first_sample >= u64::from(format.sample_rate) * 2 {
                 self.estimator.reset();
+                self.delay.reset();
                 self.estimator_settled = true;
             }
-            let sent = tl.at((stamp.first_sample + frames as u64) as f64);
-            self.estimator.observe(sent, arrived_us as f64);
+            let s = tl.at((stamp.first_sample + frames as u64) as f64);
+            self.estimator.observe(s, arrived_us as f64);
+            sent = Some(s);
         }
         let map = self.explicit_map.or_else(|| self.estimator.map());
+        let record_s = frames as f64 / f64::from(format.sample_rate.max(1));
+        let delay = match sent {
+            Some(s) => {
+                self.delay
+                    .observe(s, arrived_us as f64, record_s * 1e6, map.as_ref(), record_s)
+            }
+            None => crate::delay::Delay {
+                us: self.delay.current(),
+                rate: 0.0,
+            },
+        };
         if let Some(p) = self.playout.as_mut() {
             p.push(Block {
                 epoch: stamp.epoch,
@@ -236,7 +246,8 @@ impl TileAudio {
                 pcm,
                 timeline: stamp.timeline,
                 map,
-                playout_delay_us: self.config.playout_delay_us,
+                playout_delay_us: delay.us,
+                delay_rate: delay.rate,
                 now_us: arrived_us as f64,
             });
         }
@@ -317,6 +328,8 @@ impl TileAudio {
             playout: self.playout.as_ref().map(Playout::stats),
             tap: self.tap.as_ref().map(|t| t.sender.stats()),
             no_free_slot: self.audible && self.output.is_some() && self.playout.is_none(),
+            playout_delay_us: self.delay.current(),
+            playout_delay_target_us: self.delay.target(),
             ..self.stats
         }
     }

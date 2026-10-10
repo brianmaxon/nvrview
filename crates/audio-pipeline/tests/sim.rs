@@ -207,3 +207,65 @@ fn resyncs_after_a_long_stall() {
         .fold(0.0, f64::max);
     assert!(worst < BOUND_US, "worst {worst} µs");
 }
+
+#[test]
+fn playout_delay_adapts_to_the_jitter() {
+    use audio_pipeline::delay::{INITIAL_DELAY_US, MIN_DELAY_US};
+    // A clean network (0–10 ms of jitter) and a much worse one than the
+    // measurement (heavier and wider), 10 minutes each.
+    let low = SimConfig {
+        duration_s: 600.0,
+        jitter: Jitter::Uniform { max_us: 10_000.0 },
+        seed: 31,
+        ..SimConfig::default()
+    };
+    let high = SimConfig {
+        duration_s: 600.0,
+        jitter: Jitter::Heavy {
+            slow_sd_us: 90_000.0,
+            slow_tau_s: 2.0,
+            fast_scale_us: 30_000.0,
+            clip_us: (-250_000.0, 350_000.0),
+        },
+        seed: 32,
+        ..SimConfig::default()
+    };
+    for (name, cfg) in [("low jitter", &low), ("high jitter", &high)] {
+        // Resyncs after the warm-up would be audible jumps.
+        let mut resyncs_settled = 0;
+        let r = run(cfg, |t, tile| {
+            if t < 2.0 * SETTLE_S {
+                resyncs_settled = tile.stats().playout.map_or(0, |p| p.resyncs);
+            }
+        });
+        report(name, &r);
+        let s = r.tile.stats();
+        let p = s.playout.unwrap();
+        let d = s.playout_delay_us;
+        println!(
+            "{name}: playout delay {:.0} ms (target {:.0} ms), {} underruns",
+            d / 1e3,
+            s.playout_delay_target_us.unwrap() / 1e3,
+            p.underruns
+        );
+        if name == "low jitter" {
+            // Shrinks to (nearly) the floor: record + output lead + 10 ms.
+            assert!(d < INITIAL_DELAY_US - 100_000.0, "delay {d}");
+            assert!(d < MIN_DELAY_US + 20_000.0, "delay {d}");
+            assert_eq!(p.underruns, 0);
+        } else {
+            assert!(d > INITIAL_DELAY_US + 50_000.0, "delay {d}");
+        }
+        // Following the delay is smooth: every click stays on its (moving)
+        // target and nothing jumps after the warm-up.
+        let (worst, n) = r.worst_after(SETTLE_S);
+        assert!(n > 500);
+        assert!(worst < BOUND_US, "{name}: worst {worst} µs");
+        assert_eq!(
+            p.resyncs,
+            resyncs_settled,
+            "{name}: resyncs after {} s",
+            2.0 * SETTLE_S
+        );
+    }
+}
