@@ -1,0 +1,21 @@
+[package]
+name = "discovery"
+version = "0.1.0"
+description = "LAN discovery of NVRs and cameras: the native UDP search, its UDP 2015 probe, and ONVIF WS-Discovery, as sans-I/O codecs plus a small tokio runner"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+if-addrs = "0.15"
+quick-xml = "0.41"
+socket2 = "0.6"
+tokio = { version = "1", features = ["net", "time", "rt", "macros"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "time", "rt", "macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true
