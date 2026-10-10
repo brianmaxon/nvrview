@@ -1,0 +1,244 @@
+// The one decoded picture a tile keeps for drawing (docs/RENDERING.md,
+// "The platform renderer"): newest wins, older ones are overwritten in
+// place. Two shapes, chosen by where the decoder's output lives:
+//
+// - hardware decoding: one NV12 texture the decoder's output surface is
+//   copied into on the GPU, read through an R8 view (luma) and an R8G8
+//   view (chroma);
+// - software decoding: an R8 and an R8G8 texture filled from the decoder's
+//   NV12 output in memory.
+//
+// Either way the renderer sees two views and a color matrix. Every member
+// is used only while holding the device lock (GpuDevice.Lock).
+
+using NvrView.Interop;
+using TerraFX.Interop.DirectX;
+using TerraFX.Interop.Windows;
+using static TerraFX.Interop.Windows.Windows;
+
+namespace NvrView.Video;
+
+/// <summary>The core's YCbCr-to-RGB matrix: row-major 3x4, samples as code/255.</summary>
+public unsafe struct ColorMatrix
+{
+    /// <summary>The 12 coefficients.</summary>
+    public fixed float M[12];
+
+    /// <summary>Copies the matrix of a Configure action.</summary>
+    public static ColorMatrix From(in NvColor color)
+    {
+        ColorMatrix m = default;
+        for (int i = 0; i < 12; i++)
+        {
+            m.M[i] = color.YcbcrToRgb[i];
+        }
+        return m;
+    }
+
+    /// <summary>
+    /// BT.601 video range, for pictures decoded outside the core (benchmarks);
+    /// the core always supplies its own.
+    /// </summary>
+    public static ColorMatrix Bt601VideoRange()
+    {
+        // (R, G, B) = M * (Y, Cb, Cr, 1) with samples as code/255.
+        const float ys = 255f / 219f, cs = 255f / 224f;
+        ColorMatrix m = default;
+        float[] rows =
+        [
+            ys, 0, 1.402f * cs, 0,
+            ys, -0.344136f * cs, -0.714136f * cs, 0,
+            ys, 1.772f * cs, 0, 0,
+        ];
+        for (int r = 0; r < 3; r++)
+        {
+            float offset = -16f / 255f * ys;
+            offset -= 128f / 255f * (rows[r * 4 + 1] + rows[r * 4 + 2]);
+            rows[r * 4 + 3] = offset;
+        }
+        for (int i = 0; i < 12; i++)
+        {
+            m.M[i] = rows[i];
+        }
+        return m;
+    }
+}
+
+/// <summary>A tile's held picture (see the file comment). Use only under the device lock.</summary>
+public sealed unsafe class TilePicture : IDisposable
+{
+    private readonly GpuDevice _gpu;
+    private ID3D11Texture2D* _nv12;
+    private ID3D11Texture2D* _luma;
+    private ID3D11Texture2D* _chroma;
+    private ID3D11ShaderResourceView* _lumaView;
+    private ID3D11ShaderResourceView* _chromaView;
+
+    /// <summary>Creates an empty picture on <paramref name="gpu"/>.</summary>
+    public TilePicture(GpuDevice gpu) => _gpu = gpu;
+
+    /// <summary>Width of the textures (the decoder's output, possibly the coded size).</summary>
+    public uint TextureWidth { get; private set; }
+
+    /// <summary>Height of the textures.</summary>
+    public uint TextureHeight { get; private set; }
+
+    /// <summary>The visible picture inside the textures (the Configure's visible_rect).</summary>
+    public NvRect Visible { get; set; }
+
+    /// <summary>The matrix the shader applies.</summary>
+    public ColorMatrix Color;
+
+    /// <summary>True while there is a picture to draw (false before the first and after Clear).</summary>
+    public bool HasPicture { get; private set; }
+
+    /// <summary>Timestamp of the held picture, µs.</summary>
+    public long PtsUs { get; private set; }
+
+    /// <summary>Grows with every new picture or Clear.</summary>
+    public ulong Sequence { get; private set; }
+
+    /// <summary>The visible size, for the grid layout; zero without a picture.</summary>
+    public NvSize PictureSize =>
+        HasPicture ? new NvSize(Visible.Width, Visible.Height) : default;
+
+    internal ID3D11ShaderResourceView* LumaView => _lumaView;
+
+    internal ID3D11ShaderResourceView* ChromaView => _chromaView;
+
+    /// <summary>Copies a decoder output surface (NV12, on this device) in on the GPU.</summary>
+    internal void CopyFrom(ID3D11Texture2D* source, uint subresource, uint width, uint height, long ptsUs)
+    {
+        if (_nv12 == null || TextureWidth != width || TextureHeight != height)
+        {
+            Release();
+            CreateNv12(width, height);
+        }
+        D3D11_BOX box = new() { left = 0, top = 0, front = 0, right = width, bottom = height, back = 1 };
+        _gpu.Context->CopySubresourceRegion(
+            (ID3D11Resource*)_nv12, 0, 0, 0, 0, (ID3D11Resource*)source, subresource, &box);
+        Published(ptsUs);
+    }
+
+    /// <summary>
+    /// Uploads an NV12 picture from memory: <paramref name="height"/> luma
+    /// rows of <paramref name="pitch"/> bytes, then the interleaved chroma
+    /// plane at <paramref name="chromaOffset"/>.
+    /// </summary>
+    internal void Upload(byte* data, int pitch, int chromaOffset, uint width, uint height, long ptsUs)
+    {
+        if (_luma == null || TextureWidth != width || TextureHeight != height)
+        {
+            Release();
+            CreatePlanes(width, height);
+        }
+        _gpu.Context->UpdateSubresource((ID3D11Resource*)_luma, 0, null, data, (uint)pitch, 0);
+        _gpu.Context->UpdateSubresource((ID3D11Resource*)_chroma, 0, null, data + chromaOffset, (uint)pitch, 0);
+        Published(ptsUs);
+    }
+
+    /// <summary>Drops the picture (the tile draws black); keeps the textures for reuse.</summary>
+    public void Clear()
+    {
+        HasPicture = false;
+        Sequence++;
+    }
+
+    private void Published(long ptsUs)
+    {
+        HasPicture = true;
+        PtsUs = ptsUs;
+        Sequence++;
+    }
+
+    private void CreateNv12(uint width, uint height)
+    {
+        D3D11_TEXTURE2D_DESC desc = new()
+        {
+            Width = width,
+            Height = height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = DXGI_FORMAT.DXGI_FORMAT_NV12,
+            SampleDesc = new DXGI_SAMPLE_DESC { Count = 1, Quality = 0 },
+            Usage = D3D11_USAGE.D3D11_USAGE_DEFAULT,
+            BindFlags = (uint)D3D11_BIND_FLAG.D3D11_BIND_SHADER_RESOURCE,
+        };
+        ID3D11Texture2D* tex = null;
+        GpuDevice.Check(_gpu.Device->CreateTexture2D(&desc, null, &tex), "CreateTexture2D(NV12)");
+        _nv12 = tex;
+        // An R8 view reads the luma plane of NV12, an R8G8 view the chroma plane.
+        _lumaView = View((ID3D11Resource*)tex, DXGI_FORMAT.DXGI_FORMAT_R8_UNORM);
+        _chromaView = View((ID3D11Resource*)tex, DXGI_FORMAT.DXGI_FORMAT_R8G8_UNORM);
+        TextureWidth = width;
+        TextureHeight = height;
+    }
+
+    private void CreatePlanes(uint width, uint height)
+    {
+        _luma = Plane(width, height, DXGI_FORMAT.DXGI_FORMAT_R8_UNORM);
+        _chroma = Plane((width + 1) / 2, (height + 1) / 2, DXGI_FORMAT.DXGI_FORMAT_R8G8_UNORM);
+        _lumaView = View((ID3D11Resource*)_luma, DXGI_FORMAT.DXGI_FORMAT_R8_UNORM);
+        _chromaView = View((ID3D11Resource*)_chroma, DXGI_FORMAT.DXGI_FORMAT_R8G8_UNORM);
+        TextureWidth = width;
+        TextureHeight = height;
+    }
+
+    private ID3D11Texture2D* Plane(uint width, uint height, DXGI_FORMAT format)
+    {
+        D3D11_TEXTURE2D_DESC desc = new()
+        {
+            Width = width,
+            Height = height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = format,
+            SampleDesc = new DXGI_SAMPLE_DESC { Count = 1, Quality = 0 },
+            Usage = D3D11_USAGE.D3D11_USAGE_DEFAULT,
+            BindFlags = (uint)D3D11_BIND_FLAG.D3D11_BIND_SHADER_RESOURCE,
+        };
+        ID3D11Texture2D* tex = null;
+        GpuDevice.Check(_gpu.Device->CreateTexture2D(&desc, null, &tex), "CreateTexture2D(plane)");
+        return tex;
+    }
+
+    private ID3D11ShaderResourceView* View(ID3D11Resource* resource, DXGI_FORMAT format)
+    {
+        D3D11_SHADER_RESOURCE_VIEW_DESC desc = default;
+        desc.Format = format;
+        desc.ViewDimension = D3D_SRV_DIMENSION.D3D11_SRV_DIMENSION_TEXTURE2D;
+        desc.Texture2D.MostDetailedMip = 0;
+        desc.Texture2D.MipLevels = 1;
+        ID3D11ShaderResourceView* view = null;
+        GpuDevice.Check(_gpu.Device->CreateShaderResourceView(resource, &desc, &view), "CreateShaderResourceView");
+        return view;
+    }
+
+    private void Release()
+    {
+        ReleaseOne(ref _lumaView);
+        ReleaseOne(ref _chromaView);
+        ReleaseOne(ref _nv12);
+        ReleaseOne(ref _luma);
+        ReleaseOne(ref _chroma);
+        TextureWidth = 0;
+        TextureHeight = 0;
+    }
+
+    private static void ReleaseOne<T>(ref T* p)
+        where T : unmanaged, IUnknown.Interface
+    {
+        if (p != null)
+        {
+            p->Release();
+            p = null;
+        }
+    }
+
+    /// <summary>Releases the textures. Call under the device lock.</summary>
+    public void Dispose()
+    {
+        HasPicture = false;
+        Release();
+    }
+}

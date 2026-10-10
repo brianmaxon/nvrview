@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Headless demo of NvrView.Video: plays mock-nvr channels through the
+       core and the Windows decoder and renderer, offscreen
+       (see apps/windows/README.md). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NvrView.Demo</RootNamespace>
+    <SelfContained>false</SelfContained>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+    <ProjectReference Include="../NvrView.Video/NvrView.Video.csproj" />
+  </ItemGroup>
+</Project>

@@ -116,6 +116,59 @@ go. The decoder and the pipeline do not depend on this choice; if memory
 matters more at M3, presenting decoded surfaces as layer contents replaces
 only the drawing step.
 
+## Windows
+
+`apps/windows/NvrView.Video` (design in
+[apps/windows/README.md](../apps/windows/README.md)): the system's H.264 or
+H.265 decoder MFT, given the shared D3D11 device's DXGI device manager,
+decodes with DXVA into decoder surfaces; each picture is copied on the GPU
+into the tile's NV12 texture and drawn by one D3D11 pass with the core's
+matrix. Without a GPU (WARP) the same MFTs decode on the CPU and pictures
+are uploaded. The headless self-test (`NvrView.Demo --selftest`) checks
+real pixels read back from the render target on both paths.
+
+Measured on an AMD Ryzen 5 5560U (6 cores, 12 threads) with integrated
+Radeon graphics, Windows 11, release builds, synthetic `testsrc2` streams
+(no B-frames, a keyframe every 2 s).
+
+The decoder alone (`NvrView.Demo --bench`, access units submitted back to
+back, each picture copied or uploaded into a tile picture): pictures per
+second, and CPU time per picture.
+
+| Stream | H.264 GPU | H.264 CPU | H.265 GPU | H.265 CPU |
+| --- | --- | --- | --- | --- |
+| 640x360 | 720/s, 0.6 ms | 989/s, 2.4 ms | 677/s, 0.7 ms | 593/s, 4.5 ms |
+| 1920x1080 | 302/s, 0.8 ms | 118/s, 13.5 ms | 258/s, 0.5 ms | 104/s, 25.1 ms |
+| 2560x1440 | 228/s, 1.2 ms | 79/s, 24.5 ms | 176/s, 0.8 ms | 72/s, 37.0 ms |
+| 2560x1920 (5 MP) | 179/s, 0.8 ms | 74/s, 29.3 ms | 145/s, 1.4 ms | 59/s, 51.3 ms |
+| 3840x2160 | 120/s, 1.4 ms | 48/s, 43.3 ms | 90/s, 1.8 ms | 37/s, 77.0 ms |
+
+So a picture takes 3.3 ms of the GPU's decoder at 1080p and 8 ms at
+3840x2160 (H.264), with under 2 ms of CPU; CPU decoding keeps two to three
+cores busy and costs 4 (640x360) to 45 (3840x2160 H.265) times the CPU
+time.
+
+Live tiles (`NvrView.Demo --live`): N channels of one mock-nvr, every one a
+640x360 H.264 sub-stream-like stream at 15 fps, the grid drawn offscreen at
+960x720 and 30 fps. CPU is the viewer process (core, decoders, renderer)
+as a share of all 12 logical processors; every tile decoded and drew 15
+pictures per second (14.7 at worst with 16 tiles on the CPU).
+
+| Tiles | GPU decoding: CPU, working set, private | CPU decoding: CPU, working set, private |
+| --- | --- | --- |
+| 4 | 0.6%, 103 MB, 123 MB | 1.2%, 98 MB, 64 MB |
+| 9 | 1.1%, 143 MB, 236 MB | 3.0%, 134 MB, 110 MB |
+| 16 | 1.5%, 215 MB, 377 MB | 5.8%, 180 MB, 169 MB |
+
+Also measured: 16 such tiles in H.265 on the GPU, 2.2% CPU, 204 MB working
+set, 588 MB private; 4 tiles of 1920x1080 H.264 at 20 fps on the GPU, 0.6%
+CPU, 266 MB working set, 476 MB private. Private bytes grow by about 20 to
+35 MB per GPU-decoded 640x360 tile and about 100 MB per 1920x1080 tile,
+most likely each decoder MFT's own pool of decoder surfaces, which an
+integrated GPU allocates from system memory (not broken down further). The longest single Decode
+action in a run (decoder start-up included) was 160 to 220 ms; on average
+a Decode action took 0.6 to 3.4 ms on the core's thread for that tile.
+
 ## Where this crosses the C interface (M2)
 
 The core runs the pipeline on its per-channel delivery thread and invokes the

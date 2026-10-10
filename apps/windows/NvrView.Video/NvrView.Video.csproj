@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Windows side of the core's decoder actions (docs/RENDERING.md):
+       Media Foundation decoding into D3D11 NV12 textures and a D3D11 grid
+       renderer. Windows only; see apps/windows/README.md. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <RootNamespace>NvrView.Video</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+    <!-- MIT; raw COM interop for D3D11, DXGI, Media Foundation, and the
+         HLSL compiler, with no managed wrapper objects per call. -->
+    <PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6" />
+  </ItemGroup>
+</Project>
