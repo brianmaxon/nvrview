@@ -14,8 +14,13 @@ final class SidebarOverlay: NSObject {
     static let animationDuration: TimeInterval = 0.18
 
     private(set) var reveal = SidebarReveal()
-    /// The time source: tests of the window can replace it.
+    /// The time source: the viewer's clock (the system clock in the app, the
+    /// self-test's manual one there).
     var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// When false, no timer is armed for the next deadline: whoever moves the
+    /// clock calls `tick()` (the self-test, after advancing its manual clock;
+    /// a real timer could never see a manual clock move).
+    var armsTimer = true
     /// Docks the sidebar (the pin control).
     var onPin: () -> Void = {}
     /// Whether the overlay's content has a text field being edited.
@@ -127,10 +132,17 @@ final class SidebarOverlay: NSObject {
 
     // MARK: Timer
 
+    /// Runs what is due at the clock's time now (also called by the window's
+    /// slow timer and by the self-test after moving its clock).
+    func tick() {
+        guard let deadline = reveal.deadline, clock() >= deadline else { return }
+        fired()
+    }
+
     private func rearm() {
         timer?.invalidate()
         timer = nil
-        guard let deadline = reveal.deadline else { return }
+        guard armsTimer, let deadline = reveal.deadline else { return }
         let t = Timer(timeInterval: max(0, deadline - clock()), repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.fired() }
         }

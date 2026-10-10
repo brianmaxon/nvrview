@@ -52,6 +52,12 @@ final class AppModel {
     @ObservationIgnored private let credentials: any CredentialStore
     @ObservationIgnored private let deviceFile: JSONFileStore<DeviceConfig>
     @ObservationIgnored private let groupFile: JSONFileStore<CameraGroup>
+    @ObservationIgnored private let cameraFile: JSONFileStore<CameraOptions>
+    /// Doorbell calls in progress (docs/UX.md "Doorbell calls").
+    @ObservationIgnored private(set) var calls: DoorbellCalls!
+    @ObservationIgnored private let taps = TapRouter()
+    /// Who wants to hear of every detection (the windows' insets).
+    @ObservationIgnored private var detectionListeners: [UUID: (DetectionEvent, CameraRef, Date) -> Void] = [:]
     @ObservationIgnored private var player: AudioPlayer?
     @ObservationIgnored private var observers: [UUID: () -> Void] = [:]
     @ObservationIgnored private var expiry: Timer?
@@ -64,6 +70,8 @@ final class AppModel {
     private(set) var devices: [DeviceRuntime] = []
     private(set) var layouts: [SavedLayout] = []
     private(set) var groups: [CameraGroup] = []
+    /// Per-camera options (entrance, doorbell talk-back and ring), saved.
+    private(set) var cameraSettings: [CameraOptions] = []
     private(set) var detections = DetectionTracker()
     /// What the sidebar rows show for the detections (held briefly after a
     /// stop, like the tiles' corner indicators).
@@ -112,6 +120,27 @@ final class AppModel {
         }
     }
     static let hideOfflineKey = "hideOfflineChannels"
+    /// Doorbell call transcripts go into the event log only when this is on
+    /// (recording a conversation may need consent). Off by default.
+    var saveCallTranscripts = UserDefaults.standard.bool(forKey: AppModel.saveTranscriptsKey) {
+        didSet {
+            UserDefaults.standard.set(saveCallTranscripts, forKey: Self.saveTranscriptsKey)
+            notify()
+        }
+    }
+    static let saveTranscriptsKey = "saveCallTranscripts"
+    /// The stage corner for alert insets; nil: opposite the indicators.
+    var insetCornerChoice: ChromeCorner? = UserDefaults.standard.string(forKey: AppModel.insetCornerKey)
+        .flatMap(ChromeCorner.init(rawValue:))
+    {
+        didSet {
+            UserDefaults.standard.set(insetCornerChoice?.rawValue, forKey: Self.insetCornerKey)
+            notify()
+        }
+    }
+    static let insetCornerKey = "insetCorner"
+    /// Where the insets go now.
+    var insetCorner: ChromeCorner { insetCornerChoice ?? indicatorCorner.opposite }
 
     /// The channels the sidebar lists for a device.
     func listedChannels(_ device: DeviceRuntime) -> [ChannelInfo] {
@@ -127,31 +156,37 @@ final class AppModel {
     init(
         factory: CoreFactory, fakeBox: FakeBox?, credentials: any CredentialStore,
         deviceFile: JSONFileStore<DeviceConfig>, groupFile: JSONFileStore<CameraGroup>,
-        clock: any ViewerClock = SystemViewerClock()
+        cameraFile: JSONFileStore<CameraOptions> = JSONFileStore(file: nil),
+        clock: any ViewerClock = SystemViewerClock(), callServices: CallServices? = nil
     ) throws {
         self.clock = clock
         let target = Target()
+        let taps = taps
         bridge = try CoreBridge(
             factory: factory,
             onEvent: { event in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { target.model?.handle(event) }
                 }
-            })
+            },
+            onAudioTap: { block, tile in taps.deliver(block, tile: tile) })
         fake = fakeBox?.core
         leases = TileLeases(bridge: bridge)
         self.credentials = credentials
         self.deviceFile = deviceFile
         self.groupFile = groupFile
+        self.cameraFile = cameraFile
         target.model = self
+        calls = DoorbellCalls(model: self, services: callServices ?? .system(), taps: taps)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
             return info.tiers.contains("extern") && !info.isMultiLens
         }
         leases.resolve = { [weak self] key in self?.devices.first { $0.key == key }?.deviceID }
         leases.onTileChange = { [weak self] camera, tile in
-            guard let self, let tile else { return }
-            try? bridge.setTileAudio(tile, audible: audible.contains(camera))
+            guard let self else { return }
+            if let tile { try? bridge.setTileAudio(tile, audible: audible.contains(camera)) }
+            calls.tileChanged(camera)
         }
     }
 
@@ -175,6 +210,7 @@ final class AppModel {
     /// Loads the stores, adds every device to the core, and starts audio.
     func start(extraDevices: [(DeviceConfig, String)] = [], muted: Bool = false) {
         groups = groupFile.load()
+        cameraSettings = cameraFile.load()
         var configs = deviceFile.load()
         for (config, password) in extraDevices where !configs.contains(where: { $0.key == config.key }) {
             // For this run only: never written to the Keychain or the file.
@@ -186,7 +222,10 @@ final class AppModel {
         for d in devices { connect(d.key) }
         startAudio(muted: muted)
         expiry = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.expireDetections() }
+            MainActor.assumeIsolated {
+                self?.expireDetections()
+                self?.tickCalls()
+            }
         }
         notify()
     }
@@ -208,6 +247,7 @@ final class AppModel {
         guard !closed else { return }
         closed = true
         expiry?.invalidate()
+        calls.endAll()
         player?.stop()
         player = nil
         leases.closeAll()
@@ -229,6 +269,73 @@ final class AppModel {
 
     private func notify() {
         for body in observers.values { body() }
+    }
+
+    /// Something the views show changed (doorbell calls).
+    func changed() { notify() }
+
+    /// Calls `body` for every detection, motion and alarm event, with its
+    /// camera and when it happened (the windows' insets). Keep the token.
+    func subscribeDetections(_ body: @escaping (DetectionEvent, CameraRef, Date) -> Void) -> UUID {
+        let token = UUID()
+        detectionListeners[token] = body
+        return token
+    }
+
+    func unsubscribeDetections(_ token: UUID) { detectionListeners[token] = nil }
+
+    /// Steps the doorbell calls on the viewer clock (the one-second timer;
+    /// the self-test after advancing its clock).
+    func tickCalls() { calls.tick(now: clock.now) }
+
+    /// A line for the session's event log. Only its first line goes to the
+    /// system log: a saved transcript stays in the app's own log.
+    func logEvent(_ text: String, transcriptFollows: Bool = false) {
+        alerts.record(text, at: Date())
+        let first = text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? text
+        NSLog("%@", first + (transcriptFollows ? " (transcript saved in the event log)" : ""))
+    }
+
+    // MARK: Camera options
+
+    /// A camera's options (defaults when never set).
+    func cameraOptions(_ camera: CameraRef) -> CameraOptions {
+        cameraSettings.first { $0.camera == camera } ?? CameraOptions(camera: camera)
+    }
+
+    private func updateOptions(_ camera: CameraRef, _ change: (inout CameraOptions) -> Void) {
+        var o = cameraOptions(camera)
+        change(&o)
+        cameraSettings.removeAll { $0.camera == camera }
+        if !o.isDefault { cameraSettings.append(o) }
+        cameraFile.save(cameraSettings)
+        notify()
+    }
+
+    /// Marks a camera as an entrance: a person on it opens an alert inset.
+    func setEntrance(_ camera: CameraRef, _ on: Bool) { updateOptions(camera) { $0.entrance = on } }
+
+    /// A doorbell plays when it rings even if nothing was playing.
+    func setUnmuteOnRing(_ camera: CameraRef, _ on: Bool) { updateOptions(camera.firstLens) { $0.unmuteOnRing = on } }
+
+    /// Talk-back for a doorbell (camera motion control; off by default):
+    /// passed to the core at once, and after every connection.
+    func setAllowTalk(_ camera: CameraRef, _ on: Bool) {
+        let camera = camera.firstLens
+        updateOptions(camera) { $0.allowTalk = on }
+        logEvent("Talk-back \(on ? "allowed" : "turned off"): channel \(camera.channel + 1)")
+        if let id = runtime(camera.device)?.deviceID, (0...255).contains(camera.channel) {
+            try? bridge.setTalkPermission(device: id, channel: UInt8(camera.channel), allowed: on)
+        }
+    }
+
+    /// Passes the user's talk-back permissions for a device's doorbells to
+    /// the core (it keeps them for this run only).
+    private func applyTalkPermissions(_ key: String) {
+        guard let id = runtime(key)?.deviceID else { return }
+        for o in cameraSettings where o.camera.device == key && o.allowTalk && (0...255).contains(o.camera.channel) {
+            try? bridge.setTalkPermission(device: id, channel: UInt8(o.camera.channel), allowed: true)
+        }
     }
 
     // MARK: Devices
@@ -267,6 +374,7 @@ final class AppModel {
             if let coreKey = bridge.deviceKey(id), coreKey != devices[i].key {
                 adoptCoreKey(coreKey, at: i)
             }
+            applyTalkPermissions(devices[i].key)
             leases.reopen(device: devices[i].key)
         } catch {
             devices[i].link = DeviceLink(state: .other("cannot add (status \(error.code))"), since: Self.now)
@@ -287,6 +395,12 @@ final class AppModel {
             groups[g].cameras = groups[g].cameras.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 }
         }
         groupFile.save(groups)
+        cameraSettings = cameraSettings.map { o in
+            var o = o
+            if o.camera.device == old { o.camera = o.camera.rekeyed(to: coreKey) }
+            return o
+        }
+        cameraFile.save(cameraSettings)
         audible = Set(audible.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 })
         for layout in layouts where layout.root.cameras.contains(where: { $0.device == old }) {
             var l = layout
@@ -534,9 +648,11 @@ final class AppModel {
 
     func stopListening() { setAudible([]) }
 
-    private func setAudible(_ new: Set<CameraRef>) {
+    /// Makes exactly `new` audible.
+    func setAudible(_ new: Set<CameraRef>) {
         let changed = audible.symmetricDifference(new)
         audible = new
+        calls?.audibleChanged(new)
         for camera in changed {
             // Unmuting only routes audio already flowing in the core.
             if let tile = leases.tile(for: camera) {
@@ -599,9 +715,13 @@ final class AppModel {
             leases.startFailed(tile: tile, reason: reason)
         case .detection(let d):
             guard let key = key(forDevice: d.device) else { return }
-            detections.apply(d, camera: d.camera(deviceKey: key))
+            let camera = d.camera(deviceKey: key)
+            detections.apply(d, camera: camera)
             refreshIndicators()
             raiseAlerts(d, deviceKey: key)
+            let at = Self.eventDate(d)
+            if d.alarm, d.kind == "visitor", d.active { calls.ring(camera, at: at) }
+            for body in detectionListeners.values { body(d, camera, at) }
         case .layoutsChanged:
             reloadLayouts()
         case .timing(let what, let tile, let ns, let detail):
@@ -611,6 +731,8 @@ final class AppModel {
             }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
+        case .talk(let t):
+            calls.talkEvent(t)
         case .tileTier, .audioStats, .tileStats:
             break
         }
@@ -639,11 +761,19 @@ final class AppModel {
         refreshIndicators()
     }
 
-    private func raiseAlerts(_ d: DetectionEvent, deviceKey: String) {
-        // The start arrives seconds after the sound began: date it by when
-        // the first matched beep arrived, on the core's clock.
+    /// When an event happened: a sound alarm's start arrives seconds after
+    /// the sound began, so it is dated by when the first matched beep
+    /// arrived, on the core's clock.
+    static func eventDate(_ d: DetectionEvent) -> Date {
         var at = Date()
-        if let ns = d.atNanos { at = at.addingTimeInterval(-Double(HostClock.nowNanos() &- ns) / 1e9) }
+        if let ns = d.atNanos, ns <= HostClock.nowNanos() {
+            at = at.addingTimeInterval(-Double(HostClock.nowNanos() &- ns) / 1e9)
+        }
+        return at
+    }
+
+    private func raiseAlerts(_ d: DetectionEvent, deviceKey: String) {
+        let at = Self.eventDate(d)
         let before = alerts.log.count
         guard alerts.apply(d, deviceKey: deviceKey, at: at) else { return }
         for entry in alerts.log.dropFirst(before) { NSLog("%@", entry.text) }
@@ -674,4 +804,35 @@ final class FakeBox: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return stored }
         set { lock.lock(); stored = newValue; lock.unlock() }
     }
+}
+
+/// What the user set for one camera (saved in the app's data directory). The
+/// doorbell options belong to a channel (its first lens).
+struct CameraOptions: Codable, Equatable, Sendable {
+    var camera: CameraRef
+    /// A person on this camera opens an alert inset (docs/UX.md "Alert insets").
+    var entrance = false
+    /// A doorbell: audible when it rings even if nothing was playing.
+    var unmuteOnRing = false
+    /// A doorbell: talk-back allowed (camera motion control; off by default).
+    var allowTalk = false
+
+    init(camera: CameraRef, entrance: Bool = false, unmuteOnRing: Bool = false, allowTalk: Bool = false) {
+        self.camera = camera
+        self.entrance = entrance
+        self.unmuteOnRing = unmuteOnRing
+        self.allowTalk = allowTalk
+    }
+
+    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        camera = try c.decode(CameraRef.self, forKey: .camera)
+        entrance = try c.decodeIfPresent(Bool.self, forKey: .entrance) ?? false
+        unmuteOnRing = try c.decodeIfPresent(Bool.self, forKey: .unmuteOnRing) ?? false
+        allowTalk = try c.decodeIfPresent(Bool.self, forKey: .allowTalk) ?? false
+    }
+
+    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk }
 }

@@ -32,6 +32,10 @@
 	<string>26.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>NVRView sends your voice through a doorbell's speaker when you press Talk during a doorbell call. It never listens otherwise.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>NVRView transcribes doorbell calls on this Mac, so you can read what a visitor says without unmuting. Nothing leaves this Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>NVRView connects to your NVRs and cameras on the local network to show their live video.</string>
 	<key>NSPrincipalClass</key>

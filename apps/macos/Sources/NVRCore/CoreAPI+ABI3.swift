@@ -33,3 +33,17 @@ extension CoreAPI {
     public func layoutPut(json: String) throws(CoreStatus) { throw .invalidArgument }
     public func layoutDelete(id: String) throws(CoreStatus) { throw .invalidArgument }
 }
+
+// Talk-back (docs/FFI.md "Talk-back"): camera motion control, off for every
+// camera until the app passes the user's per-camera permission. A core
+// without it refuses everything, so nothing is ever sent.
+extension CoreAPI {
+    public func talkSetPermission(device: UInt64, channel: UInt8, allowed: Bool) throws(CoreStatus) {
+        throw .invalidArgument
+    }
+    public func talkStart(_ tile: UInt64) throws(CoreStatus) { throw .notPermitted }
+    public func talkPush(_ tile: UInt64, samples: UnsafeBufferPointer<Float>, sampleRate: UInt32) throws(CoreStatus) {
+        throw .invalidArgument
+    }
+    public func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus) { throw .invalidArgument }
+}

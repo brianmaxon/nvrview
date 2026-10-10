@@ -47,12 +47,16 @@ public struct FakeDeviceSpec: Sendable {
     public var multiLensChannels: Set<Int>
     /// Channels whose camera sends no audio (their level reads 0).
     public var channelsWithoutAudio: Set<Int>
+    /// Channels whose camera supports talk-back (a doorbell: `ipcAudioTalk`
+    /// 1); a talk on any other channel is refused with `not_supported`.
+    public var talkChannels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
         detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
-        multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = []
+        multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = []
     ) {
+        self.talkChannels = talkChannels
         self.multiLensChannels = multiLensChannels
         self.channelsWithoutAudio = channelsWithoutAudio
         self.name = name
@@ -149,10 +153,12 @@ public final class FakeCore: CoreAPI {
         public var tierAlignCap: Duration = .milliseconds(300)
         /// A new tier's stream starts with the clip's latest keyframe (its
         /// pictures keep the camera's timestamps), so a switch does not wait
-        /// up to a whole group of pictures for the next one. Off by default:
-        /// the stream then joins the clip where the shown tier is. The app's
-        /// self-test turns it on to keep its tier switches short.
-        public var newTierStartsAtKeyframe = false
+        /// up to a whole group of pictures for the next one. On by default,
+        /// as the real device behaves: a new preview starts at a fresh
+        /// keyframe (observed; docs/protocol.md "Sub and main of one
+        /// camera"). Off, the stream joins the clip where the shown tier is
+        /// and waits for its next keyframe (for tests of that path).
+        public var newTierStartsAtKeyframe = true
         /// The clock (nanoseconds) the tier switch's timeout and alignment
         /// cap count on: the host clock, or a test's manual one so a test
         /// need not sleep through them.
@@ -164,6 +170,9 @@ public final class FakeCore: CoreAPI {
         public var layoutsFile: URL?
         /// At most this many layouts (`nv_layout_put` then fails with limit).
         public var maxLayouts = 500
+        /// A permitted talk goes from `starting` to `active` at once; off, it
+        /// stays `starting` until `activateTalk` (tests of the wait).
+        public var talkStartsActive = true
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -303,6 +312,7 @@ public final class FakeCore: CoreAPI {
         for tile in tiles {
             if let t = detach(tile) {
                 t.stop()
+                endTalk(t)
                 emitEvent(#"{"type":"tile_closed","tile":\#(tile),"reason":"device_removed"}"#)
             }
         }
@@ -340,6 +350,7 @@ public final class FakeCore: CoreAPI {
         // Joins the playback thread and waits out any pump: no action for the
         // tile runs after this returns.
         t.stop()
+        endTalk(t)
     }
 
     public func tileDecoded(_ tile: UInt64, ptsMicros: Int64) -> CoreStatus {
@@ -459,6 +470,121 @@ public final class FakeCore: CoreAPI {
 
     private let soundLock = NSLock()
     private nonisolated(unsafe) var soundActive: Set<String> = []
+
+    // MARK: Talk-back (camera motion control)
+
+    private struct TalkWorld {
+        /// "device/channel" with the permission.
+        var permitted: Set<String> = []
+        /// Talking tiles: active once started, samples pushed (at 16 kHz).
+        var talks: [UInt64: (active: Bool, samples16k: Double)] = [:]
+        var starts = 0
+    }
+    private let talkWorld = Mutex(TalkWorld())
+
+    private func talkKey(_ device: UInt64, _ channel: UInt8) -> String { "\(device)/\(channel)" }
+
+    private func talkJSON(_ t: FakeTile, _ rest: String) -> String {
+        #"{"type":"talk","tile":\#(t.id),"device":\#(t.device),"channel":\#(t.channel),\#(rest)}"#
+    }
+
+    public func talkSetPermission(device: UInt64, channel: UInt8, allowed: Bool) throws(CoreStatus) {
+        requireOutsideCallback("nv_talk_set_permission")
+        let tiles: [FakeTile] = try world.withLock { w throws(CoreStatus) in
+            if w.freed { throw .closed }
+            guard let d = w.devices[device] else { throw .unknownID }
+            return d.tiles.compactMap { w.tiles[$0] }.filter { $0.channel == channel }
+        }
+        let key = talkKey(device, channel)
+        let stopped: [(FakeTile, Double)] = talkWorld.withLock { t in
+            if allowed {
+                t.permitted.insert(key)
+                return []
+            }
+            t.permitted.remove(key)
+            return tiles.compactMap { tile in t.talks.removeValue(forKey: tile.id).map { (tile, $0.samples16k) } }
+        }
+        for (tile, samples) in stopped {
+            emitEvent(talkJSON(tile, #""state":"stopped","reason":"permission_revoked","sent_ms":\#(Int(samples / 16)),"dropped_ms":0"#))
+        }
+    }
+
+    public func talkStart(_ tile: UInt64) throws(CoreStatus) {
+        requireOutsideCallback("nv_talk_start")
+        guard let t = world.withLock({ $0.tiles[tile] }) else { throw .unknownID }
+        let supported = world.withLock { $0.devices[t.device]?.spec.talkChannels.contains(Int(t.channel)) } ?? false
+        enum Outcome { case refused(String), already, started }
+        let outcome: Outcome = talkWorld.withLock { w in
+            guard w.permitted.contains(talkKey(t.device, t.channel)) else { return .refused("not_permitted") }
+            if w.talks[tile] != nil { return .already }
+            guard supported else { return .refused("not_supported") }
+            w.talks[tile] = (options.talkStartsActive, 0)
+            w.starts += 1
+            return .started
+        }
+        switch outcome {
+        case .refused(let reason):
+            emitEvent(talkJSON(t, #""state":"refused","reason":"\#(reason)""#))
+            if reason == "not_permitted" { throw .notPermitted }
+        case .already:
+            break
+        case .started:
+            emitEvent(talkJSON(t, #""state":"starting""#))
+            if options.talkStartsActive { emitEvent(talkJSON(t, #""state":"active""#)) }
+        }
+    }
+
+    /// Makes a starting talk active (with `talkStartsActive` off).
+    public func activateTalk(tile: UInt64) {
+        guard let t = world.withLock({ $0.tiles[tile] }) else { return }
+        let changed = talkWorld.withLock { w -> Bool in
+            guard let talk = w.talks[tile], !talk.active else { return false }
+            w.talks[tile]?.active = true
+            return true
+        }
+        if changed { emitEvent(talkJSON(t, #""state":"active""#)) }
+    }
+
+    public func talkPush(_ tile: UInt64, samples: UnsafeBufferPointer<Float>, sampleRate: UInt32) throws(CoreStatus) {
+        guard world.withLock({ $0.tiles[tile] }) != nil else { throw .unknownID }
+        guard (8_000...192_000).contains(sampleRate), samples.allSatisfy({ $0.isFinite }) else {
+            throw .invalidArgument
+        }
+        talkWorld.withLock { w in
+            guard w.talks[tile] != nil else { return }
+            w.talks[tile]!.samples16k += Double(samples.count) * 16_000 / Double(sampleRate)
+        }
+    }
+
+    public func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus) {
+        requireOutsideCallback("nv_talk_stop")
+        guard let t = world.withLock({ $0.tiles[tile] }) else { throw .unknownID }
+        guard let talk = talkWorld.withLock({ $0.talks.removeValue(forKey: tile) }) else { return }
+        let reason = drain ? "finished" : "stopped"
+        emitEvent(talkJSON(t, #""state":"stopped","reason":"\#(reason)","sent_ms":\#(Int(talk.samples16k / 16)),"dropped_ms":0"#))
+    }
+
+    /// Whether a tile is talking (starting or active).
+    public func isTalking(tile: UInt64) -> Bool { talkWorld.withLock { $0.talks[tile] != nil } }
+
+    /// The audio pushed to a tile's current talk, in ms at 16 kHz.
+    public func talkPushedMilliseconds(tile: UInt64) -> Double {
+        talkWorld.withLock { ($0.talks[tile]?.samples16k ?? 0) / 16 }
+    }
+
+    /// How many talks were started (each one a device command in the core).
+    public var talkStarts: Int { talkWorld.withLock { $0.starts } }
+
+    /// Whether talk-back is permitted on a channel.
+    public func talkPermitted(device: UInt64, channel: UInt8) -> Bool {
+        talkWorld.withLock { $0.permitted.contains(talkKey(device, channel)) }
+    }
+
+    /// A tile ends: its talk stops first (`tile_closed` reason).
+    private func endTalk(_ t: FakeTile) {
+        guard let talk = talkWorld.withLock({ $0.talks.removeValue(forKey: t.id) }) else { return }
+        emitEvent(talkJSON(t, #""state":"stopped","reason":"tile_closed","sent_ms":\#(Int(talk.samples16k / 16)),"dropped_ms":0"#))
+    }
 
     fileprivate func event(_ json: String) { emitEvent(json) }
 

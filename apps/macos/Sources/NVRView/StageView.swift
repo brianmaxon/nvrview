@@ -94,7 +94,7 @@ final class StageView: NSView {
     /// point of the shown picture.
     private var zoomEasing = ZoomEasing<CameraRef>()
     /// The picture's layout size per camera, from the last refresh.
-    private var pictureSizes: [CameraRef: CGSize] = [:]
+    var pictureSizes: [CameraRef: CGSize] = [:]
 
     private var focusAnimation = FocusAnimation(duration: StageView.focusDuration)
     /// The camera this stage told the leases it focuses.
@@ -105,6 +105,23 @@ final class StageView: NSView {
         let path: NodePath
     }
     private var demandOwners: Set<DemandOwner> = []
+
+    // Alert insets (docs/UX.md "Alert insets"; StageView+Insets.swift).
+    var insetBoard = InsetBoard()
+    var alertInsetViews: [CameraRef: InsetView] = [:]
+    /// Where each drawn inset's picture goes, in the overlay's coordinates.
+    var insetVideoRects: [CameraRef: CGRect] = [:]
+    let moreChip = NSTextField(labelWithString: "")
+    /// Holds the insets above the tiles' chrome (top-left origin; clicks
+    /// between insets reach the stage).
+    let insetLayer = PassThroughView()
+    /// The swapped-in camera's header and a doorbell call over the stage.
+    let stageCall = StageCallView()
+    /// The leases the insets and the swapped-in camera hold.
+    var insetHeld: [CameraRef: Int] = [:]
+    var detectionToken: UUID?
+    /// The swapped-in camera, as the leases know its demand (main stream).
+    var takeoverCamera: CameraRef?
 
     private enum Gesture {
         case divider(NodePath)
@@ -135,6 +152,7 @@ final class StageView: NSView {
         overlay.stage = self
         addSubview(grid)
         addSubview(overlay)
+        installInsets()
         overlay.registerForDraggedTypes([.string])
         alertActive = { [weak model] in model?.alerts.isActive($0) == true }
         dismissAlert = { [weak model] in model?.dismissAlert($0) }
@@ -200,11 +218,12 @@ final class StageView: NSView {
         super.layout()
         frames = state.tree.frames(in: overlay.bounds, gap: gap)
         layoutChrome()
+        layoutInsetViews()
         window?.invalidateCursorRects(for: overlay)
     }
 
     private func layoutChrome() {
-        let leaves = currentLeaves
+        let leaves = insetBoard.swap == nil ? currentLeaves : []
         let shown = Set(leaves.map(\.path))
         for (path, view) in chromes { view.isHidden = !shown.contains(path) }
         for leaf in leaves {
@@ -218,6 +237,9 @@ final class StageView: NSView {
             if let inset = insets[f] { overlay.addSubview(inset, positioned: .above, relativeTo: nil) }
         }
     }
+
+    /// Lays the tiles' chrome out again (the swap hides it).
+    func relayoutChrome() { layoutChrome() }
 
     /// Places and updates the zoom maps: shown while the tile is zoomed and
     /// the chrome is up.
@@ -242,6 +264,7 @@ final class StageView: NSView {
 
     /// Re-reads names, badges, veils and listening from the model.
     func refreshChrome() {
+        refreshInsets()
         for leaf in frames.leaves {
             guard let view = chromes[leaf.path] else { continue }
             view.apply(content(for: leaf))
@@ -339,10 +362,10 @@ final class StageView: NSView {
         var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [], zooms: [])
         var tiles: [GridTile] = []
         var paths: [NodePath] = []
-        for leaf in currentLeaves {
-            guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
-            paths.append(leaf.path)
-            let cell = leaf.rect.pixels(scaleX: scaleX, scaleY: scaleY)
+        /// One tile drawn into `rect` (points): the layout's, the swapped-in
+        /// camera's over the whole stage, or an inset's on top.
+        func draw(_ tile: CoreTile, camera: CameraRef, rect: CGRect, zoom: TileZoom, fill: Bool) {
+            let cell = rect.pixels(scaleX: scaleX, scaleY: scaleY)
             let snapshot = tile.snapshot
             let picture = tile.latestPicture()
             let size = picture.map { PixelSize(width: UInt32($0.width), height: UInt32($0.height)) }
@@ -350,23 +373,40 @@ final class StageView: NSView {
             let pictureSize = CGSize(width: Int(mapping.layoutSize.width), height: Int(mapping.layoutSize.height))
             let matrix = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
                 ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
-            // Zoom changes only the source rectangle sampled (TilePlacement).
-            let zoom = state.zoom[camera] ?? .none
             if pictureSize != .zero, pictureSizes[camera] != pictureSize { pictureSizes[camera] = pictureSize }
+            // Zoom changes only the source rectangle sampled (TilePlacement).
             let placed = TilePlacement.place(
-                rect: leaf.rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
-                offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: state.fill,
-                zoom: zoom)
+                rect: rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
+                offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: fill, zoom: zoom)
             tiles.append(GridTile(picture: tile, color: matrix, destination: placed.destination, source: placed.source))
             key.tiles.append(ObjectIdentifier(tile))
             key.rects.append(cell)
             key.versions.append(snapshot.version)
             key.sizes.append(pictureSize)
             key.zooms.append(zoom)
-            // Read only for meters on screen (audible, or hovered).
-            if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
-                chrome.setLevel(level.peak)
+        }
+        // After a swap the swapped-in camera fills the stage instead of the
+        // layout (nothing is drawn under it).
+        if let shown = insetBoard.swap?.shown {
+            if let tile = model.leases.tile(for: shown) {
+                draw(tile, camera: shown, rect: points, zoom: .none, fill: false)
             }
+        } else {
+            for leaf in currentLeaves {
+                guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
+                paths.append(leaf.path)
+                draw(tile, camera: camera, rect: leaf.rect, zoom: state.zoom[camera] ?? .none, fill: state.fill)
+                // Read only for meters on screen (audible, or hovered).
+                if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
+                    chrome.setLevel(level.peak)
+                }
+            }
+        }
+        // Insets on top, the top of the stack drawn last; the same decoded
+        // pictures as every other tile of that camera (no extra decode).
+        for item in insetBoard.shown.reversed() {
+            guard let rect = insetVideoRects[item.camera], let tile = model.leases.tile(for: item.camera) else { continue }
+            draw(tile, camera: item.camera, rect: rect, zoom: .none, fill: false)
         }
         if key != lastKey || renderer.tiles.count != tiles.count {
             if key.zooms != lastKey?.zooms { layoutInsets(currentLeaves) }
@@ -406,6 +446,7 @@ final class StageView: NSView {
     func tick(now: Double) {
         stepFocus(now: now)
         stepZoom(now: now)
+        tickInsets(now: now)
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }
     }
@@ -684,6 +725,7 @@ final class StageView: NSView {
     /// The window is closing: ends focus, withdraws every stream request,
     /// and stops the renderer asking this stage for frames.
     func tearDown() {
+        tearDownInsets()
         endFocusImmediately()
         syncDemands(clearAll: true)
         grid.prepare = nil
@@ -898,6 +940,7 @@ final class StageView: NSView {
         // (ViewerWindow); what is left here is the stage's own.
         switch event.keyCode {
         case 53:  // Escape
+            if handleInsetKey(.dismiss) { return }
             if state.focused != nil {
                 unfocus()
             } else if state.editing {
@@ -949,6 +992,11 @@ final class StageView: NSView {
             }
             item("Focus") { [weak self] in self?.focus(leaf.path) }
             menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
+            let entrance = model.cameraOptions(camera).entrance
+            let e = ClosureMenuItem(title: "Entrance") { [weak self] in self?.model.setEntrance(camera, !entrance) }
+            e.state = entrance ? .on : .off
+            e.toolTip = "A person on this camera opens an alert inset when it is not on screen"
+            menu.addItem(e)
             menu.addItem(.separator())
         }
         item("Split Side by Side") { [weak self] in self?.split(.row) }

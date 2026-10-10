@@ -101,6 +101,8 @@ public enum CoreEvent: Sendable, Equatable {
     case layoutsChanged(revision: Int? = nil)
     /// ABI 3: a timing hook for the budgets (section 5), nanoseconds.
     case timing(what: String, tile: UInt64?, nanos: UInt64, tierSwitch: TierSwitchTiming? = nil)
+    /// Talk-back progress (docs/FFI.md "Talk-back").
+    case talk(TalkEvent)
 
     private struct Wire: Decodable {
         var type: String
@@ -147,6 +149,8 @@ public enum CoreEvent: Sendable, Equatable {
         var ns: UInt64?
         var lens: Int?
         var revision: Int?
+        var sent_ms: Int?
+        var dropped_ms: Int?
     }
 
     struct ChannelList: Decodable {
@@ -239,6 +243,13 @@ public enum CoreEvent: Sendable, Equatable {
                     source: .device, atNanos: w.at_ns, lens: w.lens))
         case "layouts_changed":
             return .layoutsChanged(revision: w.revision)
+        case "talk":
+            guard let tile = w.tile, let state = w.state else { return nil }
+            return .talk(
+                TalkEvent(
+                    tile: tile, device: w.device, channel: w.channel, state: TalkEvent.State(state), reason: w.reason,
+                    status: w.status, retryMilliseconds: w.retry_ms, sentMilliseconds: w.sent_ms,
+                    droppedMilliseconds: w.dropped_ms))
         case "timing":
             guard let what = w.what, let ns = w.ns else { return nil }
             var detail: TierSwitchTiming?
@@ -353,5 +364,53 @@ public struct DetectionEvent: Sendable, Equatable {
         self.atNanos = atNanos
         self.lens = lens
         self.alarm = alarm
+    }
+}
+
+/// One `talk` event: where a tile's talk-back stands.
+public struct TalkEvent: Sendable, Equatable {
+    public enum State: Sendable, Equatable {
+        case starting, active, refused, stopped
+        case other(String)
+
+        public init(_ s: String) {
+            switch s {
+            case "starting": self = .starting
+            case "active": self = .active
+            case "refused": self = .refused
+            case "stopped": self = .stopped
+            default: self = .other(s)
+            }
+        }
+    }
+
+    public var tile: UInt64
+    public var device: UInt64?
+    public var channel: Int?
+    public var state: State
+    /// With `refused` and `stopped`: `not_permitted`, `rate_limited`,
+    /// `device_refused`, `stopped`, `idle`, ...
+    public var reason: String?
+    /// The device's reply status, when it gave one.
+    public var status: Int?
+    /// With `rate_limited`: how long until a start is allowed again.
+    public var retryMilliseconds: Int?
+    public var sentMilliseconds: Int?
+    public var droppedMilliseconds: Int?
+
+    public init(
+        tile: UInt64, device: UInt64? = nil, channel: Int? = nil, state: State, reason: String? = nil,
+        status: Int? = nil, retryMilliseconds: Int? = nil, sentMilliseconds: Int? = nil,
+        droppedMilliseconds: Int? = nil
+    ) {
+        self.tile = tile
+        self.device = device
+        self.channel = channel
+        self.state = state
+        self.reason = reason
+        self.status = status
+        self.retryMilliseconds = retryMilliseconds
+        self.sentMilliseconds = sentMilliseconds
+        self.droppedMilliseconds = droppedMilliseconds
     }
 }

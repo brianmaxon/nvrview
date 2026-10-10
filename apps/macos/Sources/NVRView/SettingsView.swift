@@ -2,13 +2,27 @@ import AppKit
 import NVRCore
 import SwiftUI
 
-/// Settings: the devices (NVRs and cameras) to connect to. Passwords go to
-/// the Keychain only, never to a file or the defaults; the device list file
-/// holds no secret.
+/// Settings: devices, per-camera options, and alerts.
 struct SettingsView: View {
     let model: AppModel
+
+    var body: some View {
+        TabView {
+            DeviceSettingsView(model: model).tabItem { Label("Devices", systemImage: "server.rack") }
+            CameraSettingsView(model: model).tabItem { Label("Cameras", systemImage: "video") }
+            AlertSettingsView(model: model).tabItem { Label("Alerts", systemImage: "bell") }
+        }
+        .frame(minWidth: 640, minHeight: 400)
+    }
+}
+
+/// The devices (NVRs and cameras) to connect to. Passwords go to the
+/// Keychain only, never to a file or the defaults; the device list file
+/// holds no secret.
+struct DeviceSettingsView: View {
+    let model: AppModel
     @State private var selection: String?
-    @State private var draft = SettingsView.blank()
+    @State private var draft = DeviceSettingsView.blank()
     @State private var port = "9000"
     @State private var password = ""
     @State private var isNew = true
@@ -131,6 +145,89 @@ struct SettingsView: View {
         password = ""
         isNew = false
         selection = config.key
+    }
+}
+
+/// Per camera: Entrance (a person opens an alert inset), and for doorbells
+/// the ring's audio and talk-back (camera motion control, off by default).
+struct CameraSettingsView: View {
+    let model: AppModel
+
+    var body: some View {
+        Form {
+            Section {
+                Text(
+                    "Talk-back sends this Mac's microphone, or a typed reply spoken by the system voice, through a doorbell's speaker. It is off for every doorbell until allowed here, starts only when you press Talk or send a reply, is rate-limited by the core, and every use is logged."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            ForEach(model.devices) { d in
+                Section(d.config.name) {
+                    if d.channels.isEmpty {
+                        Text("No cameras known yet (connect the device first)").foregroundStyle(.secondary)
+                    }
+                    ForEach(model.listedChannels(d), id: \.channel) { c in
+                        row(CameraRef(device: d.key, channel: c.channel))
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func row(_ camera: CameraRef) -> some View {
+        let o = model.cameraOptions(camera)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(model.name(of: camera)).font(.headline)
+            Toggle(
+                "Entrance: a person opens an alert inset",
+                isOn: Binding(get: { o.entrance }, set: { model.setEntrance(camera, $0) }))
+            Toggle(
+                "Doorbell: unmute on ring even when not listening",
+                isOn: Binding(get: { o.unmuteOnRing }, set: { model.setUnmuteOnRing(camera, $0) }))
+            Toggle(
+                "Doorbell: allow talk-back",
+                isOn: Binding(get: { o.allowTalk }, set: { model.setAllowTalk(camera, $0) }))
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// Alert insets and doorbell call options.
+struct AlertSettingsView: View {
+    let model: AppModel
+
+    var body: some View {
+        Form {
+            Section("Alert insets") {
+                Picker(
+                    "Corner",
+                    selection: Binding(
+                        get: { model.insetCornerChoice?.rawValue ?? "" },
+                        set: { model.insetCornerChoice = ChromeCorner(rawValue: $0) })
+                ) {
+                    Text("Opposite the detection indicators").tag("")
+                    ForEach(ChromeCorner.allCases, id: \.rawValue) { Text($0.title).tag($0.rawValue) }
+                }
+                Text(
+                    "When a doorbell rings, a smoke or CO alarm is heard, or a person is detected on a camera marked as an entrance, and that camera is not on screen, its live video appears in an inset. Click it (or press Tab) to swap it with the stage; Esc closes it."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Section("Doorbell calls") {
+                Toggle(
+                    "Save call transcripts in the event log",
+                    isOn: Binding(get: { model.saveCallTranscripts }, set: { model.saveCallTranscripts = $0 }))
+                Text(
+                    "Calls are transcribed on this Mac while they last. With saving off (the default), the transcript is gone when the call ends. Recording a conversation may need the other person's consent where you live."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
     }
 }
 

@@ -1,0 +1,85 @@
+import AVFoundation
+import Foundation
+
+/// Turns audio buffers of any format (the microphone's, or text-to-speech
+/// rendered by `AVSpeechSynthesizer.write(_:toBufferCallback:)`) into 16 kHz
+/// mono float samples: what talk-back pushes (`nv_talk_push`) and what the
+/// transcription engines take.
+///
+/// Streaming: one converter per input format keeps the resampler's state
+/// between buffers, so consecutive buffers join without clicks. Not thread
+/// safe; use it from one thread (or queue) at a time.
+public final class TalkAudioConverter {
+    public static let sampleRate = 16_000.0
+
+    private var converter: AVAudioConverter?
+    private var inputFormat: AVAudioFormat?
+    private let output: AVAudioFormat
+
+    public init() {
+        output = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: Self.sampleRate, channels: 1, interleaved: false)!
+    }
+
+    /// The 16 kHz mono samples of `buffer` (channels mixed down by the
+    /// converter). Empty for an empty or unconvertible buffer.
+    public func convert(_ buffer: AVAudioPCMBuffer) -> [Float] {
+        guard buffer.frameLength > 0 else { return [] }
+        if inputFormat != buffer.format {
+            inputFormat = buffer.format
+            converter = AVAudioConverter(from: buffer.format, to: output)
+            // Leading silence for the resampler's latency, so the output
+            // has exactly the input's duration.
+            converter?.primeMethod = .normal
+            // Mixes every input channel into the one output channel.
+            if buffer.format.channelCount > 1 { converter?.downmix = true }
+        }
+        var given = false
+        return drain { _, status in
+            if given {
+                status.pointee = .noDataNow
+                return nil
+            }
+            given = true
+            status.pointee = .haveData
+            return buffer
+        }
+    }
+
+    /// The rest held in the resampler at the end of a stream (a typed reply
+    /// rendered in one go). The next buffer starts a new stream.
+    public func flush() -> [Float] {
+        let rest = drain { _, status in
+            status.pointee = .endOfStream
+            return nil
+        }
+        converter?.reset()
+        return rest
+    }
+
+    /// Converts until the converter wants more input (or the stream ended):
+    /// a full output buffer means more is waiting.
+    private func drain(_ input: @escaping AVAudioConverterInputBlock) -> [Float] {
+        guard let converter, let out = AVAudioPCMBuffer(pcmFormat: output, frameCapacity: 4096) else { return [] }
+        var samples: [Float] = []
+        while true {
+            var error: NSError?
+            out.frameLength = 0
+            let status = converter.convert(to: out, error: &error, withInputFrom: input)
+            if status == .error { return samples }
+            if let data = out.floatChannelData, out.frameLength > 0 {
+                samples.append(contentsOf: UnsafeBufferPointer(start: data[0], count: Int(out.frameLength)))
+            }
+            // `.haveData`: the output filled up; anything else: done for now.
+            if status != .haveData || out.frameLength == 0 { return samples }
+        }
+    }
+
+    /// A whole recording (several buffers of one stream) at once.
+    public static func convertAll(_ buffers: [AVAudioPCMBuffer]) -> [Float] {
+        let c = TalkAudioConverter()
+        var samples: [Float] = []
+        for b in buffers { samples += c.convert(b) }
+        return samples + c.flush()
+    }
+}

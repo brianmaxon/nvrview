@@ -79,6 +79,22 @@ public protocol CoreAPI: Sendable {
     /// `nv_tile_audio_tap`: the tile's audio as 16 kHz blocks to the sink.
     func tileAudioTap(_ tile: UInt64, enabled: Bool) throws(CoreStatus)
 
+    /// `nv_talk_set_permission`: enables (or withdraws) talk-back on one
+    /// channel of a device for this run; withdrawing stops a running talk.
+    func talkSetPermission(device: UInt64, channel: UInt8, allowed: Bool) throws(CoreStatus)
+
+    /// `nv_talk_start`: asks to talk to the tile's camera; progress arrives as
+    /// `talk` events. `.notPermitted` (and a `refused` event) without the
+    /// permission.
+    func talkStart(_ tile: UInt64) throws(CoreStatus)
+
+    /// `nv_talk_push`: mono float samples (-1...1) at `sampleRate` for the
+    /// tile's talk. Not from a real-time audio callback.
+    func talkPush(_ tile: UInt64, samples: UnsafeBufferPointer<Float>, sampleRate: UInt32) throws(CoreStatus)
+
+    /// `nv_talk_stop`: at once, or after the audio already pushed (`drain`).
+    func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus)
+
     /// `nv_audio_render` and its context, for the real-time callback. Valid
     /// until `free`; stop rendering before that.
     var audioRenderHook: AudioRenderHook { get }
