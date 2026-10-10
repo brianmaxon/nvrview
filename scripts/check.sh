@@ -97,4 +97,14 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   fi
 fi
 
+# Plays the Media Source samples in real browsers (headless Chrome and
+# WebKit through playwright-cli). Off by default: it needs playwright-cli and
+# browsers and takes a few minutes. NVRVIEW_BROWSER_TESTS=1 runs it.
+if [ "${NVRVIEW_BROWSER_TESTS:-0}" = "1" ]; then
+  step "browser playback check"
+  scripts/browser-check.sh
+else
+  step "browser playback check skipped (NVRVIEW_BROWSER_TESTS=1 runs it)"
+fi
+
 printf '\nAll checks passed.\n'
