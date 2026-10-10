@@ -308,3 +308,19 @@ A doorbell press opens the doorbell's inset as a call:
 - The call ends when the user closes it or about 60 s after the last activity
   (press, speech, talk-back), and is listed in the event log with its times
   and, if saved, its transcript.
+
+## Windows notes
+
+The Windows app (`apps/windows/NvrView.App`) follows these requirements
+with Windows conventions:
+
+- Ctrl takes the place of ⌘ (Ctrl+L listens, Ctrl+, opens Settings), and
+  Ctrl+click on a speaker listens to several tiles.
+- Shortcuts are listed in a help overlay (F1) and in the right-click menu,
+  which also carries Settings, full screen, and diagnostics (Ctrl+D).
+- Full screen is the window's own full-screen presenter (F, and Esc after
+  leaving focus).
+- A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel;
+  touch-screen pinch is not handled yet.
+- Until the corner indicators exist on Windows, detections show as small
+  always-visible badges at the bottom of the tile, with their source.
