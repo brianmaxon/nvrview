@@ -197,6 +197,30 @@ Details settled while building it (macOS):
   marked, drawn as overlay layers (no second picture, so no extra drawing or
   texture work), in the shown picture's bottom left corner.
 
+## Stream quality per tile
+
+A tile's context menu (right-click) has **Quality**, as in the official app,
+for seeing more detail in a tile without focusing it (useful with digital
+zoom):
+
+- **Auto** (default): the low stream in the grid, the main stream when
+  focused. Auto also switches a tile to the main stream while it is zoomed
+  past about 2x, and back when zoomed out again, so zooming in shows real
+  detail.
+- **Clear**: the main stream, also in the grid.
+- **Fluent**: the low stream, also when focused (saves bandwidth).
+- **Balanced**: the middle stream, offered only for cameras that serve one
+  (a single-lens camera's `extern` tier; never for a second lens, whose
+  tiers are its own).
+
+The choice belongs to the tile and is saved with the layout (a member of the
+layout's leaf), so it survives relaunches. Because a camera is streamed
+once, a tile asking for a higher quality raises it for every tile showing
+that camera while it asks, as focus does. Changing quality uses the aligned
+tier switch, so the picture sharpens in place without a gap. A tile not on
+Auto shows its quality in its hover header, and the menu notes that the main
+stream on many tiles costs the device and this computer much more.
+
 ## Alerts
 
 Some detections matter enough that the tile must not let them pass unseen:
