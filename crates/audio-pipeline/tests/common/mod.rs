@@ -192,8 +192,8 @@ impl SimResult {
     }
 }
 
-const HOST0_US: f64 = 1_000_000_000.0;
-const PTS0_US: f64 = 7_000_000.0;
+pub const HOST0_US: f64 = 1_000_000_000.0;
+pub const PTS0_US: f64 = 7_000_000.0;
 
 pub fn run(cfg: &SimConfig, observe: impl FnMut(f64, &TileAudio)) -> SimResult {
     run_with(cfg, |_| {}, observe)

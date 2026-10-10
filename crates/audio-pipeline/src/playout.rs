@@ -68,7 +68,8 @@ pub struct PlayoutStats {
     pub av_offset_us: Option<f64>,
     /// Frames queued in the ring at the last block.
     pub buffered_frames: u64,
-    /// Current ratio correction (relative to the feed-forward ratio).
+    /// Deviation of the resampling ratio from nominal (the estimated clock
+    /// skew plus the controller's correction).
     pub correction: f64,
     /// Hard resyncs after the first start.
     pub resyncs: u64,

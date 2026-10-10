@@ -27,6 +27,7 @@ name = "audio-pipeline"
 version = "0.1.0"
 dependencies = [
  "crossbeam-queue",
+ "mock-nvr",
  "symphonia-codec-aac",
  "symphonia-core",
 ]

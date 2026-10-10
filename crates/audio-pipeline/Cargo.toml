@@ -14,3 +14,6 @@ crossbeam-queue = "0.3.8"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+mock-nvr = { path = "../../tools/mock-nvr" }
