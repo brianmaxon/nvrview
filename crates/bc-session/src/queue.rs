@@ -61,6 +61,15 @@ impl FrameQueue {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether [`FrameQueue::push_media`] would keep `rec` right now (not
+    /// discarded by keyframe gating).
+    pub(crate) fn accepts(&self, rec: &Record) -> bool {
+        match rec {
+            Record::Video { keyframe: true, .. } | Record::Info { .. } => true,
+            Record::Video { .. } | Record::Audio { .. } => !self.lock().gated,
+        }
+    }
+
     pub(crate) fn push_media(&self, rec: Record) {
         let keyframe = matches!(rec, Record::Video { keyframe: true, .. });
         let gateable = matches!(

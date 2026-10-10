@@ -5,14 +5,14 @@ use crate::config::{Jitter, SessionConfig};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::transport::Connector;
 use bc_protocol::framer::Decoder;
-use bc_protocol::media::Demuxer;
+use bc_protocol::media::{Demuxer, Record};
 use bc_protocol::session::{Command, Event, Session};
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, ChannelInfo};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -115,7 +115,6 @@ enum Request {
 }
 
 struct NewSub {
-    id: u64,
     channel: u8,
     tier: StreamTier,
     queue: Arc<FrameQueue>,
@@ -128,7 +127,6 @@ pub struct DeviceSession {
     state_rx: watch::Receiver<ConnState>,
     channels_rx: watch::Receiver<Option<Vec<ChannelInfo>>>,
     query_timeout: Duration,
-    next_sub: AtomicU64,
     queue_frames: usize,
     join: Option<JoinHandle<()>>,
 }
@@ -163,7 +161,6 @@ impl DeviceSession {
             state_rx,
             channels_rx,
             query_timeout,
-            next_sub: AtomicU64::new(0),
             queue_frames,
             join: Some(join),
         }
@@ -171,7 +168,8 @@ impl DeviceSession {
 
     /// Subscribes to a channel's stream tier. The preview starts as soon as
     /// the session is logged in and restarts after every reconnect. Drop the
-    /// [`Subscription`] to stop it.
+    /// [`Subscription`] to stop it. Subscriptions to the same channel and
+    /// tier share one device preview, which stops with the last of them.
     pub async fn subscribe(
         &self,
         channel: u8,
@@ -181,10 +179,8 @@ impl DeviceSession {
             return Err(SessionClosed);
         }
         let queue = Arc::new(FrameQueue::new(self.queue_frames));
-        let id = self.next_sub.fetch_add(1, Ordering::Relaxed);
         self.cmd_tx
             .send(Request::Subscribe(NewSub {
-                id,
                 channel,
                 tier,
                 queue: queue.clone(),
@@ -312,55 +308,95 @@ impl LogLimiter {
     }
 }
 
-struct Sub {
-    channel: u8,
-    tier: StreamTier,
-    queue: Arc<FrameQueue>,
+/// One device preview, shared by every subscription to the same channel and
+/// tier. The stream is demultiplexed once; each subscriber has its own queue.
+struct Stream {
+    /// Message ID of the running start request; `None` until it is sent on
+    /// the current connection.
     msg_id: Option<u32>,
     demux: Demuxer,
+    subs: Vec<Arc<FrameQueue>>,
+    /// The latest stream info record, replayed to subscribers that attach
+    /// mid-stream (everything else they wait for at a keyframe).
+    info: Option<Record>,
+    /// Status of a refused start, replayed to late subscribers.
+    rejected: Option<u16>,
 }
+
+type StreamKey = (u8, StreamTier);
 
 #[derive(Default)]
 struct Subs {
-    map: HashMap<u64, Sub>,
-    by_msg: HashMap<u32, u64>,
+    streams: HashMap<StreamKey, Stream>,
+    by_msg: HashMap<u32, StreamKey>,
+}
+
+/// Hands `rec` to every queue that would keep it. Queues that are still
+/// waiting for a keyframe discard it, so they cost no copy; the last
+/// accepting queue gets the record itself.
+fn fan_out(queues: &[Arc<FrameQueue>], rec: Record) {
+    let accepting: Vec<&Arc<FrameQueue>> = queues.iter().filter(|q| q.accepts(&rec)).collect();
+    let Some((last, rest)) = accepting.split_last() else {
+        return;
+    };
+    for q in rest {
+        q.push_media(rec.clone());
+    }
+    last.push_media(rec);
 }
 
 impl Subs {
     fn add(&mut self, n: NewSub) {
-        self.map.insert(
-            n.id,
-            Sub {
-                channel: n.channel,
-                tier: n.tier,
-                queue: n.queue,
+        let st = self
+            .streams
+            .entry((n.channel, n.tier))
+            .or_insert_with(|| Stream {
                 msg_id: None,
                 demux: Demuxer::new(),
-            },
-        );
+                subs: Vec::new(),
+                info: None,
+                rejected: None,
+            });
+        // A late subscriber starts gated (the queue's initial state): it
+        // sees video from the next keyframe on, preceded by the stream info.
+        if let Some(info) = &st.info {
+            n.queue.push_media(info.clone());
+        }
+        if let Some(status) = st.rejected {
+            n.queue.push_control(Item::StartRejected { status });
+        }
+        st.subs.push(n.queue);
     }
 
     /// The connection is gone: previews must be restarted on the next one.
     fn connection_lost(&mut self) {
         self.by_msg.clear();
-        for s in self.map.values_mut() {
-            s.msg_id = None;
-            s.demux = Demuxer::new();
-            s.queue.discontinuity();
+        for st in self.streams.values_mut() {
+            st.msg_id = None;
+            st.demux = Demuxer::new();
+            st.info = None;
+            st.rejected = None;
+            for q in &st.subs {
+                q.discontinuity();
+            }
         }
     }
 
     /// Removes subscriptions their owners dropped (without device traffic).
     fn reap_offline(&mut self) {
-        self.map
-            .retain(|_, s| !s.queue.cancelled.load(Ordering::SeqCst));
+        for st in self.streams.values_mut() {
+            st.subs.retain(|q| !q.cancelled.load(Ordering::SeqCst));
+        }
+        self.streams.retain(|_, st| !st.subs.is_empty());
     }
 
     fn close_all(&mut self) {
-        for s in self.map.values() {
-            s.queue.close();
+        for st in self.streams.values() {
+            for q in &st.subs {
+                q.close();
+            }
         }
-        self.map.clear();
+        self.streams.clear();
         self.by_msg.clear();
     }
 }
@@ -728,31 +764,33 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx.connection_lost();
 }
 
-/// Starts previews for new subscriptions and stops those their owners
-/// dropped.
+/// Starts one preview per stream that has subscribers, and stops the stream
+/// when its last subscriber was dropped.
 async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
 ) -> Result<(), Failure> {
-    let ids: Vec<u64> = ctx.subs.map.keys().copied().collect();
-    for id in ids {
-        let Some(sub) = ctx.subs.map.get_mut(&id) else {
+    let keys: Vec<StreamKey> = ctx.subs.streams.keys().copied().collect();
+    for key in keys {
+        let Some(st) = ctx.subs.streams.get_mut(&key) else {
             continue;
         };
-        if sub.queue.cancelled.load(Ordering::SeqCst) {
-            if let Some(mid) = sub.msg_id {
+        st.subs.retain(|q| !q.cancelled.load(Ordering::SeqCst));
+        if st.subs.is_empty() {
+            let mid = st.msg_id;
+            ctx.subs.streams.remove(&key);
+            if let Some(mid) = mid {
                 ctx.subs.by_msg.remove(&mid);
                 let bytes = c.session.stop_preview(mid).map_err(|e| e.to_string())?;
                 c.send(&bytes).await?;
             }
-            ctx.subs.map.remove(&id);
-        } else if sub.msg_id.is_none() {
+        } else if st.msg_id.is_none() {
             let (mid, bytes) = c
                 .session
-                .start_preview(sub.channel, sub.tier)
+                .start_preview(key.0, key.1)
                 .map_err(|e| e.to_string())?;
-            sub.msg_id = Some(mid);
-            ctx.subs.by_msg.insert(mid, id);
+            st.msg_id = Some(mid);
+            ctx.subs.by_msg.insert(mid, key);
             c.send(&bytes).await?;
         }
     }
@@ -784,25 +822,32 @@ async fn sync_queries<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
     match ev {
         Event::Media { message_id, data } => {
-            let Some(sub) = ctx
+            let Some(st) = ctx
                 .subs
                 .by_msg
                 .get(&message_id)
-                .and_then(|id| ctx.subs.map.get_mut(id))
+                .and_then(|k| ctx.subs.streams.get_mut(k))
             else {
                 return;
             };
-            sub.demux.push(&data);
+            st.demux.push(&data);
             loop {
-                match sub.demux.next_record() {
-                    Ok(Some(r)) => sub.queue.push_media(r),
+                match st.demux.next_record() {
+                    Ok(Some(r)) => {
+                        if matches!(r, Record::Info { .. }) {
+                            st.info = Some(r.clone());
+                        }
+                        fan_out(&st.subs, r);
+                    }
                     Ok(None) => break,
                     Err(e) => {
                         if let Some(n) = demux_log.allow() {
-                            warn!(channel = sub.channel, suppressed = n, error = %e, "bad media record; waiting for next keyframe");
+                            warn!(suppressed = n, error = %e, "bad media record; waiting for next keyframe");
                         }
-                        sub.demux.resync();
-                        sub.queue.gate();
+                        st.demux.resync();
+                        for q in &st.subs {
+                            q.gate();
+                        }
                         break;
                     }
                 }
@@ -814,13 +859,16 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             status,
             ..
         } if status != 200 => {
-            if let Some(sub) = ctx
+            if let Some(st) = ctx
                 .subs
                 .by_msg
                 .get(&message_id)
-                .and_then(|id| ctx.subs.map.get(id))
+                .and_then(|k| ctx.subs.streams.get_mut(k))
             {
-                sub.queue.push_control(Item::StartRejected { status });
+                st.rejected = Some(status);
+                for q in &st.subs {
+                    q.push_control(Item::StartRejected { status });
+                }
             }
         }
         Event::Control {
