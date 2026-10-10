@@ -44,6 +44,10 @@ public struct TalkState: Sendable, Equatable {
     }
 
     public private(set) var phase: Phase = .idle
+    /// Starts sent to the core whose `refused` or `stopped` has not arrived
+    /// (each start ends with exactly one). The events of an earlier start
+    /// that arrive late change nothing.
+    public private(set) var outstanding = 0
 
     public init() {}
 
@@ -65,14 +69,31 @@ public struct TalkState: Sendable, Equatable {
         return true
     }
 
-    /// `nv_talk_start` failed at once (`.notPermitted` without the permission).
+    /// `nv_talk_start` was called and accepted: its events will follow.
+    public mutating func startSent() { outstanding += 1 }
+
+    /// `nv_talk_start` failed at once (`.notPermitted` without the
+    /// permission; that refusal still sends its event, counted here).
     public mutating func startFailed(_ status: CoreStatus) {
+        if status == .notPermitted { outstanding += 1 }
         let reason = status == .notPermitted ? "not_permitted" : status == .unknownID ? "tile_closed" : "error"
         phase = .refused(reason: reason, retryMilliseconds: nil)
     }
 
-    /// Folds in a `talk` event for the call's tile.
-    public mutating func apply(_ event: TalkEvent) {
+    /// Folds in a `talk` event for the call's tile. Returns false for an
+    /// event that belongs to an earlier start (or to none): ignored.
+    @discardableResult
+    public mutating func apply(_ event: TalkEvent) -> Bool {
+        switch event.state {
+        case .refused, .stopped:
+            guard outstanding > 0 else { return false }
+            outstanding -= 1
+            if outstanding > 0 { return false }
+        case .starting, .active:
+            guard outstanding > 0 else { return false }
+        case .other:
+            return false
+        }
         switch event.state {
         case .starting: phase = .starting
         case .active: phase = .active
@@ -81,6 +102,7 @@ public struct TalkState: Sendable, Equatable {
         case .stopped: phase = .stopped(reason: event.reason ?? "stopped")
         case .other: break
         }
+        return true
     }
 
     /// The user let go of Talk: back to idle once the stop is asked for.

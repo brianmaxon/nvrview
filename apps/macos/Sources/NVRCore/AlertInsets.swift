@@ -316,11 +316,13 @@ public struct InsetBoard: Sendable, Equatable {
     /// Something was done with an inset (or its call): its close clock
     /// starts again.
     public mutating func use(_ camera: CameraRef, now: Double) {
-        if var s = swap, s.shown == camera {
+        if var s = swap, s.shown == camera, s.item.usedAt < now {
             s.item.usedAt = now
             swap = s
         }
-        for i in items.indices where items[i].camera == camera && !items[i].isReturn { items[i].usedAt = now }
+        for i in items.indices where items[i].camera == camera && !items[i].isReturn {
+            items[i].usedAt = max(items[i].usedAt, now)
+        }
     }
 
     /// Sound-alarm insets whose alert was dismissed elsewhere (another

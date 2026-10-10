@@ -70,16 +70,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             var o = FakeCore.Options(clips: clips)
             o.pacing = .realtime(fps: 20)
             o.devices = [
-                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6, multiLensChannels: [5]),
+                // Channel 4 is a made-up doorbell (talk-back capable).
+                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6, multiLensChannels: [5], talkChannels: [3]),
                 "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
             ]
-            o.detectionDemo = 12
+            // The self-test sends its own detections and alarms, at known times.
+            o.detectionDemo = options.selfTestSeconds == nil ? 12 : nil
             let box = FakeBox()
             let credentials = MemoryCredentials()
             let model = try AppModel(
                 factory: FakeCore.factory(options: o) { box.core = $0 }, fakeBox: box, credentials: credentials,
                 deviceFile: JSONFileStore(file: nil), groupFile: JSONFileStore(file: nil),
-                clock: testClock ?? SystemViewerClock())
+                clock: testClock ?? SystemViewerClock(),
+                // The self-test never asks for the microphone or speech recognition.
+                callServices: options.selfTestSeconds != nil ? .fakes() : nil)
             return model
         }
         guard let factory = AppModel.realFactory(dataDirectory: options.dataDirectory) else {
@@ -95,7 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             groupFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("groups.json")
                     ?? JSONFileStore<CameraGroup>.appSupport("groups.json")),
-            clock: testClock ?? SystemViewerClock())
+            cameraFile: JSONFileStore(
+                file: options.dataDirectory?.appendingPathComponent("cameras.json")
+                    ?? JSONFileStore<CameraOptions>.appSupport("cameras.json")),
+            clock: testClock ?? SystemViewerClock(),
+            callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }
 
     /// `--host`/`--user`: one device for this run, password from

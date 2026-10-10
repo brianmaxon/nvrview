@@ -33,7 +33,18 @@ import VideoKit
 ///    with an active alert keeps its header, an interaction brings the
 ///    chrome back, and 0 eases the zoom back to exactly 1x (and the
 ///    sub-stream);
-/// 12. AppKit logged none of the warnings in `forbiddenLog` during the run.
+/// 12. with `--fake`, a doorbell press (`visitor` alarm) while another tile
+///    is focused opens the doorbell's inset as a call (drawn by the same
+///    grid; muted with its Unmute control, as nothing was playing); its
+///    tapped audio reaches the transcript; Talk without the permission is
+///    refused and sends nothing, with it the microphone's audio and a typed
+///    reply go out; a click swaps it with the focused camera, Tab swaps
+///    back, Esc dismisses it and ends the call; a doorbell inset closes by
+///    itself a minute after the press; a smoke alarm's inset stays until
+///    dismissed, and dismissing it dismisses its alert. The microphone,
+///    speech recognition and text-to-speech are fakes: no permission
+///    prompt, ever;
+/// 13. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
 /// animations, easing and the idle delay finish when the test advances it,
@@ -76,6 +87,7 @@ final class SelfTest {
             w.stage.tick()
             w.sidebarOverlay.tick()
         }
+        app.model?.tickCalls()
     }
 
     /// Every device connected, every tile playing, and the first tile's
@@ -394,6 +406,9 @@ final class SelfTest {
             problems.append("no camera to zoom")
             return checkLog()
         }
+        // The renderer as the stage lays it out now (after the focus steps,
+        // a window behind others may not have had a refresh yet).
+        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
         let before = stage.renderedSource(of: path)
         // One mouse-wheel step's worth, eased over the next refreshes.
         stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
@@ -470,9 +485,188 @@ final class SelfTest {
                 }
                 stage.fullScreen = false
                 stage.chromeHideDelay = 3
-                stage.alertActive = { _ in false }
-                checkLog()
+                stage.alertActive = { [weak model] in model?.alerts.isActive($0) == true }
+                insetStep()
             }
+        }
+    }
+
+    // MARK: Alert insets and doorbell calls
+
+    private func insetStep() {
+        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
+        let stage = window.stage
+        guard let device = model.runtime("fake-1"), let id = device.deviceID else {
+            problems.append("no fake device for the doorbell")
+            return checkLog()
+        }
+        let doorbell = CameraRef(device: device.key, channel: 3)
+        guard let other = window.state.tree.leaves.first(where: { $0.camera != nil && $0.camera != doorbell }),
+            let otherCamera = other.camera
+        else {
+            problems.append("no other camera to focus")
+            return checkLog()
+        }
+        model.stopListening()
+        stage.focus(other.path)
+        advance(StageView.focusDuration)
+        let startsBefore = fake.talkStarts
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+        when({ stage.insetBoard.item(for: doorbell) != nil && model.calls.call(for: doorbell) != nil }, timeout: 3) { [self] in
+            guard stage.insetBoard.item(for: doorbell) != nil, let call = model.calls.call(for: doorbell) else {
+                problems.append("a doorbell press did not open its inset and call")
+                return checkLog()
+            }
+            let views = stage.shownInsetViews
+            print("doorbell: inset \(views.count), unmute shown \(views.first?.unmuteShown == true), talk \(call.talk.text)")
+            if views.count != 1 { problems.append("expected one inset view, saw \(views.count)") }
+            if !call.showsUnmute || views.first?.unmuteShown != true {
+                problems.append("the doorbell call did not show Unmute while nothing was playing")
+            }
+            if model.audible.contains(doorbell) { problems.append("the doorbell became audible without listening or the setting") }
+            if fake.talkStarts != startsBefore { problems.append("talk-back started on its own") }
+            // The inset is one more tile of the same grid, drawn on top.
+            let grid = stage.grid
+            grid.prepare?(grid.renderer, grid.drawableSize)
+            // In focus the grid draws the focused tile; the inset adds one.
+            if grid.renderer.tiles.count != 2 {
+                problems.append("the grid draws \(grid.renderer.tiles.count) tiles for the focused tile and one inset")
+            }
+            guard let tile = model.leases.tile(for: doorbell) else {
+                problems.append("the doorbell has no tile")
+                return checkLog()
+            }
+            if grid.renderer.tiles.last.map({ ObjectIdentifier($0.picture as AnyObject) }) != ObjectIdentifier(tile) {
+                problems.append("the inset is not drawn last (on top)")
+            }
+            // Its tapped audio reaches the visitor's transcript (fake engine).
+            fake.pumpAudio(tile: tile.id, count: 17)
+            when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
+                let lines = model.calls.call(for: doorbell)?.transcript.lines ?? []
+                print("transcript: \(lines.map { "\($0.source.label): \($0.text)" })")
+                if lines.first?.source != .visitor { problems.append("the doorbell's audio did not reach the transcript") }
+                talkStep(doorbell, otherCamera, startsBefore)
+            }
+        }
+    }
+
+    private func talkStep(_ doorbell: CameraRef, _ otherCamera: CameraRef, _ startsBefore: Int) {
+        guard let model = app.model, let fake = model.fake, let tile = model.leases.tile(for: doorbell) else {
+            return checkLog()
+        }
+        // Without the permission: refused, nothing sent.
+        model.calls.startTalking(doorbell)
+        let refused = model.calls.call(for: doorbell)?.talk.phase
+        print("talk without permission: \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
+        if refused != .refused(reason: "not_permitted", retryMilliseconds: nil) {
+            problems.append("talk-back without the permission was not refused (\(String(describing: refused)))")
+        }
+        if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
+        model.calls.stopTalking(doorbell)
+        // With it: the microphone's audio goes out while Talk is held.
+        model.setAllowTalk(doorbell, true)
+        model.calls.startTalking(doorbell)
+        when({ model.calls.call(for: doorbell)?.talk.isActive == true }, timeout: 2) { [self] in
+            model.calls.fakeMicrophone?.speak(count: 16_000)
+            let sent = fake.talkPushedMilliseconds(tile: tile.id)
+            print(String(format: "talk with permission: %@, %.0f ms pushed", model.calls.call(for: doorbell)?.talk.text ?? "-", sent))
+            if model.calls.call(for: doorbell)?.talk.isActive != true { problems.append("talk-back did not become active") }
+            if abs(sent - 1000) > 1 { problems.append("the microphone's audio was not pushed (\(sent) ms)") }
+            model.calls.stopTalking(doorbell)
+            when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
+                // A typed reply: rendered, pushed once active, drained.
+                model.calls.sendReply("Hello, one moment please", to: doorbell)
+                when({
+                    if case .stopped(let r)? = model.calls.call(for: doorbell)?.talk.phase { return r == "finished" }
+                    return false
+                }, timeout: 3) { [self] in
+                    let phase = model.calls.call(for: doorbell)?.talk.phase
+                    print("typed reply: \(model.calls.fakeSpeech?.rendered ?? []), talk \(String(describing: phase))")
+                    if model.calls.fakeSpeech?.rendered != ["Hello, one moment please"] {
+                        problems.append("the typed reply was not rendered")
+                    }
+                    if phase != .stopped(reason: "finished") { problems.append("the typed reply's talk did not drain") }
+                    model.setAllowTalk(doorbell, false)
+                    swapStep(doorbell, otherCamera)
+                }
+            }
+        }
+    }
+
+    private func swapStep(_ doorbell: CameraRef, _ otherCamera: CameraRef) {
+        guard let model = app.model, let window else { return checkLog() }
+        let stage = window.stage
+        model.calls.unmute(doorbell)
+        if !model.audible.contains(doorbell) { problems.append("Unmute did not make the doorbell audible") }
+        // A click swaps: the doorbell fills the stage, the focused camera
+        // goes into the return inset.
+        stage.swapInset(doorbell)
+        let swapped = stage.insetBoard.swap?.shown == doorbell
+            && stage.insetBoard.items.first.map { $0.isReturn && $0.camera == otherCamera } == true
+        print("swap: doorbell on the stage \(swapped), wants \(model.leases.wantedTier(doorbell).name)")
+        if !swapped { problems.append("clicking the inset did not swap it with the focused camera") }
+        if model.leases.wantedTier(doorbell) != .main { problems.append("the swapped-in doorbell did not ask for the main stream") }
+        if !stage.showsCamera(doorbell) || stage.showsCamera(otherCamera) {
+            problems.append("after the swap the stage does not show the doorbell")
+        }
+        press("\t", keyCode: ViewerKeys.tab)
+        let back = stage.insetBoard.swap == nil && stage.insetBoard.item(for: doorbell) != nil
+        print("tab: swapped back \(back)")
+        if !back { problems.append("Tab did not swap back") }
+        press("\u{1b}", keyCode: ViewerKeys.escape)
+        let gone = stage.insetBoard.isEmpty && model.calls.call(for: doorbell) == nil
+        print("esc: inset dismissed and call ended \(gone), audible \(model.audible.count)")
+        if !gone {
+            problems.append("Esc did not dismiss the inset and end the call: \(stage.insetBoard.items.map { "\($0.camera) \($0.kind)" })")
+        }
+        if !model.audible.isEmpty { problems.append("ending the call did not restore what played before") }
+        if window.state.focused == nil { problems.append("Esc on an inset also left focus") }
+        autoCloseStep(doorbell)
+    }
+
+    /// A doorbell inset closes by itself a minute after the press ended.
+    private func autoCloseStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake, let id = model.runtime("fake-1")?.deviceID else {
+            return checkLog()
+        }
+        let stage = window.stage
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: false, alarm: true)
+        when({ stage.insetBoard.item(for: doorbell)?.active == false }, timeout: 3) { [self] in
+            advance(InsetBoard.autoCloseDelay - 1)
+            let stayed = stage.insetBoard.item(for: doorbell) != nil
+            advance(2)
+            let closed = stage.insetBoard.item(for: doorbell) == nil
+            print("doorbell inset: open after 59 s \(stayed), closed after 61 s \(closed), call ended \(model.calls.call(for: doorbell) == nil)")
+            if !stayed || !closed { problems.append("the doorbell inset did not close a minute after the press") }
+            if model.calls.call(for: doorbell) != nil { problems.append("the call did not end a minute after the last activity") }
+            smokeStep()
+        }
+    }
+
+    /// A smoke alarm's inset stays until dismissed; dismissing it dismisses
+    /// the alert.
+    private func smokeStep() {
+        guard let model = app.model, let window, let fake = model.fake, let device = model.runtime("fake-1"),
+            let id = device.deviceID
+        else { return checkLog() }
+        let stage = window.stage
+        let hall = CameraRef(device: device.key, channel: 4)
+        fake.emitSoundDetection(device: id, channel: 4, start: true)
+        fake.emitSoundDetection(device: id, channel: 4, start: false)
+        when({ stage.insetBoard.item(for: hall)?.active == false }, timeout: 3) { [self] in
+            let critical = stage.insetBoard.item(for: hall)?.kind.isCritical == true
+            advance(InsetBoard.lostStopAfter + InsetBoard.autoCloseDelay + 60)
+            let stays = stage.insetBoard.item(for: hall) != nil
+            print("smoke inset: critical \(critical), still open after 4 min \(stays), alert \(model.alerts.isActive(hall))")
+            if !critical || !stays { problems.append("the smoke alarm's inset did not stay") }
+            press("\u{1b}", keyCode: ViewerKeys.escape)
+            print("smoke inset dismissed \(stage.insetBoard.isEmpty), alert dismissed \(!model.alerts.isActive(hall))")
+            if !stage.insetBoard.isEmpty { problems.append("Esc did not dismiss the smoke alarm's inset") }
+            if model.alerts.isActive(hall) { problems.append("dismissing the smoke inset did not dismiss its alert") }
+            stage.unfocus()
+            advance(StageView.focusDuration)
+            checkLog()
         }
     }
 

@@ -268,4 +268,16 @@ import Testing
         #expect(top[0].x == 1000 - 12 - 300 && top[0].y == 12)
         #expect(InsetGeometry.width(stage: 400) == 220)
     }
+
+    // MARK: Keys
+
+    @Test func tabAndEscGoToTheInsetsOnlyOnTheStage() {
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.tab, modifiers: [], isRepeat: false, context: .stage) == .swap)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.escape, modifiers: [], isRepeat: false, context: .stage) == .dismiss)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.tab, modifiers: [], isRepeat: false, context: .textEditing) == nil)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.tab, modifiers: [], isRepeat: false, context: .sidebar) == nil)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.tab, modifiers: [.shift], isRepeat: false, context: .stage) == nil)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.escape, modifiers: [], isRepeat: true, context: .stage) == nil)
+        #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.space, modifiers: [], isRepeat: false, context: .stage) == nil)
+    }
 }

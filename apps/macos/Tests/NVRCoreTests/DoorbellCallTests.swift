@@ -34,9 +34,13 @@ import Testing
     @Test func talkGoesThroughStartingToActiveAndStops() {
         var talk = TalkState()
         #expect(talk.phase == .idle)
+        // An event with no start of ours is ignored.
+        let stray = talk.apply(TalkEvent(tile: 7, state: .active))
+        #expect(!stray && talk.phase == .idle)
         let first = talk.requestStart()
         let again = talk.requestStart()
         #expect(first && !again)  // once
+        talk.startSent()
         talk.apply(TalkEvent(tile: 7, state: .starting))
         #expect(talk.isTalking && !talk.isActive)
         talk.apply(TalkEvent(tile: 7, state: .active))
@@ -48,6 +52,24 @@ import Testing
         #expect(talk.text == "Talk ended")
         let restarted = talk.requestStart()
         #expect(restarted)  // a new start after a stop
+    }
+
+    @Test func aLateRefusalOfAnEarlierStartChangesNothing() {
+        var talk = TalkState()
+        _ = talk.requestStart()
+        talk.startFailed(.notPermitted)  // its refused event is still on the way
+        // The user allowed talk-back and pressed Talk again.
+        _ = talk.requestStart()
+        talk.startSent()
+        let late = talk.apply(TalkEvent(tile: 7, state: .refused, reason: "not_permitted"))
+        #expect(!late)
+        #expect(talk.phase == .requested)
+        talk.apply(TalkEvent(tile: 7, state: .starting))
+        talk.apply(TalkEvent(tile: 7, state: .active))
+        #expect(talk.isActive)
+        talk.apply(TalkEvent(tile: 7, state: .stopped, reason: "stopped"))
+        #expect(talk.phase == .stopped(reason: "stopped"))
+        #expect(talk.outstanding == 0)
     }
 
     @Test func notPermittedIsRefusedWithAReason() {
@@ -65,8 +87,11 @@ import Testing
     @Test func refusalsSayWhy() {
         var talk = TalkState()
         _ = talk.requestStart()
+        talk.startSent()
         talk.apply(TalkEvent(tile: 7, state: .refused, reason: "rate_limited", retryMilliseconds: 41_000))
         #expect(talk.text == "Talk-back refused: too many attempts (try again in 41 s)")
+        _ = talk.requestStart()
+        talk.startSent()
         talk.apply(TalkEvent(tile: 7, state: .stopped, reason: "idle"))
         #expect(talk.text == "Talk ended: no audio for a while")
         #expect(TalkState.words("device_refused") == "the device refused")

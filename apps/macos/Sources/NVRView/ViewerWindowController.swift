@@ -304,6 +304,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         default:
             break
         }
+        // Tab and Esc go to the alert insets first, when there are any.
+        if event.type == .keyDown, let key = insetKey(for: event), stage.handleInsetKey(key) { return true }
         guard event.type == .keyDown, let shortcut = shortcut(for: event) else { return false }
         perform(shortcut)
         return true
@@ -331,6 +333,16 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         return ViewerKeys.shortcut(
             keyCode: event.keyCode, characters: event.charactersIgnoringModifiers, modifiers: modifiers,
             isRepeat: event.isARepeat, context: keyContext)
+    }
+
+    func insetKey(for event: NSEvent) -> InsetKey? {
+        let flags = event.modifierFlags
+        var modifiers: KeyModifiers = []
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.command) { modifiers.insert(.command) }
+        return ViewerKeys.insetKey(keyCode: event.keyCode, modifiers: modifiers, isRepeat: event.isARepeat, context: keyContext)
     }
 
     /// A text field in the overlay is being edited.

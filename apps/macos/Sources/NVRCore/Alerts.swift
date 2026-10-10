@@ -132,6 +132,11 @@ public struct AlertCenter: Sendable, Equatable {
         }
     }
 
+    /// Adds a line to the session's event log (a doorbell call, say).
+    public mutating func record(_ text: String, at: Date) {
+        log.append(.init(at: at, text: text))
+    }
+
     /// The user dismissed the camera's alert: gone for every tile and window,
     /// count reset. Returns the dismissed alert.
     @discardableResult

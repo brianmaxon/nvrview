@@ -102,6 +102,14 @@ public struct KeyModifiers: OptionSet, Sendable {
     public static let command = KeyModifiers(rawValue: 8)
 }
 
+/// What Tab and Esc do while the stage has alert insets (docs/UX.md
+/// "Alert insets"): Tab swaps the top inset with the stage (or back), Esc
+/// dismisses it. Without insets the keys go on as before.
+public enum InsetKey: Sendable, Equatable {
+    case swap
+    case dismiss
+}
+
 public enum ViewerKeys {
     /// macOS virtual key codes used here.
     public static let leftArrow: UInt16 = 123
@@ -111,6 +119,22 @@ public enum ViewerKeys {
     public static let space: UInt16 = 49
     public static let returnKey: UInt16 = 36
     public static let enter: UInt16 = 76
+    public static let tab: UInt16 = 48
+    public static let escape: UInt16 = 53
+
+    /// Tab or Esc for the insets: only on the stage (never while text is
+    /// edited or a sidebar list has the keyboard), without modifiers, not on
+    /// key repeat.
+    public static func insetKey(keyCode: UInt16, modifiers: KeyModifiers, isRepeat: Bool, context: KeyContext)
+        -> InsetKey?
+    {
+        guard context == .stage, modifiers.isEmpty, !isRepeat else { return nil }
+        switch keyCode {
+        case tab: return .swap
+        case escape: return .dismiss
+        default: return nil
+        }
+    }
 
     /// The shortcut for a key press, or nil to let the key go on to
     /// whatever has the keyboard focus (and then the menus). Letters work
