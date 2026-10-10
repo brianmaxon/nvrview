@@ -72,7 +72,10 @@ pub enum Record {
     },
     /// An audio frame.
     Audio {
-        /// The two-digit stream index from the record magic (`05wb` is 5).
+        /// The stream index from the record magic: a digit magic reads as its
+        /// two-digit number (`05wb` is 5). The first character can be any of
+        /// `0` to `@`, each counted as its offset from `0` times ten (`:5wb`
+        /// is 105), so `stream_index % 10` is always the second character.
         stream_index: u8,
         /// Raw audio payload.
         data: Vec<u8>,
@@ -111,18 +114,35 @@ enum Kind {
     Audio { index: u8 },
 }
 
-fn digits(a: u8, b: u8) -> Option<u8> {
-    (a.is_ascii_digit() && b.is_ascii_digit()).then(|| (a - b'0') * 10 + (b - b'0'))
+/// Whether `c` may be the first character of a video or audio magic: any
+/// character from `0` to `@` (0x30-0x40). Digits are what native cameras send;
+/// a third-party camera behind an NVR sent `:` (`:0dc`, `:1dc`). The character
+/// is given no meaning here (see "Records as the official client reads them"
+/// in docs/protocol.md).
+fn first_char_ok(c: u8) -> bool {
+    (b'0'..=b'@').contains(&c)
+}
+
+/// Offset of an accepted first character from `0` (0-16).
+fn first_char_value(c: u8) -> u8 {
+    c - b'0'
 }
 
 fn classify(magic: [u8; 4]) -> Option<Kind> {
-    match &magic {
-        b"1001" | b"1002" => Some(Kind::Info),
-        // `<stream index><frame type>dc`: type 0 is a keyframe, 1 a predicted frame.
-        [a, b, b'd', b'c'] => digits(*a, *b).map(|_| Kind::Video {
-            keyframe: *b == b'0',
+    match magic {
+        [b'1', b'0', b'0', b'1' | b'2'] => Some(Kind::Info),
+        // `<any of 0-@><frame type>dc`: type 0 is a keyframe, any other digit
+        // a predicted frame.
+        [a, b, b'd', b'c'] if first_char_ok(a) && b.is_ascii_digit() => Some(Kind::Video {
+            keyframe: b == b'0',
         }),
-        [a, b, b'w', b'b'] => digits(*a, *b).map(|index| Kind::Audio { index }),
+        // `<any of 0-@><digit>wb`: the index is the first character's offset
+        // from `0` times ten plus the second digit, so a digit magic reads as
+        // its two-digit number (`05wb` is 5) and the second character is
+        // always `index % 10`.
+        [a, b, b'w', b'b'] if first_char_ok(a) && b.is_ascii_digit() => Some(Kind::Audio {
+            index: first_char_value(a) * 10 + (b - b'0'),
+        }),
         _ => None,
     }
 }
@@ -305,8 +325,10 @@ pub fn encode_info(width: u32, height: u32, fps: u8) -> Vec<u8> {
 }
 
 /// Encodes a video record with an optional extra header, padded to 8 bytes.
-/// The magic is `<stream index><frame type>dc`: `stream` is the first digit
-/// (0-9), and the frame type is `0` for a keyframe and `1` otherwise.
+/// The magic is `<first><frame type>dc`: `stream` gives the first character
+/// as its offset from `0` (0-9 are digits; 10 to 16 are `:` to `@`, as a
+/// third-party camera sends; larger values wrap to a digit), and the frame
+/// type is `0` for a keyframe and `1` otherwise.
 pub fn encode_video(
     stream: u8,
     keyframe: bool,
@@ -317,7 +339,7 @@ pub fn encode_video(
 ) -> Vec<u8> {
     let mut v = Vec::with_capacity(VIDEO_HEADER_LEN + extra_header.len() + data.len() + 8);
     v.extend_from_slice(&[
-        b'0' + stream % 10,
+        b'0' + if stream <= 16 { stream } else { stream % 10 },
         if keyframe { b'0' } else { b'1' },
         b'd',
         b'c',
@@ -332,11 +354,14 @@ pub fn encode_video(
     v
 }
 
-/// Encodes an audio record (`NNwb`), padded to 8 bytes.
+/// Encodes an audio record (`NNwb`), padded to 8 bytes. The inverse of the
+/// demuxer's index: indexes up to 169 round-trip (100 and up give a first
+/// character from `:` to `@`); larger ones wrap the first character to a digit.
 pub fn encode_audio(stream_index: u8, data: &[u8]) -> Vec<u8> {
+    let tens = stream_index / 10;
     let mut v = Vec::with_capacity(AUDIO_HEADER_LEN + data.len() + 8);
     v.extend_from_slice(&[
-        b'0' + stream_index / 10 % 10,
+        b'0' + if tens <= 16 { tens } else { tens % 10 },
         b'0' + stream_index % 10,
         b'w',
         b'b',
@@ -445,6 +470,143 @@ mod tests {
             &encode_video(1, false, Codec::H265, 0, &[], &[])[..4],
             b"11dc"
         );
+    }
+
+    fn video_with_magic(magic: &[u8; 4], pts_us: u64, data: &[u8]) -> Vec<u8> {
+        let mut rec = encode_video(0, true, Codec::H264, pts_us, &[], data);
+        rec[..4].copy_from_slice(magic);
+        rec
+    }
+
+    /// The first character of a video or audio magic may be anything from
+    /// `0` to `@`; a third-party camera sends `:0dc` and `:1dc`.
+    #[test]
+    fn first_character_from_zero_to_at_is_accepted() {
+        for first in b'0'..=b'@' {
+            for (second, keyframe) in [(b'0', true), (b'1', false)] {
+                let magic = [first, second, b'd', b'c'];
+                let mut d = Demuxer::new();
+                d.push(&video_with_magic(&magic, 3, &[0, 0, 0, 1, 0x65]));
+                match d.next_record().unwrap() {
+                    Some(Record::Video { keyframe: k, .. }) => assert_eq!(k, keyframe, "{magic:?}"),
+                    other => panic!("{magic:?}: {other:?}"),
+                }
+            }
+            let mut rec = encode_audio(5, &[1, 2, 3]);
+            rec[0] = first;
+            let mut d = Demuxer::new();
+            d.push(&rec);
+            match d.next_record().unwrap() {
+                Some(Record::Audio { stream_index, data }) => {
+                    assert_eq!(stream_index % 10, 5);
+                    assert_eq!(stream_index / 10, first - b'0');
+                    assert_eq!(data, vec![1, 2, 3]);
+                    // The index round-trips through the encoder.
+                    assert_eq!(encode_audio(stream_index, &data), rec);
+                }
+                other => panic!("{first}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            &encode_video(10, true, Codec::H264, 0, &[], &[])[..4],
+            b":0dc"
+        );
+        assert_eq!(
+            &encode_video(10, false, Codec::H264, 0, &[], &[])[..4],
+            b":1dc"
+        );
+        assert_eq!(
+            &encode_video(16, true, Codec::H264, 0, &[], &[])[..4],
+            b"@0dc"
+        );
+        assert_eq!(&encode_audio(105, &[])[..4], b":5wb");
+    }
+
+    /// Characters just outside `0`-`@` (and non-digit second characters)
+    /// are still unknown magics.
+    #[test]
+    fn first_character_outside_the_range_is_rejected() {
+        for magic in [
+            b"A0dc", b"/0dc", b"a1dc", b" 0dc", b"A5wb", b"/5wb", b":xdc", b":ewb", b"0:dc",
+        ] {
+            let mut d = Demuxer::new();
+            d.push(&video_with_magic(magic, 0, &[0, 0, 0, 1, 0x65]));
+            assert_eq!(
+                d.next_record(),
+                Err(DemuxError::UnknownMagic(*magic)),
+                "{magic:?}"
+            );
+        }
+    }
+
+    /// A third-party stream (`:0dc`/`:1dc`) mixed with digit-magic video and
+    /// audio parses whole and in every chunking, and resynchronizes onto a
+    /// `:` record after garbage.
+    #[test]
+    fn third_party_magics_mixed_and_resync() {
+        let mut bytes = encode_info(1920, 1080, 15);
+        let mut recs = vec![Record::Info {
+            width: 1920,
+            height: 1080,
+            fps: 15,
+        }];
+        for i in 0..6u64 {
+            let keyframe = i % 3 == 0;
+            let data = nal(11 + i as u8, 50 + i as usize * 9);
+            bytes.extend(encode_video(
+                10,
+                keyframe,
+                Codec::H264,
+                i * 66_000,
+                &[],
+                &data,
+            ));
+            recs.push(Record::Video {
+                codec: Codec::H264,
+                keyframe,
+                pts_us: i * 66_000,
+                data: data.clone(),
+                extra_header: Vec::new(),
+            });
+            if i == 2 {
+                bytes.extend(encode_video(0, false, Codec::H264, 1, &[], &data));
+                recs.push(Record::Video {
+                    codec: Codec::H264,
+                    keyframe: false,
+                    pts_us: 1,
+                    data,
+                    extra_header: Vec::new(),
+                });
+                bytes.extend(encode_audio(5, &[7; 13]));
+                recs.push(Record::Audio {
+                    stream_index: 5,
+                    data: vec![7; 13],
+                });
+            }
+        }
+        for chunk in [bytes.len(), 1, 7, 8, 64] {
+            let mut d = Demuxer::new();
+            let mut out = Vec::new();
+            for c in bytes.chunks(chunk) {
+                d.push(c);
+                drain(&mut d, &mut out);
+            }
+            assert_eq!(out, recs, "chunk {chunk}");
+            assert_eq!(d.buffered(), 0);
+        }
+        // Garbage, including an out-of-range magic, then the `:` stream
+        // without its info record: resync lands on the first `:0dc`.
+        let info_len = encode_info(1, 1, 1).len();
+        let mut stream = b"A0dcH264".to_vec();
+        stream.extend([0xAAu8; 16]);
+        stream.extend(&bytes[info_len..]);
+        let mut d = Demuxer::new();
+        d.push(&stream);
+        assert!(matches!(d.next_record(), Err(DemuxError::UnknownMagic(_))));
+        d.resync();
+        let mut out = Vec::new();
+        drain(&mut d, &mut out);
+        assert_eq!(out, recs[1..]);
     }
 
     #[test]
