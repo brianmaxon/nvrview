@@ -116,6 +116,19 @@ Events from all cameras are grouped into incidents:
 - **Progress** per incident and per camera, pausable, survives app restarts.
 - **No re-encoding** for plain downloads: chunks are joined and remuxed into
   MP4 (H.264 or H.265 video, AAC audio) with correct timestamps.
+- **Joining** (`recordings::finalize`) is crash-safe in two steps. The chunks
+  are written to a fragmented MP4 (`joined.fmp4` in the camera's parts
+  folder, flushed and synced every fragment of up to 2 s), with the overlap
+  dropped by timestamp and each audio frame placed right after the video frame
+  it followed (audio has no timestamp; audio that followed a repeated
+  video frame is dropped with it). Then the fragmented file is remuxed into a
+  standard faststart MP4 under a temporary name, renamed into place, and
+  deleted. A killed process leaves either the fragmented file (it plays up to
+  its last complete fragment; `recover_fragmented` finishes it) or a finished
+  MP4, never a partial output name, and the raw chunks stay until the job is
+  forgotten, so an interrupted join is simply redone. A change of codec or
+  parameter sets in the middle of an incident fails the join (a file has one
+  `moov`); handling it by splitting the output is not done yet.
 
 ## Output
 
