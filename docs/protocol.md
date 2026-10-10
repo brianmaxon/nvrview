@@ -138,6 +138,19 @@ Observed rates are lower than the advertised frame rate (about 4–15 fps on
 sub-streams, 12–15 fps on high tiers); use the timestamps, not the info record.
 (observed)
 
+### Audio payloads
+
+All observed in a live capture of several cameras on one NVR (about 6,500
+audio records across both stream indexes, sub and high tiers).
+
+| Fact | Provenance |
+| --- | --- |
+| Every audio record's payload is exactly one ADTS frame (sync `0xFFF`, MPEG-4, no CRC) whose frame length equals the record's payload size. | observed |
+| The ADTS headers say AAC-LC, 16 kHz, mono, one raw data block per frame: 1024 samples, 64 ms per record. | observed |
+| Frame sizes vary (variable bit rate); about 250 to 520 bytes were common. | observed |
+| Audio records carry no timestamp. They are interleaved with video records (about 15.6 audio records per second against 4–15 video frames), so a record's position between video frames is the only timing information in the stream. | observed |
+| Counting samples against the video timestamps over about 64 s gave 16,005 to 16,013 samples per second of video time, not exactly 16,000: the cameras' audio and video clocks differ slightly, and a player that plays audio at a local 16 kHz drifts by seconds per hour. | observed |
+
 ## Session upkeep
 
 | Fact | Provenance |
@@ -175,7 +188,7 @@ Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 
 - Keepalive interval and idle timeout.
 - Logout command, if any.
-- Audio codec of `05wb`/`15wb` records (AAC with ADTS framing is expected; not
-  yet checked for live streams).
+- Whether any camera model sends audio in another codec or sample rate (all
+  observed so far: AAC-LC 16 kHz mono).
 - Behavior at the device's limits: how many concurrent streams per session and
   per device.

@@ -8,6 +8,8 @@ Windows is planned, and the design keeps that possible from the first commit.
 
 - Live view of every channel on one or more NVRs: a grid of sub-streams, and one
   channel full screen on its main stream.
+- Listening that stays in sync with video for hours, with the same audio
+  available to local speech recognition later ([AUDIO.md](AUDIO.md)).
 - Far lower CPU, memory, and battery use than the official Electron app: native
   code on Apple Silicon, hardware video decoding, no browser engine.
 - Robust behavior on bad streams: wait for the next keyframe instead of
@@ -167,6 +169,7 @@ to Keychain and Windows Credential Manager), logging, settings format.
 | M0 | Confirm live start/stop and keepalive against real hardware | the protocol |
 | M1 | `bc-protocol`, `bc-session`, `bc-cli` writing a channel to a playable file; CI green on Linux and Windows | the core, portably |
 | M2 | C interface plus one live channel in the macOS app | the boundary |
+| M2a | Listening on one tile: AAC decode, timestamping, drift-corrected playback, audio tap | audio that stays in sync |
 | M3 | Grid, full-screen focus, reconnect, Keychain | a usable macOS app |
 | M4 | Windows app, one channel, then the grid | Windows |
 
