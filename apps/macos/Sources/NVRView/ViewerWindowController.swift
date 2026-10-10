@@ -163,8 +163,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .layout(let id):
             if let l = model.layout(id) {
                 // Another window (or app) changed it: follow, unless this
-                // window is the one that just stored the same tree.
-                if l.root != state.tree || l.name != state.name {
+                // window is the one that just stored the same tree, or a
+                // drag here is still changing it (the model notifies on
+                // every statistics event; following the stored tree then
+                // snapped a divider back mid-drag). The drag stores its
+                // result when it ends.
+                if !stage.isInteracting, l.root != state.tree || l.name != state.name {
                     state.tree = l.root
                     state.name = l.name
                     stage.reload()

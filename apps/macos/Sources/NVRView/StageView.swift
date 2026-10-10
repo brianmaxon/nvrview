@@ -367,6 +367,10 @@ final class StageView: NSView {
     // MARK: Focus
 
     var isFocused: Bool { state.focused != nil }
+
+    /// A pointer gesture (divider drag, tile drag, pan) is in progress: the
+    /// tree on screen may differ from the stored layout until it ends.
+    var isInteracting: Bool { gesture != nil }
     /// A focus animation is running (self-test).
     var isAnimatingFocus: Bool { focusAnimation != nil }
     /// A mouse-wheel zoom is still easing (self-test).
