@@ -91,6 +91,9 @@ pub struct SessionConfig {
     /// session cannot slow one down without stalling live view. Default
     /// 64 MiB.
     pub download_buffer_bytes: usize,
+    /// Subscribe to the device's detection pushes (command 192) after every
+    /// login, delivered by [`crate::DeviceSession::alarms`]. Default on.
+    pub alarm_report: bool,
 }
 
 impl SessionConfig {
@@ -112,6 +115,7 @@ impl SessionConfig {
             max_downloads: 1,
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
+            alarm_report: true,
         }
     }
 }

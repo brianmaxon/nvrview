@@ -157,6 +157,8 @@ pub(crate) struct Snapshot {
 /// One playout slot.
 pub(crate) struct Slot {
     claimed: AtomicBool,
+    /// Whoever claimed it ([`SlotLevel::owner`]); 0 when free.
+    owner: AtomicU64,
     playing: AtomicBool,
     gain: AtomicU32,
     skip_to: AtomicU64,
@@ -175,6 +177,7 @@ impl Slot {
     fn new() -> Slot {
         Slot {
             claimed: AtomicBool::new(false),
+            owner: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             gain: AtomicU32::new(1.0f32.to_bits()),
             skip_to: AtomicU64::new(NO_SKIP),
@@ -290,14 +293,16 @@ impl AudioOutput {
         }
     }
 
-    /// Claims a free slot, or `None` when all are in use.
-    pub(crate) fn claim(&self) -> Option<SlotLease> {
+    /// Claims a free slot for `owner` (any tag; the renderer's levels name
+    /// it), or `None` when all are in use.
+    pub(crate) fn claim(&self, owner: u64) -> Option<SlotLease> {
         let index = self.shared.slots.iter().position(|s| {
             s.claimed
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
         })?;
         let slot = &self.shared.slots[index];
+        slot.owner.store(owner, Ordering::Release);
         let ring = slot
             .ring
             .get_or_init(|| Ring::new(self.shared.ring_frames, self.shared.format.channels));
@@ -383,6 +388,7 @@ impl Drop for SlotLease {
         s.playing.store(false, Ordering::Release);
         s.underruns.store(0, Ordering::Relaxed);
         s.underrun_frames.store(0, Ordering::Relaxed);
+        s.owner.store(0, Ordering::Release);
         s.claimed.store(false, Ordering::Release);
     }
 }
@@ -402,7 +408,32 @@ struct SlotState {
     /// Data has been seen since the slot started playing.
     had_data: bool,
     was_playing: bool,
+    /// Peak level with a slow release, before volume.
+    peak: f32,
+    /// Mean square level, smoothed, before volume.
+    mean_square: f32,
+    /// The owner of the slot while playing, else 0.
+    owner: u64,
 }
+
+/// The level of one playing slot, measured by the renderer before volume:
+/// what the tile's audio carries, whether or not it is muted.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SlotLevel {
+    /// The tag given when the slot was claimed (0: the slot is free or not
+    /// playing).
+    pub owner: u64,
+    /// Peak sample magnitude, 0 to 1, falling off over about
+    /// [`LEVEL_PEAK_RELEASE_S`].
+    pub peak: f32,
+    /// RMS level, 0 to 1, over about [`LEVEL_RMS_WINDOW_S`].
+    pub rms: f32,
+}
+
+/// Time constant of the peak level's release.
+pub const LEVEL_PEAK_RELEASE_S: f32 = 0.3;
+/// Time constant of the RMS level's smoothing.
+pub const LEVEL_RMS_WINDOW_S: f32 = 0.1;
 
 /// The real-time side: mixes every playing slot into the app's buffer.
 pub struct Renderer {
@@ -419,6 +450,21 @@ impl std::fmt::Debug for Renderer {
 }
 
 impl Renderer {
+    /// The level of each slot after the last [`Renderer::render`], in slot
+    /// order (owner 0 for slots that are not playing). Real-time safe.
+    pub fn levels(&self) -> impl Iterator<Item = SlotLevel> + '_ {
+        self.local.iter().map(|st| SlotLevel {
+            owner: st.owner,
+            peak: st.peak,
+            rms: st.mean_square.max(0.0).sqrt().min(1.0),
+        })
+    }
+
+    /// Slots (tiles that can play at once).
+    pub fn slots(&self) -> usize {
+        self.local.len()
+    }
+
     /// The output format.
     pub fn format(&self) -> OutputFormat {
         self.shared.format
@@ -438,6 +484,9 @@ impl Renderer {
         for (slot, st) in self.shared.slots.iter().zip(self.local.iter_mut()) {
             if !slot.playing.load(Ordering::Acquire) {
                 st.was_playing = false;
+                st.owner = 0;
+                st.peak = 0.0;
+                st.mean_square = 0.0;
                 continue;
             }
             let Some(ring) = slot.ring.get() else {
@@ -449,6 +498,8 @@ impl Renderer {
                     ..SlotState::default()
                 };
             }
+            st.owner = slot.owner.load(Ordering::Acquire);
+            let (mut block_peak, mut block_sq) = (0.0f32, 0.0f32);
             let w = ring.write.load(Ordering::Acquire);
             let mut r = ring.read.load(Ordering::Relaxed);
             let target_gain = f32::from_bits(slot.gain.load(Ordering::Relaxed));
@@ -524,8 +575,21 @@ impl Renderer {
                 }
                 let o = (i + k) * ch;
                 for c in 0..ch {
-                    out[o + c] += ring.sample(r + k as u64, c) * g;
+                    let v = ring.sample(r + k as u64, c);
+                    block_peak = block_peak.max(v.abs());
+                    block_sq += v * v;
+                    out[o + c] += v * g;
                 }
+            }
+            // Levels over the whole call (frames not played count as
+            // silence), smoothed across calls by their length.
+            if frames > 0 {
+                let secs = frames as f32 / fmt.sample_rate as f32;
+                let ms = block_sq / (frames * ch) as f32;
+                let a = 1.0 - (-secs / LEVEL_RMS_WINDOW_S).exp();
+                st.mean_square += (ms - st.mean_square) * a;
+                let release = (-secs / LEVEL_PEAK_RELEASE_S).exp();
+                st.peak = block_peak.min(1.0).max(st.peak * release);
             }
             if short {
                 st.fade_in = FADE_FRAMES;
@@ -557,7 +621,7 @@ mod tests {
     #[test]
     fn plays_ring_content_with_volume_and_reports_position() {
         let (o, mut r) = output(fmt(), OutputConfig::default());
-        let lease = o.claim().unwrap();
+        let lease = o.claim(1).unwrap();
         lease.set_gain(0.5);
         lease.set_playing(true);
         lease.ring().push(&vec![1.0; 2 * 4800]);
@@ -573,9 +637,41 @@ mod tests {
     }
 
     #[test]
+    fn levels_name_the_owner_and_ignore_volume() {
+        let (o, mut r) = output(fmt(), OutputConfig::default());
+        assert_eq!(r.slots(), 8);
+        let lease = o.claim(42).unwrap();
+        lease.set_gain(0.0); // muted: the level still shows the signal
+        lease.set_playing(true);
+        lease.ring().push(&vec![0.5; 2 * 48_000]);
+        let mut buf = vec![0.0; 2 * 480];
+        for k in 0..50 {
+            r.render(&mut buf, k * 10_000_000);
+        }
+        let l: Vec<SlotLevel> = r.levels().collect();
+        assert_eq!(l[0].owner, 42);
+        assert!((l[0].peak - 0.5).abs() < 1e-4, "{l:?}");
+        assert!((l[0].rms - 0.5).abs() < 0.01, "{l:?}");
+        assert!(l[1..].iter().all(|s| s.owner == 0 && s.peak == 0.0));
+        assert!(buf.iter().all(|&s| s == 0.0));
+        // Silence: the peak falls off over a fraction of a second.
+        let silent = o.claim(7).unwrap();
+        drop(lease);
+        for k in 0..100 {
+            r.render(&mut buf, k * 10_000_000);
+        }
+        assert_eq!(r.levels().next().unwrap().owner, 0);
+        silent.set_playing(true);
+        r.render(&mut buf, 0);
+        let l = r.levels().nth(1).unwrap();
+        assert_eq!(l.owner, 7);
+        assert_eq!((l.peak, l.rms), (0.0, 0.0));
+    }
+
+    #[test]
     fn skip_fades_out_and_jumps() {
         let (o, mut r) = output(fmt(), OutputConfig::default());
-        let lease = o.claim().unwrap();
+        let lease = o.claim(1).unwrap();
         lease.set_gain(1.0);
         lease.set_playing(true);
         let mut buf = vec![0.0; 2 * 480];
@@ -600,8 +696,8 @@ mod tests {
                 buffer_ms: 100,
             },
         );
-        let lease = o.claim().unwrap();
-        assert!(o.claim().is_none());
+        let lease = o.claim(1).unwrap();
+        assert!(o.claim(1).is_none());
         lease.set_gain(1.0);
         lease.set_playing(true);
         assert_eq!(lease.ring().push(&vec![0.1; 2 * 100_000]), 8192);
@@ -618,6 +714,6 @@ mod tests {
         r.render(&mut buf, 0);
         assert_eq!(lease.snapshot().unwrap().read, 24_000);
         drop(lease);
-        assert!(o.claim().is_some());
+        assert!(o.claim(1).is_some());
     }
 }

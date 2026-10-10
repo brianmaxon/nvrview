@@ -25,7 +25,10 @@ mod tile;
 pub mod timestamp;
 
 pub use decode::{AudioCodec, PcmFormat};
-pub use output::{AudioOutput, OutputConfig, OutputFormat, Renderer, output};
+pub use output::{
+    AudioOutput, LEVEL_PEAK_RELEASE_S, LEVEL_RMS_WINDOW_S, OutputConfig, OutputFormat, Renderer,
+    SlotLevel, output,
+};
 pub use playout::{MAX_CORRECTION, PlayoutStats, RESYNC_US};
 pub use presentation::{PresentationEstimator, PresentationMap};
 pub use tap::{TAP_RATE, TapBlock, TapReceiver, TapSender, TapStats, tap};

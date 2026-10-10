@@ -13,6 +13,10 @@
 //!   restart, in parallel across devices and bounded per device.
 //! - [`chunk`]: the raw chunk files a download writes (Annex-B video, ADTS
 //!   audio, and a small index of timestamps), the input of the MP4 step.
+//! - [`finalize`]: joins a camera job's chunks into one standard MP4
+//!   (crash-safe, through a fragmented file): the scheduler's final step.
+//! - [`thumbs`]: cover thumbnails (one keyframe per time range) in a
+//!   bounded on-disk cache, capped by count and bytes.
 //! - [`naming`]: the output folder and file names and `incident.json`.
 //!
 //! Times are the device's local wall-clock time as "naive seconds" (see
@@ -23,12 +27,14 @@
 //! APIs; it builds and tests on Linux, macOS, and Windows.
 
 pub mod chunk;
+pub mod finalize;
 pub mod incident;
 pub mod index;
 pub mod indexer;
 pub mod naming;
 pub mod scheduler;
 mod store;
+pub mod thumbs;
 
 pub use bc_protocol::archive::DateTime;
 

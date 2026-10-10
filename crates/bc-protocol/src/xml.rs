@@ -196,7 +196,7 @@ pub fn parse_extension(xml: &str) -> Result<Extension, XmlError> {
 
 /// Collects, for every element named `record`, the text of the leaf
 /// elements inside it (first occurrence of each name wins).
-fn records(xml: &str, record: &str) -> Result<Vec<Vec<(String, String)>>, XmlError> {
+pub(crate) fn records(xml: &str, record: &str) -> Result<Vec<Vec<(String, String)>>, XmlError> {
     let mut reader = Reader::from_str(xml);
     let mut out = Vec::new();
     let mut current: Option<Vec<(String, String)>> = None;
@@ -231,7 +231,7 @@ fn records(xml: &str, record: &str) -> Result<Vec<Vec<(String, String)>>, XmlErr
     }
 }
 
-fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+pub(crate) fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
     fields
         .iter()
         .find(|(n, _)| n == name)

@@ -14,7 +14,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--user NAME] [--max-logins N] [--fps N] [--width N] [--height N]\n\
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
-    \x20               [--recordings DAYS]\n\
+    \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -29,6 +29,8 @@ fn run() -> Result<(), String> {
     let mut replay: Option<PathBuf> = None;
     let (mut replay_loop, mut replay_speed) = (false, 1.0f64);
     let mut recording_days = 0u32;
+    let mut aitype = 0u32;
+    let mut detections: Option<f64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -62,6 +64,10 @@ fn run() -> Result<(), String> {
             "--replay" => replay = Some(PathBuf::from(v)),
             "--recordings" => {
                 recording_days = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
+            "--aitype" => aitype = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
+            "--detections" => {
+                detections = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
             }
             "--replay-speed" => {
                 replay_speed = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
@@ -108,6 +114,14 @@ fn run() -> Result<(), String> {
             .filter_map(|i| DateTime::from_naive_secs(now - i * 86_400))
             .collect();
         cfg.archive = Some(ArchiveConfig::new(days));
+    }
+    // Every channel advertises the same capabilities.
+    cfg.aitypes = vec![aitype; usize::from(channels)];
+    if let Some(secs) = detections {
+        if !(secs.is_finite() && secs > 0.0) {
+            return Err("--detections must be positive".into());
+        }
+        cfg.detection_cycle = Some(std::time::Duration::from_secs_f64(secs));
     }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;

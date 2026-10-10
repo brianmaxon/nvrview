@@ -1,5 +1,30 @@
 # C interface, ABI 3 (planned for M3)
 
+> **Implemented.** The contract now lives in [FFI.md](FFI.md) and
+> [`nvrview.h`](nvrview.h) (`NV_ABI_VERSION` 3); this page is the plan as
+> agreed. Where the implementation differs:
+>
+> 1. `nv_tile_decoded` and `nv_tile_decode_failed` take the action's
+>    `generation` (third argument): during a switch two decoders answer,
+>    and both streams of a camera can carry the same timestamps.
+> 2. The switch reaches the action path too: the old generation gets a
+>    final `NV_ACTION_RESET`, ordered with the new generation's actions.
+>    A generation that fails also ends with its own Reset.
+> 3. `tile_tier` `failed` carries a `reason`; asking for the tier already
+>    requested reports `active` again instead of starting anything.
+> 4. Detection events also have `alarm` (other device states, such as a
+>    doorbell press) and an optional `lens` (second lens of a multi-lens
+>    camera); kinds are lowercase.
+> 5. `nv_tile_audio_level` is measured before the tile's volume and reads 0
+>    for a tile that is not audible or not known (it never fails for an
+>    unknown tile: it takes no lock to check).
+> 6. Layouts: the core needs a directory, `NvConfig.data_dir` (new, last
+>    member); `nv_layouts_get` returns `{"revision":N,"layouts":[...]}` and
+>    uses `NV_ERR_BUFFER_TOO_SMALL` (new) to ask for a larger buffer; the
+>    core sets `version` itself; `layouts_changed` carries `revision`.
+>    Device keys come from `nv_device_key` (new) and `key` in
+>    `device_info`, one per device address.
+
 The additions M3 needs, agreed before the core and the app are built in
 parallel. Everything in [FFI.md](FFI.md) still holds; on implementation this
 moves into FFI.md and `docs/nvrview.h`, and `NV_ABI_VERSION` becomes 3.

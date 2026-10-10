@@ -8,6 +8,10 @@ pub const MAGIC: [u8; 4] = [0xf0, 0xde, 0xbc, 0x0a];
 pub const SHORT_HEADER_LEN: usize = 20;
 /// Header size for classes with a payload offset.
 pub const LONG_HEADER_LEN: usize = 24;
+/// Command number of a recording playback (docs/protocol.md, "Replay media
+/// headers"): its messages have a 24-byte header whose bytes 16 to 19 are
+/// not a status and class.
+pub const REPLAY_COMMAND: u32 = 5;
 
 /// Message class, which also decides the header size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,6 +108,17 @@ pub struct Header {
     /// for classes with a 24-byte header; `Some(0)` means the whole body is
     /// the payload.
     pub payload_offset: Option<u32>,
+    /// For command 5 ([`REPLAY_COMMAND`]) only: the u32 in header bytes
+    /// 16 to 19. On the device's media messages it is the `seq` the client
+    /// chose in the preceding command 123; those bytes are then not a status
+    /// and class, so `status` and `class` of such a header carry no meaning
+    /// (`class` is always one of the two 24-byte classes). On other command-5
+    /// messages (the client's request, the device's first reply) the value
+    /// is just those bytes read as a number, and `status` and `class` are
+    /// valid. The caller knows which kind of message it holds. When this is
+    /// `Some`, [`Header::encode_into`] writes it in place of status and
+    /// class.
+    pub replay_seq: Option<u32>,
 }
 
 impl Header {
@@ -123,10 +138,17 @@ impl Header {
         out.extend_from_slice(&self.command.to_le_bytes());
         out.extend_from_slice(&self.body_len.to_le_bytes());
         out.extend_from_slice(&self.message_id.to_le_bytes());
-        out.extend_from_slice(&self.status.to_le_bytes());
-        // Unlike every other field, the class is big-endian: `0x1465` is the
-        // byte sequence `14 65` on the wire (docs/protocol.md).
-        out.extend_from_slice(&self.class.value().to_be_bytes());
+        match self.replay_seq {
+            Some(seq) if self.command == REPLAY_COMMAND && self.class.has_payload_offset() => {
+                out.extend_from_slice(&seq.to_le_bytes());
+            }
+            _ => {
+                out.extend_from_slice(&self.status.to_le_bytes());
+                // Unlike every other field, the class is big-endian: `0x1465`
+                // is the byte sequence `14 65` on the wire (docs/protocol.md).
+                out.extend_from_slice(&self.class.value().to_be_bytes());
+            }
+        }
         if self.class.has_payload_offset() {
             out.extend_from_slice(&self.payload_offset.unwrap_or(0).to_le_bytes());
         }
@@ -149,7 +171,16 @@ impl Header {
         let u32_at = |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
         let u16_at = |o: usize| u16::from_le_bytes([buf[o], buf[o + 1]]);
         let raw_class = u16::from_be_bytes([buf[18], buf[19]]);
-        let class = Class::from_value(raw_class).ok_or(HeaderError::UnknownClass(raw_class))?;
+        // Command 5 always has a 24-byte header, and bytes 16 to 19 of its
+        // media messages are a sequence number, not a status and class: a
+        // number whose high half reads as an unknown class, or as a
+        // 20-byte-header class, must not fail or shorten the header.
+        let replay = u32_at(4) == REPLAY_COMMAND;
+        let class = match Class::from_value(raw_class) {
+            Some(c) if !replay || c.has_payload_offset() => c,
+            _ if replay => Class::Device,
+            _ => return Err(HeaderError::UnknownClass(raw_class)),
+        };
         let len = class.header_len();
         if buf.len() < len {
             return Err(HeaderError::Incomplete { needed: len });
@@ -161,6 +192,7 @@ impl Header {
             status: u16_at(16),
             class,
             payload_offset: class.has_payload_offset().then(|| u32_at(20)),
+            replay_seq: replay.then(|| u32_at(16)),
         };
         Ok((header, len))
     }
@@ -178,6 +210,7 @@ mod tests {
             status: 200,
             class,
             payload_offset: class.has_payload_offset().then_some(5),
+            replay_seq: None,
         }
     }
 
@@ -192,6 +225,7 @@ mod tests {
             status: 0xdc12,
             class: Class::ClientHandshake,
             payload_offset: None,
+            replay_seq: None,
         };
         let mut out = Vec::new();
         h.encode_into(&mut out);
@@ -247,5 +281,76 @@ mod tests {
             Header::decode(&buf),
             Err(HeaderError::UnknownClass(_))
         ));
+    }
+
+    fn replay_wire(seq: u32, offset: u32) -> Vec<u8> {
+        let mut w = vec![0xf0, 0xde, 0xbc, 0x0a, 5, 0, 0, 0, 9, 0, 0, 0, 7, 0, 0, 0];
+        w.extend_from_slice(&seq.to_le_bytes());
+        w.extend_from_slice(&offset.to_le_bytes());
+        w
+    }
+
+    /// Media messages of a playback carry a sequence number where other
+    /// messages have a status and class; whatever its value, the header is
+    /// 24 bytes long and the sequence number is returned.
+    #[test]
+    fn replay_media_header_holds_a_sequence_number() {
+        // A number close to a Unix time, as the client chose them; one whose
+        // high half is the bytes of a 24-byte class (0x1464), one that is a
+        // 20-byte class (0x1465), and one that is no class at all.
+        for seq in [
+            0x6a00_1234u32,
+            0x6414_0001,
+            0x6514_ffff,
+            0x6614_0000,
+            0x1234_5678,
+        ] {
+            let wire = replay_wire(seq, 12);
+            let (h, len) = Header::decode(&wire).unwrap();
+            assert_eq!(len, 24, "seq {seq:#x}");
+            assert_eq!(h.command, 5);
+            assert_eq!((h.body_len, h.message_id), (9, 7));
+            assert_eq!(h.payload_offset, Some(12));
+            assert_eq!(h.replay_seq, Some(seq));
+            assert!(h.class.has_payload_offset());
+            let mut out = Vec::new();
+            h.encode_into(&mut out);
+            assert_eq!(out, wire, "seq {seq:#x} survives a round trip");
+        }
+    }
+
+    /// The same bytes in another command are still a status and class, and an
+    /// unknown class is still an error there.
+    #[test]
+    fn only_command_five_reads_a_sequence_number() {
+        let mut wire = replay_wire(0x6a00_1234, 0);
+        wire[4] = 3;
+        assert_eq!(Header::decode(&wire), Err(HeaderError::UnknownClass(0x6a)));
+        let (h, _) = Header::decode(&replay_wire(0x6a00_1234, 0)).unwrap();
+        assert_eq!(h.replay_seq, Some(0x6a00_1234));
+        let (h, _) = Header::decode(&{
+            let mut w = replay_wire(0, 0);
+            w[4] = 3;
+            w[16..20].copy_from_slice(&[200, 0, 0x14, 0x64]);
+            w
+        })
+        .unwrap();
+        assert_eq!(
+            (h.status, h.class, h.replay_seq),
+            (200, Class::Client, None)
+        );
+    }
+
+    /// The device's first reply to a play request (command 5) and the
+    /// client's request keep a status and class; the sequence field is just
+    /// those bytes.
+    #[test]
+    fn replay_control_messages_keep_status_and_class() {
+        let wire = [
+            0xf0, 0xde, 0xbc, 0x0a, 5, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 200, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let (h, len) = Header::decode(&wire).unwrap();
+        assert_eq!((len, h.status, h.class), (24, 200, Class::Device));
+        assert_eq!(h.replay_seq, Some(200));
     }
 }

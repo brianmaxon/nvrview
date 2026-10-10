@@ -27,11 +27,16 @@ SKIP_FILES = {"scripts/check-sanitized.py", "docs/SANITIZATION.md"}
 BLOCKED_SUFFIXES = {".pcap", ".pcapng", ".cap", ".h264", ".h265", ".hevc",
                     ".mp4", ".mov", ".mkv", ".jpg", ".jpeg", ".har", ".log"}
 SYNTHETIC_DIR = "fixtures/synthetic/"
+# Editor and OS leftovers. Swap files record the user name, host name, and
+# path of the edited file in their header, and binary files are not scanned
+# line by line, so they are blocked by name.
+JUNK_NAME_RE = re.compile(r"(^|/)(\.[^/]*\.sw[a-p]|[^/]*~|\.#[^/]*|#[^/]*#|\.DS_Store)$")
 
 IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])")
 MAC_RE = re.compile(r"\b[0-9A-Fa-f]{2}(?:[:-][0-9A-Fa-f]{2}){5}\b")
 REOLINK_UID_RE = re.compile(r"\b9527[0-9A-Z]{12}\b")
-HOME_PATH_RE = re.compile(r"(/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\[^\\\s]+)")
+HOME_PATH_RE = re.compile(r"(/Users/[A-Za-z0-9._-]+|/home/[A-Za-z0-9._-]+|[A-Za-z]:\\Users\\[^\\\s]+"
+                          r"|(?<![\w~])~[A-Za-z][A-Za-z0-9._-]*/)")
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b")
 
 ALLOWED_NETS = [ipaddress.ip_network(n) for n in (
@@ -84,6 +89,8 @@ def check_line(line: str, denylist: list[str]) -> list[str]:
 
 
 def check_path(path: str) -> list[str]:
+    if JUNK_NAME_RE.search(path):
+        return [f"{path}: editor or OS leftover (swap, backup, or .DS_Store file)"]
     suffix = Path(path).suffix.lower()
     if suffix in BLOCKED_SUFFIXES and not path.startswith(SYNTHETIC_DIR):
         return [f"{path}: capture/media file type {suffix} outside {SYNTHETIC_DIR}"]

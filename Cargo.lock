@@ -453,6 +453,7 @@ dependencies = [
  "bc-protocol",
  "bc-session",
  "mock-nvr",
+ "mp4-remux",
  "serde",
  "serde_json",
  "tempfile",
@@ -789,6 +790,7 @@ name = "viewer-ffi"
 version = "0.1.0"
 dependencies = [
  "mock-nvr",
+ "tempfile",
  "viewer-core",
 ]
 

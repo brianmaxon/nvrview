@@ -26,7 +26,7 @@ use viewer_core::{
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
-pub const NV_ABI_VERSION: u32 = 2;
+pub const NV_ABI_VERSION: u32 = 3;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -39,9 +39,11 @@ pub enum NvStatus {
     NV_ERR_UNKNOWN_ID = -2,
     /// the core is shutting down
     NV_ERR_CLOSED = -3,
-    /// too many devices or tiles
+    /// too many devices, tiles, layouts, or queued requests
     NV_ERR_LIMIT = -4,
     NV_ERR_INTERNAL = -5,
+    /// the output buffer is too small; *len holds the size needed
+    NV_ERR_BUFFER_TOO_SMALL = -6,
 }
 
 #[repr(C)]
@@ -175,6 +177,10 @@ pub struct NvAction {
     pub configure: NvConfigure,
     pub decode: NvDecode,
     pub status: NvTileStatus,
+    /// The tile's stream this action belongs to: 0 when opened, one more
+    /// for each tier switch (nv_tile_set_tier). Each generation has its own
+    /// platform decoder; answer with the action's generation.
+    pub generation: u32,
 }
 
 /// One block of a tile's tapped audio: 16 kHz mono, borrowed for the
@@ -237,6 +243,9 @@ pub struct NvConfig {
     pub log_max_files: u32,
     /// 0 = default
     pub log_max_total_bytes: u64,
+    /// The app's data directory (UTF-8, NUL-terminated), where the core keeps
+    /// layouts and device keys; NULL = in memory only.
+    pub data_dir: *const c_char,
 }
 
 /// Grid layout of one tile: its cell, where to draw, and what to sample.
@@ -331,8 +340,9 @@ const NO_BYTES: NvBytes = NvBytes {
 };
 
 impl Callbacks for FfiCallbacks {
-    fn on_action(&self, tile: u64, action: &Action<'_>) {
+    fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>) {
         let mut a = NvAction {
+            generation,
             kind: NvActionKind::NV_ACTION_FLUSH,
             configure: NvConfigure {
                 codec: NvCodec::NV_CODEC_H264,
@@ -519,6 +529,16 @@ pub unsafe extern "C" fn nv_core_new(
         let mut cfg = CoreConfig::default();
         // SAFETY: the caller promises `config` is null or valid to read.
         if let Some(c) = unsafe { config.as_ref() }
+            && !c.data_dir.is_null()
+        {
+            // SAFETY: non-null and NUL-terminated per the caller.
+            let Some(dir) = (unsafe { string(c.data_dir) }) else {
+                return NvStatus::NV_ERR_INVALID_ARGUMENT;
+            };
+            cfg.data_dir = Some(PathBuf::from(dir));
+        }
+        // SAFETY: as above.
+        if let Some(c) = unsafe { config.as_ref() }
             && !c.log_dir.is_null()
         {
             // SAFETY: non-null and NUL-terminated per the caller.
@@ -680,20 +700,54 @@ pub unsafe extern "C" fn nv_tile_close(core: *mut NvCore, tile: u64) -> NvStatus
     })
 }
 
-/// Decoder results. Every Decode not discarded by a later Flush, Reset, or
-/// Configure gets exactly one of these; a failed Configure gets one
-/// nv_tile_decode_failed. Callable from any thread, including inside
-/// on_action; they never block.
+/// Asks the tile to show `tier` (for example main on focus, sub back in the
+/// grid). The tile keeps presenting its current stream until the new one's
+/// first picture has been decoded, then switches in one step: no gap, no
+/// black frame. The new stream's actions carry the next generation; the
+/// switch is the old generation's final NV_ACTION_RESET (and a tile_tier
+/// event). Returns at once; progress arrives as events. Asking for the tier
+/// already requested changes nothing.
 ///
 /// # Safety
 /// `core` is a live handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn nv_tile_decoded(core: *mut NvCore, tile: u64, pts_us: i64) -> NvStatus {
+pub unsafe extern "C" fn nv_tile_set_tier(
+    core: *mut NvCore,
+    tile: u64,
+    tier: NvStreamTierValue,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let Some(tier) = StreamTier::from_number(tier) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.set_tile_tier(tile, tier))
+    })
+}
+
+/// Decoder results, for the generation of the action they answer. Every
+/// Decode not discarded by a later Flush, Reset, or Configure gets exactly
+/// one of these; a failed Configure gets one nv_tile_decode_failed.
+/// Results for a generation that has ended are ignored. Callable from any
+/// thread, including inside on_action; they never block.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_tile_decoded(
+    core: *mut NvCore,
+    tile: u64,
+    generation: u32,
+    pts_us: i64,
+) -> NvStatus {
     guarded(|| {
         // SAFETY: per the caller.
         match unsafe { core_ref(core) } {
             // The inverse of the cast in on_action.
-            Some(c) => status(c.decoded(tile, pts_us as u64)),
+            Some(c) => status(c.decoded(tile, generation, pts_us as u64)),
             None => NvStatus::NV_ERR_INVALID_ARGUMENT,
         }
     })
@@ -721,6 +775,7 @@ fn failure(kind: NvDecodeFailureValue) -> Option<DecodeFailureKind> {
 pub unsafe extern "C" fn nv_tile_decode_failed(
     core: *mut NvCore,
     tile: u64,
+    generation: u32,
     kind: NvDecodeFailureValue,
 ) -> NvStatus {
     guarded(|| {
@@ -729,7 +784,7 @@ pub unsafe extern "C" fn nv_tile_decode_failed(
             return NvStatus::NV_ERR_INVALID_ARGUMENT;
         };
         match failure(kind) {
-            Some(k) => status(c.decode_failed(tile, k)),
+            Some(k) => status(c.decode_failed(tile, generation, k)),
             None => NvStatus::NV_ERR_INVALID_ARGUMENT,
         }
     })
@@ -850,6 +905,153 @@ pub unsafe extern "C" fn nv_tile_audio_tap(
             return NvStatus::NV_ERR_INVALID_ARGUMENT;
         }
         status(nv.core.set_tile_audio_tap(tile, enabled))
+    })
+}
+
+/// Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
+/// last measured it, before the tile's volume (peak with a 0.3 s release,
+/// RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
+/// known, and before rendering starts. Lock-free and allocation-free;
+/// callable from any thread, including callbacks, at display rate.
+///
+/// # Safety
+/// `core` is a live handle; `peak` and `rms` are valid for one write each.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_tile_audio_level(
+    core: *mut NvCore,
+    tile: u64,
+    peak: *mut f32,
+    rms: *mut f32,
+) -> NvStatus {
+    guarded(|| {
+        if peak.is_null() || rms.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let (p, r) = c.tile_audio_level(tile);
+        // SAFETY: both non-null and valid for one write per the caller.
+        unsafe {
+            put(peak, p);
+            put(rms, r);
+        }
+        NvStatus::NV_OK
+    })
+}
+
+/// Copies `text` and a NUL into `out` when it fits (`cap` > its length);
+/// `*len` always receives its length without the NUL.
+///
+/// # Safety
+/// `out` is null or valid for writing `cap` bytes; `len` is valid for one
+/// write.
+unsafe fn copy_out(text: &str, out: *mut c_char, cap: usize, len: *mut usize) -> NvStatus {
+    // SAFETY: per the caller.
+    if !unsafe { put(len, text.len()) } {
+        return NvStatus::NV_ERR_INVALID_ARGUMENT;
+    }
+    if out.is_null() || cap <= text.len() {
+        return NvStatus::NV_ERR_BUFFER_TOO_SMALL;
+    }
+    // SAFETY: `out` is valid for `cap` > text.len() bytes per the caller,
+    // and does not overlap a string the core owns.
+    unsafe {
+        std::ptr::copy_nonoverlapping(text.as_ptr(), out.cast::<u8>(), text.len());
+        out.add(text.len()).write(0);
+    }
+    NvStatus::NV_OK
+}
+
+/// The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,
+/// NUL-terminated, `*len` bytes without the NUL. The same address (host and
+/// port) gets the same key in every run while the data directory is kept.
+/// NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap` <= `*len`.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_device_key(
+    core: *mut NvCore,
+    device: u64,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        match c.device_key(device) {
+            // SAFETY: per the caller.
+            Ok(k) => unsafe { copy_out(&k, out, cap, len) },
+            Err(e) => error_status(e),
+        }
+    })
+}
+
+/// Every stored layout as JSON, `{"revision":N,"layouts":[...]}`, into `out`
+/// (NUL-terminated; `*len` bytes without the NUL). NV_ERR_BUFFER_TOO_SMALL
+/// (with `*len` set) when `cap` <= `*len`: call again with a larger buffer.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_layouts_get(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        // SAFETY: per the caller.
+        unsafe { copy_out(&c.layouts_json(), out, cap, len) }
+    })
+}
+
+/// Inserts or replaces (by "id") one layout given as JSON. The core
+/// validates it (NV_ERR_INVALID_ARGUMENT if not a valid split tree), sets
+/// its "version", stores it atomically, and sends layouts_changed.
+/// NV_ERR_LIMIT when the store is full, NV_ERR_INTERNAL when it cannot be
+/// written (nothing changes).
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_layout_put(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(json)) = (unsafe { core_ref(core) }, unsafe { string(json) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        match c.put_layout(json) {
+            Ok(_) => NvStatus::NV_OK,
+            Err(e) => error_status(e),
+        }
+    })
+}
+
+/// Deletes a layout by id and sends layouts_changed. NV_ERR_UNKNOWN_ID if
+/// there is none.
+///
+/// # Safety
+/// `core` is a live handle; `id` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_layout_delete(core: *mut NvCore, id: *const c_char) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(id)) = (unsafe { core_ref(core) }, unsafe { string(id) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.delete_layout(id))
     })
 }
 

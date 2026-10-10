@@ -79,14 +79,14 @@ struct Rec {
 }
 
 impl Callbacks for Rec {
-    fn on_action(&self, tile: u64, action: &Action<'_>) {
+    fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>) {
         if let Action::Decode { pts, .. } = *action {
             self.shown
                 .lock()
                 .unwrap()
                 .push((pts, clock::now_ns() as f64 / 1e3));
             if let Some(c) = self.core.get().and_then(Weak::upgrade) {
-                let _ = c.decoded(tile, pts);
+                let _ = c.decoded(tile, generation, pts);
             }
         }
     }
@@ -165,6 +165,30 @@ fn play(core: &Core, seconds: f64) -> Vec<f64> {
         k += 1;
     }
     heard
+}
+
+/// Renders like [`play`] and returns the highest peak level the core
+/// reported for `tile` meanwhile.
+fn play_level(core: &Core, tile: u64, seconds: f64) -> f32 {
+    let mut buf = vec![0.0f32; 480 * 2];
+    let start = clock::now_ns() + 10_000_000;
+    let mut max = 0.0f32;
+    let until = Instant::now() + Duration::from_secs_f64(seconds);
+    let mut k = 0u64;
+    while Instant::now() < until {
+        let host = start + k * 10_000_000;
+        let now = clock::now_ns();
+        if now + 10_000_000 < host {
+            std::thread::sleep(Duration::from_nanos(host - 10_000_000 - now));
+        }
+        let _ = core.render_audio(&mut buf, 2, host);
+        let (peak, rms) = core.tile_audio_level(tile);
+        assert!((0.0..=1.0).contains(&peak) && (0.0..=1.0).contains(&rms));
+        assert!(rms <= peak + 1e-6);
+        max = max.max(peak);
+        k += 1;
+    }
+    max
 }
 
 #[test]
@@ -276,10 +300,17 @@ fn clicks_are_heard_their_playout_delay_after_their_picture() {
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(rec.taps.lock().unwrap().len(), n);
 
+    // The meter sees the clicks, also while muted.
+    assert!(play_level(&core, tile, 3.0) > THRESHOLD);
+    core.set_tile_audio(tile, true, 0.0).unwrap();
+    assert!(play_level(&core, tile, 3.0) > THRESHOLD);
+    assert_eq!(core.tile_audio_level(tile + 100), (0.0, 0.0));
+
     // Silent: the slot is released, nothing more is heard.
     core.set_tile_audio(tile, false, 1.0).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     assert!(play(&core, 1.5).is_empty());
+    assert_eq!(core.tile_audio_level(tile), (0.0, 0.0));
     core.shutdown();
     nvr.shutdown();
 }
