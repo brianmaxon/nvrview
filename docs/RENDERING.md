@@ -243,7 +243,7 @@ each one of two projections:
 
 **Shader constants.** One block per dewarped tile, in 16-byte rows (the
 same layout in Metal's `constant` buffer and HLSL's `cbuffer`; tests on both
-sides check it), 27 rows, 432 bytes, bound beside the tile's ordinary
+sides check it), 22 rows, 352 bytes, bound beside the tile's ordinary
 constants:
 
 | Row | Contents |
