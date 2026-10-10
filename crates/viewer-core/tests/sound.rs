@@ -2,7 +2,7 @@
 //! alarm (a 3.1 kHz tone in the T3 rhythm, fixtures/synthetic
 //! aac-smoke-t3.aac) or a steady two-tone signal (aac-tone.aac) with its
 //! video, on every channel; the core decodes it and reports alarms as
-//! `detection` events with `source` `mac_audio`, keeping per-second
+//! `detection` events with `source` `local_audio`, keeping per-second
 //! loudness for each tile.
 
 mod common;
@@ -36,7 +36,7 @@ fn mock(audio: &str, channels: u8) -> mock_nvr::MockNvr {
 fn sound_events(rec: &Recorder) -> Vec<Value> {
     rec.events_of("detection")
         .into_iter()
-        .filter(|e| e["source"] == "mac_audio")
+        .filter(|e| e["source"] == "local_audio")
         .collect()
 }
 
@@ -125,7 +125,7 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
     let stop = &of_channel(&rec, 0)[1];
     assert_eq!(stop["state"], "stop");
     assert_eq!(stop["kind"], "smoke_alarm");
-    assert_eq!(stop["source"], "mac_audio");
+    assert_eq!(stop["source"], "local_audio");
     let order: Vec<String> = rec
         .timeline()
         .into_iter()

@@ -154,7 +154,7 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
-{"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"mac_audio","at_ns":457}
+{"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"local_audio","at_ns":457}
 {"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}
 {"type":"alarm","device":1,"channel":2,"kind":"visitor","state":"start","at_ns":790}
 {"type":"layouts_changed","revision":4}
@@ -207,7 +207,7 @@ change.
   reports (`kind` as the device names it, such as `visitor` for a doorbell
   press). `lens` is present (1) for the second lens of a multi-lens camera.
   `source` is `device`; on-device models will report through the same
-  event with `source` `local`. `at_ns` is the core's clock
+  event with `source` `local_video` (`local_audio` for sound). `at_ns` is the core's clock
   (`nv_clock_now_ns`) at arrival: the pushes carry no usable time. When the
   session drops or the device is removed, everything active gets its
   `stop` first.
@@ -215,7 +215,7 @@ change.
   with audio, audible or not, muted or not, for the standard smoke-alarm
   (temporal-three) and CO-alarm (temporal-four) patterns
   (`crates/sound-events`; docs/PLAYBACK.md, "Sound") and reports them as
-  `detection` events with `source` `mac_audio` (the source of all sound
+  `detection` events with `source` `local_audio` (the source of all sound
   labels, docs/FFI-RECORDINGS.md section 2a) and `kind` `smoke_alarm` or
   `co_alarm`; no `lens` (a camera's microphone belongs to no one lens).
   `start` comes once two alarm cycles have matched, about 7.5 s after a

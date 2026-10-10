@@ -146,7 +146,7 @@ monitoring; a missed sound is never shown as "no alarm".
 - **Sound labels.** On macOS, SoundAnalysis's built-in classifier labels
   sirens, glass breaking, barking, a baby crying, knocking, and similar
   sounds; the app hands the labels to the core, which stores them as events
-  (`source` `mac_audio`) next to the device's. They join incidents, filter
+  (`source` `local_audio`) next to the device's. They join incidents, filter
   the list and timeline, and can feed triggers and the notification
   verifier like any other detection. Device detections of sound (such as a
   camera's own baby-cry detection) are used where a camera has them.

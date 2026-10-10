@@ -11,7 +11,7 @@
 //!   the analyzers allocate once, when the tile opens.
 //! - **Alarms.** [`sound_events::AlarmDetector`] finds smoke (T3) and CO
 //!   (T4) alarm patterns. Each episode becomes a `detection` event with
-//!   `source` `mac_audio` and `kind` `smoke_alarm` or `co_alarm`, `start`
+//!   `source` `local_audio` and `kind` `smoke_alarm` or `co_alarm`, `start`
 //!   when the detector reports it and `stop` when it ends, when audio stops
 //!   arriving for [`STALL_NS`], or when the tile ends. Several tiles of one
 //!   channel (main and sub, say) report one episode once: the core counts
@@ -58,7 +58,7 @@ pub const MAX_LOUDNESS_HISTORY_S: u32 = 3600;
 
 /// The `source` of detections found in sound (docs/FFI-RECORDINGS.md,
 /// section 2a).
-pub const SOURCE: &str = "mac_audio";
+pub const SOURCE: &str = "local_audio";
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -414,7 +414,7 @@ impl SoundHub {
 }
 
 /// The `detection` event of an alarm found in sound (docs/FFI.md,
-/// "Events"): the fields of a device detection, with `source` `mac_audio`.
+/// "Events"): the fields of a device detection, with `source` `local_audio`.
 /// No `lens`: a camera's microphone is not tied to one of its lenses, and a
 /// tile's stream tier does not tell lenses apart.
 pub(crate) fn detection_event(
