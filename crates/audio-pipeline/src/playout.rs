@@ -186,7 +186,14 @@ impl Playout {
             return self.not_played(b);
         };
         let snap_host_us = snap.host_ns as f64 / 1e3;
-        let next_call_us = snap_host_us + snap.frames as f64 * 1e6 / self.out_rate;
+        // Frames per host second as the renderer runs (nominally the
+        // output rate; see the renderer's clock).
+        let frame_rate = if snap.ns_per_frame > 0.0 {
+            1e9 / snap.ns_per_frame
+        } else {
+            self.out_rate
+        };
+        let next_call_us = snap_host_us + snap.frames as f64 * 1e6 / frame_rate;
         if b.now_us - next_call_us > STALL_US {
             return self.not_played(b);
         }
@@ -201,7 +208,7 @@ impl Playout {
         let w = ring.write_index();
         let mut error = None;
         if !self.need_start && self.awaiting_skip.is_none() {
-            let heard = snap_host_us + (w as f64 - snap.read as f64) * 1e6 / self.out_rate;
+            let heard = snap_host_us + (w as f64 - snap.read as f64) * 1e6 / frame_rate;
             let e = heard - target_of(rs.position());
             let limit = if self.since_start_s < WARMUP_S {
                 RESYNC_WARMUP_US
@@ -225,11 +232,11 @@ impl Playout {
             // Drop what is queued, then line the next frame up with its
             // target by writing silence or skipping input.
             self.awaiting_skip = Some(self.lease.request_skip(w));
-            let heard = next_call_us.max(b.now_us) + FADE_FRAMES as f64 * 1e6 / self.out_rate;
+            let heard = next_call_us.max(b.now_us) + FADE_FRAMES as f64 * 1e6 / frame_rate;
             let delay_us = target_of(rs.position()) - heard;
             if delay_us >= 0.0 {
                 let cap = (ring.capacity() / 2) as f64;
-                let frames = (delay_us * self.out_rate / 1e6).min(cap) as usize;
+                let frames = (delay_us * frame_rate / 1e6).min(cap) as usize;
                 self.scratch.clear();
                 self.scratch.resize(frames * self.out_channels, 0.0);
                 let n = ring.push(&self.scratch);
@@ -267,8 +274,8 @@ impl Playout {
             }
             correction = (kp * f + KI * self.integ).clamp(-MAX_CORRECTION, MAX_CORRECTION);
         }
-        let nominal = f64::from(b.format.sample_rate) / self.out_rate;
-        let feed_forward = tl.rate() / map.host_per_camera / self.out_rate;
+        let nominal = f64::from(b.format.sample_rate) / frame_rate;
+        let feed_forward = tl.rate() / map.host_per_camera / frame_rate;
         // A growing playout delay means each sample is heard that much
         // later than the last: play slower by its rate (and faster while it
         // shrinks), so the change needs no jump and no correction.

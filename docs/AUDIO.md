@@ -187,6 +187,19 @@ Specified in [FFI.md](FFI.md#audio) and [nvrview.h](nvrview.h):
   (`nv_clock_now_ns`; on macOS `mach_absolute_time` in nanoseconds, the
   unit of `AudioTimeStamp.mHostTime`), so arrival times and render times
   need no conversion between clocks.
+- The renderer does not take each `host_time_ns` literally: it keeps a
+  smoothed render clock, a second-order loop that follows the host times
+  with the frames rendered as its clock (it locks within a few dozen calls,
+  then takes 5% of each call's error). Host times that jitter by
+  milliseconds per call average out, and an app whose calls come further
+  apart than the frames they render (a timer loop passing `now + 10 ms`
+  and sleeping 10 ms: measured 12.2 ms per call on macOS; a Windows timer
+  tick is 15.6 ms) gets a frame period to match (within 0.5× to 2× of
+  nominal), so neither causes resyncs. A host time more than 50 ms from
+  the estimate is a real jump (rendering stopped): the clock starts over
+  there and the usual resync rules apply. Before this, such a timer loop
+  resynced every few seconds and its tile's level dropped to 0 for
+  seconds at a time.
 - `nv_tile_audio_set(core, tile, audible, volume)` (audible and volume in
   one call; volume 0 is the mute that keeps the slot).
 - `nv_tile_audio_tap(core, tile, enabled)` plus the `on_audio_tap` callback
@@ -218,8 +231,10 @@ In `crates/audio-pipeline` unless noted.
   the measurement (65 ms SD, heavy-tailed): the measured skews, the 16,013 Hz
   worst case, and a 1.5 s stall every 5 minutes. Every click stays within
   ±40 ms of its target after the first minute, and the 10-minute mean offset
-  shows no trend. Also: resync after a 3 s audio gap and a 6 s stall, and a
-  check that the ratio correction stays small under jitter.
+  shows no trend. Also: resync after a 3 s audio gap and a 6 s stall, a
+  check that the ratio correction stays small under jitter, and no resync
+  or silence with host times jittering ±5 ms per call or from 10, 12.2,
+  and 15.6 ms timer loops rendering 10 ms per call.
 - viewer-core, end to end against mock-nvr (AAC clicks, 30 ms jitter): the
   core's renderer, driven like a device on the host clock, plays each click
   within a few ms of its picture's arrival plus the reported playout delay;
