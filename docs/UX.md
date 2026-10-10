@@ -213,6 +213,65 @@ Details settled while building it (macOS):
   marked, drawn as overlay layers (no second picture, so no extra drawing or
   texture work), in the shown picture's bottom left corner.
 
+## Fisheye cameras
+
+A fisheye (360°) camera sends one circular picture of everything around
+it. Each tile showing one can turn that circle into easier views, drawn by
+this computer while it draws the tile (docs/RENDERING.md, "Fisheye
+dewarping"). Nothing is sent to the camera: no motion commands, no
+settings; the camera keeps streaming the same picture.
+
+- **Fisheye view** in the tile's context menu (right-click), shown only for
+  a fisheye camera (the core reports `fisheye`), chooses the view:
+  - **Original**: the circle as the camera sends it, with digital zoom as
+    on any tile.
+  - **Panorama**: the whole circle unwrapped into one 360° strip, the
+    horizon along the top for a ceiling camera.
+  - **Double panorama**: two 180° strips stacked, which fits an ordinary
+    tile shape better than one long strip.
+  - **Quad**: four virtual cameras, 90° each, looking in four directions
+    (front, right, back, left in reading order).
+  - **Virtual PTZ**: one virtual camera that the user aims and zooms with
+    the pointer, with straight lines kept straight.
+- **The default is Original**, for existing tiles and for a fisheye camera
+  newly put in a tile alike: a tile without a saved choice shows the
+  camera's own picture, so nothing looks different until the user picks a
+  view, and the choice means the same in every app sharing the layouts.
+- The view belongs to the tile and is saved with the layout (the leaf's
+  `fisheye` member: the view, and the pan, tilt and field of view of the
+  virtual camera), like Quality. Several tiles of the same camera can show
+  different views; the camera is still streamed once.
+- **Mount** (ceiling, wall, desk) is a per-camera setting in the same menu
+  and in Settings > Cameras, default ceiling. The panorama and the virtual
+  views depend on it (a ceiling camera's horizon is the rim of the circle,
+  a wall camera's runs across the middle).
+- The image circle (its center and size) is found automatically from the
+  first pictures and kept for the run; a manual adjustment may come later.
+  The camera's text overlay outside the circle does not appear in the
+  dewarped views.
+- A tile in a dewarped view names it in its hover header ("Panorama",
+  "Virtual PTZ"), as it names a quality that is not Auto.
+
+Pointer and keys in a dewarped view (they replace digital zoom there):
+
+| Input | Panorama, Double panorama, Quad | Virtual PTZ |
+| --- | --- | --- |
+| Drag | turns the view left and right; the picture follows the pointer | aims the virtual camera (pan and tilt); the picture follows the pointer |
+| Mouse wheel, pinch, Option-scroll | nothing | zooms (field of view 120° to 20°), eased smoothly like digital zoom |
+| Trackpad two-finger scroll | turns the view | aims the virtual camera |
+| 0, or the header's reset control | back to the default direction | back to the default direction and field of view |
+
+While editing the layout a drag still moves the tile, as on any tile.
+Double-click keeps its meaning (focus), and focus, full screen and Quality
+work as on any tile: focusing a dewarped tile keeps its view and switches it
+to the main stream, which dewarps with more detail.
+
+Details settled while building it (macOS):
+
+- The view's pan, tilt and field of view are saved with the layout when a
+  drag or zoom ends, not on every refresh.
+- Settings > Cameras lists Mount for fisheye cameras only.
+
 ## Stream quality per tile
 
 A tile's context menu (right-click) has **Quality**, as in the official app,

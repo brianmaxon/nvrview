@@ -177,6 +177,137 @@ and measurements (no per-frame allocations, presentation during resizes,
 device-loss recovery, decoder memory settings that did not help) are in
 [apps/windows/README.md](../apps/windows/README.md), "The app".
 
+## Fisheye dewarping
+
+A fisheye camera (docs/protocol.md, "Fisheye cameras"; `fisheye` in the
+`channels` event) sends its raw circular image. The apps turn it into
+panoramas and virtual views while drawing the tile, in the same grid pass:
+no extra decode, no extra stream, no copy. Several tiles of one camera (one
+shared tile in the core, one decoded picture) can each show a different
+view. Nothing is sent to the camera. The views and the menu are in
+[UX.md](UX.md), "Fisheye cameras"; this is the shared math both apps
+implement, each in pure code with tests (macOS: `NVRCore/Fisheye.swift`;
+Windows: `NvrView.Tiles/Fisheye.cs`) and in one shader (Metal, HLSL).
+
+**Inverse mapping.** For every output pixel the fragment (pixel) shader
+computes a direction (which view of the tile the pixel is in, then that
+view's projection), turns the direction into a point of the fisheye picture
+with the lens model, and samples the decoded NV12 picture there with the
+tile's color matrix. Directions outside the lens's field of view draw black.
+
+**Lens model.** Equidistant (`r = f·θ`): the distance from the circle's
+center is proportional to the angle θ from the optical axis, and the rim is
+θmax, half the field of view (180° assumed, so the rim is the horizon). In
+the lens frame (x right and y down in the picture, z out of the lens), a
+unit direction `d` lands at
+
+    θ = acos(d.z),  ρ = θ / θmax
+    u = cx + ρ · r · d.x / |d.xy|,  v = cy + ρ · r · (W/H) · d.y / |d.xy|
+
+where `u`, `v` are fractions of the picture's width W and height H, the
+circle's center is (`cx`, `cy`) in the same fractions and its radius `r` a
+fraction of the width. The inverse (tests and circle sampling) is
+`θ = ρ·θmax`, `d = (sin θ · x/ρ, sin θ · y/ρ, cos θ)` with
+`x = (u − cx)/r`, `y = (v − cy)·(H/W)/r`, `ρ = |(x, y)|`.
+
+**Directions the user thinks in.** A viewer frame with x to the right, y
+down (gravity) and z forward: pan ψ turns right about the vertical, tilt τ
+looks down from the horizon, and (ψ, τ) is the direction
+`(sin ψ cos τ, sin τ, cos ψ cos τ)`. The camera's mount (a per-camera
+setting) rotates this frame into the lens frame:
+
+| Mount | Lens frame of (x, y, z) | ψ = 0 | Where τ = 90° is |
+| --- | --- | --- | --- |
+| Ceiling (default), looking down | (x, −z, y) | toward the top of the picture; ψ grows clockwise | the circle's center |
+| Desk, looking up | (x, z, −y) | toward the bottom; ψ grows counterclockwise | outside the view (τ = −90° is the center) |
+| Wall, looking ahead | (x, y, z) | the center | the bottom rim |
+
+**Views.** A tile shows one to four views, each in a rectangle of the tile,
+each one of two projections:
+
+- *Rectilinear* (a virtual camera; straight lines stay straight): forward
+  `f` = (ψ, τ), right `(cos ψ, 0, −sin ψ)`, down `f × right`; the pixel at
+  (a, b) ∈ [−1, 1]² of its rectangle looks along
+  `f + a·tan(h/2)·right + b·tan(v/2)·down`, with horizontal field of view h
+  and vertical `v = 2·atan(tan(h/2) · height/width)` of the rectangle.
+- *Cylindrical* (a panorama strip; equirectangular): the pixel at
+  (x, y) ∈ [0, 1]² looks along (ψ0 + x·Δψ, τ0 + y·Δτ).
+
+| Mode | Views |
+| --- | --- |
+| Original | none: the circle as it is, with digital zoom (the ordinary tile) |
+| Panorama | ceiling: one strip ψ = pan − 180°…pan + 180°, τ from 0° down by Δτ = clamp(360°·height/width, 30°, 90°) (square pixels when the tile allows); desk: the same strip with τ from −Δτ up to 0°; wall: ψ = −90°…90°, τ centered, Δτ = clamp(180°·height/width, 30°, 180°) |
+| Double panorama | ceiling and desk: two 180° strips stacked (pan − 180°…pan on top, pan…pan + 180° below), each with Δτ = clamp(180°·(height/2)/width, 30°, 90°); a wall mount shows Panorama |
+| Quad | a 2×2 grid of rectilinear views with h = 90°: ceiling at ψ = pan + 0°, 90°, 180°, 270° (reading order) and τ = 45°; desk the same at τ = −45°; wall at ψ = −67.5°, −22.5°, 22.5°, 67.5° with h = 60° and τ = 0° |
+| Virtual PTZ | one rectilinear view (ψ, τ, h): defaults (0°, 45°, 90°) ceiling, (0°, −45°, 90°) desk, (0°, 0°, 90°) wall; h from 20° to 120°; τ within 0°…90° ceiling, −90°…0° desk, −80°…80° wall; ψ wraps (wall: within −90°…90°) |
+
+**Shader constants.** One block per dewarped tile, in 16-byte rows (the
+same layout in Metal's `constant` buffer and HLSL's `cbuffer`; tests on both
+sides check it), 27 rows, 432 bytes, bound beside the tile's ordinary
+constants:
+
+| Row | Contents |
+| --- | --- |
+| 0 | `cx, cy, r, r·W/H` (circle center and radius, picture fractions) |
+| 1 | `θmax` (radians), number of views (1…4), 0, 0 |
+| 2 + 5k | view k's rectangle in the tile: left, top, right, bottom in 0…1 |
+| 3 + 5k | axis X (xyz, lens frame), w = projection: 0 rectilinear, 1 cylindrical |
+| 4 + 5k | axis Y (xyz), w = rectilinear: tan(h/2); cylindrical: ψ0 (radians) |
+| 5 + 5k | axis Z (xyz), w = rectilinear: tan(v/2); cylindrical: Δψ |
+| 6 + 5k | cylindrical: τ0, Δτ (radians), 0, 0; rectilinear: zeros |
+
+For a rectilinear view the axes are its right, down and forward vectors in
+the lens frame; for a cylindrical one they are the viewer frame's x, y and
+z axes in the lens frame (the mount's columns), and the shader builds
+`cos τ sin ψ · X + sin τ · Y + cos τ cos ψ · Z`. The CPU computes every
+row (mount, views, angles) and the shader does only the per-pixel part.
+
+**Finding the circle.** No query reports the circle, so each app measures
+it from the first decoded pictures of each camera and keeps it for the run
+(in normalized units, so sub and main share it):
+
+1. Border level: the 10th percentile of luma in the four corner squares
+   (side 4% of the shorter dimension, at least 4 pixels); threshold = that
+   + 20 (8-bit codes). A camera's text overlay in the corners covers too
+   little of them to move that percentile.
+2. 180 rays from the picture center; on each, step inward one pixel at a
+   time from the picture's edge to 10% of the shorter dimension. The first
+   run of 4 samples at or above the threshold marks the rim at its
+   outermost sample.
+3. Fit a circle to the rim points by algebraic least squares, then three
+   times drop points whose distance from the circle exceeds
+   max(3 × 1.4826 × the median absolute residual, 1 pixel) and fit again.
+   (A ray that hits the overlay text first, outside the circle, is dropped
+   here.)
+4. Accept when at least 90 points remain, the median residual is at most
+   1% of the width, the radius is 25%…75% of the shorter dimension, and
+   the center is within the middle half of the picture. Otherwise try again
+   on a later picture (at most one try per half second); after 8 failed
+   tries (a black night picture, a lens cap) use the inscribed circle
+   (center (0.5, 0.5), diameter the shorter dimension) and stop.
+
+Measured: on the synthetic fixture (`fixtures/synthetic/fisheye/h264-fisheye.h264`,
+circle at (0.49, 0.505), radius 0.46) the fit is within 0.3% of the width;
+on a real camera's main stream it agreed within 0.1% across pictures and
+with the sub-stream (docs/protocol.md). A manual adjustment of center,
+radius and field of view is future work.
+
+**Interaction.** Drags, the wheel and pinch change the tile's view instead
+of its digital zoom when the tile is in a dewarped mode (UX.md): a
+horizontal drag changes pan in every dewarped mode (and tilt in Virtual
+PTZ) by the angle the pointer moved across the view, so the picture follows
+the pointer; the wheel and pinch change the PTZ field of view, eased in
+logarithmic steps with the same time-based easing as digital zoom (time
+constant 0.06 s), so it ends exactly on the target however few refreshes
+there are.
+
+**Platforms.** macOS: the Metal grid renderer has a second render pipeline
+(`dewarp_fragment`) used for tiles with dewarp constants; the
+display-layer renderer of the demo cannot dewarp (it hands pictures to the
+system compositor), so dewarping needs the Metal renderer, which the app
+always uses. Windows: the D3D11 grid renderer's second pixel shader, same
+constants in a second constant buffer.
+
 ## Where this crosses the C interface (M2)
 
 The core runs the pipeline on its per-channel delivery thread and invokes the
