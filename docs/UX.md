@@ -86,7 +86,7 @@ in either case.
 | Arrow keys | Move the selection to the neighboring tile in that direction, by position in the layout (nearest tile whose center lies in that direction), not by list order. In focus, switch the focused camera to the neighbor in that direction. |
 | Space | Toggle the selected tile between focus (it fills the stage) and the grid it came from, as a continuous animation (see "Full screen and focus"). Combined with F, Space gives full-screen video of one camera and back. |
 | 0 | Reset digital zoom on the selected tile. |
-| ⌘L (Ctrl+L) | Listen to the selected tile (as before). |
+| M | Listen to the selected tile, or mute it if it is the one playing (⌘L / Ctrl+L does the same). |
 
 Selection is visible as a thin outline that fades with the other chrome, and
 follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help

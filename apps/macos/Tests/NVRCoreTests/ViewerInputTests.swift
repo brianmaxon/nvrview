@@ -106,6 +106,9 @@ private func path(_ tree: LayoutNode, _ channel: Int) -> NodePath {
 
     @Test func singleKeysOnTheStage() {
         #expect(key(3, "f") == .toggleFullScreen)
+        #expect(key(46, "m") == .toggleListening)
+        #expect(key(46, "M", .shift) == .toggleListening)
+        #expect(key(46, "m", .command) == nil)  // Cmd-M stays Minimize
         #expect(key(1, "s") == .toggleSidebar)
         #expect(key(29, "0") == .resetZoom)
         #expect(key(82, "0") == .resetZoom)  // keypad

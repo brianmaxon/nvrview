@@ -309,6 +309,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .move(let direction): stage.moveSelection(direction)
         case .toggleFocus: stage.toggleFocus()
         case .resetZoom: stage.resetSelectedZoom()
+        case .toggleListening: toggleListening(nil)
         case .confirm: stage.confirm()
         }
     }
@@ -318,6 +319,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     @objc func fullScreenKey(_ sender: Any?) { perform(.toggleFullScreen) }
     @objc func sidebarKey(_ sender: Any?) { perform(.toggleSidebar) }
     @objc func resetZoomKey(_ sender: Any?) { perform(.resetZoom) }
+    @objc func listenKey(_ sender: Any?) { perform(.toggleListening) }
     @objc func selectLeft(_ sender: Any?) { perform(.move(.left)) }
     @objc func selectRight(_ sender: Any?) { perform(.move(.right)) }
     @objc func selectUp(_ sender: Any?) { perform(.move(.up)) }

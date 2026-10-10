@@ -74,6 +74,8 @@ public enum ViewerShortcut: Sendable, Equatable {
     case move(MoveDirection)
     case toggleFocus
     case resetZoom
+    /// M: listen to the selected tile, or mute it if it is the one playing.
+    case toggleListening
     /// Return or Enter: dismisses the selected tile's alert if it has one,
     /// else toggles focus (as before).
     case confirm
@@ -134,6 +136,7 @@ public enum ViewerKeys {
         case "f": return .toggleFullScreen
         case "s": return .toggleSidebar
         case "0": return .resetZoom
+        case "m": return .toggleListening
         default: return nil
         }
     }

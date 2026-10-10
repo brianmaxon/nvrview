@@ -311,7 +311,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.
-            item("Listen", #selector(ViewerWindowController.toggleListening(_:)), "l"),
+            item("Listen or Mute", #selector(ViewerWindowController.listenKey(_:)), "m", []),
+            hidden(item("Listen", #selector(ViewerWindowController.toggleListening(_:)), "l")),
             item("Stop Listening", #selector(ViewerWindowController.stopListening(_:)), "l", [.command, .shift]),
         ])
         let window = NSMenu(title: "Window")
