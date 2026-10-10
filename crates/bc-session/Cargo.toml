@@ -14,7 +14,9 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
-tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "rt-multi-thread"] }
+# test-util: tests run on a paused clock (`start_paused`), the device on
+# the same clock (`mock_nvr::spawn_in`).
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "rt-multi-thread", "test-util"] }
 
 [lints]
 workspace = true

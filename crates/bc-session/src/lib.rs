@@ -70,7 +70,7 @@ pub use lens::LensProbe;
 pub use queue::{Item, Subscription};
 pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
 pub use talk::{Refusal, StopReason, Talk, TalkState, TalkStats};
-pub use transport::{Connector, TcpConnector};
+pub use transport::{Connector, FnConnector, TcpConnector};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;

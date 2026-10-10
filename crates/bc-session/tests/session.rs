@@ -1,6 +1,7 @@
-//! End-to-end tests against an in-process fake device on loopback. The fake
-//! speaks the protocol using bc-protocol's encoders and synthetic credentials;
-//! no real device is involved.
+//! End-to-end tests against an in-process fake device over in-memory pipes,
+//! on a paused clock: every timeout, backoff, and retry runs in simulated
+//! time. The fake speaks the protocol using bc-protocol's encoders and
+//! synthetic credentials; no real device is involved.
 
 use bc_protocol::crypto::{SessionKey, credential_hash, xor_obfuscate};
 use bc_protocol::framer::{Decoder, RawMessage, encode_message_with_status};
@@ -8,13 +9,15 @@ use bc_protocol::header::Class;
 use bc_protocol::media::{Codec, Record, encode_info, encode_video};
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::find_text;
-use bc_session::{BackoffConfig, ConnState, DeviceSession, Item, SessionConfig, TcpConnector};
-use std::net::SocketAddr;
+use bc_session::{
+    BackoffConfig, ConnState, Connector, DeviceSession, FnConnector, Item, SessionConfig,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::time::Instant;
 
 const USER: &str = "example-user";
 const PASSWORD: &str = "example-password";
@@ -55,7 +58,7 @@ struct Seen {
 }
 
 struct Fake {
-    addr: SocketAddr,
+    mode: Mode,
     seen: Arc<Mutex<Vec<Seen>>>,
     accepted: Arc<AtomicUsize>,
     active: Arc<AtomicUsize>,
@@ -66,42 +69,43 @@ struct Fake {
 
 impl Fake {
     async fn start(mode: Mode) -> Fake {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let f = Fake {
-            addr: listener.local_addr().unwrap(),
+        Fake {
+            mode,
             seen: Arc::default(),
             accepted: Arc::default(),
             active: Arc::default(),
             max_active: Arc::default(),
             accept_times: Arc::default(),
             live: tokio::sync::broadcast::channel(64).0,
-        };
-        let live = f.live.clone();
+        }
+    }
+
+    /// Connects to the fake through in-memory pipes, each served by a task
+    /// of its own (as an accepted TCP connection would be).
+    fn connector(&self) -> impl Connector + use<> {
+        let mode = self.mode;
+        let live = self.live.clone();
         let (seen, accepted, active, max_active, times) = (
-            f.seen.clone(),
-            f.accepted.clone(),
-            f.active.clone(),
-            f.max_active.clone(),
-            f.accept_times.clone(),
+            self.seen.clone(),
+            self.accepted.clone(),
+            self.active.clone(),
+            self.max_active.clone(),
+            self.accept_times.clone(),
         );
-        tokio::spawn(async move {
-            loop {
-                let Ok((sock, _)) = listener.accept().await else {
-                    return;
-                };
-                let conn = accepted.fetch_add(1, Ordering::SeqCst);
-                times.lock().unwrap().push(Instant::now());
-                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                max_active.fetch_max(now, Ordering::SeqCst);
-                let (seen, active) = (seen.clone(), active.clone());
-                let live_rx = live.subscribe();
-                tokio::spawn(async move {
-                    serve(sock, conn, mode, seen, live_rx).await;
-                    active.fetch_sub(1, Ordering::SeqCst);
-                });
-            }
-        });
-        f
+        FnConnector(move || {
+            let (client, sock) = tokio::io::duplex(64 * 1024);
+            let conn = accepted.fetch_add(1, Ordering::SeqCst);
+            times.lock().unwrap().push(Instant::now());
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(now, Ordering::SeqCst);
+            let (seen, active) = (seen.clone(), active.clone());
+            let live_rx = live.subscribe();
+            tokio::spawn(async move {
+                serve(sock, conn, mode, seen, live_rx).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+            });
+            Ok(client)
+        })
     }
 
     /// Sends frames on the running preview of `channel` and `tier`.
@@ -157,7 +161,7 @@ fn media_message(key: &SessionKey, id: u32, mut stream: Vec<u8>) -> Vec<u8> {
 }
 
 async fn serve(
-    mut sock: TcpStream,
+    mut sock: impl AsyncRead + AsyncWrite + Unpin,
     conn: usize,
     mode: Mode,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -366,10 +370,10 @@ async fn recv(sub: &mut bc_session::Subscription) -> Item {
         .expect("subscription ended")
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn login_succeeds_and_channels_are_demultiplexed() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(5, StreamTier::Main).await.unwrap();
 
@@ -400,10 +404,10 @@ async fn login_succeeds_and_channels_are_demultiplexed() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bad_credentials_are_not_retried() {
     let fake = Fake::start(Mode::RejectLogin).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut sub = s.subscribe(0, StreamTier::Sub).await.unwrap();
     let mut rx = s.watch_state();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -428,25 +432,25 @@ async fn bad_credentials_are_not_retried() {
     assert!(s.subscribe(1, StreamTier::Sub).await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn idle_sessions_are_probed() {
     let fake = Fake::start(Mode::Normal).await;
     let mut cfg = config();
     cfg.probe_after_idle = Duration::from_millis(50);
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
     wait_until("three connection tests", || fake.count(93) >= 3).await;
     // The device answers each test, so the connection stays up.
     assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_silent_device_is_declared_dead_and_reconnected() {
     let fake = Fake::start(Mode::SilentAfterLogin).await;
     let mut cfg = config();
     cfg.probe_after_idle = Duration::from_millis(50);
     cfg.dead_after = Duration::from_millis(200);
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
     let started = Instant::now();
     wait_until("a reconnect", || fake.accepted.load(Ordering::SeqCst) >= 2).await;
     // Not before the dead interval, and probes were tried first.
@@ -455,10 +459,10 @@ async fn a_silent_device_is_declared_dead_and_reconnected() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_locked_account_reports_the_unlock_time() {
     let fake = Fake::start(Mode::LockedLogin).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut rx = s.watch_state();
     tokio::time::timeout(Duration::from_secs(5), async {
         while !matches!(*rx.borrow_and_update(), ConnState::LoginFailed { .. }) {
@@ -479,10 +483,10 @@ async fn a_locked_account_reports_the_unlock_time() {
     assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn close_logs_out_after_stopping_previews() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
     s.close().await;
@@ -505,10 +509,10 @@ async fn close_logs_out_after_stopping_previews() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reconnects_do_not_stack() {
     let fake = Fake::start(Mode::DropAfterLogin).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut sub = s.subscribe(0, StreamTier::Sub).await.unwrap();
     tokio::time::sleep(Duration::from_millis(700)).await;
     let n = fake.accepted.load(Ordering::SeqCst);
@@ -529,10 +533,10 @@ async fn reconnects_do_not_stack() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn previews_restart_after_reconnect() {
     let fake = Fake::start(Mode::DropFirstAfterStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut sub = s.subscribe(3, StreamTier::Sub).await.unwrap();
     // First connection: media, then the device hangs up. Unread media is
     // flushed on disconnect, so only what follows the gap is guaranteed.
@@ -553,10 +557,10 @@ async fn previews_restart_after_reconnect() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn close_stops_previews_before_closing_the_socket() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(4, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
@@ -582,10 +586,10 @@ async fn close_stops_previews_before_closing_the_socket() {
     while a.recv().await.is_some() {}
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_the_handle_closes_the_session() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(6, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
     drop(s);
@@ -593,10 +597,10 @@ async fn dropping_the_handle_closes_the_session() {
     assert_eq!(fake.stops_for(6), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_a_subscription_stops_only_that_preview() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
@@ -631,10 +635,10 @@ async fn expect_video(sub: &mut bc_session::Subscription, want: (bool, u64)) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn subscribers_to_one_stream_share_a_single_preview() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
     for sub in [&mut a, &mut b] {
@@ -652,10 +656,10 @@ async fn subscribers_to_one_stream_share_a_single_preview() {
     assert_eq!(fake.stops_for(2), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_preview_stops_only_with_the_last_subscriber() {
     let fake = Fake::start(Mode::Live).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(1, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
@@ -676,10 +680,10 @@ async fn the_preview_stops_only_with_the_last_subscriber() {
     assert_eq!(fake.stops_for(1), 1);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_late_subscriber_starts_at_a_keyframe() {
     let fake = Fake::start(Mode::Live).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
     recv(&mut a).await;
     fake.send_live(1, StreamTier::Sub, &[(true, 1), (false, 2)]);
@@ -703,12 +707,12 @@ async fn a_late_subscriber_starts_at_a_keyframe() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_slow_subscriber_only_overflows_its_own_queue() {
     let fake = Fake::start(Mode::Live).await;
     let mut cfg = config();
     cfg.queue_frames = 4;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
     let mut slow = s.subscribe(1, StreamTier::Sub).await.unwrap();
     let mut fast = s.subscribe(1, StreamTier::Sub).await.unwrap();
     recv(&mut fast).await;
@@ -741,10 +745,10 @@ async fn a_slow_subscriber_only_overflows_its_own_queue() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reconnect_restarts_a_shared_stream_once() {
     let fake = Fake::start(Mode::DropFirstAfterStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(3, StreamTier::Sub).await.unwrap();
     for sub in [&mut a, &mut b] {
@@ -769,10 +773,10 @@ async fn a_reconnect_restarts_a_shared_stream_once() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn tiers_of_one_channel_are_separate_previews() {
     let fake = Fake::start(Mode::Normal).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let s = DeviceSession::spawn(fake.connector(), config());
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Main).await.unwrap();
     recv(&mut a).await;
@@ -785,13 +789,13 @@ async fn tiers_of_one_channel_are_separate_previews() {
     wait_until("both stops", || fake.stops_for(2) == 2).await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_refused_start_reaches_every_subscriber() {
     let fake = Fake::start(Mode::RefuseStart).await;
     // Without a wait, a 400 is final at once.
     let mut cfg = config();
     cfg.preview_wait_limit = Duration::ZERO;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
     assert_eq!(recv(&mut a).await, Item::StartRejected { status: 400 });
@@ -833,10 +837,10 @@ fn assert_alternating(seq: &[u32]) {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_400_is_waited_out_with_restarts_then_refused() {
     let fake = Fake::start(Mode::RefuseStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(150, 1000));
+    let s = DeviceSession::spawn(fake.connector(), waiting_config(150, 1000));
     let started = Instant::now();
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
@@ -871,10 +875,10 @@ async fn a_400_is_waited_out_with_restarts_then_refused() {
     assert_eq!(starts_and_stops(&fake, 2), seq);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn restarts_follow_the_retry_interval() {
     let fake = Fake::start(Mode::RefuseStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(300, 60_000));
+    let s = DeviceSession::spawn(fake.connector(), waiting_config(300, 60_000));
     let mut a = s.subscribe(1, StreamTier::Main).await.unwrap();
     assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
     let t0 = Instant::now();
@@ -889,10 +893,10 @@ async fn restarts_follow_the_retry_interval() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_the_subscription_during_the_wait_stops_the_preview() {
     let fake = Fake::start(Mode::RefuseStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(100, 60_000));
+    let s = DeviceSession::spawn(fake.connector(), waiting_config(100, 60_000));
     let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
     assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
     wait_until("a restart", || starts_for(&fake, 3) >= 2).await;
@@ -909,10 +913,10 @@ async fn dropping_the_subscription_during_the_wait_stops_the_preview() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn closing_the_session_during_the_wait_stops_the_preview() {
     let fake = Fake::start(Mode::RefuseStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(100, 60_000));
+    let s = DeviceSession::spawn(fake.connector(), waiting_config(100, 60_000));
     let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
     assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
     s.close().await;

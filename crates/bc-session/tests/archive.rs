@@ -1,18 +1,20 @@
 //! Recording searches, cover images, and downloads against the in-process
 //! mock NVR's fake recording store, alongside live view on the same session.
 
+mod common;
+
 use bc_protocol::archive::{
     CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
 };
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{
-    DeviceSession, Download, DownloadError, DownloadEvent, Item, SessionConfig, TcpConnector,
-};
+use bc_session::{DeviceSession, Download, DownloadError, DownloadEvent, Item, SessionConfig};
+use common::mock_connector;
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn d(day: u8, h: u8, m: u8, s: u8) -> DateTime {
     DateTime::new(2026, 10, day, h, m, s).unwrap()
@@ -26,7 +28,7 @@ fn spawn_mock(tweak: impl FnOnce(&mut ArchiveConfig)) -> mock_nvr::MockNvr {
     let mut a = ArchiveConfig::new(vec![d(8, 0, 0, 0), d(9, 0, 0, 0)]);
     tweak(&mut a);
     cfg.archive = Some(a);
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr, tweak: impl FnOnce(&mut SessionConfig)) -> DeviceSession {
@@ -34,7 +36,7 @@ fn session(nvr: &mock_nvr::MockNvr, tweak: impl FnOnce(&mut SessionConfig)) -> D
     cfg.query_timeout = Duration::from_secs(5);
     cfg.download_stall_timeout = Duration::from_millis(700);
     tweak(&mut cfg);
-    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+    DeviceSession::spawn(mock_connector(nvr), cfg)
 }
 
 fn request(ch: u8, a: DateTime, b: DateTime) -> DownloadRequest {
@@ -64,7 +66,7 @@ async fn drain(dl: &mut Download) -> Result<(Option<u64>, usize, usize), Downloa
     Ok((est, video, recs))
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn searches_return_typed_results() {
     let nvr = spawn_mock(|a| {
         a.file_page = 7;
@@ -167,7 +169,7 @@ async fn searches_return_typed_results() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn download_runs_beside_live_view_without_interrupting_it() {
     // Throttled so the download lasts about two seconds.
     let nvr = spawn_mock(|a| a.download_rate = Some(250_000));
@@ -219,7 +221,7 @@ async fn download_runs_beside_live_view_without_interrupting_it() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_stalled_download_is_detected_and_cancel_sends_144() {
     let nvr = spawn_mock(|_| {});
     let s = session(&nvr, |_| {});
@@ -258,7 +260,7 @@ async fn a_stalled_download_is_detected_and_cancel_sends_144() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn dropping_a_running_download_stops_it() {
     let nvr = spawn_mock(|a| a.download_rate = Some(100_000));
     let s = session(&nvr, |_| {});
@@ -278,7 +280,7 @@ async fn dropping_a_running_download_stops_it() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn downloads_are_one_at_a_time_per_device_by_default() {
     let nvr = spawn_mock(|a| a.download_rate = Some(100_000));
     let s = session(&nvr, |_| {});
@@ -318,7 +320,7 @@ async fn downloads_are_one_at_a_time_per_device_by_default() {
     s.close().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_disconnect_fails_the_download_and_the_session_recovers() {
     let nvr = spawn_mock(|_| {});
     let s = session(&nvr, |c| {
@@ -349,13 +351,23 @@ async fn a_disconnect_fails_the_download_and_the_session_recovers() {
     assert_eq!(nvr.active_logins(), 0);
 }
 
+/// Real time and real TCP: the property is the TCP server's (its writes
+/// into a full socket buffer wait instead of failing), so this test does not
+/// use the in-memory mock or a paused clock.
 #[tokio::test]
 async fn a_download_survives_a_reader_that_falls_behind() {
     // Unpaced, as devices send downloads. Blocking this runtime's only
     // thread stops the session reading, so the server's socket send buffer
     // fills and its writes must wait rather than fail.
-    let nvr = spawn_mock(|_| {});
-    let s = session(&nvr, |_| {});
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(Fixture::load(&path).unwrap());
+    cfg.channels = 3;
+    cfg.archive = Some(ArchiveConfig::new(vec![d(8, 0, 0, 0), d(9, 0, 0, 0)]));
+    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let mut scfg = SessionConfig::new("example-user", "example-password");
+    scfg.query_timeout = Duration::from_secs(5);
+    let s = DeviceSession::spawn(bc_session::TcpConnector::new(nvr.addr()), scfg);
     let mut dl = s
         .download(&request(1, d(8, 22, 0, 0), d(8, 22, 0, 59)))
         .await
@@ -364,7 +376,8 @@ async fn a_download_survives_a_reader_that_falls_behind() {
         dl.next().await.unwrap(),
         Some(DownloadEvent::Estimate(_))
     ));
-    std::thread::sleep(Duration::from_millis(500));
+    // Far longer than the server needs to fill the socket buffers.
+    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(drain(&mut dl).await.unwrap().1, 600);
     s.close().await;
 }
