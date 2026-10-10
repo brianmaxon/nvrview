@@ -32,10 +32,16 @@ stream once per tile (sharing one stream is a later optimization).
   could wait on the thread it runs on.
 - `nv_tile_decoded` and `nv_tile_decode_failed` may be called from any thread
   (platform decoders answer on their own threads) and never block.
+- **Nothing about an object before its ID exists.** No event names a device
+  until `nv_device_add` has returned its ID, and no `on_action` for a tile
+  runs until `nv_tile_open` has returned its ID. (The core holds them back.)
 - After `nv_tile_close` returns, no `on_action` for that tile is running or
   will run. After `nv_core_free` returns, no callback at all.
 
 ## Memory
+
+- `NvConfig` and every pointer inside it are read only during
+  `nv_core_new`.
 
 - Everything the core passes (action pointers, access units, parameter sets,
   JSON) is borrowed for the duration of the callback. Apps copy what they
@@ -53,6 +59,17 @@ rules, also from RENDERING.md: every `DECODE` not discarded by a later
 `FLUSH`, `RESET`, or `CONFIGURE` gets exactly one `nv_tile_decoded` or
 `nv_tile_decode_failed`, dropped pictures included (`NV_FAIL_NO_PICTURE`), and
 a failed `CONFIGURE` gets one `nv_tile_decode_failed` with a Configure kind.
+
+**Values an app does not recognize** (a newer core): an unknown action kind
+is ignored and never needs an answer (the core adds answerable kinds only
+with an ABI change). A `CONFIGURE` with an unknown codec or color matrix is
+answered with `NV_FAIL_INVALID_PARAMETER_SETS`; a `DECODE` the app cannot
+submit is answered with `NV_FAIL_INVALID_ACCESS_UNIT`.
+
+**Picture size.** `source` rectangles from `nv_grid_layout` are in
+visible-picture pixels. VideoToolbox outputs pictures at the visible
+(cropped) size, measured on a stream with a conformance window; a platform
+decoder that outputs the coded size must add `visible_rect`'s origin.
 
 The core also drives each pipeline's clock (`tick`) and tells it about
 reconnects (`discontinuity`); the app does not.
@@ -81,6 +98,10 @@ change.
 - `channels` arrives after each login and whenever the device pushes a new
   list; names come from per-channel queries and may arrive in a later
   `channels` event than the slot list.
+- `tile_closed` is sent once for every tile that ends, whatever ended it,
+  after that tile's last `on_action` has returned; no action for it follows.
+  For `nv_tile_close` it may arrive after the call returns (`reason`:
+  `closed`, `device_removed`, `login_failed`, `core_shutdown`).
 - `tile_stats` arrives about once a second per tile while it is open, for
   diagnostics overlays; apps may ignore it.
 
