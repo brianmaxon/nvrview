@@ -93,8 +93,9 @@ done
   echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
   tail -n +2 "$csv" | sed 's/,/ | /g; s/^/| /; s/$/ |/'
   echo
-  echo "CPU is percent of one core (top). Energy impact is top's POWER column, an"
-  echo "approximation of Activity Monitor's Energy Impact. Occluded windows draw at a"
-  echo "throttled rate, so treat both as lower bounds."
+  echo "CPU is percent of one core (top). top's POWER column came out identical to CPU"
+  echo "percent here, so it is not an independent energy measure; real Energy Impact"
+  echo "needs powermetrics (sudo) or Activity Monitor. Occluded windows draw at a"
+  echo "throttled rate, so treat CPU as a lower bound."
 } > "$md"
 cat "$md"
