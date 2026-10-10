@@ -26,6 +26,8 @@ pub enum CliError {
         status: u16,
         /// Attempts left before lockout, when the device says.
         remain_times: Option<u32>,
+        /// Seconds until a lockout ends, when the device says.
+        unlock_secs: Option<u32>,
     },
     /// No login within the time allowed.
     NotConnected(String),
@@ -44,12 +46,19 @@ impl fmt::Display for CliError {
         match self {
             CliError::LoginRefused {
                 status,
-                remain_times: Some(n),
-            } => write!(
-                f,
-                "login refused (status {status}); {n} attempts left before lockout"
-            ),
-            CliError::LoginRefused { status, .. } => write!(f, "login refused (status {status})"),
+                remain_times,
+                unlock_secs,
+            } => {
+                let meaning = xml::login_status_meaning(*status);
+                write!(f, "login refused: {meaning} (status {status})")?;
+                match (unlock_secs, remain_times) {
+                    (Some(s), _) if *s > 0 => {
+                        write!(f, "; locked, try again in {} min", s.div_ceil(60))
+                    }
+                    (_, Some(n)) if *n > 0 => write!(f, "; {n} attempts left before lockout"),
+                    _ => Ok(()),
+                }
+            }
             CliError::NotConnected(why) => write!(f, "could not log in: {why}"),
             CliError::Query(e) => write!(f, "query failed: {e}"),
             CliError::StreamRefused(s) => write!(f, "the device refused the stream (status {s})"),
@@ -86,10 +95,12 @@ pub async fn wait_logged_in(session: &DeviceSession, limit: Duration) -> Result<
                 ConnState::LoginFailed {
                     status,
                     remain_times,
+                    unlock_secs,
                 } => {
                     return Err(CliError::LoginRefused {
                         status,
                         remain_times,
+                        unlock_secs,
                     });
                 }
                 ConnState::Closed => return Err(CliError::SessionEnded),
@@ -285,9 +296,11 @@ pub async fn record<W: Write>(
                     ConnState::LoginFailed {
                         status,
                         remain_times,
+                        unlock_secs,
                     } => CliError::LoginRefused {
                         status,
                         remain_times,
+                        unlock_secs,
                     },
                     _ => CliError::SessionEnded,
                 });

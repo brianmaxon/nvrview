@@ -7,6 +7,7 @@
 //! - handshake (nonce) and login with one configured user name and password;
 //!   a wrong credential is answered with status 401, and the number of
 //!   concurrent logged-in sessions can be capped;
+//! - logout (2), which frees the login slot at once;
 //! - keepalive (93), version (80), capabilities (199), stream info (146),
 //!   per-channel version info (318), and a channel info push (145) after login;
 //! - preview start (3) and stop (4): a looping synthetic video fixture is sent
@@ -414,6 +415,14 @@ impl Conn {
                     ),
                     None => self.reply_xml(318, id, 400, ""),
                 }
+            }
+            // Logout: answer, then free the login slot and end the session.
+            // (A real client closes TCP after the reply; ending it here too is
+            // the mock's choice.)
+            2 => {
+                self.reply_xml(2, id, 200, "")?;
+                self.close();
+                Ok(())
             }
             3 => self.start_preview(m),
             4 => self.stop_preview(m),

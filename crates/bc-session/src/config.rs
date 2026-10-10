@@ -50,9 +50,17 @@ pub struct SessionConfig {
     pub user: String,
     /// Login password. Never logged.
     pub password: String,
-    /// Interval between keepalives (command 93). The official client was seen
-    /// sending one every 30 to 140 s; the default is 60 s.
-    pub keepalive_interval: Duration,
+    /// Send a connection test (command 93) after this long with nothing
+    /// received, and at most once per this interval. Any received bytes,
+    /// media included, count as life, so a session carrying video sends
+    /// none. Default 6 s, as the official client (docs/protocol.md).
+    pub probe_after_idle: Duration,
+    /// Declare the connection dead and reconnect after this long with
+    /// nothing received (not within `probe_after_idle` of logging in).
+    /// Default 10 s, as the official client on direct connections.
+    pub dead_after: Duration,
+    /// How long a graceful close waits for the logout reply (command 2).
+    pub logout_timeout: Duration,
     /// How long to wait for the TCP connection.
     pub connect_timeout: Duration,
     /// How long handshake plus login may take in total.
@@ -74,7 +82,9 @@ impl SessionConfig {
         SessionConfig {
             user: user.into(),
             password: password.into(),
-            keepalive_interval: Duration::from_secs(60),
+            probe_after_idle: Duration::from_secs(6),
+            dead_after: Duration::from_secs(10),
+            logout_timeout: Duration::from_secs(2),
             connect_timeout: Duration::from_secs(10),
             login_timeout: Duration::from_secs(15),
             write_timeout: Duration::from_secs(10),
@@ -88,7 +98,8 @@ impl SessionConfig {
 impl fmt::Debug for SessionConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SessionConfig")
-            .field("keepalive_interval", &self.keepalive_interval)
+            .field("probe_after_idle", &self.probe_after_idle)
+            .field("dead_after", &self.dead_after)
             .field("backoff", &self.backoff)
             .field("queue_frames", &self.queue_frames)
             .finish_non_exhaustive()

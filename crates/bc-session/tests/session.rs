@@ -28,6 +28,10 @@ enum Mode {
     DropAfterLogin,
     /// On the first connection only: answer the first preview start, then close.
     DropFirstAfterStart,
+    /// Refuse the login as locked, with an unlock time.
+    LockedLogin,
+    /// Log in, then never send another byte (a dead connection).
+    SilentAfterLogin,
 }
 
 #[derive(Clone, Debug)]
@@ -174,7 +178,7 @@ fn handle(
         let mut body = m.body.clone();
         xor_obfuscate(h.message_id, &mut body);
         let text = String::from_utf8(body).unwrap();
-        let ok = mode != Mode::RejectLogin
+        let ok = !matches!(mode, Mode::RejectLogin | Mode::LockedLogin)
             && find_text(&text, "userName").unwrap().as_deref()
                 == Some(credential_hash(USER, NONCE).as_str())
             && find_text(&text, "password").unwrap().as_deref()
@@ -183,6 +187,11 @@ fn handle(
             out.bytes
                 .push(reply(1, h.message_id, 200, Class::Device, &[]));
             out.close = mode == Mode::DropAfterLogin;
+        } else if mode == Mode::LockedLogin {
+            let mut e = b"<body><LoginErrInfo><remainTimes>0</remainTimes><unlockTime>300</unlockTime></LoginErrInfo></body>".to_vec();
+            xor_obfuscate(h.message_id, &mut e);
+            out.bytes
+                .push(reply(1, h.message_id, 407, Class::Device, &e));
         } else {
             let mut e =
                 b"<body><LoginErrInfo><remainTimes>2</remainTimes></LoginErrInfo></body>".to_vec();
@@ -202,7 +211,15 @@ fn handle(
         command: h.command,
         text: text.clone(),
     });
+    if mode == Mode::SilentAfterLogin {
+        return out;
+    }
     match h.command {
+        2 => {
+            out.bytes
+                .push(reply(2, h.message_id, 200, Class::Device, &[]));
+            out.close = true;
+        }
         93 => {
             let mut b = b"<body><LinkType><type>LAN</type></LinkType></body>".to_vec();
             key.encrypt(&mut b);
@@ -329,7 +346,8 @@ async fn bad_credentials_are_not_retried() {
         s.state(),
         ConnState::LoginFailed {
             status: 401,
-            remain_times: Some(2)
+            remain_times: Some(2),
+            unlock_secs: None,
         }
     );
     // Several backoff periods pass; there must be no further attempts.
@@ -340,14 +358,80 @@ async fn bad_credentials_are_not_retried() {
 }
 
 #[tokio::test]
-async fn keepalives_are_sent() {
+async fn idle_sessions_are_probed() {
     let fake = Fake::start(Mode::Normal).await;
     let mut cfg = config();
-    cfg.keepalive_interval = Duration::from_millis(50);
+    cfg.probe_after_idle = Duration::from_millis(50);
     let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
-    wait_until("three keepalives", || fake.count(93) >= 3).await;
+    wait_until("three connection tests", || fake.count(93) >= 3).await;
+    // The device answers each test, so the connection stays up.
     assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
     s.close().await;
+}
+
+#[tokio::test]
+async fn a_silent_device_is_declared_dead_and_reconnected() {
+    let fake = Fake::start(Mode::SilentAfterLogin).await;
+    let mut cfg = config();
+    cfg.probe_after_idle = Duration::from_millis(50);
+    cfg.dead_after = Duration::from_millis(200);
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let started = Instant::now();
+    wait_until("a reconnect", || fake.accepted.load(Ordering::SeqCst) >= 2).await;
+    // Not before the dead interval, and probes were tried first.
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(fake.count(93) >= 1);
+    s.close().await;
+}
+
+#[tokio::test]
+async fn a_locked_account_reports_the_unlock_time() {
+    let fake = Fake::start(Mode::LockedLogin).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut rx = s.watch_state();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(*rx.borrow_and_update(), ConnState::LoginFailed { .. }) {
+            rx.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        s.state(),
+        ConnState::LoginFailed {
+            status: 407,
+            remain_times: Some(0),
+            unlock_secs: Some(300),
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn close_logs_out_after_stopping_previews() {
+    let fake = Fake::start(Mode::Normal).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    recv(&mut a).await;
+    s.close().await;
+    wait_until("socket closed", || fake.active.load(Ordering::SeqCst) == 0).await;
+    let cmds: Vec<u32> = fake
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.command)
+        .collect();
+    let stop = cmds.iter().position(|c| *c == 4).expect("a preview stop");
+    let logout = cmds.iter().position(|c| *c == 2).expect("a logout");
+    assert!(stop < logout, "{cmds:?}");
+    assert_eq!(cmds.last(), Some(&2), "{cmds:?}");
+    let text = &fake.seen.lock().unwrap()[logout].text;
+    assert!(
+        text.contains("<LoginUser") && !text.contains("password"),
+        "{text}"
+    );
 }
 
 #[tokio::test]
@@ -418,7 +502,7 @@ async fn close_stops_previews_before_closing_the_socket() {
         .iter()
         .map(|s| s.command)
         .collect();
-    assert!(cmds.iter().all(|c| [3, 4, 93].contains(c)), "{cmds:?}");
+    assert!(cmds.iter().all(|c| [2, 3, 4, 93].contains(c)), "{cmds:?}");
     // After close the queue drains and then ends; it must not hang.
     while a.recv().await.is_some() {}
 }

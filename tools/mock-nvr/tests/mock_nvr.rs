@@ -161,7 +161,8 @@ fn bad_credentials_get_401_and_lock_out() {
         c.login(),
         Event::LoginRejected {
             status: 401,
-            remain_times: Some(1)
+            remain_times: Some(1),
+            unlock_secs: None,
         }
     );
     let mut c = Client::connect(&nvr, "someone-else", PASSWORD);
@@ -169,7 +170,8 @@ fn bad_credentials_get_401_and_lock_out() {
         c.login(),
         Event::LoginRejected {
             status: 401,
-            remain_times: Some(0)
+            remain_times: Some(0),
+            unlock_secs: None,
         }
     );
     // Locked out: even correct credentials are refused now.
@@ -178,7 +180,8 @@ fn bad_credentials_get_401_and_lock_out() {
         c.login(),
         Event::LoginRejected {
             status: 401,
-            remain_times: Some(0)
+            remain_times: Some(0),
+            unlock_secs: None,
         }
     ));
     assert_eq!(nvr.active_logins(), 0);

@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout};
+use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, info, warn};
 
 /// Connection state, observable through [`DeviceSession::watch_state`].
@@ -41,6 +41,8 @@ pub enum ConnState {
         status: u16,
         /// Remaining attempts before lockout, when the device reports it.
         remain_times: Option<u32>,
+        /// Seconds until a lockout ends, when the device reports it.
+        unlock_secs: Option<u32>,
     },
     /// Closed by [`DeviceSession::close`] or by dropping the handle.
     Closed,
@@ -442,6 +444,7 @@ enum Exit {
     Rejected {
         status: u16,
         remain_times: Option<u32>,
+        unlock_secs: Option<u32>,
     },
     Failed {
         reached_login: bool,
@@ -487,11 +490,18 @@ async fn supervise<C: Connector>(connector: C, mut ctx: Ctx) {
             Exit::Rejected {
                 status,
                 remain_times,
+                unlock_secs,
             } => {
-                warn!(status, ?remain_times, "login refused; not retrying");
+                warn!(
+                    status,
+                    ?remain_times,
+                    ?unlock_secs,
+                    "login refused; not retrying"
+                );
                 ctx.state_tx.send_replace(ConnState::LoginFailed {
                     status,
                     remain_times,
+                    unlock_secs,
                 });
                 ctx.finish();
                 return;
@@ -589,6 +599,7 @@ enum Login {
     Rejected {
         status: u16,
         remain_times: Option<u32>,
+        unlock_secs: Option<u32>,
     },
 }
 
@@ -607,10 +618,12 @@ async fn login<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             Event::LoginRejected {
                 status,
                 remain_times,
+                unlock_secs,
             } => {
                 return Ok(Login::Rejected {
                     status,
                     remain_times,
+                    unlock_secs,
                 });
             }
             _ => {}
@@ -643,10 +656,12 @@ where
         Ok(Login::Rejected {
             status,
             remain_times,
+            unlock_secs,
         }) => {
             return Exit::Rejected {
                 status,
                 remain_times,
+                unlock_secs,
             };
         }
         Err(reason) => {
@@ -685,6 +700,28 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 }
             }
             Err(e) => debug!(%e, "stop_preview failed"),
+        }
+    }
+    // Log out and wait briefly for the reply, as the official client does,
+    // so the device frees the login slot at once.
+    if let Ok(bytes) = c.session.logout()
+        && c.send(&bytes).await.is_ok()
+    {
+        let reply = timeout(ctx.cfg.logout_timeout, async {
+            loop {
+                match c.next_event().await {
+                    Ok(Event::Control {
+                        command: 2, status, ..
+                    }) => return Some(status),
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+            }
+        })
+        .await;
+        match reply {
+            Ok(Some(status)) => debug!(status, "logged out"),
+            _ => debug!("no logout reply"),
         }
     }
     let _ = timeout(c.write_timeout, c.wr.shutdown()).await;
@@ -816,10 +853,14 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
 ) -> Result<(), Failure> {
-    let period = ctx.cfg.keepalive_interval;
-    let mut keepalive = interval_at(Instant::now() + period, period);
-    keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Liveness as the official client does it (docs/protocol.md): any bytes
+    // received count; after `probe_after_idle` of silence send a connection
+    // test (93), at most once per that interval; after `dead_after` of
+    // silence the connection is dead.
+    let probe_after = ctx.cfg.probe_after_idle;
+    let dead_after = ctx.cfg.dead_after;
     let mut last_rx = Instant::now();
+    let mut last_probe = last_rx;
     let mut demux_log = LogLimiter::new(Duration::from_secs(5));
     let mut session_log = LogLimiter::new(Duration::from_secs(5));
     loop {
@@ -843,19 +884,23 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         sync_previews(ctx, c).await?;
         sync_queries(ctx, c).await?;
+        let probe_due = last_rx.max(last_probe) + probe_after;
+        let dead_due = last_rx + dead_after;
         tokio::select! {
             r = c.fill() => {
                 r?;
                 last_rx = Instant::now();
             }
-            _ = keepalive.tick() => {
-                // Replies and media both count as proof of life; two silent
-                // intervals mean the peer is gone.
-                if last_rx.elapsed() > period * 2 {
+            () = sleep_until(probe_due.min(dead_due)) => {
+                let now = Instant::now();
+                if now >= dead_due {
                     return Err("no data from device".to_owned());
                 }
-                let bytes = c.session.keepalive().map_err(|e| e.to_string())?;
-                c.send(&bytes).await?;
+                if now >= probe_due {
+                    let bytes = c.session.keepalive().map_err(|e| e.to_string())?;
+                    c.send(&bytes).await?;
+                    last_probe = now;
+                }
             }
             _ = ctx.shared.wake.notified() => {}
             cmd = ctx.cmd_rx.recv() => match cmd {

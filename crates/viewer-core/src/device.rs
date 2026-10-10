@@ -142,12 +142,18 @@ fn state_event(id: u64, s: &ConnState) -> String {
         ConnState::LoginFailed {
             status,
             remain_times,
+            unlock_secs,
         } => {
             let o = o
                 .str("state", "login_failed")
-                .u64("status", u64::from(*status));
-            match remain_times {
+                .u64("status", u64::from(*status))
+                .str("reason", bc_protocol::xml::login_status_meaning(*status));
+            let o = match remain_times {
                 Some(r) => o.u64("remain_times", u64::from(*r)),
+                None => o,
+            };
+            match unlock_secs {
+                Some(s) => o.u64("unlock_s", u64::from(*s)),
                 None => o,
             }
         }
@@ -327,15 +333,21 @@ mod tests {
         let v = parse(&ConnState::LoginFailed {
             status: 401,
             remain_times: Some(2),
+            unlock_secs: None,
         });
         assert_eq!(v["state"], "login_failed");
         assert_eq!(v["status"], 401);
+        assert_eq!(v["reason"], "wrong user name or password");
         assert_eq!(v["remain_times"], 2);
+        assert!(v.get("unlock_s").is_none());
         let v = parse(&ConnState::LoginFailed {
-            status: 401,
+            status: 407,
             remain_times: None,
+            unlock_secs: Some(300),
         });
         assert!(v.get("remain_times").is_none());
+        assert_eq!(v["reason"], "account locked");
+        assert_eq!(v["unlock_s"], 300);
     }
 
     #[test]
