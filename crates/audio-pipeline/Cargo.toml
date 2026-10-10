@@ -1,0 +1,16 @@
+[package]
+name = "audio-pipeline"
+version = "0.1.0"
+description = "Sans-I/O per-tile audio for nvrview: ADTS parsing, AAC-LC decoding, timestamping, drift-corrected playout, and taps"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+symphonia-core = "0.6"
+symphonia-codec-aac = "0.6"
+crossbeam-queue = "0.3.8"
+
+[lints]
+workspace = true
