@@ -5,7 +5,7 @@
 use bc_protocol::archive::DateTime;
 use bc_protocol::media::{Codec, Record};
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, FnConnector, SessionConfig};
 use mock_nvr::archive::{ArchiveConfig, MockEvent};
 use mock_nvr::audio::AudioFixture;
 use mock_nvr::fixture::Fixture;
@@ -112,7 +112,7 @@ fn spawn_mock(audio: bool) -> mock_nvr::MockNvr {
         ));
     }
     cfg.archive = Some(a);
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
@@ -120,7 +120,7 @@ fn session(nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
     cfg.query_timeout = Duration::from_secs(5);
     cfg.backoff.initial = Duration::from_millis(50);
     cfg.backoff.jitter = 0.0;
-    Arc::new(DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg))
+    Arc::new(DeviceSession::spawn(in_memory(nvr), cfg))
 }
 
 fn download() -> IncidentDownload {
@@ -192,7 +192,7 @@ fn expected(parts: &Path, n: u32) -> (Vec<u64>, usize) {
     (pts, audio)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn downloaded_incident_becomes_one_seamless_mp4() {
     let nvr = spawn_mock(true);
     let sess = session(&nvr);
@@ -258,7 +258,7 @@ async fn downloaded_incident_becomes_one_seamless_mp4() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn chunks_left_by_a_run_without_a_muxer_are_finalized_on_restart() {
     let nvr = spawn_mock(false);
     let sess = session(&nvr);
@@ -421,4 +421,10 @@ fn a_killed_join_leaves_a_fragmented_file_that_recovers() {
     if have_ffprobe() {
         assert!(!packets(&joined, "v").is_empty());
     }
+}
+
+/// Connects to `nvr` (on the test's runtime) through in-memory pipes.
+fn in_memory(nvr: &mock_nvr::MockNvr) -> impl bc_session::Connector + use<> {
+    let addr = nvr.addr();
+    FnConnector(move || mock_nvr::connect(addr))
 }
