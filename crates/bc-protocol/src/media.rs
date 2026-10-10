@@ -63,9 +63,11 @@ pub enum Record {
         /// Annex-B NAL unit bytes.
         data: Vec<u8>,
         /// The record's extra header, exactly as received (often empty).
-        /// When at least 8 bytes long, bytes 0-3 are a u32 count of seconds
-        /// of the device's wall clock ([`wall_clock_secs`]); see
-        /// "Records as the official client reads them" in docs/protocol.md.
+        /// When at least 8 bytes long, a keyframe's bytes 0-3 are a u32
+        /// count of seconds of the device's wall clock ([`wall_clock_secs`]);
+        /// a predicted frame's hold another value there. See "Records as
+        /// the official client reads them" and "Sub and main of one camera"
+        /// in docs/protocol.md.
         extra_header: Vec<u8>,
     },
     /// An audio frame.
@@ -284,7 +286,9 @@ impl Demuxer {
 
 /// The device wall-clock seconds in a video extra header: the u32
 /// little-endian at bytes 0-3, when the header is at least 8 bytes long
-/// (docs/protocol.md, "Records as the official client reads them").
+/// (docs/protocol.md, "Records as the official client reads them"). Only a
+/// keyframe's header holds seconds there; a predicted frame's holds another
+/// value, which this returns all the same.
 pub fn wall_clock_secs(extra_header: &[u8]) -> Option<u32> {
     (extra_header.len() >= 8).then(|| u32_at(extra_header, 0))
 }

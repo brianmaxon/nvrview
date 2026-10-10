@@ -12,10 +12,16 @@
 //!   with the reference tier's over the same span: on one clock the
 //!   difference is minus the latency difference (a fraction of a second)
 //!   and the same in every run; on separate clocks it is arbitrary and
-//!   changes when a tier restarts. Drift is the slope of *pts − arrival*
-//!   per tier, in µs per second (ppm). Where video extra headers carry the
-//!   device's wall-clock seconds, each tier's *pts − seconds × 10⁶* must
-//!   fall in one window one second wide; on one clock the tiers' windows
+//!   changes when a tier restarts. Pictures of the same moment with
+//!   identical timestamps in both tiers are decisive: separate clocks do
+//!   not agree to the microsecond picture after picture. Relative drift
+//!   is the slope of the difference of the tiers' *pts − arrival*, pooled
+//!   over every run and reported with its standard error; arrival jitter
+//!   makes it uncertain over short runs, so it counts against a shared
+//!   clock only when it is both large and significant. Keyframes' extra
+//!   headers carry the device's wall-clock seconds (predicted frames carry
+//!   something else there); each tier's *pts − seconds × 10⁶* is reported
+//!   as a spread around its median, and on one clock the tiers' spreads
 //!   overlap.
 //! - **Latency difference**: for pictures of the same moment (equal or
 //!   nearest timestamps), how much later the other tier arrives than the
@@ -48,6 +54,9 @@ struct Frame {
     pts: i64,
     key: bool,
     size: usize,
+    /// The device's wall-clock seconds, from a keyframe's extra header.
+    /// Predicted frames' extra headers hold another value at the same
+    /// offset (docs/protocol.md), so they get none.
     wall: Option<u32>,
     run: u32,
     /// Part of the burst of buffered pictures at the start of its run;
@@ -98,15 +107,51 @@ fn median(v: Vec<f64>) -> f64 {
 
 /// Least-squares slope of `y` over `x`.
 fn slope(points: &[(f64, f64)]) -> Option<f64> {
-    if points.len() < 3 {
+    pooled_slope(&[points.to_vec()]).map(|f| f.slope)
+}
+
+/// A fitted slope and its standard error.
+#[derive(Clone, Copy, Debug)]
+struct Fit {
+    slope: f64,
+    se: f64,
+}
+
+/// Least-squares slope of `y` over `x` shared by several groups, each with
+/// its own intercept (every group centered on its own mean), with the
+/// slope's standard error.
+fn pooled_slope(groups: &[Vec<(f64, f64)>]) -> Option<Fit> {
+    let (mut sxx, mut sxy, mut n) = (0.0, 0.0, 0usize);
+    let mut centered = Vec::new();
+    for g in groups.iter().filter(|g| g.len() >= 2) {
+        let k = g.len() as f64;
+        let mx = g.iter().map(|p| p.0).sum::<f64>() / k;
+        let my = g.iter().map(|p| p.1).sum::<f64>() / k;
+        for p in g {
+            let (x, y) = (p.0 - mx, p.1 - my);
+            sxx += x * x;
+            sxy += x * y;
+            centered.push((x, y));
+        }
+        n += g.len();
+    }
+    let used = groups.iter().filter(|g| g.len() >= 2).count();
+    if n < 3 || sxx <= 0.0 {
         return None;
     }
-    let n = points.len() as f64;
-    let mx = points.iter().map(|p| p.0).sum::<f64>() / n;
-    let my = points.iter().map(|p| p.1).sum::<f64>() / n;
-    let sxx: f64 = points.iter().map(|p| (p.0 - mx).powi(2)).sum();
-    let sxy: f64 = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
-    (sxx > 0.0).then(|| sxy / sxx)
+    let slope = sxy / sxx;
+    let rss: f64 = centered.iter().map(|(x, y)| (y - slope * x).powi(2)).sum();
+    let dof = n.saturating_sub(used + 1).max(1) as f64;
+    Some(Fit {
+        slope,
+        se: (rss / dof / sxx).sqrt(),
+    })
+}
+
+/// A drift (ppm) that is both larger than 200 ppm and more than three
+/// standard errors from zero.
+fn drift_significant(f: Fit) -> bool {
+    f.slope.abs() > 200.0 && f.slope.abs() > 3.0 * f.se
 }
 
 fn tier_name(t: Option<StreamTier>) -> &'static str {
@@ -124,6 +169,70 @@ fn ms(us: f64) -> String {
         "–".into()
     } else {
         format!("{:.1}", us / 1000.0)
+    }
+}
+
+fn signed_ms(us: f64) -> String {
+    if us.is_nan() {
+        "–".into()
+    } else {
+        format!("{:+.1}", us / 1000.0)
+    }
+}
+
+/// How a tier's `pts − wall seconds × 10⁶` (µs) spreads over its keyframes.
+/// On one clock it stays within one second (the seconds are truncated) up
+/// to the timestamps' own jitter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WallSpread {
+    n: usize,
+    min: i64,
+    median: i64,
+    max: i64,
+}
+
+impl WallSpread {
+    fn of(t: &Tier) -> Option<WallSpread> {
+        let mut d: Vec<i64> = t
+            .frames
+            .iter()
+            .filter_map(|f| f.wall.map(|w| f.pts - i64::from(w) * 1_000_000))
+            .collect();
+        if d.is_empty() {
+            return None;
+        }
+        d.sort_unstable();
+        Some(WallSpread {
+            n: d.len(),
+            min: d[0],
+            median: d[(d.len() - 1) / 2],
+            max: d[d.len() - 1],
+        })
+    }
+
+    fn within_one_second(&self) -> bool {
+        self.max - self.min < 1_000_000 + 1_000
+    }
+
+    /// Whether the two spreads `[min, max]` share any value (1 ms slack).
+    fn overlaps(&self, other: &WallSpread) -> bool {
+        self.min.max(other.min) <= self.max.min(other.max) + 1_000
+    }
+
+    /// The seconds are truncated, so on a clock that follows them
+    /// `pts − seconds × 10⁶ = C + (fraction of a second)` for one constant
+    /// `C`: the window of `C` values these keyframes allow, `[max − 1 s,
+    /// min]` (empty, `lo > hi`, when the spread exceeds a second).
+    fn window(&self) -> (i64, i64) {
+        (self.max - 999_999, self.min)
+    }
+
+    /// Whether one constant `C` fits both tiers' keyframes (1 ms slack).
+    fn compatible(&self, other: &WallSpread) -> bool {
+        let (a, b) = (self.window(), other.window());
+        self.within_one_second()
+            && other.within_one_second()
+            && a.0.max(b.0) <= a.1.min(b.1) + 1_000
     }
 }
 
@@ -254,7 +363,11 @@ impl Analysis {
                             pts: pts_us as i64,
                             key: keyframe,
                             size: data.len(),
-                            wall: wall_clock_secs(&extra_header),
+                            wall: if keyframe {
+                                wall_clock_secs(&extra_header)
+                            } else {
+                                None
+                            },
                             run,
                             burst: false,
                         }),
@@ -402,7 +515,7 @@ impl Analysis {
             Some(d) => format!("{d:+.0}"),
             None => "–".into(),
         });
-        row(s, "frames with wall-clock seconds", &|t| {
+        row(s, "keyframes with wall-clock seconds", &|t| {
             t.frames
                 .iter()
                 .filter(|f| f.wall.is_some())
@@ -411,13 +524,26 @@ impl Analysis {
         });
         row(
             s,
-            "pts within one wall-clock second",
-            &|t| match wall_window(t.frames.iter()) {
+            "pts − seconds × 10⁶ around its median, ms min / median / max",
+            &|t| match WallSpread::of(t) {
                 None => "–".into(),
-                Some((lo, hi)) if lo <= hi + 1_000 => {
-                    format!("yes (±{} ms)", ms((hi - lo).max(0) as f64 / 2.0))
+                Some(w) => format!(
+                    "{} / {} / {}",
+                    signed_ms((w.min - w.median) as f64),
+                    signed_ms(0.0),
+                    signed_ms((w.max - w.median) as f64)
+                ),
+            },
+        );
+        row(
+            s,
+            "pts within one wall-clock second",
+            &|t| match WallSpread::of(t) {
+                None => "–".into(),
+                Some(w) if w.within_one_second() => {
+                    format!("yes (spread {} ms)", ms((w.max - w.min) as f64))
                 }
-                Some((lo, hi)) => format!("no (off by {} ms)", ms((lo - hi) as f64)),
+                Some(w) => format!("no (spread {} ms)", ms((w.max - w.min) as f64)),
             },
         );
         s.push('\n');
@@ -448,10 +574,15 @@ impl Analysis {
                  each {oname} run. On one clock it is minus the latency difference and the \
                  same in every run.\n"
             );
+            let _ = writeln!(
+                s,
+                "Drift: slope of the difference of the two tiers' pts − arrival, ppm ± one \
+                 standard error; arrival jitter dominates it over short runs.\n"
+            );
             let _ = writeln!(s, "| run | frames | seconds | offset ms | drift ppm |");
             let _ = writeln!(s, "|---|---|---|---|---|");
             let mut offsets = Vec::new();
-            let mut drifts = Vec::new();
+            let mut drift_groups: Vec<Vec<(f64, f64)>> = Vec::new();
             for (n, run) in o.run_ids().into_iter().enumerate() {
                 let fr: Vec<&Frame> = o.run_frames(run).filter(|f| !f.burst).collect();
                 if fr.is_empty() {
@@ -462,30 +593,25 @@ impl Analysis {
                 let off = (mine.len() >= 5)
                     .then(|| reference.lag_median(from, to).map(|r| median(mine) - r))
                     .flatten();
-                // Relative drift: slope of this tier's pts − arrival minus the
-                // reference's, over the same span (10 s at least).
+                // Relative drift: this tier's pts − arrival minus the
+                // reference's (at the reference picture nearest in arrival),
+                // against arrival seconds.
+                let rel_points: Vec<(f64, f64)> = fr
+                    .iter()
+                    .filter_map(|f| {
+                        let g = nearest_at(reference, f.at, from, to)?;
+                        Some((f.at as f64 / 1e6, ((f.pts - f.at) - (g.pts - g.at)) as f64))
+                    })
+                    .collect();
                 let rel = if to - from >= 10_000_000 {
-                    let pts_of = |t: &Tier| -> Vec<(f64, f64)> {
-                        t.frames
-                            .iter()
-                            .filter(|f| !f.burst && f.at >= from && f.at <= to)
-                            .filter(|f| t.tier != o.tier || f.run == run)
-                            .map(|f| (f.at as f64 / 1e6, (f.pts - f.at) as f64))
-                            .collect()
-                    };
-                    match (slope(&pts_of(o)), slope(&pts_of(reference))) {
-                        (Some(a), Some(b)) => Some(a - b),
-                        _ => None,
-                    }
+                    pooled_slope(std::slice::from_ref(&rel_points))
                 } else {
                     None
                 };
                 if let Some(x) = off {
                     offsets.push(x);
                 }
-                if let Some(d) = rel {
-                    drifts.push(d);
-                }
+                drift_groups.push(rel_points);
                 let _ = writeln!(
                     s,
                     "| {} | {} | {:.1} | {} | {} |",
@@ -493,37 +619,65 @@ impl Analysis {
                     fr.len(),
                     (to - from) as f64 / 1e6,
                     off.map_or("–".into(), ms),
-                    rel.map_or("–".into(), |d| format!("{d:+.1}"))
+                    rel.map_or("–".into(), |d| format!("{:+.1} ± {:.1}", d.slope, d.se))
                 );
             }
             s.push('\n');
+            let pooled = pooled_slope(&drift_groups);
+            if let Some(d) = pooled {
+                let _ = writeln!(
+                    s,
+                    "Drift pooled over every run: {:+.1} ± {:.1} ppm{}.\n",
+                    d.slope,
+                    d.se,
+                    if drift_significant(d) {
+                        ""
+                    } else {
+                        " (not significant: under 200 ppm or within three standard errors)"
+                    }
+                );
+            }
 
             // Pictures of the same moment.
-            let ref_interval = reference.frame_interval();
-            let tol = (ref_interval / 2.0).clamp(1_000.0, 50_000.0);
+            // Half the shorter frame interval: a picture of the other
+            // tier between two reference pictures is not the same moment.
+            let interval = reference.frame_interval().min(o.frame_interval());
+            let tol = (interval / 2.0).clamp(1_000.0, 50_000.0);
             let mut lat = Vec::new();
             let mut exact = 0usize;
+            let mut exact_span = (i64::MAX, i64::MIN);
             for f in o.frames.iter().filter(|f| !f.burst) {
                 let Some(g) = nearest_pts(reference, f) else {
                     continue;
                 };
                 let dp = (f.pts - g.pts) as f64;
-                if dp.abs() > tol {
+                if dp.abs() >= tol {
                     continue;
                 }
-                exact += usize::from(f.pts == g.pts);
+                if f.pts == g.pts {
+                    exact += 1;
+                    exact_span = (exact_span.0.min(f.pts), exact_span.1.max(f.pts));
+                }
                 lat.push((f.at - g.at) as f64 - dp);
             }
             let lat = sorted(lat);
             let _ = writeln!(
                 s,
-                "Pictures of the same moment ({oname} frames with a {rname} frame within \
-                 {} ms of its timestamp): {} of {}, {} with identical timestamps.\n",
+                "Pictures of the same moment ({oname} frames with a {rname} frame closer \
+                 than {} ms to its timestamp): {} of {}, {} with identical timestamps.\n",
                 ms(tol),
                 lat.len(),
                 o.frames.len(),
                 exact
             );
+            if exact >= 2 {
+                let _ = writeln!(
+                    s,
+                    "The identical timestamps span {:.1} s of {rname}'s clock: over that span the \
+                     two clocks differ by 0 µs (drift 0 ppm, to the timestamps' 1 µs resolution).\n",
+                    (exact_span.1 - exact_span.0) as f64 / 1e6
+                );
+            }
             if !lat.is_empty() {
                 let mean = lat.iter().sum::<f64>() / lat.len() as f64;
                 let sd =
@@ -541,39 +695,64 @@ impl Analysis {
                 );
             }
 
-            // Wall-clock windows.
-            let wall = match (
-                wall_window(reference.frames.iter()),
-                wall_window(o.frames.iter()),
-            ) {
-                (Some((rlo, rhi)), Some((olo, ohi))) => {
-                    let agree = rlo <= rhi + 1_000
-                        && olo <= ohi + 1_000
-                        && rlo.max(olo) <= rhi.min(ohi) + 1_000;
+            // Wall-clock seconds.
+            let wall = match (WallSpread::of(reference), WallSpread::of(o)) {
+                (Some(r), Some(w)) => {
+                    let agree = r.compatible(&w);
+                    let rel = |x: i64| signed_ms((x - r.median) as f64);
+                    let (rw, ow) = (r.window(), w.window());
                     let _ = writeln!(
                         s,
-                        "Wall-clock seconds: {oname}'s pts − seconds × 10⁶ window lies {} to {} ms \
-                         from {rname}'s; the windows {}.\n",
-                        ms((olo - rlo) as f64),
-                        ms((ohi - rhi) as f64),
-                        if agree { "overlap" } else { "do not overlap" }
+                        "Wall-clock seconds (keyframes): pts − seconds × 10⁶ relative to \
+                         {rname}'s median, ms:\n\n\
+                         | tier | keyframes | min | median | max |\n|---|---|---|---|---|\n\
+                         | {rname} | {} | {} | {} | {} |\n| {oname} | {} | {} | {} | {} |\n\n\
+                         The spreads {}. Seconds are truncated, so on a clock that follows them \
+                         pts − seconds × 10⁶ is one constant plus a fraction of a second: {rname}'s \
+                         keyframes allow that constant from {} to {} ms, {oname}'s from {} to {} ms; \
+                         {}.\n",
+                        r.n,
+                        rel(r.min),
+                        rel(r.median),
+                        rel(r.max),
+                        w.n,
+                        rel(w.min),
+                        rel(w.median),
+                        rel(w.max),
+                        if r.overlaps(&w) {
+                            "overlap"
+                        } else {
+                            "do not overlap"
+                        },
+                        rel(rw.0),
+                        rel(rw.1),
+                        rel(ow.0),
+                        rel(ow.1),
+                        if agree {
+                            "one constant fits both tiers"
+                        } else {
+                            "no one constant fits both tiers"
+                        }
                     );
                     Some(agree)
                 }
                 _ => {
                     let _ = writeln!(
                         s,
-                        "Wall-clock seconds: not in both tiers' extra headers; not compared.\n"
+                        "Wall-clock seconds: not in both tiers' keyframes; not compared.\n"
                     );
                     None
                 }
             };
-            verdicts.push((oname, offsets, drifts, lat.len(), exact, wall));
+            verdicts.push((oname, offsets, pooled, lat.len(), exact, wall));
         }
 
         let mut lines = Vec::new();
-        for (oname, offsets, drifts, matched, exact, wall) in verdicts {
-            if offsets.is_empty() {
+        for (oname, offsets, pooled, matched, exact, wall) in verdicts {
+            // Identical timestamps on (nearly) every picture of the same
+            // moment: separate clocks cannot do that.
+            let identical = exact >= 10 && exact * 10 >= matched * 9;
+            if offsets.is_empty() && !identical {
                 lines.push(format!(
                     "shared clock ({oname}/{rname}): unknown (no overlapping runs)"
                 ));
@@ -584,22 +763,36 @@ impl Analysis {
                 .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
             let small = lo.abs().max(hi.abs()) < 2_000_000.0;
             let steady = hi - lo < 200_000.0;
-            let max_drift = drifts.iter().fold(0.0f64, |m, d| m.max(d.abs()));
-            let no_drift = max_drift < 200.0;
+            let drifting = pooled.is_some_and(drift_significant);
             let wall_ok = wall.unwrap_or(true);
-            let shared = small && steady && no_drift && wall_ok;
-            let mut evidence = vec![format!(
-                "offset {} to {} ms over {} run(s)",
-                ms(lo),
-                ms(hi),
-                offsets.len()
-            )];
-            if !drifts.is_empty() {
-                evidence.push(format!("drift up to {max_drift:.0} ppm"));
+            let shared = identical || (small && steady && !drifting && wall_ok);
+            let mut evidence = Vec::new();
+            if identical {
+                evidence.push(format!(
+                    "{exact} of {matched} matched pictures with identical timestamps (decisive)"
+                ));
             }
-            evidence.push(format!(
-                "{exact} of {matched} matched pictures with identical timestamps"
-            ));
+            if !offsets.is_empty() {
+                evidence.push(format!(
+                    "offset {} to {} ms over {} run(s)",
+                    ms(lo),
+                    ms(hi),
+                    offsets.len()
+                ));
+            }
+            if let Some(d) = pooled {
+                evidence.push(format!(
+                    "relative drift {:+.0} ± {:.0} ppm{}",
+                    d.slope,
+                    d.se,
+                    if drifting { "" } else { " (not significant)" }
+                ));
+            }
+            if !identical {
+                evidence.push(format!(
+                    "{exact} of {matched} matched pictures with identical timestamps"
+                ));
+            }
             match wall {
                 Some(true) => evidence.push("wall-clock windows overlap".into()),
                 Some(false) => evidence.push("wall-clock windows disagree".into()),
@@ -776,19 +969,14 @@ fn drift(t: &Tier) -> Option<f64> {
     slope(&pts)
 }
 
-/// The window `[lo, hi]` in which `pts − wall seconds × 10⁶` must lie for
-/// every frame with wall-clock seconds; `lo > hi` when no single window
-/// one second wide fits them all.
-fn wall_window<'a>(frames: impl Iterator<Item = &'a Frame>) -> Option<(i64, i64)> {
-    let d: Vec<i64> = frames
-        .filter_map(|f| f.wall.map(|w| f.pts - i64::from(w) * 1_000_000))
-        .collect();
-    if d.is_empty() {
-        return None;
-    }
-    let max = *d.iter().max().expect("not empty");
-    let min = *d.iter().min().expect("not empty");
-    Some((max - 999_999, min))
+/// The live reference frame that arrived nearest to `at`, within
+/// `[from, to]`.
+fn nearest_at(reference: &Tier, at: i64, from: i64, to: i64) -> Option<&Frame> {
+    reference
+        .frames
+        .iter()
+        .filter(|g| !g.burst && g.at >= from && g.at <= to)
+        .min_by_key(|g| (g.at - at).abs())
 }
 
 /// The reference frame with the timestamp nearest to `f`'s.
@@ -806,9 +994,14 @@ mod tests {
     use bc_protocol::media::Codec;
     use bc_protocol::recording::TierWriter;
 
+    /// Predicted frames' extra headers hold this (not seconds) where
+    /// keyframes hold the wall-clock seconds, as observed.
+    const P_FRAME_WORD: u32 = 0x0900_0006;
+
     fn pic(keyframe: bool, pts_us: u64, wall: Option<u32>) -> Record {
         let extra_header = wall.map_or(Vec::new(), |w| {
-            let mut e = w.to_le_bytes().to_vec();
+            let word = if keyframe { w } else { P_FRAME_WORD };
+            let mut e = word.to_le_bytes().to_vec();
             e.extend([0u8; 4]);
             e
         });
@@ -827,32 +1020,81 @@ mod tests {
     /// capture, main 150 ms (plus a little jitter). Main starts at 2 s and
     /// restarts every 10 s with a burst of `burst` buffered pictures.
     fn synthetic(main_shift: i64, burst: u64) -> Vec<u8> {
+        build(Synth {
+            main_shift,
+            burst,
+            ..Synth::default()
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    struct Synth {
+        main_shift: i64,
+        burst: u64,
+        /// Arrival jitter added to both tiers, ± µs (deterministic).
+        jitter: u64,
+        /// Main restarts every `period` µs and runs `pictures` pictures.
+        period: u64,
+        pictures: u64,
+        seconds: u64,
+    }
+
+    impl Default for Synth {
+        fn default() -> Synth {
+            Synth {
+                main_shift: 0,
+                burst: 0,
+                jitter: 0,
+                period: 10_000_000,
+                pictures: 140,
+                seconds: 40,
+            }
+        }
+    }
+
+    /// Deterministic jitter in `[-amp, amp]` µs for picture `i` of `salt`.
+    fn jitter(amp: u64, salt: u64, i: u64) -> i64 {
+        if amp == 0 {
+            return 0;
+        }
+        let mut x = (i ^ (salt << 32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        x ^= x >> 29;
+        x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x ^= x >> 32;
+        (x % (2 * amp + 1)) as i64 - amp as i64
+    }
+
+    fn build(p: Synth) -> Vec<u8> {
         let clock0 = 5_000_000_000i64;
         let wall0 = 1_000_000u32;
         let mut items: Vec<(u64, u8, StreamTier, Option<Record>)> = Vec::new();
-        for i in 0..400u64 {
+        for i in 0..p.seconds * 10 {
             let c = i * 100_000;
             let pts = (clock0 + c as i64) as u64;
             let wall = wall0 + ((clock0 + c as i64 - clock0) / 1_000_000) as u32;
+            let at = (c as i64 + 30_000 + p.jitter as i64 + jitter(p.jitter, 1, i)) as u64;
             items.push((
-                c + 30_000,
+                at,
                 0,
                 StreamTier::Sub,
                 Some(pic(i % 20 == 0, pts, Some(wall))),
             ));
         }
         let mut start = 2_000_000u64;
-        while start + 8_000_000 < 40_000_000 {
+        while start + p.period - 2_000_000 < p.seconds * 1_000_000 {
             items.push((start, 1, StreamTier::Main, None));
             // The device answers 300 ms later with pictures captured from
             // `burst` frames before then, at once, then live.
-            let first_c = start + 300_000 - 150_000 - burst * 50_000;
+            let first_c = start + 300_000 - 150_000 - p.burst * 50_000;
             let first_c = first_c / 50_000 * 50_000;
-            for k in 0..140u64 {
+            for k in 0..p.pictures {
                 let c = first_c + k * 50_000;
-                let live_at = c + 150_000 + (k * 7919 % 11) * 1_000;
+                let live_at = (c as i64
+                    + 150_000
+                    + ((k * 7919 % 11) * 1_000) as i64
+                    + jitter(p.jitter, 2 + start, k)) as u64;
                 let at = live_at.max(start + 300_000 + k * 1_000);
-                let pts = (clock0 + c as i64 + main_shift) as u64;
+                let pts = (clock0 + c as i64 + p.main_shift) as u64;
                 let wall = wall0 + (c / 1_000_000) as u32;
                 items.push((
                     at,
@@ -861,8 +1103,8 @@ mod tests {
                     Some(pic(k % 40 == 0, pts, Some(wall))),
                 ));
             }
-            items.push((start + 7_500_000, 3, StreamTier::Main, None));
-            start += 10_000_000;
+            items.push((start + p.period - 2_500_000, 3, StreamTier::Main, None));
+            start += p.period;
         }
         items.sort_by_key(|x| (x.0, x.1));
         let mut w = TierWriter::new(Vec::new()).unwrap();
@@ -916,6 +1158,108 @@ mod tests {
         assert!(md.contains("shared clock (main/sub): no"), "{md}");
         assert!(md.contains("wall-clock windows disagree"), "{md}");
         assert!(md.contains("Future work"), "{md}");
+    }
+
+    /// Bug: over runs of tens of seconds, arrival jitter of a couple of
+    /// hundred milliseconds made the per-run drift swing by hundreds of
+    /// ppm, and that noise vetoed a shared clock although every picture of
+    /// the same moment had the identical timestamp in both tiers.
+    #[test]
+    fn arrival_jitter_does_not_veto_identical_timestamps() {
+        let p = Synth {
+            jitter: 110_000,
+            period: 15_000_000,
+            pictures: 240,
+            seconds: 62,
+            ..Synth::default()
+        };
+        let a = Analysis::read(&build(p)[..]).unwrap();
+        let md = a.to_markdown();
+        // The per-run drift really is noisy: at least one run's estimate
+        // exceeds the old 200 ppm limit.
+        let noisy = md
+            .lines()
+            .filter(|l| l.contains(" ± ") && l.starts_with("| "))
+            .filter_map(|l| {
+                l.split('|')
+                    .nth(5)?
+                    .split('±')
+                    .next()?
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+            })
+            .any(|d| d.abs() > 200.0);
+        assert!(noisy, "{md}");
+        assert!(md.contains("shared clock (main/sub): yes"), "{md}");
+        assert!(md.contains("identical timestamps (decisive)"), "{md}");
+        assert!(!md.contains("Future work"), "{md}");
+    }
+
+    /// Bug: only keyframes carry the wall-clock seconds, but every frame's
+    /// extra header was read as seconds, so each tier's window came out
+    /// empty and the tiers were reported as disagreeing (with an offset
+    /// range that contained 0).
+    #[test]
+    fn wall_clock_seconds_come_from_keyframes() {
+        let a = Analysis::read(&synthetic(0, 0)[..]).unwrap();
+        let md = a.to_markdown();
+        assert!(
+            md.contains("| keyframes with wall-clock seconds | 20 |"),
+            "{md}"
+        );
+        assert!(md.contains("; one constant fits both tiers."), "{md}");
+        assert!(md.contains("wall-clock windows overlap"), "{md}");
+        let row = md
+            .lines()
+            .find(|l| l.starts_with("| pts within one wall-clock second |"))
+            .unwrap();
+        assert_eq!(row.matches("yes (spread").count(), 2, "{row}");
+    }
+
+    #[test]
+    fn spreads_overlap_whatever_their_order() {
+        let w = |min, max| WallSpread {
+            n: 2,
+            min,
+            median: (min + max) / 2,
+            max,
+        };
+        // Main's spread lies from 159.9 ms above to 52.7 ms below sub's
+        // (the range contains 0): that is overlap.
+        let sub = w(0, 900_000);
+        let main = w(159_900, 900_000 - 52_700);
+        assert!(sub.overlaps(&main) && main.overlaps(&sub));
+        let main = w(-300_000, 100_000);
+        assert!(sub.overlaps(&main) && main.overlaps(&sub));
+        let far = w(37_000_000, 37_900_000);
+        assert!(!sub.overlaps(&far) && !far.overlaps(&sub));
+        assert!(sub.within_one_second() && !w(0, 1_200_000).within_one_second());
+    }
+
+    #[test]
+    fn pooled_slope_fits_one_slope_across_runs_with_its_error() {
+        // Two runs, slope 3, different intercepts, no noise.
+        let a: Vec<(f64, f64)> = (0..10)
+            .map(|i| (i as f64, 3.0 * i as f64 + 100.0))
+            .collect();
+        let b: Vec<(f64, f64)> = (20..30)
+            .map(|i| (i as f64, 3.0 * i as f64 - 500.0))
+            .collect();
+        let f = pooled_slope(&[a, b]).unwrap();
+        assert!((f.slope - 3.0).abs() < 1e-9 && f.se < 1e-6, "{f:?}");
+        assert!(!drift_significant(Fit {
+            slope: 400.0,
+            se: 300.0
+        }));
+        assert!(drift_significant(Fit {
+            slope: 400.0,
+            se: 100.0
+        }));
+        assert!(!drift_significant(Fit {
+            slope: 150.0,
+            se: 1.0
+        }));
     }
 
     #[test]

@@ -58,19 +58,24 @@ values, or picture contents). The reference tier is the sub-stream.
 
 - **Tiers**: frame rate from timestamps and from arrivals, GOP length in
   frames and seconds, keyframe and other frame sizes, bit rate, timestamp
-  drift against arrivals, and whether each tier's timestamps stay within one
-  second of its wall-clock seconds.
+  drift against arrivals, and, over the keyframes (only they carry the
+  wall-clock seconds), the spread of *pts − seconds × 10⁶* around its
+  median and whether it stays within one second.
 - **Clock relation**: per run of the other tier (start or discontinuity to
   the next), the median of *pts − arrival* minus the reference tier's over
   the same span. On one clock this is minus the latency difference and the
   same in every run; on separate clocks it is arbitrary and changes on
-  restart. Also the relative drift (ppm) on runs of 10 s or more, the count
-  of pictures with identical timestamps in both tiers, and whether the two
-  tiers' *pts − seconds × 10⁶* windows overlap.
+  restart. Also the relative drift (slope of the difference of the tiers'
+  *pts − arrival*, ppm ± one standard error) per run of 10 s or more and
+  pooled over every run, the count of pictures with identical timestamps in
+  both tiers, and both tiers' keyframe spreads of *pts − seconds × 10⁶*
+  relative to the reference's median: whether they overlap, and whether one
+  constant fits both (the seconds are truncated, so each tier allows the
+  constant in *[max − 1 s, min]*).
 - **Latency difference**: for pictures of the same moment (nearest
-  timestamps, within half a reference frame interval), how much later the
-  other tier arrived, corrected by the timestamp difference: median, p10,
-  p90, jitter (p90 − p10), standard deviation.
+  timestamps, closer than half the shorter frame interval of the two
+  tiers), how much later the other tier arrived, corrected by the timestamp
+  difference: median, p10, p90, jitter (p90 − p10), standard deviation.
 - **Starts**: for each start request, the time to the first record, first
   video record, and first keyframe; whether the first video was a keyframe;
   the first keyframe's *age* (how much older than the run's steady latency
@@ -78,9 +83,15 @@ values, or picture contents). The reference tier is the sub-stream.
   steady latency by more than two frame intervals: buffered frames); and
   *live* (the first picture back at the steady latency). Pictures in a
   burst are left out of the clock and latency comparison.
-- **Verdict**: `shared clock: yes/no (evidence)`. "Yes" needs per-run
-  offsets under 2 s that agree within 200 ms, relative drift under 200 ppm,
-  and overlapping wall-clock windows when both tiers carry them. On "no",
+- **Verdict**: `shared clock: yes/no (evidence)`. Identical timestamps on
+  at least 90% of the pictures of the same moment (10 at least) are
+  decisive: separate clocks do not agree to the microsecond picture after
+  picture. Otherwise "yes" needs per-run offsets under 2 s that agree
+  within 200 ms, no significant relative drift (the pooled drift counts
+  only when it exceeds 200 ppm *and* three standard errors: with a couple
+  of hundred milliseconds of arrival jitter, runs of tens of seconds cannot
+  measure drift to 200 ppm), and one wall-clock constant fitting both tiers
+  when both carry the seconds. On "no",
   the report names the fallback, aligning the tiers by correlating motion in
   their decoded pictures, as future work; it is not implemented.
 
