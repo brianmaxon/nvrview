@@ -103,6 +103,49 @@ Events from all cameras are grouped into incidents:
   observed seek-and-play flow (123, 5, 7), one stream per visible lane,
   within the device's session limits.
 
+## Device AI search
+
+Newer NVR firmware runs its own search over its recordings: by event type
+(people, vehicle, animal, package, visitor, ...), by danger level, by a
+tracked object across cameras, and by a typed phrase ("AI video search"). The
+commands, request fields, and hit fields are in protocol.md ("Event log and
+AI search: commands 516–519, 759, 653"), read from the official client but
+**not yet seen on the wire**. The plan, in order:
+
+1. **Capture it.** The official client's AI search screen with a packet
+   capture running: a type search, a danger-level search, a track ("follow
+   this person"), a text search, opening a hit's detail and cover image.
+   Record the observed request and reply bodies, timings, and paging in
+   protocol.md, and confirm how support is advertised (199
+   `eventLogVersion`).
+2. **Read back results with our own client.** Type, danger-level, and track
+   searches (516 → 517 pages → 518, 519 counts, 759 detail, 653 cover) are
+   read-only viewing commands; add them to the allowlist once observed, then
+   a `bc-cli eventlog` command, then the core. Hits become incidents like the
+   272–274 index's, with their extra fields (`dangerLevel`, `yoloWorldType`,
+   the 759 description text and tracks) kept for filtering and display.
+3. **Use it for notifications, if it can be read soon enough.** Measure how
+   long after an event its hit appears in a 516 search, how costly a
+   repeated narrow search (last minute, chosen cameras) is for the NVR, and
+   what the hit adds over the live detection push (command 33): a danger
+   level, an object type beyond person/vehicle/animal, a description, or a
+   track across cameras. If a hit arrives within seconds, a notification can
+   wait briefly for it to add detail or to confirm (the verifier in
+   ARCHITECTURE.md, with the device's own judgment as one more signal), and
+   it fails open: no hit in time never suppresses a notification. Searches
+   run at most a few times a minute per NVR, one at a time, never while the
+   device is busy serving playback, within the session limits.
+4. **Text search needs a text encoder.** The NVR compares a feature vector,
+   not text; the official client makes it with a downloaded encoder model or
+   the vendor's server. Using the vendor's server is out (it can record the
+   search). Shipping or downloading the vendor's model needs its license
+   checked first; a compatible open encoder would have to produce vectors in
+   the same space, which is unlikely. Until that is settled, text search is
+   out of scope and type, danger, and track searches are the useful part.
+5. **Fast thumbnails.** The official client fetches one cover per hit, one
+   at a time, which makes its search slow. Ours fetches covers only for hits
+   on screen, in parallel up to the device's measured limit, and caches them.
+
 ## Sound
 
 The official desktop app's playback ignores audio, although recordings
@@ -250,6 +293,9 @@ compositor and encoder.
 
 ## Open questions
 
+- Device AI search (above): the wire format, how soon a hit appears after
+  an event, the device's cost and limits for repeated searches, and whether
+  text search can work without the vendor's encoder.
 - Animal event type names from the device (needs a capture with an animal
   event).
 - Whether live view and 143 downloads can share a session, and the
