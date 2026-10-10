@@ -151,6 +151,7 @@ change.
 {"type":"device_info","device":1,"name":"NVR","model":"EXAMPLE-MODEL"}
 {"type":"channels","device":1,"channels":[{"channel":0,"connected":true,"tiers":["main","sub"],"name":"Channel 1","model":"EXAMPLE-CAM"}]}
 {"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
+{"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
 {"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}
@@ -193,7 +194,15 @@ change.
   `stop` first.
 - `detects` in `channels` lists the detection kinds a channel's camera
   advertises (199 `aitype` bits), once known; `[]` for a camera without
-  AI. It may arrive in a later `channels` event than the slot list.
+  AI. For a multi-lens camera it is every kind of the camera (the
+  channel's own `aitype` and all its lenses' together). It may arrive in a
+  later `channels` event than the slot list.
+- `lenses` (with `detects`) is the number of lenses of a multi-lens camera,
+  present only when it has two or more: the 199 item of such a camera
+  holds one sub-item per lens (newer NVR firmware; docs/protocol.md "Which
+  channels detect what"). `lens_detects` then lists each lens's detection
+  kinds, lens 0 first. The `tiers` a channel advertises do not tell a
+  second lens apart (single-lens cameras can advertise `extern` too).
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from

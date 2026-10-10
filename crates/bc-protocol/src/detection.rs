@@ -7,7 +7,8 @@
 //! reads one snapshot and the caller compares consecutive ones.
 //!
 //! Which detection types a channel supports comes from the `aitype` bitmask
-//! of each channel `item` in the capabilities reply (command 199), read by
+//! of each channel `item` in the capabilities reply (command 199), and per
+//! lens from the `subItem`s of a multi-lens camera, read by
 //! [`parse_channel_ai`] and named by [`ai_kinds`].
 
 use crate::xml::{XmlError, field, records};
@@ -74,28 +75,110 @@ pub fn parse_alarm_event_list(xml: &str) -> Result<Vec<AlarmState>, XmlError> {
 }
 
 /// One channel's AI capabilities from the capabilities reply (199).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChannelAi {
     /// `chnID` (0-based, as `channelId` elsewhere).
     pub channel: u8,
-    /// `aitype`, a bitmask ([`ai_kinds`]).
+    /// The item's own `aitype`, a bitmask ([`ai_kinds`]).
+    pub aitype: u32,
+    /// The lenses of a multi-lens camera, from the item's `subItem`s (each
+    /// with its own `chnID` and `aitype`), by lens number; empty when the
+    /// item has none (a single-lens camera, or older firmware).
+    pub lenses: Vec<LensAi>,
+}
+
+/// One lens of a multi-lens camera in the capabilities reply (199).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LensAi {
+    /// The `subItem`'s `chnID`: 0 for the first lens, 1 for the second
+    /// (apparently the lens that 33 calls `subChannel`).
+    pub lens: u8,
+    /// The lens's `aitype`.
     pub aitype: u32,
 }
 
+type Fields = Vec<(String, String)>;
+
 /// Reads each channel `item` that has a `chnID` and an `aitype` from a
-/// `Support` reply (199). Items without them are skipped. The per-lens
-/// `subItem`s of a multi-lens camera are not read; the item's own `chnID`
-/// and `aitype` come before them.
+/// `Support` reply (199), with the per-lens `subItem`s of a multi-lens
+/// camera (docs/protocol.md, "Which channels detect what"). Items without
+/// them are skipped, and so are sub-items without them.
 pub fn parse_channel_ai(xml: &str) -> Result<Vec<ChannelAi>, XmlError> {
-    Ok(records(xml, "item")?
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    // The open item's own fields and its finished sub-items, the open
+    // sub-item's fields, and the open leaf element.
+    let mut item: Option<(Fields, Vec<Fields>)> = None;
+    let mut sub: Option<Fields> = None;
+    let mut leaf: Option<(String, String)> = None;
+    loop {
+        match reader.read_event().map_err(|_| XmlError::Malformed)? {
+            Event::Start(e) => {
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                if item.is_none() {
+                    if name == "item" {
+                        item = Some((Vec::new(), Vec::new()));
+                    }
+                } else if name == "subItem" && sub.is_none() {
+                    sub = Some(Vec::new());
+                } else {
+                    leaf = Some((name, String::new()));
+                }
+            }
+            Event::Text(t) => {
+                if let Some((_, text)) = leaf.as_mut() {
+                    text.push_str(&t.xml10_content().map_err(|_| XmlError::Malformed)?);
+                }
+            }
+            Event::End(e) => {
+                let name = e.local_name();
+                let name = name.as_ref();
+                if name == b"subItem" && sub.is_some() {
+                    if let (Some(s), Some((_, subs))) = (sub.take(), item.as_mut()) {
+                        subs.push(s);
+                    }
+                } else if name == b"item" && sub.is_none() {
+                    if let Some((fields, subs)) = item.take() {
+                        out.extend(channel_ai(&fields, &subs));
+                    }
+                } else if let Some((n, text)) = leaf.take() {
+                    let fields = match (sub.as_mut(), item.as_mut()) {
+                        (Some(s), _) => Some(s),
+                        (None, Some((f, _))) => Some(f),
+                        _ => None,
+                    };
+                    if let Some(f) = fields
+                        && !f.iter().any(|(x, _)| *x == n)
+                    {
+                        f.push((n, text.trim().to_owned()));
+                    }
+                }
+            }
+            Event::Eof => return Ok(out),
+            _ => {}
+        }
+    }
+}
+
+fn channel_ai(item: &[(String, String)], subs: &[Fields]) -> Option<ChannelAi> {
+    let mut lenses: Vec<LensAi> = subs
         .iter()
-        .filter_map(|f| {
-            Some(ChannelAi {
-                channel: field(f, "chnID")?.parse().ok()?,
-                aitype: field(f, "aitype")?.parse().ok()?,
+        .filter_map(|s| {
+            Some(LensAi {
+                lens: field(s, "chnID")?.parse().ok()?,
+                aitype: field(s, "aitype")?.parse().ok()?,
             })
         })
-        .collect())
+        .collect();
+    lenses.sort_by_key(|l| l.lens);
+    lenses.dedup_by_key(|l| l.lens);
+    Some(ChannelAi {
+        channel: field(item, "chnID")?.parse().ok()?,
+        aitype: field(item, "aitype")?.parse().ok()?,
+        lenses,
+    })
 }
 
 /// `aitype` bits that name a detection type, with the name the alarm-state
@@ -179,17 +262,38 @@ mod tests {
             vec![
                 ChannelAi {
                     channel: 0,
-                    aitype: 0
+                    aitype: 0,
+                    lenses: vec![]
                 },
                 ChannelAi {
                     channel: 1,
-                    aitype: 7
+                    aitype: 7,
+                    lenses: vec![]
                 },
                 ChannelAi {
                     channel: 2,
-                    aitype: 23
+                    aitype: 23,
+                    lenses: vec![LensAi { lens: 0, aitype: 7 }, LensAi { lens: 1, aitype: 1 }]
                 },
             ]
+        );
+        // Sub-items in another order, one incomplete, other fields among
+        // them: lenses by number, the item's own fields untouched.
+        let xml = "<body><Support><item><chnID>4</chnID>\
+            <subItem><chnID>1</chnID><aitype>3</aitype><other>2</other></subItem>\
+            <subItem><aitype>5</aitype></subItem>\
+            <subItem><chnID>0</chnID><aitype>23</aitype></subItem>\
+            <aitype>19</aitype></item></Support></body>";
+        let ai = parse_channel_ai(xml).unwrap();
+        assert_eq!(ai.len(), 1);
+        assert_eq!((ai[0].channel, ai[0].aitype), (4, 19));
+        assert_eq!(
+            ai[0]
+                .lenses
+                .iter()
+                .map(|l| (l.lens, l.aitype))
+                .collect::<Vec<_>>(),
+            vec![(0, 23), (1, 3)]
         );
         assert!(ai_kinds(0).is_empty());
         assert_eq!(ai_kinds(7), vec!["people", "vehicle"]);

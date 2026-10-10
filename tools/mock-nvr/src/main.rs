@@ -15,6 +15,8 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
+    \x20               [--multi-lens CH:BITS,BITS]\n\
+    --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -30,6 +32,7 @@ fn run() -> Result<(), String> {
     let (mut replay_loop, mut replay_speed) = (false, 1.0f64);
     let mut recording_days = 0u32;
     let mut aitype = 0u32;
+    let mut multi_lens: Option<(u8, Vec<u32>)> = None;
     let mut detections: Option<f64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -66,6 +69,18 @@ fn run() -> Result<(), String> {
                 recording_days = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--aitype" => aitype = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
+            "--multi-lens" => {
+                let bad = || format!("bad value for {a}: {v} (CH:BITS,BITS)");
+                let (ch, bits) = v.split_once(':').ok_or_else(bad)?;
+                let bits: Vec<u32> = bits
+                    .split(',')
+                    .map(|b| b.parse().map_err(|_| bad()))
+                    .collect::<Result<_, _>>()?;
+                if bits.len() < 2 {
+                    return Err(bad());
+                }
+                multi_lens = Some((ch.parse().map_err(|_| bad())?, bits));
+            }
             "--detections" => {
                 detections = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
             }
@@ -117,6 +132,13 @@ fn run() -> Result<(), String> {
     }
     // Every channel advertises the same capabilities.
     cfg.aitypes = vec![aitype; usize::from(channels)];
+    if let Some((ch, bits)) = multi_lens {
+        if ch >= channels {
+            return Err(format!("--multi-lens channel {ch} is not below --channels"));
+        }
+        cfg.lens_aitypes = vec![Vec::new(); usize::from(channels)];
+        cfg.lens_aitypes[usize::from(ch)] = bits;
+    }
     if let Some(secs) = detections {
         if !(secs.is_finite() && secs > 0.0) {
             return Err("--detections must be positive".into());

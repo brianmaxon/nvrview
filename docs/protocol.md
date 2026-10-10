@@ -385,6 +385,14 @@ the next session's first push is a fresh snapshot.
 | `AiCfg` (299, read per channel at login) has `detectType` (comma list such as `people,vehicle,dog_cat`) and AI tracking settings. Read-only use is viewing tier; 300 writes it (configuration, never sent). | observed |
 | `AbilityInfo` (151) has no AI-specific entries; its `alarm` module holds only permissions such as `motion_rw`. | observed |
 
+How nvrview uses this: the core reads each `item`'s `aitype` and its
+`subItem`s (lens number from the sub-item's `chnID`, and its `aitype`). A
+channel whose item has two or more sub-items is reported to the app as a
+multi-lens camera (`lenses`, and `lens_detects` per lens, in the `channels`
+event, docs/FFI.md), with `detects` the union of the item's and the lenses'
+kinds. Without sub-items (older firmware, single-lens cameras) only the
+item's `aitype` is used, and nothing marks a second lens.
+
 ### Animal type names
 
 | Name | Where | Provenance |

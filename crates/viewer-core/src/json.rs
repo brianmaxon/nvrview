@@ -90,6 +90,34 @@ impl Object {
         self
     }
 
+    /// Adds an array of arrays of strings.
+    pub(crate) fn str_arrays<'a, I>(
+        mut self,
+        key: &str,
+        values: impl IntoIterator<Item = I>,
+    ) -> Object
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        self.key(key);
+        self.buf.push('[');
+        for (i, inner) in values.into_iter().enumerate() {
+            if i > 0 {
+                self.buf.push(',');
+            }
+            self.buf.push('[');
+            for (k, v) in inner.into_iter().enumerate() {
+                if k > 0 {
+                    self.buf.push(',');
+                }
+                escape_into(&mut self.buf, v);
+            }
+            self.buf.push(']');
+        }
+        self.buf.push(']');
+        self
+    }
+
     /// Adds an array of objects.
     pub(crate) fn objects(mut self, key: &str, values: impl IntoIterator<Item = Object>) -> Object {
         self.key(key);

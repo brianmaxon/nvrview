@@ -27,7 +27,8 @@
 //!   and alarm-state pushes (33) whenever a test changes a channel's state
 //!   ([`MockNvr::set_alarm`]) or a scripted cycle does
 //!   ([`Config::detection_cycle`]); per-channel `aitype` capabilities in
-//!   the 199 reply ([`Config::aitypes`]);
+//!   the 199 reply ([`Config::aitypes`], and per lens of a multi-lens camera
+//!   [`Config::lens_aitypes`]);
 //! - optionally, a fake recording store ([`archive`]): day records (142),
 //!   file search (14–16), event search (272–274), cover images (298), and
 //!   download by time range (143, stopped by 144), with injectable download
@@ -103,6 +104,12 @@ pub struct Config {
     /// (missing channels report 0: no AI). For example 7 is AI with people
     /// and vehicles, 23 adds dogs and cats (docs/protocol.md).
     pub aitypes: Vec<u32>,
+    /// Multi-lens cameras: by channel, each lens's `aitype`, sent as one
+    /// `subItem` per lens (with `chnID` 0, 1, ...) inside the channel's
+    /// item of the 199 reply, as newer NVR firmware does (docs/protocol.md,
+    /// "Which channels detect what"). Missing or empty: a single-lens
+    /// camera, no sub-items.
+    pub lens_aitypes: Vec<Vec<u32>>,
     /// If set, a scripted detection moves through the channels: each period
     /// one channel reports motion and `people` for the first half of the
     /// period, then returns to idle, and the next channel follows.
@@ -128,6 +135,7 @@ impl Config {
             replay: None,
             archive: None,
             aitypes: Vec::new(),
+            lens_aitypes: Vec::new(),
             detection_cycle: None,
         }
     }
@@ -617,7 +625,7 @@ impl Conn {
     }
 
     /// Capabilities (199): the channel count and one `item` per channel
-    /// with its `aitype`.
+    /// with its `aitype`, and one `subItem` per lens of a multi-lens camera.
     fn support(&self) -> String {
         let cfg = &self.shared.config;
         let mut s = format!(
@@ -627,8 +635,15 @@ impl Conn {
         for c in 0..cfg.channels {
             let ai = cfg.aitypes.get(usize::from(c)).copied().unwrap_or(0);
             s.push_str(&format!(
-                "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n</item>\n"
+                "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n"
             ));
+            let lenses = cfg.lens_aitypes.get(usize::from(c));
+            for (lens, ai) in lenses.into_iter().flatten().enumerate() {
+                s.push_str(&format!(
+                    "<subItem>\n<chnID>{lens}</chnID>\n<aitype>{ai}</aitype>\n</subItem>\n"
+                ));
+            }
+            s.push_str("</item>\n");
         }
         s.push_str("</Support>\n");
         s
