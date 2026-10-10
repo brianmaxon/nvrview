@@ -39,6 +39,17 @@ fi
 step "Windows compile check"
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 
+# Linux tests in Docker, when the Docker daemon is running.
+# NVRVIEW_LINUX_TESTS=0 skips them.
+if [ "${NVRVIEW_LINUX_TESTS:-1}" = "0" ]; then
+  step "Linux tests skipped (NVRVIEW_LINUX_TESTS=0)"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  step "Linux tests (Docker)"
+  scripts/linux-check.sh
+else
+  step "Linux tests skipped (Docker is not running)"
+fi
+
 if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   step "macOS app tests"
   (cd apps/macos && swift test)
