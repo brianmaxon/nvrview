@@ -23,6 +23,11 @@
 //!   recorded, at their recorded times, optionally accelerated or looped;
 //!   with several tiers, all previews share one replay clock, so a tier
 //!   started later joins at the same capture moment ([`replay`]).
+//! - optionally, third-party (ONVIF) camera channels ([`ThirdPartyConfig`]):
+//!   every preview start is answered with status 400 and the first few
+//!   send nothing; a later one streams on the message ID of its 400, with
+//!   `:0dc`/`:1dc` video magics, as observed for such a camera behind an NVR
+//!   (docs/protocol.md, "Records as the official client reads them").
 //! - detection events ([`alarms`]): the alarm-report subscription (192)
 //!   and alarm-state pushes (33) whenever a test changes a channel's state
 //!   ([`MockNvr::set_alarm`]) or a scripted cycle does
@@ -114,6 +119,37 @@ pub struct Config {
     /// one channel reports motion and `people` for the first half of the
     /// period, then returns to idle, and the next channel follows.
     pub detection_cycle: Option<Duration>,
+    /// If set, these channels behave like third-party cameras behind an NVR.
+    pub third_party: Option<ThirdPartyConfig>,
+}
+
+/// Third-party (ONVIF) camera channels: each preview start is answered with
+/// status 400 and an empty body. The first `refusals` starts of a channel
+/// and tier (counted server-wide) send nothing more; each later one sends
+/// its stream `media_delay` after the 400, on the same message ID, with
+/// `:0dc`/`:1dc` video magics and `encryptLen` 1024. A stop is answered 200
+/// either way.
+#[derive(Clone, Debug)]
+pub struct ThirdPartyConfig {
+    /// The third-party channels.
+    pub channels: Vec<u8>,
+    /// Starts of each channel and tier answered with 400 and no stream
+    /// before one streams; `u32::MAX` never streams.
+    pub refusals: u32,
+    /// Delay between the 400 and the stream of a start that streams.
+    pub media_delay: Duration,
+}
+
+impl ThirdPartyConfig {
+    /// `channels`, each refusing `refusals` starts, streaming 200 ms after
+    /// the 400 of the next.
+    pub fn new(channels: Vec<u8>, refusals: u32) -> ThirdPartyConfig {
+        ThirdPartyConfig {
+            channels,
+            refusals,
+            media_delay: Duration::from_millis(200),
+        }
+    }
 }
 
 impl Config {
@@ -137,6 +173,7 @@ impl Config {
             aitypes: Vec::new(),
             lens_aitypes: Vec::new(),
             detection_cycle: None,
+            third_party: None,
         }
     }
 }
@@ -155,6 +192,8 @@ struct Shared {
     /// Start of the shared replay clock of an `NVRREC02` replay: the first
     /// preview started on this server.
     replay_epoch: OnceLock<Instant>,
+    /// Starts of third-party channels so far, by (channel, handle).
+    third_party_starts: Mutex<HashMap<(u8, u32), u32>>,
 }
 
 /// Most downloads remembered for [`MockNvr::download_log`].
@@ -187,6 +226,7 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         alarms,
         next_conn: AtomicU64::new(1),
         replay_epoch: OnceLock::new(),
+        third_party_starts: Mutex::new(HashMap::new()),
     });
     let s = Arc::clone(&shared);
     let accept = thread::spawn(move || accept_loop(listener, s));
@@ -343,7 +383,8 @@ enum State {
 
 struct Stream {
     stop: Arc<AtomicBool>,
-    join: JoinHandle<()>,
+    /// `None` for a third-party start that sends nothing.
+    join: Option<JoinHandle<()>>,
 }
 
 struct Conn {
@@ -426,7 +467,9 @@ impl Conn {
         self.shared.alarms.unsubscribe(self.id);
         for (_, s) in self.streams.drain().chain(self.downloads.drain()) {
             s.stop.store(true, Ordering::SeqCst);
-            let _ = s.join.join();
+            if let Some(j) = s.join {
+                let _ = j.join();
+            }
         }
         if self.holds_login {
             self.holds_login = false;
@@ -713,21 +756,54 @@ impl Conn {
 
     fn start_preview(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
-        let Some((handle, _, tier)) = self.preview_target(m) else {
+        let Some((handle, channel, tier)) = self.preview_target(m) else {
             return self.reply_xml(3, id, 400, "");
         };
         if self.streams.contains_key(&handle) {
             return self.reply_xml(3, id, 400, "");
         }
-        let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut delay = Duration::ZERO;
+        if let Some(tp) = &self.shared.config.third_party
+            && tp.channels.contains(&channel)
+        {
+            let n = {
+                let mut starts = lock(&self.shared.third_party_starts);
+                let n = starts.entry((channel, handle)).or_insert(0);
+                *n = n.saturating_add(1);
+                *n
+            };
+            // Every start of a third-party channel is answered 400; the
+            // stream, if any, follows on the same message ID.
+            self.reply_xml(3, id, 400, "")?;
+            if n <= tp.refusals {
+                self.streams.insert(handle, Stream { stop, join: None });
+                return Ok(());
+            }
+            delay = tp.media_delay;
+        }
+        let writer = Arc::clone(&self.writer);
         let key = self.key.clone().expect("logged in");
         let (cfg_shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
         // Like a real device, send no separate reply: the first media message
         // (status 200) is the answer.
         let join = thread::spawn(move || {
-            let _ = stream_media(&cfg_shared, &writer, &key, id, tier, &stop2);
+            let until = Instant::now() + delay;
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                if stop2.load(Ordering::SeqCst) || cfg_shared.shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                thread::sleep(left.min(POLL));
+            }
+            let _ = stream_media(&cfg_shared, &writer, &key, id, channel, tier, &stop2);
         });
-        self.streams.insert(handle, Stream { stop, join });
+        self.streams.insert(
+            handle,
+            Stream {
+                stop,
+                join: Some(join),
+            },
+        );
         Ok(())
     }
 
@@ -748,7 +824,9 @@ impl Conn {
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             w.write_all(&bytes)?;
         }
-        let _ = s.join.join();
+        if let Some(j) = s.join {
+            let _ = j.join();
+        }
         Ok(())
     }
 }
@@ -784,6 +862,7 @@ fn stream_media(
     writer: &Writer,
     key: &SessionKey,
     id: u32,
+    channel: u8,
     tier: StreamTier,
     stop: &AtomicBool,
 ) -> io::Result<()> {
@@ -791,6 +870,16 @@ fn stream_media(
     if let Some(r) = &cfg.replay {
         return stream_replay(shared, writer, key, id, tier, stop, r);
     }
+    // A third-party camera's video magics start with `:` (`:0dc`, `:1dc`).
+    let first = if cfg
+        .third_party
+        .as_ref()
+        .is_some_and(|t| t.channels.contains(&channel))
+    {
+        10
+    } else {
+        0
+    };
     let fix = &cfg.fixture;
     let fps = cfg.fps.max(1);
     let audio = cfg.audio.as_deref();
@@ -822,7 +911,7 @@ fn stream_media(
             Item::Video { pts_us, .. } => {
                 let frame = &fix.frames()[index];
                 index = fix.next_index(index);
-                encode_video(0, frame.keyframe, fix.codec(), pts_us, &[], &frame.data)
+                encode_video(first, frame.keyframe, fix.codec(), pts_us, &[], &frame.data)
             }
             Item::Audio { k } => {
                 let a = audio.expect("audio items only with audio");
@@ -1020,8 +1109,8 @@ impl Conn {
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
                     w.write_all(&bytes)?;
                 }
-                if let Some(s) = stream {
-                    let _ = s.join.join();
+                if let Some(j) = stream.and_then(|s| s.join) {
+                    let _ = j.join();
                 }
                 Ok(())
             }
@@ -1106,8 +1195,15 @@ impl Conn {
                 &shared, &writer, &key, id, &recs, estimate, &stop2, fault, rate,
             );
         });
-        self.downloads.retain(|_, s| !s.join.is_finished());
-        self.downloads.insert(id, Stream { stop, join });
+        self.downloads
+            .retain(|_, s| s.join.as_ref().is_some_and(|j| !j.is_finished()));
+        self.downloads.insert(
+            id,
+            Stream {
+                stop,
+                join: Some(join),
+            },
+        );
         Ok(())
     }
 }

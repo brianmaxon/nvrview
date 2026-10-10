@@ -16,7 +16,11 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
     \x20               [--multi-lens CH:BITS,BITS]\n\
+    \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
+    --third-party makes channels behave like third-party cameras behind an NVR: every\n\
+    preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
+    later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -34,6 +38,8 @@ fn run() -> Result<(), String> {
     let mut aitype = 0u32;
     let mut multi_lens: Option<(u8, Vec<u32>)> = None;
     let mut detections: Option<f64> = None;
+    let mut third_party: Vec<u8> = Vec::new();
+    let (mut third_party_refusals, mut third_party_delay_ms) = (2u32, 200u64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -80,6 +86,18 @@ fn run() -> Result<(), String> {
                     return Err(bad());
                 }
                 multi_lens = Some((ch.parse().map_err(|_| bad())?, bits));
+            }
+            "--third-party" => {
+                third_party = v
+                    .split(',')
+                    .map(|c| c.parse().map_err(|_| format!("bad value for {a}: {v}")))
+                    .collect::<Result<_, _>>()?
+            }
+            "--third-party-refusals" => {
+                third_party_refusals = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
+            "--third-party-delay-ms" => {
+                third_party_delay_ms = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--detections" => {
                 detections = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
@@ -144,6 +162,16 @@ fn run() -> Result<(), String> {
             return Err("--detections must be positive".into());
         }
         cfg.detection_cycle = Some(std::time::Duration::from_secs_f64(secs));
+    }
+    if !third_party.is_empty() {
+        if let Some(ch) = third_party.iter().find(|c| **c >= channels) {
+            return Err(format!(
+                "--third-party channel {ch} is not below --channels"
+            ));
+        }
+        let mut tp = mock_nvr::ThirdPartyConfig::new(third_party, third_party_refusals);
+        tp.media_delay = std::time::Duration::from_millis(third_party_delay_ms);
+        cfg.third_party = Some(tp);
     }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;

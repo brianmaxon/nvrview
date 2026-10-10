@@ -94,6 +94,17 @@ pub struct SessionConfig {
     /// Subscribe to the device's detection pushes (command 192) after every
     /// login, delivered by [`crate::DeviceSession::alarms`]. Default on.
     pub alarm_report: bool,
+    /// A preview start answered with status 400 is not final: a third-party
+    /// camera behind an NVR can answer 400 and then send its stream on that
+    /// message ID (docs/protocol.md, "Records as the official client reads
+    /// them"). Until media arrives, the session stops and restarts the
+    /// preview this long after each 400, as the official client does
+    /// (about every 6 s). Default 6 s.
+    pub preview_retry_interval: Duration,
+    /// How long after the first 400 the session keeps waiting and retrying
+    /// before it gives up and reports [`crate::Item::StartRejected`].
+    /// Zero makes a 400 final at once. Default 60 s.
+    pub preview_wait_limit: Duration,
 }
 
 impl SessionConfig {
@@ -116,6 +127,8 @@ impl SessionConfig {
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
             alarm_report: true,
+            preview_retry_interval: Duration::from_secs(6),
+            preview_wait_limit: Duration::from_secs(60),
         }
     }
 }
@@ -128,6 +141,8 @@ impl fmt::Debug for SessionConfig {
             .field("backoff", &self.backoff)
             .field("queue_frames", &self.queue_frames)
             .field("max_downloads", &self.max_downloads)
+            .field("preview_retry_interval", &self.preview_retry_interval)
+            .field("preview_wait_limit", &self.preview_wait_limit)
             .finish_non_exhaustive()
     }
 }

@@ -281,6 +281,9 @@ struct Generation {
     p: TilePipeline,
     /// Camera timestamp of the picture the app reported decoded last.
     last_decoded_pts: Option<u64>,
+    /// The device answered the start with 400 and the session is waiting
+    /// for its stream (`tile_waiting` `waiting` was sent).
+    waiting: bool,
 }
 
 impl Generation {
@@ -291,8 +294,53 @@ impl Generation {
             sub,
             p,
             last_decoded_pts: None,
+            waiting: false,
         }
     }
+
+    /// Notes a subscription item for the `tile_waiting` event: the start of
+    /// a wait for the device's stream, and its end at the first media.
+    fn track_waiting(&mut self, tile: u64, item: &Item, events: &EventSink) {
+        match item {
+            Item::WaitingForDevice { status } if !self.waiting => {
+                self.waiting = true;
+                info!(
+                    tile,
+                    generation = self.generation,
+                    status = *status,
+                    "the device answered the start with 400; waiting for its stream"
+                );
+                events.send(
+                    waiting_event(tile, self, "waiting")
+                        .u64("status", u64::from(*status))
+                        .finish(),
+                    Priority::State,
+                );
+            }
+            Item::Media(_) if self.waiting => {
+                self.waiting = false;
+                info!(
+                    tile,
+                    generation = self.generation,
+                    "the device's stream arrived after a wait"
+                );
+                events.send(
+                    waiting_event(tile, self, "streaming").finish(),
+                    Priority::State,
+                );
+            }
+            Item::StartRejected { .. } => self.waiting = false,
+            _ => {}
+        }
+    }
+}
+
+fn waiting_event(tile: u64, g: &Generation, state: &str) -> Object {
+    Object::event("tile_waiting")
+        .u64("tile", tile)
+        .str("tier", crate::device::tier_name(g.tier))
+        .u64("generation", u64::from(g.generation))
+        .str("state", state)
 }
 
 /// Whether two tiers of one channel are known to share one timestamp clock:
@@ -765,6 +813,7 @@ impl TileThread {
     /// An item of the generation being started: video goes to its pipeline;
     /// audio waits until it is shown.
     fn starting_item(tile: u64, st: &mut Starting, item: Item, ctx: &TileContext) {
+        st.g.track_waiting(tile, &item, &ctx.events);
         match item {
             Item::Media(Record::Video {
                 codec: c,
@@ -781,7 +830,7 @@ impl TileThread {
                     data,
                 });
             }
-            Item::Media(_) => {}
+            Item::Media(_) | Item::WaitingForDevice { .. } => {}
             Item::Discontinuity => st.g.p.discontinuity(),
             Item::StartRejected { status } => {
                 warn!(tile, status, "the device refused to start the new tier");
@@ -791,6 +840,7 @@ impl TileThread {
     }
 
     fn item(&mut self, g: &mut Generation, item: Item) {
+        g.track_waiting(self.id, &item, &self.ctx.events);
         let p = &mut g.p;
         if matches!(item, Item::Media(_)) {
             self.sequence += 1;
@@ -838,6 +888,8 @@ impl TileThread {
                 self.audio.discontinuity();
                 p.discontinuity();
             }
+            // Reported by `track_waiting`; the session keeps trying.
+            Item::WaitingForDevice { .. } => {}
             Item::StartRejected { status } => {
                 warn!(
                     tile = self.id,

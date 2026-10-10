@@ -161,6 +161,9 @@ change.
 {"type":"timing","what":"tier_switch","tile":7,"ns":2345678,"delta_ms":40,"held_ms":0,"capped":false}
 {"type":"tile_stats","tile":7,"tier":"sub","generation":0,"received":120,"decoded":118,"gated":0,"dropped":2,"failures":0,"resets":0}
 {"type":"tile_closed","tile":7,"reason":"device_removed"}
+{"type":"tile_waiting","tile":7,"tier":"sub","generation":0,"state":"waiting","status":400}
+{"type":"tile_waiting","tile":7,"tier":"sub","generation":0,"state":"streaming"}
+{"type":"tile_error","tile":7,"reason":"start_rejected","status":400}
 {"type":"audio_stats","tile":7,"records":386,"bytes":26722,"decoded":386,"concealed":0,"rejected":0,"talkback_ignored":0,"epoch":0,"audible":true,"volume":1,"tapped":true,"no_free_slot":false,"playout_delay_ms":223.76,"outliers":0,"timestamp_resets":0,"codec":"aac","sample_rate":16000,"channels":1,"rate_estimate":15999.93,"playout_delay_target_ms":100,"av_offset_ms":0.092,"buffered_ms":199.104,"correction_ppm":1.819,"resyncs":0,"starts":1,"underruns":0,"underrun_frames":0,"overflow_frames":0,"blocks_not_played":0,"tap_blocks":386,"tap_dropped":0}
 ```
 
@@ -174,6 +177,21 @@ change.
   after that tile's last `on_action` has returned; no action for it follows.
   For `nv_tile_close` it may arrive after the call returns (`reason`:
   `closed`, `device_removed`, `login_failed`, `core_shutdown`).
+- `tile_waiting` reports a stream the device has not started yet. A
+  third-party (ONVIF) camera behind an NVR answers a preview with status 400
+  and may send its stream afterwards (docs/protocol.md, "Records as the
+  official client reads them"), so the core keeps that preview open and
+  restarts it about every 6 s. `waiting` (with the reply `status`) is sent
+  once when the wait begins; `streaming` follows when media arrives, and
+  pictures follow as usual. If none arrives within 60 s, `tile_error`
+  (`reason` `start_rejected`, `status` 400) ends the wait instead. An app
+  can show "waiting for the camera" on the tile meanwhile. During a tier
+  switch it is reported with the new generation; the switch's own 15 s
+  limit still applies (`tile_tier` `failed`, `timeout`).
+- `tile_error` with `reason` `start_rejected` means the device refused the
+  tile's stream (`status`: the reply status); the tile stays open and shows
+  nothing until the device session reconnects or the app reopens the tile
+  (once no other tile shows that stream).
 - `tile_stats` arrives about once a second per tile while it is open, for
   diagnostics overlays; apps may ignore it. It describes the shown
   generation.

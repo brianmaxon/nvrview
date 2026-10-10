@@ -227,6 +227,7 @@ impl DeviceSession {
             transfers: Transfers::default(),
             conn_gen: 0,
             limiter: LogLimiter::new(Duration::from_secs(5)),
+            wait_log: LogLimiter::new(Duration::from_secs(5)),
         };
         let join = tokio::spawn(supervise(connector, ctx));
         DeviceSession {
@@ -431,6 +432,46 @@ struct Stream {
     info: Option<Record>,
     /// Status of a refused start, replayed to late subscribers.
     rejected: Option<u16>,
+    /// Media has arrived on the current start's message ID.
+    saw_media: bool,
+    /// The start was answered with 400 and no media has arrived yet.
+    waiting: Option<Wait>,
+}
+
+/// A preview answered with 400, waiting for the device's stream
+/// ([`SessionConfig::preview_retry_interval`]).
+#[derive(Clone, Copy, Debug)]
+struct Wait {
+    /// Status that started the wait, replayed to late subscribers.
+    status: u16,
+    /// Give up at this time ([`SessionConfig::preview_wait_limit`] after the
+    /// first 400).
+    until: Instant,
+    /// Stop and restart the preview at this time; `None` until the current
+    /// start has been answered with 400 (never two starts outstanding).
+    retry_at: Option<Instant>,
+    /// Restarts sent so far.
+    retries: u32,
+}
+
+impl Stream {
+    fn new() -> Stream {
+        Stream {
+            msg_id: None,
+            demux: Demuxer::new(),
+            subs: Vec::new(),
+            info: None,
+            rejected: None,
+            saw_media: false,
+            waiting: None,
+        }
+    }
+
+    /// The earliest time a wait needs attention.
+    fn wait_due(&self) -> Option<Instant> {
+        let w = self.waiting?;
+        Some(w.retry_at.map_or(w.until, |r| r.min(w.until)))
+    }
 }
 
 type StreamKey = (u8, StreamTier);
@@ -460,17 +501,15 @@ impl Subs {
         let st = self
             .streams
             .entry((n.channel, n.tier))
-            .or_insert_with(|| Stream {
-                msg_id: None,
-                demux: Demuxer::new(),
-                subs: Vec::new(),
-                info: None,
-                rejected: None,
-            });
+            .or_insert_with(Stream::new);
         // A late subscriber starts gated (the queue's initial state): it
         // sees video from the next keyframe on, preceded by the stream info.
         if let Some(info) = &st.info {
             n.queue.push_media(info.clone());
+        }
+        if let Some(w) = &st.waiting {
+            n.queue
+                .push_control(Item::WaitingForDevice { status: w.status });
         }
         if let Some(status) = st.rejected {
             n.queue.push_control(Item::StartRejected { status });
@@ -486,6 +525,8 @@ impl Subs {
             st.demux = Demuxer::new();
             st.info = None;
             st.rejected = None;
+            st.saw_media = false;
+            st.waiting = None;
             for q in &st.subs {
                 q.discontinuity();
             }
@@ -498,6 +539,11 @@ impl Subs {
             st.subs.retain(|q| !q.cancelled.load(Ordering::SeqCst));
         }
         self.streams.retain(|_, st| !st.subs.is_empty());
+    }
+
+    /// The earliest time a preview waiting for its stream needs attention.
+    fn wait_due(&self) -> Option<Instant> {
+        self.streams.values().filter_map(Stream::wait_due).min()
     }
 
     fn close_all(&mut self) {
@@ -603,6 +649,8 @@ struct Ctx {
     /// Incremented on every successful login.
     conn_gen: u64,
     limiter: LogLimiter,
+    /// Previews answered with 400 and their restarts.
+    wait_log: LogLimiter,
 }
 
 impl Ctx {
@@ -974,7 +1022,7 @@ async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 let bytes = c.session.stop_preview(mid).map_err(|e| e.to_string())?;
                 c.send(&bytes).await?;
             }
-        } else if st.msg_id.is_none() {
+        } else if st.msg_id.is_none() && st.rejected.is_none() {
             let (mid, bytes) = c
                 .session
                 .start_preview(key.0, key.1)
@@ -982,6 +1030,60 @@ async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             st.msg_id = Some(mid);
             ctx.subs.by_msg.insert(mid, key);
             c.send(&bytes).await?;
+        } else if let Some(w) = st.waiting {
+            let now = Instant::now();
+            if now >= w.until {
+                // Waited long enough: the device refused the stream.
+                st.waiting = None;
+                st.rejected = Some(w.status);
+                let mid = st.msg_id.take();
+                for q in &st.subs {
+                    q.push_control(Item::StartRejected { status: w.status });
+                }
+                warn!(
+                    channel = key.0,
+                    tier = ?key.1,
+                    status = w.status,
+                    retries = w.retries,
+                    "device refused the stream: no media after waiting"
+                );
+                if let Some(mid) = mid {
+                    ctx.subs.by_msg.remove(&mid);
+                    let bytes = c.session.stop_preview(mid).map_err(|e| e.to_string())?;
+                    c.send(&bytes).await?;
+                }
+            } else if w.retry_at.is_some_and(|t| now >= t) {
+                // As the official client does: stop the refused start, then
+                // send the same start again (with a new message ID).
+                if let Some(old) = st.msg_id.take() {
+                    ctx.subs.by_msg.remove(&old);
+                    let bytes = c.session.stop_preview(old).map_err(|e| e.to_string())?;
+                    c.send(&bytes).await?;
+                }
+                let (mid, bytes) = c
+                    .session
+                    .start_preview(key.0, key.1)
+                    .map_err(|e| e.to_string())?;
+                st.msg_id = Some(mid);
+                st.demux = Demuxer::new();
+                st.saw_media = false;
+                st.waiting = Some(Wait {
+                    retry_at: None,
+                    retries: w.retries + 1,
+                    ..w
+                });
+                ctx.subs.by_msg.insert(mid, key);
+                if let Some(n) = ctx.wait_log.allow() {
+                    debug!(
+                        channel = key.0,
+                        tier = ?key.1,
+                        retry = w.retries + 1,
+                        suppressed = n,
+                        "restarting a preview the device answered with 400"
+                    );
+                }
+                c.send(&bytes).await?;
+            }
         }
     }
     Ok(())
@@ -1143,6 +1245,13 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             else {
                 return;
             };
+            st.saw_media = true;
+            if let Some(w) = st.waiting.take() {
+                info!(
+                    retries = w.retries,
+                    "stream started after the device answered its preview with 400"
+                );
+            }
             st.demux.push(&data);
             loop {
                 match st.demux.next_record() {
@@ -1172,12 +1281,51 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             status,
             ..
         } if status != 200 => {
-            if let Some(st) = ctx
+            let Some(st) = ctx
                 .subs
                 .by_msg
                 .get(&message_id)
                 .and_then(|k| ctx.subs.streams.get_mut(k))
-            {
+            else {
+                return;
+            };
+            if status == 400 && st.saw_media {
+                // Media already proves the stream is running.
+                if let Some(n) = ctx.wait_log.allow() {
+                    debug!(
+                        status,
+                        suppressed = n,
+                        "preview answered 400 after its media; ignored"
+                    );
+                }
+            } else if status == 400 && !ctx.cfg.preview_wait_limit.is_zero() {
+                // Not final (docs/protocol.md): keep the preview open for
+                // media on this message ID and restart it later.
+                let now = Instant::now();
+                let retry_at = Some(now + ctx.cfg.preview_retry_interval);
+                match &mut st.waiting {
+                    Some(w) => w.retry_at = retry_at,
+                    None => {
+                        st.waiting = Some(Wait {
+                            status,
+                            until: now + ctx.cfg.preview_wait_limit,
+                            retry_at,
+                            retries: 0,
+                        });
+                        for q in &st.subs {
+                            q.push_control(Item::WaitingForDevice { status });
+                        }
+                    }
+                }
+                if let Some(n) = ctx.wait_log.allow() {
+                    info!(
+                        status,
+                        suppressed = n,
+                        "preview answered 400; waiting for the device's stream"
+                    );
+                }
+            } else {
+                st.waiting = None;
                 st.rejected = Some(status);
                 for q in &st.subs {
                     q.push_control(Item::StartRejected { status });
@@ -1271,12 +1419,13 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         sync_transfers(ctx, c).await?;
         let probe_due = last_rx.max(last_probe) + probe_after;
         let dead_due = last_rx + dead_after;
+        let wait_due = ctx.subs.wait_due();
         tokio::select! {
             r = c.fill() => {
                 r?;
                 last_rx = Instant::now();
             }
-            () = sleep_until(probe_due.min(dead_due)) => {
+            () = sleep_until(wait_due.map_or(probe_due, |w| w.min(probe_due)).min(dead_due)) => {
                 let now = Instant::now();
                 if now >= dead_due {
                     return Err("no data from device".to_owned());

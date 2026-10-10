@@ -32,6 +32,13 @@
 //! - **Bounded memory**: each [`Subscription`] has a fixed-capacity queue; a
 //!   slow consumer loses frames up to the next keyframe, and the loss is
 //!   reported ([`Item::Discontinuity`], [`Subscription::dropped`]).
+//! - **A 400 to a preview is waited out, boundedly**: a third-party camera
+//!   behind an NVR answers its preview with 400 and may stream afterwards on
+//!   that message ID, so the preview stays open, is restarted (stop, then a
+//!   new start: never two outstanding) every
+//!   [`SessionConfig::preview_retry_interval`] while no media has arrived,
+//!   and is given up after [`SessionConfig::preview_wait_limit`]
+//!   ([`Item::WaitingForDevice`], then media or [`Item::StartRejected`]).
 //! - **No retry storm on bad credentials**: a refused login ends the session
 //!   in [`ConnState::LoginFailed`] and is not retried; devices lock out after
 //!   a few failures.
