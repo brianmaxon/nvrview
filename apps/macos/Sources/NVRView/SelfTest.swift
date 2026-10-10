@@ -72,7 +72,10 @@ final class SelfTest {
     private func advance(_ seconds: Double) {
         guard let clock = app.testClock else { return }
         clock.advance(by: seconds)
-        for w in app.windows { w.stage.tick() }
+        for w in app.windows {
+            w.stage.tick()
+            w.sidebarOverlay.tick()
+        }
     }
 
     /// Every device connected, every tile playing, and the first tile's
@@ -290,31 +293,33 @@ final class SelfTest {
     /// The edge reveal: with the sidebar collapsed, a pointer resting at the
     /// left edge slides the sidebar over the stage without resizing the stage
     /// or its drawable, and it slides away again after the pointer leaves.
+    /// The dwell and the hide delay run on the test clock.
     private func revealStep() {
         guard let window else { return lensStep() }
         window.setSidebarCollapsedForTest(true)
-        after(0.6) { [self] in
-            let grid = window.stage.grid
+        let grid = window.stage.grid
+        when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in
             let size = grid.bounds.size, drawable = grid.drawableSize, resizes = grid.drawableResizes
             let overlay = window.sidebarOverlay
             overlay.simulatedPointer = CGPoint(x: 2, y: 200)
             overlay.pointerAt(CGPoint(x: 2, y: 200))
-            when({ overlay.isShown }, timeout: 3) { [self] in
-                if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
-                after(0.4) { [self] in
-                    if grid.bounds.size != size || grid.drawableSize != drawable || grid.drawableResizes != resizes {
-                        problems.append("the stage or its drawable changed size while the sidebar overlay was up")
-                    }
-                    print("reveal: shown, stage \(Int(size.width))x\(Int(size.height)) unchanged")
-                    overlay.simulatedPointer = CGPoint(x: 900, y: 200)
-                    overlay.pointerAt(CGPoint(x: 900, y: 200))
-                    when({ !overlay.isShown }, timeout: 3) { [self] in
-                        if overlay.isShown { problems.append("the sidebar overlay did not slide away") }
-                        overlay.simulatedPointer = nil
-                        window.setSidebarCollapsedForTest(false)
-                        after(0.6) { [self] in lensStep() }
-                    }
+            advance(overlay.reveal.dwell / 2)
+            if overlay.isShown { problems.append("the sidebar slid in before the dwell") }
+            advance(overlay.reveal.dwell / 2)
+            if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
+            // A few real refreshes with the overlay sliding in over the stage.
+            after(0.25) { [self] in
+                if grid.bounds.size != size || grid.drawableSize != drawable || grid.drawableResizes != resizes {
+                    problems.append("the stage or its drawable changed size while the sidebar overlay was up")
                 }
+                print("reveal: shown, stage \(Int(size.width))x\(Int(size.height)) unchanged")
+                overlay.simulatedPointer = CGPoint(x: 900, y: 200)
+                overlay.pointerAt(CGPoint(x: 900, y: 200))
+                advance(overlay.reveal.hideDelay)
+                if overlay.isShown { problems.append("the sidebar overlay did not slide away") }
+                overlay.simulatedPointer = nil
+                window.setSidebarCollapsedForTest(false)
+                when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in lensStep() }
             }
         }
     }

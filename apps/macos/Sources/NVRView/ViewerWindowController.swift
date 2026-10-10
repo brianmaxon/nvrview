@@ -97,6 +97,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
         overlayHost.rootView = SidebarView(model: model, window: self, state: sidebar)
         overlay.onPin = { [weak self] in self?.dockSidebar() }
+        // The edge reveal's dwell and hide delay count on the viewer's clock;
+        // a manual one (the self-test) is moved by whoever calls `tick`.
+        let clock = model.clock
+        overlay.clock = { clock.now }
+        overlay.armsTimer = !(clock is ManualViewerClock)
         overlay.isEditing = { [weak self] in self?.overlayIsEditing ?? false }
         sidebarObservation = sidebarItem.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.sidebarCollapsedChanged() }
@@ -111,6 +116,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             MainActor.assumeIsolated {
                 self?.stage.refreshChrome()
                 self?.stage.tick()
+                self?.overlay.tick()
             }
         }
         show(content)
@@ -349,8 +355,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     var sidebarOverlay: SidebarOverlay { overlay }
 
-    /// The self-test collapses and docks the sidebar like the user would.
-    func setSidebarCollapsedForTest(_ collapsed: Bool) { sidebarItem.animator().isCollapsed = collapsed }
+    /// The self-test collapses and docks the sidebar like the user would
+    /// (without the animation, so it need not wait for it).
+    func setSidebarCollapsedForTest(_ collapsed: Bool) {
+        sidebarItem.isCollapsed = collapsed
+        window?.contentView?.layoutSubtreeIfNeeded()
+    }
 
     /// Applies the saved choice when a window is reopened.
     func restoreSidebar(collapsed: Bool) {
