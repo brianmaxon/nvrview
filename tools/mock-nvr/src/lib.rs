@@ -21,14 +21,20 @@
 //! - optionally, a recorded stream instead (`NVRREC01`): the records are sent
 //!   as recorded, at their recorded times, optionally accelerated or looped
 //!   ([`replay`]).
+//! - optionally, a fake recording store ([`archive`]): day records (142),
+//!   file search (14–16), event search (272–274), cover images (298), and
+//!   download by time range (143, stopped by 144), with injectable download
+//!   stalls and disconnects.
 //!
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
+pub mod archive;
 pub mod audio;
 pub mod fixture;
 pub mod replay;
 
+use archive::{ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent};
 use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
 use bc_protocol::framer::{Decoder, RawMessage, encode_message_with_status};
@@ -38,7 +44,7 @@ use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, XML_DECLARATION};
 use fixture::Fixture;
 use replay::{ReplayConfig, Step};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -82,6 +88,9 @@ pub struct Config {
     /// If set, every preview serves this recording instead of the fixture
     /// (and `audio`): see [`replay`].
     pub replay: Option<ReplayConfig>,
+    /// If set, the device has recordings: see [`archive`]. Without it, the
+    /// recording commands are answered with status 400.
+    pub archive: Option<ArchiveConfig>,
 }
 
 impl Config {
@@ -101,6 +110,7 @@ impl Config {
             fixture: Arc::new(fixture),
             audio: None,
             replay: None,
+            archive: None,
         }
     }
 }
@@ -111,7 +121,13 @@ struct Shared {
     logins: AtomicUsize,
     failed: AtomicU32,
     nonce_counter: AtomicU32,
+    faults: Mutex<Vec<DownloadFault>>,
+    download_log: Mutex<VecDeque<DownloadLog>>,
+    command_counts: Mutex<HashMap<u32, u64>>,
 }
+
+/// Most downloads remembered for [`MockNvr::download_log`].
+const DOWNLOAD_LOG_LEN: usize = 10_000;
 
 /// A running mock NVR. Dropping it (or calling [`MockNvr::shutdown`]) stops
 /// the server and closes every connection.
@@ -132,6 +148,9 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         logins: AtomicUsize::new(0),
         failed: AtomicU32::new(0),
         nonce_counter: AtomicU32::new(0),
+        faults: Mutex::new(Vec::new()),
+        download_log: Mutex::new(VecDeque::new()),
+        command_counts: Mutex::new(HashMap::new()),
     });
     let s = Arc::clone(&shared);
     let accept = thread::spawn(move || accept_loop(listener, s));
@@ -151,6 +170,26 @@ impl MockNvr {
     /// Number of sessions that are currently logged in.
     pub fn active_logins(&self) -> usize {
         self.shared.logins.load(Ordering::SeqCst)
+    }
+
+    /// Queues a fault for the next download that matches it (each fault
+    /// applies once, in the order queued).
+    pub fn inject_download_fault(&self, fault: DownloadFault) {
+        lock(&self.shared.faults).push(fault);
+    }
+
+    /// Downloads (143) the server has started, oldest first (the most recent
+    /// 10,000).
+    pub fn download_log(&self) -> Vec<DownloadLog> {
+        lock(&self.shared.download_log).iter().cloned().collect()
+    }
+
+    /// How many messages with this command number logged-in clients sent.
+    pub fn command_count(&self, command: u32) -> u64 {
+        lock(&self.shared.command_counts)
+            .get(&command)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Stops the server and waits for its threads.
@@ -218,6 +257,13 @@ struct Conn {
     key: Option<SessionKey>,
     holds_login: bool,
     streams: HashMap<u32, Stream>,
+    /// Running downloads by message ID.
+    downloads: HashMap<u32, Stream>,
+    /// Open file searches: handle to (files, next index).
+    file_searches: HashMap<u32, (Vec<FileEntry>, usize)>,
+    /// Open event searches: handle to (channel, events, next index).
+    event_searches: HashMap<u32, (u8, Vec<MockEvent>, usize)>,
+    next_event_handle: u32,
 }
 
 fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
@@ -233,6 +279,10 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
         key: None,
         holds_login: false,
         streams: HashMap::new(),
+        downloads: HashMap::new(),
+        file_searches: HashMap::new(),
+        event_searches: HashMap::new(),
+        next_event_handle: 1,
     };
     let result = conn.run(&mut reader);
     conn.close();
@@ -268,7 +318,7 @@ impl Conn {
     }
 
     fn close(&mut self) {
-        for (_, s) in self.streams.drain() {
+        for (_, s) in self.streams.drain().chain(self.downloads.drain()) {
             s.stop.store(true, Ordering::SeqCst);
             let _ = s.join.join();
         }
@@ -390,7 +440,25 @@ impl Conn {
         String::from_utf8_lossy(&v).into_owned()
     }
 
+    /// The payload's XML text, decrypted (bodies sent after an extension).
+    fn payload_text(&self, m: &RawMessage) -> String {
+        let mut v = m.payload().to_vec();
+        if let Some(k) = &self.key {
+            k.decrypt(&mut v);
+        }
+        String::from_utf8_lossy(&v).into_owned()
+    }
+
     fn command(&mut self, m: &RawMessage) -> io::Result<()> {
+        *lock(&self.shared.command_counts)
+            .entry(m.header.command)
+            .or_insert(0) += 1;
+        if matches!(
+            m.header.command,
+            14 | 15 | 16 | 142 | 143 | 144 | 272 | 273 | 274 | 298
+        ) {
+            return self.archive_command(m);
+        }
         let cfg = &self.shared.config;
         let id = m.header.message_id;
         match m.header.command {
@@ -673,4 +741,336 @@ fn stream_replay(
         w.write_all(&out)?;
     }
     Ok(())
+}
+
+impl Conn {
+    /// The recording commands (docs/protocol.md, "Recordings: search and
+    /// download"). Without an [`ArchiveConfig`], each is refused with 400.
+    fn archive_command(&mut self, m: &RawMessage) -> io::Result<()> {
+        let id = m.header.message_id;
+        let cmd = m.header.command;
+        let Some(cfg) = self.shared.config.archive.clone() else {
+            return self.reply_xml(cmd, id, 400, "");
+        };
+        let channels = self.shared.config.channels;
+        match cmd {
+            142 => match archive::day_records_reply(&cfg, channels, &self.request_text(m)) {
+                Some(body) => self.reply_xml(142, id, 200, &body),
+                None => self.reply_xml(142, id, 400, ""),
+            },
+            14 => {
+                let r = archive::read_req(&self.request_text(m), "FileInfo");
+                let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
+                    return self.reply_xml(14, id, 400, "");
+                };
+                if ch >= channels {
+                    return self.reply_xml(14, id, 400, "");
+                }
+                let files = archive::files(&cfg, ch, start, end);
+                // Handles are reused once closed, as devices do.
+                let handle = (0..)
+                    .find(|h| !self.file_searches.contains_key(h))
+                    .unwrap_or(0);
+                let body = archive::file_search_summary(ch, handle, &files, start, end);
+                self.file_searches.insert(handle, (files, 0));
+                self.reply_xml(14, id, 200, &body)
+            }
+            15 => {
+                let r = archive::read_req(&self.request_text(m), "FileInfo");
+                let Some((files, next)) = r.handle.and_then(|h| self.file_searches.get_mut(&h))
+                else {
+                    return self.reply_xml(15, id, 400, "");
+                };
+                let end = next.saturating_add(cfg.file_page.max(1)).min(files.len());
+                let page = files[*next..end].to_vec();
+                *next = end;
+                let body = archive::file_page(r.handle.unwrap_or(0), &page);
+                self.reply_xml(15, id, 200, &body)
+            }
+            16 => {
+                let r = archive::read_req(&self.request_text(m), "FileInfo");
+                match r.handle.and_then(|h| self.file_searches.remove(&h)) {
+                    Some(_) => self.reply_xml(16, id, 200, ""),
+                    None => self.reply_xml(16, id, 400, ""),
+                }
+            }
+            272 => {
+                // The body travels as the payload after a channel extension.
+                let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
+                let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
+                    return self.reply_xml(272, id, 400, "");
+                };
+                if ch >= channels || m.extension().is_empty() {
+                    return self.reply_xml(272, id, 400, "");
+                }
+                let handle = self.next_event_handle;
+                self.next_event_handle = self.next_event_handle.wrapping_add(1).max(1);
+                let events = archive::events(&cfg, ch, start, end);
+                self.event_searches.insert(handle, (ch, events, 0));
+                self.reply_xml(
+                    272,
+                    id,
+                    200,
+                    &format!(
+                        "<findAlarmVideo version=\"1.1\">\n<channelId>{ch}</channelId>\n\
+                         <fileHandle>{handle}</fileHandle>\n</findAlarmVideo>\n"
+                    ),
+                )
+            }
+            273 => {
+                let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
+                let Some(handle) = r.handle else {
+                    return self.reply_xml(273, id, 400, "");
+                };
+                let Some((ch, events, next)) = self.event_searches.get_mut(&handle) else {
+                    return self.reply_xml(273, id, 400, "");
+                };
+                let end = next.saturating_add(cfg.event_page.max(1)).min(events.len());
+                let page = events[*next..end].to_vec();
+                *next = end;
+                let finished = end >= events.len();
+                let ch = *ch;
+                let body = archive::event_page(&cfg, ch, handle, &page, finished);
+                self.reply_xml(273, id, 200, &body)
+            }
+            274 => {
+                let r = archive::read_req(&self.payload_text(m), "findAlarmVideo");
+                match r.handle.and_then(|h| self.event_searches.remove(&h)) {
+                    Some(_) => self.reply_xml(274, id, 200, ""),
+                    None => self.reply_xml(274, id, 400, ""),
+                }
+            }
+            298 => self.cover(m, &cfg),
+            143 => self.start_download(m, cfg),
+            144 => {
+                // Stop the download this ID names; if none, any running one.
+                let key = if self.downloads.contains_key(&id) {
+                    Some(id)
+                } else {
+                    self.downloads.keys().next().copied()
+                };
+                let stream = key.and_then(|k| self.downloads.remove(&k));
+                {
+                    let mut w = lock(&self.writer);
+                    if let Some(s) = &stream {
+                        s.stop.store(true, Ordering::SeqCst);
+                    }
+                    let bytes = encode_message_with_status(144, id, 200, Class::Device, &[], &[])
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+                    w.write_all(&bytes)?;
+                }
+                if let Some(s) = stream {
+                    let _ = s.join.join();
+                }
+                Ok(())
+            }
+            _ => self.reply_xml(cmd, id, 400, ""),
+        }
+    }
+
+    /// 298: an empty acknowledgment, then the stream info and one keyframe
+    /// (`EncryptLen`, capital E, as observed), then an empty status-300 end.
+    fn cover(&mut self, m: &RawMessage, cfg: &ArchiveConfig) -> io::Result<()> {
+        let id = m.header.message_id;
+        let r = archive::read_req(&self.request_text(m), "CoverPreview");
+        let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
+            return self.reply_xml(298, id, 400, "");
+        };
+        if ch >= self.shared.config.channels {
+            return self.reply_xml(298, id, 400, "");
+        }
+        let key = self.key.clone().expect("logged in");
+        let c = &self.shared.config;
+        let recs = archive::media(cfg, &c.fixture, c.width, c.height, start, end);
+        let picked: Vec<(archive::Kind, Vec<u8>)> = recs
+            .into_iter()
+            .filter(|(k, _)| matches!(k, archive::Kind::Info | archive::Kind::Key))
+            .take(2)
+            .collect();
+        let mut out = encode_message_with_status(298, id, 200, Class::Device, &[], &[])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        for (kind, rec) in &picked {
+            transfer_message(&key, 298, id, *kind, rec, true, &mut out)?;
+        }
+        out.extend(
+            encode_message_with_status(298, id, 300, Class::Device, &[], &[])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?,
+        );
+        self.send_raw(&out)
+    }
+
+    /// 143: a size estimate, the media, and an empty status-300 end, sent by
+    /// a thread of its own so 144 and other commands are served meanwhile.
+    fn start_download(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
+        let id = m.header.message_id;
+        let r = archive::read_req(&self.request_text(m), "FileInfo");
+        let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
+            return self.reply_xml(143, id, 400, "");
+        };
+        if ch >= self.shared.config.channels || end < start || self.downloads.contains_key(&id) {
+            return self.reply_xml(143, id, 400, "");
+        }
+        {
+            let mut log = lock(&self.shared.download_log);
+            if log.len() >= DOWNLOAD_LOG_LEN {
+                log.pop_front();
+            }
+            log.push_back(DownloadLog {
+                channel: ch,
+                start,
+                end,
+                stream: r.stream,
+            });
+        }
+        let fault = {
+            let mut f = lock(&self.shared.faults);
+            f.iter()
+                .position(|x| x.channel.is_none_or(|c| c == ch))
+                .map(|i| f.remove(i))
+        };
+        let key = self.key.clone().expect("logged in");
+        let c = &self.shared.config;
+        let recs = archive::media(&cfg, &c.fixture, c.width, c.height, start, end);
+        let estimate: u64 = recs.iter().map(|(_, r)| r.len() as u64).sum();
+        let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
+        let (shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
+        let rate = cfg.download_rate;
+        let join = thread::spawn(move || {
+            let _ = serve_download(
+                &shared, &writer, &key, id, &recs, estimate, &stop2, fault, rate,
+            );
+        });
+        self.downloads.retain(|_, s| !s.join.is_finished());
+        self.downloads.insert(id, Stream { stop, join });
+        Ok(())
+    }
+}
+
+/// Encodes one record of a download or cover reply: the first message has
+/// an extension with `binaryData` and the encrypted length (the whole
+/// record for info and audio, 1024 bytes of a keyframe, 32 of a predicted
+/// frame, as the official client received them); continuation messages have
+/// a `binaryData`-only extension and a plain payload.
+fn transfer_message(
+    key: &SessionKey,
+    cmd: u32,
+    id: u32,
+    kind: archive::Kind,
+    record: &[u8],
+    capital: bool,
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
+    let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
+    let tag = if capital { "EncryptLen" } else { "encryptLen" };
+    for (n, chunk) in record.chunks(CHUNK).enumerate() {
+        let mut payload = chunk.to_vec();
+        let mut ext = if n == 0 {
+            let len = match kind {
+                archive::Kind::Key => ENCRYPT_LEN,
+                archive::Kind::Predicted => 32,
+                archive::Kind::Info | archive::Kind::Audio => payload.len(),
+            }
+            .min(payload.len());
+            key.encrypt(&mut payload[..len]);
+            format!(
+                "{XML_DECLARATION}\n<Extension version=\"1.1\">\n<binaryData>1</binaryData>\n\
+                 <{tag}>{len}</{tag}>\n</Extension>\n"
+            )
+        } else {
+            format!(
+                "{XML_DECLARATION}\n<Extension version=\"1.1\">\n<binaryData>1</binaryData>\n</Extension>\n"
+            )
+        }
+        .into_bytes();
+        key.encrypt(&mut ext);
+        out.extend(
+            encode_message_with_status(cmd, id, 200, Class::Device, &ext, &payload)
+                .map_err(enc_err)?,
+        );
+    }
+    Ok(())
+}
+
+/// Sends a download: the estimate, the media (throttled to `rate` bytes per
+/// second if set), and the end. Stops silently once `stop` is set (a 144
+/// arrived); applies `fault` when its byte count is reached.
+#[allow(clippy::too_many_arguments)]
+fn serve_download(
+    shared: &Shared,
+    writer: &Writer,
+    key: &SessionKey,
+    id: u32,
+    recs: &[(archive::Kind, Vec<u8>)],
+    estimate: u64,
+    stop: &AtomicBool,
+    fault: Option<DownloadFault>,
+    rate: Option<u64>,
+) -> io::Result<()> {
+    let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
+    let stopped = || stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst);
+    let mut body = format!(
+        "{XML_DECLARATION}\n<body>\n<FileInfoList version=\"1.1\">\n<FileInfo>\n<FileCount>1</FileCount>\n\
+         <sizeL>{}</sizeL>\n<sizeH>{}</sizeH>\n</FileInfo>\n</FileInfoList>\n</body>\n",
+        estimate & 0xffff_ffff,
+        estimate >> 32
+    )
+    .into_bytes();
+    key.encrypt(&mut body);
+    {
+        let mut w = lock(writer);
+        if stopped() {
+            return Ok(());
+        }
+        w.write_all(
+            &encode_message_with_status(143, id, 200, Class::Device, &[], &body)
+                .map_err(enc_err)?,
+        )?;
+    }
+    let start = Instant::now();
+    let mut sent: usize = 0;
+    let mut out = Vec::new();
+    for (kind, rec) in recs {
+        if let Some(f) = fault
+            && sent >= f.after_bytes
+        {
+            match f.kind {
+                FaultKind::Stall => {
+                    while !stopped() {
+                        thread::sleep(POLL);
+                    }
+                    return Ok(());
+                }
+                FaultKind::Disconnect => {
+                    let _ = lock(writer).shutdown(Shutdown::Both);
+                    return Ok(());
+                }
+            }
+        }
+        out.clear();
+        transfer_message(key, 143, id, *kind, rec, false, &mut out)?;
+        {
+            let mut w = lock(writer);
+            if stopped() {
+                return Ok(());
+            }
+            w.write_all(&out)?;
+        }
+        sent += rec.len();
+        if let Some(rate) = rate.filter(|r| *r > 0) {
+            let due = start + Duration::from_secs_f64(sent as f64 / rate as f64);
+            while let Some(left) = due.checked_duration_since(Instant::now()) {
+                if stopped() {
+                    return Ok(());
+                }
+                thread::sleep(left.min(POLL));
+            }
+        }
+    }
+    let mut w = lock(writer);
+    if stopped() {
+        return Ok(());
+    }
+    w.write_all(
+        &encode_message_with_status(143, id, 300, Class::Device, &[], &[]).map_err(enc_err)?,
+    )
 }
