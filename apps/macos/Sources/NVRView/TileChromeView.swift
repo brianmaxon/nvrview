@@ -63,6 +63,8 @@ final class TileChromeView: NSView {
     private let emptyHint = NSTextField(labelWithString: "Drag a camera here")
     private var fadeTimer: Timer?
     private var tracking: NSTrackingArea?
+    /// Where the pointer was (screen coordinates) at the last hover event.
+    private var lastPointer: NSPoint?
     private var content: TileChromeContent?
     private var level: Float = 0
     /// The header stays shown (an active alert; docs/UX.md "Alerts").
@@ -320,9 +322,18 @@ final class TileChromeView: NSView {
         veilDetail.frame = CGRect(x: 8, y: h / 2 + 2, width: max(w - 16, 0), height: 16)
         emptyHint.frame = CGRect(x: 8, y: h / 2 - 8, width: max(w - 16, 0), height: 16)
         drop.frame = bounds
-        if let tracking { removeTrackingArea(tracking) }
+    }
+
+    /// One tracking area for the view's life: `.inVisibleRect` follows the
+    /// view's size by itself. Recreating it on every layout (the header
+    /// relayouts about twice a second) made AppKit send fresh entered and
+    /// moved events with the pointer standing still, so the header came
+    /// back on its own after fading.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard tracking == nil else { return }
         let area = NSTrackingArea(
-            rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
             owner: self)
         addTrackingArea(area)
         tracking = area
@@ -330,8 +341,20 @@ final class TileChromeView: NSView {
 
     // MARK: Hover
 
-    override func mouseEntered(with event: NSEvent) { showChrome() }
-    override func mouseMoved(with event: NSEvent) { showChrome() }
+    override func mouseEntered(with event: NSEvent) {
+        lastPointer = NSEvent.mouseLocation
+        showChrome()
+    }
+
+    /// Only a real movement shows the header: a moved event with the
+    /// pointer where it was (cursor unhiding, window or layer updates) is
+    /// ignored.
+    override func mouseMoved(with event: NSEvent) {
+        let now = NSEvent.mouseLocation
+        if let last = lastPointer, abs(now.x - last.x) < 0.5, abs(now.y - last.y) < 0.5 { return }
+        lastPointer = now
+        showChrome()
+    }
     override func mouseExited(with event: NSEvent) { scheduleFade(after: Self.fadeOutAfterExit) }
 
     /// Fades in at once; fades out a few seconds after the last movement.
