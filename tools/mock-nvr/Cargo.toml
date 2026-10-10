@@ -1,0 +1,15 @@
+[package]
+name = "mock-nvr"
+version = "0.1.0"
+description = "A fake Reolink-style NVR for tests and development: handshake, login, keepalive, channel info, and looping synthetic live video"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bc-protocol = { path = "../../crates/bc-protocol" }
+
+[lints]
+workspace = true
