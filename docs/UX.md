@@ -308,3 +308,15 @@ A doorbell press opens the doorbell's inset as a call:
 - The call ends when the user closes it or about 60 s after the last activity
   (press, speech, talk-back), and is listed in the event log with its times
   and, if saved, its transcript.
+
+## Sidebar
+
+- Whether a window's sidebar is open or collapsed is saved with the window
+  and restored on relaunch (window restore).
+- **Edge reveal:** while it is collapsed, resting the pointer at the window's
+  far left edge for a moment (about 150 ms, so passing over does not count)
+  slides the sidebar in over the video as an overlay: the stage is not
+  resized or redrawn. It slides away about half a second after the pointer
+  leaves it; clicking or dragging cameras from it works as usual. S, or a pin
+  control in the overlay, docks it again (which resizes the stage as before).
+  The same works in full screen.
