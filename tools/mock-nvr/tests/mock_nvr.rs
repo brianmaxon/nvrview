@@ -111,8 +111,17 @@ fn login_ok_pushes_channel_list_and_answers_queries() {
     c.tcp.write_all(&q).unwrap();
     match c.control() {
         Event::Control {
-            command: 146, xml, ..
-        } => assert_eq!(xml.matches("<StreamInfo>").count(), 3),
+            command: 146,
+            status,
+            xml,
+            ..
+        } => {
+            // Status 300 with a full body, as real devices answer; one entry
+            // whose bitmask covers all 3 channels.
+            assert_eq!(status, 300);
+            assert_eq!(xml.matches("<StreamInfo>").count(), 1);
+            assert!(xml.contains("<channelBits>7</channelBits>"));
+        }
         e => panic!("{e:?}"),
     }
     let q = c
@@ -216,15 +225,8 @@ fn preview_delivers_fixture_from_first_keyframe_then_stops() {
 
     let (id, bytes) = c.session.start_preview(1, StreamTier::Sub).unwrap();
     c.tcp.write_all(&bytes).unwrap();
-    assert!(matches!(
-        c.control(),
-        Event::Control {
-            command: 3,
-            status: 200,
-            ..
-        }
-    ));
 
+    // No separate reply: media (status 200) answers the start directly.
     let mut demux = Demuxer::new();
     // 45 frames: past one loop of the 60-frame file's tail from the keyframe.
     let recs = read_until_video(&mut c, id, &mut demux, 45);

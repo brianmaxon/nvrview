@@ -104,6 +104,7 @@ is `1F 2D 3C 4B 5A 69 78 FF`. (observed)
 | Fact | Provenance |
 | --- | --- |
 | The device answers a start with status 200 and then streams media as command-3 messages carrying **the start request's message ID**; that ID is how channels are demultiplexed on one session. | observed |
+| There is no separate empty reply to a start: the first command-3 message from the device already carries status 200, the `binaryData` extension, and media. | observed |
 | A stop is answered by an empty command-4 reply with status 200. | observed |
 | `handle` = `(stream tier << 8) | channelId`, with tiers `mainStream` 0, `subStream` 1, `mobileStream` 2, `externStream` 4. | observed |
 | `mainStream`/`subStream` are the usual high/low tiers. Multi-lens cameras expose a second lens as `externStream` (high) and `mobileStream` (low). | observed |
@@ -151,6 +152,15 @@ Answered on the same session; bodies are XML. All observed.
 | 146 | empty | `StreamInfoList`: per-channel stream tiers with resolutions and codecs |
 | 199 | empty | `Support`: capabilities including channel count |
 | 318 | extension `<channelId>` | per-channel `VersionInfo`, including the channel's name and camera model |
+
+Reply details:
+
+| Fact | Provenance |
+| --- | --- |
+| The 146 reply carries status **300**, not 200, together with a complete body (seen on two NVRs). Treat 300 as success for this command. | observed |
+| `StreamInfoList` holds one `StreamInfo` per distinct stream configuration, not one per channel. Its `channelBits` is a bitmask of the channels that share it (bit *n* = channel *n*), and it contains one `encodeTable` per tier with `type` (`mainStream`, `subStream`), `resolution/width`, `resolution/height`, `videoEncType`, `defaultFramerate`, `defaultBitrate`, `defaultGop`, `framerateTable`, `bitrateTable`. | observed |
+| `videoEncType` takes the values 0 and 1. That 0 is H.264 and 1 is H.265 is **unconfirmed**; take the codec from the media records. | open |
+| `ChannelInfoList` (145) is pushed with message ID 0 and lists every channel slot. Each `ChannelInfo` has `channelId`, `state` (`connect` for a slot with a camera, `none` for an empty one), `changed`, `uid`, `streamSupport` (a comma-separated tier list such as `mainStream,subStream,externStream`), `abilityChanged`, `wifiState`. It has no channel name; names come from 318. | observed |
 
 Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 192, 299, 511, 527–551, 574 (configuration and capability queries), and 14–16,

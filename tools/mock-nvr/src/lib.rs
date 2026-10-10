@@ -391,14 +391,9 @@ impl Conn {
                     cfg.channels
                 ),
             ),
-            145 | 146 => {
-                let inner = if m.header.command == 145 {
-                    self.channel_info_list()
-                } else {
-                    self.stream_info_list()
-                };
-                self.reply_xml(m.header.command, id, 200, &inner)
-            }
+            145 => self.reply_xml(145, id, 200, &self.channel_info_list()),
+            // Real devices answer 146 with status 300 and a full body.
+            146 => self.reply_xml(146, id, 300, &self.stream_info_list()),
             318 => {
                 let text = self.request_text(m);
                 match xml::find_text(&text, "channelId")
@@ -430,9 +425,8 @@ impl Conn {
         let mut s = String::from("<ChannelInfoList version=\"1.1\">\n");
         for c in 0..self.shared.config.channels {
             s.push_str(&format!(
-                "<ChannelInfo>\n<channelId>{c}</channelId>\n<name>Channel {}</name>\n\
-                 <state>online</state>\n</ChannelInfo>\n",
-                u32::from(c) + 1
+                "<ChannelInfo>\n<channelId>{c}</channelId>\n<state>connect</state>\n\
+                 <streamSupport>mainStream,subStream</streamSupport>\n</ChannelInfo>\n"
             ));
         }
         s.push_str("</ChannelInfoList>\n");
@@ -441,22 +435,29 @@ impl Conn {
 
     fn stream_info_list(&self) -> String {
         let cfg = &self.shared.config;
-        let codec = match cfg.fixture.codec() {
-            bc_protocol::media::Codec::H264 => "h264",
-            bc_protocol::media::Codec::H265 => "h265",
+        // 0 = H.264 and 1 = H.265 is unconfirmed (docs/protocol.md); clients
+        // must take the codec from the media records.
+        let enc_type = match cfg.fixture.codec() {
+            bc_protocol::media::Codec::H264 => 0,
+            bc_protocol::media::Codec::H265 => 1,
         };
-        let mut s = String::from("<StreamInfoList version=\"1.1\">\n");
-        for c in 0..cfg.channels {
-            s.push_str(&format!("<StreamInfo>\n<channelId>{c}</channelId>\n"));
-            for t in [StreamTier::Main, StreamTier::Sub] {
-                s.push_str(&format!(
-                    "<encodeTable>\n<type>{}</type>\n<resolution>\n<width>{}</width>\n<height>{}</height>\n\
-                     </resolution>\n<frameRate>{}</frameRate>\n<encoderType>{codec}</encoderType>\n</encodeTable>\n",
-                    t.name(), cfg.width, cfg.height, cfg.fps
-                ));
-            }
-            s.push_str("</StreamInfo>\n");
+        // Every channel shares one configuration, so one entry covers all of
+        // them through the channel bitmask.
+        let bits: u64 = (0..cfg.channels.min(64)).fold(0, |b, c| b | 1 << c);
+        let mut s = String::from("<StreamInfoList version=\"1.1\">\n<StreamInfo>\n");
+        s.push_str(&format!("<channelBits>{bits}</channelBits>\n"));
+        for t in [StreamTier::Main, StreamTier::Sub] {
+            s.push_str(&format!(
+                "<encodeTable>\n<type>{}</type>\n<resolution>\n<width>{}</width>\n<height>{}</height>\n\
+                 </resolution>\n<videoEncType>{enc_type}</videoEncType>\n\
+                 <defaultFramerate>{}</defaultFramerate>\n</encodeTable>\n",
+                t.name(),
+                cfg.width,
+                cfg.height,
+                cfg.fps
+            ));
         }
+        s.push_str("</StreamInfo>\n");
         s.push_str("</StreamInfoList>\n");
         s
     }
@@ -480,14 +481,8 @@ impl Conn {
         let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
         let key = self.key.clone().expect("logged in");
         let (cfg_shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
-        // The reply and the first media are written under the same lock
-        // discipline as every frame, so the reply always comes first.
-        {
-            let mut w = lock(&self.writer);
-            let bytes = encode_message_with_status(3, id, 200, Class::Device, &[], &[])
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-            w.write_all(&bytes)?;
-        }
+        // Like a real device, send no separate reply: the first media message
+        // (status 200) is the answer.
         let join = thread::spawn(move || {
             let _ = stream_media(&cfg_shared, &writer, &key, id, &stop2);
         });
