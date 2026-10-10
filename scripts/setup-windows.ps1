@@ -138,7 +138,20 @@ git -C $RepoDir config core.longpaths true
 if ($EnableSsh) {
   Step 'OpenSSH server (key-only, local subnet only)'
   $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-  if ($cap.State -ne 'Installed') { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }
+  if ($cap.State -ne 'Installed') {
+    Write-Host 'installing the OpenSSH server from Windows Update: this often takes 2-10 minutes'
+    Write-Host 'with no progress shown (check from another window with:'
+    Write-Host "  Get-WindowsCapability -Online -Name OpenSSH.Server*)"
+    try {
+      Add-WindowsCapability -Online -Name $cap.Name | Out-Null
+    } catch {
+      Write-Host "Add-WindowsCapability failed ($($_.Exception.Message)); trying DISM"
+      dism /Online /Add-Capability /CapabilityName:$($cap.Name) /NoRestart
+      if ($LASTEXITCODE -ne 0) {
+        throw 'Could not install the OpenSSH server; try: winget install --id Microsoft.OpenSSH.Preview -e'
+      }
+    }
+  }
   Set-Service -Name sshd -StartupType Automatic
   Start-Service sshd
 
