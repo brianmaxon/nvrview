@@ -214,7 +214,8 @@ A doorbell press opens the doorbell's inset as a call:
   it, rate-limited, every use logged; the talk-back protocol facts go into
   docs/protocol.md before any code sends them.
 - **Live transcript:** from the press, both sides are transcribed on this
-  computer (a local speech recognition model; nothing leaves the house): the
+  computer (a local speech recognition model on both macOS and Windows,
+  possibly a different engine on each; nothing leaves the house): the
   doorbell's audio and, while talking back, the microphone, labeled by side,
   so the visitor can be read when the user cannot unmute (in a meeting, for
   example). Shown live in the call; saved with the event only if the user
