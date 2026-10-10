@@ -25,6 +25,9 @@ Inputs:
   it, with codec, keyframe flag, and timestamp (µs).
 - `decoded(pts)` and `decode_failed(kind)`: results reported by the platform
   decoder, possibly late and from another thread (the caller serializes them).
+  A `Configure` that fails is reported as `decode_failed` too. Pictures still
+  in flight when `Flush`, `Reset`, or `Configure` runs are discarded with no
+  result, so not every `Decode` gets one.
 - `tick(now)`: drives time-based policy (recovery cooldowns, stall detection).
 
 Actions, drained in order with `next_action()`:
@@ -60,14 +63,21 @@ The pipeline also parses parameter sets (H.264 SPS, H.265 VPS/SPS) for coded
 size, cropping, and VUI color description, and turns that into `color`:
 matrix (BT.601, BT.709, BT.2020), full or video range, and a ready-to-use
 3×4 YCbCr→RGB matrix in `f32`, so both platforms' shaders only multiply.
+The matrix is row-major and maps `(Y, Cb, Cr, 1)` to `(R, G, B)`, where Y, Cb
+and Cr are 8-bit samples normalized as the GPU reads them (code / 255) and
+R, G, B come out in 0…1; range offsets live in the fourth column. The
+platform asks its decoder for output in the stream's range (VideoToolbox
+otherwise converts to whatever range the output format names), so the
+samples match the matrix.
 Without a VUI color description: BT.709 for heights of 720 and above, BT.601
 below, video range.
 
 ## Layout (shared)
 
 `grid_layout(tile_count, viewport, gap, picture_sizes, mode)` returns one
-destination rectangle per tile in pixels plus the source rectangle to sample
-(fit with letterboxing, or fill with cropping). Platforms draw one quad per
+destination rectangle per tile in pixels of the viewport plus the source
+rectangle to sample in pixels of the picture, both with the origin at the top
+left (fit with letterboxing, or fill with cropping). Platforms draw one quad per
 tile from these rectangles.
 
 ## The platform renderer
