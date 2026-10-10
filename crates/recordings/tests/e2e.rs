@@ -1,12 +1,14 @@
 //! End to end against two in-process mock NVRs with fake recording stores:
 //! index fill, search by type, incident grouping across cameras and
 //! devices, and incident downloads that survive stalls, disconnects, and a
-//! restart without fetching a completed chunk twice.
+//! restart without fetching a completed chunk twice. The devices run on the
+//! test's runtime and paused clock, reached through in-memory pipes, so
+//! stall timeouts and backoffs run in simulated time.
 
 use bc_protocol::archive::DateTime;
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, Item, SessionConfig, TcpConnector};
+use bc_session::{DeviceSession, FnConnector, Item, SessionConfig};
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, DownloadLog, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;
 use recordings::chunk;
@@ -22,7 +24,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn d(day: u8, h: u8, m: u8, s: u8) -> DateTime {
     DateTime::new(2026, 10, day, h, m, s).unwrap()
@@ -62,7 +65,7 @@ fn spawn_mock(events: Vec<MockEvent>, rate: Option<u64>) -> mock_nvr::MockNvr {
     a.events = events;
     a.download_rate = rate;
     cfg.archive = Some(a);
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, &tokio::runtime::Handle::current())
 }
 
 fn session(nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
@@ -71,7 +74,9 @@ fn session(nvr: &mock_nvr::MockNvr) -> Arc<DeviceSession> {
     cfg.download_stall_timeout = Duration::from_millis(700);
     cfg.backoff.initial = Duration::from_millis(50);
     cfg.backoff.jitter = 0.0;
-    Arc::new(DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg))
+    let addr = nvr.addr();
+    let connector = FnConnector(move || mock_nvr::connect(addr));
+    Arc::new(DeviceSession::spawn(connector, cfg))
 }
 
 fn fixed_clock(t: Arc<AtomicI64>) -> Clock {
@@ -115,7 +120,7 @@ async fn index_device(
     .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     let nvr = spawn_mock(events_a(), None);
     let s = session(&nvr);
@@ -195,7 +200,7 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     s.close_shared().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn events_from_two_devices_group_into_one_three_camera_incident() {
     let (a, b) = (spawn_mock(events_a(), None), spawn_mock(events_b(), None));
     let (sa, sb) = (session(&a), session(&b));
@@ -298,7 +303,7 @@ fn check_chunks(folder: &Path, parts: &str, n: usize) {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn three_camera_download_survives_a_stall_and_a_disconnect() {
     let (a, b) = (spawn_mock(vec![], None), spawn_mock(vec![], None));
     // Side (A ch 1) stalls in its second chunk; Gate (B ch 0) loses its
@@ -464,7 +469,7 @@ impl CloseShared for Arc<DeviceSession> {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn a_restart_resumes_from_the_first_missing_chunk() {
     // Throttled so a chunk (about 100 kB here) takes a while.
     let a = spawn_mock(vec![], Some(150_000));
@@ -564,7 +569,7 @@ async fn a_restart_resumes_from_the_first_missing_chunk() {
     sb.close_shared().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn pausing_stops_the_running_download_and_resuming_finishes() {
     let a = spawn_mock(vec![], Some(100_000));
     let sa = session(&a);
@@ -602,7 +607,8 @@ async fn pausing_stops_the_running_download_and_resuming_finishes() {
     assert!(
         p[0].cameras
             .iter()
-            .all(|c| c.state == CameraState::ChunksComplete)
+            .all(|c| c.state == CameraState::ChunksComplete),
+        "{p:#?}"
     );
     sched.shutdown().await;
     drop(sched);

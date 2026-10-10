@@ -46,7 +46,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -54,9 +54,9 @@ const JOB_VERSION: u32 = 1;
 /// Name of the hidden folder inside an incident folder.
 pub const PARTS_DIR: &str = ".parts";
 const JOB_FILE: &str = "job.json";
-/// Records queued for a chunk's writer thread. When the disk falls behind,
-/// the download waits here, and its session buffer (bounded) takes the
-/// rest; live view never waits.
+/// Records queued for a chunk's writer while it writes the previous batch.
+/// When the disk falls behind, the download waits here, and its session
+/// buffer (bounded) takes the rest; live view never waits.
 const WRITE_QUEUE: usize = 256;
 
 /// The final step of a camera job: join its complete chunks into one file.
@@ -994,74 +994,114 @@ async fn receive(
     }
 }
 
-enum WriteMsg {
-    Record(Record),
-    /// Every record is in: flush, sync, and mark the chunk complete.
-    Finish,
-}
-
-/// A [`ChunkWriter`] on a blocking thread, fed through a bounded queue, so
-/// its writes and its final `fsync` never block an async worker.
+/// A [`ChunkWriter`] whose file work runs on blocking threads, so its
+/// writes and its final `fsync` never block an async worker. Records queue
+/// here (at most [`WRITE_QUEUE`]) while the previous batch is written; each
+/// blocking task lasts one batch, not the whole chunk, so the runtime knows
+/// when disk work is in progress (a runtime on a paused test clock does not
+/// move its clock during one).
 struct BlockingChunk {
-    tx: mpsc::Sender<WriteMsg>,
-    join: JoinHandle<io::Result<Option<ChunkIndex>>>,
+    slot: Slot,
+    queue: Vec<Record>,
     dir: PathBuf,
     n: u32,
 }
 
+/// Where a [`BlockingChunk`]'s writer is.
+enum Slot {
+    /// Between batches.
+    Idle(Box<ChunkWriter>),
+    /// Creating the files or writing a batch; the task returns the writer.
+    Busy(JoinHandle<io::Result<Box<ChunkWriter>>>),
+    /// The writer failed; nothing more is written.
+    Failed(io::Error),
+    /// Taken for a moment while changing state.
+    Empty,
+}
+
 impl BlockingChunk {
     fn start(dir: &Path, n: u32, start: Secs, end: Secs) -> BlockingChunk {
-        let (tx, mut rx) = mpsc::channel(WRITE_QUEUE);
         let path = dir.to_owned();
-        let join = tokio::task::spawn_blocking(move || {
-            let mut w = ChunkWriter::create(&path, n, start, end)?;
-            while let Some(m) = rx.blocking_recv() {
-                match m {
-                    WriteMsg::Record(r) => w.write(&r)?,
-                    WriteMsg::Finish => return w.finish().map(Some),
-                }
-            }
-            // Abandoned: leave the partial files to `discard` or the next
-            // attempt, never mark them complete.
-            Ok(None)
+        let create = tokio::task::spawn_blocking(move || {
+            ChunkWriter::create(&path, n, start, end).map(Box::new)
         });
         BlockingChunk {
-            tx,
-            join,
+            slot: Slot::Busy(create),
+            queue: Vec::new(),
             dir: dir.to_owned(),
             n,
         }
     }
 
+    /// Waits for the batch in progress, if any.
+    async fn settle(&mut self) {
+        let Slot::Busy(task) = &mut self.slot else {
+            return;
+        };
+        self.slot = match task.await {
+            Ok(Ok(w)) => Slot::Idle(w),
+            Ok(Err(e)) => Slot::Failed(e),
+            Err(e) => Slot::Failed(io::Error::other(e)),
+        };
+    }
+
+    /// Starts writing the queued records if the writer is free.
+    fn hand_off(&mut self) {
+        if self.queue.is_empty() || !matches!(self.slot, Slot::Idle(_)) {
+            return;
+        }
+        let Slot::Idle(mut w) = std::mem::replace(&mut self.slot, Slot::Empty) else {
+            unreachable!("checked");
+        };
+        let batch = std::mem::take(&mut self.queue);
+        self.slot = Slot::Busy(tokio::task::spawn_blocking(move || {
+            for r in &batch {
+                w.write(r)?;
+            }
+            Ok(w)
+        }));
+    }
+
     /// Queues a record, waiting while the queue is full; false once the
     /// writer has stopped (it failed).
     async fn write(&mut self, r: Record) -> bool {
-        self.tx.send(WriteMsg::Record(r)).await.is_ok()
+        if matches!(self.slot, Slot::Failed(_)) {
+            return false;
+        }
+        self.queue.push(r);
+        let finished = matches!(&self.slot, Slot::Busy(t) if t.is_finished());
+        if finished || self.queue.len() >= WRITE_QUEUE {
+            self.settle().await;
+        }
+        self.hand_off();
+        !matches!(self.slot, Slot::Failed(_))
     }
 
     /// Completes the chunk and returns its index.
-    async fn finish(self) -> io::Result<ChunkIndex> {
-        // A failed send means the writer already stopped; its result says why.
-        let _ = self.tx.send(WriteMsg::Finish).await;
-        match self.join.await {
-            Ok(Ok(Some(idx))) => Ok(idx),
-            Ok(Ok(None)) => Err(io::Error::other("chunk writer stopped")),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(io::Error::other(e)),
+    async fn finish(mut self) -> io::Result<ChunkIndex> {
+        self.settle().await;
+        self.hand_off();
+        self.settle().await;
+        match std::mem::replace(&mut self.slot, Slot::Empty) {
+            Slot::Idle(w) => tokio::task::spawn_blocking(move || w.finish())
+                .await
+                .map_err(io::Error::other)?,
+            Slot::Failed(e) => Err(e),
+            Slot::Busy(_) | Slot::Empty => Err(io::Error::other("chunk writer stopped")),
         }
     }
 
     /// Stops the writer and removes the chunk's files; the writer's error,
     /// if it failed.
-    async fn discard(self) -> Option<io::Error> {
-        let BlockingChunk { tx, join, dir, n } = self;
-        drop(tx);
+    async fn discard(mut self) -> Option<io::Error> {
+        self.queue.clear();
         // Removed after the writer has stopped, so it cannot recreate them.
-        let err = match join.await {
-            Ok(Err(e)) => Some(e),
-            Ok(Ok(_)) => None,
-            Err(e) => Some(io::Error::other(e)),
+        self.settle().await;
+        let err = match std::mem::replace(&mut self.slot, Slot::Empty) {
+            Slot::Failed(e) => Some(e),
+            _ => None,
         };
+        let (dir, n) = (self.dir, self.n);
         let _ = tokio::task::spawn_blocking(move || chunk::remove_chunk(&dir, n)).await;
         err
     }
