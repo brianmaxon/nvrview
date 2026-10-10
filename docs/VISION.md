@@ -30,7 +30,9 @@ developer's machine and never committed. Only aggregate numbers appear here.
   "person" on a static object in 72 % of pictures at 0.5 confidence and in
   none at 0.7.
 - **Recall on real stills is poor for Vision, high for small vision-language
-  models.** On 400 hand-labeled stills (see "Recall on labeled stills"),
+  models; RT-DETR with tiles is the cheap middle.** On 400 hand-labeled
+  stills (see "Recall on labeled stills" and "RT-DETR on the labeled
+  stills"),
   Vision's human detector raised no false alarm but found only about 35 % of
   people; gemma4 (e4b) found 99 % of people and 97 % of vehicles with 6 % and
   10 % false alarms; ministral-3 (8B) was the precise one (0.4 % and 2 %)
@@ -266,6 +268,52 @@ qwen3-vl 2 of 206.
   be small or ambiguous objects the labeler left unmarked. One prompt per
   model, no confidences (booleans only), no localization scored.
 
+### RT-DETR on the labeled stills
+
+The same 400 stills through RT-DETR R18 and R50 (converted by
+`convert-rtdetr.py`, run on the Neural Engine with `cpuAndNeuralEngine`).
+Person is COCO person; vehicle is car, truck, bus, or motorcycle. "Tiles"
+adds four overlapping crops (each 60 % of the frame, 20 % overlap) to the
+whole-frame pass, keeping the highest score. Recall / false-positive rate,
+percent:
+
+| Detector | Threshold | Person | Vehicle | Time per picture (p50) |
+| --- | --- | --- | --- | --- |
+| R18, whole frame | 0.4 | 84 / 8.3 | 74 / 6.0 | 14 ms |
+| R18, whole frame | 0.5 | 79 / 3.4 | 68 / 1.5 | 14 ms |
+| R18, whole frame | 0.7 | 59 / 0.4 | 47 / 0.5 | 14 ms |
+| R18, whole frame + tiles | 0.5 | 96 / 7.2 | 78 / 5.0 | 53 ms |
+| R18, whole frame + tiles | 0.6 | 87 / 2.3 | 72 / 3.0 | 53 ms |
+| R50, whole frame | 0.5 | 84 / 3.4 | 78 / 4.5 | 23 ms |
+| R50, whole frame + tiles | 0.5 | 98 / 8.3 | 86 / 8.5 | 93 ms |
+| R50, whole frame + tiles | 0.6 | 96 / 4.5 | 83 / 4.5 | 93 ms |
+| R18, whole frame + tiles 0.5, AND gemma4 | — | 96 / 0.8 | 77 / 2.0 | — |
+| R18, whole frame + tiles 0.3, AND gemma4 | — | 98 / 4.5 | 91 / 6.5 | — |
+
+Times exclude decoding the JPEG; scaling a 4K frame to 640x640 adds about
+10 ms. The machine was shared (load average 4–7 of 14 cores).
+
+- **Tiling is what fixes small people:** it added 16 points of person recall
+  and 10 of vehicle recall at about four times the cost. Small, distant
+  figures, not lighting, were the gap, as with Vision.
+- **RT-DETR then gemma4 is the best pair measured.** RT-DETR removes most of
+  gemma4's false alarms and gemma4 removes most of RT-DETR's, while recall
+  stays at RT-DETR's. ministral as the confirmer caps person recall at its
+  own 73 %. Vision adds nothing on person (RT-DETR already finds everything
+  Vision finds) and a few points on vehicles.
+- **Night is the weak spot:** at 0.5 on the whole frame, person precision is
+  99 % by day and 76 % at night; vehicle recall falls from 74 % to 58 %.
+- **No repeating static false person** at a fixed place in any viewpoint
+  (unlike the earlier study's recording); one single-picture false person
+  at 0.71 was a household object. Some vehicle false positives are real
+  partial or distant vehicles the labels missed.
+- **Animal classes are not usable ungated:** with no animal in any picture,
+  tiling raised animal false positives to 15 % at 0.5, mostly "bird" in
+  foliage.
+- **Caveats:** thresholds were chosen on the same 400 pictures (no held-out
+  set), so treat them as optimistic; stretching and letterboxing scored
+  about the same, and stretching is the default.
+
 ## Cost per camera at 1–2 fps
 
 From the real-time runs on this machine, for a 640x480 sub-stream:
@@ -294,10 +342,12 @@ a third of one core out of 14, and no GPU.
    where vehicles matter** (or "other objects"), with a high threshold (0.7)
    and suppression of boxes that never move (a static object that looks like
    a person is the typical false alarm, as with RT-DETR above).
-3. **Model choice for vehicles: RT-DETR R18 converted by our script**
-   (Apache-2.0 code and weights, 13 ms, 5 ms CPU on the Neural Engine), or
-   YOLOv3 converted by us from the public-domain Darknet weights. Choose
-   between them after recall is measured. Never AGPL models.
+3. **Model choice: RT-DETR converted by our script** (Apache-2.0 code and
+   weights), for people as well as vehicles: R18 (39 MB, 14 ms) with tiles
+   at 0.5 found 96 % of people on labeled stills, against Vision's 35 %. R50
+   (83 MB, 23 ms) is better on vehicles. Confirm its hits with a
+   vision-language model (gemma4) before notifying, failing open. Never AGPL
+   models.
 4. **Neural Engine only.** Set Vision's main-stage device to the Neural
    Engine explicitly and Core ML's compute units to `cpuAndNeuralEngine`.
    The GPU belongs to the renderer: GPU inference made it 57–80 % busy for one
@@ -315,8 +365,8 @@ a third of one core out of 14, and no GPU.
 
 ## Open questions
 
-- **Recall on video.** Picture-level recall on stills is measured above; a
-  COCO detector (RT-DETR) on the same stills is next. Event-level recall
+- **Recall on video.** Picture-level recall on stills is measured above, for
+  Vision, RT-DETR, and three vision-language models. Event-level recall
   needs recordings with real events. The cheapest ground truth
   is the device itself: record a sub-stream from a camera with device AI
   while logging its `people`/`vehicle`/`dog_cat` pushes (command 33) and use
