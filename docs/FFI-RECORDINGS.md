@@ -40,7 +40,7 @@
 | Cameras | `{"device": "<device key>", "channel": 3, "lens": 0}` everywhere in JSON | Incidents, edits, downloads, and groups persist across runs, so they use the stable device key (FFI.md, "Layouts"), never per-run device IDs. `lens` (0 or 1) replaces the Baichuan stream names for a second lens of a multi-lens camera; it defaults to 0 and may be omitted |
 | Tiers | `"main"` or `"sub"` in JSON; `NV_TIER_MAIN`/`NV_TIER_SUB` in C | The core maps lens and tier to the device's stream (lens 1 main is `externStream` on Baichuan). `NV_TIER_MOBILE`/`NV_TIER_EXTERN` are refused for playback tiles |
 | Time | **Device-local seconds** (`start`, `end`: integer seconds since 1970-01-01 00:00:00 of the device's wall clock, no zone) for the index, incidents, and downloads; **device-local milliseconds** (`*_ms`) for playback and edit lists | Devices report wall-clock time with no zone (protocol.md "Times"); the core never converts it to UTC (it has no time-zone database). Apps format these numbers as if they were UTC to show the device's own wall time. Integers keep timeline arithmetic trivial |
-| Kinds | Event `kind` uses the vocabulary of live `detection` events: `motion` (the device's `md`), then the device's own lowercase names (`people`, `vehicle`, `dog_cat`, `face`, `package`, `visitor`, `pir`, `cry`, ...). Unknown kinds pass through | The same badge code serves live and recorded events; `source` is `device` or, for on-device classification later, `local` |
+| Kinds | Event `kind` uses the vocabulary of live `detection` events: `motion` (the device's `md`), then the device's own lowercase names (`people`, `vehicle`, `dog_cat`, `face`, `package`, `visitor`, `pir`, `cry`, ...). Unknown kinds pass through | The same badge code serves live and recorded events. `source` says where an event came from: `device` (the camera or NVR), `mac_video` (on-device vision on the computer), `mac_audio` (on-device sound analysis, section 2a). Sound kinds share the namespace: `smoke_alarm`, `co_alarm`, `siren`, `glass_break`, `dog_bark`, `baby_cry`, ... (section 2a) |
 | Results | Synchronous queries answer from memory into `out`/`cap`/`len` (the ABI 3 buffer convention); anything that needs the device returns at once and reports through events | No call waits on the network; the app's main thread may query the index |
 | Persistence | Under `NvConfig.data_dir/recordings/`; downloads under a directory the app names | Same atomic-write rules as layouts; without `data_dir`, index and edits live in memory for the run and downloads cannot resume |
 
@@ -144,6 +144,102 @@ Answers:
   `sched` and `manual`).
 - Events of a second lens are reported with `lens` 1 (see "Existing code",
   item 2).
+
+## 2a. Sound: loudness and labels
+
+The official client's playback ignores audio, although recordings carry it
+(protocol.md, "Playback"). Sound makes some events easy to find that video
+misses or cannot see at all: an alarm sounding in another room, glass
+breaking, a dog barking at night. This section adds two things to the index:
+a **loudness envelope** per camera, drawn as a lane under the timeline, and
+**sound labels**, events with `source` `mac_audio` that filter, group, and
+search like device events. It is an aid for finding and labeling events,
+never an alarm system (docs/ARCHITECTURE.md, "Sound events and audio
+alarms").
+
+Who does what, so the core stays free of platform frameworks:
+
+| Part | Where | Why |
+| --- | --- | --- |
+| Loudness envelope (peak and RMS per second) | core | plain arithmetic on decoded PCM; the same on every platform |
+| Alarm-pattern detector (smoke T3, CO T4: a narrow-band tone near 3 kHz in the standard on/off rhythm) | core | deterministic DSP, no model; tested on synthetic audio; works on Windows too |
+| General sound classification (sirens, glass, barking, crying, ...) | app (SoundAnalysis on macOS; an ONNX model on Windows later) | platform frameworks; the app reads 16 kHz mono PCM from the existing audio tap or from a recording and hands the labels to the core |
+| Storing, indexing, grouping, search | core | one index per device, shared by every window, like device events |
+
+Sources of audio:
+
+1. **Live**: every tile with audio already decodes it (FFI.md, audio
+   level). The core keeps the envelope and runs the alarm detector for every
+   live tile, audible or not. For cameras not on screen, the app may ask the
+   core to keep their **sub-stream** open for sound only
+   (`nv_sound_watch`): one session already carries every channel, and a
+   sub-stream costs the device about 110 kbit/s (protocol.md, "Sub and main
+   of one camera"). Video of a watched-only stream is not decoded.
+2. **Recordings**: when a download finishes, or while a camera plays back,
+   its audio goes through the same envelope, detector, and (in the app)
+   classifier. An optional background pass over the index fetches older
+   audio, newest day first, at most one stream per device and only while
+   the device is otherwise idle; it is off by default (open question 13).
+
+```c
+/* Keeps a camera's sub-stream open for sound analysis while enabled, with
+ * no tile and no video decoding. Counts toward the device's stream limit
+ * like a tile. `camera` is {"device","channel","lens"}. */
+NvStatus nv_sound_watch(NvCore *core, const char *camera, bool enabled);
+
+/* Loudness lanes for the timeline: per camera, one value per bucket in
+ * [start, end]. Answers from memory. */
+NvStatus nv_recordings_loudness(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+
+/* Labels the app's classifier produced, for one camera and a time range.
+ * The core merges them into the index as events (source "mac_audio"),
+ * replacing earlier labels from the same analyzer for that range, so a
+ * re-analysis does not duplicate. */
+NvStatus nv_sound_labels_put(NvCore *core, const char *json);
+```
+
+Loudness query and answer (`bucket_s` 1 to 3600; the core keeps 1-second
+buckets and aggregates on the way out):
+
+```json
+{"start": 1791590400, "end": 1791676799, "bucket_s": 60,
+ "cameras": [{"device": "d-3f9a0c1b7e2d4a65", "channel": 3}]}
+
+{"revision": 41, "lanes": [{"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
+  "bucket_s": 60, "start": 1791590400,
+  "peak_db": [-48, -47, -12, null, -50], "rms_db": [-60, -59, -30, null, -61]}]}
+```
+
+- Values are dBFS rounded to whole decibels, `null` where no audio was
+  analyzed (not "silence"). Stored as one byte per value: a camera costs
+  about 170 KB per day, bounded by the index's age and size limits.
+
+Labels from the app:
+
+```json
+{"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
+ "analyzer": "soundanalysis-v1", "start": 1791618000, "end": 1791618600,
+ "labels": [{"kind": "dog_bark", "start": 1791618125, "end": 1791618131, "confidence": 0.91,
+             "label": "dog_bark"}]}
+```
+
+- `kind` is from a short, documented set the apps map their classifier's
+  labels onto (`smoke_alarm`, `co_alarm`, `siren`, `car_alarm`,
+  `glass_break`, `dog_bark`, `baby_cry`, `shout`, `knock`, `doorbell`);
+  `label` keeps the classifier's own name, so nothing is lost and the set
+  can grow. Unknown kinds pass through, as for device events.
+- The core's own alarm detector writes `smoke_alarm` and `co_alarm` with
+  `"analyzer": "pattern-v1"` and no confidence (it matched or it did not).
+- Labels are capped per camera and day (default 2000; the lowest
+  confidence goes first) so a noisy camera cannot grow the index without
+  bound. Labels below the app's confidence threshold are not sent.
+- Sound events join incidents like other events (they can start or extend
+  one), appear in `nv_recordings_events` with `"source": "mac_audio"`, and
+  filter by `kinds`.
+- Live detections from sound are also sent as live `detection` events with
+  `"source": "mac_audio"`, so badges, triggers, and the notification
+  verifier treat them like any other detection, under the same rule: a
+  missed sound is never shown as "no alarm".
 
 ## 3. Incidents and the user's edits
 
@@ -596,8 +692,11 @@ fields must be ignored.
 {"type": "playback_camera", "playback": 3, "tile": 11, "state": "playing"}
 {"type": "playback_seek", "playback": 3, "position_ms": 1791618130000, "generation": 2, "state": "starting"}
 {"type": "playback_closed", "playback": 3, "reason": "closed"}
+{"type": "sound_watch", "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 5, "lens": 0}, "state": "watching"}
 ```
 
+- `sound_watch` `state`: `watching`, `stopped`, `refused` (`reason`: the
+  device's stream limit, or the camera has no audio).
 - `recordings_index` `state`: `idle` (up to date), `filling`,
   `refreshing`, `waiting_device`, `failed` (`reason`; retried next pass).
   Sent on state changes and at most once a second while filling.
@@ -697,6 +796,8 @@ or a counted drop, never growth):
 | `nv_thumbnail_get`/`_put`/`_cancel` | `ThumbnailCache::{get, put}`, `cover_thumbnail` | a per-device newest-first fetch queue with cancel; thumbnail priority over index searches |
 | `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, retry, forget, resume_all, progress}`, `Mp4Finalizer` | per-camera pause and retry, failure reason codes, coalesced events, `delete_partial`, `waiting_device`, device removal |
 | `nv_playback_*`, playback events | tiles, `TilePipeline`, generations (`tile.rs`), audio hub, `Subscription`-style bounded queue, replay framing (`encode_replay_media`, `replay_seq`) | playback commands in `bc-protocol` and `bc-session`, play streams routed by message ID and seq, file-boundary handling, the shared clock and paced release, buffering policy, mock-nvr playback |
+| `nv_sound_watch`, `sound_watch` | `Subscription`, audio decoding in `TileAudio` | a tile-less subscription that decodes audio only; stream-limit accounting |
+| `nv_recordings_loudness`, `nv_sound_labels_put` | the level meter (`audio-pipeline`), `DeviceIndex` day files | the 1-second envelope store, the T3/T4 pattern detector, label merge and caps, sound kinds in incidents and search |
 | `nv_edit_compute` | incident intervals, `nv_grid_layout`, `mp4` crate (reading sync samples) | the follow-cut and grid planners |
 
 ## 11. Existing code that conflicts or is missing
@@ -833,3 +934,13 @@ it as "not yet", and only `nv_thumbnail_get` returns it.
 11. **Edits beyond follow cut and grids** (picture-in-picture, a chosen
     camera order per incident, labels with event kinds): in scope for the
     first `nv_edit_compute`, or later?
+12. **Watching sound on cameras that are not on screen.** Keeping every
+    camera's sub-stream open for sound uses one stream per camera on the
+    device. Should the app watch all cameras with audio by default, only
+    the ones the user picks, or none until sound features are turned on?
+13. **Background analysis of older recordings.** Off by default as
+    proposed (it fetches audio from the device), on when the user asks for
+    a day or camera, or a slow default pass over the last few days?
+14. **The sound kind set.** The proposed ten kinds plus the classifier's
+    own label: enough for the first version? Should "cry" from the device
+    and `baby_cry` from the computer be one filter?

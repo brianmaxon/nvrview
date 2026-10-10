@@ -61,6 +61,9 @@ The index fills in the background (recent days first, then older ones),
 refreshes the current day periodically, and is shared by every window. All of
 this is read-only toward the device.
 
+- **Sound** per channel: a loudness envelope (peak and RMS per second) and
+  sound labels as events of our own (see "Sound" below).
+
 Animal events: the device's own type names for animals have not been observed
 yet (open question). Until they are, "animal" can also come from on-device
 classification of cover images and sampled frames (Core ML on macOS), stored
@@ -89,12 +92,47 @@ Events from all cameras are grouped into incidents:
 - **Timeline**: one lane per camera, zoomable from a week down to seconds
   with the trackpad or keyboard, events drawn as colored bars by type,
   incidents as bands across lanes, large hit targets, and a thumbnail strip
-  under the cursor.
+  under the cursor. Under each camera's lane, a thin loudness lane shows
+  where something was loud, and sound labels appear as markers like device
+  events.
+- **Filter and search by sound** as by video type: "barking, last week",
+  "any alarm sound today", or "loud moments on this camera".
 - **Synchronized multi-camera playback**: the cameras of an incident play
   side by side on one clock (the cameras' recorded times), scrub together,
   step frame by frame, and switch any lane to full size. Playback uses the
   observed seek-and-play flow (123, 5, 7), one stream per visible lane,
   within the device's session limits.
+
+## Sound
+
+The official desktop app's playback ignores audio, although recordings
+carry it. Sound finds events that video misses or cannot see: an alarm in
+another room, glass breaking, a dog barking at night, a shout. It is an aid
+for finding and labeling events, never a replacement for alarm systems or
+monitoring; a missed sound is never shown as "no alarm".
+
+- **Loudness lane.** The core keeps a per-second loudness envelope per
+  camera, from live audio (every tile with audio, audible or not, and
+  cameras the user keeps watching for sound) and from recordings as they are
+  downloaded or played. Drawn under each timeline lane, it shows at a glance
+  where to look, with no classifier at all. About 170 KB per camera per day.
+- **Alarm patterns.** A deterministic detector in the core recognizes the
+  standard smoke-alarm (three beeps, T3) and CO-alarm (four beeps, T4)
+  rhythms of a tone near 3 kHz, with no model; it is tested on synthetic
+  audio, and a camera's alarm test button is the hardware check.
+- **Sound labels.** On macOS, SoundAnalysis's built-in classifier labels
+  sirens, glass breaking, barking, a baby crying, knocking, and similar
+  sounds; the app hands the labels to the core, which stores them as events
+  (`source` `mac_audio`) next to the device's. They join incidents, filter
+  the list and timeline, and can feed triggers and the notification
+  verifier like any other detection. Device detections of sound (such as a
+  camera's own baby-cry detection) are used where a camera has them.
+- **Older recordings** are analyzed on demand (a day or a camera the user
+  picks), or by an optional slow background pass, newest first, one stream
+  per device, only while the device is otherwise idle.
+
+The C interface for this is in [FFI-RECORDINGS.md](FFI-RECORDINGS.md),
+section 2a.
 
 ## Download
 
@@ -188,3 +226,9 @@ compositor and encoder.
 - How 143 reports errors, and how a play ends at the end of a file.
 - Clock agreement between cameras behind one NVR (recorded times come from
   the NVR; offsets between cameras with their own clocks need measuring).
+- Which cameras to keep watching for sound when they are not on screen
+  (each costs one sub-stream on the device), and whether older recordings
+  are analyzed by default.
+- How well camera microphones pick up an alarm in another room (test with
+  the alarm's test button), and how SoundAnalysis's labels fare on
+  compressed 16 kHz camera audio (measure before relying on a label).
