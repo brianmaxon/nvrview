@@ -248,6 +248,7 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | Local API and MCP server | control events, detections, transcripts, snapshots, triggers | localhost only, authenticated; exposes viewing data and app actions (such as focusing a tile). Camera motion control only with a separate, per-camera grant to that client, the same limits as the user's own use, and a log of every command; never configuration. Implemented once in the core. |
 | Focus drift detection and autofocus | frame tap (a sharpness measure per camera against its own baseline), detections, camera motion control | detection first and on its own: "camera 3 is 40% less sharp than usual", after restarts and over weeks. Correction triggers the camera's own autofocus where the model has it, else a bounded focus search (step, measure, keep the best). Suggest-and-confirm by default, automatic only if enabled for that camera; stops after two failed attempts. |
 | PTZ position watchdog | read-only PTZ position queries, frame tap (comparison with a reference snapshot), camera motion control | detects a PTZ camera that drifted or points at the ground (buggy firmware), from its reported position and from the picture. Correction recalls a preset the user saved (such as home), never raw coordinates chosen by us. Same consent and limits as autofocus. |
+| Multi-factor automation | triggers over several signals: facial recognition, expected activity (schedules, past patterns), presence of known devices on the local network | actions fire only when the signals agree (for example an unknown face, outside expected hours, with no household phone at home); every signal and rule stays local; presence detection only observes the local network. |
 | Doorbell text-to-speech | camera motion control (doorbell speaker), triggers, templates | speaks a message through a doorbell (for example "Leave the package by the door"). Text comes only from user-written templates with a few typed slots (time, camera name); untrusted text (transcripts, detected text, anything a visitor says or shows, other devices' payloads) is never spoken and never instructs an agent. An agent may only pick a template and fill typed slots, with the user's grant; rate-limited and logged. |
 
 ## Build and CI
@@ -268,6 +269,7 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | M2 | C interface plus one live channel in the macOS app | the boundary |
 | M2a | Listening on one tile: AAC decode, timestamping, drift-corrected playback, audio tap | audio that stays in sync |
 | M3 | Grid, full-screen focus, reconnect, Keychain | a usable macOS app |
+| P | Playback: find recorded clips quickly (timeline, thumbnails, detections) and download them fast, resumably, and reliably | better than the official app's slow, error-prone downloads |
 | M4 | Windows app, one channel, then the grid | Windows |
 
 ## Lessons from the official app

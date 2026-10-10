@@ -107,9 +107,11 @@ the crate's `Renderer`.
   the late tail of the jitter (177 ms above median measured). Note that with
   pictures shown on arrival the video itself jitters by the same ±67 ms, and
   audio lags the typical picture by the playout delay, more than lip-sync
-  tolerances (tens of ms). Delaying video by a similar jitter buffer and
-  passing that as the presentation map would let the playout delay shrink to
-  the record length plus a margin; that is a video-path decision.
+  tolerances (tens of ms). **Decision: video is never delayed** (live view,
+  above all full screen, shows the newest picture), so audio trails the
+  picture by its playout delay. The delay therefore adapts to the measured
+  jitter of each stream (a high percentile of recent delivery delay, bounded)
+  instead of a fixed 280 ms, so it is as short as the network allows.
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the
