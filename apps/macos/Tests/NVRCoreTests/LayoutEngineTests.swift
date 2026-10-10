@@ -576,3 +576,105 @@ private struct SplitMix {
         #expect(rig.fake.violations.isEmpty)
     }
 }
+
+@Suite struct CornerIndicatorTests {
+    @Test func itemsFromTracker() {
+        var t = DetectionTracker()
+        let c0 = CameraRef(device: "d", channel: 1, lens: 0)
+        let c1 = CameraRef(device: "d", channel: 1, lens: 1)
+        t.apply(DetectionEvent(device: 1, channel: 1, kind: "motion", active: true), camera: c0)
+        t.apply(DetectionEvent(device: 1, channel: 1, kind: "people", active: true), camera: c0)
+        t.apply(DetectionEvent(device: 1, channel: 1, kind: "people", active: true, source: .local), camera: c0)
+        t.apply(DetectionEvent(device: 1, channel: 1, kind: "smoke_alarm", active: true, source: .localAudio), camera: c0)
+        t.apply(DetectionEvent(device: 1, channel: 1, kind: "visitor", active: true, alarm: true), camera: c0)
+        let items = IndicatorItem.items(from: t.active(for: c0))
+        #expect(items.map(\.kind) == [.motion, .person, .visitor, .smokeAlarm])
+        #expect(items[1].description == "Person (camera AI and this Mac)")
+        #expect(items[3].description == "Smoke alarm (sound)")
+        #expect(items[3].kind.isSound && !items[0].kind.isSound)
+        // The sound shows on the other lens too; nothing else does.
+        #expect(IndicatorItem.items(from: t.active(for: c1)).map(\.kind) == [.smokeAlarm])
+        // Nothing active is an empty set, never an "all clear" item.
+        #expect(IndicatorItem.items(from: []).isEmpty)
+        #expect(IndicatorKind(detectionKind: "baby_cry") == .other)
+    }
+
+    @Test func holdsAboutTwoSecondsAfterAStop() {
+        var h = IndicatorHold()
+        let person = IndicatorItem(kind: .person, source: "camera AI")
+        h.update([person], now: 100)
+        // Still detected: shown however long it lasts.
+        #expect(h.visible(now: 500) == [person])
+        #expect(h.nextExpiry(now: 500) == nil)
+        h.update([], now: 500)
+        #expect(h.visible(now: 501.9) == [person])
+        #expect(h.nextExpiry(now: 501) == 502)
+        #expect(h.visible(now: 502.0).isEmpty)
+        // A brief gap does not flicker, and a restart cancels the hold.
+        h.update([person], now: 600)
+        h.update([], now: 600.5)
+        h.update([person], now: 601)
+        #expect(h.visible(now: 650) == [person])
+        h.update([], now: 700)
+        h.update([], now: 703)
+        #expect(h.visible(now: 703).isEmpty)
+    }
+
+    @Test func cornerSettingPersistsAndPlaces() throws {
+        let suite = "indicator-corner-test"
+        let d = try #require(UserDefaults(suiteName: suite))
+        d.removePersistentDomain(forName: suite)
+        defer { d.removePersistentDomain(forName: suite) }
+        #expect(ChromeCorner.load(from: d) == .topRight)
+        for corner in ChromeCorner.allCases {
+            corner.save(to: d)
+            #expect(ChromeCorner.load(from: d) == corner)
+        }
+        d.set("middle", forKey: ChromeCorner.defaultsKey)
+        #expect(ChromeCorner.load(from: d) == .topRight)
+        let size = (width: 200.0, height: 100.0)
+        func at(_ c: ChromeCorner) -> (x: Double, y: Double) {
+            c.rowOrigin(count: 2, symbol: 10, gap: 4, inset: 8, in: size)
+        }
+        let right = 168.0, bottom = 82.0
+        #expect(at(.topLeft).x == 8 && at(.topLeft).y == 8)
+        #expect(at(.topRight).x == right && at(.topRight).y == 8)
+        #expect(at(.bottomLeft).x == 8 && at(.bottomLeft).y == bottom)
+        #expect(at(.bottomRight).x == right && at(.bottomRight).y == bottom)
+    }
+}
+
+@Suite struct SidebarIndicatorTests {
+    @Test func rowSymbolsAndDeviceSummary() {
+        var t = DetectionTracker()
+        func cam(_ d: String, _ c: Int, _ l: Int = 0) -> CameraRef { CameraRef(device: d, channel: c, lens: l) }
+        t.apply(DetectionEvent(device: 1, channel: 2, kind: "people", active: true), camera: cam("a", 2))
+        t.apply(DetectionEvent(device: 1, channel: 2, kind: "vehicle", active: true, lens: 1), camera: cam("a", 2, 1))
+        t.apply(DetectionEvent(device: 1, channel: 4, kind: "smoke_alarm", active: true, source: .localAudio), camera: cam("a", 4))
+        t.apply(DetectionEvent(device: 2, channel: 2, kind: "motion", active: true), camera: cam("b", 2))
+        var b = IndicatorBoard()
+        let first = b.update(t, now: 10)
+        #expect(first)
+        // A lens row shows its own; the channel row summarizes both lenses.
+        #expect(b.items(for: cam("a", 2, 0)).map(\.kind) == [.person])
+        #expect(b.items(for: cam("a", 2, 1)).map(\.kind) == [.vehicle])
+        #expect(b.items(device: "a", channel: 2).map(\.kind) == [.person, .vehicle])
+        // Sound shows on both lenses.
+        #expect(b.items(for: cam("a", 4, 1)).map(\.kind) == [.smokeAlarm])
+        // Idle cameras show nothing, never an "all clear".
+        #expect(b.items(for: cam("a", 3)).isEmpty)
+        // A device row is the union over its cameras; other devices apart.
+        #expect(b.items(device: "a").map(\.kind) == [.person, .vehicle, .smokeAlarm])
+        #expect(b.items(device: "b").map(\.kind) == [.motion])
+        // Stops hold about two seconds, then clear; no change reported between.
+        t.apply(DetectionEvent(device: 1, channel: 2, kind: "people", active: false), camera: cam("a", 2))
+        let held = b.update(t, now: 11)
+        #expect(!held)
+        #expect(b.items(for: cam("a", 2)).map(\.kind) == [.person])
+        let gone = b.update(t, now: 13.5)
+        #expect(gone)
+        #expect(b.items(for: cam("a", 2)).isEmpty)
+        let quiet = b.update(t, now: 14)
+        #expect(!quiet)
+    }
+}

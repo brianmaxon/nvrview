@@ -194,6 +194,7 @@ struct SidebarView: View {
                 Text(count).font(.caption).foregroundStyle(.secondary)
                     .help(model.hideOfflineChannels ? "Channels listed (offline ones hidden: View > Hide Offline Channels)" : "Channels")
             }
+            IndicatorSymbols(items: model.indicators.items(device: device.key))
             Spacer()
             Text(Self.stateText(device)).font(.caption).foregroundStyle(Self.stateColor(device.link.state))
         }
@@ -239,16 +240,19 @@ struct SidebarView: View {
     private func cameraRow(
         _ camera: CameraRef, indent: Bool, title: String? = nil, depth: Int = 1, detectionsOf: [CameraRef]? = nil
     ) -> some View {
-        let detections = (detectionsOf ?? [camera]).flatMap { model.detections.active(for: $0) }
+        let symbols = detectionsOf != nil
+            ? model.indicators.items(device: camera.device, channel: camera.channel)
+            : model.indicators.items(for: camera)
         let offline = model.channelInfo(camera)?.connected == false
         return Button {
             window?.cameraPicked(camera)
         } label: {
             HStack(spacing: 6) {
                 Circle()
-                    .fill(offline ? Color.orange : (detections.isEmpty ? Color.green : Color(StageView.color(for: detections[0].kind))))
+                    .fill(offline ? Color.orange : Color.green)
                     .frame(width: 7, height: 7)
                 Text(title ?? model.name(of: camera)).lineLimit(1)
+                IndicatorSymbols(items: symbols)
                 if model.audible.contains(camera) {
                     Image(systemName: "speaker.wave.2.fill").font(.caption2).foregroundStyle(.secondary)
                         .accessibilityLabel("Listening")
@@ -335,5 +339,25 @@ struct SidebarView: View {
         case .loginFailed?, .other?: .red
         default: .secondary
         }
+    }
+}
+
+/// The per-kind detection symbols after a sidebar row's name: small, quiet,
+/// fading in and out; nothing at all when nothing is detected.
+struct IndicatorSymbols: View {
+    var items: [IndicatorItem]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(items, id: \.kind) { item in
+                Image(systemName: item.kind.symbolName)
+                    .font(.system(size: 9))
+                    .foregroundStyle(item.kind.isSound ? Color(red: 1, green: 0.7, blue: 0.3) : Color.secondary)
+                    .help(item.description)
+                    .accessibilityLabel(item.description)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: items)
     }
 }

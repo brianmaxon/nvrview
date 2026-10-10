@@ -8,18 +8,15 @@ struct TileChromeContent: Equatable {
     var subtitle: String?
     /// The frame-rate readout, when the user turned it on.
     var rates: String?
-    var badges: [Badge] = []
+    /// What is detected now for the camera (corner indicators).
+    var indicators: [IndicatorItem] = []
+    var corner: ChromeCorner = .fallback
     var veil: TileVeil?
     var hasCamera: Bool
     var audible: Bool
     var selected: Bool
     var editing: Bool
     var dropTarget: Bool
-
-    struct Badge: Equatable {
-        var text: String
-        var color: NSColor
-    }
 }
 
 /// The lightweight layer above one tile of the Metal surface (docs/UX.md
@@ -45,7 +42,7 @@ final class TileChromeView: NSView {
     private let subtitle = NSTextField(labelWithString: "")
     private let rates = NSTextField(labelWithString: "")
     private let speaker = NSButton()
-    private let badges = NSStackView()
+    private let cornerView = CornerIndicatorView()
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
     private let veilDetail = NSTextField(labelWithString: "")
@@ -107,9 +104,7 @@ final class TileChromeView: NSView {
         speaker.setAccessibilityLabel("Listen")
         header.addSubview(speaker)
 
-        badges.orientation = .horizontal
-        badges.spacing = 4
-        addSubview(badges)
+        addSubview(cornerView)
 
         veil.wantsLayer = true
         veil.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.055, blue: 0.063, alpha: 0.78).cgColor
@@ -184,10 +179,8 @@ final class TileChromeView: NSView {
             systemSymbolName: c.audible ? "speaker.wave.2.fill" : "speaker.slash.fill",
             accessibilityDescription: c.audible ? "Listening" : "Muted")
         speaker.setAccessibilityLabel(c.audible ? "Stop listening" : "Listen")
-        if old?.badges != c.badges {
-            for v in badges.arrangedSubviews { v.removeFromSuperview() }
-            for b in c.badges { badges.addArrangedSubview(Self.badge(b)) }
-        }
+        cornerView.corner = c.corner
+        cornerView.set(active: c.indicators)
         veil.isHidden = c.veil == nil || !c.hasCamera
         veilTitle.stringValue = c.veil?.title ?? ""
         veilDetail.stringValue = c.veil?.detail ?? ""
@@ -236,36 +229,6 @@ final class TileChromeView: NSView {
         hoverMeter.frame = CGRect(x: 0, y: 0, width: w, height: 3)
     }
 
-    private static func badge(_ b: TileChromeContent.Badge) -> NSView {
-        let label = NSTextField(labelWithString: b.text)
-        label.font = .systemFont(ofSize: 10, weight: .semibold)
-        label.textColor = .white
-        label.wantsLayer = true
-        label.drawsBackground = false
-        let box = NSView()
-        box.wantsLayer = true
-        box.layer?.backgroundColor = b.color.cgColor
-        box.layer?.cornerRadius = 8
-        box.addSubview(label)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        box.translatesAutoresizingMaskIntoConstraints = false
-        // The badges' stack is placed by frame, and has a zero frame until
-        // the tile's first layout; the far-side insets are strong preferences
-        // so that a zero-size stack never makes the set unsatisfiable (which
-        // AppKit logs).
-        let trailing = label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -6)
-        let bottom = label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1)
-        trailing.priority = .defaultHigh
-        bottom.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 6),
-            trailing,
-            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 1),
-            bottom,
-        ])
-        return box
-    }
-
     // MARK: Layout
 
     override func layout() {
@@ -283,11 +246,12 @@ final class TileChromeView: NSView {
         CATransaction.commit()
         let button: CGFloat = 26
         speaker.frame = CGRect(x: w - button - 6, y: 4, width: button, height: 22)
-        let badgeSize = badges.fittingSize
-        let badgeRight = speaker.isHidden ? w - 8 : speaker.frame.minX - 4
-        badges.frame = CGRect(x: max(badgeRight - badgeSize.width, 8), y: 7, width: badgeSize.width, height: badgeSize.height)
-        let titleRight = (badges.arrangedSubviews.isEmpty ? badgeRight : badges.frame.minX) - 6
-        title.frame = CGRect(x: 10, y: 7, width: max(titleRight - 10, 0), height: 16)
+        cornerView.frame = bounds
+        // The title keeps clear of the indicators when they share its edge.
+        let taken = cornerView.occupiedWidth()
+        let titleLeft: CGFloat = 10 + (cornerView.corner == .topLeft ? taken : 0)
+        let titleRight = (speaker.isHidden ? w - 8 : speaker.frame.minX - 4) - (cornerView.corner == .topRight ? taken : 0) - 6
+        title.frame = CGRect(x: titleLeft, y: 7, width: max(titleRight - titleLeft, 0), height: 16)
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
         rates.frame = CGRect(x: 10, y: subtitle.isHidden ? 22 : 36, width: max(w - 20, 0), height: 14)
         veil.frame = bounds

@@ -21,6 +21,8 @@ public struct DetectionTracker: Sendable, Equatable {
     /// they are kept per channel (keyed by its first lens) and shown for
     /// every lens of the channel.
     private var sound: [CameraRef: [Active]] = [:]
+    var activeKeys: [CameraRef] { Array(active.keys) }
+    var soundKeys: [CameraRef] { Array(sound.keys) }
 
     public init() {}
 

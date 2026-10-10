@@ -220,11 +220,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc func toggleFrameRates(_ sender: Any?) { model?.showFrameRates.toggle() }
+    private func cornerMenuItem() -> NSMenuItem {
+        let menu = NSMenu(title: "Detection Indicators")
+        for corner in ChromeCorner.allCases {
+            let i = NSMenuItem(title: corner.title, action: #selector(setIndicatorCorner(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = corner.rawValue
+            menu.addItem(i)
+        }
+        let parent = NSMenuItem(title: "Detection Indicators", action: nil, keyEquivalent: "")
+        parent.submenu = menu
+        return parent
+    }
+    @objc func setIndicatorCorner(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let c = ChromeCorner(rawValue: raw) { model?.indicatorCorner = c }
+    }
     @objc func toggleHideOffline(_ sender: Any?) { model?.hideOfflineChannels.toggle() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
         if item.action == #selector(toggleHideOffline(_:)) { item.state = model?.hideOfflineChannels == true ? .on : .off }
+        if item.action == #selector(setIndicatorCorner(_:)) {
+            item.state = (item.representedObject as? String) == model?.indicatorCorner.rawValue ? .on : .off
+        }
         return true
     }
 
@@ -281,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             item("Show Frame Rates", #selector(toggleFrameRates(_:))),
             item("Hide Offline Channels", #selector(toggleHideOffline(_:))),
+            cornerMenuItem(),
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.

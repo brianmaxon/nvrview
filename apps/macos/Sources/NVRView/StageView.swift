@@ -169,12 +169,6 @@ final class StageView: NSView {
                 dropTarget: dropTarget == leaf.path)
         }
         let active = model.detections.active(for: camera)
-        let multiLens = model.isMultiLens(camera)
-        let badges = active.map { a in
-            TileChromeContent.Badge(
-                text: DetectionTracker.badgeText(a, lensName: multiLens ? AppModel.lensName(camera.lens) : nil),
-                color: Self.color(for: a.kind))
-        }
         var detail: [String] = [model.deviceName(camera.device)]
         if let tile = model.leases.tile(for: camera) {
             let t = tile.tierState
@@ -188,7 +182,8 @@ final class StageView: NSView {
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
             title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
-            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil, badges: badges,
+            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil,
+            indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }
