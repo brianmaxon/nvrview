@@ -270,6 +270,19 @@ struct Ctx {
     limiter: LogLimiter,
 }
 
+impl Ctx {
+    /// Ends the session for good: refuses new subscriptions, and closes every
+    /// queue (including requests still waiting in the command channel) so
+    /// subscribers see the end instead of waiting forever.
+    fn finish(&mut self) {
+        self.cmd_rx.close();
+        while let Ok(n) = self.cmd_rx.try_recv() {
+            self.subs.add(n);
+        }
+        self.subs.close_all();
+    }
+}
+
 enum Exit {
     /// Close requested; previews were stopped and the socket shut down.
     Closed,
@@ -327,7 +340,7 @@ async fn supervise<C: Connector>(connector: C, mut ctx: Ctx) {
                     status,
                     remain_times,
                 });
-                ctx.subs.close_all();
+                ctx.finish();
                 return;
             }
             Exit::Failed {
@@ -351,7 +364,7 @@ async fn supervise<C: Connector>(connector: C, mut ctx: Ctx) {
             }
         }
     }
-    ctx.subs.close_all();
+    ctx.finish();
     ctx.state_tx.send_replace(ConnState::Closed);
 }
 
