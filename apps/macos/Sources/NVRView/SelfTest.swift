@@ -283,7 +283,39 @@ final class SelfTest {
         after(0.1) { [self] in
             model.deleteGroup(group)
             if let layout { model.deleteLayout(layout) }
-            after(0.1) { [self] in lensStep() }
+            after(0.1) { [self] in revealStep() }
+        }
+    }
+
+    /// The edge reveal: with the sidebar collapsed, a pointer resting at the
+    /// left edge slides the sidebar over the stage without resizing the stage
+    /// or its drawable, and it slides away again after the pointer leaves.
+    private func revealStep() {
+        guard let window else { return lensStep() }
+        window.setSidebarCollapsedForTest(true)
+        after(0.6) { [self] in
+            let grid = window.stage.grid
+            let size = grid.bounds.size, drawable = grid.drawableSize, resizes = grid.drawableResizes
+            let overlay = window.sidebarOverlay
+            overlay.simulatedPointer = CGPoint(x: 2, y: 200)
+            overlay.pointerAt(CGPoint(x: 2, y: 200))
+            when({ overlay.isShown }, timeout: 3) { [self] in
+                if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
+                after(0.4) { [self] in
+                    if grid.bounds.size != size || grid.drawableSize != drawable || grid.drawableResizes != resizes {
+                        problems.append("the stage or its drawable changed size while the sidebar overlay was up")
+                    }
+                    print("reveal: shown, stage \(Int(size.width))x\(Int(size.height)) unchanged")
+                    overlay.simulatedPointer = CGPoint(x: 900, y: 200)
+                    overlay.pointerAt(CGPoint(x: 900, y: 200))
+                    when({ !overlay.isShown }, timeout: 3) { [self] in
+                        if overlay.isShown { problems.append("the sidebar overlay did not slide away") }
+                        overlay.simulatedPointer = nil
+                        window.setSidebarCollapsedForTest(false)
+                        after(0.6) { [self] in lensStep() }
+                    }
+                }
+            }
         }
     }
 

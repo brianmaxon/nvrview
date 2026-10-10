@@ -191,6 +191,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let frame = SavedWindow.placement(of: w.frame, screens: screens, minSize: ViewerWindowController.minSize)
             guard let controller = openWindow(content, frame: frame) else { continue }
             reopened = true
+            controller.restoreSidebar(collapsed: w.sidebarCollapsed)
             if w.fullScreen, options.selfTestSeconds == nil { controller.window?.toggleFullScreen(nil) }
         }
         return reopened
