@@ -32,6 +32,19 @@ enum Mode {
     LockedLogin,
     /// Log in, then never send another byte (a dead connection).
     SilentAfterLogin,
+    /// Answer a preview start with the stream info only; the test feeds
+    /// frames with [`Fake::send_live`].
+    Live,
+    /// Refuse every preview start with status 400.
+    RefuseStart,
+}
+
+/// Frames the test asks the fake to send on a running preview.
+#[derive(Clone, Debug)]
+struct LiveFrames {
+    handle: String,
+    /// (keyframe, pts)
+    frames: Vec<(bool, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +61,7 @@ struct Fake {
     active: Arc<AtomicUsize>,
     max_active: Arc<AtomicUsize>,
     accept_times: Arc<Mutex<Vec<Instant>>>,
+    live: tokio::sync::broadcast::Sender<LiveFrames>,
 }
 
 impl Fake {
@@ -60,7 +74,9 @@ impl Fake {
             active: Arc::default(),
             max_active: Arc::default(),
             accept_times: Arc::default(),
+            live: tokio::sync::broadcast::channel(64).0,
         };
+        let live = f.live.clone();
         let (seen, accepted, active, max_active, times) = (
             f.seen.clone(),
             f.accepted.clone(),
@@ -78,13 +94,24 @@ impl Fake {
                 let now = active.fetch_add(1, Ordering::SeqCst) + 1;
                 max_active.fetch_max(now, Ordering::SeqCst);
                 let (seen, active) = (seen.clone(), active.clone());
+                let live_rx = live.subscribe();
                 tokio::spawn(async move {
-                    serve(sock, conn, mode, seen).await;
+                    serve(sock, conn, mode, seen, live_rx).await;
                     active.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         });
         f
+    }
+
+    /// Sends frames on the running preview of `channel` and `tier`.
+    fn send_live(&self, channel: u8, tier: StreamTier, frames: &[(bool, u64)]) {
+        self.live
+            .send(LiveFrames {
+                handle: tier.handle(channel).to_string(),
+                frames: frames.to_vec(),
+            })
+            .unwrap();
     }
 
     fn count(&self, command: u32) -> usize {
@@ -122,18 +149,51 @@ fn reply(command: u32, id: u32, status: u16, class: Class, body: &[u8]) -> Vec<u
     encode_message_with_status(command, id, status, class, &[], body).unwrap()
 }
 
-async fn serve(mut sock: TcpStream, conn: usize, mode: Mode, seen: Arc<Mutex<Vec<Seen>>>) {
+fn media_message(key: &SessionKey, id: u32, mut stream: Vec<u8>) -> Vec<u8> {
+    let mut ext = b"<Extension version=\"1.1\"><binaryData>1</binaryData><encryptLen>1024</encryptLen></Extension>".to_vec();
+    key.encrypt(&mut ext);
+    key.encrypt(&mut stream);
+    encode_message_with_status(3, id, 200, Class::Device, &ext, &stream).unwrap()
+}
+
+async fn serve(
+    mut sock: TcpStream,
+    conn: usize,
+    mode: Mode,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    mut live_rx: tokio::sync::broadcast::Receiver<LiveFrames>,
+) {
     let key = SessionKey::derive(NONCE, PASSWORD);
     let mut dec = Decoder::new();
     let mut buf = [0u8; 4096];
+    // Start message IDs by handle, for live frames.
+    let mut starts: std::collections::HashMap<String, u32> = Default::default();
     loop {
-        let n = match sock.read(&mut buf).await {
-            Ok(0) | Err(_) => return,
-            Ok(n) => n,
+        let n = tokio::select! {
+            r = sock.read(&mut buf) => match r {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            },
+            l = live_rx.recv() => {
+                if let Ok(l) = l && let Some(id) = starts.get(&l.handle) {
+                    let mut stream = Vec::new();
+                    for (k, pts) in &l.frames {
+                        let nal: &[u8] = if *k { &[0, 0, 0, 1, 0x65, 1] } else { &[0, 0, 0, 1, 0x41, 2] };
+                        stream.extend(encode_video(0, *k, Codec::H264, *pts, &[], nal));
+                    }
+                    if sock.write_all(&media_message(&key, *id, stream)).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
+            }
         };
         dec.push(&buf[..n]);
         while let Some(m) = dec.next_message().unwrap() {
             let out = handle(&m, &key, conn, mode, &seen);
+            if let Some(h) = out.started.clone() {
+                starts.insert(h, m.header.message_id);
+            }
             for bytes in out.bytes {
                 if sock.write_all(&bytes).await.is_err() {
                     return;
@@ -149,6 +209,8 @@ async fn serve(mut sock: TcpStream, conn: usize, mode: Mode, seen: Arc<Mutex<Vec
 struct Out {
     bytes: Vec<Vec<u8>>,
     close: bool,
+    /// Handle of a preview this message started.
+    started: Option<String>,
 }
 
 fn handle(
@@ -162,6 +224,7 @@ fn handle(
     let mut out = Out {
         bytes: vec![],
         close: false,
+        started: None,
     };
     if h.command == 1 && h.class == Class::ClientHandshake {
         let mut body = format!(
@@ -232,8 +295,22 @@ fn handle(
                 .unwrap()
                 .parse()
                 .unwrap();
+            if mode == Mode::RefuseStart {
+                out.bytes
+                    .push(reply(3, h.message_id, 400, Class::Device, &[]));
+                return out;
+            }
             out.bytes
                 .push(reply(3, h.message_id, 200, Class::Device, &[]));
+            if mode == Mode::Live {
+                out.started = find_text(&text, "handle").unwrap();
+                out.bytes.push(media_message(
+                    key,
+                    h.message_id,
+                    encode_info(1920, 1080, 15),
+                ));
+                return out;
+            }
             let mut stream = encode_info(1920, 1080, 15);
             stream.extend(encode_video(
                 0,
@@ -251,13 +328,7 @@ fn handle(
                 &[],
                 &[0, 0, 0, 1, 0x41, 2],
             ));
-            let mut ext = b"<Extension version=\"1.1\"><binaryData>1</binaryData><encryptLen>1024</encryptLen></Extension>".to_vec();
-            key.encrypt(&mut ext);
-            key.encrypt(&mut stream);
-            out.bytes.push(
-                encode_message_with_status(3, h.message_id, 200, Class::Device, &ext, &stream)
-                    .unwrap(),
-            );
+            out.bytes.push(media_message(key, h.message_id, stream));
             out.close = mode == Mode::DropFirstAfterStart && conn == 0;
         }
         4 => out
@@ -532,4 +603,196 @@ async fn dropping_a_subscription_stops_only_that_preview() {
     assert_eq!(fake.active.load(Ordering::SeqCst), 1);
     s.close().await;
     wait_until("stop for channel 2", || fake.stops_for(2) == 1).await;
+}
+
+fn starts_for(fake: &Fake, channel: u8) -> usize {
+    fake.seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            s.command == 3
+                && find_text(&s.text, "channelId").unwrap().as_deref() == Some(&channel.to_string())
+        })
+        .count()
+}
+
+async fn expect_video(sub: &mut bc_session::Subscription, want: (bool, u64)) {
+    loop {
+        let i = recv(sub).await;
+        if let Some(v) = video_pts(&i) {
+            assert_eq!(v, want);
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn subscribers_to_one_stream_share_a_single_preview() {
+    let fake = Fake::start(Mode::Normal).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    for sub in [&mut a, &mut b] {
+        assert!(matches!(
+            recv(sub).await,
+            Item::Media(Record::Info { width: 1920, .. })
+        ));
+        assert_eq!(video_pts(&recv(sub).await), Some((true, 2000)));
+        assert_eq!(video_pts(&recv(sub).await), Some((false, 2001)));
+    }
+    assert_eq!(starts_for(&fake, 2), 1);
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+    s.close().await;
+    wait_until("socket closed", || fake.active.load(Ordering::SeqCst) == 0).await;
+    assert_eq!(fake.stops_for(2), 1);
+}
+
+#[tokio::test]
+async fn the_preview_stops_only_with_the_last_subscriber() {
+    let fake = Fake::start(Mode::Live).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    recv(&mut a).await;
+    recv(&mut b).await;
+    drop(a);
+    // The stream goes on for the remaining subscriber.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.stops_for(1), 0);
+    fake.send_live(1, StreamTier::Sub, &[(true, 10)]);
+    expect_video(&mut b, (true, 10)).await;
+    drop(b);
+    wait_until("the stop", || fake.stops_for(1) == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.stops_for(1), 1);
+    assert_eq!(starts_for(&fake, 1), 1);
+    s.close().await;
+    wait_until("socket closed", || fake.active.load(Ordering::SeqCst) == 0).await;
+    assert_eq!(fake.stops_for(1), 1);
+}
+
+#[tokio::test]
+async fn a_late_subscriber_starts_at_a_keyframe() {
+    let fake = Fake::start(Mode::Live).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    recv(&mut a).await;
+    fake.send_live(1, StreamTier::Sub, &[(true, 1), (false, 2)]);
+    expect_video(&mut a, (true, 1)).await;
+    expect_video(&mut a, (false, 2)).await;
+    let mut b = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    // Stream info is replayed; no preview was started for it.
+    assert!(matches!(
+        recv(&mut b).await,
+        Item::Media(Record::Info { .. })
+    ));
+    // Let the subscription reach the supervisor, then send predicted frames
+    // (which b must skip) followed by a keyframe.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    fake.send_live(1, StreamTier::Sub, &[(false, 3)]);
+    expect_video(&mut a, (false, 3)).await;
+    fake.send_live(1, StreamTier::Sub, &[(false, 4), (true, 5), (false, 6)]);
+    expect_video(&mut b, (true, 5)).await;
+    expect_video(&mut b, (false, 6)).await;
+    assert_eq!(starts_for(&fake, 1), 1);
+    s.close().await;
+}
+
+#[tokio::test]
+async fn a_slow_subscriber_only_overflows_its_own_queue() {
+    let fake = Fake::start(Mode::Live).await;
+    let mut cfg = config();
+    cfg.queue_frames = 4;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
+    let mut slow = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    let mut fast = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    recv(&mut fast).await;
+    fake.send_live(1, StreamTier::Sub, &[(true, 0)]);
+    expect_video(&mut fast, (true, 0)).await;
+    // One frame at a time, so the fast subscriber never falls behind; the
+    // slow one never reads.
+    for pts in 1..=20u64 {
+        fake.send_live(1, StreamTier::Sub, &[(false, pts)]);
+        expect_video(&mut fast, (false, pts)).await;
+    }
+    assert_eq!(fast.dropped(), 0);
+    assert!(slow.dropped() > 0);
+    // The slow one sees a gap, then resumes at the next keyframe.
+    fake.send_live(1, StreamTier::Sub, &[(true, 100)]);
+    expect_video(&mut fast, (true, 100)).await;
+    let mut saw_gap = false;
+    loop {
+        match recv(&mut slow).await {
+            Item::Discontinuity => saw_gap = true,
+            i => {
+                if let Some(v) = video_pts(&i) {
+                    assert!(saw_gap);
+                    assert_eq!(v, (true, 100));
+                    break;
+                }
+            }
+        }
+    }
+    s.close().await;
+}
+
+#[tokio::test]
+async fn a_reconnect_restarts_a_shared_stream_once() {
+    let fake = Fake::start(Mode::DropFirstAfterStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(3, StreamTier::Sub).await.unwrap();
+    for sub in [&mut a, &mut b] {
+        let mut saw_gap = false;
+        loop {
+            match recv(sub).await {
+                Item::Discontinuity => saw_gap = true,
+                i if saw_gap && video_pts(&i).is_some_and(|(k, _)| k) => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2);
+    let seen = fake.seen.lock().unwrap().clone();
+    for conn in [0, 1] {
+        let n = seen
+            .iter()
+            .filter(|x| x.conn == conn && x.command == 3)
+            .count();
+        assert_eq!(n, 1, "starts on connection {conn}");
+    }
+    s.close().await;
+}
+
+#[tokio::test]
+async fn tiers_of_one_channel_are_separate_previews() {
+    let fake = Fake::start(Mode::Normal).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(2, StreamTier::Main).await.unwrap();
+    recv(&mut a).await;
+    recv(&mut b).await;
+    assert_eq!(starts_for(&fake, 2), 2);
+    drop(a);
+    wait_until("one stop", || fake.stops_for(2) == 1).await;
+    assert_eq!(fake.active.load(Ordering::SeqCst), 1);
+    s.close().await;
+    wait_until("both stops", || fake.stops_for(2) == 2).await;
+}
+
+#[tokio::test]
+async fn a_refused_start_reaches_every_subscriber() {
+    let fake = Fake::start(Mode::RefuseStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::StartRejected { status: 400 });
+    assert_eq!(recv(&mut b).await, Item::StartRejected { status: 400 });
+    // A subscriber that attaches afterwards hears it too, without a second
+    // start request.
+    let mut c = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut c).await, Item::StartRejected { status: 400 });
+    assert_eq!(starts_for(&fake, 2), 1);
+    s.close().await;
 }

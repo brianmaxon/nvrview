@@ -12,6 +12,12 @@
 //!   dropping the handle, and a failed connection all end with the previous
 //!   socket gone before any new one opens. A graceful close sends a preview
 //!   stop for every active stream first.
+//! - **One preview per stream**: subscriptions to the same channel and tier
+//!   share a single device preview, started by the first subscriber and
+//!   stopped when the last one is dropped. The stream is demultiplexed once;
+//!   each subscriber has its own queue, keyframe gating, and drop counters, so
+//!   a slow one never affects another. A subscriber that attaches mid-stream
+//!   gets the stream info, then video from the next keyframe.
 //! - **Read-only**: only commands the protocol crate's allowlist can build are
 //!   ever sent (login, preview start and stop, keepalive, and the read-only
 //!   info queries behind [`DeviceSession::query`]).
