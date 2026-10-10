@@ -52,6 +52,9 @@ final class SelfTest {
         let cameras = window.state.tree.cameras
         let playing = cameras.filter { model.leases.tile(for: $0)?.snapshot.status == .playing }.count
         print("window \"\(window.state.name)\": \(window.state.tree.leafCount) tiles, \(cameras.count) cameras, \(playing) playing")
+        if let f = window.window?.frame {
+            print("windows: \(app.windows.count), first at \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))")
+        }
         if playing == 0 { problems.append("no tile is playing") }
         capture("grid") { [self] in resizeStep() }
     }
