@@ -29,6 +29,7 @@ mod nonblocking;
 mod ratelimit;
 mod redact;
 mod rotate;
+mod setup;
 mod stats;
 
 pub use nonblocking::{NonBlockingWriter, WriterThread};
@@ -37,4 +38,11 @@ pub use ratelimit::{
 };
 pub use redact::{MASK, Redacted, RedactedTail};
 pub use rotate::{RotatingFileWriter, RotationConfig, total_bytes_on_disk};
+pub use setup::{
+    DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_FILES, DEFAULT_MAX_TOTAL_BYTES, DEFAULT_QUEUE_LINES,
+    InitError, LogConfig, LogGuard, Pipeline, build_pipeline, build_pipeline_with_clock, init,
+};
 pub use stats::{LogStats, LogStatsSnapshot};
+
+#[cfg(test)]
+mod flood_tests;
