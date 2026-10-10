@@ -267,6 +267,11 @@ struct Conn {
 }
 
 fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
+    // The listener is non-blocking, and on Windows and macOS an accepted
+    // socket inherits that: reads would spin instead of waiting `POLL`, and
+    // a write into a full send buffer would fail with `WouldBlock` (ending a
+    // download or live stream mid-way) instead of waiting for the client.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(POLL))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     stream.set_nodelay(true)?;
