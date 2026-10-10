@@ -604,15 +604,68 @@ The `01wb` record, as observed in every message: the magic, then both u16
 size fields 520; a 4-byte prefix that was always `00 01 02 00`; the IMA ADPCM
 state (i16 little-endian predictor, u8 step index, one zero byte); then 512
 bytes of 4-bit samples, which is 1024 samples. The first record started from
-predictor 0, step index 0.
+predictor 0, step index 0. Every 202 payload was exactly 528 bytes: the
+8-byte record header and the 520 bytes, so no padding.
+
+**How the samples are coded** (observed (client capture), measured by
+decoding all 135 records of the session with the standard IMA ADPCM step
+and index tables):
+
+- Each byte holds two samples, **high nibble first**. Decoded high nibble
+  first, the state at the end of every record equaled the state in the next
+  record's header, predictor and step index both, in 134 of 134 cases; decoded
+  low nibble first, in none.
+- So the encoder runs continuously across records: a record's header is the
+  encoder state before its first sample (not an extra sample), carried over
+  from the previous record. With the 8-byte headers removed, the records
+  concatenate into a plain IMA ADPCM stream starting from state 0, the same
+  coding FFmpeg's `adpcm_ima_ssi` decoder reads (high nibble first, standard
+  tables, no block headers); nvrview's tests check its encoder against that
+  decoder.
+
+**Exact requests** (observed (client capture); channel numbers aside, as
+sent):
+
+- 201's extension is the XML declaration, then
+  `<Extension version="1.1">` with only `<channelId>` (no `chnType`), each
+  element on its own line. Its payload is the XML declaration, `<body>`, the
+  `TalkConfig` above, `</body>`. The body has no `priority`, although the
+  ability lists one.
+- 11 is the same extension alone: the header's payload offset equals the
+  body length, and nothing follows.
+- 202's extension is the XML declaration, then `<Extension version="1.1">`
+  with `<binaryData>1</binaryData>` and `<channelId>`, 131 bytes before
+  encryption.
+- 201 and 11 carried ordinary session message IDs (the next free ones);
+  only 202 used ID 0. The device answered 201 and 11 with the request's ID.
+- Every `TalkAbility` reply seen (every talk-capable channel of two NVRs,
+  read several times) had `duplex` `FDX` only, `followVideoStream` as the first (on
+  some channels the only) `audioStreamMode`, and one `audioConfig`: `adpcm`,
+  16000, 16, 1024, `mono`, `priority` 0. The reply body has no
+  `channelId`. The client's 201 repeated the first `duplex`, the first
+  `audioStreamMode`, and that `audioConfig`.
 
 | Fact | Provenance |
 | --- | --- |
 | The first 202 followed the 201 reply after about 0.2 s; the 11 followed the last 202 after about 50 ms. | observed |
 | Records went out at a mean spacing of 64.0 ms (median 62 ms, from 5 to 144 ms between messages), which is 1024 samples at 16 kHz: the talk audio is 16 kHz ADPCM, as the ability advertised. (The 8 kHz of the client's ADPCM *decoder*, reported above, applies to received audio only.) | observed |
+| The pacing is real time: over the session's 8.6 s, the n-th record went out within -12 to +104 ms of n × 64 ms after the first, and ended 5 ms early. Gaps ran 55–72 ms for most records, with the occasional long gap (up to 144 ms) followed by a short one (down to 5 ms): the client catches up after a stall instead of drifting, and never ran more than about two records ahead of or behind the clock. | observed (client capture) |
 | The device answered **every** 202 with an empty 202 reply, status 200, message ID 0, after 4–118 ms (median 29 ms). | observed |
 | No talk-status push (693) arrived during talk. | observed (client capture) |
 | Commands 12 and 203–205 (other talk stream variants) are not used by this client. | reported (client) |
+
+**What nvrview does with this** (the reason the allowlist grew): 10 joins the
+viewing tier (a read-only query); 201, 202 and 11 form the talk-back part of
+the motion tier and are built only for a channel the user enabled talk-back
+on. nvrview sends talk only to channels whose 199 item has `ipcAudioTalk`
+1 and whose ability offers the one configuration observed (`adpcm`, 16000,
+16, 1024, `mono`); builds the 201 body itself from that template (never
+from client-supplied XML); sends 202 in real time from a local clock, one
+1024-sample record per 64 ms, catching up a short stall as the client
+does but restarting its clock after a longer one rather than bursting, and
+drops audio rather than queueing it without bound; and sends
+11 on every exit path (stop, drop, session close, a refused or failed
+record), since nothing observed ends a talk but 11.
 
 ## Recordings: search and download
 
@@ -892,8 +945,13 @@ serves live view only, and ONVIF offered no replay service. (observed)
   commands, and speeds other than 40 and 1; what 709 does; whether any camera
   supports an autofocus command (no channel in the capture advertised
   `autoFocus`); the meaning of the `01wb` prefix `00 01 02 00` in talk
-  records; and whether talk-back needs 202 at real-time pace or tolerates
-  bursts.
+  records (only one record size was seen); whether talk-back needs 202 at
+  real-time pace or tolerates bursts; whether it needs a live view of the
+  channel to be running (the client always had one: `followVideoStream`);
+  what a device answers to a 201 on a channel without talk-back, to a
+  second 201, or to 202 without 201; and whether the received-audio ADPCM
+  path (above, reported low nibble first) is in fact coded high nibble first
+  like talk-back records.
 - Recordings: whether 15 must be repeated for days with many files; the
   meaning of `dayType` entries for days without recordings and the full
   mapping of the numeric `streamType` in 272; how a play (5) ends at the end
