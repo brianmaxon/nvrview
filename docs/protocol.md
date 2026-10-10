@@ -269,6 +269,11 @@ Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 
 ## Open questions
 
+- Camera motion control (needed before any code sends it): the commands and
+  bodies for reading the PTZ position, recalling a preset, moving, focus and
+  autofocus, and a doorbell's talk-back audio; which models support each. To
+  be observed from the official app's PTZ and focus controls, and checked
+  against static analysis of the client.
 - Idle timeout on the device side. The client's side is now reported
   (command 93 after 6 s of silence; dead after 10 s on a direct connection);
   confirm on hardware, including whether a device answers 93 while streaming

@@ -42,8 +42,13 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 
 ## 3. Device safety
 
-- Read-only toward devices: the session layer has a command allowlist, and
-  nothing that changes device settings goes on it.
+- Never change device configuration: the session layer has a command
+  allowlist, and nothing that changes device settings goes on it.
+- The one exception is **camera motion control** (PTZ preset recall and moves,
+  focus, a doorbell's speaker): a separate allowlist tier, off by default,
+  enabled per camera by the user, rate-limited, and logged. Never send it
+  automatically unless the user enabled automatic correction for that camera.
+  See "Device commands" in docs/ARCHITECTURE.md.
 - One session per device carrying all channels; close it on every exit path.
   NVRs allow only a few logins, and exhausting them locks out other clients.
 - Tests and development run against `tools/mock-nvr`, not real hardware, unless

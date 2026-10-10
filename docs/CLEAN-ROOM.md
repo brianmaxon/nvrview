@@ -31,7 +31,9 @@ what keeps that line clear.
 
 ## Device safety
 
-The viewer is read-only toward devices. The session layer refuses any command
-number not on its allowlist; widening the allowlist needs a reason recorded in
-`docs/protocol.md`. Device sessions are scarce: one per device, always closed on
+The viewer never changes device configuration. The session layer refuses any
+command number not on its allowlist; widening the allowlist needs a reason
+recorded in `docs/protocol.md`. Camera motion control (preset recall, moves,
+focus, a doorbell's speaker) is a separate tier that is off unless the user
+enables it per camera (docs/ARCHITECTURE.md, "Device commands"). Device sessions are scarce: one per device, always closed on
 every exit path.
