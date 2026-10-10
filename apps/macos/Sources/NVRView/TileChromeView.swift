@@ -25,8 +25,9 @@ struct TileChromeContent: Equatable {
 /// The lightweight layer above one tile of the Metal surface (docs/UX.md
 /// "Chrome"): a header with the camera's name and a speaker button that
 /// fades in at once on hover and out a few seconds after the pointer stops
-/// or leaves; detection badges; a thin level meter along the top while the
-/// camera is audible (it stays when the header fades); and words over the
+/// or leaves; detection badges; a thin level meter along the top
+/// (`LevelMeterMode`: green and always shown while the camera is audible,
+/// monochrome with the header while it is muted); and words over the
 /// picture while the device is reconnecting.
 ///
 /// It never takes clicks except on its button, so the stage below handles
@@ -48,8 +49,12 @@ final class TileChromeView: NSView {
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
     private let veilDetail = NSTextField(labelWithString: "")
+    /// The audible meter (green, on the tile, stays when the header fades).
     private let meter = CALayer()
     private let meterTrack = CALayer()
+    /// The muted meter (monochrome, in the header, fades with it).
+    private let hoverMeter = CALayer()
+    private let hoverTrack = CALayer()
     private let outline = CALayer()
     private let drop = NSTextField(labelWithString: "Swap here")
     private let emptyHint = NSTextField(labelWithString: "Drag a camera here")
@@ -132,11 +137,17 @@ final class TileChromeView: NSView {
         addSubview(drop)
 
         meterTrack.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        meter.backgroundColor = NSColor.white.withAlphaComponent(0.7).cgColor
+        meter.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.85).cgColor
         meterTrack.isHidden = true
         meter.isHidden = true
         layer?.addSublayer(meterTrack)
         layer?.addSublayer(meter)
+        hoverTrack.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        hoverMeter.backgroundColor = NSColor.white.withAlphaComponent(0.6).cgColor
+        hoverTrack.isHidden = true
+        hoverMeter.isHidden = true
+        header.layer?.addSublayer(hoverTrack)
+        header.layer?.addSublayer(hoverMeter)
 
         outline.borderColor = NSColor.controlAccentColor.cgColor
         outline.borderWidth = 0
@@ -189,23 +200,40 @@ final class TileChromeView: NSView {
         CATransaction.setDisableActions(true)
         outline.borderWidth = c.selected ? 2 : (c.editing ? 1 : 0)
         outline.borderColor = (c.selected ? NSColor.controlAccentColor : NSColor.white.withAlphaComponent(0.12)).cgColor
-        meterTrack.isHidden = !c.audible
-        meter.isHidden = !c.audible
-        if !c.audible { level = 0 }
+        let mode = LevelMeterMode(hasCamera: c.hasCamera, audible: c.audible)
+        meterTrack.isHidden = mode != .audible
+        meter.isHidden = mode != .audible
+        hoverTrack.isHidden = mode != .muted
+        hoverMeter.isHidden = mode != .muted
+        if old.map({ LevelMeterMode(hasCamera: $0.hasCamera, audible: $0.audible) }) != mode { level = 0 }
         CATransaction.commit()
         if !c.hasCamera { layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor } else { layer?.backgroundColor = nil }
         needsLayout = true
     }
 
-    /// The level meter (0...1), called at display rate while audible.
+    private var meterMode: LevelMeterMode {
+        content.map { LevelMeterMode(hasCamera: $0.hasCamera, audible: $0.audible) } ?? .hidden
+    }
+
+    /// Whether the stage should read this tile's level now: only while its
+    /// meter is on screen (audible, or muted with the header shown).
+    var wantsLevel: Bool { meterMode.polls(headerShown: header.alphaValue > 0) }
+
+    /// The level meter (0...1), called at display rate while `wantsLevel`.
     func setLevel(_ value: Float) {
-        guard content?.audible == true else { return }
+        guard wantsLevel else { return }
         // Fast attack, slower release, so it reads as a level, not a flicker.
         level = value > level ? value : max(value, level * 0.85)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        meter.frame = CGRect(x: 0, y: 0, width: bounds.width * CGFloat(min(max(level, 0), 1)), height: 3)
+        layoutMeters()
         CATransaction.commit()
+    }
+
+    private func layoutMeters() {
+        let w = bounds.width * CGFloat(min(max(level, 0), 1))
+        meter.frame = CGRect(x: 0, y: 0, width: w, height: 3)
+        hoverMeter.frame = CGRect(x: 0, y: 0, width: w, height: 3)
     }
 
     private static func badge(_ b: TileChromeContent.Badge) -> NSView {
@@ -241,7 +269,8 @@ final class TileChromeView: NSView {
         CATransaction.setDisableActions(true)
         headerGradient.frame = header.bounds
         meterTrack.frame = CGRect(x: 0, y: 0, width: w, height: 3)
-        meter.frame = CGRect(x: 0, y: 0, width: w * CGFloat(min(max(level, 0), 1)), height: 3)
+        hoverTrack.frame = CGRect(x: 0, y: 0, width: w, height: 3)
+        layoutMeters()
         outline.frame = bounds
         CATransaction.commit()
         let button: CGFloat = 26

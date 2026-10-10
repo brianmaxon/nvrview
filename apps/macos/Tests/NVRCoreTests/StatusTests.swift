@@ -34,3 +34,21 @@ import Testing
         #expect(FrameRateText.make(device: nil, shown: nil, displayHz: 0) == "Device – fps · Shown – fps")
     }
 }
+
+@Suite struct LevelMeterModeTests {
+    @Test func colorAndVisibility() {
+        #expect(LevelMeterMode(hasCamera: false, audible: false) == .hidden)
+        #expect(LevelMeterMode(hasCamera: false, audible: true) == .hidden)
+        #expect(LevelMeterMode(hasCamera: true, audible: false) == .muted)
+        #expect(LevelMeterMode(hasCamera: true, audible: true) == .audible)
+        // Muted: only with the header (hover), and polled only then.
+        #expect(LevelMeterMode.muted.visible(headerShown: true))
+        #expect(!LevelMeterMode.muted.visible(headerShown: false))
+        #expect(!LevelMeterMode.muted.polls(headerShown: false))
+        // Audible: always, also once the header has faded.
+        #expect(LevelMeterMode.audible.visible(headerShown: false))
+        #expect(LevelMeterMode.audible.polls(headerShown: false))
+        #expect(!LevelMeterMode.hidden.visible(headerShown: true))
+        #expect(!LevelMeterMode.hidden.polls(headerShown: true))
+    }
+}

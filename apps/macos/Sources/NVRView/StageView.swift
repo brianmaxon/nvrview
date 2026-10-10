@@ -278,8 +278,9 @@ final class StageView: NSView {
             key.rects.append(cell)
             key.versions.append(snapshot.version)
             key.sizes.append(pictureSize)
-            if model.audible.contains(camera), let level = model.level(camera) {
-                chromes[leaf.path]?.setLevel(level.peak)
+            // Read only for meters on screen (audible, or hovered).
+            if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
+                chrome.setLevel(level.peak)
             }
         }
         if key != lastKey || renderer.tiles.count != tiles.count {

@@ -27,12 +27,16 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   camera. (The official app cannot unmute in full screen.)
 - Keyboard: a shortcut toggles listening on the focused tile.
 - While a tile is audible, a small signal-level meter shows that sound is
-  arriving: a thin, partly transparent bar along the top of that tile by
-  default, optionally a slim meter column along the edge of the grid that
+  arriving: a thin, partly transparent green bar along the top of that tile
+  by default, optionally a slim meter column along the edge of the grid that
   follows the audible tile. It shows level only, never a waveform of
   content, and stays visible when the header fades.
-- The level comes from the core's audio stats (or the tap), not from a
-  second decode.
+- Hovering any muted tile shows the same meter in monochrome (white on
+  gray), fading with the header, so the user can see which cameras have
+  sound before unmuting one.
+- The level comes from the core (`nv_tile_audio_level`: the decoded audio's
+  level before volume, audible or not), not from a second decode. The app
+  reads it only for meters on screen, about once per display refresh.
 
 ## Full screen and focus
 

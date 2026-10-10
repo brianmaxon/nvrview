@@ -499,9 +499,9 @@ final class AppModel {
         notify()
     }
 
-    /// The level meter's value for an audible camera.
+    /// The level meter's value: the camera's decoded audio, audible or not.
     func level(_ camera: CameraRef) -> AudioLevel? {
-        guard audible.contains(camera), let tile = leases.tile(for: camera) else { return nil }
+        guard let tile = leases.tile(for: camera) else { return nil }
         return bridge.audioLevel(tile)
     }
 

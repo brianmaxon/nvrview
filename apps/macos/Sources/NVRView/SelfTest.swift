@@ -14,7 +14,8 @@ import VideoKit
 /// 3. focusing a tile animates it to the whole stage and then switches its
 ///    camera to the main stream (with `--fake`, whose core models the tier
 ///    switch), still showing a picture;
-/// 4. listening makes the camera audible and its level meter reads a level;
+/// 4. a muted camera reads a level (for its hover meter); listening makes
+///    it audible and its level meter reads a level;
 /// 5. leaving focus asks for the sub-stream again;
 /// 6. with `--fake`, the fake core saw no contract violation;
 /// 7. the sidebar took rows added and removed in several places in one
@@ -130,6 +131,10 @@ final class SelfTest {
 
     private func listenStep(_ camera: CameraRef) {
         guard let model = app.model else { finish(problems) }
+        // A muted camera's meter (on hover) reads its decoded audio too.
+        let muted = model.level(camera)
+        print("muted level \(muted.map { String(format: "%.2f", $0.peak) } ?? "n/a")")
+        if model.fake != nil, (muted?.peak ?? 0) <= 0 { problems.append("no audio level while muted") }
         model.toggleListening(camera, additive: false)
         after(0.5) { [self] in
             let level = model.level(camera)

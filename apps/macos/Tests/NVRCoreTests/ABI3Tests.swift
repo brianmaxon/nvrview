@@ -307,7 +307,9 @@ import VideoKit
         let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
         defer { rig.bridge.shutdown() }
         let tile = try rig.open()
-        #expect(rig.bridge.audioLevel(tile) == .silent)
+        // Whether audible or not: the level of the decoded audio.
+        let muted = try #require(rig.bridge.audioLevel(tile))
+        #expect(muted.peak > 0 && muted.peak <= 1)
         try rig.bridge.setTileAudio(tile, audible: true)
         let level = try #require(rig.bridge.audioLevel(tile))
         #expect(level.peak > 0 && level.peak <= 1)
@@ -318,9 +320,21 @@ import VideoKit
         try rig.bridge.setTileAudio(tile, audible: true, volume: 0)
         #expect(rig.bridge.audioLevel(tile) == AudioLevel(peak: 0.5, rms: 0.25))
         try rig.bridge.setTileAudio(tile, audible: false)
-        #expect(rig.bridge.audioLevel(tile) == .silent)
+        #expect(rig.bridge.audioLevel(tile) == AudioLevel(peak: 0.5, rms: 0.25))
         // Unknown tiles read 0, never an error.
         #expect(try rig.fake.tileAudioLevel(999) == .silent)
+    }
+
+    @Test func aCameraWithoutAudioReadsZero() throws {
+        var o = FakeCore.Options(clips: [try Fixtures.clip("h264-basic.h264")])
+        o.devices = ["192.0.2.1": FakeDeviceSpec(channelCount: 2, channelsWithoutAudio: [1])]
+        let rig = try Rig(o)
+        defer { rig.bridge.shutdown() }
+        let quiet = try rig.open(channel: 1)
+        #expect(rig.bridge.audioLevel(quiet) == .silent)
+        try rig.bridge.setTileAudio(quiet, audible: true)
+        #expect(rig.bridge.audioLevel(quiet) == .silent)
+        #expect((rig.bridge.audioLevel(try rig.open(channel: 0))?.peak ?? 0) > 0)
     }
 }
 
