@@ -10,7 +10,11 @@ namespace NvrView.App;
 
 internal static class SettingsDialog
 {
-    public static async Task ShowAsync(XamlRoot root, Viewer viewer, bool development)
+    public static async Task ShowAsync(XamlRoot root, Viewer viewer, bool development) =>
+        await Create(root, viewer, development).ShowAsync();
+
+    /// <summary>The dialog, not shown yet.</summary>
+    public static ContentDialog Create(XamlRoot root, Viewer viewer, bool development)
     {
         var list = new ListView { Width = 220, Height = 260, SelectionMode = ListViewSelectionMode.Single };
         var name = new TextBox { Header = "Name", PlaceholderText = "NVR" };
@@ -137,7 +141,7 @@ internal static class SettingsDialog
         layout.Children.Add(note);
 
         Reload(viewer.Devices.FirstOrDefault()?.Config.Key);
-        var dialog = new ContentDialog
+        return new ContentDialog
         {
             XamlRoot = root,
             Title = "Devices",
@@ -145,6 +149,5 @@ internal static class SettingsDialog
             CloseButtonText = "Done",
             DefaultButton = ContentDialogButton.Close,
         };
-        await dialog.ShowAsync();
     }
 }

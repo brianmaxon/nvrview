@@ -126,6 +126,31 @@ internal sealed class SelfTest(App app, AppOptions options)
                 _problems.Add("a wrong password did not end in login_failed");
             }
             v.Disconnect(wrong);
+
+            // What the Settings dialog does on Save and Remove (in memory in
+            // this mode): a second device connects, then goes away.
+            var saved = new DeviceConfig { Name = "second", Host = mock.Host, Port = mock.Port, User = "example-user" };
+            v.SaveDevice(saved, Environment.GetEnvironmentVariable("NVRVIEW_TEST_PASSWORD") ?? "example-password");
+            bool connected = await Until(() => v.Devices.Any(d => d.Config.Key == saved.Key && d.State == "connected"), 10);
+            int tilesWithSecond = v.Tiles.Length;
+            v.ForgetDevice(saved.Key);
+            Say($"settings save: second device connected {connected}, {tilesWithSecond} tiles; removed: {v.Devices.All(d => d.Config.Key != saved.Key)}, {v.Tiles.Length} tiles");
+            if (!connected || v.Devices.Any(d => d.Config.Key == saved.Key))
+            {
+                _problems.Add("saving and removing a device did not connect and remove it");
+            }
+
+            // The dialog itself opens and closes.
+            var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true);
+            _ = dialog.ShowAsync();
+            await Task.Delay(500);
+            bool shown = dialog.IsLoaded;
+            dialog.Hide();
+            Say($"settings dialog shown: {shown}");
+            if (!shown)
+            {
+                _problems.Add("the Settings dialog did not open");
+            }
         }
 
         // 2. Live resize.

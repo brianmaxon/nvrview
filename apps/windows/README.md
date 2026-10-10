@@ -306,7 +306,8 @@ that is refused once, then streams):
    `tile_waiting` first;
 2. the render thread allocates nothing over a second of steady playing;
 3. a second device with a wrong password ends in `login_failed`, said in
-   words;
+   words; saving a device the way the Settings dialog does connects it and
+   opens its tiles, removing it closes them, and the dialog opens and closes;
 4. resizing the window on every refresh for about a second keeps the grid
    presenting while the buffers are resized at most every 100 ms, and they
    settle at the panel's exact pixel size;
