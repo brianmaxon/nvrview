@@ -59,7 +59,11 @@ public final class CoreBridge: Sendable {
         }
 
         func core(didReject failure: CoreDecodeFailure, tile id: UInt64) {
-            registry.withLock { $0.byID[id] }?.reject(failure, generation: 0)
+            core(didReject: failure, tile: id, generation: 0)
+        }
+
+        func core(didReject failure: CoreDecodeFailure, tile id: UInt64, generation: UInt32) {
+            registry.withLock { $0.byID[id] }?.reject(failure, generation: generation)
         }
 
         func core(didEmit json: UnsafeRawBufferPointer) {
@@ -70,11 +74,11 @@ public final class CoreBridge: Sendable {
                 // not allowed here).
                 registry.withLock { $0.byID[id] }?.markClosed()
             }
-            if case .tileTier(let id, let tier, let state, let generation) = event {
+            if case .tileTier(let id, let tier, let state, let generation, let reason) = event {
                 // Applied here, on the core's thread, so the tile shows the
                 // new generation from the next refresh on, whatever the app's
                 // main thread is doing.
-                registry.withLock { $0.byID[id] }?.applyTier(tier, state: state, generation: generation)
+                registry.withLock { $0.byID[id] }?.applyTier(tier, state: state, generation: generation, reason: reason)
             }
             onEvent(event)
         }
@@ -180,6 +184,13 @@ public final class CoreBridge: Sendable {
             tile.noteRequested(tile.tier)
             throw error
         }
+    }
+
+    /// ABI 3 `nv_device_key`: the device's stable key, the name layouts use
+    /// for it; nil when the core has none (an older core).
+    public func deviceKey(_ device: UInt64) -> String? {
+        guard let c = core.withLock({ $0 }) else { return nil }
+        return try? c.deviceKey(device)
     }
 
     /// ABI 3 `nv_tile_audio_level`, or nil when the core cannot say.

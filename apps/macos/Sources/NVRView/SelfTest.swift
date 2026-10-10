@@ -96,6 +96,7 @@ final class SelfTest {
 
     private func capture(_ what: String, then next: @escaping @MainActor () -> Void) {
         guard let window else { finish(problems + ["no window"]) }
+        print("\(what): display refreshes \(window.stage.grid.refreshes), frames drawn \(window.stage.grid.framesDrawn)")
         var done = false
         window.stage.grid.captureNextFrame { [self] image in
             MainActor.assumeIsolated {
@@ -106,7 +107,12 @@ final class SelfTest {
                 next()
             }
         }
-        after(5) { [self] in if !done { finish(problems + ["no \(what) frame was drawn"]) } }
+        after(5) { [self] in
+            if !done {
+                print("\(what): display refreshes \(window.stage.grid.refreshes), frames drawn \(window.stage.grid.framesDrawn)")
+                finish(problems + ["no \(what) frame was drawn"])
+            }
+        }
     }
 
     private static func spread(_ image: RenderedImage) -> Double {

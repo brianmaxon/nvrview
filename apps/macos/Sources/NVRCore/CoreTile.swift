@@ -66,6 +66,13 @@ public final class CoreTile: TilePictureSource {
         /// snapshot version and picture sequence so views notice.
         var switches: UInt64 = 0
         var closed = false
+        /// Generations that failed (their `tile_tier` `failed` came first):
+        /// a late action of theirs must not bring a decoder back.
+        var ended = Set<UInt32>()
+        /// Each generation's tier, from its `starting` event (the core's
+        /// word; actions of a generation can arrive before that event).
+        var startedTiers: [UInt32: StreamTier] = [:]
+        var latestStarted: UInt32 = 0
 
         var current: Generation? { generations.first { $0.number == shown } }
     }
@@ -185,31 +192,64 @@ public final class CoreTile: TilePictureSource {
     }
 
     /// Folds in a `tile_tier` event. Called on the core's event thread.
-    func applyTier(_ tier: StreamTier?, state newState: TierSwitchState, generation: UInt32) {
+    ///
+    /// `requested` follows the app's latest request: a `starting` sets it, an
+    /// `active` or `failed` for the latest generation settles it, and older
+    /// generations' events (such as an `active` repeated for a request made
+    /// before the latest one) leave it alone.
+    func applyTier(_ tier: StreamTier?, state newState: TierSwitchState, generation: UInt32, reason: String? = nil) {
         let released = state.withLock { s -> [Generation] in
             s.lastState = newState
             switch newState {
+            case .starting:
+                if let tier { s.startedTiers[generation] = tier }
+                s.latestStarted = max(s.latestStarted, generation)
+                if let tier, generation >= s.latestStarted { s.requested = tier }
+                return []
             case .active:
                 guard generation >= s.shown else { return [] }
                 if generation != s.shown {
                     s.shown = generation
                     s.switches &+= 1
                 }
-                if let t = s.generations.first(where: { $0.number == generation })?.tier ?? tier {
+                if let t = tier ?? s.startedTiers[generation] ?? s.generations.first(where: { $0.number == generation })?.tier {
                     s.shownTier = t
                 }
-                s.requested = s.shownTier
+                if generation >= s.latestStarted { s.requested = s.shownTier }
                 let old = s.generations.filter { $0.number < generation }
                 s.generations.removeAll { $0.number < generation }
                 return old
             case .failed:
-                s.requested = s.shownTier
+                if generation != s.shown { s.ended.insert(generation) }
+                if reason != "superseded", generation >= s.latestStarted { s.requested = s.shownTier }
                 let failed = s.generations.filter { $0.number == generation && $0.number != s.shown }
                 s.generations.removeAll { $0.number == generation && $0.number != s.shown }
                 return failed
-            case .starting, .other:
+            case .other:
                 return []
             }
+        }
+        Self.release(released)
+    }
+
+    /// The core ends the shown generation of a switch with a final Reset,
+    /// in order with the new generation's actions: the moment to show the
+    /// new pictures (the `tile_tier` event follows on the event path). A
+    /// Reset of the shown generation while a newer one already has a picture
+    /// is taken as that final Reset; any other Reset is the pipeline's own.
+    private func showNewerAfterFinalReset(of generation: UInt32) {
+        let released = state.withLock { s -> [Generation] in
+            guard generation == s.shown,
+                let newer = s.generations.filter({ $0.number > generation && $0.decoder.latestPicture() != nil })
+                    .max(by: { $0.number < $1.number })
+            else { return [] }
+            s.shown = newer.number
+            s.shownTier = s.startedTiers[newer.number] ?? newer.tier
+            if newer.number >= s.latestStarted { s.requested = s.shownTier }
+            s.switches &+= 1
+            let old = s.generations.filter { $0.number < newer.number }
+            s.generations.removeAll { $0.number < newer.number }
+            return old
         }
         Self.release(released)
     }
@@ -232,10 +272,12 @@ public final class CoreTile: TilePictureSource {
             if let g = s.generations.first(where: { $0.number == generation }) { return (g, false) }
             // An older generation than the shown one has been switched away
             // from: the core sends it nothing more after the switch.
-            guard generation > s.shown, generation > (s.generations.map(\.number).max() ?? 0) else {
-                return (nil, false)
-            }
-            let g = makeGeneration(generation, tier: s.requested)
+            guard generation > s.shown, generation > (s.generations.map(\.number).max() ?? 0),
+                !s.ended.contains(generation)
+            else { return (nil, false) }
+            // A Reset for a generation without a decoder has nothing to destroy.
+            if case .reset = action { return (nil, false) }
+            let g = makeGeneration(generation, tier: s.startedTiers[generation] ?? s.requested)
             s.generations.append(g)
             return (g, false)
         }
@@ -267,6 +309,7 @@ public final class CoreTile: TilePictureSource {
             decoder.flush()
         case .reset:
             decoder.reset()
+            showNewerAfterFinalReset(of: generation)
         case .clear:
             decoder.clear()
         case .status(let status):

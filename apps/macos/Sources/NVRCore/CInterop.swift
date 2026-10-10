@@ -118,14 +118,17 @@ public enum CCallbacks {
                 // Borrowed pointers: handled synchronously, never kept.
                 guard let converted = CoreAction(action.pointee) else {
                     // Unknown kinds need no answer; a Configure or Decode does.
+                    let generation = action.pointee.generation
                     switch action.pointee.kind {
-                    case NV_ACTION_CONFIGURE: sink.core(didReject: .invalidParameterSets, tile: tile)
-                    case NV_ACTION_DECODE: sink.core(didReject: .invalidAccessUnit, tile: tile)
+                    case NV_ACTION_CONFIGURE:
+                        sink.core(didReject: .invalidParameterSets, tile: tile, generation: generation)
+                    case NV_ACTION_DECODE:
+                        sink.core(didReject: .invalidAccessUnit, tile: tile, generation: generation)
                     default: break
                     }
                     return
                 }
-                sink.core(didDeliver: converted, tile: tile)
+                sink.core(didDeliver: converted, tile: tile, generation: action.pointee.generation)
             },
             on_event: { context, json, length in
                 guard let context, let json, length > 0 else { return }

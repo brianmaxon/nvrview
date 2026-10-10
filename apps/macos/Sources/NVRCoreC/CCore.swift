@@ -22,26 +22,24 @@ public final class CCore: CoreAPI {
     /// (docs/FFI.md Versioning): checked here, at startup.
     public static var abiMatches: Bool { nv_abi_version() == UInt32(NV_ABI_VERSION) }
 
-    public static func factory(logDirectory: String? = nil) -> CoreFactory {
+    /// `dataDirectory` is where the core keeps layouts and device keys
+    /// (nil: in memory for the run).
+    public static func factory(logDirectory: String? = nil, dataDirectory: String? = nil) -> CoreFactory {
         { sink throws(CoreStatus) in
             guard abiMatches else { throw .internal }
-            return try CCore(sink: sink, logDirectory: logDirectory)
+            return try CCore(sink: sink, logDirectory: logDirectory, dataDirectory: dataDirectory)
         }
     }
 
-    init(sink: any CoreSink, logDirectory: String?) throws(CoreStatus) {
+    init(sink: any CoreSink, logDirectory: String?, dataDirectory: String?) throws(CoreStatus) {
         let (callbacks, context) = CCallbacks.make(sink: sink)
         var out: OpaquePointer?
-        let status: CoreStatus
-        // log_dir is copied by nv_core_new before it returns.
-        if let logDirectory {
-            status = logDirectory.withCString { dir in
-                var config = NvConfig(log_dir: dir, log_max_files: 0, log_max_total_bytes: 0, data_dir: nil)
+        // Both strings are copied by nv_core_new before it returns.
+        let status = Self.withOptionalCString(logDirectory) { log in
+            Self.withOptionalCString(dataDirectory) { data in
+                var config = NvConfig(log_dir: log, log_max_files: 0, log_max_total_bytes: 0, data_dir: data)
                 return CoreStatus(nv_core_new(&config, callbacks, &out))
             }
-        } else {
-            var config = NvConfig(log_dir: nil, log_max_files: 0, log_max_total_bytes: 0, data_dir: nil)
-            status = CoreStatus(nv_core_new(&config, callbacks, &out))
         }
         guard status.isOK, let out else {
             context.release()
@@ -51,6 +49,33 @@ public final class CCore: CoreAPI {
     }
 
     deinit { free() }
+
+    private static func withOptionalCString<R>(_ s: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
+        guard let s else { return body(nil) }
+        return s.withCString { body($0) }
+    }
+
+    /// Calls a string-returning C function, growing the buffer as
+    /// `NV_ERR_BUFFER_TOO_SMALL` asks (`*len` + 1 bytes).
+    private static func string(
+        _ call: (UnsafeMutablePointer<CChar>?, Int, UnsafeMutablePointer<Int>) -> NvStatus
+    ) throws(CoreStatus) -> String {
+        var capacity = 4096
+        for _ in 0..<4 {
+            var buffer = [CChar](repeating: 0, count: capacity)
+            var length = 0
+            let status = CoreStatus(buffer.withUnsafeMutableBufferPointer { call($0.baseAddress, $0.count, &length) })
+            if status == .bufferTooSmall {
+                capacity = length + 1
+                continue
+            }
+            if !status.isOK { throw status }
+            return buffer.withUnsafeBufferPointer { b in
+                String(decoding: UnsafeRawBufferPointer(start: b.baseAddress, count: min(length, b.count)), as: UTF8.self)
+            }
+        }
+        throw .internal
+    }
 
     private func core() throws(CoreStatus) -> OpaquePointer {
         guard let c = handle.withLock({ $0.core }) else { throw .closed }
@@ -86,17 +111,67 @@ public final class CCore: CoreAPI {
         // Held across the call so `free` cannot run underneath it; the call never blocks.
         handle.withLock { h in
             guard let c = h.core else { return .closed }
-            // Generation 0: this bridge never switches a tile's tier, so every
-            // action it receives belongs to the tile's first generation.
             return CoreStatus(nv_tile_decoded(c, tile, 0, ptsMicros))
         }
     }
 
-    public func tileDecodeFailed(_ tile: UInt64, kind: CoreDecodeFailure) -> CoreStatus {
+    public func tileDecoded(_ tile: UInt64, generation: UInt32, ptsMicros: Int64) -> CoreStatus {
         handle.withLock { h in
             guard let c = h.core else { return .closed }
-            return CoreStatus(nv_tile_decode_failed(c, tile, 0, NvDecodeFailure(kind)))
+            return CoreStatus(nv_tile_decoded(c, tile, generation, ptsMicros))
         }
+    }
+
+    public func tileDecodeFailed(_ tile: UInt64, generation: UInt32, kind: CoreDecodeFailure) -> CoreStatus {
+        handle.withLock { h in
+            guard let c = h.core else { return .closed }
+            return CoreStatus(nv_tile_decode_failed(c, tile, generation, NvDecodeFailure(kind)))
+        }
+    }
+
+    // MARK: ABI 3
+
+    public func tileSetTier(_ tile: UInt64, tier: StreamTier) throws(CoreStatus) {
+        let status = CoreStatus(nv_tile_set_tier(try core(), tile, NvStreamTier(tier)))
+        if !status.isOK { throw status }
+    }
+
+    public func tileAudioLevel(_ tile: UInt64) throws(CoreStatus) -> AudioLevel {
+        // Lock-free in the core; held here only so `free` cannot run underneath.
+        try handle.withLock { h throws(CoreStatus) -> AudioLevel in
+            guard let c = h.core else { throw .closed }
+            var peak: Float = 0
+            var rms: Float = 0
+            let status = CoreStatus(nv_tile_audio_level(c, tile, &peak, &rms))
+            if !status.isOK { throw status }
+            return AudioLevel(peak: peak, rms: rms)
+        }
+    }
+
+    public func deviceKey(_ device: UInt64) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_device_key(c, device, $0, $1, $2) }
+    }
+
+    public func layoutsGet() throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_layouts_get(c, $0, $1, $2) }
+    }
+
+    public func layoutPut(json: String) throws(CoreStatus) {
+        let c = try core()
+        let status = CoreStatus(nv_layout_put(c, json))
+        if !status.isOK { throw status }
+    }
+
+    public func layoutDelete(id: String) throws(CoreStatus) {
+        let c = try core()
+        let status = CoreStatus(nv_layout_delete(c, id))
+        if !status.isOK { throw status }
+    }
+
+    public func tileDecodeFailed(_ tile: UInt64, kind: CoreDecodeFailure) -> CoreStatus {
+        tileDecodeFailed(tile, generation: 0, kind: kind)
     }
 
     // MARK: Audio

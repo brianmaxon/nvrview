@@ -127,6 +127,8 @@ public struct CoreStatus: Sendable, Equatable, Error {
     public static let closed = CoreStatus(-3)
     public static let limit = CoreStatus(-4)
     public static let `internal` = CoreStatus(-5)
+    /// ABI 3: the output buffer is too small; the length needed came back.
+    public static let bufferTooSmall = CoreStatus(-6)
 
     public var isOK: Bool { code == 0 }
 }

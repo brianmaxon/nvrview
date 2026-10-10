@@ -6,26 +6,29 @@ import Synchronization
 /// modeled for the fake: it validates each layout, versions it, keeps at most
 /// `limit`, and optionally writes them to a file atomically.
 ///
-/// What it checks, and what the real core must check too:
-/// - the object has a non-empty string `id` (at most 128 bytes), a string
-///   `name`, and a `root` node;
+/// What it checks, as docs/FFI.md "Layouts" says the core does:
+/// - the object has a non-empty string `id` and a string `name` (each at
+///   most 256 bytes) and a `root` node; the whole layout at most 64 KiB;
 /// - a node is either a leaf `{"camera": null}` or
-///   `{"camera": {"device": "<non-empty key>", "channel": 0...255}}`, or a
-///   split `{"split": "row"|"col", "ratio": r, "a": node, "b": node}` with
-///   0 < r < 1;
-/// - at most `maxDepth` levels and `maxLeaves` leaves.
+///   `{"camera": {"device": "<key, 1...256 bytes>", "channel": 0...255}}`,
+///   or a split `{"split": "row"|"col", "ratio": 0.02...0.98, "a": node,
+///   "b": node}`;
+/// - at most `maxSplitDepth` splits deep and `maxLeaves` tiles.
 ///
 /// Versioning: the stored `version` is 1 for a new id and one more than the
 /// stored one on every replace, whatever the caller sent. Unknown fields are
 /// kept as they are, so a newer app's additions survive an older app's edit.
 ///
-/// `nv_layouts_get` returns `{"layouts":[...]}` in insertion order.
+/// `nv_layouts_get` returns `{"revision":N,"layouts":[...]}` in insertion
+/// order; `revision` grows with every change.
 final class FakeLayouts: Sendable {
-    static let maxDepth = 32
+    static let maxSplitDepth = 16
     static let maxLeaves = 64
+    static let maxBytes = 64 * 1024
 
     private struct Stored: Sendable {
         var ids: [String] = []
+        var revision = 0
         /// Canonical JSON (sorted keys) per id, version included.
         var json: [String: String] = [:]
     }
@@ -42,6 +45,7 @@ final class FakeLayouts: Sendable {
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let list = object["layouts"] as? [[String: Any]]
         {
+            s.revision = (object["revision"] as? NSNumber)?.intValue ?? 0
             for layout in list where (try? Self.validate(layout)) != nil {
                 guard let id = layout["id"] as? String, s.json[id] == nil, let text = Self.canonical(layout) else {
                     continue
@@ -53,37 +57,43 @@ final class FakeLayouts: Sendable {
         stored = Mutex(s)
     }
 
-    func all() -> String {
-        stored.withLock { s in
-            #"{"layouts":["# + s.ids.compactMap { s.json[$0] }.joined(separator: ",") + "]}"
-        }
+    func all() -> String { stored.withLock { Self.document($0) } }
+
+    private static func document(_ s: Stored) -> String {
+        #"{"revision":\#(s.revision),"layouts":["# + s.ids.compactMap { s.json[$0] }.joined(separator: ",") + "]}"
     }
 
-    func put(_ json: String) throws(CoreStatus) {
-        guard let data = json.data(using: .utf8),
+    /// Returns the new revision.
+    func put(_ json: String) throws(CoreStatus) -> Int {
+        guard json.utf8.count <= Self.maxBytes, let data = json.data(using: .utf8),
             var layout = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { throw .invalidArgument }
         try Self.validate(layout)
         let id = layout["id"] as! String
-        let snapshot: String = try stored.withLock { s throws(CoreStatus) in
+        let (snapshot, revision): (String, Int) = try stored.withLock { s throws(CoreStatus) in
             let previous = s.json[id].flatMap { Self.version(of: $0) } ?? 0
             if s.json[id] == nil && s.ids.count >= limit { throw .limit }
             layout["version"] = previous + 1
             guard let text = Self.canonical(layout) else { throw .invalidArgument }
             if s.json[id] == nil { s.ids.append(id) }
             s.json[id] = text
-            return #"{"layouts":["# + s.ids.compactMap { s.json[$0] }.joined(separator: ",") + "]}"
+            s.revision += 1
+            return (Self.document(s), s.revision)
         }
         write(snapshot)
+        return revision
     }
 
-    func delete(_ id: String) throws(CoreStatus) {
-        let snapshot: String = try stored.withLock { s throws(CoreStatus) in
+    /// Returns the new revision.
+    func delete(_ id: String) throws(CoreStatus) -> Int {
+        let (snapshot, revision): (String, Int) = try stored.withLock { s throws(CoreStatus) in
             guard s.json.removeValue(forKey: id) != nil else { throw .unknownID }
             s.ids.removeAll { $0 == id }
-            return #"{"layouts":["# + s.ids.compactMap { s.json[$0] }.joined(separator: ",") + "]}"
+            s.revision += 1
+            return (Self.document(s), s.revision)
         }
         write(snapshot)
+        return revision
     }
 
     private func write(_ text: String) {
@@ -96,18 +106,18 @@ final class FakeLayouts: Sendable {
     // MARK: Validation
 
     static func validate(_ layout: [String: Any]) throws(CoreStatus) {
-        guard let id = layout["id"] as? String, !id.isEmpty, id.utf8.count <= 128,
-            layout["name"] is String, let root = layout["root"]
+        guard let id = layout["id"] as? String, !id.isEmpty, id.utf8.count <= 256,
+            let name = layout["name"] as? String, name.utf8.count <= 256, let root = layout["root"]
         else { throw .invalidArgument }
         var leaves = 0
-        try node(root, depth: 1, leaves: &leaves)
+        try node(root, depth: 0, leaves: &leaves)
     }
 
     private static func node(_ value: Any, depth: Int, leaves: inout Int) throws(CoreStatus) {
-        guard depth <= maxDepth, let n = value as? [String: Any] else { throw .invalidArgument }
+        guard let n = value as? [String: Any] else { throw .invalidArgument }
         if let split = n["split"] {
-            guard let axis = split as? String, axis == "row" || axis == "col",
-                let ratio = (n["ratio"] as? NSNumber)?.doubleValue, ratio > 0, ratio < 1,
+            guard depth < maxSplitDepth, let axis = split as? String, axis == "row" || axis == "col",
+                let ratio = (n["ratio"] as? NSNumber)?.doubleValue, ratio >= 0.02, ratio <= 0.98,
                 let a = n["a"], let b = n["b"]
             else { throw .invalidArgument }
             try node(a, depth: depth + 1, leaves: &leaves)
@@ -119,7 +129,7 @@ final class FakeLayouts: Sendable {
         guard leaves <= maxLeaves else { throw .invalidArgument }
         if n["camera"] is NSNull { return }
         guard let camera = n["camera"] as? [String: Any], let device = camera["device"] as? String,
-            !device.isEmpty, let channel = camera["channel"] as? NSNumber,
+            !device.isEmpty, device.utf8.count <= 256, let channel = camera["channel"] as? NSNumber,
             CFGetTypeID(channel) == CFNumberGetTypeID(), CFNumberIsFloatType(channel) == false, (0...255).contains(channel.intValue)
         else { throw .invalidArgument }
     }

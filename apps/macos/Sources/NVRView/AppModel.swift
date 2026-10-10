@@ -39,7 +39,9 @@ final class AppModel {
         var model: String?
         var channels: [ChannelInfo] = []
 
-        var key: String { config.key }
+        /// The name layouts and groups give the device's cameras: the core's
+        /// stable device key once known (`nv_device_key`), else the app's.
+        var key: String { config.coreKey ?? config.key }
         var id: String { config.key }
     }
 
@@ -104,12 +106,15 @@ final class AppModel {
     }
 
     /// The real core, if this build has one.
-    static func realFactory() -> CoreFactory? {
+    static func realFactory(dataDirectory: URL? = nil) -> CoreFactory? {
         #if NVRVIEW_REAL_CORE
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/NVRView", isDirectory: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        return CCore.factory(logDirectory: logs.path)
+        // The core keeps layouts and device keys here.
+        let data = dataDirectory?.appendingPathComponent("core") ?? JSONFileStore<DeviceConfig>.appSupport("core")
+        try? FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
+        return CCore.factory(logDirectory: logs.path, dataDirectory: data.path)
         #else
         return nil
         #endif
@@ -178,21 +183,25 @@ final class AppModel {
 
     // MARK: Devices
 
-    func runtime(_ key: String) -> DeviceRuntime? { devices.first { $0.key == key } }
+    /// By camera key or configuration key.
+    func runtime(_ key: String) -> DeviceRuntime? { index(key).map { devices[$0] } }
 
     private func key(forDevice id: UInt64) -> String? { devices.first { $0.deviceID == id }?.key }
 
-    private func index(_ key: String) -> Int? { devices.firstIndex { $0.key == key } }
+    private func index(_ key: String) -> Int? { devices.firstIndex { $0.key == key || $0.config.key == key } }
 
-    func hasPassword(_ key: String) -> Bool { password(key) != nil }
+    func hasPassword(_ key: String) -> Bool { runtime(key).flatMap { password($0.config.key) } != nil }
 
-    private func password(_ key: String) -> String? { transient[key] ?? credentials.password(for: key) }
+    /// By configuration key (the Keychain account).
+    private func password(_ configKey: String) -> String? {
+        transient[configKey] ?? credentials.password(for: configKey)
+    }
 
     /// Adds the device to the core with its stored password.
     private func connect(_ key: String) {
         guard let i = index(key), !closed else { return }
         let config = devices[i].config
-        guard let password = password(key) else {
+        guard let password = password(config.key) else {
             devices[i].link = DeviceLink(state: .other("needs password"), since: Self.now)
             return
         }
@@ -200,15 +209,41 @@ final class AppModel {
             let id = try bridge.addDevice(host: config.host, port: config.port, user: config.user, password: password)
             devices[i].deviceID = id
             if devices[i].link.state == nil { devices[i].link = DeviceLink(state: .connecting, since: Self.now) }
-            leases.reopen(device: key)
+            if let coreKey = bridge.deviceKey(id), coreKey != devices[i].key {
+                adoptCoreKey(coreKey, at: i)
+            }
+            leases.reopen(device: devices[i].key)
         } catch {
             devices[i].link = DeviceLink(state: .other("cannot add (status \(error.code))"), since: Self.now)
+        }
+    }
+
+    /// The core names this device differently from what layouts and groups
+    /// used so far (first run with a core that assigns keys, or the address
+    /// changed): rename its cameras everywhere the app can.
+    private func adoptCoreKey(_ coreKey: String, at i: Int) {
+        let old = devices[i].key
+        leases.closeTiles(device: old)
+        devices[i].config.coreKey = coreKey
+        if transient[devices[i].config.key] == nil {
+            deviceFile.save(devices.filter { transient[$0.config.key] == nil }.map(\.config))
+        }
+        for g in groups.indices {
+            groups[g].cameras = groups[g].cameras.map { $0.device == old ? CameraRef(device: coreKey, channel: $0.channel) : $0 }
+        }
+        groupFile.save(groups)
+        audible = Set(audible.map { $0.device == old ? CameraRef(device: coreKey, channel: $0.channel) : $0 })
+        for layout in layouts where layout.root.cameras.contains(where: { $0.device == old }) {
+            var l = layout
+            l.root = layout.root.rekeying(device: old, to: coreKey)
+            saveLayout(l)
         }
     }
 
     /// Removes the device from the core (its tiles end; leases stay).
     private func disconnect(_ key: String) {
         guard let i = index(key) else { return }
+        let key = devices[i].key
         leases.closeTiles(device: key)
         if let id = devices[i].deviceID { try? bridge.removeDevice(id) }
         devices[i].deviceID = nil
@@ -228,21 +263,29 @@ final class AppModel {
         }
         if let i = index(config.key) {
             disconnect(config.key)
+            // Kept until the core says otherwise (a new address gets a new
+            // key, adopted on connect).
+            var config = config
+            config.coreKey = config.coreKey ?? devices[i].config.coreKey
             devices[i].config = config
         } else {
             devices.append(DeviceRuntime(config: config))
         }
-        if transient[config.key] == nil { deviceFile.save(devices.filter { transient[$0.key] == nil }.map(\.config)) }
+        if transient[config.key] == nil {
+            deviceFile.save(devices.filter { transient[$0.config.key] == nil }.map(\.config))
+        }
         connect(config.key)
         notify()
     }
 
     /// Removes a device, its password, and its cameras from every group.
     func removeDevice(_ key: String) {
+        guard let d = runtime(key) else { return }
         disconnect(key)
-        devices.removeAll { $0.key == key }
-        if transient.removeValue(forKey: key) == nil { credentials.deletePassword(for: key) }
-        deviceFile.save(devices.filter { transient[$0.key] == nil }.map(\.config))
+        devices.removeAll { $0.config.key == d.config.key }
+        if transient.removeValue(forKey: d.config.key) == nil { credentials.deletePassword(for: d.config.key) }
+        deviceFile.save(devices.filter { transient[$0.config.key] == nil }.map(\.config))
+        let key = d.key
         for i in groups.indices { groups[i].cameras.removeAll { $0.device == key } }
         groupFile.save(groups)
         audible = audible.filter { $0.device != key }

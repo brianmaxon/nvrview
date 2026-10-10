@@ -66,17 +66,20 @@ public struct FakeDeviceSpec: Sendable {
 /// - tier switches: `tileSetTier` starts a second pipeline (a new
 ///   `generation`, its pictures continuing the camera's timestamps), both
 ///   pipelines' actions flow until the new one's first Decode is answered,
-///   then the old one stops and `tile_tier` `active` and a `tier_switch`
-///   timing follow;
+///   then the old one ends with a final Reset and `tile_tier` `active` and a
+///   `tier_switch` timing follow; a generation that never shows ends with
+///   its own Reset and `failed` with a reason (superseded, start_rejected,
+///   undecodable, timeout); asking for the tier already shown reports
+///   `active` again;
 /// - detection and motion events (`emitDetection`, and periodically in
 ///   real-time pacing with `detectionDemo`), `detects` in `channels`;
 /// - `tileAudioLevel`; the layouts store (`FakeLayouts`) with
 ///   `layouts_changed`; the `first_picture` timing; several devices, each
 ///   described by `Options.devices`.
 ///
-/// Events the real core sends from its own threads in response to an answer
-/// (`tile_tier` `active`, timings) are queued and sent at the start of the
-/// tile's next pump, never from inside `tileDecoded`.
+/// What the real core sends from its own threads in response to an answer
+/// (final Resets, `tile_tier`, timings) is queued and sent at the start of
+/// the tile's next pump, never from inside `tileDecoded`.
 ///
 /// It also checks the app: every Decode not discarded by a later Flush, Reset
 /// or Configure must be answered exactly once (per generation), nothing may
@@ -110,8 +113,12 @@ public final class FakeCore: CoreAPI {
         public var channelCount = 4
         /// What a device added with a given host reports.
         public var devices: [String: FakeDeviceSpec] = [:]
-        /// Tier switches fail (`tile_tier` `failed`; the old tier keeps showing).
+        /// Tier switches fail (`tile_tier` `failed`, reason `start_rejected`;
+        /// the old tier keeps showing).
         public var tierSwitchFails = false
+        /// A new tier that has decoded nothing after this long fails
+        /// (reason `timeout`), as in the core.
+        public var tierSwitchTimeout: Duration = .seconds(15)
         /// In real-time pacing, each tile's channel reports a detection (or,
         /// without camera AI, motion) every this many seconds, for 3 s.
         public var detectionDemo: Double?
@@ -138,6 +145,7 @@ public final class FakeCore: CoreAPI {
     private struct Device {
         var failed: Bool
         var spec: FakeDeviceSpec
+        var key: String
         var tiles: [UInt64]
     }
 
@@ -159,6 +167,7 @@ public final class FakeCore: CoreAPI {
     public let audio = FakeAudio()
     private let audioTiles = Mutex<[UInt64: FakeTileAudio]>([:])
     private let levels = Mutex<[UInt64: AudioLevel]>([:])
+    private let actionLog = Mutex<[UInt64: [String]]>([:])
     private let tapLock = NSLock()
     private let output = Mutex<(sampleRate: UInt32, channels: UInt32)?>(nil)
     private let layouts: FakeLayouts
@@ -225,7 +234,7 @@ public final class FakeCore: CoreAPI {
             if w.freed { throw .closed }
             let id = w.nextID
             w.nextID += 1
-            w.devices[id] = Device(failed: failed, spec: spec, tiles: [])
+            w.devices[id] = Device(failed: failed, spec: spec, key: Self.key(host: host, port: port), tiles: [])
             return id
         }
         emitEvent(#"{"type":"device_state","device":\#(id),"state":"connecting"}"#)
@@ -233,7 +242,8 @@ public final class FakeCore: CoreAPI {
             emitEvent(#"{"type":"device_state","device":\#(id),"state":"login_failed","status":401,"remain_times":\#(remaining)}"#)
         } else {
             emitEvent(#"{"type":"device_state","device":\#(id),"state":"connected","future_field":1}"#)
-            emitEvent(#"{"type":"device_info","device":\#(id),"name":"\#(spec.name)","model":"\#(spec.model)"}"#)
+            emitEvent(
+                #"{"type":"device_info","device":\#(id),"name":"\#(spec.name)","model":"\#(spec.model)","key":"\#(Self.key(host: host, port: port))"}"#)
             let channels = (0..<spec.channelCount).map { c in
                 let detects = spec.detectingChannels.contains(c) ? spec.detects.map { "\"\($0)\"" }.joined(separator: ",") : ""
                 return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]}"#
@@ -326,6 +336,25 @@ public final class FakeCore: CoreAPI {
         for t in tiles { t.stop() }
     }
 
+    // MARK: ABI 3: device keys
+
+    /// The stable key the core gives a device address (case-insensitive
+    /// host, and port): `d-` and 16 hex digits, the same in every run.
+    public static func key(host: String, port: UInt16) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325  // FNV-1a
+        for byte in "\(host.lowercased()):\(port)".utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x0000_0100_0000_01b3
+        }
+        let hex = String(hash, radix: 16)
+        return "d-" + String(repeating: "0", count: 16 - hex.count) + hex
+    }
+
+    public func deviceKey(_ device: UInt64) throws(CoreStatus) -> String {
+        guard let d = world.withLock({ $0.devices[device] }) else { throw .unknownID }
+        return d.key
+    }
+
     // MARK: ABI 3: tiers
 
     public func tileSetTier(_ tile: UInt64, tier: StreamTier) throws(CoreStatus) {
@@ -349,14 +378,22 @@ public final class FakeCore: CoreAPI {
 
     /// Emits a `detection` event (or `motion`, for `kind` "motion") as the
     /// core does on a device's state push.
-    public func emitDetection(device: UInt64, channel: Int, kind: String, start: Bool, source: String = "device") {
+    /// With `alarm`, an `alarm` event (such as `visitor`, a doorbell press);
+    /// `lens` 1 marks the second lens of a multi-lens camera.
+    public func emitDetection(
+        device: UInt64, channel: Int, kind: String, start: Bool, source: String = "device", lens: Int? = nil,
+        alarm: Bool = false
+    ) {
         let at = HostClock.nowNanos()
         let state = start ? "start" : "stop"
+        let lensField = lens.map { #","lens":\#($0)"# } ?? ""
         if kind == DetectionEvent.motionKind {
-            emitEvent(#"{"type":"motion","device":\#(device),"channel":\#(channel),"state":"\#(state)","at_ns":\#(at)}"#)
-        } else {
             emitEvent(
-                #"{"type":"detection","device":\#(device),"channel":\#(channel),"kind":"\#(kind)","state":"\#(state)","source":"\#(source)","at_ns":\#(at)}"#)
+                #"{"type":"motion","device":\#(device),"channel":\#(channel)\#(lensField),"state":"\#(state)","at_ns":\#(at)}"#)
+        } else {
+            let type = alarm ? "alarm" : "detection"
+            emitEvent(
+                #"{"type":"\#(type)","device":\#(device),"channel":\#(channel)\#(lensField),"kind":"\#(kind)","state":"\#(state)","source":"\#(source)","at_ns":\#(at)}"#)
         }
     }
 
@@ -372,15 +409,15 @@ public final class FakeCore: CoreAPI {
     public func layoutPut(json: String) throws(CoreStatus) {
         requireOutsideCallback("nv_layout_put")
         if world.withLock({ $0.freed }) { throw .closed }
-        try layouts.put(json)
-        emitEvent(#"{"type":"layouts_changed"}"#)
+        let revision = try layouts.put(json)
+        emitEvent(#"{"type":"layouts_changed","revision":\#(revision)}"#)
     }
 
     public func layoutDelete(id: String) throws(CoreStatus) {
         requireOutsideCallback("nv_layout_delete")
         if world.withLock({ $0.freed }) { throw .closed }
-        try layouts.delete(id)
-        emitEvent(#"{"type":"layouts_changed"}"#)
+        let revision = try layouts.delete(id)
+        emitEvent(#"{"type":"layouts_changed","revision":\#(revision)}"#)
     }
 
     // MARK: Audio
@@ -414,13 +451,14 @@ public final class FakeCore: CoreAPI {
         }
     }
 
-    /// ABI 3 `nv_tile_audio_level`. The level is what the render path last
-    /// mixed for the tile, so a silent tile reads 0. An audible tile reads a
-    /// level set with `setAudioLevel`, or else a slowly varying synthetic one.
+    /// ABI 3 `nv_tile_audio_level`. Measured by the render path on what it
+    /// mixes, before the tile's volume (a muted audible tile still shows a
+    /// level); a tile that is not audible, or not known, reads 0 (never an
+    /// error). An audible tile reads a level set with `setAudioLevel`, or
+    /// else a slowly varying synthetic one.
     public func tileAudioLevel(_ tile: UInt64) throws(CoreStatus) -> AudioLevel {
-        guard world.withLock({ $0.tiles[tile] }) != nil else { throw .unknownID }
         let a = audioTiles.withLock { $0[tile] }
-        guard let a, a.audible, a.volume > 0 else { return .silent }
+        guard let a, a.audible else { return .silent }
         if let level = levels.withLock({ $0[tile] }) { return level }
         let t = Double(HostClock.nowNanos()) / 1e9
         let peak = Float(0.35 + 0.3 * sin(t * 5.3) * sin(t * 1.7))
@@ -531,6 +569,15 @@ public final class FakeCore: CoreAPI {
         world.withLock { $0.tiles[tile] }?.generations
     }
 
+    /// The last actions sent to a tile (up to 256), as `kind@generation`.
+    public func lastActions(tile: UInt64) -> [String] { actionLog.withLock { $0[tile] ?? [] } }
+
+    /// Sends a tile's queued final Resets but not its queued events (to see
+    /// the action path decide a switch before the event confirms it).
+    public func deliverFinalResetsOnly(tile: UInt64) {
+        world.withLock { $0.tiles[tile] }?.deliverFinalResets()
+    }
+
     /// The tier a tile shows now.
     public func shownTier(tile: UInt64) -> StreamTier? { world.withLock { $0.tiles[tile] }?.shownTier }
 
@@ -561,6 +608,19 @@ public final class FakeCore: CoreAPI {
     }
 
     fileprivate func deliver(_ action: CoreAction, tile: UInt64, generation: UInt32) {
+        let name: String
+        switch action {
+        case .configure: name = "configure"
+        case .decode: name = "decode"
+        case .flush: name = "flush"
+        case .reset: name = "reset"
+        case .clear: name = "clear"
+        case .status: name = "status"
+        }
+        actionLog.withLock { log in
+            log[tile, default: []].append("\(name)@\(generation)")
+            if log[tile]!.count > 256 { log[tile]!.removeFirst(log[tile]!.count - 256) }
+        }
         insideCallback { sink.core(didDeliver: action, tile: tile, generation: generation) }
     }
 }
@@ -617,6 +677,7 @@ private final class FakeTile: Sendable {
         var pendingFailures = 0
         var status: TileStatus?
         var answeredDecode = false
+        var startedAt = HostClock.nowNanos()
 
         init(generation: UInt32, tier: StreamTier, clip: FakeClip, cursor: Int) {
             self.generation = generation
@@ -639,6 +700,9 @@ private final class FakeTile: Sendable {
         /// Events to send at the next pump (the core's own thread would
         /// send them; never from inside an answer).
         var queued: [String] = []
+        /// Generations that have ended and still get their final Reset, sent
+        /// at the next pump before anything else.
+        var finalResets: [UInt32] = []
         var switchStartedAt: UInt64 = 0
     }
 
@@ -744,7 +808,20 @@ private final class FakeTile: Sendable {
         emitLock.unlock()
     }
 
+    /// Sends each ended generation's final Reset (docs/FFI.md: the old
+    /// generation's last action is a Reset, in order with the new one's).
+    func deliverFinalResets() {
+        emitLock.lock()
+        defer { emitLock.unlock() }
+        let resets = state.withLock { s -> [UInt32] in
+            defer { s.finalResets.removeAll() }
+            return s.stopped ? [] : s.finalResets
+        }
+        for g in resets { owner.deliver(.reset, tile: id, generation: g) }
+    }
+
     func flushEvents() {
+        deliverFinalResets()
         let events = state.withLock { s -> [String] in
             defer { s.queued.removeAll() }
             return s.stopped ? [] : s.queued
@@ -758,8 +835,20 @@ private final class FakeTile: Sendable {
             flushEvents()
             emitLock.lock()
             defer { emitLock.unlock() }
+            var timedOut = false
             let steps = state.withLock { s -> [(UInt32, [StandInAction])]? in
                 guard !silent, !s.stopped else { return nil }
+                // A new tier that never decodes gives up, as in the core.
+                let limit = UInt64(owner.options.tierSwitchTimeout / .nanoseconds(1))
+                let now = HostClock.nowNanos()
+                for lane in s.lanes where lane.generation > s.shown && !lane.answeredDecode && now &- lane.startedAt > limit {
+                    s.lanes.removeAll { $0.generation == lane.generation }
+                    s.retired.insert(lane.generation)
+                    s.finalResets.append(lane.generation)
+                    s.queued.append(
+                        #"{"type":"tile_tier","tile":\#(id),"tier":"\#(lane.tier.name)","state":"failed","generation":\#(lane.generation),"reason":"timeout"}"#)
+                    timedOut = true
+                }
                 var steps: [(UInt32, [StandInAction])] = []
                 for i in s.lanes.indices {
                     let clip = s.lanes[i].clip
@@ -778,6 +867,11 @@ private final class FakeTile: Sendable {
                     steps.append((s.lanes[i].generation, actions))
                 }
                 return steps.isEmpty ? nil : steps
+            }
+            if timedOut {
+                emitLock.unlock()
+                flushEvents()
+                emitLock.lock()
             }
             guard let steps else { break }
             pushed += 1
@@ -816,16 +910,28 @@ private final class FakeTile: Sendable {
             guard let shownLane = s.lanes.first(where: { $0.generation == s.shown }) else { return [] }
             let pending = s.lanes.first { $0.generation > s.shown }
             if let pending, pending.tier == tier { return [] }
-            if pending == nil, shownLane.tier == tier { return [] }
+            if pending == nil, shownLane.tier == tier {
+                // The tier already requested: nothing starts; reported again.
+                return [
+                    #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"active","generation":\#(s.shown)}"#
+                ]
+            }
             var events: [String] = []
             if let pending {
-                // Superseded: its pipeline stops, nothing is owed for it.
+                // Superseded: its pipeline stops with a final Reset, nothing
+                // more is owed for it.
                 s.lanes.removeAll { $0.generation == pending.generation }
                 s.retired.insert(pending.generation)
+                s.finalResets.append(pending.generation)
                 events.append(
                     #"{"type":"tile_tier","tile":\#(id),"tier":"\#(pending.tier.name)","state":"failed","generation":\#(pending.generation),"reason":"superseded"}"#)
             }
-            if tier == shownLane.tier { return events }
+            if tier == shownLane.tier {
+                // Back to the tier shown: nothing starts; reported as active.
+                events.append(
+                    #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"active","generation":\#(s.shown)}"#)
+                return events
+            }
             let generation = s.nextGeneration
             s.nextGeneration += 1
             s.switchStartedAt = now
@@ -833,8 +939,9 @@ private final class FakeTile: Sendable {
                 #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"starting","generation":\#(generation)}"#)
             if owner.options.tierSwitchFails {
                 s.retired.insert(generation)
+                s.finalResets.append(generation)
                 s.queued.append(
-                    #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"failed","generation":\#(generation)}"#)
+                    #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"failed","generation":\#(generation),"reason":"start_rejected"}"#)
                 return events
             }
             let clip = owner.clip(channel: channel, tier: tier, opened: openedTier)
@@ -957,7 +1064,10 @@ private final class FakeTile: Sendable {
                     // The switch: the old pipeline stops here, nothing more
                     // is owed for it, and the new one is the only one left.
                     let tier = s.lanes[i].tier
-                    for old in s.lanes where old.generation < generation { s.retired.insert(old.generation) }
+                    for old in s.lanes where old.generation < generation {
+                        s.retired.insert(old.generation)
+                        s.finalResets.append(old.generation)
+                    }
                     s.lanes.removeAll { $0.generation < generation }
                     s.shown = generation
                     s.queued.append(
@@ -975,8 +1085,9 @@ private final class FakeTile: Sendable {
                         let tier = s.lanes[i].tier
                         s.retired.insert(generation)
                         s.lanes.remove(at: i)
+                        s.finalResets.append(generation)
                         s.queued.append(
-                            #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"failed","generation":\#(generation)}"#)
+                            #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"failed","generation":\#(generation),"reason":"undecodable"}"#)
                     }
                 } else {
                     guard s.lanes[i].outstanding > 0 else { return "\(kind) answered with no Decode outstanding" }

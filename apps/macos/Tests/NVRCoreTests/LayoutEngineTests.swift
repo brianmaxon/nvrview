@@ -77,6 +77,12 @@ private func shape(_ n: LayoutNode) -> String {
         #expect(contractTree.settingRatio(0.5, at: [.a]) == nil)
     }
 
+    @Test func rekeying() {
+        let tree = contractTree.assigning(cam(1, "dev-b"), at: [.b, .a])!
+        #expect(tree.rekeying(device: "dev-a", to: "d-0000000000000001").cameraList
+            == [cam(3, "d-0000000000000001"), cam(1, "dev-b"), cam(9, "d-0000000000000001")])
+    }
+
     @Test func assignAndClearDevice() throws {
         let assigned = try #require(contractTree.assigning(cam(1, "dev-b"), at: [.b, .a]))
         #expect(assigned.cameraList == [cam(3), cam(1, "dev-b"), cam(9)])

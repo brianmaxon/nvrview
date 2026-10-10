@@ -58,15 +58,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 deviceFile: JSONFileStore(file: nil), groupFile: JSONFileStore(file: nil))
             return model
         }
-        guard let factory = AppModel.realFactory() else {
+        guard let factory = AppModel.realFactory(dataDirectory: options.dataDirectory) else {
             throw CocoaError(.featureUnsupported, userInfo: [
                 NSLocalizedDescriptionKey: "this build has no core library; run with --fake and fixture files"
             ])
         }
         return try AppModel(
             factory: factory, fakeBox: nil, credentials: KeychainCredentials(service: options.keychainService),
-            deviceFile: JSONFileStore(file: JSONFileStore<DeviceConfig>.appSupport("devices.json")),
-            groupFile: JSONFileStore(file: JSONFileStore<CameraGroup>.appSupport("groups.json")))
+            deviceFile: JSONFileStore(
+                file: options.dataDirectory?.appendingPathComponent("devices.json")
+                    ?? JSONFileStore<DeviceConfig>.appSupport("devices.json")),
+            groupFile: JSONFileStore(
+                file: options.dataDirectory?.appendingPathComponent("groups.json")
+                    ?? JSONFileStore<CameraGroup>.appSupport("groups.json")))
     }
 
     /// `--host`/`--user`: one device for this run, password from
@@ -93,8 +97,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Two example layouts for `--fake`, so the sidebar has something to show.
     private func seedFakeLayouts(_ model: AppModel) {
         guard model.layouts.isEmpty else { return }
-        let a = (0..<6).map { CameraRef(device: "fake-1", channel: $0) }
-        let b = (0..<4).map { CameraRef(device: "fake-2", channel: $0) }
+        // Named by the keys the core gave the devices.
+        let k1 = model.runtime("fake-1")?.key ?? "fake-1", k2 = model.runtime("fake-2")?.key ?? "fake-2"
+        let a = (0..<6).map { CameraRef(device: k1, channel: $0) }
+        let b = (0..<4).map { CameraRef(device: k2, channel: $0) }
         model.createLayout(name: "Overview", root: LayoutNode.balanced(a + b))
         model.createLayout(
             name: "Split Example",

@@ -15,6 +15,9 @@ struct DeviceConfig: Codable, Equatable, Identifiable, Sendable {
     var host: String
     var port: UInt16
     var user: String
+    /// The core's stable key for this device (ABI 3 `nv_device_key`), once
+    /// known; layouts and groups name its cameras by it.
+    var coreKey: String?
 
     var id: String { key }
 

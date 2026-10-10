@@ -47,7 +47,8 @@ public indirect enum LayoutNode: Sendable, Equatable {
     public static let minRatio = 0.1
     public static let maxRatio = 0.9
     /// Deeper trees are refused (the core refuses them too).
-    public static let maxDepth = 32
+    /// At most 16 splits deep (17 levels), as the core stores them.
+    public static let maxDepth = 17
     public static let maxLeaves = 64
 
     public static let empty = LayoutNode.leaf(nil)
@@ -171,6 +172,16 @@ public indirect enum LayoutNode: Sendable, Equatable {
         case .leaf(let c): c?.device == device ? .empty : self
         case .split(let axis, let ratio, let a, let b):
             .split(axis, ratio: ratio, a: a.clearing(device: device), b: b.clearing(device: device))
+        }
+    }
+
+    /// Renames a device key in every leaf (the core gave the device a key).
+    public func rekeying(device old: String, to new: String) -> LayoutNode {
+        switch self {
+        case .leaf(let c):
+            c?.device == old ? .leaf(CameraRef(device: new, channel: c!.channel)) : self
+        case .split(let axis, let ratio, let a, let b):
+            .split(axis, ratio: ratio, a: a.rekeying(device: old, to: new), b: b.rekeying(device: old, to: new))
         }
     }
 

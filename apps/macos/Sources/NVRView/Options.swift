@@ -17,10 +17,13 @@ struct Options {
     var fake = false
     var files: [URL] = []
     var selfTestSeconds: Double?
+    /// Where devices, groups and the core's store live (default: the app's
+    /// Application Support folder); for development and self-tests.
+    var dataDirectory: URL?
 
     static let usage = """
-        usage: NVRView [--keychain-service NAME] [--selftest SECONDS]
-               NVRView --host HOST [--port N] --user USER [--selftest SECONDS]
+        usage: NVRView [--keychain-service NAME] [--data-dir DIR] [--selftest SECONDS]
+               NVRView --host HOST [--port N] --user USER [--data-dir DIR] [--selftest SECONDS]
                NVRView --fake [--selftest SECONDS] file.h264|file.h265 ...
         Devices are configured in Settings; passwords are kept in the macOS Keychain. With --host, the
         password is read from NVRVIEW_PASSWORD (development against mock-nvr) or the Keychain
@@ -37,6 +40,7 @@ struct Options {
             case "--port": guard let v = it.next().flatMap(UInt16.init), v > 0 else { return nil }; o.port = v
             case "--user": guard let v = it.next(), !v.isEmpty else { return nil }; o.user = v
             case "--keychain-service": guard let v = it.next(), !v.isEmpty else { return nil }; o.keychainService = v
+            case "--data-dir": guard let v = it.next(), !v.isEmpty else { return nil }; o.dataDirectory = URL(fileURLWithPath: v)
             case "--fake": o.fake = true
             case "--selftest": guard let v = it.next().flatMap(Double.init), v > 0 else { return nil }; o.selfTestSeconds = v
             default:

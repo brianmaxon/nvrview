@@ -19,8 +19,8 @@ import VideoKit
             parse(#"{"type":"tile_tier","tile":7,"tier":"sub","state":"active","generation":3}"#)
                 == .tileTier(tile: 7, tier: .sub, state: .active, generation: 3))
         #expect(
-            parse(#"{"type":"tile_tier","tile":7,"tier":"main","state":"failed","generation":4,"reason":"x"}"#)
-                == .tileTier(tile: 7, tier: .main, state: .failed, generation: 4))
+            parse(#"{"type":"tile_tier","tile":7,"tier":"main","state":"failed","generation":4,"reason":"timeout"}"#)
+                == .tileTier(tile: 7, tier: .main, state: .failed, generation: 4, reason: "timeout"))
         #expect(
             parse(#"{"type":"tile_tier","tile":7,"tier":"future","state":"paused","generation":1}"#)
                 == .tileTier(tile: 7, tier: nil, state: .other("paused"), generation: 1))
@@ -41,10 +41,19 @@ import VideoKit
             parse(#"{"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}"#)
                 == .detection(DetectionEvent(device: 1, channel: 5, kind: "motion", active: true, source: .device, atNanos: 789)))
         #expect(parse(#"{"type":"detection","device":1,"kind":"people","state":"start"}"#) == nil)
+        #expect(
+            parse(#"{"type":"detection","device":1,"channel":3,"lens":1,"kind":"People","state":"stop","source":"device","at_ns":456}"#)
+                == .detection(
+                    DetectionEvent(device: 1, channel: 3, kind: "people", active: false, source: .device, atNanos: 456, lens: 1)))
+        #expect(
+            parse(#"{"type":"alarm","device":1,"channel":2,"kind":"visitor","state":"start","at_ns":790}"#)
+                == .detection(
+                    DetectionEvent(device: 1, channel: 2, kind: "visitor", active: true, source: .device, atNanos: 790, alarm: true)))
     }
 
     @Test func layoutsTimingAndChannelCapabilities() {
-        #expect(parse(#"{"type":"layouts_changed"}"#) == .layoutsChanged)
+        #expect(parse(#"{"type":"layouts_changed"}"#) == .layoutsChanged(revision: nil))
+        #expect(parse(#"{"type":"layouts_changed","revision":4}"#) == .layoutsChanged(revision: 4))
         #expect(
             parse(#"{"type":"timing","what":"first_picture","tile":7,"ns":123456789}"#)
                 == .timing(what: "first_picture", tile: 7, nanos: 123_456_789))
@@ -108,6 +117,7 @@ import VideoKit
         // The switch is announced at the core's next turn.
         step(rig, tile)
         #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .active, generation: 1))
+        #expect(rig.fake.lastActions(tile: tile.id).contains { $0 == "reset@0" })
         #expect(tile.tierState.shown == .main)
         #expect(tile.tierState.shownGeneration == 1)
         #expect(tile.tierState.requested == .main)
@@ -149,7 +159,9 @@ import VideoKit
         for _ in 0..<5 { step(rig, tile) }
         try rig.bridge.setTileTier(tile, .main)
         step(rig, tile)
-        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1))
+        #expect(
+            tierEvents(rig).last
+                == .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1, reason: "start_rejected"))
         #expect(tile.tierState.shown == .sub)
         #expect(tile.tierState.requested == .sub)
         #expect(tile.tierState.lastState == .failed)
@@ -166,15 +178,84 @@ import VideoKit
         for _ in 0..<3 { step(rig, tile) }
         try rig.bridge.setTileTier(tile, .main)
         try rig.bridge.setTileTier(tile, .sub)
-        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1))
+        #expect(
+            tierEvents(rig).suffix(2)
+                == [
+                    .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1, reason: "superseded"),
+                    .tileTier(tile: tile.id, tier: .sub, state: .active, generation: 0),
+                ])
         #expect(rig.fake.generations(tile: tile.id)?.running == [0])
         #expect(tile.tierState.shown == .sub)
         for _ in 0..<5 { step(rig, tile) }
+        // The superseded generation ended with its own Reset.
+        #expect(rig.fake.lastActions(tile: tile.id).contains("reset@1"))
+        #expect(tile.decoders.count == 1)
         #expect(rig.fake.violations.isEmpty)
-        // Asking for the tier already shown does nothing.
-        let count = tierEvents(rig).count
+        // Asking for the tier already shown starts nothing; it is reported again.
         try rig.bridge.setTileTier(tile, .sub)
-        #expect(tierEvents(rig).count == count)
+        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .sub, state: .active, generation: 0))
+        #expect(rig.fake.generations(tile: tile.id)?.running == [0])
+    }
+
+    @Test func aSwitchThatNeverDecodesTimesOut() throws {
+        let rig = try rig { $0.tierSwitchTimeout = .milliseconds(50) }
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<3 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        // Never answered: the new generation's actions are only executed, and
+        // its decoder is kept from answering by pumping nothing for it.
+        Thread.sleep(forTimeInterval: 0.1)
+        step(rig, tile)
+        #expect(
+            tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .failed, generation: 1, reason: "timeout"))
+        #expect(tile.tierState.shown == .sub)
+        #expect(tile.decoders.count == 1)
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    @Test func theFinalResetSwitchesBeforeTheEvent() throws {
+        let rig = try rig()
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<12 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        var steps = 0
+        while rig.fake.generations(tile: tile.id)?.shown != 1, steps < 400 {
+            step(rig, tile)
+            steps += 1
+        }
+        // Only the final Reset, no event yet: the tile already shows the new
+        // generation (the action path decides; the event confirms).
+        rig.fake.deliverFinalResetsOnly(tile: tile.id)
+        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .starting, generation: 1))
+        #expect(tile.tierState.shownGeneration == 1)
+        #expect(tile.decoders.count == 1)
+        #expect(tile.latestPicture() != nil)
+        step(rig, tile)
+        #expect(tierEvents(rig).last == .tileTier(tile: tile.id, tier: .main, state: .active, generation: 1))
+        #expect(rig.fake.violations.isEmpty)
+    }
+
+    /// An `active` repeated for an earlier request can reach the app after
+    /// it asked for the next tier: the next generation must still get the
+    /// tier the core started it with.
+    @Test func aRepeatedActiveDoesNotConfuseTheNextSwitch() throws {
+        let rig = try rig()
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.bridge.openTile(device: rig.device, channel: 0, tier: .sub)
+        for _ in 0..<12 { step(rig, tile) }
+        try rig.bridge.setTileTier(tile, .main)
+        var steps = 0
+        while tile.tierState.shown != .main, steps < 400 { step(rig, tile); steps += 1 }
+        try rig.bridge.setTileTier(tile, .sub)
+        rig.fake.emit(event: #"{"type":"tile_tier","tile":\#(tile.id),"tier":"main","state":"active","generation":1}"#)
+        #expect(tile.tierState.requested == .sub)
+        steps = 0
+        while tile.tierState.shownGeneration != 2, steps < 400 { step(rig, tile); steps += 1 }
+        #expect(tile.tierState.shown == .sub)
+        #expect(tile.tierState.requested == .sub)
+        #expect(rig.fake.violations.isEmpty)
     }
 
     @Test func gridRendersTheShownGeneration() throws {
@@ -205,8 +286,13 @@ import VideoKit
         #expect(level.rms <= level.peak)
         rig.fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.5, rms: 0.25))
         #expect(rig.bridge.audioLevel(tile) == AudioLevel(peak: 0.5, rms: 0.25))
+        // Measured before the volume: a muted audible tile still shows sound arriving.
+        try rig.bridge.setTileAudio(tile, audible: true, volume: 0)
+        #expect(rig.bridge.audioLevel(tile) == AudioLevel(peak: 0.5, rms: 0.25))
         try rig.bridge.setTileAudio(tile, audible: false)
         #expect(rig.bridge.audioLevel(tile) == .silent)
+        // Unknown tiles read 0, never an error.
+        #expect(try rig.fake.tileAudioLevel(999) == .silent)
     }
 }
 
@@ -233,11 +319,35 @@ import VideoKit
         list = try layouts(rig)
         #expect(list.count == 1)
         #expect(list[0]["version"] as? Int == 2)
-        let changes = rig.events.get().filter { $0 == .layoutsChanged }.count
-        #expect(changes == 2)
+        let revisions = rig.events.get().compactMap { e -> Int? in
+            if case .layoutsChanged(let r) = e { return r }
+            return nil
+        }
+        #expect(revisions == [1, 2])
+        let document = try #require(
+            try JSONSerialization.jsonObject(with: Data(try rig.bridge.layoutsJSON().utf8)) as? [String: Any])
+        #expect(document["revision"] as? Int == 2)
         try rig.bridge.deleteLayout(id: "l1")
         #expect(try layouts(rig).isEmpty)
         #expect(throws: CoreStatus.unknownID) { try rig.bridge.deleteLayout(id: "l1") }
+    }
+
+    @Test func limitsFromTheContract() throws {
+        let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
+        defer { rig.bridge.shutdown() }
+        func chain(_ splits: Int) -> String {
+            var node = #"{"camera":null}"#
+            for _ in 0..<splits { node = #"{"split":"row","ratio":0.5,"a":\#(node),"b":{"camera":null}}"# }
+            return #"{"id":"deep","name":"Deep","root":\#(node)}"#
+        }
+        try rig.bridge.putLayout(json: chain(16))
+        #expect(throws: CoreStatus.invalidArgument) { try rig.bridge.putLayout(json: chain(17)) }
+        try rig.bridge.putLayout(
+            json: #"{"id":"r","name":"R","root":{"split":"col","ratio":0.02,"a":{"camera":null},"b":{"camera":null}}}"#)
+        #expect(throws: CoreStatus.invalidArgument) {
+            try rig.bridge.putLayout(
+                json: #"{"id":"r","name":"R","root":{"split":"col","ratio":0.01,"a":{"camera":null},"b":{"camera":null}}}"#)
+        }
     }
 
     @Test(arguments: [
@@ -285,6 +395,21 @@ import VideoKit
         #expect(list.map { $0["id"] as? String } == ["l0", "l1"])
         #expect(list[0]["name"] as? String == "Renamed")
         #expect(list[0]["version"] as? Int == 2)
+    }
+}
+
+@Suite struct DeviceKeyTests {
+    @Test func keysAreStablePerAddress() throws {
+        let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
+        defer { rig.bridge.shutdown() }
+        let key = try #require(rig.bridge.deviceKey(rig.device))
+        #expect(key.hasPrefix("d-") && key.count == 18)
+        #expect(key == FakeCore.key(host: "192.0.2.1", port: 9000))
+        #expect(FakeCore.key(host: "NVR.example", port: 9000) == FakeCore.key(host: "nvr.example", port: 9000))
+        #expect(FakeCore.key(host: "192.0.2.1", port: 9001) != key)
+        let again = try rig.bridge.addDevice(host: "192.0.2.1", port: 9000, user: "example-user", password: "example")
+        #expect(rig.bridge.deviceKey(again) == key)
+        #expect(rig.bridge.deviceKey(12345) == nil)
     }
 }
 

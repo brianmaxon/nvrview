@@ -80,11 +80,14 @@ public enum CoreEvent: Sendable, Equatable {
     case tileClosed(tile: UInt64, reason: String?)
     case audioStats(tile: UInt64, stats: AudioStatsEvent)
     /// ABI 3: progress of `nv_tile_set_tier` (docs/FFI-ABI3.md section 1).
-    case tileTier(tile: UInt64, tier: StreamTier?, state: TierSwitchState, generation: UInt32)
+    /// `reason` comes with `failed` (`superseded`, `timeout`,
+    /// `start_rejected`, `stream_ended`, `undecodable`, `session_closed`).
+    case tileTier(tile: UInt64, tier: StreamTier?, state: TierSwitchState, generation: UInt32, reason: String? = nil)
     /// ABI 3: a detection started or stopped on a channel (section 2).
     case detection(DetectionEvent)
-    /// ABI 3: the stored layouts changed (section 4); read them again.
-    case layoutsChanged
+    /// ABI 3: the stored layouts changed; read them again. `revision` grows
+    /// with every change.
+    case layoutsChanged(revision: Int? = nil)
     /// ABI 3: a timing hook for the budgets (section 5), nanoseconds.
     case timing(what: String, tile: UInt64?, nanos: UInt64)
 
@@ -128,6 +131,8 @@ public enum CoreEvent: Sendable, Equatable {
         var at_ns: UInt64?
         var what: String?
         var ns: UInt64?
+        var lens: Int?
+        var revision: Int?
     }
 
     struct ChannelList: Decodable {
@@ -191,23 +196,32 @@ public enum CoreEvent: Sendable, Equatable {
             guard let tile = w.tile, let state = w.state, let tier = w.tier else { return nil }
             return .tileTier(
                 tile: tile, tier: StreamTier(name: tier), state: TierSwitchState(state),
-                generation: w.generation ?? 0)
+                generation: w.generation ?? 0, reason: w.reason)
         case "detection":
             guard let device = w.device, let channel = w.channel, let kind = w.kind, let state = w.state else {
                 return nil
             }
             return .detection(
                 DetectionEvent(
-                    device: device, channel: channel, kind: kind, active: state == "start",
-                    source: DetectionSource(w.source ?? "device"), atNanos: w.at_ns))
+                    device: device, channel: channel, kind: kind.lowercased(), active: state == "start",
+                    source: DetectionSource(w.source ?? "device"), atNanos: w.at_ns, lens: w.lens))
+        case "alarm":
+            // Other device states, such as a doorbell press (`visitor`).
+            guard let device = w.device, let channel = w.channel, let kind = w.kind, let state = w.state else {
+                return nil
+            }
+            return .detection(
+                DetectionEvent(
+                    device: device, channel: channel, kind: kind.lowercased(), active: state == "start",
+                    source: DetectionSource(w.source ?? "device"), atNanos: w.at_ns, lens: w.lens, alarm: true))
         case "motion":
             guard let device = w.device, let channel = w.channel, let state = w.state else { return nil }
             return .detection(
                 DetectionEvent(
                     device: device, channel: channel, kind: DetectionEvent.motionKind, active: state == "start",
-                    source: .device, atNanos: w.at_ns))
+                    source: .device, atNanos: w.at_ns, lens: w.lens))
         case "layouts_changed":
-            return .layoutsChanged
+            return .layoutsChanged(revision: w.revision)
         case "timing":
             guard let what = w.what, let ns = w.ns else { return nil }
             return .timing(what: what, tile: w.tile, nanos: ns)
@@ -266,10 +280,15 @@ public struct DetectionEvent: Sendable, Equatable {
     public var source: DetectionSource
     /// The core clock at arrival; the pushes carry no usable time.
     public var atNanos: UInt64?
+    /// 1 for the second lens of a multi-lens camera, nil otherwise.
+    public var lens: Int?
+    /// An `alarm` event (a device state that is not an object or motion,
+    /// such as a doorbell press).
+    public var alarm: Bool
 
     public init(
         device: UInt64, channel: Int, kind: String, active: Bool, source: DetectionSource = .device,
-        atNanos: UInt64? = nil
+        atNanos: UInt64? = nil, lens: Int? = nil, alarm: Bool = false
     ) {
         self.device = device
         self.channel = channel
@@ -277,5 +296,7 @@ public struct DetectionEvent: Sendable, Equatable {
         self.active = active
         self.source = source
         self.atNanos = atNanos
+        self.lens = lens
+        self.alarm = alarm
     }
 }
