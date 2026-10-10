@@ -268,3 +268,78 @@ async fn info_queries_return_the_reply_body() {
     }
     s.close().await;
 }
+
+/// A third-party camera channel: the device answers each preview with 400
+/// and streams only after the session restarts it.
+fn spawn_third_party_mock() -> mock_nvr::MockNvr {
+    let mut cfg = mock_nvr::Config::new(Fixture::load(&fixture_path("h264-basic.h264")).unwrap());
+    cfg.channels = 2;
+    cfg.fps = 100;
+    let mut tp = mock_nvr::ThirdPartyConfig::new(vec![1], 1);
+    tp.media_delay = Duration::from_millis(100);
+    cfg.third_party = Some(tp);
+    mock_nvr::spawn(cfg).unwrap()
+}
+
+fn quick_retry_session(nvr: &mock_nvr::MockNvr) -> DeviceSession {
+    let mut cfg = SessionConfig::new("example-user", "example-password");
+    cfg.preview_retry_interval = Duration::from_millis(200);
+    DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg)
+}
+
+#[tokio::test]
+async fn records_a_channel_whose_preview_is_answered_400() {
+    let nvr = spawn_third_party_mock();
+    let s = quick_retry_session(&nvr);
+    wait_logged_in(&s, LIMIT).await.unwrap();
+    let mut out = Vec::new();
+    let stats = record(
+        &s,
+        1,
+        StreamTier::Sub,
+        &mut out,
+        Default::default(),
+        RecordLimits { frames: Some(20) },
+        tokio::time::sleep(LIMIT),
+    )
+    .await
+    .unwrap();
+    s.close().await;
+    assert_eq!(stats.waits, 1);
+    assert_eq!(stats.frames, 20);
+    assert!(stats.keyframes >= 1);
+    // The file starts at the fixture's first keyframe.
+    let fixture = Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
+    let first = &fixture.frames()[fixture.first_keyframe()].data;
+    assert!(out.starts_with(first));
+    assert_eq!(nvr.command_count(3), 2);
+}
+
+#[tokio::test]
+async fn captures_a_channel_whose_preview_is_answered_400() {
+    use bc_cli::{CaptureConfig, capture};
+    use bc_protocol::recording::TierWriter;
+
+    let nvr = spawn_third_party_mock();
+    let s = quick_retry_session(&nvr);
+    wait_logged_in(&s, LIMIT).await.unwrap();
+    let mut out = TierWriter::new(Vec::new()).unwrap();
+    let cc = CaptureConfig {
+        channel: 1,
+        tiers: vec![StreamTier::Sub],
+        stagger: Duration::ZERO,
+        restart: None,
+    };
+    let stats = capture(
+        &s,
+        &cc,
+        &mut out,
+        tokio::time::sleep(Duration::from_millis(1_500)),
+    )
+    .await
+    .unwrap();
+    s.close().await;
+    let sub = &stats.tiers[0].1;
+    assert_eq!(sub.waits, 1, "{sub:?}");
+    assert!(sub.videos >= 50 && sub.keyframes >= 1, "{sub:?}");
+}

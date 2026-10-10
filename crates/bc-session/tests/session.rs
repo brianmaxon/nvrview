@@ -788,7 +788,10 @@ async fn tiers_of_one_channel_are_separate_previews() {
 #[tokio::test]
 async fn a_refused_start_reaches_every_subscriber() {
     let fake = Fake::start(Mode::RefuseStart).await;
-    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
+    // Without a wait, a 400 is final at once.
+    let mut cfg = config();
+    cfg.preview_wait_limit = Duration::ZERO;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), cfg);
     let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
     let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
     assert_eq!(recv(&mut a).await, Item::StartRejected { status: 400 });
@@ -799,4 +802,122 @@ async fn a_refused_start_reaches_every_subscriber() {
     assert_eq!(recv(&mut c).await, Item::StartRejected { status: 400 });
     assert_eq!(starts_for(&fake, 2), 1);
     s.close().await;
+}
+
+fn waiting_config(retry_ms: u64, limit_ms: u64) -> SessionConfig {
+    let mut c = config();
+    c.preview_retry_interval = Duration::from_millis(retry_ms);
+    c.preview_wait_limit = Duration::from_millis(limit_ms);
+    c
+}
+
+/// The preview starts (3) and stops (4) the fake saw for `channel`, in order.
+fn starts_and_stops(fake: &Fake, channel: u8) -> Vec<u32> {
+    let ch = channel.to_string();
+    fake.seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            (s.command == 3 || s.command == 4)
+                && find_text(&s.text, "channelId").unwrap().as_deref() == Some(ch.as_str())
+        })
+        .map(|s| s.command)
+        .collect()
+}
+
+/// Every start is stopped before the next one: never two outstanding.
+fn assert_alternating(seq: &[u32]) {
+    for (i, c) in seq.iter().enumerate() {
+        assert_eq!(*c, if i % 2 == 0 { 3 } else { 4 }, "sequence {seq:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_400_is_waited_out_with_restarts_then_refused() {
+    let fake = Fake::start(Mode::RefuseStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(150, 1000));
+    let started = Instant::now();
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    let mut b = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    assert_eq!(recv(&mut b).await, Item::WaitingForDevice { status: 400 });
+    // A late subscriber hears that the stream is being waited for.
+    let mut c = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut c).await, Item::WaitingForDevice { status: 400 });
+    for sub in [&mut a, &mut b, &mut c] {
+        // Nothing else (no second "waiting") until the wait ends.
+        assert_eq!(recv(sub).await, Item::StartRejected { status: 400 });
+    }
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1000) && waited < Duration::from_millis(2500),
+        "gave up after {waited:?}"
+    );
+    // The last start is stopped when the session gives up.
+    wait_until("the final stop", || {
+        starts_and_stops(&fake, 2).len().is_multiple_of(2)
+    })
+    .await;
+    let seq = starts_and_stops(&fake, 2);
+    assert_alternating(&seq);
+    let starts = seq.len() / 2;
+    // One start, then a restart about every 150 ms for 1 s.
+    assert!((4..=8).contains(&starts), "{starts} starts");
+    // Refused for good: no more starts.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(starts_and_stops(&fake, 2), seq);
+    s.close().await;
+    assert_eq!(starts_and_stops(&fake, 2), seq);
+}
+
+#[tokio::test]
+async fn restarts_follow_the_retry_interval() {
+    let fake = Fake::start(Mode::RefuseStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(300, 60_000));
+    let mut a = s.subscribe(1, StreamTier::Main).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    let t0 = Instant::now();
+    wait_until("three starts", || starts_for(&fake, 1) >= 3).await;
+    let elapsed = t0.elapsed();
+    // Two restarts, each 300 ms after the previous 400.
+    assert!(
+        elapsed >= Duration::from_millis(550) && elapsed < Duration::from_millis(1500),
+        "{elapsed:?}"
+    );
+    assert_alternating(&starts_and_stops(&fake, 1));
+    s.close().await;
+}
+
+#[tokio::test]
+async fn dropping_the_subscription_during_the_wait_stops_the_preview() {
+    let fake = Fake::start(Mode::RefuseStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(100, 60_000));
+    let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    wait_until("a restart", || starts_for(&fake, 3) >= 2).await;
+    drop(a);
+    wait_until("the stop", || {
+        starts_and_stops(&fake, 3).len().is_multiple_of(2)
+    })
+    .await;
+    let seq = starts_and_stops(&fake, 3);
+    // No restart after the stop.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(starts_and_stops(&fake, 3), seq);
+    assert_alternating(&seq);
+    s.close().await;
+}
+
+#[tokio::test]
+async fn closing_the_session_during_the_wait_stops_the_preview() {
+    let fake = Fake::start(Mode::RefuseStart).await;
+    let s = DeviceSession::spawn(TcpConnector::new(fake.addr), waiting_config(100, 60_000));
+    let mut a = s.subscribe(3, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    s.close().await;
+    let seq = starts_and_stops(&fake, 3);
+    assert_alternating(&seq);
+    assert_eq!(seq.len() % 2, 0, "{seq:?}");
+    assert_eq!(fake.count(2), 1, "logged out");
 }

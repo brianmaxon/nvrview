@@ -16,7 +16,19 @@ pub enum Item {
     /// The stream was interrupted (connection lost, or the queue overflowed
     /// and was flushed). Flush decoders; video resumes at the next keyframe.
     Discontinuity,
-    /// The device refused to start this preview (reply status).
+    /// The device answered the preview start with status 400, which may
+    /// not be final (a third-party camera behind an NVR does this before
+    /// its stream starts): the session keeps the preview open, restarts it
+    /// every [`crate::SessionConfig::preview_retry_interval`], and either
+    /// media follows (the wait is over) or, after
+    /// [`crate::SessionConfig::preview_wait_limit`],
+    /// [`Item::StartRejected`] does. Sent once per wait.
+    WaitingForDevice {
+        /// Reply status of the start request (400).
+        status: u16,
+    },
+    /// The device refused to start this preview (reply status). Final for
+    /// this subscription until the connection is reestablished.
     StartRejected {
         /// Reply status of the start request.
         status: u16,

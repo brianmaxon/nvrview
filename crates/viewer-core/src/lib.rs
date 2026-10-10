@@ -159,6 +159,13 @@ pub struct CoreConfig {
     /// tier's first decoded picture, for a picture that is not older than
     /// the one shown (docs/FFI.md, "Switching a tile's stream tier").
     pub tier_switch_align_cap: Duration,
+    /// After a preview start answered with status 400 (a third-party camera
+    /// behind an NVR), how long until the session restarts it while no
+    /// media has arrived (`tile_waiting`, docs/FFI.md).
+    pub preview_retry_interval: Duration,
+    /// How long after the first 400 the session keeps waiting before the
+    /// tile reports `tile_error` `start_rejected`; zero makes a 400 final.
+    pub preview_wait_limit: Duration,
 }
 
 impl Default for CoreConfig {
@@ -175,6 +182,8 @@ impl Default for CoreConfig {
             stats_interval: Duration::from_secs(1),
             tier_switch_timeout: Duration::from_secs(15),
             tier_switch_align_cap: Duration::from_millis(300),
+            preview_retry_interval: Duration::from_secs(6),
+            preview_wait_limit: Duration::from_secs(60),
         }
     }
 }
@@ -452,6 +461,8 @@ impl Core {
         let mut cfg = bc_session::SessionConfig::new(user, password);
         cfg.backoff = self.config.backoff;
         cfg.queue_frames = self.config.queue_frames.max(1);
+        cfg.preview_retry_interval = self.config.preview_retry_interval;
+        cfg.preview_wait_limit = self.config.preview_wait_limit;
         let events = self.event_sink.clone();
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
         let handle = {

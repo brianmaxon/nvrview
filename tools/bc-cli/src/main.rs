@@ -414,6 +414,13 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             if raw.is_some() {
                 eprintln!("{} records in the raw recording", stats.raw_records);
             }
+            if stats.waits > 0 {
+                eprintln!(
+                    "note: the device answered the preview with status 400; \
+                     the session waited for its stream ({} wait(s))",
+                    stats.waits
+                );
+            }
             if stats.skipped_codec_change > 0 {
                 eprintln!(
                     "skipped {} frames after a codec change",
@@ -475,6 +482,14 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
                     c.keyframes,
                     c.discontinuities,
                     c.dropped
+                );
+            }
+            for (tier, c) in stats.tiers.iter().filter(|(_, c)| c.waits > 0) {
+                eprintln!(
+                    "note: {}: the device answered the preview with status 400; \
+                     the session waited for its stream ({} wait(s))",
+                    tier.name(),
+                    c.waits
                 );
             }
             eprintln!("analyze with: bc-cli analyze {}", raw.display());

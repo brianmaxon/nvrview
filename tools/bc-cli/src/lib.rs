@@ -235,6 +235,10 @@ pub struct RecordStats {
     pub audio_frames: u64,
     /// Records written to the raw recording, if any.
     pub raw_records: u64,
+    /// Times the session waited for the stream after the device answered
+    /// the preview with status 400 (restarting the preview meanwhile)
+    /// instead of giving up, as a third-party camera behind an NVR needs.
+    pub waits: u64,
 }
 
 /// Optional outputs besides the video file.
@@ -322,6 +326,9 @@ pub async fn record<W: Write>(
             }
             Some(Item::Media(Record::Info { .. })) => {}
             Some(Item::Discontinuity) => stats.discontinuities += 1,
+            // The session keeps waiting and restarting the preview; media
+            // or a final refusal follows.
+            Some(Item::WaitingForDevice { .. }) => stats.waits += 1,
             Some(Item::StartRejected { status }) => return Err(CliError::StreamRefused(status)),
             None => {
                 return Err(match session.state() {
@@ -394,6 +401,9 @@ pub struct TierCounts {
     pub discontinuities: u64,
     /// Frames the subscription dropped because the writer fell behind.
     pub dropped: u64,
+    /// Times the session waited for the stream after a 400 (see
+    /// [`RecordStats::waits`]).
+    pub waits: u64,
 }
 
 /// What a [`capture`] wrote, per tier in the configured order.
@@ -534,6 +544,7 @@ pub async fn capture<W: Write>(
                             out.discontinuity(tier, arrival())?;
                             c.discontinuities += 1;
                         }
+                        Some(Item::WaitingForDevice { .. }) => c.waits += 1,
                         Some(Item::StartRejected { status }) => {
                             return Err(CliError::StreamRefused(status));
                         }
