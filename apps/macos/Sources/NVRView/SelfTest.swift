@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import Foundation
 import NVRCore
 import VideoKit
@@ -8,13 +9,15 @@ import VideoKit
 ///
 /// 1. a device is connected, a tile is playing, and a non-flat picture is on
 ///    screen;
-/// 2. focusing a tile animates it to the whole stage and then switches its
+/// 2. resizing the window continuously keeps the grid drawing and
+///    resizes its drawable only now and then, then to the exact size;
+/// 3. focusing a tile animates it to the whole stage and then switches its
 ///    camera to the main stream (with `--fake`, whose core models the tier
 ///    switch), still showing a picture;
-/// 3. listening makes the camera audible and its level meter reads a level;
-/// 4. leaving focus asks for the sub-stream again;
-/// 5. with `--fake`, the fake core saw no contract violation;
-/// 6. the sidebar took rows added and removed in several places in one
+/// 4. listening makes the camera audible and its level meter reads a level;
+/// 5. leaving focus asks for the sub-stream again;
+/// 6. with `--fake`, the fake core saw no contract violation;
+/// 7. the sidebar took rows added and removed in several places in one
 ///    update (a group and a layout at once), and AppKit logged none of the warnings
 ///    in `forbiddenLog` during the whole run.
 ///
@@ -50,7 +53,51 @@ final class SelfTest {
         let playing = cameras.filter { model.leases.tile(for: $0)?.snapshot.status == .playing }.count
         print("window \"\(window.state.name)\": \(window.state.tree.leafCount) tiles, \(cameras.count) cameras, \(playing) playing")
         if playing == 0 { problems.append("no tile is playing") }
-        capture("grid") { [self] in focusStep() }
+        capture("grid") { [self] in resizeStep() }
+    }
+
+    /// Resizes the window on every refresh for half a second, like a
+    /// full-screen transition: the grid keeps drawing while the drawable
+    /// size follows only now and then, and exactly once it settles.
+    private func resizeStep() {
+        guard let window, let nsWindow = window.window else { finish(problems) }
+        let grid = window.stage.grid
+        let start = nsWindow.frame
+        let resizes = grid.drawableResizes, refreshes = grid.refreshes, drawn = grid.framesDrawn
+        let began = CACurrentMediaTime()
+        let steps = 60
+        func advance(_ step: Int) {
+            let t = Double(step) / Double(steps)
+            var f = start
+            f.size.width += 240 * t
+            f.size.height += 135 * t
+            nsWindow.setFrame(f, display: true)
+            if step < steps {
+                after(0.5 / Double(steps)) { advance(step + 1) }
+                return
+            }
+            after(0.3) { [self] in
+                let elapsed = CACurrentMediaTime() - began
+                let r = grid.drawableResizes - resizes
+                let shown = grid.refreshes - refreshes, made = grid.framesDrawn - drawn
+                let scale = nsWindow.backingScaleFactor
+                let want = CGSize(
+                    width: (grid.bounds.width * scale).rounded(), height: (grid.bounds.height * scale).rounded())
+                let have = grid.drawableSize
+                print(String(
+                    format: "resize: %d steps in %.2f s, %d drawable sizes, %d refreshes, %d frames drawn, drawable %.0fx%.0f for %.0fx%.0f",
+                    steps, elapsed, r, shown, made, have.width, have.height, want.width, want.height))
+                // At most one size per 100 ms, plus the first and the settled one.
+                if Double(r) > elapsed / 0.1 + 2 {
+                    problems.append("the drawable was resized \(r) times in \(String(format: "%.2f", elapsed)) s")
+                }
+                if have != want { problems.append("the drawable did not settle at the view's size") }
+                if made < shown / 2 { problems.append("the grid stopped drawing during the resize") }
+                nsWindow.setFrame(start, display: true)
+                after(0.3) { [self] in focusStep() }
+            }
+        }
+        advance(1)
     }
 
     private func focusStep() {

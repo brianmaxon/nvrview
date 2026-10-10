@@ -215,12 +215,14 @@ final class StageView: NSView {
         stepAnimation()
         let points = overlay.bounds
         guard points.width > 0, points.height > 0 else { return }
-        let scale = drawable.width / points.width
+        // Per axis: during a resize the drawable may lag the view (it is
+        // stretched to the bounds until its size catches up).
+        let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
         var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [])
         var tiles: [GridTile] = []
         for leaf in currentLeaves {
             guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
-            let cell = leaf.rect.pixels(scale: scale)
+            let cell = leaf.rect.pixels(scaleX: scaleX, scaleY: scaleY)
             let snapshot = tile.snapshot
             let picture = tile.latestPicture()
             let size = picture.map { PixelSize(width: UInt32($0.width), height: UInt32($0.height)) }
@@ -232,9 +234,19 @@ final class StageView: NSView {
             if mapping.layoutSize == .zero {
                 gridTile = GridTile(picture: tile, color: matrix, destination: cell, source: nil)
             } else {
-                let fit = PictureFit.fit(picture: pictureSize, in: cell, fill: state.fill)
+                // Fitted where the picture appears (even scale), then mapped
+                // into the possibly stretched drawable, so the picture keeps
+                // its shape while the drawable catches up with a resize.
+                let stretch = scaleY / scaleX
+                let shown = abs(stretch - 1) < 0.001 ? cell : leaf.rect.pixels(scale: scaleX)
+                let fit = PictureFit.fit(picture: pictureSize, in: shown, fill: state.fill)
+                let destination = shown == cell
+                    ? fit.destination
+                    : CGRect(
+                        x: fit.destination.minX, y: fit.destination.minY * stretch,
+                        width: fit.destination.width, height: fit.destination.height * stretch)
                 gridTile = GridTile(
-                    picture: tile, color: matrix, destination: fit.destination,
+                    picture: tile, color: matrix, destination: destination,
                     source: fit.source.offsetBy(dx: CGFloat(mapping.offset.x), dy: CGFloat(mapping.offset.y)))
             }
             tiles.append(gridTile)

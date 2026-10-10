@@ -182,9 +182,13 @@ public enum RectAnimation {
 
 extension CGRect {
     /// The rectangle in pixels of a `scale` backing, rounded to whole pixels.
-    public func pixels(scale: CGFloat) -> CGRect {
-        let x0 = (minX * scale).rounded(), y0 = (minY * scale).rounded()
-        let x1 = (maxX * scale).rounded(), y1 = (maxY * scale).rounded()
+    public func pixels(scale: CGFloat) -> CGRect { pixels(scaleX: scale, scaleY: scale) }
+
+    /// With a scale per axis: a drawable that has not yet followed a resize
+    /// is stretched to the view, so points map to its pixels unevenly.
+    public func pixels(scaleX: CGFloat, scaleY: CGFloat) -> CGRect {
+        let x0 = (minX * scaleX).rounded(), y0 = (minY * scaleY).rounded()
+        let x1 = (maxX * scaleX).rounded(), y1 = (maxY * scaleY).rounded()
         return CGRect(x: x0, y: y0, width: max(x1 - x0, 0), height: max(y1 - y0, 0))
     }
 }
