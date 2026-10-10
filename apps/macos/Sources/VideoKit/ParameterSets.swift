@@ -94,7 +94,7 @@ public struct ParameterSetTracker: Sendable {
         var sizes: [Int] = []
         var offset = 0
         for set in sets {
-            set.copyBytes(to: UnsafeMutableBufferPointer(start: storage + offset, count: set.count))
+            _ = set.copyBytes(to: UnsafeMutableBufferPointer(start: storage + offset, count: set.count))
             ptrs.append(UnsafePointer(storage + offset))
             sizes.append(set.count)
             offset += set.count
