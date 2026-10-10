@@ -43,6 +43,11 @@
 //!   download by time range (143, stopped by 144), with injectable download
 //!   stalls and disconnects.
 //!
+//! - optionally, doorbell talk-back ([`talk`]): `ipcAudioTalk` 1 in the
+//!   199 reply for [`Config::talk_channels`], the talk ability (10), and a
+//!   talk (201, audio 202, close 11) whose received records are logged
+//!   ([`MockNvr::talk_log`]) so tests can decode and time them.
+//!
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
@@ -51,6 +56,7 @@ pub mod archive;
 pub mod audio;
 pub mod fixture;
 pub mod replay;
+pub mod talk;
 
 use archive::{ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent};
 use audio::{AudioConfig, Item, Jitter, Schedule};
@@ -134,6 +140,9 @@ pub struct Config {
     /// By channel, the camera's `uid` in the channel list (145); missing or
     /// empty: no `uid` element.
     pub uids: Vec<String>,
+    /// Channels with a speaker (`ipcAudioTalk` 1): they answer the talk
+    /// ability (10) and accept talk-back ([`talk`]). Others answer 400.
+    pub talk_channels: Vec<u8>,
 }
 
 /// How a channel's camera treats the second-lens tiers (`externStream` and
@@ -210,6 +219,7 @@ impl Config {
             third_party: None,
             extern_modes: Vec::new(),
             uids: Vec::new(),
+            talk_channels: Vec::new(),
         }
     }
 
@@ -240,6 +250,12 @@ struct Shared {
     replay_epoch: OnceLock<Instant>,
     /// Starts of third-party channels so far, by (channel, handle).
     third_party_starts: Mutex<HashMap<(u8, u32), u32>>,
+    /// Every talk so far, oldest first.
+    talks: Mutex<Vec<talk::TalkLog>>,
+    /// Status for talk opens (201); 200 accepts.
+    talk_open_status: AtomicU32,
+    /// Status for talk audio replies (202); 200 accepts.
+    talk_audio_status: AtomicU32,
 }
 
 /// Most downloads remembered for [`MockNvr::download_log`].
@@ -273,6 +289,9 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         next_conn: AtomicU64::new(1),
         replay_epoch: OnceLock::new(),
         third_party_starts: Mutex::new(HashMap::new()),
+        talks: Mutex::new(Vec::new()),
+        talk_open_status: AtomicU32::new(200),
+        talk_audio_status: AtomicU32::new(200),
     });
     let s = Arc::clone(&shared);
     let accept = thread::spawn(move || accept_loop(listener, s));
@@ -331,6 +350,28 @@ impl MockNvr {
                 ai_type: ai_type.to_owned(),
             },
         )
+    }
+
+    /// Every talk so far (201 accepted), oldest first, with the audio
+    /// records each received.
+    pub fn talk_log(&self) -> Vec<talk::TalkLog> {
+        lock(&self.shared.talks).clone()
+    }
+
+    /// Sets the status later talk opens (201) are answered with (200, the
+    /// default, accepts; anything else refuses).
+    pub fn set_talk_open_status(&self, status: u16) {
+        self.shared
+            .talk_open_status
+            .store(u32::from(status), Ordering::SeqCst);
+    }
+
+    /// Sets the status later talk audio messages (202) are answered with
+    /// (200 by default).
+    pub fn set_talk_audio_status(&self, status: u16) {
+        self.shared
+            .talk_audio_status
+            .store(u32::from(status), Ordering::SeqCst);
     }
 
     /// Sessions subscribed to alarm pushes (command 192) right now.
@@ -450,6 +491,8 @@ struct Conn {
     /// Open event searches: handle to (channel, events, next index).
     event_searches: HashMap<u32, (u8, Vec<MockEvent>, usize)>,
     next_event_handle: u32,
+    /// Open talks: channel to index in the shared talk log.
+    open_talks: HashMap<u8, usize>,
 }
 
 fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
@@ -475,6 +518,7 @@ fn serve(stream: TcpStream, shared: Arc<Shared>) -> io::Result<()> {
         file_searches: HashMap::new(),
         event_searches: HashMap::new(),
         next_event_handle: 1,
+        open_talks: HashMap::new(),
     };
     let result = conn.run(&mut reader);
     conn.close();
@@ -511,6 +555,15 @@ impl Conn {
 
     fn close(&mut self) {
         self.shared.alarms.unsubscribe(self.id);
+        if !self.open_talks.is_empty() {
+            let mut talks = lock(&self.shared.talks);
+            for (_, i) in self.open_talks.drain() {
+                if let Some(t) = talks.get_mut(i) {
+                    t.end = talk::TalkEnd::Disconnected;
+                    t.ended = Some(Instant::now());
+                }
+            }
+        }
         for (_, s) in self.streams.drain().chain(self.downloads.drain()) {
             s.stop.store(true, Ordering::SeqCst);
             if let Some(j) = s.join {
@@ -709,7 +762,78 @@ impl Conn {
             }
             3 => self.start_preview(m),
             4 => self.stop_preview(m),
+            10 | 11 | 201 | 202 => self.talk_command(m),
             other => self.reply_xml(other, id, 400, ""),
+        }
+    }
+
+    /// The channel named in the request's extension.
+    fn ext_channel(&self, m: &RawMessage) -> Option<u8> {
+        xml::find_text(&self.request_text(m), "channelId")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u8>().ok())
+    }
+
+    /// Talk-back (10, 201, 202, 11): see [`talk`].
+    fn talk_command(&mut self, m: &RawMessage) -> io::Result<()> {
+        let id = m.header.message_id;
+        let cmd = m.header.command;
+        let channel = self
+            .ext_channel(m)
+            .filter(|c| self.shared.config.talk_channels.contains(c));
+        match (cmd, channel) {
+            (10, Some(_)) => self.reply_xml(10, id, 200, talk::ABILITY),
+            (201, Some(ch)) => {
+                let body = self.payload_text(m);
+                let ok = bc_protocol::talk::parse_open_body(&body)
+                    .is_ok_and(|(c, _, audio)| c == ch && audio.is_supported());
+                let status = self.shared.talk_open_status.load(Ordering::SeqCst) as u16;
+                if !ok || self.open_talks.contains_key(&ch) {
+                    return self.reply_xml(201, id, 400, "");
+                }
+                if status != 200 {
+                    return self.reply_xml(201, id, status, "");
+                }
+                let mut talks = lock(&self.shared.talks);
+                talks.push(talk::TalkLog {
+                    channel: ch,
+                    connection: self.id,
+                    opened: Instant::now(),
+                    ended: None,
+                    end: talk::TalkEnd::Open,
+                    records: Vec::new(),
+                });
+                self.open_talks.insert(ch, talks.len() - 1);
+                drop(talks);
+                self.reply_xml(201, id, 200, "")
+            }
+            (202, Some(ch)) => {
+                let at = Instant::now();
+                let Some(&i) = self.open_talks.get(&ch) else {
+                    return self.reply_xml(202, 0, 400, "");
+                };
+                let Some(recs) = talk::records(m.payload(), at) else {
+                    return self.reply_xml(202, 0, 400, "");
+                };
+                if let Some(t) = lock(&self.shared.talks).get_mut(i) {
+                    t.records.extend(recs);
+                }
+                let status = self.shared.talk_audio_status.load(Ordering::SeqCst) as u16;
+                self.reply_xml(202, 0, status, "")
+            }
+            (11, Some(ch)) => match self.open_talks.remove(&ch) {
+                Some(i) => {
+                    if let Some(t) = lock(&self.shared.talks).get_mut(i) {
+                        t.end = talk::TalkEnd::Closed;
+                        t.ended = Some(Instant::now());
+                    }
+                    self.reply_xml(11, id, 200, "")
+                }
+                None => self.reply_xml(11, id, 400, ""),
+            },
+            (202, None) => self.reply_xml(202, 0, 400, ""),
+            _ => self.reply_xml(cmd, id, 400, ""),
         }
     }
 
@@ -723,8 +847,10 @@ impl Conn {
         );
         for c in 0..cfg.channels {
             let ai = cfg.aitypes.get(usize::from(c)).copied().unwrap_or(0);
+            let talk = u8::from(cfg.talk_channels.contains(&c));
             s.push_str(&format!(
-                "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n"
+                "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n\
+                 <ipcAudioTalk>{talk}</ipcAudioTalk>\n"
             ));
             let lenses = cfg.lens_aitypes.get(usize::from(c));
             for (lens, ai) in lenses.into_iter().flatten().enumerate() {
