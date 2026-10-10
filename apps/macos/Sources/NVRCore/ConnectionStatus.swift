@@ -25,7 +25,7 @@ public struct ConnectionStatus: Sendable, Equatable {
             tileEnded = true
         case .audioStats(_, let stats):
             audio = stats
-        case .channels, .tileStats:
+        case .channels, .tileStats, .tileTier, .detection, .layoutsChanged, .timing:
             break
         }
     }

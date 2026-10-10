@@ -78,7 +78,7 @@ public final class CoreGrid {
         var pictures: [PixelSize] = []
         for tile in tiles {
             snapshots.append(tile.snapshot)
-            let p = tile.decoder.latestPicture()
+            let p = tile.latestPicture()
             pictures.append(p.map { PixelSize(width: UInt32($0.width), height: UInt32($0.height)) } ?? .zero)
         }
         let key = Key(
@@ -117,7 +117,7 @@ public final class CoreGrid {
                     y: Int(layout.source.y) + Int(mapping.offset.y),
                     width: Int(layout.source.width), height: Int(layout.source.height))
             return GridTile(
-                picture: tiles[i].decoder, color: matrix,
+                picture: tiles[i], color: matrix,
                 destination: CGRect(
                     x: Int(layout.dest.x), y: Int(layout.dest.y), width: Int(layout.dest.width),
                     height: Int(layout.dest.height)),

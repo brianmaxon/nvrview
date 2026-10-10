@@ -29,6 +29,40 @@ public protocol CoreAPI: Sendable {
     @discardableResult
     func tileDecodeFailed(_ tile: UInt64, kind: CoreDecodeFailure) -> CoreStatus
 
+    /// `nv_tile_decoded` for an action of a given `generation` (ABI 3: while a
+    /// tier switch runs, a tile has two pipelines, and both streams of a
+    /// camera can carry the same timestamps). Answers for a generation that
+    /// has ended are ignored by the core.
+    @discardableResult
+    func tileDecoded(_ tile: UInt64, generation: UInt32, ptsMicros: Int64) -> CoreStatus
+
+    /// `nv_tile_decode_failed` for an action of a given `generation`.
+    @discardableResult
+    func tileDecodeFailed(_ tile: UInt64, generation: UInt32, kind: CoreDecodeFailure) -> CoreStatus
+
+    /// ABI 3 `nv_tile_set_tier`: show `tier` in this tile. The current stream
+    /// keeps presenting until the new one's first keyframe has decoded; the
+    /// switch is announced by a `tile_tier` event. Returns at once.
+    func tileSetTier(_ tile: UInt64, tier: StreamTier) throws(CoreStatus)
+
+    /// ABI 3 `nv_tile_audio_level`: the latest peak and RMS (0...1) of the
+    /// tile's audio, measured by the audio render before the tile's volume;
+    /// 0 for a tile that is not audible or not known. Callable at display
+    /// rate, from any thread, also inside callbacks.
+    func tileAudioLevel(_ tile: UInt64) throws(CoreStatus) -> AudioLevel
+
+    /// ABI 3 `nv_device_key`: the stable key layouts name the device by.
+    func deviceKey(_ device: UInt64) throws(CoreStatus) -> String
+
+    /// ABI 3 `nv_layouts_get`: every stored layout, as JSON.
+    func layoutsGet() throws(CoreStatus) -> String
+
+    /// ABI 3 `nv_layout_put`: insert or replace one layout (JSON) by its id.
+    func layoutPut(json: String) throws(CoreStatus)
+
+    /// ABI 3 `nv_layout_delete`.
+    func layoutDelete(id: String) throws(CoreStatus)
+
     /// `nv_grid_layout`: pure. One entry per picture size; a zero size is a
     /// tile with no picture yet. `fill` crops instead of letterboxing.
     func gridLayout(viewport: PixelSize, gap: UInt32, pictureSizes: [PixelSize], fill: Bool)
@@ -64,6 +98,11 @@ public protocol CoreAPI: Sendable {
 public protocol CoreSink: AnyObject, Sendable {
     /// `on_action`: serialized per tile, never re-entrant.
     func core(didDeliver action: CoreAction, tile: UInt64)
+    /// An unanswerable action of a given generation (ABI 3).
+    func core(didReject failure: CoreDecodeFailure, tile: UInt64, generation: UInt32)
+    /// `on_action` with the action's `generation` (ABI 3 `NvAction.generation`).
+    /// The default hands generation-0 actions to `core(didDeliver:tile:)`.
+    func core(didDeliver action: CoreAction, tile: UInt64, generation: UInt32)
     /// `on_event`: serialized across the core. UTF-8 JSON, not terminated.
     func core(didEmit json: UnsafeRawBufferPointer)
     /// An action that needs an answer but carries a value this version does
@@ -76,7 +115,13 @@ public protocol CoreSink: AnyObject, Sendable {
 }
 
 extension CoreSink {
+    public func core(didDeliver action: CoreAction, tile: UInt64, generation: UInt32) {
+        core(didDeliver: action, tile: tile)
+    }
     public func core(didReject failure: CoreDecodeFailure, tile: UInt64) {}
+    public func core(didReject failure: CoreDecodeFailure, tile: UInt64, generation: UInt32) {
+        core(didReject: failure, tile: tile)
+    }
     public func core(didTap block: CoreAudioBlock, tile: UInt64) {}
 }
 
