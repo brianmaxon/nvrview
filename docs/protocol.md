@@ -935,6 +935,114 @@ minutes. Its token logins also count against the device's session limit:
 six logins without a logout made the device refuse new connections. RTSP
 serves live view only, and ONVIF offered no replay service. (observed)
 
+## LAN discovery
+
+How the official desktop client finds devices on the local network ("search
+LAN for devices"). All facts below are **observed (client capture)**: a
+capture of the official desktop client searching twice, on a LAN with NVRs
+and cameras of several product classes, unless marked otherwise. Discovery uses UDP only and no login.
+
+Two exchanges were on the wire. In the client capture only the first one was
+answered; our own probes later drew answers to both (see "Our own search").
+
+### Search request and device record (UDP 2000 → UDP 3000)
+
+| Fact | Provenance |
+| --- | --- |
+| The request is the 4-byte UDP payload `aa aa 00 00`, sent to the subnet's broadcast address, destination port **2000**, from an ephemeral source port. The client sent each request twice back to back, and repeated the pair about every 11 s while its search screen was open. | observed (client capture) |
+| Every device answers each request copy with one 388-byte UDP datagram, unicast to the requester's address at destination port **3000**, whatever the request's source port was (the client had its own socket on port 3000). Replies arrived within about 10–100 ms. | observed (client capture) |
+| A reply's source port is 2000 on some devices and an ephemeral port (fixed per device across the capture) on others, NVRs included. | observed (client capture) |
+| A reply carries no transaction ID, magic, or checksum, and repeats byte for byte for the same device; it cannot be matched to a request except by timing. Duplicates (two per request pair) are normal. | observed (client capture) |
+| NVRs send the same 4-byte request themselves, from source port 3000 to the limited broadcast address (255.255.255.255) port 2000, about every 2 s, and other hosts on the network send it too: a listener on port 2000 sees other searchers, not device announcements. | observed (client capture) |
+
+The 388-byte record. Strings are ASCII, NUL-terminated and NUL-padded within
+the field; integers little-endian. Field sizes are the distance to the next
+field seen in use, so a longer string than any observed may be allowed.
+Every byte not listed was zero in every reply.
+
+| Offset | Size | Content | Provenance |
+| --- | --- | --- | --- |
+| 0 | 50 | zero | observed (client capture) |
+| 50 | 1 | 1 on every camera, 2 on every NVR: device kind | observed (client capture) |
+| 51 | 1 | small integer, differing by product class (cameras, doorbells, NVRs); meaning unknown | observed (client capture) |
+| 52 | 1 | 1 on cameras; a larger value on NVRs; meaning unknown | observed (client capture) |
+| 54 | 1 | 1 on cameras; 16 on NVRs, matching the channel count of the 16-channel NVR the rest of this document describes: channel count | observed (client capture) |
+| 57 | 1 | 1 on every device; meaning unknown | observed (client capture) |
+| 80 | 6 | the MAC address, binary | observed (client capture) |
+| 104 | 4 | `aa aa 00 00`, the request's bytes | observed (client capture) |
+| 108 | 20 | the device's IPv4 address, dotted decimal | observed (client capture) |
+| 128 | 2 | u16: the device's TCP port for this protocol (9000 on every device), followed by 2 zero bytes | observed (client capture) |
+| 132 | 32 | the device name the user gave it | observed (client capture) |
+| 164 | 64 | the MAC address as text, `xx:xx:xx:xx:xx:xx`; upper case on cameras, lower case on NVRs | observed (client capture) |
+| 228 | 32 | the device UID, 16 characters; empty on one camera | observed (client capture) |
+| 260 | 32 | a short lower-case product-class tag with underscores; set on some camera classes, empty on others and on NVRs | observed (client capture) |
+| 292 | 96 | on NVRs, the MAC address as 12 upper-case hex digits without separators; empty on cameras | observed (client capture) |
+
+Not in the record: the model, firmware version, HTTP, HTTPS, RTSP, or ONVIF
+ports, and any subnet mask or gateway. Those come from the session after
+login ("Device information"). Whether the record is identical for a device
+on firmware other than the families seen here is unknown.
+
+### Second probe (UDP 2015)
+
+In the same search, the client also sent a second kind of probe. No device
+answered it in the client capture (no other UDP reached the client); a
+battery-powered camera answered our own (see "Our own search").
+
+| Fact | Provenance |
+| --- | --- |
+| Destination UDP port **2015**; 73-byte payload; to the subnet broadcast address (and, in the first search, also to 255.255.255.255), each copy from its own ephemeral source port. | observed (client capture) |
+| A burst of 21 probes about 25 ms apart per search. Each probe went out two or three times with identical bytes; consecutive probes differed only in the transaction ID, which increased by one per probe and continued from one search to the next. | observed (client capture) |
+
+Probe header, 20 bytes, all u32 little-endian:
+
+| Offset | Field | Provenance |
+| --- | --- | --- |
+| 0 | magic: the bytes `3a cf 87 2a` | observed (client capture) |
+| 4 | body length (53, the bytes after the header) | observed (client capture) |
+| 8 | 1 in every probe | observed (client capture) |
+| 12 | transaction ID | observed (client capture) |
+| 16 | checksum of the (encrypted) body: CRC-32 with the reflected polynomial `0x04C11DB7` (zlib's), but initial value 0 and no final XOR (zlib's `crc32` uses `0xFFFFFFFF` for both); it matched in every probe | observed (client capture) |
+
+Body obfuscation: the body is processed as 32-bit little-endian words (the
+last one partial). Word *i* is XORed with `(K[i mod 8] + tid) mod 2^32`,
+written little-endian, where `tid` is the header's transaction ID and `K` is
+
+`1F2D3C4B 5A6C7F8D 38172E4B 8271635A 863F1A2B A5C6F7D8 8371E1B4 17F2D3A5`
+
+(observed (client capture)). The first word is the fixed TCP XOR key's first
+four bytes read as a little-endian word, recovered by known plaintext; the
+table was confirmed by every probe in the capture decoding to the same
+well-formed XML:
+
+```xml
+<P2P><C2D_S><to><port>N</port></to></C2D_S></P2P>
+```
+
+where `N` is a port number that was not one of the probes' source ports, and
+no traffic arrived on it during the capture. (observed (client capture))
+
+### WS-Discovery from NVRs
+
+| Fact | Provenance |
+| --- | --- |
+| NVRs send a standard ONVIF WS-Discovery `Probe` (SOAP 1.2, WS-Discovery 2005/04, `Types` `tdn:NetworkVideoTransmitter`) to 239.255.255.250:3702 about every 6–7 s, presumably to find ONVIF cameras to add. The official client sent none. | observed (client capture) | <!-- sanitize:allow (the standard WS-Discovery multicast group) -->
+
+### Our own search
+
+Sent by nvrview's own test script from a computer on the same subnet, after
+the facts above were recorded: two search requests (`aa aa 00 00` to the
+subnet broadcast, port 2000) and, separately, two rounds of the UDP 2015 probe
+(each one probe sent twice, with a random transaction ID and our own listening
+port as `N`). Nothing else was sent.
+
+| Fact | Provenance |
+| --- | --- |
+| Every device that answered the official client answered the two requests with two identical 388-byte records each, byte for byte the same as in the client capture, to our socket bound to port 3000 **on the interface address**. Replies came within 15–320 ms. | observed |
+| While the official client was running on the same computer, it held UDP port 3000 on the wildcard address, and binding the wildcard address again failed even with `SO_REUSEADDR` and `SO_REUSEPORT`; binding port 3000 on the interface's own address with `SO_REUSEADDR` succeeded and received the replies (macOS). | observed |
+| One device that never answers the port-2000 request, a battery-powered camera, answered each UDP 2015 probe copy from source port 2015 to the port named in the probe (`N`), not to the probe's source port. The answer has the same 20-byte header (magic, body length, 1, the probe's transaction ID echoed, CRC-32 as above) and the same body obfuscation keyed by that transaction ID. No other device answered. | observed |
+| Its body: `<P2P><D2C_S_R><bat><low>…</low><pct>…</pct><c>…</c><p>…</p></bat><uid>…</uid></D2C_S_R></P2P>`, with `pct` the battery charge in percent (100 at the time) and `uid` the device UID; `low` and `c` were 0 and `p` was 2, meanings unknown. It carries no name, address, model, or TCP port: the address is the datagram's source. | observed |
+
 ## Open questions
 
 - Camera motion control: 18 (four directions and stop), 19 `toPos`, 295,
@@ -993,6 +1101,12 @@ serves live view only, and ONVIF offered no replay service. (observed)
 - Behavior at the device's limits: how many concurrent streams per session and
   per device. The statuses are reported (409, 410 at login; 430 at stream
   start); the numbers are not.
+- LAN discovery: what record bytes 51, 52 and 57 mean; whether devices on
+  other firmware send a different record size; why the battery camera did
+  not answer the official client's UDP 2015 probes (asleep at the time, or
+  something about the probe's port); what `low`, `c` and `p` in `D2C_S_R`
+  mean, and whether a battery camera listens on port 9000 at all while it
+  sleeps.
 - A second message magic, bytes `a0 cb ed 0f`, which the client's receive
   path accepts besides `f0 de bc 0a` (reported); when devices send it is
   unknown.
