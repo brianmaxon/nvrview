@@ -6,18 +6,56 @@ Windows is planned, and the design keeps that possible from the first commit.
 
 ## Goals
 
-- Live view of every channel on one or more NVRs: a grid of sub-streams, and one
-  channel full screen on its main stream.
-- Listening that stays in sync with video for hours, with the same audio
-  available to local speech recognition later ([AUDIO.md](AUDIO.md)).
-- Far lower CPU, memory, and battery use than the official Electron app: native
-  code on Apple Silicon, hardware video decoding, no browser engine.
-- Robust behavior on bad streams: wait for the next keyframe instead of
-  rebuilding the decoder, and never let logging grow without bound.
-- Read-only toward devices. The viewer never changes device settings.
+What it does: live view of every channel on one or more NVRs (a grid of
+sub-streams, one channel full screen on its main stream), with listening that
+stays in sync with video ([AUDIO.md](AUDIO.md)). How it should do it:
 
-Out of scope for now: recorded-video playback, PTZ, two-way audio, alerts,
-remote (P2P/relay) access, and device setup.
+1. **Fix what the official app gets wrong.** No decoder rebuild loops on bad
+   streams (wait for the next keyframe), no audio that drifts out of sync over
+   hours, no logs that grow without bound, no reconnect storms.
+2. **Start fast, stay light, stay responsive.** Native code, hardware video
+   decoding, no browser engine; far lower CPU, memory, and energy use than the
+   official Electron app, measured against the budgets below, not assumed.
+3. **A platform for features.** Transcription, keyword spotting, on-device
+   vision, and triggers plug into defined extension points (below) instead of
+   being bolted onto the viewer.
+4. **Safe for devices and accounts.** Read-only toward devices; one login per
+   device, logged out on every close; a refused login is never retried
+   automatically, so the viewer can never lock an account or crowd out other
+   clients.
+5. **Private and local.** No cloud account. Video, audio, transcripts, and
+   detections stay on the machine; models run on device.
+6. **Reliable for days, not minutes.** Runs unattended for weeks: every queue,
+   buffer, cache, and log is bounded, and network drops and NVR reboots are
+   recovered from without user action. Checked by soak tests against replayed
+   real streams.
+7. **One core, every platform.** Every decision (protocol, sessions, decoder
+   policy, audio timing, layout, extension events) lives in shared Rust; apps
+   only decode, draw, play, and present. A fix lands once and behaves the same
+   on macOS and Windows.
+8. **Testable without hardware.** Everything can be developed against
+   `mock-nvr`, replayed recordings, and pixel-checking self-tests; real devices
+   are used only to confirm protocol facts.
+
+### Budgets
+
+Measured on every relevant change once M3 exists (Apple silicon, release
+build). Targets are set from the first baseline; until then they are
+placeholders.
+
+| Measure | Target |
+| --- | --- |
+| Launch to first live picture (saved credentials, one tile) | TBD at M3 |
+| Process memory, 1 tile / 16 tiles | TBD at M3 (includes about 200 MB fixed for the Metal renderer, an accepted cost) |
+| CPU per sub-stream tile at steady state | TBD at M3 |
+| Energy impact (macOS energy report), 4 and 16 tiles | TBD at M3 |
+| Tile to full screen (click to new picture) | TBD at M3 |
+| Audio/video offset over 24 h | within ±40 ms |
+| Memory growth over a 7-day soak | none beyond startup |
+
+Out of scope for now: recorded-video playback, PTZ, two-way audio, remote
+(P2P/relay) access, and device setup. Alerts and triggers come through the
+extension points.
 
 ## The split
 
@@ -152,6 +190,32 @@ fallback is FFmpeg with D3D11VA.
 
 Shared across both through Rust: credential storage (the `keyring` crate maps
 to Keychain and Windows Credential Manager), logging, settings format.
+
+## Extension points
+
+Features build on events and data the shared core already produces, so they
+work the same on every platform and never touch the live-view path's timing.
+
+| Point | What it carries | Where it lives | Planned uses |
+| --- | --- | --- | --- |
+| Control events | device state, channel lists, tile status and stats (JSON) | core → app (`on_event`) | dashboards, health alerts |
+| Audio tap | decoded 16 kHz mono PCM with camera and wall-clock time, per tile, audible or not | core ([AUDIO.md](AUDIO.md)) | transcription, keyword spotting, sound events |
+| Frame tap | decoded pictures (on macOS `CVPixelBuffer`s straight from VideoToolbox, no copy), sampled at a configurable rate per tile, with camera time | platform renderer | on-device vision: people, vehicles, packages (Core ML on macOS; ONNX Runtime/DirectML on Windows) |
+| Detections | timestamped results from taps: text, labels, boxes, confidence | back into the core | overlays, search, triggers |
+| Triggers | rules over events and detections ("person on camera 3 after dark", "keyword heard") with actions (notify, focus the tile, mark the timeline, run a shortcut) | core, evaluated once for every platform | alerts without the official app |
+
+Rules for every extension:
+
+- **Bounded and lossy.** Taps feed bounded queues that drop with counters; a
+  slow model never delays decoding, drawing, or playback.
+- **Off the hot path.** Inference runs on its own threads (or a helper
+  process) at its own rate; the frame tap samples, it does not see every
+  frame unless asked.
+- **Local.** Models are on-device; nothing is uploaded.
+- **Timestamped.** Everything carries camera time, so results line up with
+  video and audio.
+- **Measured.** Each extension states its CPU, memory, and energy cost against
+  the budgets above.
 
 ## Build and CI
 
