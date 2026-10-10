@@ -107,7 +107,7 @@ fn login_ok_pushes_channel_list_and_answers_queries() {
         } => assert!(xml.contains("<type>LAN</type>")),
         e => panic!("{e:?}"),
     }
-    let q = c.session.query_info(Command::StreamInfoList, None).unwrap();
+    let (_, q) = c.session.query_info(Command::StreamInfoList, None).unwrap();
     c.tcp.write_all(&q).unwrap();
     match c.control() {
         Event::Control {
@@ -124,7 +124,7 @@ fn login_ok_pushes_channel_list_and_answers_queries() {
         }
         e => panic!("{e:?}"),
     }
-    let q = c
+    let (_, q) = c
         .session
         .query_info(Command::ChannelVersionInfo, Some(2))
         .unwrap();
@@ -138,7 +138,7 @@ fn login_ok_pushes_channel_list_and_answers_queries() {
         } => assert!(xml.contains("<channelId>2</channelId>")),
         e => panic!("{e:?}"),
     }
-    let q = c
+    let (_, q) = c
         .session
         .query_info(Command::ChannelVersionInfo, Some(3))
         .unwrap();

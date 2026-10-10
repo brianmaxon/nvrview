@@ -1,0 +1,22 @@
+[package]
+name = "bc-cli"
+version = "0.1.0"
+description = "Command-line client: log in to an NVR, list its channels, and record one live channel to an Annex-B file"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bc-protocol = { path = "../../crates/bc-protocol" }
+bc-session = { path = "../../crates/bc-session" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
+
+[dev-dependencies]
+mock-nvr = { path = "../mock-nvr" }
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -148,6 +148,107 @@ pub fn parse_extension(xml: &str) -> Result<Extension, XmlError> {
     })
 }
 
+/// Collects, for every element named `record`, the text of the leaf
+/// elements inside it (first occurrence of each name wins).
+fn records(xml: &str, record: &str) -> Result<Vec<Vec<(String, String)>>, XmlError> {
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    let mut current: Option<Vec<(String, String)>> = None;
+    let mut leaf: Option<(String, String)> = None;
+    loop {
+        match reader.read_event().map_err(|_| XmlError::Malformed)? {
+            Event::Start(e) => {
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                if name == record {
+                    current = Some(Vec::new());
+                } else if current.is_some() {
+                    leaf = Some((name, String::new()));
+                }
+            }
+            Event::Text(t) => {
+                if let Some((_, text)) = leaf.as_mut() {
+                    text.push_str(&t.xml10_content().map_err(|_| XmlError::Malformed)?);
+                }
+            }
+            Event::End(e) => {
+                if e.local_name().as_ref() == record.as_bytes() {
+                    out.extend(current.take());
+                } else if let (Some(fields), Some((name, text))) = (current.as_mut(), leaf.take()) {
+                    if !fields.iter().any(|(n, _)| *n == name) {
+                        fields.push((name, text.trim().to_owned()));
+                    }
+                }
+            }
+            Event::Eof => return Ok(out),
+            _ => {}
+        }
+    }
+}
+
+fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// One channel slot from a `ChannelInfoList` (command 145).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelInfo {
+    /// Channel number (0-based).
+    pub channel: u8,
+    /// Whether a camera occupies the slot (`state` is `connect`).
+    pub connected: bool,
+    /// Stream tiers the channel offers, from `streamSupport`.
+    pub tiers: Vec<StreamTier>,
+}
+
+/// Parses a `ChannelInfoList`. Entries without a valid `channelId` are
+/// skipped; unknown tier names are ignored.
+pub fn parse_channel_info_list(xml: &str) -> Result<Vec<ChannelInfo>, XmlError> {
+    Ok(records(xml, "ChannelInfo")?
+        .iter()
+        .filter_map(|f| {
+            let channel = field(f, "channelId")?.parse().ok()?;
+            Some(ChannelInfo {
+                channel,
+                connected: field(f, "state") == Some("connect"),
+                tiers: field(f, "streamSupport")
+                    .unwrap_or("")
+                    .split(',')
+                    .filter_map(|t| StreamTier::from_name(t.trim()))
+                    .collect(),
+            })
+        })
+        .collect())
+}
+
+/// Name and model from a `VersionInfo` reply: the device's own (command 80)
+/// or a channel's (command 318).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VersionInfo {
+    /// `channelId`, present in per-channel replies.
+    pub channel: Option<u8>,
+    /// User-assigned name.
+    pub name: String,
+    /// Model (`type`).
+    pub model: String,
+    /// `firmwareVersion`, if present.
+    pub firmware: Option<String>,
+}
+
+/// Parses a `VersionInfo` reply.
+pub fn parse_version_info(xml: &str) -> Result<VersionInfo, XmlError> {
+    let all = records(xml, "VersionInfo")?;
+    let f = all.first().ok_or(XmlError::Missing("VersionInfo"))?;
+    Ok(VersionInfo {
+        channel: field(f, "channelId").and_then(|c| c.parse().ok()),
+        name: field(f, "name").unwrap_or_default().to_owned(),
+        model: field(f, "type").unwrap_or_default().to_owned(),
+        firmware: field(f, "firmwareVersion").map(str::to_owned),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +305,53 @@ mod tests {
             Err(XmlError::BadNumber("encryptLen"))
         );
         assert!(find_text("<a><b></a>", "b").is_err());
+    }
+
+    #[test]
+    fn channel_info_list() {
+        let xml = "<body><ChannelInfoList version=\"1.1\">\
+                   <ChannelInfo><channelId>0</channelId><state>connect</state>\
+                   <uid>UID-EXAMPLE</uid><streamSupport>mainStream,subStream,externStream</streamSupport></ChannelInfo>\
+                   <ChannelInfo><channelId>1</channelId><state>none</state></ChannelInfo>\
+                   <ChannelInfo><channelId>x</channelId><state>connect</state></ChannelInfo>\
+                   </ChannelInfoList></body>";
+        let list = parse_channel_info_list(xml).unwrap();
+        assert_eq!(
+            list,
+            vec![
+                ChannelInfo {
+                    channel: 0,
+                    connected: true,
+                    tiers: vec![StreamTier::Main, StreamTier::Sub, StreamTier::Extern],
+                },
+                ChannelInfo {
+                    channel: 1,
+                    connected: false,
+                    tiers: vec![],
+                },
+            ]
+        );
+        assert_eq!(parse_channel_info_list("<body/>").unwrap(), vec![]);
+        assert!(parse_channel_info_list("<a><b></a>").is_err());
+    }
+
+    #[test]
+    fn version_info() {
+        let xml = "<body><VersionInfo version=\"1.1\"><channelId>3</channelId>\
+                   <name>Example camera</name><type>EXAMPLE-MODEL</type>\
+                   <detail><name>ignored</name></detail></VersionInfo></body>";
+        assert_eq!(
+            parse_version_info(xml).unwrap(),
+            VersionInfo {
+                channel: Some(3),
+                name: "Example camera".into(),
+                model: "EXAMPLE-MODEL".into(),
+                firmware: None,
+            }
+        );
+        assert_eq!(
+            parse_version_info("<body/>"),
+            Err(XmlError::Missing("VersionInfo"))
+        );
     }
 }

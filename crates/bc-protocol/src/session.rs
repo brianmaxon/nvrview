@@ -338,23 +338,23 @@ impl Session {
     }
 
     /// Builds a read-only info query: 80, 146, or 199 (empty body), or 318
-    /// (needs `channel`). Any other command is refused.
+    /// (needs `channel`). Any other command is refused. Returns the message
+    /// ID the reply will carry, and the bytes to send.
     pub fn query_info(
         &mut self,
         cmd: Command,
         channel: Option<u8>,
-    ) -> Result<Vec<u8>, SessionError> {
-        let id = self.alloc_id()?;
-        match cmd {
-            Command::VersionInfo | Command::StreamInfoList | Command::Support => {
-                self.send(cmd, id, &[], &[])
-            }
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        let ext = match cmd {
+            Command::VersionInfo | Command::StreamInfoList | Command::Support => String::new(),
             Command::ChannelVersionInfo => {
                 let ch = channel.ok_or(SessionError::WrongState("channel required"))?;
-                self.send(cmd, id, xml::channel_extension(ch).as_bytes(), &[])
+                xml::channel_extension(ch)
             }
-            other => Err(SessionError::CommandNotAllowed(other.number())),
-        }
+            other => return Err(SessionError::CommandNotAllowed(other.number())),
+        };
+        let id = self.alloc_id()?;
+        Ok((id, self.send(cmd, id, ext.as_bytes(), &[])?))
     }
 
     /// Builds a preview start. Returns the message ID that identifies this
@@ -716,10 +716,14 @@ mod tests {
             Command::StreamInfoList,
             Command::Support,
         ] {
-            let m = decode_one(&s.query_info(c, None).unwrap());
+            let m = decode_one(&s.query_info(c, None).unwrap().1);
             assert_eq!(m.header.command, c.number());
         }
-        let m = decode_one(&s.query_info(Command::ChannelVersionInfo, Some(4)).unwrap());
+        let m = decode_one(
+            &s.query_info(Command::ChannelVersionInfo, Some(4))
+                .unwrap()
+                .1,
+        );
         assert_eq!(m.header.command, 318);
         assert_eq!(m.header.payload_offset, Some(m.extension().len() as u32));
         let mut e = m.extension().to_vec();

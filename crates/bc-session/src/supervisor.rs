@@ -6,15 +6,16 @@ use crate::queue::{FrameQueue, Item, Subscription};
 use crate::transport::Connector;
 use bc_protocol::framer::Decoder;
 use bc_protocol::media::Demuxer;
-use bc_protocol::session::{Event, Session};
+use bc_protocol::session::{Command, Event, Session};
 use bc_protocol::stream::StreamTier;
-use std::collections::HashMap;
+use bc_protocol::xml::{self, ChannelInfo};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout};
 use tracing::{debug, info, warn};
@@ -57,6 +58,60 @@ impl fmt::Display for SessionClosed {
 
 impl std::error::Error for SessionClosed {}
 
+/// Reply to an info query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryReply {
+    /// Reply status. Most commands answer 200; 146 answers 300 with a full
+    /// body (see docs/protocol.md).
+    pub status: u16,
+    /// Decrypted XML body (empty when the reply has none).
+    pub xml: String,
+}
+
+/// Why an info query produced no reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryError {
+    /// The session is closed, or the login was refused.
+    Closed,
+    /// The connection dropped before the reply arrived.
+    ConnectionLost,
+    /// No reply within [`SessionConfig::query_timeout`].
+    TimedOut,
+    /// Too many queries outstanding.
+    Busy,
+    /// The command is not a read-only info query, or a needed channel is
+    /// missing.
+    NotAllowed,
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            QueryError::Closed => "device session is closed",
+            QueryError::ConnectionLost => "connection lost before the reply",
+            QueryError::TimedOut => "no reply in time",
+            QueryError::Busy => "too many queries outstanding",
+            QueryError::NotAllowed => "not an allowed info query",
+        })
+    }
+}
+
+impl std::error::Error for QueryError {}
+
+/// Queries outstanding at once (waiting for login plus in flight).
+const MAX_QUERIES: usize = 32;
+
+struct QueryReq {
+    cmd: Command,
+    channel: Option<u8>,
+    reply: oneshot::Sender<Result<QueryReply, QueryError>>,
+}
+
+enum Request {
+    Subscribe(NewSub),
+    Query(QueryReq),
+}
+
 struct NewSub {
     id: u64,
     channel: u8,
@@ -67,8 +122,10 @@ struct NewSub {
 /// Handle to a running device session. Dropping it closes the session.
 pub struct DeviceSession {
     shared: Arc<Shared>,
-    cmd_tx: mpsc::Sender<NewSub>,
+    cmd_tx: mpsc::Sender<Request>,
     state_rx: watch::Receiver<ConnState>,
+    channels_rx: watch::Receiver<Option<Vec<ChannelInfo>>>,
+    query_timeout: Duration,
     next_sub: AtomicU64,
     queue_frames: usize,
     join: Option<JoinHandle<()>>,
@@ -84,13 +141,17 @@ impl DeviceSession {
         });
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let (state_tx, state_rx) = watch::channel(ConnState::Connecting);
+        let (channels_tx, channels_rx) = watch::channel(None);
         let queue_frames = config.queue_frames;
+        let query_timeout = config.query_timeout;
         let ctx = Ctx {
             cfg: config,
             shared: shared.clone(),
             cmd_rx,
             state_tx,
+            channels_tx,
             subs: Subs::default(),
+            queries: Queries::default(),
             limiter: LogLimiter::new(Duration::from_secs(5)),
         };
         let join = tokio::spawn(supervise(connector, ctx));
@@ -98,6 +159,8 @@ impl DeviceSession {
             shared,
             cmd_tx,
             state_rx,
+            channels_rx,
+            query_timeout,
             next_sub: AtomicU64::new(0),
             queue_frames,
             join: Some(join),
@@ -118,12 +181,12 @@ impl DeviceSession {
         let queue = Arc::new(FrameQueue::new(self.queue_frames));
         let id = self.next_sub.fetch_add(1, Ordering::Relaxed);
         self.cmd_tx
-            .send(NewSub {
+            .send(Request::Subscribe(NewSub {
                 id,
                 channel,
                 tier,
                 queue: queue.clone(),
-            })
+            }))
             .await
             .map_err(|_| SessionClosed)?;
         self.shared.wake.notify_one();
@@ -133,6 +196,45 @@ impl DeviceSession {
             queue,
             shared: self.shared.clone(),
         })
+    }
+
+    /// Sends a read-only info query (80, 146, 199, or 318 with a channel)
+    /// and waits for its reply. A query made before login is sent once the
+    /// session logs in; one in flight when the connection drops fails with
+    /// [`QueryError::ConnectionLost`] and is not resent.
+    pub async fn query(&self, cmd: Command, channel: Option<u8>) -> Result<QueryReply, QueryError> {
+        let allowed = match cmd {
+            Command::VersionInfo | Command::StreamInfoList | Command::Support => true,
+            Command::ChannelVersionInfo => channel.is_some(),
+            _ => false,
+        };
+        if !allowed {
+            return Err(QueryError::NotAllowed);
+        }
+        if self.shared.is_closing() {
+            return Err(QueryError::Closed);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Request::Query(QueryReq {
+                cmd,
+                channel,
+                reply: tx,
+            }))
+            .await
+            .map_err(|_| QueryError::Closed)?;
+        self.shared.wake.notify_one();
+        match timeout(self.query_timeout, rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(QueryError::Closed),
+            Err(_) => Err(QueryError::TimedOut),
+        }
+    }
+
+    /// The device's channel list, as last pushed by the device (command 145)
+    /// after login; `None` until it arrives.
+    pub fn watch_channels(&self) -> watch::Receiver<Option<Vec<ChannelInfo>>> {
+        self.channels_rx.clone()
     }
 
     /// The current connection state.
@@ -261,25 +363,76 @@ impl Subs {
     }
 }
 
+/// Info queries waiting for login, and those sent and awaiting a reply.
+#[derive(Default)]
+struct Queries {
+    waiting: VecDeque<QueryReq>,
+    in_flight: HashMap<u32, oneshot::Sender<Result<QueryReply, QueryError>>>,
+}
+
+impl Queries {
+    fn add(&mut self, q: QueryReq) {
+        // Forget queries whose callers gave up (timed out or dropped).
+        self.waiting.retain(|w| !w.reply.is_closed());
+        self.in_flight.retain(|_, tx| !tx.is_closed());
+        if self.waiting.len() + self.in_flight.len() >= MAX_QUERIES {
+            let _ = q.reply.send(Err(QueryError::Busy));
+        } else {
+            self.waiting.push_back(q);
+        }
+    }
+
+    /// The connection is gone: replies to queries already sent will never
+    /// arrive. Waiting ones are sent on the next connection.
+    fn connection_lost(&mut self) {
+        for (_, tx) in self.in_flight.drain() {
+            let _ = tx.send(Err(QueryError::ConnectionLost));
+        }
+    }
+
+    fn close_all(&mut self) {
+        self.connection_lost();
+        for q in self.waiting.drain(..) {
+            let _ = q.reply.send(Err(QueryError::Closed));
+        }
+    }
+}
+
 struct Ctx {
     cfg: SessionConfig,
     shared: Arc<Shared>,
-    cmd_rx: mpsc::Receiver<NewSub>,
+    cmd_rx: mpsc::Receiver<Request>,
     state_tx: watch::Sender<ConnState>,
+    channels_tx: watch::Sender<Option<Vec<ChannelInfo>>>,
     subs: Subs,
+    queries: Queries,
     limiter: LogLimiter,
 }
 
 impl Ctx {
+    fn request(&mut self, r: Request) {
+        match r {
+            Request::Subscribe(n) => self.subs.add(n),
+            Request::Query(q) => self.queries.add(q),
+        }
+    }
+
+    /// The connection is gone (failed or closed).
+    fn connection_lost(&mut self) {
+        self.subs.connection_lost();
+        self.queries.connection_lost();
+    }
+
     /// Ends the session for good: refuses new subscriptions, and closes every
     /// queue (including requests still waiting in the command channel) so
     /// subscribers see the end instead of waiting forever.
     fn finish(&mut self) {
         self.cmd_rx.close();
-        while let Ok(n) = self.cmd_rx.try_recv() {
-            self.subs.add(n);
+        while let Ok(r) = self.cmd_rx.try_recv() {
+            self.request(r);
         }
         self.subs.close_all();
+        self.queries.close_all();
     }
 }
 
@@ -347,7 +500,7 @@ async fn supervise<C: Connector>(connector: C, mut ctx: Ctx) {
                 reached_login,
                 reason,
             } => {
-                ctx.subs.connection_lost();
+                ctx.connection_lost();
                 if reached_login && started.elapsed() >= ctx.cfg.backoff.stable_after {
                     attempt = 0;
                 }
@@ -380,7 +533,7 @@ async fn sleep_backoff(ctx: &mut Ctx, delay: Duration) -> bool {
             _ = sleep_until(deadline) => return false,
             _ = ctx.shared.wake.notified() => {}
             cmd = ctx.cmd_rx.recv() => match cmd {
-                Some(n) => ctx.subs.add(n),
+                Some(r) => ctx.request(r),
                 None => return true,
             },
         }
@@ -535,7 +688,7 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
     }
     let _ = timeout(c.write_timeout, c.wr.shutdown()).await;
-    ctx.subs.connection_lost();
+    ctx.connection_lost();
 }
 
 /// Starts previews for new subscriptions and stops those their owners
@@ -564,6 +717,28 @@ async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             sub.msg_id = Some(mid);
             ctx.subs.by_msg.insert(mid, id);
             c.send(&bytes).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Sends info queries that were waiting for login.
+async fn sync_queries<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    ctx: &mut Ctx,
+    c: &mut Conn<R, W>,
+) -> Result<(), Failure> {
+    while let Some(q) = ctx.queries.waiting.pop_front() {
+        if q.reply.is_closed() {
+            continue;
+        }
+        match c.session.query_info(q.cmd, q.channel) {
+            Ok((id, bytes)) => {
+                ctx.queries.in_flight.insert(id, q.reply);
+                c.send(&bytes).await?;
+            }
+            Err(_) => {
+                let _ = q.reply.send(Err(QueryError::NotAllowed));
+            }
         }
     }
     Ok(())
@@ -611,6 +786,28 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
                 sub.queue.push_control(Item::StartRejected { status });
             }
         }
+        Event::Control {
+            command: 145, xml, ..
+        } => match xml::parse_channel_info_list(&xml) {
+            Ok(list) => {
+                ctx.channels_tx.send_replace(Some(list));
+            }
+            Err(e) => {
+                if let Some(n) = demux_log.allow() {
+                    warn!(suppressed = n, error = %e, "unreadable channel list");
+                }
+            }
+        },
+        Event::Control {
+            message_id,
+            status,
+            xml,
+            ..
+        } => {
+            if let Some(tx) = ctx.queries.in_flight.remove(&message_id) {
+                let _ = tx.send(Ok(QueryReply { status, xml }));
+            }
+        }
         _ => {}
     }
 }
@@ -645,6 +842,7 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             return Ok(());
         }
         sync_previews(ctx, c).await?;
+        sync_queries(ctx, c).await?;
         tokio::select! {
             r = c.fill() => {
                 r?;
@@ -661,7 +859,7 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
             _ = ctx.shared.wake.notified() => {}
             cmd = ctx.cmd_rx.recv() => match cmd {
-                Some(n) => ctx.subs.add(n),
+                Some(r) => ctx.request(r),
                 None => return Ok(()),
             },
         }
