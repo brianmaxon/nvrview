@@ -28,6 +28,11 @@ use viewer_core::{
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
 pub const NV_ABI_VERSION: u32 = 3;
 
+/// Bumped for each addition that leaves every existing declaration
+/// unchanged (new functions, events, status codes); resets to 0 with a new
+/// NV_ABI_VERSION. Minor 1: device discovery.
+pub const NV_ABI_MINOR: u32 = 1;
+
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -507,6 +512,14 @@ unsafe fn put<T>(out: *mut T, value: T) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn nv_abi_version() -> u32 {
     NV_ABI_VERSION
+}
+
+/// The core's minor version: additions to this ABI version. An app checks
+/// nv_abi_version() for equality and nv_abi_minor() >= the minor that
+/// introduced a function before calling it.
+#[unsafe(no_mangle)]
+pub extern "C" fn nv_abi_minor() -> u32 {
+    NV_ABI_MINOR
 }
 
 /// Starts the core. `out` receives the handle. `config` is read only during
@@ -1198,6 +1211,60 @@ pub unsafe extern "C" fn nv_layout_delete(core: *mut NvCore, id: *const c_char) 
             return NvStatus::NV_ERR_INVALID_ARGUMENT;
         };
         status(c.delete_layout(id))
+    })
+}
+
+/// Starts a search for devices on the local network (minor 1): a few rounds
+/// of UDP broadcasts, and the WS-Discovery multicast, on each IPv4 interface
+/// that is up (or on the interfaces named in json), then listening until
+/// the time is up. Returns at once. Answers arrive as "discovered" events
+/// and the end as one "discovery_done" event (docs/FFI.md, "Device
+/// discovery"). json may be NULL or empty for the defaults, or:
+/// {"seconds":3,"interfaces":["192.0.2.5"],"onvif":true}
+/// (seconds 0.5 to 30; interfaces are IPv4 addresses of this computer).
+/// NV_ERR_INVALID_ARGUMENT for invalid JSON or values. One search per core:
+/// a start while one runs stops it (its discovery_done has "stopped":true)
+/// and starts the new one. The core never searches on its own.
+///
+/// # Safety
+/// `core` is a live handle; `json` is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_discover_start(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let request = if json.is_null() {
+            None
+        } else {
+            // SAFETY: per the caller.
+            match unsafe { string(json) } {
+                Some(s) => Some(s),
+                None => return NvStatus::NV_ERR_INVALID_ARGUMENT,
+            }
+        };
+        match viewer_core::discover::parse_options(request) {
+            Ok(options) => status(c.discover_start(options).map(|_| ())),
+            Err(e) => error_status(e),
+        }
+    })
+}
+
+/// Stops the running search, if any, and closes its sockets; its
+/// discovery_done event ("stopped":true) is queued before this returns.
+/// NV_OK when nothing is running.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_discover_stop(core: *mut NvCore) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.discover_stop())
     })
 }
 

@@ -53,6 +53,12 @@ internal static partial class NvLayoutCheck
                         problems.Add($"NV_ABI_VERSION: C {f[1]}, C# {NvNative.AbiVersion}");
                     }
                     break;
+                case "abi_minor" when f.Length == 2:
+                    if (uint.Parse(f[1]) != NvNative.AbiMinor)
+                    {
+                        problems.Add($"NV_ABI_MINOR: C {f[1]}, C# {NvNative.AbiMinor}");
+                    }
+                    break;
                 case "size" when f.Length == 3 && f[1] == "enum":
                     foreach (Type e in asm.GetTypes().Where(t => t.IsEnum && t.IsPublic))
                     {

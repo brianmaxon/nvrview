@@ -333,10 +333,18 @@ public static unsafe partial class NvNative
     /// <summary>NV_ABI_VERSION of the header these bindings were written for.</summary>
     public const uint AbiVersion = 3;
 
+    /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
+    public const uint AbiMinor = 1;
+
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial uint nv_abi_version();
+
+    /// <summary>The library's minor version: additions to its ABI version.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial uint nv_abi_minor();
 
     /// <summary>Starts the core.</summary>
     [LibraryImport(Library)]
@@ -459,6 +467,19 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_layout_delete(nint core, string id);
+
+    /// <summary>
+    /// Starts a search for devices on the local network (minor 1). The JSON
+    /// may be null for the defaults.
+    /// </summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_discover_start(nint core, string? json);
+
+    /// <summary>Stops the running search, if any (minor 1).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_discover_stop(nint core);
 
     /// <summary>Grid layout (pure; no core needed).</summary>
     [LibraryImport(Library)]

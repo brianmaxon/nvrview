@@ -812,6 +812,7 @@ dependencies = [
  "bc-protocol",
  "bc-session",
  "crossbeam-queue",
+ "discovery",
  "libc",
  "mock-nvr",
  "serde_json",

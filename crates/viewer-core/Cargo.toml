@@ -11,6 +11,7 @@ rust-version.workspace = true
 audio-pipeline = { path = "../audio-pipeline" }
 bc-protocol = { path = "../bc-protocol" }
 bc-session = { path = "../bc-session" }
+discovery = { path = "../discovery" }
 crossbeam-queue = "0.3.8"
 # Layouts are JSON the app passes in; they are parsed and validated with a
 # real parser (src/store.rs).

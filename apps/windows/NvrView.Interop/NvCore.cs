@@ -19,9 +19,15 @@ public sealed class NvException(NvStatus status, string function)
     public string Function { get; } = function;
 }
 
-/// <summary>The library's ABI version is not the one these bindings were written for.</summary>
-public sealed class NvAbiMismatchException(uint found)
-    : Exception($"nvrview ABI {found}, bindings expect {NvNative.AbiVersion}")
+/// <summary>
+/// The library's ABI version is not the one these bindings were written for,
+/// or its minor version is older than they need.
+/// </summary>
+public sealed class NvAbiMismatchException(uint found, uint foundMinor = uint.MaxValue)
+    : Exception(
+        foundMinor == uint.MaxValue
+            ? $"nvrview ABI {found}, bindings expect {NvNative.AbiVersion}"
+            : $"nvrview ABI {found}.{foundMinor}, bindings expect {NvNative.AbiVersion}.{NvNative.AbiMinor} or newer")
 {
     /// <summary>What <c>nv_abi_version()</c> returned.</summary>
     public uint Found { get; } = found;
@@ -258,6 +264,14 @@ public sealed unsafe class NvCore : IDisposable
             throw new NvAbiMismatchException(abi);
         }
 
+        // Additions keep the version and raise the minor: the bindings call
+        // functions of NvNative.AbiMinor, which an older core does not export.
+        uint minor = NvNative.nv_abi_minor();
+        if (minor < NvNative.AbiMinor)
+        {
+            throw new NvAbiMismatchException(abi, minor);
+        }
+
         var core = new NvCore(callbacks);
         GCHandle context = GCHandle.Alloc(core._dispatcher);
         try
@@ -324,6 +338,9 @@ public sealed unsafe class NvCore : IDisposable
 
     /// <summary>The library's ABI version (no core needed).</summary>
     public static uint AbiVersion() => NvNative.nv_abi_version();
+
+    /// <summary>The library's minor version (no core needed).</summary>
+    public static uint AbiMinor() => NvNative.nv_abi_minor();
 
     /// <summary>Now on the core's clock, nanoseconds.</summary>
     public static ulong ClockNowNs() => NvNative.nv_clock_now_ns();
@@ -518,6 +535,32 @@ public sealed unsafe class NvCore : IDisposable
         using (AcquireLease(out nint core))
         {
             Check(NvNative.nv_layout_delete(core, id), nameof(NvNative.nv_layout_delete));
+        }
+    }
+
+    /// <summary>
+    /// Starts a search for devices on the local network. Answers arrive as
+    /// <c>discovered</c> events and the end as one <c>discovery_done</c>
+    /// (docs/FFI.md, "Device discovery"). A search already running is stopped
+    /// first. <paramref name="json"/> is null for the defaults, or
+    /// <c>{"seconds":3,"interfaces":["192.0.2.5"],"onvif":true}</c>.
+    /// </summary>
+    public void DiscoverStart(string? json = null)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_discover_start(core, json), nameof(NvNative.nv_discover_start));
+        }
+    }
+
+    /// <summary>Stops the running search, if any; its <c>discovery_done</c> (stopped) follows.</summary>
+    public void DiscoverStop()
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_discover_stop(core), nameof(NvNative.nv_discover_stop));
         }
     }
 

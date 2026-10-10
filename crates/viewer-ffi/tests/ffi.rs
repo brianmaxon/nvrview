@@ -128,6 +128,8 @@ fn mock() -> mock_nvr::MockNvr {
 fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
     assert_eq!(NV_ABI_VERSION, 3);
+    assert_eq!(nv_abi_minor(), NV_ABI_MINOR);
+    assert_eq!(NV_ABI_MINOR, 1);
 }
 
 #[test]
@@ -689,4 +691,60 @@ fn talk_back_through_the_c_interface() {
     assert!(!ctx.bad.load(Ordering::SeqCst));
     // SAFETY: live core, freed once.
     unsafe { nv_core_free(core) };
+}
+
+#[test]
+fn discovery_through_the_c_interface() {
+    let ctx = Box::new(Ctx::default());
+    let mut core: *mut NvCore = ptr::null_mut();
+    let json = |s: &str| CString::new(s).unwrap();
+    let done_events = |ctx: &Ctx| -> Vec<String> {
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.contains("\"discovery_done\""))
+            .cloned()
+            .collect()
+    };
+    // SAFETY: valid callbacks, out pointers and strings throughout; the core
+    // is live until freed once at the end.
+    unsafe {
+        assert_eq!(
+            nv_core_new(ptr::null(), callbacks(&ctx), &mut core),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_discover_start(ptr::null_mut(), ptr::null()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_discover_stop(ptr::null_mut()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        for bad in ["{", "[]", "{\"seconds\":0}", "{\"interfaces\":[\"nope\"]}"] {
+            assert_eq!(
+                nv_discover_start(core, json(bad).as_ptr()),
+                NvStatus::NV_ERR_INVALID_ARGUMENT,
+                "{bad}"
+            );
+        }
+        // Nothing running: stopping is fine and sends nothing.
+        assert_eq!(nv_discover_stop(core), NvStatus::NV_OK);
+
+        // A search on loopback only (nothing answers there), stopped at once.
+        let request = json("{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}");
+        assert_eq!(nv_discover_start(core, request.as_ptr()), NvStatus::NV_OK);
+        assert_eq!(nv_discover_stop(core), NvStatus::NV_OK);
+        wait_until("discovery_done", || !done_events(&ctx).is_empty());
+        let done = done_events(&ctx);
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(done[0].contains("\"search\":1") && done[0].contains("\"stopped\":true"));
+
+        // Defaults (NULL json); freeing the core ends it.
+        assert_eq!(nv_discover_start(core, ptr::null()), NvStatus::NV_OK);
+        nv_core_free(core);
+    }
+    assert_eq!(done_events(&ctx).len(), 2);
+    assert!(!ctx.bad.load(Ordering::SeqCst));
 }

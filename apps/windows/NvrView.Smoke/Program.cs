@@ -158,6 +158,16 @@ internal sealed class FakeApp : NvCoreCallbacks
     public volatile bool DeviceClosedSeen;
     public string? TileClosedReason;
     public string? KeyFromEvent;
+    private readonly List<(ulong Search, bool Stopped)> _discoveryDone = [];
+
+    /// <summary>The discovery_done events seen so far (search ID, stopped).</summary>
+    public (ulong Search, bool Stopped)[] DiscoveryDone()
+    {
+        lock (_gate)
+        {
+            return [.. _discoveryDone];
+        }
+    }
     public string? LastAudioStats;
     public long Callbacks;
     public long Actions;
@@ -435,6 +445,12 @@ internal sealed class FakeApp : NvCoreCallbacks
                 {
                     _tierEvents.Add((e.GetProperty("tier").GetString()!, e.GetProperty("state").GetString()!,
                         e.GetProperty("generation").GetUInt32()));
+                }
+                break;
+            case "discovery_done":
+                lock (_gate)
+                {
+                    _discoveryDone.Add((e.GetProperty("search").GetUInt64(), e.GetProperty("stopped").GetBoolean()));
                 }
                 break;
             case "layouts_changed":
@@ -730,6 +746,7 @@ internal sealed class Smoke(Options options)
         SwitchTier(core, tile, NvStreamTier.Sub, "sub", 2);
 
         string key = CheckLayouts(core, device, dataDir);
+        CheckDiscovery(core);
         CheckGrid();
 
         // Close: nothing for the tile after nv_tile_close returns, and one
@@ -869,6 +886,32 @@ internal sealed class Smoke(Options options)
             {
                 Thread.Sleep(1);
             }
+        }
+    }
+
+    // Discovery (minor 1): a bad request is refused, and a search on loopback
+    // only (nothing answers there) starts, stops, and reports its end.
+    private void CheckDiscovery(NvCore core)
+    {
+        if (NvCore.AbiMinor() != NvNative.AbiMinor)
+        {
+            Problem($"nv_abi_minor {NvCore.AbiMinor()}, bindings {NvNative.AbiMinor}");
+        }
+        try
+        {
+            core.DiscoverStart("{\"seconds\":0}");
+            Problem("nv_discover_start accepted seconds 0");
+        }
+        catch (NvException e) when (e.Status == NvStatus.InvalidArgument)
+        {
+        }
+        core.DiscoverStop();
+        core.DiscoverStart("{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}");
+        core.DiscoverStop();
+        if (!WaitUntil(() => _app.DiscoveryDone().Length == 1, 5_000) ||
+            _app.DiscoveryDone()[0] is not { Search: 1, Stopped: true })
+        {
+            Problem($"discovery_done after nv_discover_stop: {string.Join(",", _app.DiscoveryDone())}");
         }
     }
 

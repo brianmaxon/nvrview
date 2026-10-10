@@ -1,9 +1,10 @@
 /*
- * Prints what the C compiler makes of nvrview.h: NV_ABI_VERSION, the size of
- * every struct, the offset of every field, and every enum constant. The C#
- * smoke test (NvLayoutCheck) compares its declarations with this output, so
- * the bindings cannot drift from the header unnoticed. Build it with the
- * compiler and target the app uses (MSVC or clang on Windows x64).
+ * Prints what the C compiler makes of nvrview.h: NV_ABI_VERSION and
+ * NV_ABI_MINOR, the size of every struct, the offset of every field, and
+ * every enum constant. The C# smoke test (NvLayoutCheck) compares its
+ * declarations with this output, so the bindings cannot drift from the
+ * header unnoticed. Build it with the compiler and target the app uses
+ * (MSVC or clang on Windows x64).
  *
  * usage: nvlayout > layout.txt
  */
@@ -18,6 +19,7 @@
 
 int main(void) {
     printf("abi %d\n", NV_ABI_VERSION);
+    printf("abi_minor %d\n", NV_ABI_MINOR);
 
     SIZE(NvConfig);
     OFF(NvConfig, log_dir);

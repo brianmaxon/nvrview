@@ -469,58 +469,88 @@ the machine (and later the web viewer) shares them.
   returns `NV_ERR_BUFFER_TOO_SMALL` and the app calls again with a buffer of
   `*len + 1` bytes.
 
-## Device discovery (proposal)
+## Device discovery
 
-Not in the header yet. A proposal for the minor-version addition that
-[FFI-RECORDINGS.md](FFI-RECORDINGS.md) "Decisions" introduces (`nv_abi_minor`;
-every existing declaration unchanged). The core side exists as the
-`discovery` crate (native search and probe, docs/protocol.md "LAN
-discovery"; ONVIF WS-Discovery), and `bc-cli discover` runs it from a
-terminal.
+Minor 1 of ABI 3: an addition that leaves every existing declaration
+unchanged (see "Versioning"). The core side is the `discovery` crate
+(native search and probe, docs/protocol.md "LAN discovery"; ONVIF
+WS-Discovery) wrapped in `viewer-core`'s `discover` module, and
+`bc-cli discover` runs the same crate from a terminal.
 
 ```c
 /* Starts a search for devices on the local network: a few rounds of UDP
  * broadcasts (and the WS-Discovery multicast) on each IPv4 interface that is
  * up, or on the interfaces named in json, then listening until the time is
  * up. Answers arrive as `discovered` events, then one `discovery_done`.
- * json (may be NULL for defaults):
+ * json (may be NULL or empty for defaults):
  *   {"seconds":3, "interfaces":["192.0.2.5"], "onvif":true}
- * Returns at once; NV_ERR_INVALID_ARGUMENT for invalid JSON or values. A
- * second start while a search runs restarts it (one search per core). */
+ * Returns at once; NV_ERR_INVALID_ARGUMENT for invalid JSON or values.
+ * One search per core: a start while a search runs stops it (its
+ * `discovery_done` has "stopped":true) and starts the new one. */
 NvStatus nv_discover_start(NvCore *core, const char *json);
 
-/* Stops the running search, if any, and closes its sockets; a
- * `discovery_done` event with "stopped":true follows. */
+/* Stops the running search, if any, and closes its sockets; its
+ * `discovery_done` ("stopped":true) is queued before this returns. NV_OK
+ * when nothing is running. */
 NvStatus nv_discover_stop(NvCore *core);
+
+/* The minor version (see "Versioning"); NV_ABI_MINOR in the header. */
+uint32_t nv_abi_minor(void);
 ```
+
+- **Request.** Every member is optional and unknown members are ignored.
+  `seconds` is 0.5 to 30 (default 3), `interfaces` lists IPv4 addresses of
+  this computer (at most 32; default: every IPv4 interface that is up,
+  loopback and point-to-point excluded), `onvif` turns the WS-Discovery
+  probe off (default true). Anything of the wrong type or range is
+  `NV_ERR_INVALID_ARGUMENT` and starts nothing.
+- **Calls.** Like the other calls, both are refused from inside a callback
+  (`NV_ERR_INVALID_ARGUMENT`) and after `nv_core_free` began
+  (`NV_ERR_CLOSED`). `nv_core_free` ends a running search the same way
+  `nv_discover_stop` does, so its `discovery_done` is delivered first.
 
 Events (same rules as every event: ignore unknown types and fields):
 
 ```json
-{"type":"discovered","search":1,"key":"d1","kind":"nvr","name":"NVR 1","address":"192.0.2.10","channels":16,"services":[{"kind":"native","port":9000}]}
+{"type":"discovered","search":1,"key":"d1","kind":"nvr","name":"NVR 1","address":"192.0.2.10","port":9000,"channels":16,"services":[{"kind":"native","port":9000}]}
 {"type":"discovered","search":1,"key":"d2","kind":"camera","name":"Camera 1","model":"EXAMPLE-CAM","address":"192.0.2.20","services":[{"kind":"onvif","port":8000,"url":"http://192.0.2.20:8000/onvif/device_service"}]}
 {"type":"discovered","search":1,"key":"d3","kind":"unknown","address":"192.0.2.30","battery_percent":80,"services":[{"kind":"native"}]}
 {"type":"discovery_done","search":1,"count":3,"stopped":false,"errors":["en1: native search on 192.0.2.5:3000: address in use"]}
 ```
 
 - **Protocol-neutral fields.** `kind` is `nvr`, `camera` or `unknown`;
+  `name`, `model`, `channels` and `battery_percent` appear when an answer
+  carried them (the native search carries a name and a channel count, not a
+  model; ONVIF carries a model). `address` is the IPv4 address that
+  answered. `port` is the TCP port of the native protocol when the answer
+  said (the search does; the battery-camera probe does not): the app fills
+  it into its add form, with 9000 as the usual default when it is absent.
   `services` lists how to connect, each with `kind` (`native` for the
   port-9000 protocol, `onvif`, more later), `port` and `url` when known.
   Absent fields are unknown. The app picks a backend from `services` and
   passes `address` and `port` to `nv_device_add`; nothing in the event is
   specific to one wire protocol beyond the service names.
+- **Already added.** The core does not say whether a found device is one the
+  app already has. The app compares `address` (and `port`) with the
+  devices it added; a `"known"` field matched by the core against device
+  keys remains future work.
 - **Updates.** A device that answers again with more (another backend, a
   battery reading) is sent again with the same `key` and the merged fields;
-  the app replaces its row. `key` is opaque and lives only for one search.
+  the app replaces its row. `key` is opaque and lives only for one search
+  (`search` is the ID `nv_discover_start` started; events of a search that
+  was stopped or restarted never follow its `discovery_done`).
 - **IDs stay in the core.** Device UIDs and ONVIF endpoint IDs are used to
-  merge answers and to tell the app, later, that a found device is one it
-  already added (a planned `"known":true` field matched against device keys),
-  but never appear in events, logs, or the UI. MAC addresses are also left
-  out of events; addresses are logged at debug level only (see "Logging").
+  merge answers (a device that answers at two addresses is one row) but never
+  appear in events, logs, or the UI. MAC addresses are also left out of
+  events; addresses are logged at debug level only (see "Logging"). The
+  `errors` of `discovery_done` are the runner's per-interface messages
+  (interface names and addresses, such as a port already in use): show them
+  at most in a details view, never log them above debug level.
 - **Only on request.** The core never searches on its own: the app calls
   `nv_discover_start` when the user opens its "find devices" screen and
   `nv_discover_stop` when it closes. Nothing leaves the local network:
-  broadcasts and the WS-Discovery multicast go out with a TTL of 1.
+  broadcasts go to each interface's subnet broadcast address and the
+  WS-Discovery multicast goes out with a TTL of 1.
 - **Bounded.** One search per core; at most 1024 devices per search;
   `seconds` from 0.5 to 30 (default 3); answers that are malformed or answer
   someone else's probe are counted and dropped.
@@ -529,7 +559,7 @@ Events (same rules as every event: ignore unknown types and fields):
   desktop client holding it on the wildcard address (observed on macOS);
   when it cannot, `discovery_done` lists the error and the other backends
   still run.
-- **macOS local network privacy (most likely; not confirmed).** A newly built command-line binary's
+- **macOS local network privacy.** A newly built command-line binary's
   broadcasts and the answers to them were silently dropped on macOS 26
   (sends reported success, nothing arrived), while an already approved
   interpreter making the same calls worked. The app bundle needs an
@@ -559,6 +589,18 @@ added audio: `on_audio_tap` at the end of `NvCallbacks`, `NvAudioBlock`,
 `nv_talk_stop`, `NV_ERR_NOT_PERMITTED`, and the `talk` event; added
 before ABI 3 was released, see "Talk-back"). Apps check
 `nv_abi_version()` at startup and refuse to run on a mismatch.
+
+`nv_abi_minor()` (`NV_ABI_MINOR`) counts additions that leave every existing
+declaration unchanged, as [FFI-RECORDINGS.md](FFI-RECORDINGS.md) "Decisions"
+(item 1) introduced it: the major number changes only for incompatible
+changes. It is 0 for everything above and resets to 0 with a new major
+number. An app needs the core's minor to be at least the minor that
+introduced a function before calling it (an older core would not export the
+symbol at all, so a bound app checks first):
+
+| minor | added |
+| --- | --- |
+| 1 | `nv_abi_minor`, device discovery (`nv_discover_start`, `nv_discover_stop`, the `discovered` and `discovery_done` events) |
 
 ## Builds
 
