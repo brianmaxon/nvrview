@@ -250,6 +250,35 @@ public final class CoreBridge: Sendable {
         try live().tileAudioTap(tile.id, enabled: enabled)
     }
 
+    // MARK: Talk-back (camera motion control)
+
+    /// `nv_talk_set_permission` for one channel of a device (this run).
+    public func setTalkPermission(device: UInt64, channel: UInt8, allowed: Bool) throws(CoreStatus) {
+        try live().talkSetPermission(device: device, channel: channel, allowed: allowed)
+    }
+
+    /// `nv_talk_start` for the tile's camera; progress comes as `talk` events.
+    public func startTalk(_ tile: CoreTile) throws(CoreStatus) { try live().talkStart(tile.id) }
+
+    /// `nv_talk_push`: mono samples at `sampleRate`. Any thread but a
+    /// real-time audio callback.
+    public func pushTalk(_ tile: CoreTile, samples: [Float], sampleRate: UInt32) throws(CoreStatus) {
+        let c = try live()
+        let id = tile.id
+        let result: Result<Void, CoreStatus> = samples.withUnsafeBufferPointer { buf in
+            do throws(CoreStatus) {
+                try c.talkPush(id, samples: buf, sampleRate: sampleRate)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        if case .failure(let status) = result { throw status }
+    }
+
+    /// `nv_talk_stop`: at once, or once what was pushed has been sent.
+    public func stopTalk(_ tile: CoreTile, drain: Bool) throws(CoreStatus) { try live().talkStop(tile.id, drain: drain) }
+
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 

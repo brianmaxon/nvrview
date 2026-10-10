@@ -191,6 +191,28 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    public func talkSetPermission(device: UInt64, channel: UInt8, allowed: Bool) throws(CoreStatus) {
+        let status = CoreStatus(nv_talk_set_permission(try core(), device, channel, allowed))
+        if !status.isOK { throw status }
+    }
+
+    public func talkStart(_ tile: UInt64) throws(CoreStatus) {
+        let status = CoreStatus(nv_talk_start(try core(), tile))
+        if !status.isOK { throw status }
+    }
+
+    public func talkPush(_ tile: UInt64, samples: UnsafeBufferPointer<Float>, sampleRate: UInt32) throws(CoreStatus) {
+        let c = try core()
+        guard let base = samples.baseAddress, !samples.isEmpty else { return }
+        let status = CoreStatus(nv_talk_push(c, tile, base, samples.count, sampleRate))
+        if !status.isOK { throw status }
+    }
+
+    public func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus) {
+        let status = CoreStatus(nv_talk_stop(try core(), tile, drain))
+        if !status.isOK { throw status }
+    }
+
     /// `nv_audio_render` with the core handle as its context. Players stop
     /// rendering before `free` (CoreBridge.shutdown sees to it).
     public var audioRenderHook: AudioRenderHook {

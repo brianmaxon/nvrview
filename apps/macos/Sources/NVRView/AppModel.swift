@@ -611,7 +611,7 @@ final class AppModel {
             }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
-        case .tileTier, .audioStats, .tileStats:
+        case .tileTier, .audioStats, .tileStats, .talk:
             break
         }
         notify()
