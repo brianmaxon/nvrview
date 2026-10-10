@@ -42,11 +42,16 @@ public struct FakeDeviceSpec: Sendable {
     /// `channels` event); the others report only motion.
     public var detectingChannels: Set<Int>
     public var detects: [String]
+    /// Channels whose camera has two lenses (`lenses` 2 in `channels`); the
+    /// second lens is served on the same channel's `extern` and `mobile`.
+    public var multiLensChannels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
-        detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"]
+        detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
+        multiLensChannels: Set<Int> = []
     ) {
+        self.multiLensChannels = multiLensChannels
         self.name = name
         self.model = model
         self.channelCount = channelCount
@@ -246,7 +251,10 @@ public final class FakeCore: CoreAPI {
                 #"{"type":"device_info","device":\#(id),"name":"\#(spec.name)","model":"\#(spec.model)","key":"\#(Self.key(host: host, port: port))"}"#)
             let channels = (0..<spec.channelCount).map { c in
                 let detects = spec.detectingChannels.contains(c) ? spec.detects.map { "\"\($0)\"" }.joined(separator: ",") : ""
-                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]}"#
+                // Like the devices observed: a multi-lens camera advertises
+                // only main and sub, and says how many lenses it has.
+                let lenses = spec.multiLensChannels.contains(c) ? #","lenses":2"# : ""
+                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
         }

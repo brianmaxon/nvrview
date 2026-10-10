@@ -18,8 +18,9 @@ import VideoKit
 /// 5. leaving focus asks for the sub-stream again;
 /// 6. with `--fake`, the fake core saw no contract violation;
 /// 7. the sidebar took rows added and removed in several places in one
-///    update (a group and a layout at once), and AppKit logged none of the warnings
-///    in `forbiddenLog` during the whole run.
+///    update (a group and a layout at once);
+/// 8. with `--fake`, a second lens plays as its own tile on its grid tier;
+/// 9. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
@@ -170,7 +171,27 @@ final class SelfTest {
         after(0.5) { [self] in
             model.deleteGroup(group)
             if let layout { model.deleteLayout(layout) }
-            after(0.5) { [self] in checkLog() }
+            after(0.5) { [self] in lensStep() }
+        }
+    }
+
+    /// With `--fake` (one made-up channel has two lenses): the second lens
+    /// streams as its own tile on the grid's lens-2 tier.
+    private func lensStep() {
+        guard let model = app.model else { finish(problems) }
+        guard let lens = model.allCameras.first(where: { $0.lens == 1 }) else {
+            problems.append("no second lens among the cameras")
+            return checkLog()
+        }
+        model.leases.acquire(lens)
+        after(2) { [self] in
+            let tile = model.leases.tile(for: lens)
+            print("\(model.name(of: lens)): showing \(tile?.tierState.shown.name ?? "nothing"), picture \(tile?.latestPicture() != nil)")
+            if tile?.tierState.shown != .mobile || tile?.latestPicture() == nil {
+                problems.append("the second lens is not playing on its grid tier")
+            }
+            model.leases.release(lens)
+            checkLog()
         }
     }
 

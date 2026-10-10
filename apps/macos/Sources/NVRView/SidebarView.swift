@@ -11,6 +11,8 @@ struct SidebarView: View {
     weak var window: ViewerWindowController?
     let state: SidebarState
     @State private var collapsedGroups: Set<String> = []
+    /// Multi-lens cameras shown with their lenses (collapsed by default).
+    @State private var expandedChannels: Set<CameraRef> = []
 
     /// A row of the Devices or Groups section.
     enum Item: Hashable, Identifiable {
@@ -18,12 +20,18 @@ struct SidebarView: View {
         case group(String)
         /// A camera under its device or group (the owner's key or id).
         case camera(String, CameraRef)
+        /// One lens under a multi-lens camera of a device.
+        case lens(CameraRef)
         var id: Self { self }
     }
 
     private var deviceItems: [Item] {
         model.devices.flatMap { d in
-            [Item.device(d.key)] + d.channels.map { Item.camera(d.key, CameraRef(device: d.key, channel: $0.channel)) }
+            [Item.device(d.key)] + d.channels.flatMap { c -> [Item] in
+                let camera = CameraRef(device: d.key, channel: c.channel)
+                guard c.isMultiLens, expandedChannels.contains(camera) else { return [.camera(d.key, camera)] }
+                return [.camera(d.key, camera)] + model.cameras(device: d.key, channel: c).map { Item.lens($0) }
+            }
         }
     }
 
@@ -63,7 +71,7 @@ struct SidebarView: View {
                                 .contextMenu {
                                     Button("Remove from Group") { model.removeCamera(camera, fromGroup: id) }
                                 }
-                        case .device:
+                        case .device, .lens:
                             EmptyView()
                         }
                     }
@@ -79,7 +87,13 @@ struct SidebarView: View {
                         case .device(let key):
                             if let device = model.runtime(key) { deviceRow(device) }
                         case .camera(_, let camera):
-                            cameraRow(camera, indent: true)
+                            if model.isMultiLens(camera) {
+                                multiLensRow(camera)
+                            } else {
+                                cameraRow(camera, indent: true)
+                            }
+                        case .lens(let camera):
+                            cameraRow(camera, indent: true, title: AppModel.lensName(camera.lens), depth: 2)
                         case .group:
                             EmptyView()
                         }
@@ -184,19 +198,44 @@ struct SidebarView: View {
             Button("New Group from This Device") {
                 model.createGroup(
                     name: device.config.name,
-                    cameras: device.channels.map { CameraRef(device: device.key, channel: $0.channel) })
+                    cameras: device.channels.flatMap { model.cameras(device: device.key, channel: $0) })
             }
             Button("Show All Cameras in New Window") {
                 model.openWindow(
                     .scratch(
                         name: device.config.name,
-                        root: LayoutNode.balanced(device.channels.map { CameraRef(device: device.key, channel: $0.channel) })))
+                        root: LayoutNode.balanced(
+                            Array(device.channels.flatMap { model.cameras(device: device.key, channel: $0) }
+                                .prefix(LayoutNode.maxLeaves)))))
             }
         }
     }
 
-    private func cameraRow(_ camera: CameraRef, indent: Bool) -> some View {
-        let detections = model.detections.active(for: camera)
+    /// A multi-lens camera, collapsed: a disclosure chevron, then the
+    /// camera's row, which acts as its first lens.
+    private func multiLensRow(_ camera: CameraRef) -> some View {
+        let expanded = expandedChannels.contains(camera)
+        return HStack(spacing: 0) {
+            Button {
+                if expanded { expandedChannels.remove(camera) } else { expandedChannels.insert(camera) }
+            } label: {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.caption2).frame(width: 12)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.leading, 4)
+            .accessibilityLabel(expanded ? "Hide Lenses" : "Show Lenses")
+            cameraRow(
+                camera, indent: false, title: model.channelName(camera),
+                detectionsOf: [camera, CameraRef(device: camera.device, channel: camera.channel, lens: 1)])
+        }
+    }
+
+    private func cameraRow(
+        _ camera: CameraRef, indent: Bool, title: String? = nil, depth: Int = 1, detectionsOf: [CameraRef]? = nil
+    ) -> some View {
+        let detections = (detectionsOf ?? [camera]).flatMap { model.detections.active(for: $0) }
         let offline = model.channelInfo(camera)?.connected == false
         return Button {
             window?.cameraPicked(camera)
@@ -205,7 +244,7 @@ struct SidebarView: View {
                 Circle()
                     .fill(offline ? Color.orange : (detections.isEmpty ? Color.green : Color(StageView.color(for: detections[0].kind))))
                     .frame(width: 7, height: 7)
-                Text(model.name(of: camera)).lineLimit(1)
+                Text(title ?? model.name(of: camera)).lineLimit(1)
                 if model.audible.contains(camera) {
                     Image(systemName: "speaker.wave.2.fill").font(.caption2).foregroundStyle(.secondary)
                         .accessibilityLabel("Listening")
@@ -218,7 +257,7 @@ struct SidebarView: View {
                         .help("Detection by the camera's AI")
                 }
             }
-            .padding(.leading, indent ? 12 : 0)
+            .padding(.leading, indent ? 12 * CGFloat(depth) : 0)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

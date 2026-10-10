@@ -66,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             var o = FakeCore.Options(clips: clips)
             o.pacing = .realtime(fps: 20)
             o.devices = [
-                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6),
+                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6, multiLensChannels: [5]),
                 "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
             ]
             o.detectionDemo = 12

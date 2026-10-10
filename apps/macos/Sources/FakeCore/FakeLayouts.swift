@@ -10,7 +10,8 @@ import Synchronization
 /// - the object has a non-empty string `id` and a string `name` (each at
 ///   most 256 bytes) and a `root` node; the whole layout at most 64 KiB;
 /// - a node is either a leaf `{"camera": null}` or
-///   `{"camera": {"device": "<key, 1...256 bytes>", "channel": 0...255}}`,
+///   `{"camera": {"device": "<key, 1...256 bytes>", "channel": 0...255}}`
+///   with an optional integer `"lens": 0...1` (absent means 0, the first lens),
 ///   or a split `{"split": "row"|"col", "ratio": 0.02...0.98, "a": node,
 ///   "b": node}`;
 /// - at most `maxSplitDepth` splits deep and `maxLeaves` tiles.
@@ -130,8 +131,16 @@ final class FakeLayouts: Sendable {
         if n["camera"] is NSNull { return }
         guard let camera = n["camera"] as? [String: Any], let device = camera["device"] as? String,
             !device.isEmpty, device.utf8.count <= 256, let channel = camera["channel"] as? NSNumber,
-            CFGetTypeID(channel) == CFNumberGetTypeID(), CFNumberIsFloatType(channel) == false, (0...255).contains(channel.intValue)
+            Self.isInteger(channel), (0...255).contains(channel.intValue)
         else { throw .invalidArgument }
+        if let lens = camera["lens"] {
+            guard let n = lens as? NSNumber, Self.isInteger(n), (0...1).contains(n.intValue) else { throw .invalidArgument }
+        }
+    }
+
+    /// A JSON integer (not a boolean, not a number with a fraction).
+    private static func isInteger(_ n: NSNumber) -> Bool {
+        CFGetTypeID(n) == CFNumberGetTypeID() && !CFNumberIsFloatType(n)
     }
 
     private static func canonical(_ layout: [String: Any]) -> String? {

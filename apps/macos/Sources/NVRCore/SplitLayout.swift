@@ -8,17 +8,49 @@ import Foundation
 // tests check invariants without a window.
 
 /// A camera as a layout names it: the core's stable device key (not the
-/// per-run device ID) and a channel.
+/// per-run device ID), a channel, and the lens (0 for the first; 1 for the
+/// second lens of a multi-lens camera, which the device serves on the same
+/// channel). Stored with `lens` only when it is not 0, so single-lens
+/// cameras read and write as before.
 public struct CameraRef: Hashable, Sendable, Codable, CustomStringConvertible {
     public var device: String
     public var channel: Int
+    public var lens: Int
 
-    public init(device: String, channel: Int) {
+    public static let maxLens = 1
+
+    public init(device: String, channel: Int, lens: Int = 0) {
         self.device = device
         self.channel = channel
+        self.lens = lens
     }
 
-    public var description: String { "\(device)/\(channel)" }
+    /// The same camera under another device key.
+    public func rekeyed(to device: String) -> CameraRef { CameraRef(device: device, channel: channel, lens: lens) }
+
+    /// The first lens of the same channel.
+    public var firstLens: CameraRef { CameraRef(device: device, channel: channel) }
+
+    public var description: String { lens == 0 ? "\(device)/\(channel)" : "\(device)/\(channel)/lens\(lens)" }
+
+    private enum CodingKeys: String, CodingKey { case device, channel, lens }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        device = try c.decode(String.self, forKey: .device)
+        channel = try c.decode(Int.self, forKey: .channel)
+        lens = try c.decodeIfPresent(Int.self, forKey: .lens) ?? 0
+        guard (0...Self.maxLens).contains(lens) else {
+            throw DecodingError.dataCorruptedError(forKey: .lens, in: c, debugDescription: "lens out of range")
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(device, forKey: .device)
+        try c.encode(channel, forKey: .channel)
+        if lens != 0 { try c.encode(lens, forKey: .lens) }
+    }
 }
 
 /// How a split divides its rectangle.
@@ -210,7 +242,7 @@ public indirect enum LayoutNode: Sendable, Equatable {
     public func rekeying(device old: String, to new: String) -> LayoutNode {
         switch self {
         case .leaf(let c, let extras):
-            c?.device == old ? .leaf(CameraRef(device: new, channel: c!.channel), extras: extras) : self
+            c?.device == old ? .leaf(c!.rekeyed(to: new), extras: extras) : self
         case .split(let axis, let ratio, let a, let b, let extras):
             .split(
                 axis, ratio: ratio, a: a.rekeying(device: old, to: new), b: b.rekeying(device: old, to: new),
@@ -284,7 +316,7 @@ public indirect enum LayoutNode: Sendable, Equatable {
 extension LayoutNode: Codable {
     private static let splitKeys: Set<String> = ["split", "ratio", "a", "b"]
     private static let leafKeys: Set<String> = ["camera"]
-    private static let cameraKeys: Set<String> = ["device", "channel"]
+    private static let cameraKeys: Set<String> = ["device", "channel", "lens"]
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: AnyKey.self)
@@ -310,9 +342,7 @@ extension LayoutNode: Codable {
             return
         }
         let cam = try c.nestedContainer(keyedBy: AnyKey.self, forKey: cameraKey)
-        let ref = CameraRef(
-            device: try cam.decode(String.self, forKey: AnyKey("device")),
-            channel: try cam.decode(Int.self, forKey: AnyKey("channel")))
+        let ref = try c.decode(CameraRef.self, forKey: cameraKey)
         self = .leaf(ref, extras: NodeExtras(node: node, camera: try cam.unknownMembers(except: Self.cameraKeys)))
     }
 
@@ -326,6 +356,7 @@ extension LayoutNode: Codable {
                 try cam.encodeUnknown(extras.camera, except: Self.cameraKeys)
                 try cam.encode(camera.device, forKey: AnyKey("device"))
                 try cam.encode(camera.channel, forKey: AnyKey("channel"))
+                if camera.lens != 0 { try cam.encode(camera.lens, forKey: AnyKey("lens")) }
             } else {
                 try c.encodeNil(forKey: AnyKey("camera"))
             }

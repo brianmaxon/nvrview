@@ -169,9 +169,11 @@ final class StageView: NSView {
                 dropTarget: dropTarget == leaf.path)
         }
         let active = model.detections.active(for: camera)
+        let multiLens = model.isMultiLens(camera)
         let badges = active.map { a in
             TileChromeContent.Badge(
-                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : ""),
+                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : "")
+                    + (multiLens ? " · " + AppModel.lensName(camera.lens) : ""),
                 color: Self.color(for: a.kind))
         }
         var detail: [String] = [model.deviceName(camera.device)]
@@ -484,14 +486,21 @@ final class StageView: NSView {
 
     static let cameraPrefix = "nvrview-camera:"
 
-    static func dragString(_ camera: CameraRef) -> String { "\(cameraPrefix)\(camera.channel)@\(camera.device)" }
+    /// "nvrview-camera:CHANNEL[.LENS]@DEVICE".
+    static func dragString(_ camera: CameraRef) -> String {
+        "\(cameraPrefix)\(camera.channel)\(camera.lens == 0 ? "" : ".\(camera.lens)")@\(camera.device)"
+    }
 
     static func camera(fromDrag s: String) -> CameraRef? {
         guard s.hasPrefix(cameraPrefix) else { return nil }
         let rest = s.dropFirst(cameraPrefix.count)
-        guard let at = rest.firstIndex(of: "@"), let channel = Int(rest[..<at]) else { return nil }
+        guard let at = rest.firstIndex(of: "@") else { return nil }
+        let numbers = rest[..<at].split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...2).contains(numbers.count), let channel = Int(numbers[0]) else { return nil }
+        let lens = numbers.count == 2 ? Int(numbers[1]) : 0
+        guard let lens, (0...CameraRef.maxLens).contains(lens) else { return nil }
         let device = String(rest[rest.index(after: at)...])
-        return device.isEmpty ? nil : CameraRef(device: device, channel: channel)
+        return device.isEmpty ? nil : CameraRef(device: device, channel: channel, lens: lens)
     }
 
     fileprivate func dragUpdated(at p: CGPoint, camera: CameraRef?) -> NSDragOperation {
@@ -559,8 +568,7 @@ final class StageView: NSView {
         for d in model.devices {
             guard !d.channels.isEmpty else { continue }
             cameras.addItem(NSMenuItem.sectionHeader(title: d.config.name))
-            for c in d.channels {
-                let camera = CameraRef(device: d.key, channel: c.channel)
+            for camera in d.channels.flatMap({ model.cameras(device: d.key, channel: $0) }) {
                 let i = ClosureMenuItem(title: model.name(of: camera)) { [weak self] in self?.assign(camera, at: leaf.path) }
                 i.state = leaf.camera == camera ? .on : .off
                 cameras.addItem(i)

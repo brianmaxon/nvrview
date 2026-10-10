@@ -172,3 +172,11 @@ public enum FrameRateText {
         return parts.joined(separator: " · ")
     }
 }
+
+extension DetectionEvent {
+    /// The camera (lens included) whose tiles show this detection: `lens` 1
+    /// is the second lens of a multi-lens camera; absent means the first.
+    public func camera(deviceKey: String) -> CameraRef {
+        CameraRef(device: deviceKey, channel: channel, lens: min(max(lens ?? 0, 0), CameraRef.maxLens))
+    }
+}
