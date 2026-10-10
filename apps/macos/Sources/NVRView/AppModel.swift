@@ -65,6 +65,11 @@ final class AppModel {
     private(set) var layouts: [SavedLayout] = []
     private(set) var groups: [CameraGroup] = []
     private(set) var detections = DetectionTracker()
+    /// What the sidebar rows show for the detections (held briefly after a
+    /// stop, like the tiles' corner indicators).
+    private(set) var indicators = IndicatorBoard()
+    /// Raised alerts (docs/UX.md "Alerts"), shared by every window.
+    private(set) var alerts = AlertCenter()
     private(set) var audible: Set<CameraRef> = []
     /// False when the core has no layouts store (an ABI 2 core): layouts
     /// then last only for this session.
@@ -89,6 +94,14 @@ final class AppModel {
         }
     }
     static let showFrameRatesKey = "showFrameRates"
+    /// The tile corner that holds the detection indicators (View menu;
+    /// remembered, top right by default).
+    var indicatorCorner = ChromeCorner.load() {
+        didSet {
+            indicatorCorner.save()
+            notify()
+        }
+    }
     /// The sidebar lists only channels that are connected (View menu;
     /// remembered). On by default: an NVR advertises every slot it has, and
     /// most of a large unit's can be empty. Unset in the defaults means on.
@@ -291,6 +304,7 @@ final class AppModel {
         devices[i].deviceID = nil
         devices[i].link = DeviceLink()
         detections.clear(device: key)
+        refreshIndicators()
     }
 
     /// Saves a new or edited device and (re)connects it. `password` nil
@@ -552,13 +566,19 @@ final class AppModel {
             case .connected: break
             case .closed:
                 detections.clear(device: key)
+                alerts.deviceLost(key)
+                refreshIndicators()
             case .loginFailed:
                 // Terminal: the core does not retry. The tiles end; new
                 // credentials in Settings add the device again.
                 detections.clear(device: key)
+                alerts.deviceLost(key)
+                refreshIndicators()
                 leases.closeTiles(device: key)
             default:
                 detections.clear(device: key)
+                alerts.deviceLost(key)
+                refreshIndicators()
             }
         case .deviceInfo(let id, let name, let model):
             guard let key = key(forDevice: id), let i = index(key) else { return }
@@ -580,6 +600,8 @@ final class AppModel {
         case .detection(let d):
             guard let key = key(forDevice: d.device) else { return }
             detections.apply(d, camera: d.camera(deviceKey: key))
+            refreshIndicators()
+            raiseAlerts(d, deviceKey: key)
         case .layoutsChanged:
             reloadLayouts()
         case .timing(let what, let tile, let ns, let detail):
@@ -614,6 +636,33 @@ final class AppModel {
         // A stop lost to a reconnect must not leave a badge up for good.
         detections.expire(now: HostClock.nowNanos(), maxAgeNanos: 120_000_000_000)
         if detections != before { notify() }
+        refreshIndicators()
+    }
+
+    private func raiseAlerts(_ d: DetectionEvent, deviceKey: String) {
+        // The start arrives seconds after the sound began: date it by when
+        // the first matched beep arrived, on the core's clock.
+        var at = Date()
+        if let ns = d.atNanos { at = at.addingTimeInterval(-Double(HostClock.nowNanos() &- ns) / 1e9) }
+        let before = alerts.log.count
+        guard alerts.apply(d, deviceKey: deviceKey, at: at) else { return }
+        for entry in alerts.log.dropFirst(before) { NSLog("%@", entry.text) }
+        notify()
+    }
+
+    /// The user dismissed a camera's alert: gone everywhere.
+    func dismissAlert(_ camera: CameraRef) {
+        let before = alerts.log.count
+        guard alerts.dismiss(camera, at: Date()) != nil else { return }
+        for entry in alerts.log.dropFirst(before) { NSLog("%@", entry.text) }
+        notify()
+    }
+
+    /// Re-reads the detections for the sidebar's symbols (on events and the
+    /// one-second tick: no per-frame work).
+    private func refreshIndicators() {
+        var board = indicators
+        if board.update(detections, now: ProcessInfo.processInfo.systemUptime) { indicators = board }
     }
 }
 

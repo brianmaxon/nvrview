@@ -17,26 +17,45 @@ public struct DetectionTracker: Sendable, Equatable {
     }
 
     private var active: [CameraRef: [Active]] = [:]
+    /// Sound detections belong to a channel's microphone, not to a lens, so
+    /// they are kept per channel (keyed by its first lens) and shown for
+    /// every lens of the channel.
+    private var sound: [CameraRef: [Active]] = [:]
+    var activeKeys: [CameraRef] { Array(active.keys) }
+    var soundKeys: [CameraRef] { Array(sound.keys) }
 
     public init() {}
 
     /// Folds in one event for the camera it names.
     public mutating func apply(_ event: DetectionEvent, camera: CameraRef) {
-        var list = active[camera] ?? []
+        let isSound = event.source == .localAudio
+        let key = isSound ? Self.channelKey(camera) : camera
+        var list = (isSound ? sound[key] : active[key]) ?? []
         list.removeAll { $0.kind == event.kind && $0.source == event.source }
         if event.active {
             list.append(Active(kind: event.kind, source: event.source, sinceNanos: event.atNanos ?? 0))
         }
         list.sort { Self.order($0.kind) < Self.order($1.kind) }
-        active[camera] = list.isEmpty ? nil : list
+        if isSound { sound[key] = list.isEmpty ? nil : list } else { active[key] = list.isEmpty ? nil : list }
+    }
+
+    private static func channelKey(_ camera: CameraRef) -> CameraRef {
+        CameraRef(device: camera.device, channel: camera.channel, lens: 0)
     }
 
     /// Forgets a device's detections (it disconnected: its stops may never come).
     public mutating func clear(device: String) {
         active = active.filter { $0.key.device != device }
+        sound = sound.filter { $0.key.device != device }
     }
 
-    public func active(for camera: CameraRef) -> [Active] { active[camera] ?? [] }
+    /// What is active for one camera (one lens): its own detections, then
+    /// the channel's sound detections, which every lens shows.
+    public func active(for camera: CameraRef) -> [Active] {
+        let own = active[camera] ?? []
+        let heard = sound[Self.channelKey(camera)] ?? []
+        return (own + heard).sorted { Self.order($0.kind) < Self.order($1.kind) }
+    }
 
     /// Drops detections older than `maxAgeNanos` (a lost stop must not leave
     /// a badge up forever).
@@ -44,6 +63,10 @@ public struct DetectionTracker: Sendable, Equatable {
         for (camera, list) in active {
             let kept = list.filter { $0.sinceNanos == 0 || now &- $0.sinceNanos < maxAgeNanos }
             active[camera] = kept.isEmpty ? nil : kept
+        }
+        for (camera, list) in sound {
+            let kept = list.filter { $0.sinceNanos == 0 || now &- $0.sinceNanos < maxAgeNanos }
+            sound[camera] = kept.isEmpty ? nil : kept
         }
     }
 
@@ -55,6 +78,7 @@ public struct DetectionTracker: Sendable, Equatable {
         case "dog_cat": 2
         case "face": 3
         case "package": 4
+        case "smoke_alarm", "co_alarm": 6
         case DetectionEvent.motionKind: 9
         default: 5
         }
@@ -69,9 +93,25 @@ public struct DetectionTracker: Sendable, Equatable {
         case "face": "Face"
         case "package": "Package"
         case DetectionEvent.motionKind: "Motion"
+        case "smoke_alarm": "Smoke alarm"
+        case "co_alarm": "CO alarm"
         default:
             kind.replacingOccurrences(of: "_", with: " ").capitalized
         }
+    }
+
+    /// The text of a tile badge: the label, then where it came from when that
+    /// is not the camera's own AI ("Mac" for this computer's vision, "sound"
+    /// for the audio listener), then the lens of a multi-lens camera.
+    public static func badgeText(_ a: Active, lensName: String? = nil) -> String {
+        var text = label(a.kind)
+        switch a.source {
+        case .local: text += " · Mac"
+        case .localAudio: text += " · sound"
+        default: break
+        }
+        if let lensName, a.source != .localAudio { text += " · " + lensName }
+        return text
     }
 
     /// Where it was detected, in words.
@@ -79,6 +119,7 @@ public struct DetectionTracker: Sendable, Equatable {
         switch source {
         case .device: "camera AI"
         case .local: "this Mac"
+        case .localAudio: "sound"
         case .other(let s): s
         }
     }

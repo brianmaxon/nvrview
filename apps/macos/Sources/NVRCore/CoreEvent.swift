@@ -303,16 +303,19 @@ public enum TierSwitchState: Sendable, Equatable {
     }
 }
 
-/// Who detected something: the camera's own AI, or a model on this Mac.
+/// Who detected something: the camera's own AI, a model on this Mac, or the
+/// sound listener (`local_audio`: patterns heard in a tile's audio).
 public enum DetectionSource: Sendable, Equatable, Hashable {
     case device
     case local
+    case localAudio
     case other(String)
 
     public init(_ s: String) {
         switch s {
         case "device": self = .device
-        case "local": self = .local
+        case "local", "local_video": self = .local
+        case "local_audio": self = .localAudio
         default: self = .other(s)
         }
     }

@@ -136,6 +136,8 @@ final class StageView: NSView {
         addSubview(grid)
         addSubview(overlay)
         overlay.registerForDraggedTypes([.string])
+        alertActive = { [weak model] in model?.alerts.isActive($0) == true }
+        dismissAlert = { [weak model] in model?.dismissAlert($0) }
         grid.prepare = { [weak self] renderer, size in
             MainActor.assumeIsolated { self?.prepare(renderer: renderer, drawable: size) }
         }
@@ -174,6 +176,11 @@ final class StageView: NSView {
         for leaf in frames.leaves where chromes[leaf.path] == nil {
             let view = TileChromeView(clock: clock)
             let path = leaf.path
+            view.onDismissAlert = { [weak self] in
+                guard let self, let camera = self.frames.leaves.first(where: { $0.path == path })?.camera else { return }
+                self.dismissAlert(camera)
+                self.refreshChrome()
+            }
             view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
             view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
@@ -244,6 +251,10 @@ final class StageView: NSView {
         }
     }
 
+    private func alertLines(for camera: CameraRef) -> [String]? {
+        model.alerts.alert(for: camera)?.lines(now: Date())
+    }
+
     private func content(for leaf: LeafFrame) -> TileChromeContent {
         let selected = state.selected == leaf.path && (state.editing || state.focused == nil)
         guard let camera = leaf.camera else {
@@ -252,13 +263,6 @@ final class StageView: NSView {
                 dropTarget: dropTarget == leaf.path)
         }
         let active = model.detections.active(for: camera)
-        let multiLens = model.isMultiLens(camera)
-        let badges = active.map { a in
-            TileChromeContent.Badge(
-                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : "")
-                    + (multiLens ? " · " + AppModel.lensName(camera.lens) : ""),
-                color: Self.color(for: a.kind))
-        }
         var detail: [String] = [model.deviceName(camera.device)]
         if let tile = model.leases.tile(for: camera) {
             let t = tile.tierState
@@ -274,7 +278,9 @@ final class StageView: NSView {
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
             title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
-            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil, badges: badges,
+            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil,
+            indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
+            alertLines: alertLines(for: camera),
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }
@@ -304,6 +310,8 @@ final class StageView: NSView {
         case "vehicle": NSColor(calibratedRed: 0.9, green: 0.54, blue: 0.18, alpha: 1)
         case "dog_cat": NSColor(calibratedRed: 0.13, green: 0.65, blue: 0.56, alpha: 1)
         case "package": NSColor(calibratedRed: 0.62, green: 0.42, blue: 0.85, alpha: 1)
+        // Sound: a calm slate, apart from the object colors.
+        case "smoke_alarm", "co_alarm": NSColor(calibratedRed: 0.4, green: 0.47, blue: 0.58, alpha: 1)
         default: NSColor(calibratedWhite: 0.45, alpha: 0.9)
         }
     }

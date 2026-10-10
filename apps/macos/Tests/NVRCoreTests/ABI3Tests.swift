@@ -38,6 +38,14 @@ import VideoKit
             parse(#"{"type":"detection","device":2,"channel":0,"kind":"package","state":"start","source":"local"}"#)
                 == .detection(DetectionEvent(device: 2, channel: 0, kind: "package", active: true, source: .local)))
         #expect(
+            parse(#"{"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"local_audio","at_ns":457}"#)
+                == .detection(
+                    DetectionEvent(device: 1, channel: 2, kind: "smoke_alarm", active: true, source: .localAudio, atNanos: 457)))
+        #expect(
+            parse(#"{"type":"detection","device":1,"channel":2,"kind":"co_alarm","state":"stop","source":"local_audio","at_ns":9}"#)
+                == .detection(
+                    DetectionEvent(device: 1, channel: 2, kind: "co_alarm", active: false, source: .localAudio, atNanos: 9)))
+        #expect(
             parse(#"{"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}"#)
                 == .detection(DetectionEvent(device: 1, channel: 5, kind: "motion", active: true, source: .device, atNanos: 789)))
         #expect(parse(#"{"type":"detection","device":1,"kind":"people","state":"start"}"#) == nil)
@@ -650,6 +658,20 @@ import VideoKit
         #expect(detections.map(\.kind) == ["vehicle", "vehicle", "motion"])
         #expect(detections.map(\.active) == [true, false, true])
         #expect(detections.allSatisfy { $0.source == .device && $0.atNanos != nil && $0.device == rig.device })
+    }
+
+    @Test func soundDetectionsArriveWithoutALens() throws {
+        let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
+        defer { rig.bridge.shutdown() }
+        rig.fake.emitSoundDetection(device: rig.device, channel: 2, kind: "co_alarm", start: true)
+        rig.fake.emitSoundDetection(device: rig.device, channel: 2, kind: "co_alarm", start: false)
+        let detections = rig.events.get().compactMap { e -> DetectionEvent? in
+            if case .detection(let d) = e { return d }
+            return nil
+        }
+        #expect(detections.map(\.kind) == ["co_alarm", "co_alarm"])
+        #expect(detections.map(\.active) == [true, false])
+        #expect(detections.allSatisfy { $0.source == .localAudio && $0.lens == nil && $0.atNanos != nil })
     }
 
     @Test func channelsCarryCapabilities() throws {
