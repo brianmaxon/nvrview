@@ -28,6 +28,7 @@ typedef enum NvStatus {
     NV_ERR_LIMIT = -4,            /* too many devices, tiles, layouts, or queued requests */
     NV_ERR_INTERNAL = -5,
     NV_ERR_BUFFER_TOO_SMALL = -6, /* the output buffer is too small; *len holds the size needed */
+    NV_ERR_NOT_PERMITTED = -7,    /* talk-back (camera motion control) is not enabled for that camera */
 } NvStatus;
 
 typedef enum NvCodec {
@@ -274,6 +275,28 @@ NvStatus nv_tile_audio_tap(NvCore *core, uint64_t tile, bool enabled);
  * not known. Lock-free and allocation-free; callable from any thread,
  * including callbacks, at display rate. */
 NvStatus nv_tile_audio_level(NvCore *core, uint64_t tile, float *peak, float *rms);
+
+/* Talk-back (docs/FFI.md, "Talk-back"): sound through a camera's or
+ * doorbell's speaker. Camera motion control: off for every camera until
+ * nv_talk_set_permission enables it, rate-limited, logged, and closed on
+ * every exit path. Progress arrives as `talk` events. */
+
+/* Enables or disables talk-back on one channel of a device, for this run.
+ * Disabling stops a running talk on it. */
+NvStatus nv_talk_set_permission(NvCore *core, uint64_t device, uint8_t channel, bool allowed);
+
+/* Starts talk-back to a tile's camera; returns at once. NV_ERR_NOT_PERMITTED
+ * (and a `talk` `refused` event) unless the camera was enabled. */
+NvStatus nv_talk_start(NvCore *core, uint64_t tile);
+
+/* Queues `count` mono float samples (-1..1) at sample_rate Hz (8000 to
+ * 192000) for a tile's talk; resampled to 16 kHz, encoded, and sent in real
+ * time. Ignored for a tile without a talk. Not from a real-time thread. */
+NvStatus nv_talk_push(NvCore *core, uint64_t tile, const float *samples, size_t count,
+                      uint32_t sample_rate);
+
+/* Ends a tile's talk at once, or (drain) after the audio already pushed. */
+NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
 
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back
  * UTF-8 and NUL-terminated in `out`; *len receives the length without the

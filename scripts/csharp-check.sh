@@ -7,20 +7,24 @@
 # Two containers, one after the other:
 #   1. the Rust image builds libnvrview.so, mock-nvr, and the C layout helper
 #      (apps/windows/layout/nvlayout.c) in the build volume shared with
-#      scripts/linux-check.sh (nvrview-linux-target, nvrview-linux-cargo);
+#      scripts/linux-check.sh (nvrview-linux-target-<checkout>, nvrview-linux-cargo);
 #   2. the .NET SDK image builds apps/windows (sources mounted read-only;
-#      output in the nvrview-csharp-build volume, packages in
+#      output in the nvrview-csharp-build-<checkout> volume, packages in
 #      nvrview-csharp-nuget) and runs the smoke test.
 # scripts/clean-docker.sh removes the volumes (--image also the images).
 set -eu
 cd "$(git rev-parse --show-toplevel)"
+# One build volume per checkout (worktrees mount different trees at the same
+# /src path, and Cargo would take another tree's newer artifacts as fresh);
+# the cargo registry is content-addressed and shared.
+checkout=$(printf '%s' "$PWD" | shasum | cut -c1-8)
 
 rust_image="${NVRVIEW_LINUX_IMAGE:-rust:1-bookworm}"
 dotnet_image="${NVRVIEW_DOTNET_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0.301-noble}"
 
 docker run --rm \
   -v "$PWD":/src \
-  -v nvrview-linux-target:/src/target \
+  -v "nvrview-linux-target-$checkout:/src/target" \
   -v nvrview-linux-cargo:/usr/local/cargo/registry \
   -w /src \
   -e CARGO_TERM_COLOR=never \
@@ -34,8 +38,8 @@ docker run --rm \
 
 docker run --rm \
   -v "$PWD":/src:ro \
-  -v nvrview-linux-target:/src/target:ro \
-  -v nvrview-csharp-build:/build \
+  -v "nvrview-linux-target-$checkout:/src/target:ro" \
+  -v "nvrview-csharp-build-$checkout:/build" \
   -v nvrview-csharp-nuget:/root/.nuget/packages \
   -w /src/apps/windows \
   -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \

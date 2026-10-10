@@ -17,6 +17,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
     \x20               [--multi-lens CH:BITS,BITS] [--extern CH:MODE,CH:MODE]\n\
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
+    \x20               [--talk CH,CH]\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
     --extern sets how channel CH lists and answers externStream/mobileStream: listed\n\
     (default), hidden (not listed, served: a second lens), info-only (not listed, one\n\
@@ -24,6 +25,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     --third-party makes channels behave like third-party cameras behind an NVR: every\n\
     preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
     later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
+    --talk gives channels a speaker (doorbell talk-back: ipcAudioTalk, ability, talk).\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -44,6 +46,7 @@ fn run() -> Result<(), String> {
     let mut detections: Option<f64> = None;
     let mut third_party: Vec<u8> = Vec::new();
     let (mut third_party_refusals, mut third_party_delay_ms) = (2u32, 200u64);
+    let mut talk: Vec<u8> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -117,6 +120,12 @@ fn run() -> Result<(), String> {
             }
             "--third-party-delay-ms" => {
                 third_party_delay_ms = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
+            "--talk" => {
+                talk = v
+                    .split(',')
+                    .map(|c| c.parse().map_err(|_| format!("bad value for {a}: {v}")))
+                    .collect::<Result<_, _>>()?
             }
             "--detections" => {
                 detections = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
@@ -201,6 +210,10 @@ fn run() -> Result<(), String> {
         tp.media_delay = std::time::Duration::from_millis(third_party_delay_ms);
         cfg.third_party = Some(tp);
     }
+    if let Some(ch) = talk.iter().find(|c| **c >= channels) {
+        return Err(format!("--talk channel {ch} is not below --channels"));
+    }
+    cfg.talk_channels = talk;
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;
     }

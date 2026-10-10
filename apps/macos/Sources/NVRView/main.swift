@@ -284,18 +284,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
         ])
+        /// Kept working from the keyboard but not listed (the single key
+        /// beside it is the one shown).
+        func hidden(_ i: NSMenuItem) -> NSMenuItem {
+            i.isHidden = true
+            i.allowsKeyEquivalentWhenHidden = true
+            return i
+        }
+        // The single-key shortcuts (docs/UX.md "Keyboard") are listed with
+        // their keys. A viewer window takes those keys before the menus do
+        // (ViewerWindow), and not while text is being edited, so the
+        // equivalents here are for showing the keys. The arrows have none:
+        // an arrow key equivalent swallows the key even when its item is
+        // disabled, which would take the arrows from lists.
+        let select = NSMenuItem(title: "Select Tile", action: nil, keyEquivalent: "")
+        select.submenu = {
+            let m = NSMenu(title: "Select Tile")
+            m.addItem(item("Left  (Left Arrow)", #selector(ViewerWindowController.selectLeft(_:)), "", []))
+            m.addItem(item("Right  (Right Arrow)", #selector(ViewerWindowController.selectRight(_:)), "", []))
+            m.addItem(item("Up  (Up Arrow)", #selector(ViewerWindowController.selectUp(_:)), "", []))
+            m.addItem(item("Down  (Down Arrow)", #selector(ViewerWindowController.selectDown(_:)), "", []))
+            return m
+        }()
         submenu("Layout", [
             item("Edit Layout", #selector(ViewerWindowController.toggleEditing(_:)), "e"),
             item("Split Side by Side", #selector(ViewerWindowController.splitSideBySide(_:)), "d"),
             item("Split Stacked", #selector(ViewerWindowController.splitStacked(_:)), "d", [.command, .shift]),
             item("Remove Tile", #selector(ViewerWindowController.removeTile(_:))),
             .separator(),
-            item("Focus Tile", #selector(ViewerWindowController.toggleFocus(_:)), "f"),
+            item("Focus Tile", #selector(ViewerWindowController.toggleFocus(_:)), " ", []),
+            hidden(item("Focus Tile", #selector(ViewerWindowController.toggleFocus(_:)), "f")),
+            select,
             item("Fill Tiles", #selector(ViewerWindowController.toggleFill(_:))),
         ])
         submenu("View", [
-            item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]),
-            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+            item("Hide Sidebar", #selector(ViewerWindowController.sidebarKey(_:)), "s", []),
+            hidden(item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control])),
+            item("Enter Full Screen", #selector(ViewerWindowController.fullScreenKey(_:)), "f", []),
+            hidden(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])),
+            item("Reset Zoom", #selector(ViewerWindowController.resetZoomKey(_:)), "0", []),
             .separator(),
             item("Show Frame Rates", #selector(toggleFrameRates(_:))),
             item("Hide Offline Channels", #selector(toggleHideOffline(_:))),
@@ -303,7 +330,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.
-            item("Listen", #selector(ViewerWindowController.toggleListening(_:)), "l"),
+            item("Listen or Mute", #selector(ViewerWindowController.listenKey(_:)), "m", []),
+            hidden(item("Listen", #selector(ViewerWindowController.toggleListening(_:)), "l")),
             item("Stop Listening", #selector(ViewerWindowController.stopListening(_:)), "l", [.command, .shift]),
         ])
         let window = NSMenu(title: "Window")

@@ -17,3 +17,4 @@ workspace = true
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
+bc-protocol = { path = "../bc-protocol" }

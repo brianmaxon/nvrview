@@ -35,6 +35,8 @@ usage:
          80|146|199|318 [--channel N]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] lenses
          [--channel N] [--seconds S]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] talk
+         --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli analyze FILE.nvrrec
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
@@ -58,6 +60,13 @@ lenses runs the viewer's second-lens probe (docs/protocol.md, \"Second
 lenses\") on each connected channel whose list does not name externStream,
 or on --channel N whatever it lists: one externStream preview, up to
 --seconds (default 2) for the first picture, then a stop; one at a time.
+talk sends sound to a camera's or doorbell's speaker (talk-back, camera
+motion control, docs/protocol.md \"Talk-back (motion)\"): only with
+--allow-talk, which enables it for --channel for this run. The sound is
+--pcm (raw 16 kHz mono signed 16-bit little-endian, as from
+`ffmpeg -i IN -ar 16000 -ac 1 -f s16le OUT`) or a quiet tone (--tone, default
+440 Hz) for --seconds (default 2), pushed in real time like a microphone.
+The talk is closed at the end, on Ctrl-C, and on every error.
 analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
@@ -86,6 +95,12 @@ enum Action {
     Lenses {
         channel: Option<u8>,
         window: Duration,
+    },
+    Talk {
+        channel: u8,
+        pcm: Option<PathBuf>,
+        tone: f64,
+        seconds: u64,
     },
 }
 
@@ -132,6 +147,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let (mut restart, mut restart_gap) = (None, Duration::from_secs(2));
     let mut file = None;
     let mut number = None;
+    let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -168,8 +184,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             "--frames" => {
                 frames = Some(value("--frames")?.parse().map_err(|_| "bad --frames")?);
             }
+            "--allow-talk" => allow_talk = true,
+            "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
+            "--tone" => {
+                tone = value("--tone")?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|f| (50.0..=4000.0).contains(f))
+                    .ok_or("bad --tone (50 to 4000 Hz)")?;
+            }
             "-h" | "--help" => return Err(String::new()),
-            "channels" | "record" | "capture" | "analyze" | "query" | "lenses"
+            "channels" | "record" | "capture" | "analyze" | "query" | "lenses" | "talk"
                 if command.is_none() =>
             {
                 command = Some(a);
@@ -231,6 +256,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
         }
         Some("analyze") => return Ok(Parsed::Analyze(file.ok_or("analyze needs a file")?)),
+        Some("talk") => {
+            if !allow_talk {
+                return Err("talk sends sound to a camera's speaker; pass --allow-talk".into());
+            }
+            Action::Talk {
+                channel: channel.ok_or("talk needs --channel")?,
+                pcm,
+                tone,
+                seconds: seconds.unwrap_or(2),
+            }
+        }
         Some("lenses") => Action::Lenses {
             channel,
             window: seconds.map_or(Duration::from_secs(2), Duration::from_secs),
@@ -495,6 +531,78 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             if let Some(e) = expected.filter(|e| !ext.eq_ignore_ascii_case(e)) {
                 eprintln!("note: the stream is {codec}; players may need a .{e} extension");
             }
+            Ok(())
+        }
+        Action::Talk {
+            channel,
+            pcm,
+            tone,
+            seconds,
+        } => {
+            let samples: Vec<i16> = match pcm {
+                Some(p) => {
+                    let bytes = std::fs::read(p)?;
+                    bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|b| i16::from_le_bytes(*b))
+                        .collect()
+                }
+                // About -20 dBFS: audible without being loud.
+                None => (0..seconds as usize * 16_000)
+                    .map(|i| {
+                        let t = i as f64 / 16_000.0;
+                        (3000.0 * (2.0 * std::f64::consts::PI * tone * t).sin()) as i16
+                    })
+                    .collect(),
+            };
+            tokio::select! {
+                r = wait_logged_in(session, LOGIN_LIMIT) => r?,
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            }
+            session.set_motion_allowed(channel, true);
+            let started = std::time::Instant::now();
+            let mut talk = tokio::select! {
+                r = session.talk(channel) => r.map_err(CliError::TalkRefused)?,
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            };
+            eprintln!(
+                "talk-back active on channel {channel} after {} ms; sending {:.2} s",
+                started.elapsed().as_millis(),
+                samples.len() as f64 / 16_000.0
+            );
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            let mut interrupted = false;
+            for chunk in samples.chunks(320) {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        interrupted = true;
+                        break;
+                    }
+                }
+                talk.push(chunk);
+                if !matches!(talk.state(), bc_session::TalkState::Active) {
+                    break;
+                }
+            }
+            if interrupted {
+                talk.stop();
+            } else {
+                talk.finish();
+            }
+            let end = tokio::time::timeout(Duration::from_secs(15), talk.ended()).await;
+            let st = talk.stats();
+            eprintln!(
+                "talk-back ended: {:?}; records sent {}, acknowledged {}, samples dropped {}, \
+                 clock restarts {}",
+                end.unwrap_or(talk.state()),
+                st.records_sent,
+                st.records_acked,
+                st.samples_dropped,
+                st.clock_restarts
+            );
             Ok(())
         }
         Action::Query { cmd, channel } => {

@@ -4,6 +4,7 @@ use crate::Shared;
 use crate::archive::{TransferItem, TransferKind, TransferSink};
 use crate::config::{Jitter, SessionConfig};
 use crate::queue::{FrameQueue, Item, Subscription};
+use crate::talk::{TalkControl, TalkLimits, TalkReq, Talks};
 use crate::transport::Connector;
 use bc_protocol::archive;
 use bc_protocol::detection::{self, AlarmState};
@@ -168,6 +169,7 @@ pub(crate) enum Request {
     Subscribe(NewSub),
     Query(QueryReq),
     Transfer(TransferReq),
+    Talk(TalkReq),
 }
 
 pub(crate) struct NewSub {
@@ -192,6 +194,10 @@ pub struct DeviceSession {
     pub(crate) download_permits: Arc<Semaphore>,
     pub(crate) download_stall_timeout: Duration,
     pub(crate) download_buffer_bytes: usize,
+    /// Talk-back permissions and rate limit.
+    pub(crate) talk_control: Arc<TalkControl>,
+    pub(crate) talk_starts_per_minute: u32,
+    pub(crate) talk_buffer: usize,
     join: Option<JoinHandle<()>>,
 }
 
@@ -214,6 +220,18 @@ impl DeviceSession {
         let download_permits = Arc::new(Semaphore::new(config.max_downloads.max(1)));
         let download_stall_timeout = config.download_stall_timeout;
         let download_buffer_bytes = config.download_buffer_bytes;
+        let talk_control = Arc::new(TalkControl::new());
+        let talk_starts_per_minute = config.talk_starts_per_minute;
+        let talk_buffer = config.talk_buffer;
+        let talks = Talks::new(
+            talk_control.clone(),
+            TalkLimits {
+                idle_timeout: config.talk_idle_timeout,
+                max_duration: config.talk_max_duration,
+                catch_up: config.talk_catch_up,
+                reply_timeout: config.query_timeout,
+            },
+        );
         let ctx = Ctx {
             cfg: config,
             shared: shared.clone(),
@@ -225,6 +243,7 @@ impl DeviceSession {
             subs: Subs::default(),
             queries: Queries::default(),
             transfers: Transfers::default(),
+            talks,
             conn_gen: 0,
             limiter: LogLimiter::new(Duration::from_secs(5)),
             wait_log: LogLimiter::new(Duration::from_secs(5)),
@@ -243,6 +262,9 @@ impl DeviceSession {
             download_permits,
             download_stall_timeout,
             download_buffer_bytes,
+            talk_control,
+            talk_starts_per_minute,
+            talk_buffer,
             join: Some(join),
         }
     }
@@ -646,6 +668,7 @@ struct Ctx {
     subs: Subs,
     queries: Queries,
     transfers: Transfers,
+    talks: Talks,
     /// Incremented on every successful login.
     conn_gen: u64,
     limiter: LogLimiter,
@@ -659,6 +682,7 @@ impl Ctx {
             Request::Subscribe(n) => self.subs.add(n),
             Request::Query(q) => self.queries.add(q),
             Request::Transfer(t) => self.transfers.add(t),
+            Request::Talk(t) => self.talks.add(t),
         }
     }
 
@@ -667,6 +691,7 @@ impl Ctx {
         self.subs.connection_lost();
         self.queries.connection_lost();
         self.transfers.connection_lost();
+        self.talks.connection_lost();
     }
 
     /// Ends the session for good: refuses new subscriptions, and closes every
@@ -680,6 +705,7 @@ impl Ctx {
         self.subs.close_all();
         self.queries.close_all();
         self.transfers.close_all();
+        self.talks.finish();
     }
 }
 
@@ -952,6 +978,12 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
 ) {
+    // Close every talk first (11): a speaker must not stay open.
+    for bytes in ctx.talks.close_all(&mut c.session) {
+        if c.send(&bytes).await.is_err() {
+            break;
+        }
+    }
     // Stop running downloads first (144), so the device stops sending.
     let downloads: Vec<u32> = c.session.active_downloads().collect();
     for id in downloads {
@@ -1178,6 +1210,17 @@ async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Opens, feeds, and closes talks (see [`Talks::poll`]).
+async fn sync_talks<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    ctx: &mut Ctx,
+    c: &mut Conn<R, W>,
+) -> Result<(), Failure> {
+    for bytes in ctx.talks.poll(&mut c.session) {
+        c.send(&bytes).await?;
+    }
+    Ok(())
+}
+
 /// Hands a download's or cover's media to its sink.
 fn transfer_media(t: &mut ActiveTransfer, data: &[u8], demux_log: &mut LogLimiter) {
     if t.abort {
@@ -1349,6 +1392,12 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             }
         },
         Event::Control {
+            command: command @ (201 | 202 | 11),
+            message_id,
+            status,
+            ..
+        } => ctx.talks.on_reply(command, message_id, status),
+        Event::Control {
             command: 145, xml, ..
         } => match xml::parse_channel_info_list(&xml) {
             Ok(list) => {
@@ -1417,9 +1466,13 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         sync_previews(ctx, c).await?;
         sync_queries(ctx, c).await?;
         sync_transfers(ctx, c).await?;
+        sync_talks(ctx, c).await?;
         let probe_due = last_rx.max(last_probe) + probe_after;
         let dead_due = last_rx + dead_after;
-        let wait_due = ctx.subs.wait_due();
+        let wait_due = match (ctx.subs.wait_due(), ctx.talks.next_due()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         tokio::select! {
             r = c.fill() => {
                 r?;

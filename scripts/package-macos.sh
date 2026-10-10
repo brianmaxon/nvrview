@@ -1,11 +1,12 @@
 #!/bin/sh
 # Builds build/NVRView.app (git-ignored): a release build of the macOS app
-# laid out as an app bundle, signed ad hoc with the hardened runtime.
+# laid out as an app bundle, signed with the hardened runtime (an Apple
+# Development identity when one is available, else ad hoc; see below).
 #
 #   scripts/package-macos.sh              real Rust core (builds the XCFramework)
 #   scripts/package-macos.sh --fake-only  without the core (only `--fake` works)
 #
-# Ad hoc signing is for local use. Distributing the app needs a Developer ID
+# This signing is for local use. Distributing the app needs a Developer ID
 # signature and notarization, which this script does not do.
 set -eu
 cd "$(git rev-parse --show-toplevel)"

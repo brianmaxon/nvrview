@@ -24,7 +24,9 @@ const MAX_TEXT: usize = 256;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeTiming {
     /// How long to wait for the first picture. A second lens's
-    /// `externStream` was observed to start within about 0.2 s.
+    /// `externStream` was observed to start within about 0.2 s, and once
+    /// took 1.18 s (docs/protocol.md, "Second lenses"); the default leaves
+    /// room above that.
     pub(crate) window: Duration,
     /// Pause before each probe, so tiles opened when the channel list
     /// arrives go first.
@@ -39,7 +41,7 @@ pub(crate) struct ProbeTiming {
 impl Default for ProbeTiming {
     fn default() -> ProbeTiming {
         ProbeTiming {
-            window: Duration::from_secs(2),
+            window: Duration::from_secs(3),
             delay: Duration::from_millis(500),
             quiet: Duration::from_secs(3),
             max_defer: Duration::from_secs(15),

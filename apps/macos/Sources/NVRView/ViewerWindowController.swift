@@ -40,6 +40,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     private let editItem = NSToolbarItem.Identifier("edit")
     private let fullScreenItem = NSToolbarItem.Identifier("fullscreen")
     private weak var editButton: NSButton?
+    private let split = NSSplitViewController()
+    private var sidebarItem: NSSplitViewItem!
+    private var sidebarHost: NSView?
+    /// Whether the sidebar was open when the window entered full screen.
+    private var sidebarBeforeFullScreen: Bool?
 
     init(model: AppModel, content: WindowContent, renderer: GridRenderer) {
         self.model = model
@@ -47,7 +52,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         stage = StageView(model: model, state: state, renderer: renderer)
         editBar = EditBar()
 
-        let window = NSWindow(
+        let window = ViewerWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
@@ -55,12 +60,15 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         window.titlebarSeparatorStyle = .automatic
         window.tabbingMode = .disallowed
+        window.acceptsMouseMovedEvents = true
         super.init(window: window)
         window.delegate = self
+        window.onEvent = { [weak self] event in self?.windowEvent(event) ?? false }
 
-        let split = NSSplitViewController()
         let sidebarHost = NSHostingController(rootView: SidebarView(model: model, window: self, state: sidebar))
+        self.sidebarHost = sidebarHost.view
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarHost)
+        self.sidebarItem = sidebarItem
         sidebarItem.minimumThickness = 200
         sidebarItem.maximumThickness = 320
         sidebarItem.canCollapse = true
@@ -80,8 +88,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         editBar.controller = self
         token = model.subscribe { [weak self] in self?.modelChanged() }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            // Countdowns and statuses that change without an event.
-            MainActor.assumeIsolated { self?.stage.refreshChrome() }
+            // Countdowns and statuses that change without an event, and the
+            // chrome's idle check (it hides about 3 s after the last input).
+            MainActor.assumeIsolated {
+                self?.stage.refreshChrome()
+                self?.stage.tickChrome()
+            }
         }
         show(content)
     }
@@ -93,7 +105,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     /// Shows a layout, group or scratch arrangement in this window.
     func show(_ content: WindowContent) {
-        if stage.isFocused { stage.tearDown() }
+        stage.cancelFocus()
         state.content = content
         state.selected = nil
         switch content {
@@ -151,8 +163,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .layout(let id):
             if let l = model.layout(id) {
                 // Another window (or app) changed it: follow, unless this
-                // window is the one that just stored the same tree.
-                if l.root != state.tree || l.name != state.name {
+                // window is the one that just stored the same tree, or a
+                // drag here is still changing it (the model notifies on
+                // every statistics event; following the stored tree then
+                // snapped a divider back mid-drag). The drag stores its
+                // result when it ends.
+                if !stage.isInteracting, l.root != state.tree || l.name != state.name {
                     state.tree = l.root
                     state.name = l.name
                     stage.reload()
@@ -249,6 +265,70 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     @objc func removeTile(_ sender: Any?) { stage.removeSelected() }
     @objc func toggleFocus(_ sender: Any?) { stage.toggleFocus() }
 
+    // MARK: Keyboard (docs/UX.md "Keyboard")
+
+    /// Every event of this window passes here first. Interactions keep the
+    /// chrome up; single-key shortcuts are taken before the focused view or
+    /// the menus see them, except while text is being edited (and the
+    /// sidebar keeps its own arrows, Space and Return). Returns true when
+    /// the event was used up.
+    private func windowEvent(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown, .leftMouseDragged, .scrollWheel,
+            .magnify, .keyDown:
+            stage.noteInteraction()
+        default:
+            break
+        }
+        guard event.type == .keyDown, let shortcut = shortcut(for: event) else { return false }
+        perform(shortcut)
+        return true
+    }
+
+    /// Where the keyboard focus is, for the shortcuts.
+    var keyContext: KeyContext {
+        guard let responder = window?.firstResponder else { return .stage }
+        // The field editor of a text field, or any text view.
+        if responder is NSText { return .textEditing }
+        if let view = responder as? NSView, let sidebarHost, view.isDescendant(of: sidebarHost) { return .sidebar }
+        return .stage
+    }
+
+    func shortcut(for event: NSEvent) -> ViewerShortcut? {
+        var modifiers: KeyModifiers = []
+        let flags = event.modifierFlags
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.command) { modifiers.insert(.command) }
+        return ViewerKeys.shortcut(
+            keyCode: event.keyCode, characters: event.charactersIgnoringModifiers, modifiers: modifiers,
+            isRepeat: event.isARepeat, context: keyContext)
+    }
+
+    func perform(_ shortcut: ViewerShortcut) {
+        switch shortcut {
+        case .toggleFullScreen: window?.toggleFullScreen(nil)
+        case .toggleSidebar: split.toggleSidebar(nil)
+        case .move(let direction): stage.moveSelection(direction)
+        case .toggleFocus: stage.toggleFocus()
+        case .resetZoom: stage.resetSelectedZoom()
+        case .toggleListening: toggleListening(nil)
+        case .confirm: stage.confirm()
+        }
+    }
+
+    // Menu items listing the single keys (main.swift). Pressed keys never
+    // reach these: the window takes them first (see `windowEvent`).
+    @objc func fullScreenKey(_ sender: Any?) { perform(.toggleFullScreen) }
+    @objc func sidebarKey(_ sender: Any?) { perform(.toggleSidebar) }
+    @objc func resetZoomKey(_ sender: Any?) { perform(.resetZoom) }
+    @objc func listenKey(_ sender: Any?) { perform(.toggleListening) }
+    @objc func selectLeft(_ sender: Any?) { perform(.move(.left)) }
+    @objc func selectRight(_ sender: Any?) { perform(.move(.right)) }
+    @objc func selectUp(_ sender: Any?) { perform(.move(.up)) }
+    @objc func selectDown(_ sender: Any?) { perform(.move(.down)) }
+
     @objc func toggleListening(_ sender: Any?) {
         guard let camera = stage.selectedCamera else { return }
         model.toggleListening(camera, additive: false)
@@ -299,6 +379,13 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        // A single key that reached the menus from another window (Settings,
+        // say) is not for this one.
+        if item.keyEquivalentModifierMask.isDisjoint(with: [.command, .control, .option]), !item.keyEquivalent.isEmpty,
+            NSApp.currentEvent?.type == .keyDown, NSApp.keyWindow !== window
+        {
+            return false
+        }
         switch item.action {
         case #selector(toggleEditing(_:)):
             item.title = state.editing ? "Done Editing" : "Edit Layout"
@@ -319,6 +406,16 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case #selector(toggleFill(_:)):
             item.state = state.fill ? .on : .off
             return true
+        case #selector(fullScreenKey(_:)):
+            item.title = window?.styleMask.contains(.fullScreen) == true ? "Exit Full Screen" : "Enter Full Screen"
+            return true
+        case #selector(sidebarKey(_:)):
+            item.title = sidebarItem.isCollapsed ? "Show Sidebar" : "Hide Sidebar"
+            return true
+        case #selector(resetZoomKey(_:)):
+            return stage.selectedCamera.map { stage.zoom(of: $0).isZoomed } == true
+        case #selector(selectLeft(_:)), #selector(selectRight(_:)), #selector(selectUp(_:)), #selector(selectDown(_:)):
+            return state.tree.leafCount > 1
         default:
             return true
         }
@@ -341,11 +438,36 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     func windowDidMove(_ notification: Notification) { onChange() }
     func windowDidEndLiveResize(_ notification: Notification) { onChange() }
-    func windowWillEnterFullScreen(_ notification: Notification) { windowedFrame = window?.frame }
+    // Full screen (docs/UX.md "Full screen chrome"): the system's own
+    // transition; the sidebar closes on the way in (the stage is resized
+    // by the transition anyway) and reopens on the way out; the toolbar
+    // and menu bar hide and slide back in at the top edge; the stage's
+    // overlays and the pointer hide after a few idle seconds. Nothing
+    // resizes the video while in full screen except the user's own S.
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        windowedFrame = window?.frame
+        sidebarBeforeFullScreen = !sidebarItem.isCollapsed
+        if !sidebarItem.isCollapsed { sidebarItem.isCollapsed = true }
+        stage.fullScreen = true
+    }
+
     func windowDidEnterFullScreen(_ notification: Notification) { onChange() }
+
+    func windowWillExitFullScreen(_ notification: Notification) {
+        stage.fullScreen = false
+        if sidebarBeforeFullScreen == true, sidebarItem.isCollapsed { sidebarItem.isCollapsed = false }
+        sidebarBeforeFullScreen = nil
+    }
+
     func windowDidExitFullScreen(_ notification: Notification) {
         windowedFrame = nil
         onChange()
+    }
+
+    func window(
+        _ window: NSWindow, willUseFullScreenPresentationOptions proposed: NSApplication.PresentationOptions = []
+    ) -> NSApplication.PresentationOptions {
+        proposed.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -390,6 +512,18 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             return nil
         }
         return item
+    }
+}
+
+/// A viewer window: hands every event to its controller first (shortcuts
+/// and the chrome's idle timer; see `ViewerWindowController.windowEvent`).
+@MainActor
+final class ViewerWindow: NSWindow {
+    var onEvent: (NSEvent) -> Bool = { _ in false }
+
+    override func sendEvent(_ event: NSEvent) {
+        if onEvent(event) { return }
+        super.sendEvent(event)
     }
 }
 

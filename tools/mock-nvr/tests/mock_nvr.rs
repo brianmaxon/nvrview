@@ -449,3 +449,121 @@ fn third_party_channel_answers_400_then_streams_on_that_message_id() {
     assert!(raw.windows(4).any(|w| w == b":1dc"));
     assert!(!raw.windows(4).any(|w| w == b"00dc" || w == b"01dc"));
 }
+
+#[test]
+fn doorbell_talk_back_round_trip() {
+    use bc_protocol::talk::{
+        AdpcmEncoder, SAMPLES_PER_RECORD, parse_talk_ability, parse_talk_channels,
+    };
+    use mock_nvr::talk::TalkEnd;
+    let nvr = start(|c| c.talk_channels = vec![2]);
+    let mut c = Client::connect(&nvr, USER, PASSWORD);
+    assert_eq!(c.login(), Event::LoginOk);
+    // 199 marks only the doorbell's channel.
+    let (_, q) = c.session.query_info(Command::Support, None).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    let Event::Control { xml, .. } = c.control() else {
+        panic!()
+    };
+    assert_eq!(parse_talk_channels(&xml).unwrap(), vec![2]);
+    // 10: the doorbell answers its ability, another channel 400.
+    let (_, q) = c.session.talk_ability(2).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    let Event::Control { status, xml, .. } = c.control() else {
+        panic!()
+    };
+    assert_eq!(status, 200);
+    let cfg = parse_talk_ability(&xml).unwrap().choose().unwrap();
+    let (_, q) = c.session.talk_ability(1).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    assert!(matches!(c.control(), Event::Control { status: 400, .. }));
+
+    // A talk on a channel without a speaker is refused.
+    c.session.set_motion_allowed(1, true);
+    let (_, q) = c.session.talk_open(1, &cfg).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    assert!(matches!(
+        c.control(),
+        Event::Control {
+            command: 201,
+            status: 400,
+            ..
+        }
+    ));
+    c.session.forget_talk(1);
+
+    // The doorbell: open, three records, close.
+    c.session.set_motion_allowed(2, true);
+    let (oid, q) = c.session.talk_open(2, &cfg).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    match c.control() {
+        Event::Control {
+            command: 201,
+            message_id,
+            status: 200,
+            ..
+        } => assert_eq!(message_id, oid),
+        e => panic!("{e:?}"),
+    }
+    let mut enc = AdpcmEncoder::new();
+    let sent: Vec<i16> = (0..SAMPLES_PER_RECORD * 3)
+        .map(|i| ((i as f64 * 0.2).sin() * 6000.0) as i16)
+        .collect();
+    let mut expected = Vec::new();
+    for block in sent.as_chunks::<SAMPLES_PER_RECORD>().0 {
+        let rec = enc.encode_record(block);
+        expected.extend(bc_protocol::talk::decode_record(&rec).unwrap().samples);
+        c.tcp
+            .write_all(&c.session.talk_audio(2, &rec).unwrap())
+            .unwrap();
+        match c.control() {
+            Event::Control {
+                command: 202,
+                message_id: 0,
+                status: 200,
+                ..
+            } => {}
+            e => panic!("{e:?}"),
+        }
+    }
+    let (_, q) = c.session.talk_close(2).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    assert!(matches!(
+        c.control(),
+        Event::Control {
+            command: 11,
+            status: 200,
+            ..
+        }
+    ));
+    let log = nvr.talk_log();
+    assert_eq!(log.len(), 1);
+    assert_eq!((log[0].channel, log[0].end), (2, TalkEnd::Closed));
+    assert_eq!(log[0].records.len(), 3);
+    assert!(log[0].records.iter().all(|r| r.stream_index == 1));
+    assert!(log[0].continuous());
+    assert_eq!(log[0].samples().unwrap(), expected);
+
+    // An open talk that the connection drops is logged as such.
+    let (_, q) = c.session.talk_open(2, &cfg).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    assert!(matches!(
+        c.control(),
+        Event::Control {
+            command: 201,
+            status: 200,
+            ..
+        }
+    ));
+    drop(c);
+    let t0 = Instant::now();
+    while nvr
+        .talk_log()
+        .last()
+        .is_some_and(|t| t.end == TalkEnd::Open)
+    {
+        assert!(t0.elapsed() < Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(nvr.talk_log()[1].end, TalkEnd::Disconnected);
+}

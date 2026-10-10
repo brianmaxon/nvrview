@@ -21,7 +21,16 @@ import VideoKit
 /// 7. the sidebar took rows added and removed in several places in one
 ///    update (a group and a layout at once);
 /// 8. with `--fake`, a second lens plays as its own tile on its grid tier;
-/// 9. AppKit logged none of the warnings in `forbiddenLog` during the run.
+/// 9. keys sent through the window's event path move the selection (right
+///    arrow), focus and unfocus (Space) and reset the zoom (0);
+/// 10. a mouse-wheel zoom step eases to 2x and the renderer samples exactly
+///    the zoomed region (the destination unchanged);
+/// 11. with full-screen chrome behavior on (simulated: the window stays
+///    behind and never enters full screen), the headers, outline and zoom
+///    map hide after the idle delay without resizing the drawable, a tile
+///    with an active alert keeps its header, and an interaction brings the
+///    chrome back;
+/// 12. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
@@ -42,7 +51,9 @@ final class SelfTest {
     func start(seconds: Double) {
         after(seconds) { [self] in checkGrid() }
         // A hard limit for the whole run.
-        after(seconds + 30) { [self] in finish(problems + ["timed out"]) }
+        // The checks after the playing time take about a minute (focus, listening,
+        // quality, lenses, keys, zoom, chrome).
+        after(seconds + 90) { [self] in finish(problems + ["timed out"]) }
     }
 
     private func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
@@ -50,6 +61,20 @@ final class SelfTest {
     }
 
     private var window: ViewerWindowController? { app.windows.first }
+
+    /// Runs `body` once `condition` holds or `timeout` seconds have passed
+    /// (a window behind others gets few display refreshes, and animations
+    /// advance only on refreshes).
+    private func when(
+        _ condition: @escaping @MainActor () -> Bool, timeout: Double, _ body: @escaping @MainActor () -> Void
+    ) {
+        let deadline = CACurrentMediaTime() + timeout
+        func poll() {
+            if condition() || CACurrentMediaTime() >= deadline { return body() }
+            after(0.05) { poll() }
+        }
+        poll()
+    }
 
     private func checkGrid() {
         guard let model = app.model, let window else { finish(["no window"]) }
@@ -123,6 +148,13 @@ final class SelfTest {
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera else {
             finish(problems + ["no camera to focus"])
         }
+        // Replacing the window's content while a tile is focused must only
+        // end the focus: the renderer keeps following the stage (it once
+        // kept drawing the old arrangement under the new tiles).
+        window.stage.focus(leaf.path)
+        window.show(window.state.content)
+        if window.stage.isFocused { problems.append("focus survived a change of content") }
+        if window.stage.grid.prepare == nil { problems.append("a change of content during focus stopped the renderer") }
         window.stage.focus(leaf.path)
         // The animation, then the switch after the main stream's first keyframe.
         after(StageView.focusDuration + 4) { [self] in
@@ -165,7 +197,28 @@ final class SelfTest {
             if let fake = model.fake {
                 problems += fake.violations.map { "core contract: \($0)" }
             }
-            sidebarStep()
+            qualityStep(camera)
+        }
+    }
+
+    /// Clear on a tile switches its camera to the main stream in the grid;
+    /// back to Auto returns it to the sub stream.
+    private func qualityStep(_ camera: CameraRef) {
+        guard let model = app.model, let window else { finish(problems) }
+        guard let leaf = window.state.tree.leaves.first(where: { $0.camera == camera }) else { return sidebarStep() }
+        window.stage.setQuality(.clear, at: leaf.path)
+        after(4) { [self] in
+            let tier = model.leases.tile(for: camera)?.tierState
+            print("quality Clear: showing \(tier?.shown.name ?? "nothing"), requested \(tier?.requested.name ?? "-")")
+            if model.fake != nil, tier?.shown != .main { problems.append("Clear did not switch to the main stream") }
+            window.stage.setQuality(.auto, at: leaf.path)
+            after(4) { [self] in
+                let back = model.leases.tile(for: camera)?.tierState
+                print("quality Auto: showing \(back?.shown.name ?? "nothing")")
+                if model.fake != nil, back?.shown != .sub { problems.append("Auto did not return to the sub stream") }
+                if window.state.tree[leaf.path]?.quality != .auto { problems.append("the quality did not reset") }
+                sidebarStep()
+            }
         }
     }
 
@@ -201,7 +254,124 @@ final class SelfTest {
                 problems.append("the second lens is not playing on its grid tier")
             }
             model.leases.release(lens)
-            checkLog()
+            keyStep()
+        }
+    }
+
+    /// A key press as AppKit delivers it to the window (the app stays
+    /// inactive and the window behind; events are addressed by number).
+    private func press(_ characters: String, keyCode: UInt16) {
+        guard let nsWindow = window?.window else { return }
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard
+                let e = NSEvent.keyEvent(
+                    with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: nsWindow.windowNumber, context: nil, characters: characters,
+                    charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)
+            else { continue }
+            NSApp.sendEvent(e)
+        }
+    }
+
+    private func keyStep() {
+        guard let window else { finish(problems) }
+        let stage = window.stage
+        let frames = window.state.tree.frames(in: stage.bounds)
+        guard let first = frames.leaves.first?.path, let right = frames.neighbor(of: first, .right) else {
+            problems.append("no two tiles side by side for the keys")
+            return checkLog()
+        }
+        window.window?.makeFirstResponder(stage)
+        window.state.selected = first
+        press(String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)), keyCode: ViewerKeys.rightArrow)
+        let moved = window.state.selected
+        print("key right arrow: selection \(moved == right ? "moved right" : "did not move")")
+        if moved != right { problems.append("the right arrow did not move the selection") }
+        press(" ", keyCode: ViewerKeys.space)
+        when({ !stage.isAnimatingFocus }, timeout: 5) { [self] in
+            let focused = window.state.focused
+            print("key space: \(focused == right ? "focused" : "not focused")")
+            if focused != right { problems.append("Space did not focus the selected tile") }
+            press(" ", keyCode: ViewerKeys.space)
+            when({ window.state.focused == nil }, timeout: 5) { [self] in
+                print("key space again: \(window.state.focused == nil ? "back to the grid" : "still focused")")
+                if window.state.focused != nil { problems.append("Space did not leave focus") }
+                zoomStep(right)
+            }
+        }
+    }
+
+    private func zoomStep(_ path: NodePath) {
+        guard let window else { finish(problems) }
+        let stage = window.stage
+        guard let leaf = window.state.tree.frames(in: stage.bounds).leaf(path), let camera = leaf.camera else {
+            problems.append("no camera to zoom")
+            return checkLog()
+        }
+        let before = stage.renderedSource(of: path)
+        // One mouse-wheel step's worth, eased over the next refreshes.
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
+        when({ !stage.isEasingZoom && stage.renderedSource(of: path) != before }, timeout: 5) { [self] in
+            let z = stage.zoom(of: camera)
+            let source = stage.renderedSource(of: path)
+            print(String(format: "zoom: %.2fx, source %@ (was %@)", z.scale, "\(source.map { "\($0)" } ?? "none")",
+                "\(before.map { "\($0)" } ?? "none")"))
+            if abs(z.scale - 2) > 0.01 { problems.append("the zoom did not ease to 2x") }
+            if let before, let source {
+                let want = z.source(fit: before, picture: before.size)
+                if abs(source.width - want.width) > 0.5 || abs(source.minX - want.minX) > 0.5
+                    || abs(source.height - before.height / 2) > 0.5
+                {
+                    problems.append("the renderer's source \(source) is not the zoomed region \(want)")
+                }
+            } else {
+                problems.append("no source rectangle for the zoomed tile")
+            }
+            chromeStep(path, camera)
+        }
+    }
+
+    private func chromeStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let window else { finish(problems) }
+        let stage = window.stage
+        let grid = stage.grid
+        let resizes = grid.drawableResizes
+        // Another tile, with an active alert: its header must stay.
+        let other = window.state.tree.leaves.first { $0.path != path && $0.camera != nil && $0.camera != camera }
+        let alerting = other?.camera
+        stage.alertActive = { $0 == alerting }
+        stage.hidesPointer = false
+        stage.chromeHideDelay = 0.5
+        stage.fullScreen = true
+        stage.refreshChrome()
+        stage.showHeader(path)
+        let shownBefore = stage.headerShown(path) == true && stage.zoomMapShown(path) == true
+        when({ !stage.chromeVisible }, timeout: 5) { [self] in
+            let header = stage.headerShown(path) == true
+            let map = stage.zoomMapShown(path) == true
+            let pinned = other.map { stage.headerShown($0.path) == true }
+            print("chrome before idle: header and map \(shownBefore ? "shown" : "not shown")")
+            print("chrome after idle: visible \(stage.chromeVisible), header \(header), map \(map), alert header \(pinned.map { "\($0)" } ?? "n/a"), drawable resizes \(grid.drawableResizes - resizes)")
+            if !shownBefore { problems.append("the header or zoom map was not shown before the idle delay") }
+            if stage.chromeVisible || header || map { problems.append("the chrome did not hide when idle") }
+            if pinned == false { problems.append("the header of a tile with an active alert hid") }
+            if grid.drawableResizes != resizes { problems.append("hiding the chrome resized the drawable") }
+            // 0 resets the selected tile's zoom: select the zoomed one.
+            window.state.selected = path
+            press("0", keyCode: 29)
+            // The key brings the chrome back at once (it may hide again,
+            // with the short delay, before the zoom has eased back).
+            let back = stage.chromeVisible
+            when({ !stage.zoom(of: camera).isZoomed }, timeout: 5) { [self] in
+                let z = stage.zoom(of: camera)
+                print("key 0: zoom \(String(format: "%.2f", z.scale))x, chrome back \(back)")
+                if z.isZoomed { problems.append("0 did not reset the zoom") }
+                if !back { problems.append("a key press did not bring the chrome back") }
+                stage.fullScreen = false
+                stage.chromeHideDelay = 3
+                stage.alertActive = { _ in false }
+                checkLog()
+            }
         }
     }
 

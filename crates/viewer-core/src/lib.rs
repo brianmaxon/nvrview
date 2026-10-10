@@ -33,6 +33,10 @@
 //! - **Reentrancy.** From inside a callback only `decoded` and
 //!   `decode_failed` are allowed; anything else returns
 //!   [`CoreError::InvalidArgument`] instead of deadlocking.
+//! - **Talk-back** ([`Core::talk_start`]) is camera motion control: refused
+//!   with [`CoreError::NotPermitted`] unless the app enabled the channel
+//!   ([`Core::set_talk_permission`], off by default); the device session
+//!   rate-limits, paces, logs, and closes it on every exit path.
 //! - **Logging.** With a log directory, the core installs `viewer-log`
 //!   (rotation capped by file count and total size, rate-limited). Passwords
 //!   are never logged; addresses only at debug level.
@@ -45,6 +49,7 @@ mod json;
 mod lens;
 pub mod sound;
 pub mod store;
+pub mod talk;
 mod tile;
 
 pub use bc_protocol::stream::StreamTier;
@@ -105,6 +110,8 @@ pub enum CoreError {
     Limit,
     /// Something unexpected failed (a thread could not start).
     Internal,
+    /// Camera motion control (talk-back) is not enabled for that camera.
+    NotPermitted,
 }
 
 impl fmt::Display for CoreError {
@@ -115,6 +122,7 @@ impl fmt::Display for CoreError {
             CoreError::Closed => "the core is shutting down",
             CoreError::Limit => "too many devices or tiles",
             CoreError::Internal => "internal error",
+            CoreError::NotPermitted => "not enabled for this camera",
         })
     }
 }
@@ -168,6 +176,10 @@ pub struct CoreConfig {
     /// How long after the first 400 the session keeps waiting before the
     /// tile reports `tile_error` `start_rejected`; zero makes a 400 final.
     pub preview_wait_limit: Duration,
+    /// How long a second-lens probe (docs/FFI.md, `lenses`) waits for the
+    /// first picture of a channel's `extern` stream before deciding the
+    /// channel has one lens.
+    pub lens_probe_window: Duration,
     /// Sound analysis of every live tile with audio: smoke and CO alarm
     /// patterns as `detection` events, and per-second loudness
     /// ([`Core::tile_loudness`]). See [`sound`].
@@ -190,6 +202,7 @@ impl Default for CoreConfig {
             tier_switch_align_cap: Duration::from_millis(300),
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            lens_probe_window: lens::ProbeTiming::default().window,
             sound: sound::SoundSettings::default(),
         }
     }
@@ -286,6 +299,8 @@ pub struct Core {
     device_keys: Mutex<store::DeviceKeys>,
     /// Second-lens probe answers, shared by every device.
     lens: lens::LensContext,
+    /// Talk-back permissions and every tile's talk.
+    talk: talk::TalkHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -337,8 +352,12 @@ impl Core {
         let device_keys = store::DeviceKeys::open(config.data_dir.clone());
         let lens = lens::LensContext {
             cache: Arc::new(Mutex::new(lens::LensCache::open(config.data_dir.clone()))),
-            timing: lens::ProbeTiming::default(),
+            timing: lens::ProbeTiming {
+                window: config.lens_probe_window,
+                ..lens::ProbeTiming::default()
+            },
         };
+        let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(Some(runtime)),
@@ -357,6 +376,7 @@ impl Core {
             layouts: Mutex::new(layouts),
             device_keys: Mutex::new(device_keys),
             lens,
+            talk,
         })
     }
 
@@ -588,6 +608,7 @@ impl Core {
             .collect();
         drop(reg);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
+        self.talk.forget_device(device);
         dev.handle.close_blocking(&self.handle);
         self.event_sink
             .send(device::closed_event(device), Priority::State);
@@ -738,6 +759,9 @@ impl Core {
                 sinks.remove(id);
                 t.signal_stop();
             }
+        }
+        for (id, _) in &tiles {
+            self.talk.tile_closed(*id);
         }
         for (id, mut t) in tiles {
             t.end(reason);
@@ -927,6 +951,89 @@ impl Core {
         self.tile_ctx.audio.render_counters()
     }
 
+    /// Enables or disables talk-back (camera motion control) on one channel
+    /// of a device, for this run. Off until enabled; disabling stops a
+    /// running talk on it (`talk` `stopped`, `permission_revoked`).
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn set_talk_permission(
+        &self,
+        device: u64,
+        channel: u8,
+        allowed: bool,
+    ) -> Result<(), CoreError> {
+        self.check_api()?;
+        let session = lock(&self.registry)
+            .devices
+            .get(&device)
+            .ok_or(CoreError::UnknownId)?
+            .handle
+            .session();
+        self.talk
+            .set_permission(device, channel, allowed, session.as_deref());
+        info!(device, channel, allowed, "talk-back permission set");
+        Ok(())
+    }
+
+    /// Starts talk-back to a tile's camera; returns at once, with progress
+    /// as `talk` events (docs/FFI.md, "Talk-back"). Starting a talk that is
+    /// starting or active changes nothing.
+    ///
+    /// # Errors
+    /// [`CoreError::NotPermitted`] when the app has not enabled talk-back
+    /// for the camera (a `talk` `refused` event follows; nothing is sent),
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn talk_start(&self, tile: u64) -> Result<(), CoreError> {
+        self.check_api()?;
+        let reg = lock(&self.registry);
+        let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+        let (device, channel) = (t.device, t.channel);
+        let session = reg.devices.get(&device).and_then(|d| d.handle.session());
+        drop(reg);
+        self.talk
+            .start(tile, device, channel, session)
+            .map_err(|talk::StartError::NotPermitted| CoreError::NotPermitted)
+    }
+
+    /// Queues mono samples (-1 to 1) at `sample_rate` Hz for a tile's talk;
+    /// the core resamples them to the device's 16 kHz. Samples for a tile
+    /// without a talk are ignored. Takes a short lock and may allocate: not
+    /// for a real-time audio thread.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for a rate outside
+    /// [`talk::PUSH_RATES`] or from inside a callback,
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`].
+    pub fn talk_push(&self, tile: u64, samples: &[f32], sample_rate: u32) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !talk::PUSH_RATES.contains(&sample_rate) {
+            return Err(CoreError::InvalidArgument);
+        }
+        if !self.talk.push(tile, samples, sample_rate)
+            && !lock(&self.registry).tiles.contains_key(&tile)
+        {
+            return Err(CoreError::UnknownId);
+        }
+        Ok(())
+    }
+
+    /// Ends a tile's talk: at once, or (`drain`) after the audio already
+    /// pushed has been sent. Nothing happens for a tile without a talk.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn talk_stop(&self, tile: u64, drain: bool) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !self.talk.stop(tile, drain) && !lock(&self.registry).tiles.contains_key(&tile) {
+            return Err(CoreError::UnknownId);
+        }
+        Ok(())
+    }
+
     /// True on threads the core owns (where callbacks run). The C interface
     /// uses it to refuse freeing the core from inside a callback.
     pub fn on_core_thread() -> bool {
@@ -958,6 +1065,7 @@ impl Core {
         self.end_tiles(tiles, CloseReason::CoreShutdown);
         // No on_audio_tap after this; the renderer renders silence.
         self.tile_ctx.audio.shutdown();
+        self.talk.shutdown();
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()
