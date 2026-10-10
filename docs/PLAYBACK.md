@@ -138,10 +138,20 @@ AI search: commands 516–519, 759, 653"), read from the official client but
 4. **Text search needs a text encoder.** The NVR compares a feature vector,
    not text; the official client makes it with a downloaded encoder model or
    the vendor's server. Using the vendor's server is out (it can record the
-   search). Shipping or downloading the vendor's model needs its license
-   checked first; a compatible open encoder would have to produce vectors in
-   the same space, which is unlikely. Until that is settled, text search is
-   out of scope and type, danger, and track searches are the useful part.
+   search). nvrview never bundles, downloads, or redistributes the vendor's
+   model. The one possible route: when the official app is already
+   installed on the same computer, an opt-in setting lets nvrview use the
+   model that installation already has, found in place, and text search is
+   offered only then. Before building it: read the official app's license
+   terms on use of its files by other software (the user decides); inspect
+   an installed copy to learn the model's format (if it is encrypted or needs
+   a proprietary runtime, the route ends there); record only facts in
+   protocol.md (file format, input tokenization, output vector size and
+   version, confirmed by test), writing the loading code from our own notes
+   under the clean-room rules; and follow the NVR's feature-version answer
+   by using whichever installed model version matches, saying so when none
+   does. An open encoder would almost certainly not produce vectors in the
+   same space. Type, danger, and track searches do not depend on any of this.
 5. **Fast thumbnails.** The official client fetches one cover per hit, one
    at a time, which makes its search slow. Ours fetches covers only for hits
    on screen, in parallel up to the device's measured limit, and caches them.
