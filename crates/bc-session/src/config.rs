@@ -105,6 +105,23 @@ pub struct SessionConfig {
     /// before it gives up and reports [`crate::Item::StartRejected`].
     /// Zero makes a 400 final at once. Default 60 s.
     pub preview_wait_limit: Duration,
+    /// Most talk-back starts per channel in any minute
+    /// ([`crate::DeviceSession::talk`]); more are refused
+    /// ([`crate::Refusal::RateLimited`]). Default 6.
+    pub talk_starts_per_minute: u32,
+    /// Talk-back samples (16 kHz) a caller may push ahead of real time;
+    /// beyond this they are dropped. Default 10 s worth.
+    pub talk_buffer: usize,
+    /// A talk with nothing pushed for this long stops
+    /// ([`crate::StopReason::Idle`]). Default 10 s.
+    pub talk_idle_timeout: Duration,
+    /// The longest talk ([`crate::StopReason::MaxDuration`]). Default 5 min.
+    pub talk_max_duration: Duration,
+    /// How far behind its clock the talk sender may fall and still catch
+    /// up (the official client ran up to about 0.1 s late); after a longer
+    /// stall the clock restarts from now instead of bursting. Default
+    /// 200 ms.
+    pub talk_catch_up: Duration,
 }
 
 impl SessionConfig {
@@ -129,6 +146,11 @@ impl SessionConfig {
             alarm_report: true,
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            talk_starts_per_minute: 6,
+            talk_buffer: 16_000 * 10,
+            talk_idle_timeout: Duration::from_secs(10),
+            talk_max_duration: Duration::from_secs(300),
+            talk_catch_up: Duration::from_millis(200),
         }
     }
 }

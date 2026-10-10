@@ -18,7 +18,7 @@
 //!   each subscriber has its own queue, keyframe gating, and drop counters, so
 //!   a slow one never affects another. A subscriber that attaches mid-stream
 //!   gets the stream info, then video from the next keyframe.
-//! - **Read-only**: only commands the protocol crate's allowlist can build are
+//! - **Read-only, but for talk-back**: only commands the protocol crate's allowlist can build are
 //!   ever sent (login, preview start and stop, keepalive, the detection
 //!   subscription (192) behind [`DeviceSession::alarms`], the read-only
 //!   info queries behind [`DeviceSession::query`], and the recording
@@ -45,6 +45,13 @@
 //! - **No retry storm on bad credentials**: a refused login ends the session
 //!   in [`ConnState::LoginFailed`] and is not retried; devices lock out after
 //!   a few failures.
+//! - **Talk-back only where allowed**: [`DeviceSession::talk`] sends sound
+//!   to a camera's speaker (camera motion control) only on a channel the
+//!   caller enabled with [`DeviceSession::set_motion_allowed`], at most
+//!   [`SessionConfig::talk_starts_per_minute`] starts per channel, paced in
+//!   real time with a bounded buffer, logged at every start and stop, and
+//!   closed (command 11) on every exit path: stop, drop, session close, a
+//!   withdrawn permission, an idle or overlong talk, and device errors.
 //! - **Quiet logs**: repeated connection failures are logged at most about
 //!   once every few seconds, with a count of the suppressed ones. Credentials
 //!   are never logged; addresses are not logged at all.
@@ -54,6 +61,7 @@ mod config;
 mod lens;
 mod queue;
 mod supervisor;
+mod talk;
 mod transport;
 
 pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
@@ -61,6 +69,7 @@ pub use config::{BackoffConfig, SessionConfig};
 pub use lens::LensProbe;
 pub use queue::{Item, Subscription};
 pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
+pub use talk::{Refusal, StopReason, Talk, TalkState, TalkStats};
 pub use transport::{Connector, TcpConnector};
 
 use std::sync::atomic::{AtomicBool, Ordering};
