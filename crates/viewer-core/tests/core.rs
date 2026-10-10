@@ -255,20 +255,21 @@ fn removing_a_device_closes_its_tiles_and_socket() {
     wait_until("the removed device's session to close", 5, || {
         nvr.active_logins() == 0
     });
-    let closed: Vec<_> = rec.events_of("tile_closed");
-    for t in [t1, t2] {
-        assert!(
+    wait_until("tile_closed for both tiles", 5, || {
+        let closed = rec.events_of("tile_closed");
+        [t1, t2].iter().all(|t| {
             closed
                 .iter()
-                .any(|e| e["tile"] == t && e["reason"] == "device_removed"),
-            "{closed:?}"
-        );
-    }
-    assert!(
+                .any(|e| e["tile"] == *t && e["reason"] == "device_removed")
+        })
+    });
+    // Events are asynchronous: the device logs out (freeing its slot on the
+    // mock) before the core reports it closed.
+    wait_until("the device's closed event", 5, || {
         rec.events_of("device_state")
             .iter()
-            .any(|e| { e["device"] == dev && e["state"] == "closed" })
-    );
+            .any(|e| e["device"] == dev && e["state"] == "closed")
+    });
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!((rec.seen(t1).len(), rec.seen(t2).len()), (n1, n2));
     assert!(rec.decodes(t3) > n3, "the other device keeps playing");
