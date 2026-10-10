@@ -8,7 +8,8 @@ import VideoKit
 /// focus, muted), then checks, in order:
 ///
 /// 1. a device is connected, a tile is playing, and a non-flat picture is on
-///    screen;
+///    screen (once every tile plays and its rates are measured, or after
+///    SECONDS at most);
 /// 2. resizing the window continuously keeps the grid drawing and
 ///    resizes its drawable only now and then, then to the exact size;
 /// 3. focusing a tile animates it to the whole stage and then switches its
@@ -23,20 +24,29 @@ import VideoKit
 /// 8. with `--fake`, a second lens plays as its own tile on its grid tier;
 /// 9. keys sent through the window's event path move the selection (right
 ///    arrow), focus and unfocus (Space) and reset the zoom (0);
-/// 10. a mouse-wheel zoom step eases to 2x and the renderer samples exactly
-///    the zoomed region (the destination unchanged);
+/// 10. a mouse-wheel zoom step eases to 2x (Auto then asks for the main
+///    stream) and the renderer samples exactly the zoomed region (the
+///    destination unchanged);
 /// 11. with full-screen chrome behavior on (simulated: the window stays
 ///    behind and never enters full screen), the headers, outline and zoom
 ///    map hide after the idle delay without resizing the drawable, a tile
-///    with an active alert keeps its header, and an interaction brings the
-///    chrome back;
+///    with an active alert keeps its header, an interaction brings the
+///    chrome back, and 0 eases the zoom back to exactly 1x (and the
+///    sub-stream);
 /// 12. AppKit logged none of the warnings in `forbiddenLog` during the run.
+///
+/// The viewer's clock is a manual one here (`AppDelegate.testClock`):
+/// animations, easing and the idle delay finish when the test advances it,
+/// not after real time. What really takes time (frames decoding, tier
+/// switches, display refreshes, drawable resizes) is waited for by polling
+/// for the condition, with a timeout.
 ///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
 final class SelfTest {
     private unowned let app: AppDelegate
     private var problems: [String] = []
+    private let began = CACurrentMediaTime()
 
     init(app: AppDelegate) { self.app = app }
 
@@ -49,11 +59,34 @@ final class SelfTest {
     ]
 
     func start(seconds: Double) {
-        after(seconds) { [self] in checkGrid() }
-        // A hard limit for the whole run.
-        // The checks after the playing time take about a minute (focus, listening,
-        // quality, lenses, keys, zoom, chrome).
-        after(seconds + 90) { [self] in finish(problems + ["timed out"]) }
+        // Line by line, also into a pipe (a run that hangs still shows how far it got).
+        setvbuf(stdout, nil, _IOLBF, 0)
+        when({ [self] in gridReady }, timeout: seconds) { [self] in checkGrid() }
+        // A hard limit for the whole run (the steps after the grid take a few
+        // seconds: tier switches and display refreshes are real).
+        after(seconds + 30) { [self] in finish(problems + ["timed out"]) }
+    }
+
+    /// Advances the viewer's clock and steps every window at the new time
+    /// (what the display link does on a refresh).
+    private func advance(_ seconds: Double) {
+        guard let clock = app.testClock else { return }
+        clock.advance(by: seconds)
+        for w in app.windows { w.stage.tick() }
+    }
+
+    /// Every device connected, every tile playing, and the first tile's
+    /// device and shown rates measured.
+    private var gridReady: Bool {
+        guard let model = app.model, let window, !model.devices.isEmpty else { return false }
+        guard model.devices.allSatisfy({ $0.link.state == .connected }) else { return false }
+        let cameras = window.state.tree.cameras
+        guard !cameras.isEmpty,
+            cameras.allSatisfy({ model.leases.tile(for: $0)?.snapshot.status == .playing }),
+            let first = cameras.first, let tile = model.leases.tile(for: first)
+        else { return false }
+        if model.fake != nil, abs((tile.deviceRate ?? 0) - 20) > 1 { return false }
+        return window.stage.shownRate(of: first) != nil
     }
 
     private func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
@@ -71,7 +104,7 @@ final class SelfTest {
         let deadline = CACurrentMediaTime() + timeout
         func poll() {
             if condition() || CACurrentMediaTime() >= deadline { return body() }
-            after(0.05) { poll() }
+            after(0.02) { poll() }
         }
         poll()
     }
@@ -79,6 +112,7 @@ final class SelfTest {
     private func checkGrid() {
         guard let model = app.model, let window else { finish(["no window"]) }
         let connected = model.devices.filter { $0.link.state == .connected }.count
+        print(String(format: "grid after %.2f s", CACurrentMediaTime() - began))
         print("devices: \(model.devices.count), connected: \(connected)")
         if connected == 0 { problems.append("no device connected") }
         let cameras = window.state.tree.cameras
@@ -119,13 +153,13 @@ final class SelfTest {
                 after(0.5 / Double(steps)) { advance(step + 1) }
                 return
             }
-            after(0.3) { [self] in
+            // Until the drawable settles at the view's size (it follows on
+            // display refreshes).
+            when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in
                 let elapsed = CACurrentMediaTime() - began
                 let r = grid.drawableResizes - resizes
                 let shown = grid.refreshes - refreshes, made = grid.framesDrawn - drawn
-                let scale = nsWindow.backingScaleFactor
-                let want = CGSize(
-                    width: (grid.bounds.width * scale).rounded(), height: (grid.bounds.height * scale).rounded())
+                let want = Self.pixelSize(of: grid)
                 let have = grid.drawableSize
                 print(String(
                     format: "resize: %d steps in %.2f s, %d drawable sizes, %d refreshes, %d frames drawn, drawable %.0fx%.0f for %.0fx%.0f",
@@ -137,10 +171,16 @@ final class SelfTest {
                 if have != want { problems.append("the drawable did not settle at the view's size") }
                 if made < shown / 2 { problems.append("the grid stopped drawing during the resize") }
                 nsWindow.setFrame(start, display: true)
-                after(0.3) { [self] in focusStep() }
+                when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in focusStep() }
             }
         }
         advance(1)
+    }
+
+    /// The drawable size a view's bounds want, in pixels.
+    private static func pixelSize(of view: NSView) -> CGSize {
+        let scale = view.window?.backingScaleFactor ?? 1
+        return CGSize(width: (view.bounds.width * scale).rounded(), height: (view.bounds.height * scale).rounded())
     }
 
     private func focusStep() {
@@ -156,8 +196,11 @@ final class SelfTest {
         if window.stage.isFocused { problems.append("focus survived a change of content") }
         if window.stage.grid.prepare == nil { problems.append("a change of content during focus stopped the renderer") }
         window.stage.focus(leaf.path)
-        // The animation, then the switch after the main stream's first keyframe.
-        after(StageView.focusDuration + 4) { [self] in
+        // The animation (on the test clock), then the switch after the main
+        // stream's first keyframe (real).
+        advance(StageView.focusDuration)
+        if window.stage.isAnimatingFocus { problems.append("the focus animation did not finish on time") }
+        when({ model.leases.tile(for: camera)?.tierState.shown == .main }, timeout: 5) { [self] in
             let tile = model.leases.tile(for: camera)
             let tier = tile?.tierState
             print("focused \(model.name(of: camera)): showing \(tier?.shown.name ?? "nothing"), requested \(tier?.requested.name ?? "-")")
@@ -173,7 +216,7 @@ final class SelfTest {
         print("muted level \(muted.map { String(format: "%.2f", $0.peak) } ?? "n/a")")
         if model.fake != nil, (muted?.peak ?? 0) <= 0 { problems.append("no audio level while muted") }
         model.toggleListening(camera, additive: false)
-        after(0.5) { [self] in
+        when({ model.audible.contains(camera) && (model.level(camera)?.peak ?? 0) > 0 }, timeout: 2) { [self] in
             let level = model.level(camera)
             print("listening: \(model.audible.contains(camera)), level \(level.map { String(format: "%.2f", $0.peak) } ?? "n/a")")
             if !model.audible.contains(camera) { problems.append("the camera did not become audible") }
@@ -186,11 +229,16 @@ final class SelfTest {
     private func unfocusStep(_ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
         window.stage.unfocus()
-        after(StageView.focusDuration + 4) { [self] in
+        // The sub-stream is asked for at once; the animation ends on the clock.
+        advance(StageView.focusDuration)
+        let requested = model.leases.tile(for: camera)?.tierState.requested
+        if model.fake != nil, requested != .sub { problems.append("leaving focus did not ask for the sub-stream") }
+        if window.stage.isFocused { problems.append("still focused") }
+        // Then the switch back (real), so the quality step starts from the grid's stream.
+        when({ model.fake == nil || model.leases.tile(for: camera)?.tierState.shown == .sub }, timeout: 5) { [self] in
             let tier = model.leases.tile(for: camera)?.tierState
             print("after focus: showing \(tier?.shown.name ?? "nothing")")
-            if model.fake != nil, tier?.requested != .sub { problems.append("leaving focus did not ask for the sub-stream") }
-            if window.stage.isFocused { problems.append("still focused") }
+            if model.fake != nil, tier?.shown != .sub { problems.append("leaving focus did not return to the sub-stream") }
             for (what, ns) in model.timings.sorted(by: { $0.key < $1.key }) {
                 print(String(format: "timing %@: %.1f ms", what, Double(ns) / 1e6))
             }
@@ -207,12 +255,12 @@ final class SelfTest {
         guard let model = app.model, let window else { finish(problems) }
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera == camera }) else { return sidebarStep() }
         window.stage.setQuality(.clear, at: leaf.path)
-        after(4) { [self] in
+        when({ model.leases.tile(for: camera)?.tierState.shown == .main }, timeout: 5) { [self] in
             let tier = model.leases.tile(for: camera)?.tierState
             print("quality Clear: showing \(tier?.shown.name ?? "nothing"), requested \(tier?.requested.name ?? "-")")
             if model.fake != nil, tier?.shown != .main { problems.append("Clear did not switch to the main stream") }
             window.stage.setQuality(.auto, at: leaf.path)
-            after(4) { [self] in
+            when({ model.leases.tile(for: camera)?.tierState.shown == .sub }, timeout: 5) { [self] in
                 let back = model.leases.tile(for: camera)?.tierState
                 print("quality Auto: showing \(back?.shown.name ?? "nothing")")
                 if model.fake != nil, back?.shown != .sub { problems.append("Auto did not return to the sub stream") }
@@ -231,10 +279,11 @@ final class SelfTest {
         let cameras = model.allCameras
         let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
         let layout = model.createLayout(name: "Self-Test", root: LayoutNode.balanced(Array(cameras.prefix(2))))
-        after(0.5) { [self] in
+        // A run-loop turn for the sidebar to take each update.
+        after(0.1) { [self] in
             model.deleteGroup(group)
             if let layout { model.deleteLayout(layout) }
-            after(0.5) { [self] in lensStep() }
+            after(0.1) { [self] in lensStep() }
         }
     }
 
@@ -247,7 +296,9 @@ final class SelfTest {
             return checkLog()
         }
         model.leases.acquire(lens)
-        after(2) { [self] in
+        when({ model.leases.tile(for: lens).map { $0.tierState.shown == .mobile && $0.latestPicture() != nil } == true },
+            timeout: 3)
+        { [self] in
             let tile = model.leases.tile(for: lens)
             print("\(model.name(of: lens)): showing \(tile?.tierState.shown.name ?? "nothing"), picture \(tile?.latestPicture() != nil)")
             if tile?.tierState.shown != .mobile || tile?.latestPicture() == nil {
@@ -288,21 +339,19 @@ final class SelfTest {
         print("key right arrow: selection \(moved == right ? "moved right" : "did not move")")
         if moved != right { problems.append("the right arrow did not move the selection") }
         press(" ", keyCode: ViewerKeys.space)
-        when({ !stage.isAnimatingFocus }, timeout: 5) { [self] in
-            let focused = window.state.focused
-            print("key space: \(focused == right ? "focused" : "not focused")")
-            if focused != right { problems.append("Space did not focus the selected tile") }
-            press(" ", keyCode: ViewerKeys.space)
-            when({ window.state.focused == nil }, timeout: 5) { [self] in
-                print("key space again: \(window.state.focused == nil ? "back to the grid" : "still focused")")
-                if window.state.focused != nil { problems.append("Space did not leave focus") }
-                zoomStep(right)
-            }
-        }
+        advance(StageView.focusDuration)
+        let focused = window.state.focused
+        print("key space: \(focused == right && !stage.isAnimatingFocus ? "focused" : "not focused")")
+        if focused != right || stage.isAnimatingFocus { problems.append("Space did not focus the selected tile") }
+        press(" ", keyCode: ViewerKeys.space)
+        advance(StageView.focusDuration)
+        print("key space again: \(window.state.focused == nil ? "back to the grid" : "still focused")")
+        if window.state.focused != nil { problems.append("Space did not leave focus") }
+        zoomStep(right)
     }
 
     private func zoomStep(_ path: NodePath) {
-        guard let window else { finish(problems) }
+        guard let model = app.model, let window else { finish(problems) }
         let stage = window.stage
         guard let leaf = window.state.tree.frames(in: stage.bounds).leaf(path), let camera = leaf.camera else {
             problems.append("no camera to zoom")
@@ -311,7 +360,15 @@ final class SelfTest {
         let before = stage.renderedSource(of: path)
         // One mouse-wheel step's worth, eased over the next refreshes.
         stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
-        when({ !stage.isEasingZoom && stage.renderedSource(of: path) != before }, timeout: 5) { [self] in
+        advance(1)
+        if stage.isEasingZoom { problems.append("the zoom was still easing after a second") }
+        if model.leases.wantedTier(camera) != .main { problems.append("Auto zoomed to 2x did not ask for the main stream") }
+        // The renderer takes the zoom in the stage's layout pass, which the
+        // display link runs before drawing; run it now rather than wait for
+        // a refresh (a window behind others gets about one a second).
+        let grid = stage.grid
+        grid.prepare?(grid.renderer, grid.drawableSize)
+        do {
             let z = stage.zoom(of: camera)
             let source = stage.renderedSource(of: path)
             print(String(format: "zoom: %.2fx, source %@ (was %@)", z.scale, "\(source.map { "\($0)" } ?? "none")",
@@ -332,7 +389,7 @@ final class SelfTest {
     }
 
     private func chromeStep(_ path: NodePath, _ camera: CameraRef) {
-        guard let window else { finish(problems) }
+        guard let model = app.model, let window else { finish(problems) }
         let stage = window.stage
         let grid = stage.grid
         let resizes = grid.drawableResizes
@@ -346,7 +403,10 @@ final class SelfTest {
         stage.refreshChrome()
         stage.showHeader(path)
         let shownBefore = stage.headerShown(path) == true && stage.zoomMapShown(path) == true
-        when({ !stage.chromeVisible }, timeout: 5) { [self] in
+        advance(0.25)
+        if !stage.chromeVisible { problems.append("the chrome hid before the idle delay") }
+        advance(0.25)
+        do {
             let header = stage.headerShown(path) == true
             let map = stage.zoomMapShown(path) == true
             let pinned = other.map { stage.headerShown($0.path) == true }
@@ -362,11 +422,15 @@ final class SelfTest {
             // The key brings the chrome back at once (it may hide again,
             // with the short delay, before the zoom has eased back).
             let back = stage.chromeVisible
-            when({ !stage.zoom(of: camera).isZoomed }, timeout: 5) { [self] in
+            advance(1)
+            do {
                 let z = stage.zoom(of: camera)
-                print("key 0: zoom \(String(format: "%.2f", z.scale))x, chrome back \(back)")
-                if z.isZoomed { problems.append("0 did not reset the zoom") }
+                print("key 0: zoom \(String(format: "%.4f", z.scale))x, chrome back \(back)")
+                if z != .none || stage.isEasingZoom { problems.append("0 did not reset the zoom") }
                 if !back { problems.append("a key press did not bring the chrome back") }
+                if model.leases.wantedTier(camera) != .sub {
+                    problems.append("Auto back at 1x did not ask for the sub stream")
+                }
                 stage.fullScreen = false
                 stage.chromeHideDelay = 3
                 stage.alertActive = { _ in false }
@@ -425,6 +489,7 @@ final class SelfTest {
 
     private func finish(_ problems: [String]) -> Never {
         app.model?.shutdown()
+        print(String(format: "selftest took %.2f s", CACurrentMediaTime() - began))
         if problems.isEmpty {
             print("selftest: PASS")
             exit(0)

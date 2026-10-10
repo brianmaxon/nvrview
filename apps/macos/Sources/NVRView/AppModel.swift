@@ -73,8 +73,11 @@ final class AppModel {
     private(set) var timings: [String: UInt64] = [:]
     /// The last tier switch of each tile (by core tile ID) and when it
     /// happened; the frame-rate readout shows it briefly.
-    private(set) var switchNotes: [UInt64: (timing: TierSwitchTiming, at: UInt64)] = [:]
-    static let switchNoteSeconds: UInt64 = 6
+    private(set) var switchNotes: [UInt64: (timing: TierSwitchTiming, at: Double)] = [:]
+    static let switchNoteSeconds = 6.0
+    /// The viewer's clock: animations, auto-hide, and how long notes show
+    /// (the system clock; a manual one in the self-test).
+    @ObservationIgnored let clock: any ViewerClock
     /// A message for the user (shown in the sidebar footer), if any.
     var notice: String?
     /// Tile headers show the device's and the shown frame rate (View menu;
@@ -110,8 +113,10 @@ final class AppModel {
 
     init(
         factory: CoreFactory, fakeBox: FakeBox?, credentials: any CredentialStore,
-        deviceFile: JSONFileStore<DeviceConfig>, groupFile: JSONFileStore<CameraGroup>
+        deviceFile: JSONFileStore<DeviceConfig>, groupFile: JSONFileStore<CameraGroup>,
+        clock: any ViewerClock = SystemViewerClock()
     ) throws {
+        self.clock = clock
         let target = Target()
         bridge = try CoreBridge(
             factory: factory,
@@ -580,7 +585,7 @@ final class AppModel {
         case .timing(let what, let tile, let ns, let detail):
             if timings[what] == nil { timings[what] = ns }
             if let tile, let detail {
-                switchNotes[tile] = (detail, HostClock.nowNanos())
+                switchNotes[tile] = (detail, clock.now)
             }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
@@ -592,14 +597,15 @@ final class AppModel {
 
     /// The tier switch note for a tile while it is recent.
     func switchNote(forTile tile: UInt64) -> String? {
-        guard let n = switchNotes[tile], HostClock.nowNanos() &- n.at < Self.switchNoteSeconds * 1_000_000_000 else {
+        guard let n = switchNotes[tile], clock.now - n.at < Self.switchNoteSeconds else {
             return nil
         }
         return n.timing.note
     }
 
     private func expireDetections() {
-        let stale = switchNotes.filter { HostClock.nowNanos() &- $0.value.at >= Self.switchNoteSeconds * 1_000_000_000 }
+        let now = clock.now
+        let stale = switchNotes.filter { now - $0.value.at >= Self.switchNoteSeconds }
         if !stale.isEmpty {
             for key in stale.keys { switchNotes[key] = nil }
             notify()
