@@ -12,6 +12,16 @@
 //                                     the self-test (SelfTest.cs): the window
 //                                     opens behind the others without taking
 //                                     focus, writes PASS or FAIL to FILE, exits
+//   NvrView.App.exe --startup-test SECONDS --log FILE [--data-dir DIR]
+//                                     the plain start (a double-click: devices
+//                                     from Settings, windows restored) on DIR
+//                                     (default: a fresh folder beside FILE);
+//                                     checks the window shows and the app idles
+//                                     without an exception, writes PASS or FAIL
+//                                     to FILE, exits (StartupTest.cs)
+//
+// A crash (an exception nothing handled) is written to crash-*.log in the
+// logs directory (AppLog.Crash) before the process ends.
 //
 // Other options: --lib PATH (nvrview.dll), --data-dir DIR (settings, layouts,
 // logs; default %LOCALAPPDATA%\NvrView), --gpu auto|hardware|warp,
@@ -52,6 +62,8 @@ internal sealed class AppOptions
 
     public double SelfTestSeconds { get; private set; }
 
+    public double StartupTestSeconds { get; private set; }
+
     public string? Log { get; private set; }
 
     public GpuChoice Gpu { get; private set; } = GpuChoice.Auto;
@@ -63,6 +75,18 @@ internal sealed class AppOptions
     public bool CredentialTest { get; private set; }
 
     public bool SelfTest => SelfTestSeconds > 0;
+
+    public bool StartupTest => StartupTestSeconds > 0;
+
+    /// <summary>A test run: windows open behind the others and are never activated.</summary>
+    public bool Background => SelfTest || StartupTest;
+
+    /// <summary>The data directory (settings, layouts, logs).</summary>
+    public string ResolvedDataDir => DataDir ?? (SelfTest
+        ? Path.Combine(Path.GetDirectoryName(Log!)!, "selftest-data")
+        : StartupTest
+            ? Path.Combine(Path.GetDirectoryName(Log!)!, "startup-data")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvrView"));
 
     /// <summary>Development mode: one device given on the command line, nothing stored.</summary>
     public bool Development => Host is not null || MockNvr is not null;
@@ -93,6 +117,10 @@ internal sealed class AppOptions
                     o.SelfTestSeconds = double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out double s) && s > 0
                         ? s : throw new ArgumentException("bad value for --selftest");
                     break;
+                case "--startup-test":
+                    o.StartupTestSeconds = double.TryParse(Value(), NumberStyles.Float, CultureInfo.InvariantCulture, out double t) && t > 0
+                        ? t : throw new ArgumentException("bad value for --startup-test");
+                    break;
                 case "--log": o.Log = Path.GetFullPath(Value()); break;
                 case "--gpu":
                     o.Gpu = Value() switch
@@ -114,6 +142,10 @@ internal sealed class AppOptions
         if (o.SelfTest && (o.MockNvr is null || o.Log is null))
         {
             throw new ArgumentException("--selftest needs --mock-nvr EXE and --log FILE");
+        }
+        if (o.StartupTest && (o.Log is null || o.SelfTest || o.Development))
+        {
+            throw new ArgumentException("--startup-test needs --log FILE, and no --selftest, --mock-nvr, or --host");
         }
         if (o.Host is not null && o.MockNvr is not null)
         {
@@ -145,13 +177,35 @@ internal static class Program
             NativeLibrary.SetDllImportResolver(typeof(NvNative).Assembly, (name, _, _) =>
                 name == NvNative.Library ? NativeLibrary.Load(lib) : 0);
         }
-        WinRT.ComWrappersSupport.InitializeComWrappers();
-        Application.Start(p =>
+        // Whatever nothing else handles is written to a crash log first.
+        string crashDir = Path.Combine(Options.ResolvedDataDir, "logs");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
-            var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
-            SynchronizationContext.SetSynchronizationContext(context);
-            _ = new App();
-        });
+            if (e.ExceptionObject is Exception ex)
+            {
+                AppLog.Crash("unhandled exception (AppDomain)", ex, crashDir);
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Crash("unobserved task exception", e.Exception, crashDir);
+            e.SetObserved();
+        };
+        try
+        {
+            WinRT.ComWrappersSupport.InitializeComWrappers();
+            Application.Start(p =>
+            {
+                var context = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());
+                SynchronizationContext.SetSynchronizationContext(context);
+                _ = new App();
+            });
+        }
+        catch (Exception e)
+        {
+            AppLog.Crash("startup failed", e, crashDir);
+            return 1;
+        }
         return App.ExitCode;
     }
 }

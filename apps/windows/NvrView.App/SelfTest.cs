@@ -878,7 +878,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         return Math.Sqrt(Math.Max(sumSq / n - mean * mean, 0));
     }
 
-    private static async Task<bool> Until(Func<bool> condition, double seconds)
+    internal static async Task<bool> Until(Func<bool> condition, double seconds)
     {
         var sw = Stopwatch.StartNew();
         while (sw.Elapsed.TotalSeconds < seconds)
