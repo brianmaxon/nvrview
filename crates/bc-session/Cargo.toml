@@ -13,6 +13,7 @@ tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "ma
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+mock-nvr = { path = "../../tools/mock-nvr" }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "rt-multi-thread"] }
 
 [lints]

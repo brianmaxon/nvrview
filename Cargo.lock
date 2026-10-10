@@ -28,6 +28,7 @@ name = "bc-session"
 version = "0.1.0"
 dependencies = [
  "bc-protocol",
+ "mock-nvr",
  "tokio",
  "tracing",
 ]

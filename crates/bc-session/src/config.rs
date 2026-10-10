@@ -63,6 +63,9 @@ pub struct SessionConfig {
     pub backoff: BackoffConfig,
     /// Capacity, in frames, of each subscription's queue.
     pub queue_frames: usize,
+    /// How long [`crate::DeviceSession::query`] waits for its reply,
+    /// including time spent waiting for the session to log in.
+    pub query_timeout: Duration,
 }
 
 impl SessionConfig {
@@ -77,6 +80,7 @@ impl SessionConfig {
             write_timeout: Duration::from_secs(10),
             backoff: BackoffConfig::default(),
             queue_frames: 64,
+            query_timeout: Duration::from_secs(15),
         }
     }
 }

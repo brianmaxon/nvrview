@@ -13,7 +13,8 @@
 //!   socket gone before any new one opens. A graceful close sends a preview
 //!   stop for every active stream first.
 //! - **Read-only**: only commands the protocol crate's allowlist can build are
-//!   ever sent (login, preview start and stop, keepalive).
+//!   ever sent (login, preview start and stop, keepalive, and the read-only
+//!   info queries behind [`DeviceSession::query`]).
 //! - **Bounded memory**: each [`Subscription`] has a fixed-capacity queue; a
 //!   slow consumer loses frames up to the next keyframe, and the loss is
 //!   reported ([`Item::Discontinuity`], [`Subscription::dropped`]).
@@ -31,7 +32,7 @@ mod transport;
 
 pub use config::{BackoffConfig, SessionConfig};
 pub use queue::{Item, Subscription};
-pub use supervisor::{ConnState, DeviceSession, SessionClosed};
+pub use supervisor::{ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
 pub use transport::{Connector, TcpConnector};
 
 use std::sync::atomic::{AtomicBool, Ordering};
