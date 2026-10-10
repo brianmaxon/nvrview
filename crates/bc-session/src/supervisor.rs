@@ -6,6 +6,7 @@ use crate::config::{Jitter, SessionConfig};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::transport::Connector;
 use bc_protocol::archive;
+use bc_protocol::detection::{self, AlarmState};
 use bc_protocol::framer::Decoder;
 use bc_protocol::media::{Demuxer, Record};
 use bc_protocol::session::{Command, Event, Session, SessionError};
@@ -17,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, info, warn};
@@ -105,6 +106,22 @@ impl std::error::Error for QueryError {}
 /// Queries outstanding at once (waiting for login plus in flight).
 const MAX_QUERIES: usize = 32;
 
+/// Alarm-state pushes a slow [`DeviceSession::alarms`] receiver may fall
+/// behind by before it misses some (each push is a full snapshot, so the
+/// next one it gets is complete again).
+const ALARM_PUSHES_QUEUED: usize = 16;
+
+/// One alarm-state push (command 33): every channel slot's detection state
+/// as the device reported it (docs/protocol.md, "Detection events").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlarmPush {
+    /// Counts logins on this session: a push from a new connection starts
+    /// afresh, whatever the previous connection's last push said.
+    pub connection: u64,
+    /// The slots this push lists.
+    pub states: Vec<AlarmState>,
+}
+
 /// A reply to a request sent through the supervisor.
 #[derive(Clone, Debug)]
 pub(crate) struct Reply {
@@ -166,6 +183,7 @@ pub struct DeviceSession {
     state_rx: watch::Receiver<ConnState>,
     channels_rx: watch::Receiver<Option<Vec<ChannelInfo>>>,
     channel_uids_rx: watch::Receiver<HashMap<u8, String>>,
+    alarms_tx: broadcast::Sender<Arc<AlarmPush>>,
     pub(crate) query_timeout: Duration,
     queue_frames: usize,
     /// Searches and cover requests in progress at once.
@@ -189,6 +207,7 @@ impl DeviceSession {
         let (state_tx, state_rx) = watch::channel(ConnState::Connecting);
         let (channels_tx, channels_rx) = watch::channel(None);
         let (channel_uids_tx, channel_uids_rx) = watch::channel(HashMap::new());
+        let (alarms_tx, _) = broadcast::channel(ALARM_PUSHES_QUEUED);
         let queue_frames = config.queue_frames;
         let query_timeout = config.query_timeout;
         let search_permits = Arc::new(Semaphore::new(config.max_searches.max(1)));
@@ -202,6 +221,7 @@ impl DeviceSession {
             state_tx,
             channels_tx,
             channel_uids_tx,
+            alarms_tx: alarms_tx.clone(),
             subs: Subs::default(),
             queries: Queries::default(),
             transfers: Transfers::default(),
@@ -215,6 +235,7 @@ impl DeviceSession {
             state_rx,
             channels_rx,
             channel_uids_rx,
+            alarms_tx,
             query_timeout,
             queue_frames,
             search_permits,
@@ -313,6 +334,15 @@ impl DeviceSession {
     /// after login; `None` until it arrives.
     pub fn watch_channels(&self) -> watch::Receiver<Option<Vec<ChannelInfo>>> {
         self.channels_rx.clone()
+    }
+
+    /// The device's alarm-state pushes (command 33), each a full snapshot,
+    /// from now on. The session subscribes to them after every login
+    /// (command 192) unless [`SessionConfig::alarm_report`] is off. A
+    /// receiver that falls more than a few pushes behind skips to newer
+    /// ones (`RecvError::Lagged`).
+    pub fn alarms(&self) -> broadcast::Receiver<Arc<AlarmPush>> {
+        self.alarms_tx.subscribe()
     }
 
     /// The current connection state.
@@ -566,6 +596,7 @@ struct Ctx {
     state_tx: watch::Sender<ConnState>,
     channels_tx: watch::Sender<Option<Vec<ChannelInfo>>>,
     channel_uids_tx: watch::Sender<HashMap<u8, String>>,
+    alarms_tx: broadcast::Sender<Arc<AlarmPush>>,
     subs: Subs,
     queries: Queries,
     transfers: Transfers,
@@ -839,6 +870,21 @@ where
     }
     info!("logged in");
     ctx.conn_gen += 1;
+    // Ask for detection pushes (192), as the official client does right
+    // after login. Its empty reply needs no handling; the pushes (33) are
+    // recognized by command number.
+    if ctx.cfg.alarm_report {
+        let sent = match c.session.start_alarm_report() {
+            Ok((_, bytes)) => c.send(&bytes).await,
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(reason) = sent {
+            return Exit::Failed {
+                reached_login: true,
+                reason,
+            };
+        }
+    }
     ctx.state_tx.send_replace(ConnState::Connected);
     match connected_loop(ctx, &mut c).await {
         Ok(()) => {
@@ -1138,6 +1184,22 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
                 }
             }
         }
+        Event::Control {
+            command: 33, xml, ..
+        } => match detection::parse_alarm_event_list(&xml) {
+            Ok(states) => {
+                // No receiver is fine: nobody is listening.
+                let _ = ctx.alarms_tx.send(Arc::new(AlarmPush {
+                    connection: ctx.conn_gen,
+                    states,
+                }));
+            }
+            Err(e) => {
+                if let Some(n) = demux_log.allow() {
+                    warn!(suppressed = n, error = %e, "unreadable alarm state");
+                }
+            }
+        },
         Event::Control {
             command: 145, xml, ..
         } => match xml::parse_channel_info_list(&xml) {

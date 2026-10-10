@@ -19,7 +19,8 @@
 //!   a slow one never affects another. A subscriber that attaches mid-stream
 //!   gets the stream info, then video from the next keyframe.
 //! - **Read-only**: only commands the protocol crate's allowlist can build are
-//!   ever sent (login, preview start and stop, keepalive, the read-only
+//!   ever sent (login, preview start and stop, keepalive, the detection
+//!   subscription (192) behind [`DeviceSession::alarms`], the read-only
 //!   info queries behind [`DeviceSession::query`], and the recording
 //!   searches, cover images, and downloads of [`DeviceSession::search_files`]
 //!   and its siblings).
@@ -47,7 +48,7 @@ mod transport;
 pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
 pub use config::{BackoffConfig, SessionConfig};
 pub use queue::{Item, Subscription};
-pub use supervisor::{ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
+pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
 pub use transport::{Connector, TcpConnector};
 
 use std::sync::atomic::{AtomicBool, Ordering};

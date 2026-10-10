@@ -94,3 +94,60 @@ async fn queries_fail_when_the_login_is_refused() {
     );
     s.close().await;
 }
+
+async fn next(
+    rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<bc_session::AlarmPush>>,
+) -> std::sync::Arc<bc_session::AlarmPush> {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("an alarm push in time")
+        .expect("the session is open")
+}
+
+#[tokio::test]
+async fn detection_pushes_arrive_after_the_subscription() {
+    let mut cfg = mock_nvr::Config::new(fixture());
+    cfg.channels = 3;
+    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let s = session(&nvr, "example-password");
+    let mut alarms = s.alarms();
+    // The first push after 192 is a full, idle snapshot.
+    let first = next(&mut alarms).await;
+    assert_eq!(first.connection, 1);
+    assert_eq!(first.states.len(), 3);
+    assert!(first.states.iter().all(|st| st.is_idle()));
+    assert_eq!(nvr.alarm_subscribers(), 1);
+    assert_eq!(nvr.command_count(192), 1);
+
+    assert!(nvr.set_alarm(2, "MD", "people"));
+    let p = next(&mut alarms).await;
+    assert!(p.states[2].motion());
+    assert_eq!(p.states[2].ai_types, vec!["people"]);
+    assert!(p.states[0].is_idle());
+    // No change, no push; then back to idle.
+    assert!(nvr.set_alarm(2, "MD", "people"));
+    assert!(nvr.set_alarm(2, "", ""));
+    let p = next(&mut alarms).await;
+    assert!(p.states[2].is_idle());
+    assert!(!nvr.set_alarm(9, "MD", ""));
+    s.close().await;
+    // The mock forgets the subscription when its side of the session ends.
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while nvr.alarm_subscribers() != 0 {
+        assert!(std::time::Instant::now() < end, "subscription not dropped");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn no_detection_subscription_when_turned_off() {
+    let nvr = spawn_mock(1);
+    let mut cfg = SessionConfig::new("example-user", "example-password");
+    cfg.alarm_report = false;
+    let s = DeviceSession::spawn(TcpConnector::new(nvr.addr()), cfg);
+    // A query round trip proves the session is logged in.
+    s.query(Command::VersionInfo, None).await.unwrap();
+    assert_eq!(nvr.command_count(192), 0);
+    assert_eq!(nvr.alarm_subscribers(), 0);
+    s.close().await;
+}

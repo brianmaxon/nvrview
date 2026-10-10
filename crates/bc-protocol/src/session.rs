@@ -64,6 +64,9 @@ pub enum Command {
     EventSearchClose = 274,
     /// 298: cover image (one keyframe) for a time range.
     Cover = 298,
+    /// 192: start alarm report: subscribes this session to the device's
+    /// detection pushes (33). Viewing tier: it changes no settings.
+    AlarmReport = 192,
 }
 
 impl Command {
@@ -95,6 +98,7 @@ impl Command {
             273 => Command::EventSearchNext,
             274 => Command::EventSearchClose,
             298 => Command::Cover,
+            192 => Command::AlarmReport,
             _ => return None,
         })
     }
@@ -410,6 +414,14 @@ impl Session {
     pub fn keepalive(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = self.alloc_id()?;
         self.send(Command::Keepalive, id, &[], &[])
+    }
+
+    /// Builds the alarm-report subscription (command 192, empty body), sent
+    /// once after login. The device then pushes alarm state (command 33,
+    /// see [`crate::detection`]) with the returned message ID.
+    pub fn start_alarm_report(&mut self) -> Result<(u32, Vec<u8>), SessionError> {
+        let id = self.alloc_id()?;
+        Ok((id, self.send(Command::AlarmReport, id, &[], &[])?))
     }
 
     /// Builds a read-only info query: 80, 146, or 199 (empty body), or 318
@@ -1013,17 +1025,52 @@ mod tests {
     }
 
     #[test]
+    fn alarm_report_and_its_pushes() {
+        assert!(Session::new(USER, PASSWORD).start_alarm_report().is_err());
+        let (mut s, key) = logged_in();
+        let (id, bytes) = s.start_alarm_report().unwrap();
+        let m = decode_one(&bytes);
+        assert_eq!(m.header.command, 192);
+        assert_eq!(m.header.message_id, id);
+        assert!(m.body.is_empty());
+        // The device's state pushes carry the 192 request's message ID.
+        let push = device_xml(
+            &key,
+            33,
+            id,
+            200,
+            "<AlarmEventList><AlarmEvent><channelId>1</channelId><status>MD</status>\
+             <AItype>people</AItype></AlarmEvent></AlarmEventList>",
+        );
+        match s.handle(&decode_one(&push)).unwrap() {
+            Event::Control {
+                command: 33,
+                message_id,
+                xml,
+                ..
+            } => {
+                assert_eq!(message_id, id);
+                let list = crate::detection::parse_alarm_event_list(&xml).unwrap();
+                assert_eq!(list[0].ai_types, vec!["people"]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn allowlist() {
         for n in [
-            1, 2, 3, 4, 14, 15, 16, 80, 93, 142, 143, 144, 145, 146, 199, 272, 273, 274, 298, 318,
+            1, 2, 3, 4, 14, 15, 16, 80, 93, 142, 143, 144, 145, 146, 192, 199, 272, 273, 274, 298,
+            318,
         ] {
             assert!(Command::is_allowed(n));
             assert_eq!(Command::from_number(n).unwrap().number(), n);
         }
-        // Never: playback by file (5, 7, 123, 381–383, 8, 9: not needed yet)
-        // and, above all, 303 (delete recording files).
+        // Never: playback by file (5, 7, 123, 381–383, 8, 9: not needed yet),
+        // 193 (stop alarm report: the session simply logs out), 300 (writes
+        // the AI configuration) and, above all, 303 (delete recording files).
         for n in [
-            0, 5, 7, 8, 9, 10, 13, 44, 58, 76, 102, 123, 303, 381, 511, 600,
+            0, 5, 7, 8, 9, 10, 13, 33, 44, 58, 76, 102, 123, 193, 300, 303, 381, 511, 600,
         ] {
             assert!(!Command::is_allowed(n), "{n}");
         }
