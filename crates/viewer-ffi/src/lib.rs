@@ -44,6 +44,8 @@ pub enum NvStatus {
     NV_ERR_INTERNAL = -5,
     /// the output buffer is too small; *len holds the size needed
     NV_ERR_BUFFER_TOO_SMALL = -6,
+    /// talk-back (camera motion control) is not enabled for that camera
+    NV_ERR_NOT_PERMITTED = -7,
 }
 
 #[repr(C)]
@@ -284,6 +286,7 @@ fn error_status(e: CoreError) -> NvStatus {
         CoreError::Closed => NvStatus::NV_ERR_CLOSED,
         CoreError::Limit => NvStatus::NV_ERR_LIMIT,
         CoreError::Internal => NvStatus::NV_ERR_INTERNAL,
+        CoreError::NotPermitted => NvStatus::NV_ERR_NOT_PERMITTED,
     }
 }
 
@@ -942,6 +945,96 @@ pub unsafe extern "C" fn nv_tile_audio_level(
             put(rms, r);
         }
         NvStatus::NV_OK
+    })
+}
+
+/// Enables or disables talk-back (camera motion control) on one channel of
+/// a device, for this run of the core. Off until enabled; the app passes
+/// the user's per-camera setting after each nv_device_add. Disabling stops
+/// a running talk on that channel.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_talk_set_permission(
+    core: *mut NvCore,
+    device: u64,
+    channel: u8,
+    allowed: bool,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.set_talk_permission(device, channel, allowed)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Starts talk-back to a tile's camera and returns at once; progress
+/// arrives as `talk` events. NV_ERR_NOT_PERMITTED (and a `talk` `refused`
+/// event; nothing is sent to the device) unless nv_talk_set_permission
+/// enabled the camera.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_talk_start(core: *mut NvCore, tile: u64) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.talk_start(tile)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Queues `count` mono float samples (-1..1) at `sample_rate` Hz (8000 to
+/// 192000) for a tile's talk; the core resamples to 16 kHz, encodes, and
+/// sends them in real time. Samples for a tile without a talk are ignored.
+/// Short lock, may allocate: not from a real-time audio callback.
+///
+/// # Safety
+/// `core` is a live handle; `samples` is valid for reading `count` floats
+/// (or `count` is 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_talk_push(
+    core: *mut NvCore,
+    tile: u64,
+    samples: *const f32,
+    count: usize,
+    sample_rate: u32,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let pcm: &[f32] = if count == 0 {
+            &[]
+        } else if samples.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        } else {
+            // SAFETY: non-null and valid for `count` floats per the caller.
+            unsafe { std::slice::from_raw_parts(samples, count) }
+        };
+        status(c.talk_push(tile, pcm, sample_rate))
+    })
+}
+
+/// Ends a tile's talk: at once, or with `drain` after the audio already
+/// pushed has been sent. The device's close is sent either way.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_talk_stop(core: *mut NvCore, tile: u64, drain: bool) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.talk_stop(tile, drain)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
     })
 }
 

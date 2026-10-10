@@ -589,3 +589,104 @@ fn layouts_and_device_keys_through_the_c_interface() {
         2
     );
 }
+
+#[test]
+fn talk_back_through_the_c_interface() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+    cfg.channels = 2;
+    cfg.talk_channels = vec![1];
+    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let ctx = Box::new(Ctx::default());
+    let mut core: *mut NvCore = ptr::null_mut();
+    // SAFETY: valid callbacks and out pointer; `ctx` outlives the core.
+    assert_eq!(
+        unsafe { nv_core_new(ptr::null(), callbacks(&ctx), &mut core) },
+        NvStatus::NV_OK
+    );
+    ctx.core.store(core, Ordering::SeqCst);
+    let host = CString::new("127.0.0.1").unwrap();
+    let user = CString::new("example-user").unwrap();
+    let password = CString::new("example-password").unwrap();
+    let (mut dev, mut tile) = (0u64, 0u64);
+    let tone: Vec<f32> = (0..16_000).map(|i| 0.3 * (i as f32 * 0.2).sin()).collect();
+    let talk_state = |state: &str| {
+        let want = format!("\"state\":\"{state}\"");
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| j.starts_with("{\"type\":\"talk\"") && j.contains(&want))
+    };
+    // SAFETY: live core, NUL-terminated strings, valid pointers.
+    unsafe {
+        assert_eq!(
+            nv_device_add(
+                core,
+                host.as_ptr(),
+                nvr.addr().port(),
+                user.as_ptr(),
+                password.as_ptr(),
+                &mut dev
+            ),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_tile_open(core, dev, 1, NvStreamTier::NV_TIER_SUB as u32, &mut tile),
+            NvStatus::NV_OK
+        );
+        // Off by default.
+        assert_eq!(nv_talk_start(core, tile), NvStatus::NV_ERR_NOT_PERMITTED);
+        assert_eq!(
+            nv_talk_set_permission(core, dev + 100, 1, true),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(
+            nv_talk_set_permission(ptr::null_mut(), dev, 1, true),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(nv_talk_set_permission(core, dev, 1, true), NvStatus::NV_OK);
+        assert_eq!(nv_talk_start(core, tile), NvStatus::NV_OK);
+        assert_eq!(nv_talk_start(core, tile + 100), NvStatus::NV_ERR_UNKNOWN_ID);
+    }
+    wait_until("talk active", || talk_state("active"));
+    // SAFETY: live core; `tone` is valid for its length.
+    unsafe {
+        assert_eq!(
+            nv_talk_push(core, tile, ptr::null(), 10, 16_000),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_talk_push(core, tile, tone.as_ptr(), tone.len(), 4_000),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_talk_push(core, tile, ptr::null(), 0, 16_000),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_talk_push(core, tile, tone.as_ptr(), tone.len(), 16_000),
+            NvStatus::NV_OK
+        );
+        assert_eq!(nv_talk_stop(core, tile, true), NvStatus::NV_OK);
+    }
+    wait_until("talk stopped", || talk_state("stopped"));
+    assert!(
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| j.contains("\"state\":\"stopped\"") && j.contains("\"reason\":\"finished\""))
+    );
+    wait_until("closed at the device", || {
+        nvr.talk_log()
+            .first()
+            .is_some_and(|t| t.end == mock_nvr::talk::TalkEnd::Closed)
+    });
+    // 16000 samples at 16 kHz: 15 full records and one padded.
+    assert_eq!(nvr.talk_log()[0].records.len(), 16);
+    assert!(!ctx.bad.load(Ordering::SeqCst));
+    // SAFETY: live core, freed once.
+    unsafe { nv_core_free(core) };
+}
