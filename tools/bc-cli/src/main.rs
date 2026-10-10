@@ -9,8 +9,8 @@
 
 use bc_cli::analyze::Analysis;
 use bc_cli::{
-    CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, list_channels, record,
-    wait_logged_in,
+    CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, info_command,
+    info_query, list_channels, record, wait_logged_in,
 };
 use bc_protocol::recording;
 use bc_protocol::stream::StreamTier;
@@ -31,6 +31,8 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] capture
          --channel N --raw FILE.nvrrec [--tiers sub,main] [--seconds S]
          [--stagger S] [--restart TIER:EVERY_S] [--restart-gap S]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] query
+         80|146|199|318 [--channel N]
   bc-cli analyze FILE.nvrrec
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
@@ -45,6 +47,11 @@ capture records several tiers of one channel on one session and one clock
 (default 2); --restart stops one tier after EVERY_S seconds and starts it
 again --restart-gap seconds later (default 2), repeatedly, to sample start
 latency. Only preview start and stop are sent.
+query sends one read-only info query (80 device version, 146 stream info,
+199 capabilities, 318 a channel's version, which needs --channel) and prints
+the decrypted XML reply body to stdout, the reply status to stderr. Nothing
+else can be sent. The output can contain device identifiers (UIDs, serial
+numbers): keep it in the git-ignored captures/ directory, never commit it.
 analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
@@ -65,6 +72,10 @@ enum Action {
         cfg: CaptureConfig,
         raw: PathBuf,
         seconds: Option<u64>,
+    },
+    Query {
+        cmd: bc_protocol::session::Command,
+        channel: Option<u8>,
     },
 }
 
@@ -110,6 +121,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut stagger = Duration::from_secs(2);
     let (mut restart, mut restart_gap) = (None, Duration::from_secs(2));
     let mut file = None;
+    let mut number = None;
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -147,8 +159,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 frames = Some(value("--frames")?.parse().map_err(|_| "bad --frames")?);
             }
             "-h" | "--help" => return Err(String::new()),
-            "channels" | "record" | "capture" | "analyze" if command.is_none() => {
+            "channels" | "record" | "capture" | "analyze" | "query" if command.is_none() => {
                 command = Some(a);
+            }
+            _ if command.as_deref() == Some("query") && number.is_none() => {
+                number = Some(a.parse::<u32>().map_err(|_| format!("bad query {a}"))?);
             }
             _ if command.as_deref() == Some("analyze") && file.is_none() => {
                 file = Some(PathBuf::from(a));
@@ -204,6 +219,19 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
         }
         Some("analyze") => return Ok(Parsed::Analyze(file.ok_or("analyze needs a file")?)),
+        Some("query") => {
+            let n = number.ok_or("query needs a command number: 80, 146, 199, or 318")?;
+            let cmd = info_command(n, channel).ok_or_else(|| {
+                if n == 318 {
+                    "query 318 needs --channel".to_owned()
+                } else if matches!(n, 80 | 146 | 199) {
+                    format!("query {n} takes no --channel")
+                } else {
+                    format!("query {n} is not a read-only info query (80, 146, 199, 318)")
+                }
+            })?;
+            Action::Query { cmd, channel }
+        }
         _ => return Err("missing command".into()),
     };
     Ok(Parsed::Device(Args {
@@ -399,6 +427,18 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             };
             if let Some(e) = expected.filter(|e| !ext.eq_ignore_ascii_case(e)) {
                 eprintln!("note: the stream is {codec}; players may need a .{e} extension");
+            }
+            Ok(())
+        }
+        Action::Query { cmd, channel } => {
+            let reply = tokio::select! {
+                r = info_query(session, cmd, channel, LOGIN_LIMIT) => r?,
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            };
+            eprintln!("status {}", reply.status);
+            print!("{}", reply.xml);
+            if !reply.xml.is_empty() && !reply.xml.ends_with('\n') {
+                println!();
             }
             Ok(())
         }

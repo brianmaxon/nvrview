@@ -1,6 +1,8 @@
 //! bc-cli's library against the in-process mock NVR.
 
-use bc_cli::{CliError, RecordLimits, list_channels, record, wait_logged_in};
+use bc_cli::{
+    CliError, RecordLimits, info_command, info_query, list_channels, record, wait_logged_in,
+};
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, SessionConfig, TcpConnector};
 use mock_nvr::fixture::Fixture;
@@ -244,4 +246,25 @@ async fn captures_tiers_and_analyzes_them() {
     assert_eq!(cells[6], "yes", "{row}");
     let burst: usize = cells[8].parse().unwrap();
     assert!(burst >= 5, "{row}\n{md}");
+}
+
+#[tokio::test]
+async fn info_queries_return_the_reply_body() {
+    let nvr = spawn_mock("h264-basic.h264", 2);
+    let s = session(&nvr, "example-password");
+    for (n, ch, tag) in [
+        (80, None, "<VersionInfo"),
+        (146, None, "<StreamInfoList"),
+        (199, None, "<Support"),
+        (318, Some(1), "<channelId>1</channelId>"),
+    ] {
+        let cmd = info_command(n, ch).unwrap();
+        let r = info_query(&s, cmd, ch, LIMIT).await.unwrap();
+        assert!(r.xml.contains(tag), "{n}: {} {}", r.status, r.xml);
+    }
+    // Only the read-only queries: nothing else can be named.
+    for (n, ch) in [(318, None), (80, Some(1)), (3, None), (31, None), (0, None)] {
+        assert!(info_command(n, ch).is_none(), "{n}");
+    }
+    s.close().await;
 }
