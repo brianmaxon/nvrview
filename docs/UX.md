@@ -72,3 +72,72 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   source (camera AI or this Mac).
 - Measured against the budgets in ARCHITECTURE.md: the interface must never
   cost frames. Overlays are lightweight layers above the Metal surface.
+
+## Keyboard
+
+Single-key shortcuts act on the window with the keyboard focus and never fire
+while a text field is being edited (Settings, a layout's name). Letters work
+in either case.
+
+| Key | Action |
+| --- | --- |
+| F | Toggle full screen for the window (the system's own transition). |
+| S | Show or hide the sidebar. |
+| Arrow keys | Move the selection to the neighboring tile in that direction, by position in the layout (nearest tile whose center lies in that direction), not by list order. In focus, switch the focused camera to the neighbor in that direction. |
+| Space | Toggle the selected tile between focus (it fills the stage) and the grid it came from, as a continuous animation (see "Full screen and focus"). Combined with F, Space gives full-screen video of one camera and back. |
+| 0 | Reset digital zoom on the selected tile. |
+| ⌘L (Ctrl+L) | Listen to the selected tile (as before). |
+
+Selection is visible as a thin outline that fades with the other chrome, and
+follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
+overlay (Windows) so they can be discovered.
+
+## Full screen chrome
+
+In full screen, every header, toolbar, sidebar edge, and hover control moves
+out of the way about 3 seconds after the last interaction (pointer movement,
+a click, a key, a scroll) and comes back on the next one. The video is never
+resized or redrawn when the chrome comes and goes: overlays slide or fade
+above it. Corner indicators (below) stay.
+
+## Corner indicators
+
+Each tile shows small, subtle symbols for what is happening now: motion,
+person, vehicle, animal, face, package, visitor (doorbell), and sound alarms
+(smoke, CO), one symbol per active kind, from device detections and the
+computer's own (vision or sound). They are always visible, including in full
+screen and on idle tiles, unlike the hover chrome, so activity can be seen at
+a glance across a wall of cameras.
+
+- Placed in one corner of the tile, the same corner on every tile; which of
+  the four corners is a setting (default top right), so they can avoid
+  timestamps or logos the camera burns into the picture.
+- Small (about the size of the picture's own overlay text at the tile's
+  size), monochrome with a soft shadow for legibility on any picture, a
+  restrained accent for sound alarms; they appear and disappear with short
+  fades as detections start and stop (holding about 2 seconds after a stop
+  so brief gaps do not flicker).
+- Never an "all clear": no symbol means no current detection reported, not
+  that nothing is there.
+- A tooltip or accessibility label names each symbol and its source.
+
+## Digital zoom
+
+Every tile and the focused or full-screen video can be zoomed digitally to
+look at a detail.
+
+- Mouse wheel or trackpad pinch zooms around the pointer; trackpad
+  two-finger scroll, or dragging, pans while zoomed. Zoom ranges from 1x to
+  about 8x, smoothly, at display rate.
+- The zoom belongs to the tile: it survives layout changes and focus, and
+  when focus switches the camera to the main stream the same region is
+  shown, now with the main stream's detail (the region is kept in picture
+  coordinates, independent of resolution).
+- Double-click keeps its meaning (focus); 0 or a small reset control in the
+  hover header returns to 1x; zoom never changes what is recorded or
+  streamed.
+- A small inset map of the whole picture, with the visible region outlined,
+  shows while zoomed and fades with the chrome.
+- How: zoom only changes the source rectangle the renderer samples from the
+  decoded picture (no extra decoding or copies), so it costs nothing per
+  frame beyond the drawing that already happens.
