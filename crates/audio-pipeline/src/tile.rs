@@ -1,13 +1,14 @@
-//! One tile's audio: decode, timestamp, play out, tap.
+//! One tile's audio: decode, timestamp, play out, tap, and 16 kHz mono for
+//! sound analysis.
 
 use crate::decode::{AudioCodec, DecodeError, Decoder, PcmFormat};
 use crate::delay::DelayControl;
+use crate::mono::{Mono16k, MonoBlock};
 use crate::output::AudioOutput;
 use crate::playout::{Block, Playout, PlayoutStats};
 use crate::presentation::{PresentationEstimator, PresentationMap};
-use crate::resample::Resampler;
-use crate::tap::{TAP_RATE, TapBlock, TapSender, TapStats};
-use crate::timestamp::{Stamp, Timeline, TimestampStats, Timestamper};
+use crate::tap::{TapBlock, TapSender, TapStats};
+use crate::timestamp::{Timeline, TimestampStats, Timestamper};
 
 /// Settings of a tile.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -78,9 +79,8 @@ pub struct AudioStats {
 
 struct TapState {
     sender: TapSender,
-    key: Option<(PcmFormat, u32)>,
-    resampler: Option<Resampler>,
-    mono: Vec<f32>,
+    /// No block sent yet: the first one is marked as a discontinuity.
+    fresh: bool,
 }
 
 /// The per-tile audio pipeline. Lives on the tile's thread; every call is
@@ -99,6 +99,9 @@ pub struct TileAudio {
     muted: bool,
     playout: Option<Playout>,
     tap: Option<TapState>,
+    /// The 16 kHz mono conversion, run while a tap or `mono_output` reads it.
+    mono: Mono16k,
+    mono_output: bool,
     pcm: Vec<f32>,
     stats: AudioStats,
     owner: u64,
@@ -131,6 +134,8 @@ impl TileAudio {
             muted: false,
             playout: None,
             tap: None,
+            mono: Mono16k::default(),
+            mono_output: false,
             pcm: Vec::new(),
             stats: AudioStats::default(),
             owner: 0,
@@ -150,8 +155,31 @@ impl TileAudio {
         self.level = level;
     }
 
+    /// Keeps the 16 kHz mono form of every record available through
+    /// [`Self::mono_block`] (for sound analysis), audible or not, tapped or
+    /// not. Off by default; a tap turns the conversion on by itself.
+    pub fn set_mono_output(&mut self, enabled: bool) {
+        self.mono_output = enabled;
+        if !self.mono_wanted() {
+            self.mono.reset();
+        }
+    }
+
+    /// The 16 kHz mono samples of the last record pushed, while
+    /// [`Self::set_mono_output`] or a tap is on; `None` when that record
+    /// produced none (rejected, or still inside the resampler's look-ahead).
+    /// The same samples the tap carries.
+    pub fn mono_block(&self) -> Option<MonoBlock<'_>> {
+        self.mono.block()
+    }
+
+    fn mono_wanted(&self) -> bool {
+        self.mono_output || self.tap.is_some()
+    }
+
     /// One audio record, in stream order.
     pub fn push(&mut self, rec: AudioRecord<'_>) {
+        self.mono.clear_ready();
         self.stats.records += 1;
         self.stats.bytes += rec.data.len() as u64;
         let mut pcm = std::mem::take(&mut self.pcm);
@@ -203,6 +231,7 @@ impl TileAudio {
         arrived_us: u64,
         wall_clock_us: Option<i64>,
     ) {
+        self.mono.clear_ready();
         let channels = format.channels.max(1);
         let frames = pcm.len() / channels;
         if let Some(level) = &self.level {
@@ -280,8 +309,12 @@ impl TileAudio {
                 now_us: arrived_us as f64,
             });
         }
-        if let Some(t) = self.tap.as_mut() {
-            t.push(format, pcm, &stamp, wall_clock_us);
+        if self.mono_wanted() {
+            self.mono
+                .push(format, pcm, &stamp, wall_clock_us, arrived_us);
+            if let (Some(t), Some(b)) = (self.tap.as_mut(), self.mono.block()) {
+                t.push(&b);
+            }
         }
     }
 
@@ -347,10 +380,11 @@ impl TileAudio {
     pub fn set_tap(&mut self, tap: Option<TapSender>) {
         self.tap = tap.map(|sender| TapState {
             sender,
-            key: None,
-            resampler: None,
-            mono: Vec::new(),
+            fresh: true,
         });
+        if !self.mono_wanted() {
+            self.mono.reset();
+        }
     }
 
     /// Current counters and state.
@@ -404,56 +438,15 @@ impl TileAudio {
 }
 
 impl TapState {
-    fn push(&mut self, format: PcmFormat, pcm: &[f32], stamp: &Stamp, wall: Option<i64>) {
-        let ch = format.channels.max(1);
-        let key = (format, stamp.epoch);
-        let discontinuity = self.key != Some(key);
-        if discontinuity {
-            self.key = Some(key);
-            self.resampler = (format.sample_rate != TAP_RATE).then(|| {
-                let mut r = Resampler::new(1, format.sample_rate, TAP_RATE);
-                r.reset(stamp.first_sample as f64);
-                r
-            });
-        }
-        self.mono.clear();
-        if ch == 1 {
-            self.mono.extend_from_slice(pcm);
-        } else {
-            self.mono.extend(
-                pcm.chunks_exact(ch)
-                    .map(|f| f.iter().sum::<f32>() / ch as f32),
-            );
-        }
-        let (samples, first_sample, camera) = match self.resampler.as_mut() {
-            None => (
-                self.mono.clone(),
-                stamp.first_sample,
-                stamp.timeline.map(|t| t.at(stamp.first_sample as f64)),
-            ),
-            Some(r) => {
-                r.push(stamp.first_sample as i64, &self.mono);
-                let pos = r.position();
-                let step = f64::from(format.sample_rate) / f64::from(TAP_RATE);
-                let mut out = Vec::with_capacity(self.mono.len() * 2 + 4);
-                r.produce(step, usize::MAX, &mut out);
-                (
-                    out,
-                    (pos / step).round() as u64,
-                    stamp.timeline.map(|t| t.at(pos)),
-                )
-            }
-        };
-        if samples.is_empty() {
-            return;
-        }
+    fn push(&mut self, b: &MonoBlock<'_>) {
+        let fresh = std::mem::take(&mut self.fresh);
         self.sender.push(TapBlock {
-            samples,
-            epoch: stamp.epoch,
-            first_sample,
-            camera_time_us: camera,
-            wall_clock_us: wall,
-            discontinuity,
+            samples: b.samples.to_vec(),
+            epoch: b.epoch,
+            first_sample: b.first_sample,
+            camera_time_us: b.camera_time_us,
+            wall_clock_us: b.wall_clock_us,
+            discontinuity: b.discontinuity || fresh,
         });
     }
 }

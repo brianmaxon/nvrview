@@ -15,6 +15,7 @@ crossbeam-queue = "0.3.8"
 # Layouts are JSON the app passes in; they are parsed and validated with a
 # real parser (src/store.rs).
 serde_json = "1"
+sound-events = { path = "../sound-events" }
 video-pipeline = { path = "../video-pipeline" }
 viewer-log = { path = "../viewer-log" }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }

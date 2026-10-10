@@ -42,6 +42,7 @@ pub mod clock;
 mod device;
 mod events;
 mod json;
+pub mod sound;
 pub mod store;
 mod tile;
 
@@ -166,6 +167,10 @@ pub struct CoreConfig {
     /// How long after the first 400 the session keeps waiting before the
     /// tile reports `tile_error` `start_rejected`; zero makes a 400 final.
     pub preview_wait_limit: Duration,
+    /// Sound analysis of every live tile with audio: smoke and CO alarm
+    /// patterns as `detection` events, and per-second loudness
+    /// ([`Core::tile_loudness`]). See [`sound`].
+    pub sound: sound::SoundSettings,
 }
 
 impl Default for CoreConfig {
@@ -184,6 +189,7 @@ impl Default for CoreConfig {
             tier_switch_align_cap: Duration::from_millis(300),
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            sound: sound::SoundSettings::default(),
         }
     }
 }
@@ -310,6 +316,7 @@ impl Core {
                 .map_err(|_| CoreError::Internal)?,
         );
         let event_sink = events.sink();
+        let sound = Arc::new(sound::SoundHub::new(config.sound, event_sink.clone()));
         let tile_ctx = TileContext {
             runtime: handle.clone(),
             callbacks,
@@ -321,6 +328,7 @@ impl Core {
             tier_switch_timeout: config.tier_switch_timeout,
             tier_switch_align_cap: config.tier_switch_align_cap,
             audio,
+            sound,
         };
         let layouts = store::Layouts::open(config.data_dir.clone());
         let device_keys = store::DeviceKeys::open(config.data_dir.clone());
@@ -885,6 +893,24 @@ impl Core {
             return (0.0, 0.0);
         }
         self.tile_ctx.audio.level(tile)
+    }
+
+    /// A live tile's recent loudness: peak and RMS per second, one byte per
+    /// value, for the last [`sound::SoundSettings::loudness_history_s`]
+    /// seconds at most, measured on its decoded audio whether audible or
+    /// not. Empty for a tile without audio so far, or with loudness kept
+    /// for no seconds. Takes two brief locks; callable from any thread
+    /// outside callbacks.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn tile_loudness(&self, tile: u64) -> Result<sound::TileLoudness, CoreError> {
+        self.check_api()?;
+        if !lock(&self.registry).tiles.contains_key(&tile) {
+            return Err(CoreError::UnknownId);
+        }
+        Ok(self.tile_ctx.sound.loudness(tile).unwrap_or_default())
     }
 
     /// Render calls that found another in progress (and rendered silence),

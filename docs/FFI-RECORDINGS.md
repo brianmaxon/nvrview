@@ -241,6 +241,54 @@ Labels from the app:
   verifier treat them like any other detection, under the same rule: a
   missed sound is never shown as "no alarm".
 
+### Live analysis: what is implemented (ABI 3)
+
+The core runs the envelope and the alarm detector on every live tile with
+audio (`viewer_core::sound`), on the tile's own thread right after each
+record is decoded, on the record's 16 kHz mono form (the samples the tap
+carries; `TileAudio::mono_block`). That costs about 10 µs per 64 ms record
+(0.016% of one core on Apple M3 Max, `cargo run --release -p viewer-core
+--example sound_cost`) and allocates nothing per record (a test with a
+counting allocator), so it needs no queue or thread of its own.
+
+- **Alarms** go out as live `detection` events with `source` `mac_audio`
+  (docs/FFI.md, "Events"); no ABI change. Several tiles of one channel
+  report one episode once; a stalled stream (3 s without audio) or the last
+  tile closing ends it.
+- **Loudness**: each live tile keeps the last 600 seconds (Rust:
+  `CoreConfig::sound.loudness_history_s`, at most 3600) in a ring of one
+  byte per value, peak and RMS, about 1.2 KB per tile; seconds are Unix
+  seconds, anchored at the wall clock when the stream's first record
+  arrived (re-anchored after a discontinuity or a gap). Rust reads it with
+  `Core::tile_loudness`.
+- **Not done yet**: recordings, `nv_sound_watch`, `nv_sound_labels_put`,
+  storing anything in the index, and the C functions below.
+
+Why a pull API for the live envelope and not a `sound_level` event: the
+app needs the envelope only while it draws a lane (a tile's level meter
+already has `nv_tile_audio_level`), so an event per tile per second would
+mostly be thrown away, and with many tiles it would crowd the event queue
+that carries state changes. A pull answers from memory when the lane is
+drawn, in the same byte form as `nv_recordings_loudness`, and costs nothing
+while nobody asks. Adding it to ABI 3 would change the header, so it is
+proposed here for ABI 4:
+
+```c
+/* A live tile's recent loudness, oldest first, one byte per second and
+ * value (0: no audio analyzed; 1..128: -127..0 dBFS, dBFS = byte - 128).
+ * Writes at most `cap` values to each of `peak` and `rms` (the newest when
+ * more are kept), the Unix second of the first to `*start_s`, and the
+ * count to `*len` (0 before any audio). Answers from memory under a brief
+ * lock, without allocating; any thread outside callbacks. */
+NvStatus nv_tile_loudness(NvCore *core, uint64_t tile, uint8_t *peak, uint8_t *rms,
+                          size_t cap, int64_t *start_s, size_t *len);
+```
+
+The Rust core already has what it wraps (`Core::tile_loudness`). Once the
+index exists, live seconds are also written to it, so
+`nv_recordings_loudness` covers live time too and the timeline needs only
+that call.
+
 ## 3. Incidents and the user's edits
 
 Incidents are derived, not stored: `recordings::incident::group` over the
@@ -880,8 +928,12 @@ NV_ERR_NOT_CONFIGURED = -8,    /* nv_recordings_configure not called, or no down
 
 /* New types: NvThumbKind, NvThumbnail, NvSeekMode, NvPlaybackState
  * (sections 4 and 6). New functions: the nv_recordings_*, nv_incident*,
- * nv_camera_groups_*, nv_thumbnail_*, nv_download*, nv_playback_*, and
- * nv_edit_compute declarations above. Nothing existing changes. */
+ * nv_camera_groups_*, nv_thumbnail_*, nv_download*, nv_playback_*,
+ * nv_sound_*, nv_tile_loudness, and nv_edit_compute declarations above.
+ * NvConfig gains, at its end (zero keeps the default):
+ *   bool sound_alarms_off;        -- no smoke and CO alarm detection
+ *   uint32_t loudness_history_s;  -- live loudness kept per tile; 0: 600 s
+ * No existing function changes. */
 ```
 
 `NV_PENDING` is the first positive status: apps that test `== NV_OK` treat

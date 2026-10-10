@@ -781,6 +781,7 @@ dependencies = [
  "libc",
  "mock-nvr",
  "serde_json",
+ "sound-events",
  "tempfile",
  "tokio",
  "tracing",

@@ -11,6 +11,7 @@
 use crate::audio::{AudioFrame, AudioHub, TileAudio, TileAudioControl, TileAudioLink, TileConfig};
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
+use crate::sound::{SoundHub, TileSoundLink};
 use crate::{Callbacks, Clock, in_callback};
 use bc_protocol::media::{Codec as MediaCodec, Record};
 use bc_protocol::stream::StreamTier;
@@ -91,6 +92,7 @@ pub(crate) struct TileContext {
     pub(crate) tier_switch_timeout: Duration,
     pub(crate) tier_switch_align_cap: Duration,
     pub(crate) audio: Arc<AudioHub>,
+    pub(crate) sound: Arc<SoundHub>,
 }
 
 /// Why a tile ended, as `tile_closed` reports it.
@@ -222,6 +224,7 @@ pub(crate) fn spawn(
     let events = ctx.events.clone();
     let hub = ctx.audio.clone();
     let meter = audio.meter.clone();
+    let sound = ctx.sound.add_tile(id, device, channel);
     let state = TileThread {
         closed_reported: closed_reported.clone(),
         id,
@@ -240,8 +243,10 @@ pub(crate) fn spawn(
             let mut a = TileAudio::new(TileConfig::default());
             a.set_owner(id);
             a.set_level_meter(meter);
+            a.set_mono_output(sound.is_some());
             a
         },
+        sound,
         talkback_ignored: 0,
         sequence: 0,
         last_video_pts: None,
@@ -493,6 +498,8 @@ struct TileThread {
     audio: TileAudio,
     /// The app's settings for it.
     link: TileAudioLink,
+    /// Sound analysis of the decoded audio (`None` when off).
+    sound: Option<TileSoundLink>,
     /// Talk-back records dropped.
     talkback_ignored: u64,
     /// Media items seen, video and audio alike.
@@ -614,6 +621,9 @@ impl TileThread {
                 // The session ended for good (the device refused the
                 // login): nothing will ever arrive.
                 _ = std::future::ready(()), if s.current.sub.is_none() => {
+                    if let Some(snd) = self.sound.as_mut() {
+                        snd.end();
+                    }
                     if !self.stop.load(Ordering::SeqCst) {
                         report_closed(
                             &self.ctx.events,
@@ -634,6 +644,9 @@ impl TileThread {
             }
             self.link.apply(&mut self.audio);
             let now_us = self.ctx.clock.now_us();
+            if let Some(snd) = self.sound.as_mut() {
+                snd.tick(now_us.saturating_mul(1000));
+            }
             s.current.p.tick(now_us);
             if let Some(st) = s.starting.as_mut() {
                 st.g.p.tick(now_us);
@@ -658,6 +671,10 @@ impl TileThread {
                     overflow_seen = overflow;
                 }
             }
+        }
+        // Alarm episodes end with the tile (before `tile_closed`).
+        if let Some(snd) = self.sound.as_mut() {
+            snd.end();
         }
         // The subscriptions drop here, on this thread, before the core's
         // close returns: the session stops the previews.
@@ -880,6 +897,9 @@ impl TileThread {
                 }
                 self.link.apply(&mut self.audio);
                 self.audio.push(frame.record());
+                if let (Some(snd), Some(b)) = (self.sound.as_mut(), self.audio.mono_block()) {
+                    snd.push(&b);
+                }
                 self.link.pushed();
             }
             Item::Media(Record::Info { .. }) => {}
