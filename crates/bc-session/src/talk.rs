@@ -27,6 +27,10 @@ use tracing::{debug, info, warn};
 
 /// One record's duration.
 pub(crate) const RECORD: Duration = Duration::from_micros(RECORD_DURATION_US);
+/// After the last record of a finishing talk, how long to wait for the
+/// device to acknowledge every record before closing. (The official client
+/// closed about 50 ms after its last record.)
+const DRAIN_WAIT: Duration = Duration::from_millis(250);
 
 /// Where a talk is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -496,6 +500,8 @@ struct Entry {
     opened: Instant,
     /// The reply of the 201 said "refused" (no close needed).
     refused: Option<u16>,
+    /// A finishing talk sent its last record at this time.
+    drained: Option<Instant>,
 }
 
 /// The supervisor's talks.
@@ -581,6 +587,7 @@ impl Talks {
                             next_due: None,
                             opened: now,
                             refused: None,
+                            drained: None,
                         },
                     );
                 }
@@ -625,8 +632,16 @@ impl Talks {
                 Phase::Active => {
                     let reason = Self::due_to_end(e, session, &self.limits, now).or_else(|| {
                         match Self::send_due(e, session, &self.limits, now, &mut out) {
-                            // Everything buffered went out.
-                            Ok(true) => Some(StopReason::Finished),
+                            // Everything buffered went out: close once the
+                            // device has acknowledged it, or soon after.
+                            Ok(true) => {
+                                let since = *e.drained.get_or_insert(now);
+                                let s = &e.shared;
+                                let acked = s.records_acked.load(Ordering::Relaxed)
+                                    >= s.records_sent.load(Ordering::Relaxed);
+                                (acked || now.duration_since(since) >= DRAIN_WAIT)
+                                    .then_some(StopReason::Finished)
+                            }
                             Ok(false) => None,
                             Err(err) => {
                                 debug!(%err, "talk audio not built");
@@ -746,6 +761,9 @@ impl Talks {
                         || (b.ending == Ending::Finish && !b.samples.is_empty());
                     if ready {
                         take(e.next_due.unwrap_or_else(Instant::now));
+                    }
+                    if let Some(t) = e.drained {
+                        take(t + DRAIN_WAIT);
                     }
                 }
             }

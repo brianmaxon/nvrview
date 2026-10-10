@@ -110,6 +110,8 @@ async fn audio_arrives_decodable_and_in_real_time_then_finishes_with_a_close() {
     let n = src.len().div_ceil(SAMPLES_PER_RECORD);
     assert_eq!(log.records.len(), n);
     assert_eq!(talk.stats().records_sent, n as u64);
+    // The close waited for the device to acknowledge every record.
+    assert_eq!(talk.stats().records_acked, n as u64);
     assert!(log.continuous());
     assert_eq!(log.samples().unwrap(), expected(&src));
     // Paced by a 64 ms clock: never ahead of it, and the whole span within
