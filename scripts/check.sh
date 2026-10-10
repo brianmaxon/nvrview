@@ -29,16 +29,19 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   step "macOS app tests"
   (cd apps/macos && swift test)
 
-  # Opens a window briefly (without taking focus), so it needs a desktop session.
-  if [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
-    step "macOS demo self-test"
+  # Opens a window for a few seconds, behind all other windows and without
+  # taking focus, so it needs a desktop session. NVRVIEW_GUI_TESTS=0 skips it.
+  if [ "${NVRVIEW_GUI_TESTS:-1}" = "0" ]; then
+    step "macOS demo self-tests skipped (NVRVIEW_GUI_TESTS=0)"
+  elif [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
+    step "macOS demo self-test, Metal renderer"
     (cd apps/macos && swift build --product NVRViewDemo &&
       .build/debug/NVRViewDemo --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
-    step "macOS demo self-test, Metal renderer"
+    step "macOS demo self-test, display-layer renderer"
     (cd apps/macos &&
-      .build/debug/NVRViewDemo --renderer metal --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+      .build/debug/NVRViewDemo --renderer layer --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
   else
-    step "macOS demo self-test skipped (no desktop session)"
+    step "macOS demo self-tests skipped (no desktop session)"
   fi
 fi
 

@@ -2,17 +2,31 @@ import AppKit
 import SwiftUI
 import VideoKit
 
-// NVRViewDemo [--renderer layer|metal] [--tiles N] [--fps F] [--selftest SECONDS] file.h264|file.h265 ...
+// NVRViewDemo [--renderer metal|layer] [--tiles N] [--fps F]
+//             [--selftest SECONDS [--window behind|front|offscreen]] file.h264|file.h265 ...
 // Plays Annex-B files in a loop, one per tile (files are reused round-robin).
-// With --selftest, plays for that long without taking focus, checks that every
-// tile is showing a changing picture, prints a report, and exits 0 or 1.
+// With --selftest, plays for that long, checks that every tile is showing a
+// changing picture, prints a report, and exits 0 or 1. Its window opens
+// behind all other windows (it still draws there, at a throttled rate) and
+// never takes focus or shows a Dock icon. Off screen it cannot draw at all.
 //
 // Renderers:
-//   layer (default)  one AVSampleBufferDisplayLayer per tile. Double-click a
-//                    tile to show it alone; double-click again to go back.
-//   metal            TileDecoder (VideoToolbox) per tile and one GridRenderer
+//   metal (default)  TileDecoder (VideoToolbox) per tile and one GridRenderer
 //                    (Metal) pass for the grid, driven by the temporary
 //                    stand-in pipeline until the Rust one arrives in M2.
+//   layer            one AVSampleBufferDisplayLayer per tile. Double-click a
+//                    tile to show it alone; double-click again to go back.
+
+/// Where the self-test puts its window.
+enum WindowPlacement: String {
+    /// In front of other windows, without taking focus.
+    case front
+    /// Behind every other window.
+    case behind
+    /// Borderless, outside every screen. Nothing draws there; kept to show
+    /// that a self-test fails loudly when the window cannot draw.
+    case offscreen
+}
 
 enum RendererKind: String {
     case layer
@@ -20,10 +34,11 @@ enum RendererKind: String {
 }
 
 struct Options {
-    var renderer = RendererKind.layer
+    var renderer = RendererKind.metal
     var tiles = 4
     var fps = 20.0
     var selfTestSeconds: Double?
+    var placement = WindowPlacement.behind
     var files: [URL] = []
 
     static func parse(_ args: [String]) -> Options? {
@@ -34,6 +49,7 @@ struct Options {
             case "--renderer": guard let v = it.next().flatMap(RendererKind.init) else { return nil }; o.renderer = v
             case "--tiles": guard let v = it.next().flatMap(Int.init), v > 0 else { return nil }; o.tiles = v
             case "--fps": guard let v = it.next().flatMap(Double.init), v > 0 else { return nil }; o.fps = v
+            case "--window": guard let v = it.next().flatMap(WindowPlacement.init) else { return nil }; o.placement = v
             case "--selftest":
                 guard let v = it.next().flatMap(Double.init), v > 0 else { return nil }; o.selfTestSeconds = v
             default: o.files.append(URL(fileURLWithPath: a))
@@ -153,6 +169,7 @@ struct GridView: View {
 final class DemoDelegate: NSObject, NSApplicationDelegate {
     let makeContent: () -> NSView
     let startSelfTest: ((NSWindow) -> Void)?
+    var placement = WindowPlacement.front
     var window: NSWindow?
 
     init(content: @escaping () -> NSView, selfTest: ((NSWindow) -> Void)?) {
@@ -174,8 +191,18 @@ final class DemoDelegate: NSObject, NSApplicationDelegate {
         window.center()
         self.window = window
         if let startSelfTest {
-            // Show the window without stealing focus from whatever the user is doing.
-            window.orderFrontRegardless()
+            // Never take focus from whatever the user is doing.
+            switch placement {
+            case .front:
+                window.orderFrontRegardless()
+            case .behind:
+                window.orderBack(nil)
+            case .offscreen:
+                window.styleMask = [.borderless]
+                let all = NSScreen.screens.reduce(NSRect.zero) { $0.union($1.frame) }
+                window.setFrameOrigin(NSPoint(x: all.maxX + 2000, y: all.maxY + 2000))
+                window.orderBack(nil)
+            }
             startSelfTest(window)
         } else {
             window.makeKeyAndOrderFront(nil)
@@ -192,16 +219,18 @@ final class DemoDelegate: NSObject, NSApplicationDelegate {
 func runDemo() {
     guard let options = Options.parse(CommandLine.arguments) else {
         FileHandle.standardError.write(Data(
-            "usage: NVRViewDemo [--renderer layer|metal] [--tiles N] [--fps F] [--selftest SECONDS] file.h264|file.h265 ...\n".utf8))
+            "usage: NVRViewDemo [--renderer metal|layer] [--tiles N] [--fps F] [--selftest SECONDS [--window behind|front|offscreen]] file.h264|file.h265 ...\n".utf8))
         exit(2)
     }
     let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
+    // A self-test gets no Dock icon or menu bar.
+    app.setActivationPolicy(options.selfTestSeconds == nil ? .regular : .accessory)
     let delegate: DemoDelegate
     switch options.renderer {
     case .layer: delegate = layerDemo(options)
     case .metal: delegate = metalDemo(options)
     }
+    delegate.placement = options.placement
     app.delegate = delegate
     withExtendedLifetime(delegate) { app.run() }
 }

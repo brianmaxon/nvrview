@@ -99,6 +99,23 @@ tile from these rectangles.
   and `--selftest` use this to check real pixels without screen-recording
   permission.
 
+## Why our own GPU pass (macOS)
+
+Measured on Apple silicon (macOS 26):
+
+| | Process memory | Notes |
+| --- | --- | --- |
+| Metal grid (6 tiles) | about 240 MB, flat | about 200 MB of it appears on the first GPU submission of any kind, even an empty render or compute pass; it does not grow with tiles |
+| `AVSampleBufferDisplayLayer` per tile | about 21 MB | the system decodes and composites outside the process |
+| Decoded `IOSurface`s as `CALayer` contents | about 41 MB with 6 full-HD tiles | composited by the window server; no shader, no readback of the final picture |
+
+We draw with Metal anyway: it applies the shared color matrix (the same
+colors on every platform), it can read back exactly what it shows (tests and
+`--selftest` check real pixels), and it is where de-warping and overlays will
+go. The decoder and the pipeline do not depend on this choice; if memory
+matters more at M3, presenting decoded surfaces as layer contents replaces
+only the drawing step.
+
 ## Where this crosses the C interface (M2)
 
 The core runs the pipeline on its per-channel delivery thread and invokes the
