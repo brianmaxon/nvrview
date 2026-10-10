@@ -14,5 +14,8 @@
 //!
 //! The protocol facts implemented here are documented in `docs/protocol.md`.
 
+pub mod crypto;
 pub mod framer;
 pub mod header;
+pub mod stream;
+pub mod xml;
