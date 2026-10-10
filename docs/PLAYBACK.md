@@ -120,8 +120,10 @@ monitoring; a missed sound is never shown as "no alarm".
   standard smoke-alarm (three beeps, T3) and CO-alarm (four beeps, T4)
   rhythms of a tone near 3 kHz, with no model; it is tested on synthetic
   audio, and a camera's alarm test button is the hardware check.
-  Implemented, with the loudness envelope, in `crates/sound-events` (not
-  yet wired into the core): T3 is 0.5 s on, 0.5 s off, three times, then
+  Implemented, with the loudness envelope, in `crates/sound-events`, and
+  run by the core on every live tile with audio, which reports alarms as
+  `detection` events (docs/FFI.md, "Events"; recordings are not analyzed
+  yet): T3 is 0.5 s on, 0.5 s off, three times, then
   1.5 s off (ISO 8201, ANSI/ASA S3.41, NFPA 72); T4 is 0.1 s on, 0.1 s off,
   four times, then about 5 s off (NFPA 720, now NFPA 72; UL 2034). The tone
   band defaults to 2.9 to 3.5 kHz, durations are accepted within 30% plus
@@ -135,7 +137,11 @@ monitoring; a missed sound is never shown as "no alarm".
   mixed into that audio at down to -40 dBFS, also after an AAC round trip.
   Cost: about 0.1 ms of CPU per second of audio for the detector and 0.01 ms
   for the envelope (Apple M3 Max, release build; `cargo run --release -p
-  sound-events --example bench`), about 0.01% of one core per camera.
+  sound-events --example bench`), about 0.01% of one core per camera. In
+  the core, with the conversion to 16 kHz mono, it adds about 10 µs to
+  each 64 ms record on the tile's thread, 0.016% of one core (`cargo run
+  --release -p viewer-core --example sound_cost`; decoding the record
+  takes about 7 µs).
   Not yet checked: a real alarm through a real camera microphone.
 - **Sound labels.** On macOS, SoundAnalysis's built-in classifier labels
   sirens, glass breaking, barking, a baby crying, knocking, and similar

@@ -154,6 +154,7 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
+{"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"mac_audio","at_ns":457}
 {"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}
 {"type":"alarm","device":1,"channel":2,"kind":"visitor","state":"start","at_ns":790}
 {"type":"layouts_changed","revision":4}
@@ -210,6 +211,27 @@ change.
   (`nv_clock_now_ns`) at arrival: the pushes carry no usable time. When the
   session drops or the device is removed, everything active gets its
   `stop` first.
+- **Alarms heard in a tile's audio.** The core listens to every live tile
+  with audio, audible or not, muted or not, for the standard smoke-alarm
+  (temporal-three) and CO-alarm (temporal-four) patterns
+  (`crates/sound-events`; docs/PLAYBACK.md, "Sound") and reports them as
+  `detection` events with `source` `mac_audio` (the source of all sound
+  labels, docs/FFI-RECORDINGS.md section 2a) and `kind` `smoke_alarm` or
+  `co_alarm`; no `lens` (a camera's microphone belongs to no one lens).
+  `start` comes once two alarm cycles have matched, about 7.5 s after a
+  smoke alarm starts and 10 s after a CO alarm; its `at_ns` is when the
+  first matched beep arrived, so it lies in the past. `stop` comes when the
+  pattern ends (about 5.5 s after the last smoke beep, 11 s after the last
+  CO group), when the tile's audio stops arriving for 3 s, or when the
+  last tile showing that channel closes (before its `tile_closed`),
+  whichever is first; its `at_ns` is when the last beep arrived, or the
+  core's clock for a stall or close. Several tiles of one channel report
+  one episode once. Badge it like any detection, but never show the
+  absence of this event as "no alarm": a camera microphone is not an alarm
+  sensor. On by default; Rust callers turn it off with
+  `CoreConfig::sound.alarms`. The C interface has no switch in ABI 3 (it
+  always uses the defaults); ABI 4 proposes one (docs/FFI-RECORDINGS.md,
+  section 13).
 - `detects` in `channels` lists the detection kinds a channel's camera
   advertises (199 `aitype` bits), once known; `[]` for a camera without
   AI. For a multi-lens camera it is every kind of the camera (the
