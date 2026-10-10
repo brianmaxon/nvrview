@@ -19,6 +19,7 @@ public partial class App : Application
     private CoreHost? _host;
     private MockNvr? _mock;
     private SelfTest? _selfTest;
+    private StartupTest? _startupTest;
     private WindowStore _windowStore = new(null);
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _saveTimer;
     private bool _shutDown;
@@ -28,8 +29,8 @@ public partial class App : Application
         InitializeComponent();
         UnhandledException += (_, e) =>
         {
-            AppLog.Warn($"unhandled: {e.Exception}");
-            if (Program.Options.SelfTest)
+            AppLog.Crash("unhandled exception (XAML)", e.Exception);
+            if (Program.Options.SelfTest || Program.Options.StartupTest)
             {
                 SelfTest.WriteLog(Program.Options.Log!, [$"unhandled exception: {e.Exception}"], []);
                 ExitCode = 1;
@@ -59,19 +60,18 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         AppOptions o = Program.Options;
-        string dataDir = o.DataDir ?? (o.SelfTest
-            ? Path.Combine(Path.GetDirectoryName(o.Log!)!, "selftest-data")
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvrView"));
+        string dataDir = o.ResolvedDataDir;
         AppLog.Open(Path.Combine(dataDir, "logs"));
         try
         {
             Start(o, dataDir);
         }
-        catch (Exception e) when (e is NvException or NvAbiMismatchException or NvrView.Video.VideoException
-            or InvalidOperationException or IOException or DllNotFoundException)
+        catch (Exception e)
         {
-            AppLog.Warn($"start failed: {e}");
-            if (o.SelfTest)
+            // Anything at all: a start that fails says why in a crash log and
+            // exits, instead of dying inside XAML with nothing written.
+            AppLog.Crash("start failed", e);
+            if (o.SelfTest || o.StartupTest)
             {
                 SelfTest.WriteLog(o.Log!, [$"start failed: {e.Message}"], []);
             }
@@ -172,12 +172,17 @@ public partial class App : Application
             _selfTest = new SelfTest(this, o);
             _selfTest.Start();
         }
+        else if (o.StartupTest)
+        {
+            _startupTest = new StartupTest(this, o);
+            _startupTest.Start();
+        }
     }
 
-    /// <summary>Opens a window with its own content (behind the others and never activated in the self-test).</summary>
+    /// <summary>Opens a window with its own content (behind the others and never activated in the self-tests).</summary>
     internal ViewerWindow OpenWindow(WindowContent content, SavedWindow? restore = null)
     {
-        var w = new ViewerWindow(_viewer!, _host!, content, restore, background: Program.Options.SelfTest);
+        var w = new ViewerWindow(_viewer!, _host!, content, restore, background: Program.Options.Background);
         _windows.Add(w);
         w.Changed += ScheduleSave;
         w.Closed += WindowClosed;

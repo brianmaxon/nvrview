@@ -15,7 +15,7 @@ headless demo.
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
 | `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping) and its tests on simulated time; builds and runs on Windows and Linux |
 | `NvrView.Shell/`, `NvrView.Shell.Tests/` | the shell's logic without a window: split-pane layouts and their JSON (the macOS app's documents, byte for byte), layout geometry, tile leases, the sidebar's edge reveal, camera groups, window restore; and its tests; builds and runs on Windows and Linux |
-| `NvrView.App/` | the app: WinUI 3 windows with split-pane layouts, the sidebar, focus, listening, Settings, and a `--selftest` (Windows only) |
+| `NvrView.App/` | the app: WinUI 3 windows with split-pane layouts, the sidebar, focus, listening, Settings, a `--selftest`, and a `--startup-test` (Windows only) |
 
 Every project targets .NET 10 (the current LTS). The bindings and the smoke
 test run on win-x64 and linux-x64 (and linux-arm64 in Docker on Apple
@@ -273,7 +273,10 @@ installed, and it runs from wherever it is copied.
   list is in `%LOCALAPPDATA%\NvrView\settings.json` (no secrets in it); the
   password is a generic credential named `nvrview/device/<key>` in Windows
   Credential Manager. Logs (the app's and the core's, both capped) are in
-  `%LOCALAPPDATA%\NvrView\logs`; `--data-dir DIR` moves all of it.
+  `%LOCALAPPDATA%\NvrView\logs`; `--data-dir DIR` moves all of it. An
+  exception nothing handled (in startup, XAML, the AppDomain, or an
+  unobserved task) is written to its own `crash-<time>.log` there (the newest
+  eight are kept) before the app ends.
 
 Other options: `--gpu auto|hardware|warp`, `--software` (CPU decoding),
 `--no-audio`, `--lib PATH` (another `nvrview.dll`).
@@ -398,6 +401,28 @@ log, which the script prints. `scripts/windows-worker.sh` builds the app on
 every run and runs this self-test when `NVRVIEW_APP_SELFTEST=1` (passed
 through by `scripts/windows-check.sh`), since it needs a logged-in user.
 
+### The plain start test
+
+```sh
+scripts/windows-app.sh startup 5
+```
+
+runs `NvrView.App.exe --startup-test 5 --log FILE --data-dir DIR` the same
+way, from the executable's folder, on a fresh empty data directory: the start
+a double-click makes on a first run (no mock, no test device, the real
+credential store, window restore), with only the window kept behind the
+others. The mock self-test cannot stand in for it: its development mode
+skips the stores and window restore, and its window used to skip the
+display placement, which is where a crash once hid (enumerating
+`DisplayArea.FindAll()` with `foreach` throws an `InvalidCastException`;
+read it by index). It checks that the window shows with its content loaded,
+the displays are read without an error, the stage has a swap chain, the
+empty stage shows "Add a device…" and the sidebar its "Add a device in
+Settings…" link, the app idles for the given seconds with no unhandled or
+callback exception, and `windows.json` is written. First-chance exceptions
+are listed but do not fail it. `NVRVIEW_APP_SELFTEST=1` runs it before the
+self-test.
+
 ### Windows App SDK
 
 WinUI 3 comes from the Windows App SDK, pinned at **1.8.260921001**
@@ -440,7 +465,7 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `WindowsCredentials`, `DeviceStore`, `SettingsDialog` | passwords in Credential Manager, the device list in `settings.json`, the Settings dialog |
-| `SelfTest`, `MockNvr` | the self-test and the mock it starts |
+| `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
 
 - **Swap chain** (`NvrView.Video/SwapChainTarget.cs`). A flip-model
   (`FLIP_SEQUENTIAL`) composition swap chain with two BGRA buffers, given to

@@ -5,8 +5,10 @@
 # real GPU, the C# shell tests, and a build of the Windows app. Stops at the
 # first failure.
 #
-#   NVRVIEW_APP_SELFTEST=1   also run the app's self-test in the logged-in
-#                            user's desktop session (scripts/windows-app.sh)
+#   NVRVIEW_APP_SELFTEST=1   also run the app's tests in the logged-in user's
+#                            desktop session (scripts/windows-app.sh): the
+#                            plain start on an empty data directory, then the
+#                            self-test against mock-nvr
 #   NVRVIEW_WINDOWS_ONLY=csharp  skips clippy and the Rust tests (for changes
 #                            under apps/windows only)
 #   NVRVIEW_WINDOWS_ONLY=app only the library and the app (also skips the
@@ -49,6 +51,9 @@ step "Windows app (build)"
 scripts/windows-app.sh build
 
 if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
+  step "Windows app plain start, first run (interactive session)"
+  scripts/windows-app.sh startup
+
   step "Windows app self-test (interactive session)"
   scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test
 fi

@@ -2,6 +2,11 @@
 // text file in the logs directory, rotated by size into a single older file,
 // so it never holds more than about 2 MB. Repeated messages are rate-limited
 // by key. No passwords or addresses are ever written here.
+//
+// A crash (an exception nothing handled: XAML's UnhandledException, the
+// AppDomain's, an unobserved task's, or one out of startup) is written to its
+// own crash-<time>.log next to app.log, keeping the newest few, so a start
+// that dies before its window shows still says why.
 
 using System.Diagnostics;
 using System.Text;
@@ -11,9 +16,11 @@ namespace NvrView.App;
 internal static class AppLog
 {
     private const long MaxBytes = 1 << 20;
+    private const int MaxCrashLogs = 8;
     private static readonly Lock s_lock = new();
     private static readonly Dictionary<string, long> s_lastByKey = [];
     private static string? s_file;
+    private static string? s_directory;
 
     /// <summary>Starts logging into <paramref name="directory"/>.</summary>
     public static void Open(string directory)
@@ -22,6 +29,7 @@ internal static class AppLog
         lock (s_lock)
         {
             s_file = Path.Combine(directory, "app.log");
+            s_directory = directory;
         }
         Info($"nvrview {typeof(AppLog).Assembly.GetName().Version} started");
     }
@@ -48,6 +56,41 @@ internal static class AppLog
             s_lastByKey[key] = now;
         }
         Write("warn", message);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="e"/> to a new crash-*.log (in the logs directory,
+    /// or <paramref name="fallbackDirectory"/> before it is open) and to app.log;
+    /// never throws. Returns the file written, or null.
+    /// </summary>
+    public static string? Crash(string what, Exception e, string? fallbackDirectory = null)
+    {
+        Write("error", $"{what}: {e}");
+        try
+        {
+            string directory;
+            lock (s_lock)
+            {
+                directory = s_directory ?? fallbackDirectory ?? Path.GetTempPath();
+            }
+            Directory.CreateDirectory(directory);
+            string file = Path.Combine(directory, $"crash-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Environment.ProcessId}.log");
+            File.WriteAllText(file,
+                $"nvrview {typeof(AppLog).Assembly.GetName().Version} {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}{Environment.NewLine}" +
+                $"{what}{Environment.NewLine}{e}{Environment.NewLine}", Encoding.UTF8);
+            // Keep the newest few.
+            foreach (FileInfo old in new DirectoryInfo(directory).GetFiles("crash-*.log")
+                .OrderByDescending(f => f.Name, StringComparer.Ordinal).Skip(MaxCrashLogs))
+            {
+                old.Delete();
+            }
+            return file;
+        }
+        catch (Exception inner) when (inner is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            Startup($"{what}: {e}");
+            return null;
+        }
     }
 
     /// <summary>Before the log is open (bad command line): the temp directory.</summary>

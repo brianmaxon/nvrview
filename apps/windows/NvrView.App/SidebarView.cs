@@ -115,6 +115,9 @@ internal sealed partial class SidebarView : UserControl
     /// <summary>A camera is being dragged from here.</summary>
     public bool IsDragging { get; private set; }
 
+    /// <summary>The rows end with the "Add a device in Settings…" link (no device configured).</summary>
+    public bool ShowsAddDevicePrompt { get; private set; }
+
     /// <summary>A context menu of this sidebar is open.</summary>
     public bool IsMenuOpen => _menus > 0;
 
@@ -328,7 +331,8 @@ internal sealed partial class SidebarView : UserControl
                 }
             }
         }
-        if (_viewer.Devices.Count == 0)
+        ShowsAddDevicePrompt = _viewer.Devices.Count == 0;
+        if (ShowsAddDevicePrompt)
         {
             var add = new HyperlinkButton { Content = "Add a device in Settings…", Padding = new Thickness(8, 2, 8, 2) };
             add.Click += (_, _) => _window.OpenSettings();

@@ -220,6 +220,9 @@ internal sealed partial class StageView : UserControl
     /// <summary>True while a divider or tile drag is in progress (the window does not follow stored changes then).</summary>
     public bool IsInteracting => _gesture is GestureKind.Divider or GestureKind.TileDrag;
 
+    /// <summary>The empty stage's "Add a device…" prompt is showing.</summary>
+    public bool ShowsAddDevicePrompt => _empty.Visibility == Visibility.Visible;
+
     /// <summary>Frames the UI thread updated the chrome (for the self-test).</summary>
     public long ChromeFrames { get; private set; }
 

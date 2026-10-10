@@ -7,9 +7,12 @@
 #                                             runs `NvrView.App.exe --selftest` against a
 #                                             mock-nvr the app starts, in the logged-in
 #                                             user's desktop session
+#   scripts/windows-app.sh startup [SECONDS]  runs `NvrView.App.exe --startup-test`: the plain
+#                                             start (as a double-click) on an empty data
+#                                             directory, idling SECONDS (default 5)
 #
-# The app is a GUI program and an SSH session has no desktop, so the
-# self-test runs as a one-time scheduled task that runs only while the user
+# The app is a GUI program and an SSH session has no desktop, so each test
+# runs as a one-time scheduled task that runs only while the user
 # is logged on (interactive), started at once and deleted afterwards. Its
 # window opens behind every other window and never takes focus. The task
 # writes its verdict to a log file in the build directory, which this script
@@ -30,21 +33,46 @@ build() {
   ls -l "$exe"
 }
 
+# Runs a .cmd file as a one-time scheduled task in the logged-on user's
+# session and waits for a verdict line in its log; prints the log.
+#   run_task NAME CMDFILE LOGFILE OUTFILE LIMIT_SECONDS
+run_task() {
+  local name="$1" cmd="$2" log="$3" output="$4" limit="$5"
+  # Task names are per worker folder, so parallel workers never collide.
+  local task
+  task="nvrview-$(basename "$(dirname "$PWD")")-$name"
+  MSYS_NO_PATHCONV=1 schtasks /create /tn "$task" /tr "\"$(cygpath -w "$PWD/$cmd")\"" /sc once /st 00:00 /it /f >/dev/null 2>&1 ||
+    { echo "could not create the scheduled task $task" >&2; return 1; }
+  MSYS_NO_PATHCONV=1 schtasks /run /tn "$task" >/dev/null
+  local waited=0
+  while [ ! -s "$log" ] || ! grep -q '^selftest: ' "$log"; do
+    sleep 2
+    waited=$((waited + 2))
+    if [ "$waited" -ge "$limit" ]; then
+      break
+    fi
+  done
+  MSYS_NO_PATHCONV=1 schtasks /delete /tn "$task" /f >/dev/null 2>&1 || true
+  if [ ! -s "$log" ]; then
+    echo "the $name run wrote no verdict within $limit s (is the user logged on?)" >&2
+    cat "$output" 2>/dev/null || true
+    return 1
+  fi
+  cat "$log"
+  grep -q '^selftest: PASS' "$log"
+}
+
 selftest() {
   local seconds="${1:-10}"
   shift || true
   local dir="$out/selftest"
   mkdir -p "$dir"
   rm -f "$dir/selftest.log" "$dir/output.txt"
-  local win_exe win_mock win_log win_out win_cmd
+  local win_exe win_mock win_log win_out
   win_exe="$(cygpath -w "$PWD/$exe")"
   win_mock="$(cygpath -w "$PWD/target/release/mock-nvr.exe")"
   win_log="$(cygpath -w "$PWD/$dir/selftest.log")"
   win_out="$(cygpath -w "$PWD/$dir/output.txt")"
-  win_cmd="$(cygpath -w "$PWD/$dir/selftest.cmd")"
-  # Task names are per worker folder, so parallel workers never collide.
-  local task
-  task="nvrview-$(basename "$(dirname "$PWD")")-selftest"
   {
     printf '@echo off\r\n'
     printf 'cd /d "%s"\r\n' "$(cygpath -w "$PWD")"
@@ -53,32 +81,42 @@ selftest() {
     for a in "$@"; do printf ' %s' "$a"; done
     printf ' > "%s" 2>&1\r\n' "$win_out"
   } >"$dir/selftest.cmd"
-  MSYS_NO_PATHCONV=1 schtasks /create /tn "$task" /tr "\"$win_cmd\"" /sc once /st 00:00 /it /f >/dev/null 2>&1 ||
-    { echo "could not create the scheduled task $task" >&2; return 1; }
-  MSYS_NO_PATHCONV=1 schtasks /run /tn "$task" >/dev/null
-  local limit=$((seconds + 150)) waited=0
-  while [ ! -s "$dir/selftest.log" ] || ! grep -q '^selftest: ' "$dir/selftest.log"; do
-    sleep 2
-    waited=$((waited + 2))
-    if [ "$waited" -ge "$limit" ]; then
-      break
-    fi
-  done
-  MSYS_NO_PATHCONV=1 schtasks /delete /tn "$task" /f >/dev/null 2>&1 || true
-  if [ ! -s "$dir/selftest.log" ]; then
-    echo "the self-test wrote no verdict within $limit s (is the user logged on?)" >&2
-    cat "$dir/output.txt" 2>/dev/null || true
-    return 1
+  run_task selftest "$dir/selftest.cmd" "$dir/selftest.log" "$dir/output.txt" $((seconds + 150))
+}
+
+# The plain start, as a double-click makes it (no mock, no test device), on a
+# fresh empty data directory (a first run), started from the executable's own
+# folder as Explorer does.
+startup() {
+  local seconds="${1:-5}"
+  local dir="$out/startup"
+  rm -rf "$dir"
+  mkdir -p "$dir/data"
+  local win_exe win_log win_out win_data
+  win_exe="$(cygpath -w "$PWD/$exe")"
+  win_log="$(cygpath -w "$PWD/$dir/startup.log")"
+  win_out="$(cygpath -w "$PWD/$dir/output.txt")"
+  win_data="$(cygpath -w "$PWD/$dir/data")"
+  {
+    printf '@echo off\r\n'
+    printf 'cd /d "%s"\r\n' "$(cygpath -w "$PWD/$(dirname "$exe")")"
+    printf '"%s" --startup-test %s --log "%s" --data-dir "%s" > "%s" 2>&1\r\n' "$win_exe" "$seconds" "$win_log" "$win_data" "$win_out"
+  } >"$dir/startup.cmd"
+  local status=0
+  run_task startup "$dir/startup.cmd" "$dir/startup.log" "$dir/output.txt" $((seconds + 90)) || status=$?
+  # A crash before the verdict leaves its reason here.
+  if [ "$status" != 0 ]; then
+    cat "$dir"/data/logs/crash-*.log 2>/dev/null || true
   fi
-  cat "$dir/selftest.log"
-  grep -q '^selftest: PASS' "$dir/selftest.log"
+  return "$status"
 }
 
 case "${1:-}" in
   build) build ;;
   selftest) shift; selftest "$@" ;;
+  startup) shift; startup "$@" ;;
   *)
-    echo "usage: $0 build | selftest [SECONDS] [APP OPTIONS...]" >&2
+    echo "usage: $0 build | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS]" >&2
     exit 2
     ;;
 esac
