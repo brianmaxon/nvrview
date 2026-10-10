@@ -4,6 +4,8 @@
 
 const $ = (id) => document.getElementById(id);
 const logEl = $("log");
+// For scripts (scripts/browser-check.sh): "ok", "fail" or "unsupported".
+const result = (r) => { document.body.dataset.result = r; };
 const log = (m, cls) => {
   const line = document.createElement("div");
   if (cls) line.className = cls;
@@ -36,6 +38,7 @@ let current = null;
 async function play() {
   if (current) { current.stop(); current = null; }
   logEl.textContent = "";
+  delete document.body.dataset.result;
   $("verdict").textContent = "";
   const name = $("sample").value;
   const live = $("live").checked;
@@ -47,7 +50,7 @@ async function play() {
   for (const m of new Set(mimes)) {
     const ok = window.MediaSource && MediaSource.isTypeSupported(m);
     log(`${ok ? "supported" : "NOT supported"}: ${m}`, ok ? "ok" : "bad");
-    if (!ok) { $("verdict").textContent = "This browser cannot play this sample's codec."; return; }
+    if (!ok) { $("verdict").textContent = "This browser cannot play this sample's codec."; result("unsupported"); return; }
   }
 
   const v = $("v");
@@ -73,10 +76,13 @@ async function play() {
       if (!feed) {
         feed = feeds[key] = new Feed(ms, seg.mime);
         log(`new SourceBuffer (${key})`);
-      } else if (seg.reset) {
-        // Parameter sets or resolution changed: reset the buffer's decoder.
+      } else if (seg.mime !== feed.mime) {
+        // A new init (parameter sets or resolution changed) is appended
+        // like the first one. changeType is only needed when the codec
+        // string changes (here the level does); same-codec inits need none.
         feed.push((sb) => {
           if (typeof sb.changeType === "function") sb.changeType(seg.mime);
+          feed.mime = seg.mime;
           log(`changeType (${key}) -> ${seg.mime}`);
           feed.busy = false; feed.pump();
         });
@@ -89,13 +95,27 @@ async function play() {
     }
   };
 
-  startedAt = performance.now();
-  for (const seg of manifest) {
-    if (!live || seg.kind === "init") { send(seg); continue; }
-    // Live pacing: release each segment when its end time has "happened".
-    const due = (seg.start_us + seg.duration_us - firstStart) / 1000;
-    timers.push(setTimeout(() => send(seg), Math.max(0, due - (performance.now() - startedAt))));
+  // Live pacing: release each media segment when its end time has
+  // "happened", and each init segment together with (just before) the media
+  // segment that follows it, as a live sender would. Segments must reach the
+  // buffer in manifest order: an init sent ahead of the media segments of the
+  // previous generation would make the decoder read them with the wrong
+  // parameter sets.
+  const dueMs = new Array(manifest.length).fill(0);
+  let next = 0;
+  for (let i = manifest.length - 1; i >= 0; i--) {
+    const seg = manifest[i];
+    if (seg.kind === "media") next = (seg.start_us + seg.duration_us - firstStart) / 1000;
+    dueMs[i] = next;
   }
+  startedAt = performance.now();
+  let i = 0;
+  const release = () => {
+    if (stopped) return;
+    while (i < manifest.length && (!live || dueMs[i] <= performance.now() - startedAt)) send(manifest[i++]);
+    if (i < manifest.length) timers.push(setTimeout(release, Math.max(0, dueMs[i] - (performance.now() - startedAt))));
+  };
+  release();
   const total = manifest.filter((s) => s.kind === "media").reduce((a, s) => Math.max(a, s.start_us + s.duration_us), 0);
   const secs = (total - firstStart) / 1e6;
   const finish = () => {
@@ -106,14 +126,23 @@ async function play() {
   };
   finish();
 
-  v.onerror = () => { log(`video error: ${v.error && v.error.message}`, "bad"); $("verdict").textContent = "FAILED"; $("verdict").className = "bad"; };
+  v.onerror = () => { log(`video error: ${v.error && v.error.message}`, "bad"); $("verdict").textContent = "FAILED"; $("verdict").className = "bad"; result("fail"); };
   v.onended = () => {
     const ok = Math.abs(v.currentTime - secs) < 1;
     $("verdict").textContent = ok ? `Played ${v.currentTime.toFixed(2)} s of ${secs.toFixed(2)} s: OK` : `Ended at ${v.currentTime.toFixed(2)} s of ${secs.toFixed(2)} s: CHECK`;
     $("verdict").className = ok ? "ok" : "bad";
+    if (document.body.dataset.result !== "fail") result(ok ? "ok" : "fail");
     log(`ended at ${v.currentTime.toFixed(2)} s (expected about ${secs.toFixed(2)} s)`);
   };
   v.ontimeupdate = () => { v.dataset.t = v.currentTime; };
+  // Decoded picture sizes in order, such as "320x240 480x270 320x240".
+  v.dataset.sizes = "";
+  v.onresize = () => {
+    if (!v.videoWidth) return;
+    const size = `${v.videoWidth}x${v.videoHeight}`;
+    log(`picture size ${size} at ${v.currentTime.toFixed(2)} s`);
+    v.dataset.sizes = `${v.dataset.sizes} ${size}`.trim();
+  };
 }
 
 (async () => {
@@ -127,5 +156,13 @@ async function play() {
   } catch (e) {
     log("No samples yet. Run: cargo run -p mp4-remux --example mse_sample", "bad");
   }
-  $("go").addEventListener("click", () => play().catch((e) => log(`${e.name}: ${e.message}`, "bad")));
+  const start = () => play().catch((e) => { log(`${e.name}: ${e.message}`, "bad"); result("fail"); });
+  $("go").addEventListener("click", start);
+  // ?sample=NAME[&live=0] picks a sample and plays it right away.
+  const q = new URLSearchParams(location.search);
+  if (q.has("sample")) {
+    $("sample").value = q.get("sample");
+    $("live").checked = q.get("live") !== "0";
+    start();
+  }
 })();

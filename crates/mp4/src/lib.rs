@@ -104,8 +104,15 @@
 //! * **Parameter-set or resolution change.** At a keyframe whose sets differ
 //!   ([`ChangePolicy::NewInit`]) the open fragment is closed, a new init is
 //!   emitted with `reset: true` and a higher `generation`, and the next
-//!   fragment starts with that keyframe. A client resets its buffer
-//!   (`changeType`, or a new `SourceBuffer`) before appending that init.
+//!   fragment starts with that keyframe; decode times, sequence numbers,
+//!   track IDs and timescales continue unchanged. A client appends that init
+//!   to the same `SourceBuffer` in stream order: after every media segment
+//!   of the previous generation and before the first one of the new
+//!   generation (an init appended early makes the decoder read the old
+//!   frames with the new parameter sets, which Chrome and Safari reject as a
+//!   decode error). It calls `changeType` with the new MIME type first when
+//!   the codec string changed (a resolution change usually changes the
+//!   level); otherwise appending the init is enough.
 //! * **Memory.** One fragment of video (bounded by time and bytes) and up to
 //!   1 MiB of audio waiting for video; segments are handed to the caller and
 //!   not kept (only the current init is).

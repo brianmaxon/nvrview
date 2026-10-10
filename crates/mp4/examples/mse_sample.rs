@@ -166,6 +166,13 @@ fn main() {
             audio: None,
         },
         Sample {
+            name: "h265-resolution-change",
+            codec: VideoCodec::H265,
+            file: "h265-resize.h265",
+            repeat: 2,
+            audio: None,
+        },
+        Sample {
             name: "h265-video-audio-muxed",
             codec: VideoCodec::H265,
             file: "h265-basic.h265",

@@ -295,27 +295,39 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | Sound events and audio alarms | audio tap (every tile's decoded audio, audible or not), detections, triggers, the recordings index | marks and searches moments by sound, the way video detections do: a smoke alarm's three-beep pattern (T3) or a CO alarm's four beeps (T4), sirens, glass breaking, barking, a baby crying. Alarm patterns first, with a small deterministic detector (a narrow-band tone near 3 kHz in the standard on/off rhythm; no model; tested on synthetic audio; `crates/sound-events`, about 0.01% of one core per camera, see docs/PLAYBACK.md, "Sound"), then a general on-device sound classifier (SoundAnalysis on macOS) for the rest; device detections (such as a camera's own baby-cry detection) are used where a camera has them. Results join the detection stream with camera time, so they label incidents, filter search, and can feed triggers and the notification verifier under the same rules. An aid for finding and labeling events, never a replacement for alarm systems or monitoring: camera microphones are not certified detectors, and a missed sound must never be presented as "no alarm". |
 | Doorbell text-to-speech | camera motion control (doorbell speaker), triggers, templates | speaks a message through a doorbell (for example "Leave the package by the door"). Text comes only from user-written templates with a few typed slots (time, camera name); untrusted text (transcripts, detected text, anything a visitor says or shows, other devices' payloads) is never spoken and never instructs an agent. An agent may only pick a template and fill typed slots, with the user's grant; rate-limited and logged. |
 
-**Web viewer: work to do first when it starts.**
+**Web viewer: work to do first when it starts.** Both items are done.
 
-1. **Fix: a resolution change breaks browser playback.** Found on
+1. **Fixed: a resolution change broke browser playback.** Found on
    2026-10-10 with the `crates/mp4/tests/mse` page in Google Chrome on macOS
-   (driven by Playwright): the four fixed-resolution samples, H.265
-   included, played to the end, but `h264-resolution-change` failed right
-   after the first switch. The new init segment arrives with `reset: true`
-   and the page calls `changeType`, then Chrome's hardware decoder rejects
-   the following frames (`PIPELINE_ERROR_DECODE`, VideoToolbox -12909, bad
-   data). Each generation decodes cleanly on its own in ffmpeg, so the
-   automated tests pass. Suspects: how the fragmenter starts a new
-   generation (init contents, the first media segment after it, decode
-   times across the switch) or the page's switching sequence. Cameras do
-   change resolution, so a live viewer would freeze at that moment until
-   this is fixed.
-2. **Add a browser playback check.** A script that serves the MSE samples
-   and plays each in a real browser through Playwright (installed Chrome,
-   for its H.264 and H.265 decoders; Safari if possible), reporting pass or
-   fail per sample. ffmpeg cannot stand in for it: it accepted the stream
-   the browser rejected. Optional in `scripts/check.sh` (it needs a browser
-   and opens a window), like the Docker and GUI steps.
+   (driven by Playwright): `h264-resolution-change` failed with
+   `PIPELINE_ERROR_DECODE` (VideoToolbox -12909, bad data) while the
+   fixed-resolution samples played. The cause was the test page, not the
+   fragmenter: with "pace like a live stream" on, it appended every init
+   segment at once and paced only the media segments, so the buffer held the
+   last generation's init (480x270 parameter sets) before the first
+   320x240 frames arrived, and the decoder failed at about 0.6 s, before the
+   first real switch. Appended all at once, in order, the sample played;
+   headless Chrome and Playwright's WebKit (Safari's engine, "Media failed
+   to decode") failed the same way. The page now releases each init with
+   the media segment after it, in stream order, and calls `changeType` only
+   when the MIME type changes. A box-level test
+   (`generation_switch_is_valid_for_media_source`) confirms what MSE needs
+   at a switch: same track ID, timescale and sample entry type, the new
+   parameter sets in the new init, increasing sequence numbers, a `tfdt`
+   that continues exactly, and a sync sample first. Appending the new init
+   without `changeType` also plays in both browsers. The rule for a live
+   sender: segments of one stream go to the browser in order, and an init is
+   never sent ahead of the media segments before it (see the `mp4-remux`
+   crate documentation).
+2. **Done: a browser playback check.** `scripts/browser-check.sh` serves
+   the MSE samples and plays each, appended at once and paced live, in
+   headless Google Chrome (its H.264 and H.265 decoders, VideoToolbox on
+   macOS) and Playwright's WebKit, reporting pass or fail per sample; a
+   resolution-change sample must also decode more than one picture size.
+   Headless Chrome uses the same hardware decoder and reproduced the
+   original failure, so no window opens. Optional in `scripts/check.sh`
+   (`NVRVIEW_BROWSER_TESTS=1`), since it needs playwright-cli and browsers.
+   Real Safari is not covered (Playwright drives WebKit, not Safari itself).
 
 ## Mobile (later)
 

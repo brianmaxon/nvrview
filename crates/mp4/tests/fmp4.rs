@@ -508,6 +508,111 @@ fn parameter_set_change_makes_a_new_init() {
     }
 }
 
+/// Box-level check of a generation switch against what Media Source
+/// Extensions needs from a stream (an init segment may arrive between media
+/// segments; the next media segment must start with a sync sample and decode
+/// times must continue): same track ID, timescale and handler in both inits,
+/// one sample entry whose configuration record carries the new parameter
+/// sets, sequence numbers that keep increasing, and a `tfdt` that starts
+/// exactly where the previous fragment ended.
+#[test]
+fn generation_switch_is_valid_for_media_source() {
+    for (codec, name) in [
+        (VideoCodec::H264, "h264-resize.h264"),
+        (VideoCodec::H265, "h265-resize.h265"),
+    ] {
+        let aus = load(codec, name);
+        let segs = run(codec, &aus, false, opts(false));
+        let at = segs
+            .iter()
+            .position(|s| s.init.as_ref().is_some_and(|i| i.reset))
+            .expect("second init");
+        let (old_init, new_init) = (&segs[0].data, &segs[at].data);
+        let (ta, tb) = (&tracks(old_init)[0], &tracks(new_init)[0]);
+        assert_eq!((ta.timescale, &ta.handler), (tb.timescale, &tb.handler));
+        assert_eq!(
+            ta.stsd_entries, tb.stsd_entries,
+            "{name}: same sample entry type"
+        );
+        assert_eq!(tb.stsd_entries.len(), 1);
+        for init in [old_init, new_init] {
+            let moov = top_box(init, "moov");
+            let trak = child(init, &moov, "trak").unwrap();
+            let tkhd = boxes_in(init, trak.start + 8, trak.end)
+                .into_iter()
+                .find(|b| b.ty == "tkhd")
+                .unwrap();
+            assert_eq!(u32at(init, tkhd.start + 20), 1, "track ID");
+            let mvex = child(init, &moov, "mvex").unwrap();
+            let trex = child(init, &mvex, "trex").unwrap();
+            assert_eq!(u32at(init, trex.start + 12), 1, "trex track ID");
+            assert_eq!(u32at(init, trex.start + 16), 1, "sample description index");
+        }
+        // The new init's configuration record holds the parameter sets of
+        // the first frame of the second encode (frame 40), not the old ones.
+        let key = &aus[40].data;
+        assert!(aus[40].key);
+        let is_set = |t: u8| match codec {
+            VideoCodec::H264 => matches!(t & 0x1f, 7 | 8),
+            VideoCodec::H265 => matches!((t >> 1) & 0x3f, 32..=34),
+        };
+        let sets: Vec<&[u8]> = nals(key)
+            .into_iter()
+            .map(|(s, e)| &key[s..e])
+            .filter(|n| is_set(n[0]))
+            .collect();
+        assert!(!sets.is_empty(), "{name}: keyframe carries parameter sets");
+        let stsd = tb.stsd.as_ref().unwrap();
+        let entry = &new_init[stsd.start..stsd.end];
+        for n in &sets {
+            assert!(
+                entry.windows(n.len()).any(|w| w == *n),
+                "{name}: new parameter set in the sample entry"
+            );
+        }
+        assert!(
+            sets.iter()
+                .any(|n| !old_init.windows(n.len()).any(|w| w == *n)),
+            "{name}: the old init has different parameter sets"
+        );
+        // Media segments on both sides of the switch.
+        let before = parse_frag(&segs[at - 1].data);
+        let after = parse_frag(&segs[at + 1].data);
+        assert!(after.seq > before.seq, "{name}: sequence numbers increase");
+        let (vb, va) = (have_video_traf(&before), have_video_traf(&after));
+        let end: u64 = vb.tfdt + vb.samples.iter().map(|s| u64::from(s.0)).sum::<u64>();
+        assert_eq!(va.tfdt, end, "{name}: decode times continue");
+        assert_eq!(va.tfdt, 2 * 90_000, "{name}: 40 frames at 20 fps");
+        assert_eq!(va.samples[0].2, SYNC, "{name}: starts with a sync sample");
+        assert!(va.samples[1..].iter().all(|s| s.2 == NON_SYNC));
+        // The first slice of the new generation is an IDR / IRAP picture
+        // (SEI may come before it, as in the first generation).
+        let first = &va.data[0];
+        let mut i = 0;
+        let slice = loop {
+            let len = u32at(first, i) as usize;
+            assert!(i + 4 + len <= first.len(), "{name}: NAL lengths");
+            let t = first[i + 4];
+            let vcl = match codec {
+                VideoCodec::H264 => (1..=5).contains(&(t & 0x1f)),
+                VideoCodec::H265 => (t >> 1) & 0x3f < 32,
+            };
+            if vcl {
+                break t;
+            }
+            i += 4 + len;
+        };
+        let irap = match codec {
+            VideoCodec::H264 => slice & 0x1f == 5,
+            VideoCodec::H265 => (16..=21).contains(&((slice >> 1) & 0x3f)),
+        };
+        assert!(
+            irap,
+            "{name}: the new generation starts with a keyframe slice"
+        );
+    }
+}
+
 #[test]
 fn reject_policy_returns_an_error_and_consumes_nothing() {
     let aus = load(VideoCodec::H264, "h264-resize.h264");

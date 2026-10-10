@@ -125,8 +125,10 @@ pub struct InitInfo {
     pub width: u32,
     pub height: u32,
     /// True when this init replaces an earlier one (parameter sets or
-    /// resolution changed): the client should reset or recreate its
-    /// `SourceBuffer` before appending it.
+    /// resolution changed). The client appends it to the same
+    /// `SourceBuffer` in stream order, after the previous generation's media
+    /// segments, calling `changeType` first when `mime` differs from the
+    /// previous init's (see the crate documentation).
     pub reset: bool,
 }
 
