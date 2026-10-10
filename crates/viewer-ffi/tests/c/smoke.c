@@ -6,6 +6,9 @@
  *
  * usage: smoke HOST PORT   (password from NVRVIEW_TEST_PASSWORD)
  */
+/* nanosleep is POSIX; strict C11 on glibc hides it without this. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "nvrview.h"
 
 #include <stdatomic.h>
