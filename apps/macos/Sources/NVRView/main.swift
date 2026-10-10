@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var settings: SettingsWindowController?
     /// With `--selftest`: AppKit's warnings on standard error, counted.
     let logWatch: LogWatch?
+    /// With `--selftest`: the viewer's clock, moved only by the self-test
+    /// (animations and timeouts finish when it says, not after real time).
+    let testClock: ManualViewerClock?
     /// The windows to reopen on the next launch (with `--fake` or
     /// `--selftest` only when given a `--data-dir`: their layouts and
     /// devices are made up).
@@ -26,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     init(options: Options) {
         self.options = options
         logWatch = options.selfTestSeconds == nil ? nil : LogWatch(patterns: SelfTest.forbiddenLog)
+        testClock = options.selfTestSeconds == nil ? nil : ManualViewerClock(now: SystemViewerClock().now)
         let remembers = options.dataDirectory != nil || (!options.fake && options.selfTestSeconds == nil)
         windowFile = JSONFileStore(
             file: remembers
@@ -70,11 +74,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
             ]
             o.detectionDemo = 12
+            // The self-test's tier switches need not wait for the clip's next keyframe.
+            o.newTierStartsAtKeyframe = options.selfTestSeconds != nil
             let box = FakeBox()
             let credentials = MemoryCredentials()
             let model = try AppModel(
                 factory: FakeCore.factory(options: o) { box.core = $0 }, fakeBox: box, credentials: credentials,
-                deviceFile: JSONFileStore(file: nil), groupFile: JSONFileStore(file: nil))
+                deviceFile: JSONFileStore(file: nil), groupFile: JSONFileStore(file: nil),
+                clock: testClock ?? SystemViewerClock())
             return model
         }
         guard let factory = AppModel.realFactory(dataDirectory: options.dataDirectory) else {
@@ -89,7 +96,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     ?? JSONFileStore<DeviceConfig>.appSupport("devices.json")),
             groupFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("groups.json")
-                    ?? JSONFileStore<CameraGroup>.appSupport("groups.json")))
+                    ?? JSONFileStore<CameraGroup>.appSupport("groups.json")),
+            clock: testClock ?? SystemViewerClock())
     }
 
     /// `--host`/`--user`: one device for this run, password from
@@ -220,11 +228,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc func toggleFrameRates(_ sender: Any?) { model?.showFrameRates.toggle() }
+    private func cornerMenuItem() -> NSMenuItem {
+        let menu = NSMenu(title: "Detection Indicators")
+        for corner in ChromeCorner.allCases {
+            let i = NSMenuItem(title: corner.title, action: #selector(setIndicatorCorner(_:)), keyEquivalent: "")
+            i.target = self
+            i.representedObject = corner.rawValue
+            menu.addItem(i)
+        }
+        let parent = NSMenuItem(title: "Detection Indicators", action: nil, keyEquivalent: "")
+        parent.submenu = menu
+        return parent
+    }
+    @objc func setIndicatorCorner(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let c = ChromeCorner(rawValue: raw) { model?.indicatorCorner = c }
+    }
     @objc func toggleHideOffline(_ sender: Any?) { model?.hideOfflineChannels.toggle() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
         if item.action == #selector(toggleHideOffline(_:)) { item.state = model?.hideOfflineChannels == true ? .on : .off }
+        if item.action == #selector(setIndicatorCorner(_:)) {
+            item.state = (item.representedObject as? String) == model?.indicatorCorner.rawValue ? .on : .off
+        }
         return true
     }
 
@@ -308,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             item("Show Frame Rates", #selector(toggleFrameRates(_:))),
             item("Hide Offline Channels", #selector(toggleHideOffline(_:))),
+            cornerMenuItem(),
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.

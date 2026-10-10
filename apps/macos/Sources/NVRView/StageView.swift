@@ -51,7 +51,7 @@ protocol StageDelegate: AnyObject {
 /// showing.
 @MainActor
 final class StageView: NSView {
-    static let focusDuration: CFTimeInterval = 0.28
+    static let focusDuration = FocusAnimation.defaultDuration
 
     let model: AppModel
     let state: WindowState
@@ -82,20 +82,21 @@ final class StageView: NSView {
     /// Whether hiding the chrome in full screen also hides the pointer (the
     /// self-test turns it off: it never touches the user's pointer).
     var hidesPointer = true
+    /// The clock every animation and timeout of the stage reads (the
+    /// model's: the system clock in the app, a manual one in the self-test).
+    let clock: any ViewerClock
     /// When the chrome hides; seconds of no interaction.
-    private(set) var idle = ChromeIdle(now: CACurrentMediaTime())
+    private(set) var idle: ChromeIdle
     /// The overlay chrome is shown (not hidden for idleness).
     var chromeVisible: Bool { idle.visible }
     private var insets: [NodePath: ZoomInsetView] = [:]
     /// Mouse-wheel zoom easing toward a target scale, per camera, around a
     /// point of the shown picture.
-    private var zoomTargets: [CameraRef: (scale: Double, unit: CGPoint, frame: CGRect)] = [:]
-    private var lastPrepare: CFTimeInterval?
+    private var zoomEasing = ZoomEasing<CameraRef>()
     /// The picture's layout size per camera, from the last refresh.
     private var pictureSizes: [CameraRef: CGSize] = [:]
 
-    private var focusProgress: Double = 0
-    private var focusAnimation: (from: Double, to: Double, start: CFTimeInterval)?
+    private var focusAnimation = FocusAnimation(duration: StageView.focusDuration)
     /// The camera this stage told the leases it focuses.
     private var focusedCamera: CameraRef?
     /// A tile of this stage as the leases know it (stream quality demands).
@@ -121,6 +122,8 @@ final class StageView: NSView {
     init(model: AppModel, state: WindowState, renderer: GridRenderer) {
         self.model = model
         self.state = state
+        clock = model.clock
+        idle = ChromeIdle(now: model.clock.now)
         grid = MetalGridView(renderer: renderer)
         super.init(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
         wantsLayer = true
@@ -133,6 +136,8 @@ final class StageView: NSView {
         addSubview(grid)
         addSubview(overlay)
         overlay.registerForDraggedTypes([.string])
+        alertActive = { [weak model] in model?.alerts.isActive($0) == true }
+        dismissAlert = { [weak model] in model?.dismissAlert($0) }
         grid.prepare = { [weak self] renderer, size in
             MainActor.assumeIsolated { self?.prepare(renderer: renderer, drawable: size) }
         }
@@ -149,7 +154,7 @@ final class StageView: NSView {
     private var currentLeaves: [LeafFrame] {
         RectAnimation.focusFrames(
             grid: frames, focused: state.focused, bounds: overlay.bounds,
-            progress: state.focused == nil ? 0 : focusProgress)
+            progress: state.focused == nil ? 0 : focusAnimation.progress)
     }
 
     /// Recomputes the frames and rebuilds chrome for the current tree.
@@ -169,8 +174,13 @@ final class StageView: NSView {
             insets[path] = nil
         }
         for leaf in frames.leaves where chromes[leaf.path] == nil {
-            let view = TileChromeView()
+            let view = TileChromeView(clock: clock)
             let path = leaf.path
+            view.onDismissAlert = { [weak self] in
+                guard let self, let camera = self.frames.leaves.first(where: { $0.path == path })?.camera else { return }
+                self.dismissAlert(camera)
+                self.refreshChrome()
+            }
             view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
             view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
@@ -241,6 +251,10 @@ final class StageView: NSView {
         }
     }
 
+    private func alertLines(for camera: CameraRef) -> [String]? {
+        model.alerts.alert(for: camera)?.lines(now: Date())
+    }
+
     private func content(for leaf: LeafFrame) -> TileChromeContent {
         let selected = state.selected == leaf.path && (state.editing || state.focused == nil)
         guard let camera = leaf.camera else {
@@ -249,13 +263,6 @@ final class StageView: NSView {
                 dropTarget: dropTarget == leaf.path)
         }
         let active = model.detections.active(for: camera)
-        let multiLens = model.isMultiLens(camera)
-        let badges = active.map { a in
-            TileChromeContent.Badge(
-                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : "")
-                    + (multiLens ? " · " + AppModel.lensName(camera.lens) : ""),
-                color: Self.color(for: a.kind))
-        }
         var detail: [String] = [model.deviceName(camera.device)]
         if let tile = model.leases.tile(for: camera) {
             let t = tile.tierState
@@ -271,7 +278,9 @@ final class StageView: NSView {
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
             title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
-            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil, badges: badges,
+            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil,
+            indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
+            alertLines: alertLines(for: camera),
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }
@@ -301,6 +310,8 @@ final class StageView: NSView {
         case "vehicle": NSColor(calibratedRed: 0.9, green: 0.54, blue: 0.18, alpha: 1)
         case "dog_cat": NSColor(calibratedRed: 0.13, green: 0.65, blue: 0.56, alpha: 1)
         case "package": NSColor(calibratedRed: 0.62, green: 0.42, blue: 0.85, alpha: 1)
+        // Sound: a calm slate, apart from the object colors.
+        case "smoke_alarm", "co_alarm": NSColor(calibratedRed: 0.4, green: 0.47, blue: 0.58, alpha: 1)
         default: NSColor(calibratedWhite: 0.45, alpha: 0.9)
         }
     }
@@ -319,13 +330,12 @@ final class StageView: NSView {
     /// pixels: advances the focus animation, lays out the tiles, feeds the
     /// level meters. Assigns the renderer's tiles only when something changed.
     private func prepare(renderer: GridRenderer, drawable: CGSize) {
-        stepAnimation()
+        tick(now: clock.now)
         let points = overlay.bounds
         guard points.width > 0, points.height > 0 else { return }
         // Per axis: during a resize the drawable may lag the view (it is
         // stretched to the bounds until its size catches up).
         let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
-        stepZoom()
         var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [], zooms: [])
         var tiles: [GridTile] = []
         var paths: [NodePath] = []
@@ -381,9 +391,27 @@ final class StageView: NSView {
     /// tree on screen may differ from the stored layout until it ends.
     var isInteracting: Bool { gesture != nil }
     /// A focus animation is running (self-test).
-    var isAnimatingFocus: Bool { focusAnimation != nil }
+    var isAnimatingFocus: Bool { focusAnimation.isRunning }
     /// A mouse-wheel zoom is still easing (self-test).
-    var isEasingZoom: Bool { !zoomTargets.isEmpty }
+    var isEasingZoom: Bool { zoomEasing.isEasing }
+
+    // MARK: Time
+
+    /// One step of everything time-driven, at `now` on the stage's clock:
+    /// the focus animation, zoom easing, chrome auto-hide and the headers'
+    /// fade-out. The display link calls it on every refresh and the window's
+    /// timer now and then (a window behind others gets few refreshes, and
+    /// what is time-based must still finish); the self-test calls it after
+    /// advancing its clock.
+    func tick(now: Double) {
+        stepFocus(now: now)
+        stepZoom(now: now)
+        if idle.tick(now: now) { hideChrome() }
+        for view in chromes.values { view.tick(now: now) }
+    }
+
+    /// `tick(now:)` at the clock's time.
+    func tick() { tick(now: clock.now) }
 
     func toggleFocus(_ path: NodePath? = nil) {
         if state.focused != nil {
@@ -417,26 +445,25 @@ final class StageView: NSView {
     }
 
     private func animateFocus(to target: Double) {
-        focusAnimation = (focusProgress, target, CACurrentMediaTime())
+        focusAnimation.start(to: target, now: clock.now)
     }
 
-    private func stepAnimation() {
-        guard let a = focusAnimation else { return }
-        let t = (CACurrentMediaTime() - a.start) / Self.focusDuration
-        focusProgress = a.from + (a.to - a.from) * min(max(t, 0), 1)
-        if t >= 1 {
-            focusAnimation = nil
-            focusProgress = a.to
-            if a.to == 1, let f = state.focused, let camera = state.tree[f]?.camera {
+    private func stepFocus(now: Double) {
+        guard focusAnimation.isRunning else { return }
+        switch focusAnimation.tick(now: now) {
+        case .focused?:
+            if let f = state.focused, let camera = state.tree[f]?.camera {
                 // After the animation: the sharper stream, swapped in by the
                 // core after its first keyframe.
                 focusedCamera = camera
                 syncDemands()
                 refreshChrome()
-            } else if a.to == 0 {
-                state.focused = nil
-                refreshChrome()
             }
+        case .unfocused?:
+            state.focused = nil
+            refreshChrome()
+        case nil:
+            break
         }
         layoutChrome()
     }
@@ -444,8 +471,7 @@ final class StageView: NSView {
     private func endFocusImmediately() {
         focusedCamera = nil
         state.focused = nil
-        focusAnimation = nil
-        focusProgress = 0
+        focusAnimation.reset()
     }
 
     /// In focus, an arrow key: the focused tile becomes `path`'s, at once,
@@ -467,7 +493,7 @@ final class StageView: NSView {
     /// focuses that tile instead.
     func moveSelection(_ direction: MoveDirection) {
         if let f = state.focused {
-            guard focusAnimation == nil, let n = frames.neighbor(of: f, direction) else { return }
+            guard !focusAnimation.isRunning, let n = frames.neighbor(of: f, direction) else { return }
             switchFocus(to: n)
             return
         }
@@ -497,7 +523,7 @@ final class StageView: NSView {
 
     /// A pointer move, click, key or scroll in the window.
     func noteInteraction() {
-        guard idle.interact(now: CACurrentMediaTime()) else { return }
+        guard idle.interact(now: clock.now) else { return }
         // Back: the outline and maps fade in; in full screen, the header of
         // the tile under the pointer too (moving the pointer also does that).
         refreshChrome()
@@ -507,14 +533,6 @@ final class StageView: NSView {
         }
     }
 
-    /// Called now and then by the window: hides the chrome once idle. Out
-    /// of full screen the headers keep their own hover timing; the outline
-    /// and zoom map fade either way.
-    func tickChrome() {
-        guard idle.tick(now: CACurrentMediaTime()) else { return }
-        hideChrome()
-    }
-
     /// The seconds of idleness before the chrome hides (the self-test
     /// shortens it).
     var chromeHideDelay: Double {
@@ -522,6 +540,9 @@ final class StageView: NSView {
         set { idle.delay = newValue }
     }
 
+    /// Hides the chrome once idle (from `tick`). Out of full screen the
+    /// headers keep their own hover timing; the outline and zoom map fade
+    /// either way.
     private func hideChrome() {
         for view in chromes.values {
             view.setOutlineShown(false)
@@ -561,12 +582,29 @@ final class StageView: NSView {
 
     /// For the tile at `p`: its camera, the unit point of `p` in its shown
     /// picture, the shown picture's size in points, and its 1x frame.
-    private func zoomTarget(at p: CGPoint) -> (camera: CameraRef, unit: CGPoint, shown: CGSize, frame: CGRect)? {
+    private func zoomTarget(at p: CGPoint)
+        -> (camera: CameraRef, path: NodePath, unit: CGPoint, shown: CGSize, frame: CGRect)?
+    {
         guard let leaf = drawnLeaf(at: p), let camera = leaf.camera, let picture = pictureSizes[camera] else {
             return nil
         }
         let shown = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill)
-        return (camera, TilePlacement.unit(p, in: shown), shown.size, zoomFrame(leaf.rect, picture))
+        return (camera, leaf.path, TilePlacement.unit(p, in: shown), shown.size, zoomFrame(leaf.rect, picture))
+    }
+
+    /// The 1x frame of `camera`'s picture now, in the tile `path` if it
+    /// still shows the camera, else its first tile: from the picture's size
+    /// at this refresh, so a picture that changed size or shape since the
+    /// easing began (the main stream replacing the sub-stream) is followed.
+    private func currentZoomFrame(_ camera: CameraRef, tile path: NodePath?) -> CGRect {
+        guard let picture = pictureSizes[camera], picture.width > 0, picture.height > 0 else {
+            return TileZoom.wholeFrame
+        }
+        let leaves = currentLeaves
+        guard let leaf = leaves.first(where: { $0.path == path && $0.camera == camera })
+            ?? leaves.first(where: { $0.camera == camera })
+        else { return TileZoom.wholeFrame }
+        return zoomFrame(leaf.rect, picture)
     }
 
     private func setZoom(_ z: TileZoom, for camera: CameraRef) {
@@ -585,11 +623,11 @@ final class StageView: NSView {
         guard let t = zoomTarget(at: p) else { return }
         noteInteraction()
         if eased {
-            let from = zoomTargets[t.camera]?.scale ?? zoom(of: t.camera).scale
+            let from = zoomEasing.target(for: t.camera)?.scale ?? zoom(of: t.camera).scale
             let target = min(max(from * factor, 1), TileZoom.maxScale)
-            zoomTargets[t.camera] = (target, t.unit, t.frame)
+            zoomEasing.set(.init(scale: target, unit: t.unit, tile: t.path), for: t.camera, now: clock.now)
         } else {
-            zoomTargets[t.camera] = nil
+            zoomEasing.cancel(t.camera)
             setZoom(zoom(of: t.camera).zoomed(by: factor, atUnit: t.unit, in: t.frame), for: t.camera)
         }
     }
@@ -599,7 +637,7 @@ final class StageView: NSView {
         guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.shown.width > 0, t.shown.height > 0 else {
             return
         }
-        zoomTargets[t.camera] = nil
+        zoomEasing.cancel(t.camera)
         let unit = CGVector(dx: delta.dx / t.shown.width, dy: delta.dy / t.shown.height)
         setZoom(zoom(of: t.camera).panned(byUnit: unit, in: t.frame), for: t.camera)
     }
@@ -618,25 +656,18 @@ final class StageView: NSView {
 
     private func resetZoom(_ camera: CameraRef) {
         guard zoom(of: camera).isZoomed else { return }
-        let frame = pictureSizes[camera].flatMap { size in
-            frames.leaves.first { $0.camera == camera }.map { zoomFrame($0.rect, size) }
-        } ?? TileZoom.wholeFrame
-        zoomTargets[camera] = (1, CGPoint(x: 0.5, y: 0.5), frame)
+        zoomEasing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5)), for: camera, now: clock.now)
     }
 
-    /// One display refresh of the mouse-wheel easing.
-    private func stepZoom() {
-        let now = CACurrentMediaTime()
-        let dt = lastPrepare.map { min(now - $0, 0.1) } ?? 1.0 / 60
-        lastPrepare = now
-        guard !zoomTargets.isEmpty else { return }
-        for (camera, t) in zoomTargets {
-            let current = zoom(of: camera)
-            let scale = TileZoom.eased(from: current.scale, to: t.scale, dt: dt)
-            let q = current.picturePoint(atUnit: t.unit, in: t.frame)
-            setZoom(current.zoomed(to: scale, keeping: q, atUnit: t.unit, in: t.frame), for: camera)
-            if scale == t.scale { zoomTargets[camera] = nil }
-        }
+    /// One step of the mouse-wheel easing (from `tick`). Time-based, so it
+    /// finishes however few refreshes there are, and it ends exactly on the
+    /// target (1x is no zoom at all).
+    private func stepZoom(now: Double) {
+        guard zoomEasing.isEasing else { return }
+        let steps = zoomEasing.tick(
+            now: now, current: { zoom(of: $0) },
+            frame: { camera, target in currentZoomFrame(camera, tile: target.tile) })
+        for step in steps { setZoom(step.zoom, for: step.key) }
     }
 
     /// Leaves focus without animating (the window closes, the tree changes).

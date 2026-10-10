@@ -185,7 +185,18 @@ import VideoKit
     }
 }
 
+/// Polls `condition` every few milliseconds until it holds or `timeout`
+/// seconds pass (real-time pacing runs on the fake's own threads).
+private func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition(), Date() < deadline { try? await Task.sleep(for: .milliseconds(2)) }
+}
+
 @Suite struct TeardownTests {
+    /// How long "nothing more happens" is watched for: at 200 pictures per
+    /// second, ten pictures' worth.
+    private static let quiet = Duration.milliseconds(50)
+
     /// Tiles running at speed, then shutdown: nothing is called into the core
     /// afterwards and nothing is called back.
     @Test func noCallbacksAfterShutdown() async throws {
@@ -195,11 +206,11 @@ import VideoKit
         options.pacing = .realtime(fps: 200)
         let rig = try Rig(options)
         let tiles = try (0..<4).map { try rig.open(channel: UInt8($0)) }
-        try await Task.sleep(for: .milliseconds(400))
+        await waitUntil { tiles.allSatisfy { $0.decoder.stats.submitted > 0 } }
         #expect(tiles.allSatisfy { $0.decoder.stats.submitted > 0 })
         rig.bridge.shutdown()
         let submitted = tiles.map { $0.decoder.stats.submitted }
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: Self.quiet)
         #expect(tiles.map { $0.decoder.stats.submitted } == submitted)
         #expect(rig.fake.answersAfterFree == 0)
         #expect(rig.fake.violations.isEmpty, "\(rig.fake.violations)")
@@ -214,11 +225,13 @@ import VideoKit
         let rig = try Rig(options)
         let a = try rig.open(channel: 0)
         let b = try rig.open(channel: 1)
-        try await Task.sleep(for: .milliseconds(300))
+        await waitUntil { a.decoder.stats.submitted > 0 && b.decoder.stats.submitted > 0 }
         rig.bridge.closeTile(a)
         let frozen = a.decoder.stats.submitted
         let bBefore = b.decoder.stats.submitted
-        try await Task.sleep(for: .milliseconds(300))
+        // The other tile keeps going while the closed one stays still.
+        await waitUntil { b.decoder.stats.submitted > bBefore + 5 }
+        try await Task.sleep(for: Self.quiet)
         #expect(a.decoder.stats.submitted == frozen)
         #expect(b.decoder.stats.submitted > bBefore)  // the other tile keeps going
         #expect(rig.bridge.tiles.count == 1)
@@ -234,7 +247,7 @@ import VideoKit
         for _ in 0..<5 {
             let rig = try Rig(options)
             let tile = try rig.open()
-            try await Task.sleep(for: .milliseconds(120))
+            await waitUntil { tile.snapshot.configures >= 1 && tile.decoder.stats.submitted > 0 }
             // The first keyframe's Configure must have been executed.
             #expect(tile.snapshot.configures >= 1)
             #expect(tile.decoder.stats.submitted > 0)

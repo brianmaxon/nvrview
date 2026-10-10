@@ -89,10 +89,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         token = model.subscribe { [weak self] in self?.modelChanged() }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             // Countdowns and statuses that change without an event, and the
-            // chrome's idle check (it hides about 3 s after the last input).
+            // stage's time step (the chrome hides about 3 s after the last
+            // input), also while the window gets no display refreshes.
             MainActor.assumeIsolated {
                 self?.stage.refreshChrome()
-                self?.stage.tickChrome()
+                self?.stage.tick()
             }
         }
         show(content)

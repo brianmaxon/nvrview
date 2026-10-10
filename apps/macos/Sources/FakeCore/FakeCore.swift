@@ -147,6 +147,16 @@ public final class FakeCore: CoreAPI {
         /// new generation's first decoded picture, waiting for the new one to
         /// reach the old one's timestamp (the real core: 300 ms).
         public var tierAlignCap: Duration = .milliseconds(300)
+        /// A new tier's stream starts with the clip's latest keyframe (its
+        /// pictures keep the camera's timestamps), so a switch does not wait
+        /// up to a whole group of pictures for the next one. Off by default:
+        /// the stream then joins the clip where the shown tier is. The app's
+        /// self-test turns it on to keep its tier switches short.
+        public var newTierStartsAtKeyframe = false
+        /// The clock (nanoseconds) the tier switch's timeout and alignment
+        /// cap count on: the host clock, or a test's manual one so a test
+        /// need not sleep through them.
+        public var tierClock: @Sendable () -> UInt64 = { HostClock.nowNanos() }
         /// In real-time pacing, each tile's channel reports a detection (or,
         /// without camera AI, motion) every this many seconds, for 3 s.
         public var detectionDemo: Double?
@@ -433,6 +443,23 @@ public final class FakeCore: CoreAPI {
         }
     }
 
+    /// Emits a sound detection (`kind` `smoke_alarm` or `co_alarm`) the way
+    /// the core does: `source` `local_audio`, no `lens`.
+    ///
+    /// Like the core, one episode per channel however many tiles show it: a
+    /// start while one is active, or a stop with none, emits nothing.
+    public func emitSoundDetection(device: UInt64, channel: Int, kind: String = "smoke_alarm", start: Bool) {
+        let key = "\(device)/\(channel)/\(kind)"
+        let emit: Bool = soundLock.withLock {
+            start ? soundActive.insert(key).inserted : soundActive.remove(key) != nil
+        }
+        guard emit else { return }
+        emitDetection(device: device, channel: channel, kind: kind, start: start, source: "local_audio")
+    }
+
+    private let soundLock = NSLock()
+    private nonisolated(unsafe) var soundActive: Set<String> = []
+
     fileprivate func event(_ json: String) { emitEvent(json) }
 
     // MARK: ABI 3: layouts
@@ -708,6 +735,9 @@ private final class FakeTile: Sendable {
         let clip: FakeClip
         var pipeline: StandInPipeline
         var cursor: Int
+        /// How far behind `cursor` the clip is read (a tier that started
+        /// at the clip's latest keyframe, `newTierStartsAtKeyframe`).
+        var unitShift = 0
         /// Decodes asked and not yet answered or discarded.
         var outstanding = 0
         var submitted = Set<Int64>()
@@ -718,9 +748,10 @@ private final class FakeTile: Sendable {
         /// The latest picture answered as decoded, and when the first was.
         var lastDecodedPTS: Int64?
         var firstDecodedAt: UInt64?
-        var startedAt = HostClock.nowNanos()
+        var startedAt: UInt64
 
-        init(generation: UInt32, tier: StreamTier, clip: FakeClip, cursor: Int) {
+        init(generation: UInt32, tier: StreamTier, clip: FakeClip, cursor: Int, now: UInt64) {
+            startedAt = now
             self.generation = generation
             self.tier = tier
             self.clip = clip
@@ -767,7 +798,7 @@ private final class FakeTile: Sendable {
         self.silent = silent
         self.owner = owner
         let clip = owner.clip(channel: channel, tier: tier, opened: tier)
-        state = Mutex(State(lanes: [Lane(generation: 0, tier: tier, clip: clip, cursor: 0)]))
+        state = Mutex(State(lanes: [Lane(generation: 0, tier: tier, clip: clip, cursor: 0, now: owner.options.tierClock())]))
     }
 
     var outstanding: Int { state.withLock { $0.lanes.reduce(0) { $0 + $1.outstanding } } }
@@ -792,6 +823,8 @@ private final class FakeTile: Sendable {
             var audioBlocks = 0
             var detectionCycle = 0
             var detectionActive: String?
+            var soundActive: String?
+            var soundCycle = 0
             let detectionStart = ContinuousClock.now
             while !cancel.load(ordering: .acquiring) {
                 _ = pump(count: 1)
@@ -815,6 +848,24 @@ private final class FakeTile: Sendable {
                     } else if !inWindow, let kind = detectionActive {
                         detectionActive = nil
                         owner.emitDetection(device: device, channel: Int(channel), kind: kind, start: false)
+                    }
+                }
+                if let every = owner.options.detectionDemo, every > 0 {
+                    // A sound episode about every fourth cycle, on its own
+                    // schedule: it starts later than a picture detection would.
+                    let elapsed = (ContinuousClock.now - detectionStart) / .seconds(1)
+                    let cycle = Int(elapsed / every)
+                    let inSound = cycle % 4 == Int(channel) % 4
+                        && elapsed.truncatingRemainder(dividingBy: every) > every * 0.5
+                        && elapsed.truncatingRemainder(dividingBy: every) < every * 0.5 + 3
+                    if inSound, soundActive == nil {
+                        let kind = soundCycle % 2 == 0 ? "smoke_alarm" : "co_alarm"
+                        soundCycle += 1
+                        soundActive = kind
+                        owner.emitSoundDetection(device: device, channel: Int(channel), kind: kind, start: true)
+                    } else if !inSound, let kind = soundActive {
+                        soundActive = nil
+                        owner.emitSoundDetection(device: device, channel: Int(channel), kind: kind, start: false)
                     }
                 }
                 next += .seconds(period)
@@ -882,7 +933,7 @@ private final class FakeTile: Sendable {
                 guard !silent, !s.stopped else { return nil }
                 // A new tier that never decodes gives up, as in the core.
                 let limit = UInt64(owner.options.tierSwitchTimeout / .nanoseconds(1))
-                let now = HostClock.nowNanos()
+                let now = owner.options.tierClock()
                 for lane in s.lanes where lane.generation > s.shown && !lane.answeredDecode && now &- lane.startedAt > limit {
                     s.lanes.removeAll { $0.generation == lane.generation }
                     s.retired.insert(lane.generation)
@@ -903,7 +954,7 @@ private final class FakeTile: Sendable {
                     let clip = s.lanes[i].clip
                     guard !clip.units.isEmpty else { continue }
                     if s.lanes[i].cursor >= clip.units.count && !owner.options.loop { continue }
-                    let unit = clip.units[s.lanes[i].cursor % clip.units.count]
+                    let unit = clip.units[(s.lanes[i].cursor - s.lanes[i].unitShift) % clip.units.count]
                     // Every tier of a camera carries the same camera time.
                     let pts = Int64(s.lanes[i].cursor) * 50_000
                         + (owner.options.tierPTSOffsetMicros[s.lanes[i].tier] ?? 0)
@@ -954,7 +1005,7 @@ private final class FakeTile: Sendable {
     func setTier(_ tier: StreamTier) -> [String] {
         emitLock.lock()
         defer { emitLock.unlock() }
-        let now = HostClock.nowNanos()
+        let now = owner.options.tierClock()
         return state.withLock { s -> [String] in
             guard !s.stopped, !silent else { return [] }
             guard let shownLane = s.lanes.first(where: { $0.generation == s.shown }) else { return [] }
@@ -995,7 +1046,13 @@ private final class FakeTile: Sendable {
                 return events
             }
             let clip = owner.clip(channel: channel, tier: tier, opened: openedTier)
-            s.lanes.append(Lane(generation: generation, tier: tier, clip: clip, cursor: shownLane.cursor))
+            var lane = Lane(generation: generation, tier: tier, clip: clip, cursor: shownLane.cursor, now: now)
+            if owner.options.newTierStartsAtKeyframe, !clip.units.isEmpty {
+                let at = shownLane.cursor % clip.units.count
+                let key = clip.units[...at].lastIndex { $0.isKeyframe } ?? at
+                lane.unitShift = at - key
+            }
+            s.lanes.append(lane)
             return events
         }
     }
@@ -1130,7 +1187,7 @@ private final class FakeTile: Sendable {
     }
 
     func answered(_ answer: Answer, generation: UInt32) {
-        let now = HostClock.nowNanos()
+        let now = owner.options.tierClock()
         let problem = state.withLock { s -> String? in
             guard let i = s.lanes.firstIndex(where: { $0.generation == generation }) else {
                 if s.retired.contains(generation) || generation < s.shown {
