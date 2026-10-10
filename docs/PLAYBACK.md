@@ -173,7 +173,12 @@ section 2a.
 - **Buffering.** Downloads arrive unpaced, and slowing one would stall live
   view on the same connection, so the session buffers a bounded amount and
   stops (144) a download whose consumer falls that far behind; the chunk is
-  fetched again.
+  fetched again. Chunk writes, their `fsync`, and job file saves run on
+  blocking threads, never on an async worker: a worker stuck in a slow disk
+  flush also holds up the tasks queued behind it, which can be the session's
+  reader. Measured before this rule, on a 6-core Windows computer under CPU
+  and disk load (debug build), live frames reached the session up to 1 s
+  late while the mock sent them on time.
 - **Scheduling**: jobs from a whole incident are queued together. Devices
   work in parallel; per device, downloads share one session with a small
   concurrency limit (one download and one search at a time by default) so

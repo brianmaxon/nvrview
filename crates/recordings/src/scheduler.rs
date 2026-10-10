@@ -23,15 +23,21 @@
 //!   subfolder. Joining a camera's chunks into its MP4 file is the
 //!   [`Finalizer`] hook, left to the muxer; without one, a camera job stops
 //!   at [`CameraState::ChunksComplete`].
+//! - **Live view first.** Downloads share the device's session with live
+//!   view, and usually its async runtime. File writes, `fsync`s, and job
+//!   file saves run on blocking threads, never on an async worker: a worker
+//!   stuck in a slow disk flush also holds up the tasks queued behind it,
+//!   which can be the session's reader and with it every live frame.
 
 use crate::chunk::{self, ChunkIndex, ChunkWriter};
 use crate::incident::{CameraId, Incident};
 use crate::naming::{self, NamePattern};
-use crate::store::{read_json, write_json};
+use crate::store::{read_json, write_atomic, write_json};
 use crate::{Secs, date_time};
 use bc_protocol::archive::DownloadRequest;
+use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, DownloadError, DownloadEvent, SearchError};
+use bc_session::{DeviceSession, Download, DownloadError, DownloadEvent, SearchError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -40,7 +46,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
@@ -48,6 +54,10 @@ const JOB_VERSION: u32 = 1;
 /// Name of the hidden folder inside an incident folder.
 pub const PARTS_DIR: &str = ".parts";
 const JOB_FILE: &str = "job.json";
+/// Records queued for a chunk's writer thread. When the disk falls behind,
+/// the download waits here, and its session buffer (bounded) takes the
+/// rest; live view never waits.
+const WRITE_QUEUE: usize = 256;
 
 /// The final step of a camera job: join its complete chunks into one file.
 ///
@@ -251,15 +261,68 @@ struct Job {
     folder: PathBuf,
     file: JobFile,
     running: Vec<bool>,
+    /// Bumped on every change to `file`; see [`JobSave`].
+    version: u64,
+    /// The version last written to disk.
+    saved: Arc<Mutex<u64>>,
 }
 
 impl Job {
+    fn new(seq: u64, folder: PathBuf, file: JobFile) -> Job {
+        Job {
+            seq,
+            folder,
+            running: vec![false; file.cameras.len()],
+            file,
+            version: 0,
+            saved: Arc::new(Mutex::new(0)),
+        }
+    }
+
     fn parts_root(&self) -> PathBuf {
         self.folder.join(PARTS_DIR)
     }
 
-    fn save(&self) -> io::Result<()> {
-        write_json(&self.parts_root().join(JOB_FILE), &self.file)
+    /// A snapshot of the job file to write once the state lock is released.
+    fn snapshot(&mut self) -> io::Result<JobSave> {
+        self.version += 1;
+        Ok(JobSave {
+            path: self.parts_root().join(JOB_FILE),
+            bytes: serde_json::to_vec_pretty(&self.file).map_err(io::Error::other)?,
+            version: self.version,
+            saved: self.saved.clone(),
+        })
+    }
+}
+
+/// A job file write taken under the state lock and done outside it (it
+/// syncs to disk, which can take a long time). Saves of one job are
+/// serialized, and one older than what is already on disk is skipped, so
+/// the file never goes back to an earlier state.
+struct JobSave {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    version: u64,
+    saved: Arc<Mutex<u64>>,
+}
+
+impl JobSave {
+    /// Writes it; blocking.
+    fn write(self) -> io::Result<()> {
+        let mut saved = lock(&self.saved);
+        if self.version <= *saved {
+            return Ok(());
+        }
+        write_atomic(&self.path, &self.bytes)?;
+        *saved = self.version;
+        Ok(())
+    }
+
+    /// Writes it on a blocking thread.
+    async fn write_off_thread(self) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || self.write())
+            .await
+            .map_err(io::Error::other)?
     }
 }
 
@@ -450,19 +513,17 @@ impl Scheduler {
     }
 
     fn insert(&self, folder: PathBuf, file: JobFile) -> io::Result<()> {
-        {
+        let seq = {
             let mut st = lock(&self.inner.state);
-            let seq = st.next_seq;
             st.next_seq += 1;
-            let job = Job {
-                seq,
-                folder,
-                running: vec![false; file.cameras.len()],
-                file,
-            };
-            job.save()?;
-            st.jobs.insert(job.file.incident.id.clone(), job);
-        }
+            st.next_seq - 1
+        };
+        // Saved before it is shared, so without holding the state lock.
+        let mut job = Job::new(seq, folder, file);
+        job.snapshot()?.write()?;
+        lock(&self.inner.state)
+            .jobs
+            .insert(job.file.incident.id.clone(), job);
         self.inner.publish();
         self.inner.changed.notify_waiters();
         Ok(())
@@ -531,17 +592,20 @@ impl Scheduler {
     /// Pauses or resumes an incident download. A running chunk is stopped
     /// (144) and fetched again on resume; completed chunks are kept.
     pub fn set_paused(&self, incident: &str, paused: bool) -> io::Result<bool> {
-        let found = {
+        let save = {
             let mut st = lock(&self.inner.state);
             match st.jobs.get_mut(incident) {
                 Some(j) => {
                     j.file.paused = paused;
-                    j.save()?;
-                    true
+                    Some(j.snapshot()?)
                 }
-                None => false,
+                None => None,
             }
         };
+        let found = save.is_some();
+        if let Some(save) = save {
+            save.write()?;
+        }
         self.inner.publish();
         self.inner.changed.notify_waiters();
         Ok(found)
@@ -549,7 +613,7 @@ impl Scheduler {
 
     /// Queues an incident's failed camera jobs again with fresh attempts.
     pub fn retry(&self, incident: &str) -> io::Result<bool> {
-        let found = {
+        let save = {
             let mut st = lock(&self.inner.state);
             match st.jobs.get_mut(incident) {
                 Some(j) => {
@@ -561,12 +625,15 @@ impl Scheduler {
                             }
                         }
                     }
-                    j.save()?;
-                    true
+                    Some(j.snapshot()?)
                 }
-                None => false,
+                None => None,
             }
         };
+        let found = save.is_some();
+        if let Some(save) = save {
+            save.write()?;
+        }
         self.inner.publish();
         self.inner.changed.notify_waiters();
         Ok(found)
@@ -644,19 +711,26 @@ impl Inner {
         st.shutdown || st.jobs.get(incident).is_none_or(|j| j.file.paused)
     }
 
-    /// Updates a camera job and saves the job file.
-    fn update(&self, incident: &str, cam: usize, f: impl FnOnce(&mut CameraJob, &mut bool)) {
-        {
+    /// Updates a camera job and saves the job file (on a blocking thread).
+    async fn update(&self, incident: &str, cam: usize, f: impl FnOnce(&mut CameraJob, &mut bool)) {
+        let save = {
             let mut st = lock(&self.state);
-            if let Some(j) = st.jobs.get_mut(incident) {
+            st.jobs.get_mut(incident).map(|j| {
                 if let (Some(c), Some(r)) = (j.file.cameras.get_mut(cam), j.running.get_mut(cam)) {
                     f(c, r);
                 }
-                if let Err(e) = j.save() {
-                    warn!(error = %e, "cannot save the download job");
-                }
-            }
+                j.snapshot()
+            })
+        };
+        let result = match save {
+            Some(Ok(save)) => save.write_off_thread().await,
+            Some(Err(e)) => Err(e),
+            None => Ok(()),
+        };
+        if let Err(e) = result {
+            warn!(error = %e, "cannot save the download job");
         }
+        // Published once saved, so what the progress shows is on disk.
         self.publish();
     }
 }
@@ -750,12 +824,14 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
         let mut delay = inner.cfg.retry_delay;
         loop {
             if inner.interrupted(&p.incident) {
-                inner.update(&p.incident, p.cam, |c, r| {
-                    *r = false;
-                    if c.state == CameraState::Running {
-                        c.state = CameraState::Queued;
-                    }
-                });
+                inner
+                    .update(&p.incident, p.cam, |c, r| {
+                        *r = false;
+                        if c.state == CameraState::Running {
+                            c.state = CameraState::Queued;
+                        }
+                    })
+                    .await;
                 return;
             }
             job.chunks[i].attempts += 1;
@@ -783,13 +859,15 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
                     job.chunks[i].done = true;
                     job.chunks[i].bytes = idx.bytes;
                     let (bytes, attempts) = (idx.bytes, job.chunks[i].attempts);
-                    inner.update(&p.incident, p.cam, |c, _| {
-                        if let Some(x) = c.chunks.get_mut(i) {
-                            x.done = true;
-                            x.bytes = bytes;
-                            x.attempts = attempts;
-                        }
-                    });
+                    inner
+                        .update(&p.incident, p.cam, |c, _| {
+                            if let Some(x) = c.chunks.get_mut(i) {
+                                x.done = true;
+                                x.bytes = bytes;
+                                x.attempts = attempts;
+                            }
+                        })
+                        .await;
                     break;
                 }
                 Err(ChunkError::Interrupted) => {
@@ -798,18 +876,22 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
                 }
                 Err(e) => {
                     debug!(chunk = i, attempts, error = %e, "chunk failed");
-                    inner.update(&p.incident, p.cam, |c, _| {
-                        if let Some(x) = c.chunks.get_mut(i) {
-                            x.attempts = attempts;
-                        }
-                    });
+                    inner
+                        .update(&p.incident, p.cam, |c, _| {
+                            if let Some(x) = c.chunks.get_mut(i) {
+                                x.attempts = attempts;
+                            }
+                        })
+                        .await;
                     if attempts >= inner.cfg.max_attempts {
                         warn!(chunk = i, attempts, error = %e, "camera download failed");
                         let reason = format!("chunk {i}: {e}");
-                        inner.update(&p.incident, p.cam, |c, r| {
-                            *r = false;
-                            c.state = CameraState::Failed(reason);
-                        });
+                        inner
+                            .update(&p.incident, p.cam, |c, r| {
+                                *r = false;
+                                c.state = CameraState::Failed(reason);
+                            })
+                            .await;
                         return;
                     }
                     sleep_or_interrupt(inner, &p.incident, delay).await;
@@ -818,12 +900,14 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
             }
         }
     }
-    inner.update(&p.incident, p.cam, |c, _| {
-        c.state = CameraState::ChunksComplete
-    });
+    inner
+        .update(&p.incident, p.cam, |c, _| {
+            c.state = CameraState::ChunksComplete
+        })
+        .await;
     // The final MP4 step, when a finalizer is installed.
     let Some(fin) = inner.finalizer.clone() else {
-        inner.update(&p.incident, p.cam, |_, r| *r = false);
+        inner.update(&p.incident, p.cam, |_, r| *r = false).await;
         return;
     };
     let (dir, out, n) = (
@@ -832,14 +916,16 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
         job.chunks.len() as u32,
     );
     let result = tokio::task::spawn_blocking(move || fin.finalize(&dir, n, &out)).await;
-    inner.update(&p.incident, p.cam, |c, r| {
-        *r = false;
-        c.state = match result {
-            Ok(Ok(())) => CameraState::Done,
-            Ok(Err(e)) => CameraState::Failed(format!("finalize: {e}")),
-            Err(e) => CameraState::Failed(format!("finalize: {e}")),
-        };
-    });
+    inner
+        .update(&p.incident, p.cam, |c, r| {
+            *r = false;
+            c.state = match result {
+                Ok(Ok(())) => CameraState::Done,
+                Ok(Err(e)) => CameraState::Failed(format!("finalize: {e}")),
+                Err(e) => CameraState::Failed(format!("finalize: {e}")),
+            };
+        })
+        .await;
 }
 
 /// Downloads one chunk into its files. Stops the download (144) when it
@@ -854,30 +940,130 @@ async fn fetch_chunk(
     n: u32,
     ch: &ChunkState,
 ) -> Result<ChunkIndex, ChunkError> {
-    let mut dl = tokio::select! {
+    let dl = tokio::select! {
         r = session.download(req) => r.map_err(ChunkError::Start)?,
         _ = wait_interrupted(inner, incident) => return Err(ChunkError::Interrupted),
     };
-    let mut w = ChunkWriter::create(dir, n, ch.start, ch.end).map_err(ChunkError::Io)?;
+    let mut w = BlockingChunk::start(dir, n, ch.start, ch.end);
+    match receive(inner, incident, dl, &mut w).await {
+        Ok(()) => w.finish().await.map_err(ChunkError::Io),
+        Err(e) => {
+            // Stopped (and its files removed) before returning, so the next
+            // attempt never races a writer still holding the old files.
+            let writer_error = w.discard().await;
+            match (e, writer_error) {
+                (ChunkError::Io(_), Some(we)) => Err(ChunkError::Io(we)),
+                (e, _) => Err(e),
+            }
+        }
+    }
+}
+
+/// Feeds a download's records to its chunk writer until the download ends
+/// (`Ok`) or fails.
+async fn receive(
+    inner: &Inner,
+    incident: &str,
+    mut dl: Download,
+    w: &mut BlockingChunk,
+) -> Result<(), ChunkError> {
     loop {
         let next = tokio::select! {
             r = dl.next() => r,
             _ = wait_interrupted(inner, incident) => {
                 dl.cancel(inner.cfg.cancel_timeout).await;
-                let _ = chunk::remove_chunk(dir, n);
                 return Err(ChunkError::Interrupted);
             }
         };
         match next {
-            Ok(Some(DownloadEvent::Record(r))) => w.write(&r).map_err(ChunkError::Io)?,
+            Ok(Some(DownloadEvent::Record(r))) => {
+                if !w.write(r).await {
+                    // The writer failed (its error replaces this one).
+                    dl.cancel(inner.cfg.cancel_timeout).await;
+                    return Err(ChunkError::Io(io::Error::other("chunk writer stopped")));
+                }
+            }
             Ok(Some(DownloadEvent::Estimate(_))) => {}
-            Ok(None) => return w.finish().map_err(ChunkError::Io),
+            Ok(None) => return Ok(()),
             Err(DownloadError::Stalled) => {
                 dl.cancel(inner.cfg.cancel_timeout).await;
                 return Err(ChunkError::Download(DownloadError::Stalled));
             }
             Err(e) => return Err(ChunkError::Download(e)),
         }
+    }
+}
+
+enum WriteMsg {
+    Record(Record),
+    /// Every record is in: flush, sync, and mark the chunk complete.
+    Finish,
+}
+
+/// A [`ChunkWriter`] on a blocking thread, fed through a bounded queue, so
+/// its writes and its final `fsync` never block an async worker.
+struct BlockingChunk {
+    tx: mpsc::Sender<WriteMsg>,
+    join: JoinHandle<io::Result<Option<ChunkIndex>>>,
+    dir: PathBuf,
+    n: u32,
+}
+
+impl BlockingChunk {
+    fn start(dir: &Path, n: u32, start: Secs, end: Secs) -> BlockingChunk {
+        let (tx, mut rx) = mpsc::channel(WRITE_QUEUE);
+        let path = dir.to_owned();
+        let join = tokio::task::spawn_blocking(move || {
+            let mut w = ChunkWriter::create(&path, n, start, end)?;
+            while let Some(m) = rx.blocking_recv() {
+                match m {
+                    WriteMsg::Record(r) => w.write(&r)?,
+                    WriteMsg::Finish => return w.finish().map(Some),
+                }
+            }
+            // Abandoned: leave the partial files to `discard` or the next
+            // attempt, never mark them complete.
+            Ok(None)
+        });
+        BlockingChunk {
+            tx,
+            join,
+            dir: dir.to_owned(),
+            n,
+        }
+    }
+
+    /// Queues a record, waiting while the queue is full; false once the
+    /// writer has stopped (it failed).
+    async fn write(&mut self, r: Record) -> bool {
+        self.tx.send(WriteMsg::Record(r)).await.is_ok()
+    }
+
+    /// Completes the chunk and returns its index.
+    async fn finish(self) -> io::Result<ChunkIndex> {
+        // A failed send means the writer already stopped; its result says why.
+        let _ = self.tx.send(WriteMsg::Finish).await;
+        match self.join.await {
+            Ok(Ok(Some(idx))) => Ok(idx),
+            Ok(Ok(None)) => Err(io::Error::other("chunk writer stopped")),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(io::Error::other(e)),
+        }
+    }
+
+    /// Stops the writer and removes the chunk's files; the writer's error,
+    /// if it failed.
+    async fn discard(self) -> Option<io::Error> {
+        let BlockingChunk { tx, join, dir, n } = self;
+        drop(tx);
+        // Removed after the writer has stopped, so it cannot recreate them.
+        let err = match join.await {
+            Ok(Err(e)) => Some(e),
+            Ok(Ok(_)) => None,
+            Err(e) => Some(io::Error::other(e)),
+        };
+        let _ = tokio::task::spawn_blocking(move || chunk::remove_chunk(&dir, n)).await;
+        err
     }
 }
 
