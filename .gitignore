@@ -21,3 +21,6 @@ DerivedData/
 apps/windows/**/bin/
 apps/windows/**/obj/
 .vs/
+
+# Swift package
+apps/macos/.build/
