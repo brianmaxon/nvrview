@@ -88,6 +88,14 @@ jobs:
             --mock-nvr "target/release/mock-nvr$exe" --fixtures fixtures/synthetic \
             --lib "$lib" --layout "$out/layout.txt" \
             --header crates/viewer-ffi/include/nvrview.h
+      # The Windows app's shell logic without a window (layouts and their
+      # JSON, leases, the sidebar reveal, window restore).
+      - name: C# shell tests
+        shell: bash
+        env:
+          DOTNET_CLI_TELEMETRY_OPTOUT: 1
+          DOTNET_NOLOGO: 1
+        run: dotnet run --project apps/windows/NvrView.Shell.Tests -c Release
       # The Windows video layer (apps/windows/NvrView.Video) on WARP with
       # CPU decoding, checked by reading rendered pixels back: hosted runners
       # have no GPU and no HEVC Video Extension, so H.264 only. Not required

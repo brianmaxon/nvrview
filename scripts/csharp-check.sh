@@ -10,7 +10,8 @@
 #      scripts/linux-check.sh (nvrview-linux-target-<checkout>, nvrview-linux-cargo);
 #   2. the .NET SDK image builds apps/windows (sources mounted read-only;
 #      output in the nvrview-csharp-build-<checkout> volume, packages in
-#      nvrview-csharp-nuget) and runs the smoke test.
+#      nvrview-csharp-nuget) and runs the smoke test, then the shell tests
+#      (NvrView.Shell.Tests: layouts, leases, window restore, ...).
 # scripts/clean-docker.sh removes the volumes (--image also the images).
 set -eu
 cd "$(git rev-parse --show-toplevel)"
@@ -54,4 +55,6 @@ docker run --rm \
       --fixtures /src/fixtures/synthetic \
       --lib /src/target/debug/libnvrview.so \
       --layout /src/target/csharp/layout.txt \
-      --header /src/crates/viewer-ffi/include/nvrview.h'
+      --header /src/crates/viewer-ffi/include/nvrview.h
+    dotnet build NvrView.Shell.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
+    dotnet /build/artifacts/bin/NvrView.Shell.Tests/debug/NvrView.Shell.Tests.dll'
