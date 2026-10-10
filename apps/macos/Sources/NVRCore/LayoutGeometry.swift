@@ -61,9 +61,9 @@ extension LayoutNode {
         var dividers: [DividerFrame] = []
         func walk(_ n: LayoutNode, _ path: NodePath, _ r: CGRect) {
             switch n {
-            case .leaf(let c):
+            case .leaf(let c, _):
                 leaves.append(LeafFrame(path: path, camera: c, rect: r))
-            case .split(let axis, let ratio, let a, let b):
+            case .split(let axis, let ratio, let a, let b, _):
                 switch axis {
                 case .row:
                     let g = min(gap, r.width)

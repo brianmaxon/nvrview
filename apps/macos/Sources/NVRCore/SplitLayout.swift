@@ -39,9 +39,29 @@ public enum Side: Sendable, Hashable {
 /// Where a node sits: the sides taken from the root (empty for the root).
 public typealias NodePath = [Side]
 
+/// Members of a stored node this app does not know, kept so that saving a
+/// layout writes them back (a newer app's additions survive this app's
+/// edits). `node` belongs to the tile or split itself and stays with it;
+/// `camera` belongs to the camera object of a leaf and goes away when the
+/// tile is given another camera.
+public struct NodeExtras: Sendable, Hashable {
+    public var node: [String: JSONValue]
+    public var camera: [String: JSONValue]
+
+    public init(node: [String: JSONValue] = [:], camera: [String: JSONValue] = [:]) {
+        self.node = node
+        self.camera = camera
+    }
+
+    public static let none = NodeExtras()
+
+    /// The same, without what belonged to the camera.
+    var withoutCamera: NodeExtras { NodeExtras(node: node) }
+}
+
 public indirect enum LayoutNode: Sendable, Equatable {
-    case leaf(CameraRef?)
-    case split(SplitAxis, ratio: Double, a: LayoutNode, b: LayoutNode)
+    case leaf(CameraRef?, extras: NodeExtras = .none)
+    case split(SplitAxis, ratio: Double, a: LayoutNode, b: LayoutNode, extras: NodeExtras = .none)
 
     /// The narrowest a pane may be dragged to, as a share of its split.
     public static let minRatio = 0.1
@@ -57,12 +77,19 @@ public indirect enum LayoutNode: Sendable, Equatable {
 
     public var isLeaf: Bool { if case .leaf = self { true } else { false } }
 
-    public var camera: CameraRef? { if case .leaf(let c) = self { c } else { nil } }
+    public var camera: CameraRef? { if case .leaf(let c, _) = self { c } else { nil } }
+
+    /// The members of this node the app does not know.
+    public var extras: NodeExtras {
+        switch self {
+        case .leaf(_, let e), .split(_, _, _, _, let e): e
+        }
+    }
 
     public subscript(path: NodePath) -> LayoutNode? {
         var node = self
         for side in path {
-            guard case .split(_, _, let a, let b) = node else { return nil }
+            guard case .split(_, _, let a, let b, _) = node else { return nil }
             node = side == .a ? a : b
         }
         return node
@@ -73,8 +100,8 @@ public indirect enum LayoutNode: Sendable, Equatable {
         var out: [(NodePath, CameraRef?)] = []
         func walk(_ n: LayoutNode, _ path: NodePath) {
             switch n {
-            case .leaf(let c): out.append((path, c))
-            case .split(_, _, let a, let b):
+            case .leaf(let c, _): out.append((path, c))
+            case .split(_, _, let a, let b, _):
                 walk(a, path + [.a])
                 walk(b, path + [.b])
             }
@@ -86,14 +113,14 @@ public indirect enum LayoutNode: Sendable, Equatable {
     public var leafCount: Int {
         switch self {
         case .leaf: 1
-        case .split(_, _, let a, let b): a.leafCount + b.leafCount
+        case .split(_, _, let a, let b, _): a.leafCount + b.leafCount
         }
     }
 
     public var depth: Int {
         switch self {
         case .leaf: 1
-        case .split(_, _, let a, let b): 1 + max(a.depth, b.depth)
+        case .split(_, _, let a, let b, _): 1 + max(a.depth, b.depth)
         }
     }
 
@@ -108,14 +135,14 @@ public indirect enum LayoutNode: Sendable, Equatable {
     /// The tree with the node at `path` replaced; nil if there is none.
     public func replacing(at path: NodePath, with node: LayoutNode) -> LayoutNode? {
         guard let first = path.first else { return node }
-        guard case .split(let axis, let ratio, let a, let b) = self else { return nil }
+        guard case .split(let axis, let ratio, let a, let b, let extras) = self else { return nil }
         let rest = Array(path.dropFirst())
         if first == .a {
             guard let na = a.replacing(at: rest, with: node) else { return nil }
-            return .split(axis, ratio: ratio, a: na, b: b)
+            return .split(axis, ratio: ratio, a: na, b: b, extras: extras)
         } else {
             guard let nb = b.replacing(at: rest, with: node) else { return nil }
-            return .split(axis, ratio: ratio, a: a, b: nb)
+            return .split(axis, ratio: ratio, a: a, b: nb, extras: extras)
         }
     }
 
@@ -125,11 +152,11 @@ public indirect enum LayoutNode: Sendable, Equatable {
     public func splitting(at path: NodePath, axis: SplitAxis, camera: CameraRef? = nil, ratio: Double = 0.5)
         -> (tree: LayoutNode, newLeaf: NodePath)?
     {
-        guard case .leaf(let existing) = self[path], leafCount < Self.maxLeaves,
+        guard let existing = self[path], existing.isLeaf, leafCount < Self.maxLeaves,
             path.count + 2 <= Self.maxDepth
         else { return nil }
-        let node = LayoutNode.split(
-            axis, ratio: Self.clamp(ratio), a: .leaf(existing), b: .leaf(camera))
+        // The old tile (with its members) moves into `a`.
+        let node = LayoutNode.split(axis, ratio: Self.clamp(ratio), a: existing, b: .leaf(camera))
         guard let tree = replacing(at: path, with: node) else { return nil }
         return (tree, path + [.b])
     }
@@ -148,40 +175,46 @@ public indirect enum LayoutNode: Sendable, Equatable {
     }
 
     /// Swaps the cameras of two leaves; the tree's shape stays as it is.
+    /// Each camera takes its own members along; the tiles keep theirs.
     public func swapping(_ p: NodePath, _ q: NodePath) -> LayoutNode? {
-        guard case .leaf(let cp) = self[p], case .leaf(let cq) = self[q] else { return nil }
+        guard case .leaf(let cp, let ep) = self[p], case .leaf(let cq, let eq) = self[q] else { return nil }
         if p == q { return self }
-        return replacing(at: p, with: .leaf(cq))?.replacing(at: q, with: .leaf(cp))
+        return replacing(at: p, with: .leaf(cq, extras: NodeExtras(node: ep.node, camera: eq.camera)))?
+            .replacing(at: q, with: .leaf(cp, extras: NodeExtras(node: eq.node, camera: ep.camera)))
     }
 
-    /// Shows `camera` (or nothing) in the leaf at `path`.
+    /// Shows `camera` (or nothing) in the leaf at `path`. The tile keeps its
+    /// own members; the previous camera's go with it.
     public func assigning(_ camera: CameraRef?, at path: NodePath) -> LayoutNode? {
-        guard self[path]?.isLeaf == true else { return nil }
-        return replacing(at: path, with: .leaf(camera))
+        guard case .leaf(let old, let extras) = self[path] else { return nil }
+        if old == camera { return self }
+        return replacing(at: path, with: .leaf(camera, extras: extras.withoutCamera))
     }
 
     /// Sets the ratio of the split at `path`, kept within `minRatio...maxRatio`.
     public func settingRatio(_ ratio: Double, at path: NodePath) -> LayoutNode? {
-        guard case .split(let axis, _, let a, let b) = self[path] else { return nil }
-        return replacing(at: path, with: .split(axis, ratio: Self.clamp(ratio), a: a, b: b))
+        guard case .split(let axis, _, let a, let b, let extras) = self[path] else { return nil }
+        return replacing(at: path, with: .split(axis, ratio: Self.clamp(ratio), a: a, b: b, extras: extras))
     }
 
     /// Replaces every camera of `device` with nothing (a removed device).
     public func clearing(device: String) -> LayoutNode {
         switch self {
-        case .leaf(let c): c?.device == device ? .empty : self
-        case .split(let axis, let ratio, let a, let b):
-            .split(axis, ratio: ratio, a: a.clearing(device: device), b: b.clearing(device: device))
+        case .leaf(let c, let extras): c?.device == device ? .leaf(nil, extras: extras.withoutCamera) : self
+        case .split(let axis, let ratio, let a, let b, let extras):
+            .split(axis, ratio: ratio, a: a.clearing(device: device), b: b.clearing(device: device), extras: extras)
         }
     }
 
     /// Renames a device key in every leaf (the core gave the device a key).
     public func rekeying(device old: String, to new: String) -> LayoutNode {
         switch self {
-        case .leaf(let c):
-            c?.device == old ? .leaf(CameraRef(device: new, channel: c!.channel)) : self
-        case .split(let axis, let ratio, let a, let b):
-            .split(axis, ratio: ratio, a: a.rekeying(device: old, to: new), b: b.rekeying(device: old, to: new))
+        case .leaf(let c, let extras):
+            c?.device == old ? .leaf(CameraRef(device: new, channel: c!.channel), extras: extras) : self
+        case .split(let axis, let ratio, let a, let b, let extras):
+            .split(
+                axis, ratio: ratio, a: a.rekeying(device: old, to: new), b: b.rekeying(device: old, to: new),
+                extras: extras)
         }
     }
 
@@ -190,8 +223,10 @@ public indirect enum LayoutNode: Sendable, Equatable {
     public var normalized: LayoutNode {
         switch self {
         case .leaf: self
-        case .split(let axis, let ratio, let a, let b):
-            .split(axis, ratio: Self.clamp(ratio.isFinite ? ratio : 0.5), a: a.normalized, b: b.normalized)
+        case .split(let axis, let ratio, let a, let b, let extras):
+            .split(
+                axis, ratio: Self.clamp(ratio.isFinite ? ratio : 0.5), a: a.normalized, b: b.normalized,
+                extras: extras)
         }
     }
 
@@ -247,34 +282,59 @@ public indirect enum LayoutNode: Sendable, Equatable {
 // MARK: JSON (docs/FFI-ABI3.md section 4)
 
 extension LayoutNode: Codable {
-    private enum Keys: String, CodingKey { case camera, split, ratio, a, b }
+    private static let splitKeys: Set<String> = ["split", "ratio", "a", "b"]
+    private static let leafKeys: Set<String> = ["camera"]
+    private static let cameraKeys: Set<String> = ["device", "channel"]
 
     public init(from decoder: any Decoder) throws {
-        let c = try decoder.container(keyedBy: Keys.self)
-        if let axis = try c.decodeIfPresent(SplitAxis.self, forKey: .split) {
-            let ratio = try c.decode(Double.self, forKey: .ratio)
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        if let axis = try c.decodeIfPresent(SplitAxis.self, forKey: AnyKey("split")) {
+            let ratioKey = AnyKey("ratio")
+            let ratio = try c.decode(Double.self, forKey: ratioKey)
             guard ratio > 0, ratio < 1 else {
-                throw DecodingError.dataCorruptedError(forKey: .ratio, in: c, debugDescription: "ratio out of range")
+                throw DecodingError.dataCorruptedError(forKey: ratioKey, in: c, debugDescription: "ratio out of range")
             }
-            self = .split(axis, ratio: ratio, a: try c.decode(LayoutNode.self, forKey: .a), b: try c.decode(LayoutNode.self, forKey: .b))
+            self = .split(
+                axis, ratio: ratio, a: try c.decode(LayoutNode.self, forKey: AnyKey("a")),
+                b: try c.decode(LayoutNode.self, forKey: AnyKey("b")),
+                extras: NodeExtras(node: try c.unknownMembers(except: Self.splitKeys)))
             return
         }
-        guard c.contains(.camera) else {
-            throw DecodingError.keyNotFound(Keys.camera, .init(codingPath: c.codingPath, debugDescription: "no camera or split"))
+        let cameraKey = AnyKey("camera")
+        guard c.contains(cameraKey) else {
+            throw DecodingError.keyNotFound(cameraKey, .init(codingPath: c.codingPath, debugDescription: "no camera or split"))
         }
-        self = .leaf(try c.decodeIfPresent(CameraRef.self, forKey: .camera))
+        let node = try c.unknownMembers(except: Self.leafKeys)
+        if try c.decodeNil(forKey: cameraKey) {
+            self = .leaf(nil, extras: NodeExtras(node: node))
+            return
+        }
+        let cam = try c.nestedContainer(keyedBy: AnyKey.self, forKey: cameraKey)
+        let ref = CameraRef(
+            device: try cam.decode(String.self, forKey: AnyKey("device")),
+            channel: try cam.decode(Int.self, forKey: AnyKey("channel")))
+        self = .leaf(ref, extras: NodeExtras(node: node, camera: try cam.unknownMembers(except: Self.cameraKeys)))
     }
 
     public func encode(to encoder: any Encoder) throws {
-        var c = encoder.container(keyedBy: Keys.self)
+        var c = encoder.container(keyedBy: AnyKey.self)
         switch self {
-        case .leaf(let camera):
-            if let camera { try c.encode(camera, forKey: .camera) } else { try c.encodeNil(forKey: .camera) }
-        case .split(let axis, let ratio, let a, let b):
-            try c.encode(axis, forKey: .split)
-            try c.encode(ratio, forKey: .ratio)
-            try c.encode(a, forKey: .a)
-            try c.encode(b, forKey: .b)
+        case .leaf(let camera, let extras):
+            try c.encodeUnknown(extras.node, except: Self.leafKeys)
+            if let camera {
+                var cam = c.nestedContainer(keyedBy: AnyKey.self, forKey: AnyKey("camera"))
+                try cam.encodeUnknown(extras.camera, except: Self.cameraKeys)
+                try cam.encode(camera.device, forKey: AnyKey("device"))
+                try cam.encode(camera.channel, forKey: AnyKey("channel"))
+            } else {
+                try c.encodeNil(forKey: AnyKey("camera"))
+            }
+        case .split(let axis, let ratio, let a, let b, let extras):
+            try c.encodeUnknown(extras.node, except: Self.splitKeys)
+            try c.encode(axis, forKey: AnyKey("split"))
+            try c.encode(ratio, forKey: AnyKey("ratio"))
+            try c.encode(a, forKey: AnyKey("a"))
+            try c.encode(b, forKey: AnyKey("b"))
         }
     }
 }
@@ -286,25 +346,41 @@ public struct SavedLayout: Sendable, Equatable, Identifiable, Codable {
     /// Set by the core on every store (1, 2, ...); sent back unchanged.
     public var version: Int
     public var root: LayoutNode
+    /// Members of the layout this app does not know, written back on save.
+    public var extras: [String: JSONValue]
 
-    public init(id: String = SavedLayout.newID(), name: String, version: Int = 0, root: LayoutNode) {
+    public init(
+        id: String = SavedLayout.newID(), name: String, version: Int = 0, root: LayoutNode,
+        extras: [String: JSONValue] = [:]
+    ) {
         self.id = id
         self.name = name
         self.version = version
         self.root = root
+        self.extras = extras
     }
 
-    private enum Keys: String, CodingKey { case id, name, version, root }
+    private static let known: Set<String> = ["id", "name", "version", "root"]
 
     public init(from decoder: any Decoder) throws {
-        let c = try decoder.container(keyedBy: Keys.self)
-        id = try c.decode(String.self, forKey: .id)
-        name = try c.decode(String.self, forKey: .name)
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 0
-        root = try c.decode(LayoutNode.self, forKey: .root).normalized
+        let c = try decoder.container(keyedBy: AnyKey.self)
+        id = try c.decode(String.self, forKey: AnyKey("id"))
+        name = try c.decode(String.self, forKey: AnyKey("name"))
+        version = try c.decodeIfPresent(Int.self, forKey: AnyKey("version")) ?? 0
+        root = try c.decode(LayoutNode.self, forKey: AnyKey("root")).normalized
+        extras = try c.unknownMembers(except: Self.known)
         guard root.depth <= LayoutNode.maxDepth, root.leafCount <= LayoutNode.maxLeaves else {
-            throw DecodingError.dataCorruptedError(forKey: .root, in: c, debugDescription: "layout too large")
+            throw DecodingError.dataCorruptedError(forKey: AnyKey("root"), in: c, debugDescription: "layout too large")
         }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: AnyKey.self)
+        try c.encodeUnknown(extras, except: Self.known)
+        try c.encode(id, forKey: AnyKey("id"))
+        try c.encode(name, forKey: AnyKey("name"))
+        try c.encode(version, forKey: AnyKey("version"))
+        try c.encode(root, forKey: AnyKey("root"))
     }
 
     public static func newID() -> String { "layout-" + UUID().uuidString.lowercased().prefix(8) }

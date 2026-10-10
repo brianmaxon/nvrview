@@ -17,7 +17,7 @@ private let contractTree = LayoutNode.split(
 private func shape(_ n: LayoutNode) -> String {
     switch n {
     case .leaf: "L"
-    case .split(let axis, let ratio, let a, let b): "\(axis.rawValue)\(ratio)(\(shape(a)),\(shape(b)))"
+    case .split(let axis, let ratio, let a, let b, _): "\(axis.rawValue)\(ratio)(\(shape(a)),\(shape(b)))"
     }
 }
 
@@ -71,9 +71,9 @@ private func shape(_ n: LayoutNode) -> String {
 
     @Test func ratiosAreClamped() throws {
         let tight = try #require(contractTree.settingRatio(0.01, at: []))
-        if case .split(_, let r, _, _) = tight { #expect(r == LayoutNode.minRatio) } else { Issue.record("not a split") }
+        if case .split(_, let r, _, _, _) = tight { #expect(r == LayoutNode.minRatio) } else { Issue.record("not a split") }
         let wide = try #require(contractTree.settingRatio(5, at: [.b]))
-        if case .split(_, let r, _, _)? = wide[[.b]] { #expect(r == LayoutNode.maxRatio) } else { Issue.record("not a split") }
+        if case .split(_, let r, _, _, _)? = wide[[.b]] { #expect(r == LayoutNode.maxRatio) } else { Issue.record("not a split") }
         #expect(contractTree.settingRatio(0.5, at: [.a]) == nil)
     }
 
@@ -160,7 +160,7 @@ private func shape(_ n: LayoutNode) -> String {
     }
 
     private func checkRatios(_ n: LayoutNode) {
-        if case .split(_, let r, let a, let b) = n {
+        if case .split(_, let r, let a, let b, _) = n {
             #expect(r >= LayoutNode.minRatio && r <= LayoutNode.maxRatio)
             checkRatios(a)
             checkRatios(b)
@@ -230,6 +230,75 @@ private struct SplitMix {
             """#
         #expect(SavedLayout.list(fromJSON: json).map(\.id) == ["ok"])
         #expect(SavedLayout.list(fromJSON: "nonsense").isEmpty)
+    }
+
+    /// A layout as a newer app might store it: members this app does not
+    /// know on the layout, on splits, on leaves and in camera objects.
+    static let withUnknownMembers = #"""
+        {"id":"l9","name":"Future","version":3,"theme":{"accent":"blue","n":[1,2.5,null,true]},
+         "root":{"split":"row","ratio":0.5,"snap":true,
+           "a":{"camera":{"device":"dev-a","channel":1,"hint":"x"},"label":"Tile A","weight":2},
+           "b":{"camera":null,"pinned":false}}}
+        """#
+
+    private func object(_ json: String) throws -> NSDictionary {
+        try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+    }
+
+    @Test func keepsMembersItDoesNotKnow() throws {
+        let layout = try #require(SavedLayout.list(fromJSON: "[\(Self.withUnknownMembers)]").first)
+        #expect(layout.extras["theme"] != nil)
+        #expect(layout.root.extras.node == ["snap": .bool(true)])
+        #expect(layout.root[[.a]]?.extras == NodeExtras(node: ["label": .string("Tile A"), "weight": .integer(2)], camera: ["hint": .string("x")]))
+        // Written back exactly (numbers, nulls and nesting included).
+        #expect(try object(layout.json) == object(Self.withUnknownMembers))
+    }
+
+    @Test func editsKeepUnknownMembersWhereTheyBelong() throws {
+        var layout = try #require(SavedLayout.list(fromJSON: "[\(Self.withUnknownMembers)]").first)
+        // A ratio drag and a rename keep everything.
+        layout.root = try #require(layout.root.settingRatio(0.7, at: []))
+        layout.name = "Renamed"
+        var o = try object(layout.json)
+        #expect((o["root"] as? NSDictionary)?["snap"] as? Bool == true)
+        #expect((o["theme"] as? NSDictionary)?["accent"] as? String == "blue")
+
+        // Swapping moves each camera's members with it; tiles keep theirs.
+        let swapped = try #require(layout.root.swapping([.a], [.b]))
+        #expect(swapped[[.a]]?.extras == NodeExtras(node: ["label": .string("Tile A"), "weight": .integer(2)]))
+        #expect(swapped[[.b]]?.extras == NodeExtras(node: ["pinned": .bool(false)], camera: ["hint": .string("x")]))
+
+        // Another camera in the tile: the tile's members stay, the old camera's go.
+        let assigned = try #require(layout.root.assigning(CameraRef(device: "dev-b", channel: 0), at: [.a]))
+        #expect(assigned[[.a]]?.extras == NodeExtras(node: ["label": .string("Tile A"), "weight": .integer(2)]))
+        // The same camera again changes nothing.
+        #expect(layout.root.assigning(CameraRef(device: "dev-a", channel: 1), at: [.a]) == layout.root)
+
+        // Splitting a tile moves it, members and all, into the new split.
+        let split = try #require(layout.root.splitting(at: [.a], axis: .col)).tree
+        #expect(split[[.a, .a]]?.extras.node["label"] == .string("Tile A"))
+        #expect(split[[.a]]?.extras == NodeExtras.none)
+
+        // A device key change keeps the camera's members.
+        let rekeyed = layout.root.rekeying(device: "dev-a", to: "dev-z")
+        #expect(rekeyed[[.a]]?.extras.camera == ["hint": .string("x")])
+        #expect(layout.root.clearing(device: "dev-a")[[.a]]?.extras == NodeExtras(node: ["label": .string("Tile A"), "weight": .integer(2)]))
+
+        layout.root = swapped
+        o = try object(layout.json)
+        let b = try #require((o["root"] as? NSDictionary)?["b"] as? NSDictionary)
+        #expect((b["camera"] as? NSDictionary)?["hint"] as? String == "x")
+        #expect(b["pinned"] as? Bool == false)
+    }
+
+    @Test func unknownMembersSurviveTheFakeStore() throws {
+        let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
+        defer { rig.bridge.shutdown() }
+        var layout = try #require(SavedLayout.list(fromJSON: "[\(Self.withUnknownMembers)]").first)
+        try rig.bridge.putLayout(json: layout.json)
+        let stored = try #require(SavedLayout.list(fromJSON: try rig.bridge.layoutsJSON()).first)
+        layout.version = 1
+        #expect(stored == layout)
     }
 
     @Test func roundTripsThroughTheFakeStore() throws {
