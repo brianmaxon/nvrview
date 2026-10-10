@@ -92,7 +92,7 @@ impl Fixture {
     }
 
     /// Index of the frame after `index` in playback order.
-    pub(crate) fn next_index(&self, index: usize) -> usize {
+    pub fn next_index(&self, index: usize) -> usize {
         if index + 1 >= self.frames.len() {
             self.first_key
         } else {

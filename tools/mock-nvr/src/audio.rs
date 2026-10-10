@@ -171,12 +171,13 @@ impl Iterator for Schedule {
 
 /// Uniform jitter source (xorshift), deterministic per seed.
 #[derive(Clone, Debug)]
-pub(crate) struct Jitter {
+pub struct Jitter {
     state: u64,
     max_us: u32,
 }
 
 impl Jitter {
+    /// A source of delays in `0..max_us`.
     pub fn new(seed: u64, max_us: u32) -> Jitter {
         Jitter {
             state: seed | 1,
@@ -184,6 +185,7 @@ impl Jitter {
         }
     }
 
+    /// The next delay, microseconds.
     pub fn next_us(&mut self) -> u64 {
         if self.max_us == 0 {
             return 0;

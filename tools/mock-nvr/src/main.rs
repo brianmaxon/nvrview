@@ -2,6 +2,7 @@
 //! environment variable (default `example-password`), never from an argument.
 
 use mock_nvr::audio::{AudioConfig, AudioFixture};
+use mock_nvr::replay::{Replay, ReplayConfig};
 use mock_nvr::{Config, fixture::Fixture, spawn};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -10,6 +11,7 @@ use std::process::ExitCode;
 const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--fixture FILE]\n\
     \x20               [--user NAME] [--max-logins N] [--fps N] [--width N] [--height N]\n\
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
+    \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -21,11 +23,17 @@ fn run() -> Result<(), String> {
     let mut user = String::from("example-user");
     let mut audio: Option<PathBuf> = None;
     let (mut audio_clock, mut audio_jitter_ms) = (16_000.0f64, 0u32);
+    let mut replay: Option<PathBuf> = None;
+    let (mut replay_loop, mut replay_speed) = (false, 1.0f64);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
             println!("{USAGE}");
             return Ok(());
+        }
+        if a == "--replay-loop" {
+            replay_loop = true;
+            continue;
         }
         let v = args.next().ok_or(format!("{a} needs a value"))?;
         match a.as_str() {
@@ -47,8 +55,15 @@ fn run() -> Result<(), String> {
             "--audio-jitter-ms" => {
                 audio_jitter_ms = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
+            "--replay" => replay = Some(PathBuf::from(v)),
+            "--replay-speed" => {
+                replay_speed = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
+    }
+    if !(replay_speed.is_finite() && replay_speed > 0.0) {
+        return Err("--replay-speed must be positive".into());
     }
     let fix = Fixture::load(&fixture).map_err(|e| e.to_string())?;
     let mut cfg = Config::new(fix);
@@ -64,6 +79,17 @@ fn run() -> Result<(), String> {
         a.clock_hz = audio_clock;
         a.jitter_us = audio_jitter_ms.saturating_mul(1000);
         cfg.audio = Some(std::sync::Arc::new(a));
+    }
+    if let Some(path) = replay {
+        let rep = Replay::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if let Some((w, h, f)) = rep.info() {
+            // The recording's own geometry wins over the defaults.
+            (cfg.width, cfg.height, cfg.fps) = (w, h, u32::from(f));
+        }
+        let mut rc = ReplayConfig::new(rep);
+        rc.speed = replay_speed;
+        rc.looped = replay_loop;
+        cfg.replay = Some(rc);
     }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;

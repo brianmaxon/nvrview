@@ -1,0 +1,19 @@
+[package]
+name = "soak"
+version = "0.1.0"
+description = "Accelerated soak harness: drives viewer-core and audio-pipeline from a replayed stream and reports drops, memory trend, and A/V offset"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+audio-pipeline = { path = "../../crates/audio-pipeline" }
+bc-protocol = { path = "../../crates/bc-protocol" }
+mock-nvr = { path = "../mock-nvr" }
+viewer-core = { path = "../../crates/viewer-core" }
+serde_json = "1"
+
+[lints]
+workspace = true
