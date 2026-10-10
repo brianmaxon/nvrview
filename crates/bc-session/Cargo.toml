@@ -1,0 +1,19 @@
+[package]
+name = "bc-session"
+version = "0.1.0"
+description = "Async (tokio) device sessions for the Baichuan protocol: login, keepalive, per-channel previews, and non-stacking reconnect"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bc-protocol = { path = "../bc-protocol" }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
