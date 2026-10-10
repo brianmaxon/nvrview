@@ -2,7 +2,7 @@ import CoreGraphics
 import CoreVideo
 import Darwin
 import Foundation
-import PipelineStandIn
+import FakeCore
 import Synchronization
 import VideoKit
 

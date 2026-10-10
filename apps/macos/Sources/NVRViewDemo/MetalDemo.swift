@@ -1,84 +1,73 @@
 import AppKit
-import PipelineStandIn
+import FakeCore
+import Foundation
+import NVRCore
 import VideoKit
 
-/// Feeds one file through the stand-in pipeline into a `TileDecoder` from a
-/// background task, paced like a live channel.
-final class MetalFilePlayer: Sendable {
-    let tile: StandInTile
-    let name: String
-    private let task: Task<Void, Never>
+/// The Metal demo's core: a `FakeCore` playing the given files (one per
+/// channel, round-robin) behind a real `CoreBridge`, paced like live channels.
+/// One device, one tile per channel; the bridge executes the core's actions
+/// with `TileDecoder`, exactly as it will for the Rust core.
+final class DemoCore: Sendable {
+    let bridge: CoreBridge
+    let fake: FakeCore
+    let tiles: [CoreTile]
+    let names: [String]
 
-    init?(file: URL, fps: Double) {
-        let codec: VideoCodec = file.pathExtension == "h265" || file.pathExtension == "hevc" ? .h265 : .h264
-        guard let data = try? Data(contentsOf: file) else { return nil }
-        let units = AccessUnitSplitter.split(data, codec: codec)
-        guard !units.isEmpty else { return nil }
-        let tile = StandInTile(codec: codec)
-        self.tile = tile
-        name = file.lastPathComponent
-        task = Task.detached {
-            let clock = ContinuousClock()
-            let period = Duration.seconds(1.0 / fps)
-            var next = clock.now
-            var n = 0
-            while !Task.isCancelled {
-                let unit = units[n % units.count]
-                tile.push(data.subdata(in: unit.range), ptsMicros: Int64(Double(n) * 1_000_000 / fps))
-                n += 1
-                next += period
-                try? await clock.sleep(until: next)
-            }
+    init?(files: [URL], tiles count: Int, fps: Double) {
+        guard let clips = try? files.map({ try FakeClip.load($0) }), clips.allSatisfy({ !$0.units.isEmpty }) else {
+            return nil
         }
+        var options = FakeCore.Options(clips: clips)
+        options.pacing = .realtime(fps: fps)
+        options.channelCount = count
+        let box = FakeCoreBox()
+        let bridge: CoreBridge
+        do {
+            bridge = try CoreBridge(factory: FakeCore.factory(options: options) { box.set($0) })
+            guard let fake = box.value else { return nil }
+            self.fake = fake
+            let device = try bridge.addDevice(host: "192.0.2.1", port: 9000, user: "example-user", password: "example")
+            var opened: [CoreTile] = []
+            for channel in 0..<count {
+                opened.append(try bridge.openTile(device: device, channel: UInt8(channel), tier: .main))
+            }
+            self.tiles = opened
+        } catch {
+            return nil
+        }
+        self.bridge = bridge
+        names = (0..<count).map { clips[$0 % clips.count].name }
     }
 
-    deinit { task.cancel() }
+    /// Closes the core (every tile, then the core itself).
+    func shutdown() { bridge.shutdown() }
 }
 
-/// The grid view plus the layout bookkeeping the stand-in does each refresh:
-/// recompute rectangles only when the drawable size, a picture size, or a
-/// color changes.
+/// Hands the `FakeCore` the factory creates back to the caller.
+final class FakeCoreBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: FakeCore?
+    func set(_ core: FakeCore) { lock.lock(); stored = core; lock.unlock() }
+    var value: FakeCore? { lock.lock(); defer { lock.unlock() }; return stored }
+}
+
+/// The grid view plus the layout bookkeeping done each refresh: the core's
+/// layout is recomputed only when the drawable size, a picture size, or a
+/// tile's configuration changes.
 @MainActor
 final class MetalGrid {
-    static let gap: CGFloat = 4
-
-    let players: [MetalFilePlayer]
+    let core: DemoCore
     let view: MetalGridView
-    private var drawableSize = CGSize.zero
-    private var sizes: [CGSize?]
-    private var colors: [StandInColor?]
+    private let layout: CoreGrid
 
-    init(players: [MetalFilePlayer]) throws {
-        self.players = players
+    init(core: DemoCore) throws {
+        self.core = core
         view = MetalGridView(renderer: try GridRenderer())
-        sizes = Array(repeating: nil, count: players.count)
-        colors = Array(repeating: nil, count: players.count)
-        view.prepare = { [unowned self] renderer, size in self.update(renderer, size) }
-    }
-
-    private func update(_ renderer: GridRenderer, _ size: CGSize) {
-        var changed = size != drawableSize || renderer.tiles.count != players.count
-        for (i, player) in players.enumerated() {
-            let picture = player.tile.decoder.latestPicture()
-            let pictureSize = picture.map { CGSize(width: $0.width, height: $0.height) }
-            if pictureSize != sizes[i] && pictureSize != nil {
-                sizes[i] = pictureSize
-                changed = true
-            }
-            let color = player.tile.color
-            if color != colors[i] {
-                colors[i] = color
-                changed = true
-            }
-        }
-        guard changed else { return }
-        drawableSize = size
-        let rects = StandInLayout.grid(count: players.count, viewport: size, gap: Self.gap, pictureSizes: sizes)
-        renderer.tiles = players.indices.map { i in
-            GridTile(
-                picture: players[i].tile.decoder,
-                color: (colors[i] ?? StandInColor.bt601VideoRange).matrix,
-                destination: rects[i])
+        layout = CoreGrid(bridge: core.bridge, gap: 4)
+        let tiles = core.tiles
+        view.prepare = { [layout] renderer, size in
+            layout.update(renderer: renderer, tiles: tiles, viewport: size)
         }
     }
 }
@@ -127,7 +116,7 @@ final class MetalSelfTest {
         }
     }
 
-    private func decodedCounts() -> [Int] { grid.players.map { $0.tile.decoder.stats.decoded } }
+    private func decodedCounts() -> [Int] { grid.core.tiles.map { $0.decoder.stats.decoded } }
 
     private func finish(window: NSWindow, image: RenderedImage) {
         finished = true
@@ -148,7 +137,7 @@ final class MetalSelfTest {
 
         let tiles = grid.view.renderer.tiles
         let decoded = decodedCounts()
-        for (i, player) in grid.players.enumerated() {
+        for (i, tile) in grid.core.tiles.enumerated() {
             var problems: [String] = []
             let rect = i < tiles.count ? tiles[i].destination : .zero
             let size = grid.view.renderer.pictureSize(ofTile: i)
@@ -167,23 +156,27 @@ final class MetalSelfTest {
             }
             if unchanged { problems.append("picture did not change") }
             if decoded[i] <= midpoint.decoded[i] { problems.append("decoding stopped") }
-            if player.tile.decodeFailures > 0 { problems.append("decode failures: \(player.tile.decodeFailures)") }
-            let s = player.tile.decoder.stats
+            let answerFailures = grid.core.fake.answers(tile: tile.id)?.failures.count ?? 0
+            if answerFailures > 0 { problems.append("decode failures: \(answerFailures)") }
+            let s = tile.decoder.stats
             print(
-                "tile \(i) \(player.name): rect \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height)), "
+                "tile \(i) \(grid.core.names[i]): rect \(Int(rect.minX)),\(Int(rect.minY)) \(Int(rect.width))x\(Int(rect.height)), "
                     + "picture \(size.map { "\(Int($0.width))x\(Int($0.height))" } ?? "none"), "
-                    + "decoded \(s.decoded), gated \(player.tile.gated), sessions \(s.sessionsCreated), "
+                    + "decoded \(s.decoded), gated \(grid.core.fake.gated(tile: tile.id)), sessions \(s.sessionsCreated), "
                     + String(format: "spread %.1f ", spread)
                     + (problems.isEmpty ? "OK" : "FAIL"))
             failures += problems.map { "tile \(i): \($0)" }
         }
 
+        failures += grid.core.fake.violations.map { "core contract: \($0)" }
         if failures.isEmpty {
             print("selftest: PASS")
+            grid.core.shutdown()
             exit(0)
         }
         for f in failures { print("  \(f)") }
         print("selftest: FAIL")
+        grid.core.shutdown()
         exit(1)
     }
 
