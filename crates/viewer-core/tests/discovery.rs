@@ -125,6 +125,9 @@ fn answers_arrive_as_events_and_merge_by_key() {
     wait_until("the search to end", 10, || !dones(&rec).is_empty());
     core.flush_events();
 
+    let started = rec.events_of("discovery_started");
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0]["search"], search);
     let found = rec.events_of("discovered");
     // The search answer, then the ONVIF answer with the model: the same key.
     assert_eq!(found.len(), 2, "{found:?}");

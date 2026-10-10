@@ -512,6 +512,7 @@ uint32_t nv_abi_minor(void);
 Events (same rules as every event: ignore unknown types and fields):
 
 ```json
+{"type":"discovery_started","search":1}
 {"type":"discovered","search":1,"key":"d1","kind":"nvr","name":"NVR 1","address":"192.0.2.10","port":9000,"channels":16,"services":[{"kind":"native","port":9000}]}
 {"type":"discovered","search":1,"key":"d2","kind":"camera","name":"Camera 1","model":"EXAMPLE-CAM","address":"192.0.2.20","services":[{"kind":"onvif","port":8000,"url":"http://192.0.2.20:8000/onvif/device_service"}]}
 {"type":"discovered","search":1,"key":"d3","kind":"unknown","address":"192.0.2.30","battery_percent":80,"services":[{"kind":"native"}]}
@@ -534,6 +535,11 @@ Events (same rules as every event: ignore unknown types and fields):
   app already has. The app compares `address` (and `port`) with the
   devices it added; a `"known"` field matched by the core against device
   keys remains future work.
+- **Started.** `discovery_started` follows every successful
+  `nv_discover_start`, before any answer, and names the search ID. An app
+  that starts searches in quick succession counts its starts and treats the
+  last one's events as current (the stopped search's `discovery_done` and
+  the new search's events can interleave with the calls).
 - **Updates.** A device that answers again with more (another backend, a
   battery reading) is sent again with the same `key` and the merged fields;
   the app replaces its row. `key` is opaque and lives only for one search
@@ -562,10 +568,21 @@ Events (same rules as every event: ignore unknown types and fields):
 - **macOS local network privacy.** A newly built command-line binary's
   broadcasts and the answers to them were silently dropped on macOS 26
   (sends reported success, nothing arrived), while an already approved
-  interpreter making the same calls worked. The app bundle needs an
-  `NSLocalNetworkUsageDescription` and the user's approval the first time
-  it searches; if a search finds nothing, the app should point at System
-  Settings, Privacy & Security, Local Network.
+  interpreter making the same calls worked. For the app bundle:
+  `NSLocalNetworkUsageDescription` (already in its Info.plist; the text
+  mentions the search) is what the system's Local Network prompt shows, and
+  the user's approval is needed the first time it searches. Neither
+  `NSBonjourServices` (it declares Bonjour service types the app browses; the
+  search uses none) nor the `com.apple.developer.networking.multicast`
+  entitlement (a restricted entitlement Apple documents for iOS and iPadOS;
+  Apple's developer forums state that neither Bonjour advertising nor direct
+  local connections need it, and nothing found says macOS requires it for
+  UDP broadcast) is added, which also keeps the app signable with an Apple
+  Development identity. While access is denied or waiting, the ONVIF
+  multicast sends fail with "No route to host" (reported in the `errors` of
+  `discovery_done`) and the broadcasts go nowhere; the sends can also delay
+  the search's end by several seconds. An app that gets `count` 0 with such
+  errors points at System Settings, Privacy & Security, Local Network.
 
 ## Logging
 

@@ -178,6 +178,14 @@ impl DiscoverHub {
         self.stop_locked(&mut running);
         let search = self.next_search.fetch_add(1, Ordering::Relaxed);
         let (stop, stop_rx) = oneshot::channel();
+        // Before any answer, so an app that starts searches in quick
+        // succession can tell which events belong to the last one.
+        self.events.send(
+            json::Object::event("discovery_started")
+                .u64("search", search)
+                .finish(),
+            Priority::State,
+        );
         let task = self
             .handle
             .spawn(run(search, options, self.events.clone(), stop_rx));
