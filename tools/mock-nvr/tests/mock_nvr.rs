@@ -382,3 +382,70 @@ fn audio_records_are_interleaved_like_a_device() {
     assert!((30..=32).contains(&k), "{k} audio records");
     assert!(elapsed >= Duration::from_millis(1900), "{elapsed:?}");
 }
+
+/// Waits for the reply to command `cmd` with message ID `id`, skipping
+/// pushes; panics if media arrives meanwhile.
+fn reply_status(c: &mut Client, cmd: u32, id: u32) -> u16 {
+    loop {
+        let m = c.next();
+        let h = m.header;
+        if h.command == cmd && h.message_id == id {
+            assert!(m.body.is_empty(), "expected an empty reply");
+            return h.status;
+        }
+        assert_ne!(h.command, 3, "unexpected preview message");
+    }
+}
+
+#[test]
+fn third_party_channel_answers_400_then_streams_on_that_message_id() {
+    let nvr = start(|c| {
+        c.fps = 100;
+        let mut tp = mock_nvr::ThirdPartyConfig::new(vec![2], 1);
+        tp.media_delay = Duration::from_millis(100);
+        c.third_party = Some(tp);
+    });
+    let mut c = Client::connect(&nvr, USER, PASSWORD);
+    assert_eq!(c.login(), Event::LoginOk);
+
+    // The first start: 400, and nothing follows it.
+    let (id, bytes) = c.session.start_preview(2, StreamTier::Sub).unwrap();
+    c.tcp.write_all(&bytes).unwrap();
+    assert_eq!(reply_status(&mut c, 3, id), 400);
+    c.tcp
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .unwrap();
+    let mut buf = [0u8; 4096];
+    assert!(c.tcp.read(&mut buf).is_err(), "nothing after the first 400");
+    c.tcp
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let stop = c.session.stop_preview(id).unwrap();
+    c.tcp.write_all(&stop).unwrap();
+    assert_eq!(reply_status(&mut c, 4, id + 1), 200);
+
+    // The second: 400 again, then the stream on the same message ID.
+    let (id, bytes) = c.session.start_preview(2, StreamTier::Sub).unwrap();
+    c.tcp.write_all(&bytes).unwrap();
+    assert_eq!(reply_status(&mut c, 3, id), 400);
+    let mut raw = Vec::new();
+    let mut demux = Demuxer::new();
+    let mut videos = Vec::new();
+    while videos.len() < 5 {
+        if let Event::Media { message_id, data } = c.event() {
+            assert_eq!(message_id, id);
+            raw.extend_from_slice(&data);
+            demux.push(&data);
+            while let Some(r) = demux.next_record().unwrap() {
+                if let Record::Video { keyframe, .. } = r {
+                    videos.push(keyframe);
+                }
+            }
+        }
+    }
+    assert!(videos[0], "starts at a keyframe");
+    // After the 32-byte info record: a third-party keyframe magic.
+    assert_eq!(&raw[32..36], b":0dc");
+    assert!(raw.windows(4).any(|w| w == b":1dc"));
+    assert!(!raw.windows(4).any(|w| w == b"00dc" || w == b"01dc"));
+}
