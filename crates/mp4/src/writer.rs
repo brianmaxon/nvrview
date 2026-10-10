@@ -21,7 +21,7 @@ const CHUNK_BYTES: usize = 1 << 20;
 /// Duration assumed for a lone video sample (25 fps).
 const DEFAULT_SAMPLE_TICKS: u32 = TIMESCALE / 25;
 /// Seconds from 1904-01-01 to 1970-01-01.
-const EPOCH_1904: u64 = 2_082_844_800;
+pub(crate) const EPOCH_1904: u64 = 2_082_844_800;
 
 /// Converts microseconds to 90 kHz ticks, rounding to nearest.
 pub fn us_to_ticks(us: i64) -> i64 {
@@ -98,11 +98,11 @@ impl Pending {
     }
 }
 
-struct VideoEntry {
-    sets: ParamSets,
-    sample_entry: Vec<u8>,
-    width: u32,
-    height: u32,
+pub(crate) struct VideoEntry {
+    pub(crate) sets: ParamSets,
+    pub(crate) sample_entry: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 struct VideoTrack {
@@ -482,7 +482,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
     }
 }
 
-fn build_entry(codec: VideoCodec, sets: ParamSets) -> Result<VideoEntry> {
+pub(crate) fn build_entry(codec: VideoCodec, sets: ParamSets) -> Result<VideoEntry> {
     let sps = sets.sps.first().ok_or(Error::MissingParameterSets)?;
     if sets.pps.is_empty() {
         return Err(Error::MissingParameterSets);
@@ -528,10 +528,10 @@ fn flush<W: Write>(
 
 /// One edit list entry in movie ticks.
 #[derive(Clone, Copy)]
-struct Edit {
-    duration: u64,
+pub(crate) struct Edit {
+    pub(crate) duration: u64,
     /// -1 for an empty edit.
-    media_time: i64,
+    pub(crate) media_time: i64,
 }
 
 struct Plan {
@@ -614,22 +614,22 @@ fn edts(buf: &mut Vec<u8>, edits: &[Edit]) {
     });
 }
 
-const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
+pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
 
-struct TrackInfo<'a> {
-    id: u32,
-    kind: &'a [u8; 4],
-    handler_name: &'a [u8],
-    timescale: u32,
-    media_duration: u64,
-    edits: &'a [Edit],
-    width: u32,
-    height: u32,
-    volume: u16,
-    tables: Tables<'a>,
+pub(crate) struct TrackInfo<'a> {
+    pub(crate) id: u32,
+    pub(crate) kind: &'a [u8; 4],
+    pub(crate) handler_name: &'a [u8],
+    pub(crate) timescale: u32,
+    pub(crate) media_duration: u64,
+    pub(crate) edits: &'a [Edit],
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) volume: u16,
+    pub(crate) tables: Tables<'a>,
 }
 
-fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
+pub(crate) fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
     let track_dur: u64 = t.edits.iter().map(|e| e.duration).sum();
     let big = track_dur > u64::from(u32::MAX) || t.media_duration > u64::from(u32::MAX);
     let v = u8::from(big);
@@ -659,7 +659,7 @@ fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
             put_u32(b, t.width << 16);
             put_u32(b, t.height << 16);
         });
-        if !(t.edits.len() == 1 && t.edits[0].media_time == 0) {
+        if !t.edits.is_empty() && !(t.edits.len() == 1 && t.edits[0].media_time == 0) {
             edts(b, t.edits);
         }
         bx(b, b"mdia", |b| {

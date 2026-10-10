@@ -65,11 +65,20 @@ mod bits;
 mod boxes;
 mod concat;
 mod error;
+mod finalize;
+mod fmp4_file;
+mod fragment;
 mod nal;
 mod writer;
 
 pub use adts::{AacConfig, SAMPLES_PER_FRAME, parse_adts};
 pub use concat::{Chunk, ChunkStats, Concatenator, TimedAudio};
 pub use error::{Error, Result};
+pub use finalize::finalize_to_mp4;
+pub use fmp4_file::{FileOptions, FileSummary, FragmentedFile};
+pub use fragment::{
+    AUDIO_TRACK_ID, AudioLayout, ChangePolicy, FragmentOptions, FragmentStats, Fragmenter,
+    InitInfo, Segment, SegmentKind, SegmentTrack, VIDEO_TRACK_ID,
+};
 pub use nal::VideoCodec;
 pub use writer::{Mp4Writer, Options, Summary, TIMESCALE, VideoFrame, us_to_ticks};
