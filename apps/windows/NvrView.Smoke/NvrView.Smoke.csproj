@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- A console client of the core through the C# bindings, run against
+       tools/mock-nvr (see apps/windows/README.md). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NvrView.Smoke</RootNamespace>
+    <SelfContained>false</SelfContained>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+  </ItemGroup>
+</Project>

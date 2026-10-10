@@ -66,6 +66,17 @@ else
   step "Linux tests skipped (Docker is not running)"
 fi
 
+# The C# bindings and smoke test (apps/windows) on Linux in Docker, when the
+# Docker daemon is running. NVRVIEW_CSHARP_TESTS=0 skips them.
+if [ "${NVRVIEW_CSHARP_TESTS:-1}" = "0" ]; then
+  step "C# smoke test skipped (NVRVIEW_CSHARP_TESTS=0)"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  step "C# smoke test (Docker)"
+  scripts/csharp-check.sh
+else
+  step "C# smoke test skipped (Docker is not running)"
+fi
+
 if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   step "macOS app tests"
   (cd apps/macos && swift test)
