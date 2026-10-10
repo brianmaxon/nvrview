@@ -253,6 +253,28 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | Multi-factor automation | triggers over several signals: facial recognition, expected activity (schedules, past patterns), presence of known devices on the local network | actions fire only when the signals agree (for example an unknown face, outside expected hours, with no household phone at home); every signal and rule stays local; presence detection only observes the local network. |
 | Doorbell text-to-speech | camera motion control (doorbell speaker), triggers, templates | speaks a message through a doorbell (for example "Leave the package by the door"). Text comes only from user-written templates with a few typed slots (time, camera name); untrusted text (transcripts, detected text, anything a visitor says or shows, other devices' payloads) is never spoken and never instructs an agent. An agent may only pick a template and fill typed slots, with the user's grant; rate-limited and logged. |
 
+**Web viewer: work to do first when it starts.**
+
+1. **Fix: a resolution change breaks browser playback.** Found on
+   2026-10-10 with the `crates/mp4/tests/mse` page in Google Chrome on macOS
+   (driven by Playwright): the four fixed-resolution samples, H.265
+   included, played to the end, but `h264-resolution-change` failed right
+   after the first switch. The new init segment arrives with `reset: true`
+   and the page calls `changeType`, then Chrome's hardware decoder rejects
+   the following frames (`PIPELINE_ERROR_DECODE`, VideoToolbox -12909, bad
+   data). Each generation decodes cleanly on its own in ffmpeg, so the
+   automated tests pass. Suspects: how the fragmenter starts a new
+   generation (init contents, the first media segment after it, decode
+   times across the switch) or the page's switching sequence. Cameras do
+   change resolution, so a live viewer would freeze at that moment until
+   this is fixed.
+2. **Add a browser playback check.** A script that serves the MSE samples
+   and plays each in a real browser through Playwright (installed Chrome,
+   for its H.264 and H.265 decoders; Safari if possible), reporting pass or
+   fail per sample. ffmpeg cannot stand in for it: it accepted the stream
+   the browser rejected. Optional in `scripts/check.sh` (it needs a browser
+   and opens a window), like the Docker and GUI steps.
+
 ## Mobile (later)
 
 Not planned; recorded so the core and the local API keep it cheap.
