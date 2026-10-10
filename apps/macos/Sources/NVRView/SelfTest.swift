@@ -31,8 +31,13 @@ final class SelfTest {
 
     init(app: AppDelegate) { self.app = app }
 
-    /// Lines AppKit must never log (it says the first will become an assert).
-    static let forbiddenLog = ["reentrant operation in its NSTableView delegate"]
+    /// Lines AppKit must never log (it says the first will become an assert;
+    /// the second is a layout whose constraints cannot all hold, such as a
+    /// stack view sized to zero).
+    static let forbiddenLog = [
+        "reentrant operation in its NSTableView delegate",
+        "Unable to simultaneously satisfy constraints",
+    ]
 
     func start(seconds: Double) {
         after(seconds) { [self] in checkGrid() }
