@@ -14,5 +14,9 @@ bc-protocol = { path = "../../crates/bc-protocol" }
 # test's runtime and (paused) clock (`spawn_in`).
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
 
+[dev-dependencies]
+# The tests run the mock on a simulated clock.
+simtime = { path = "../simtime" }
+
 [lints]
 workspace = true

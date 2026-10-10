@@ -307,6 +307,7 @@ name = "mock-nvr"
 version = "0.1.0"
 dependencies = [
  "bc-protocol",
+ "simtime",
  "tokio",
 ]
 
