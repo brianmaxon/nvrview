@@ -296,8 +296,10 @@ impl Core {
             .map_err(|_| CoreError::Internal)?;
         let handle = runtime.handle().clone();
         let events = EventThread::spawn(callbacks.clone()).map_err(|_| CoreError::Internal)?;
-        let audio =
-            Arc::new(audio::AudioHub::new(callbacks.clone()).map_err(|_| CoreError::Internal)?);
+        let audio = Arc::new(
+            audio::AudioHub::new(callbacks.clone(), config.max_tiles)
+                .map_err(|_| CoreError::Internal)?,
+        );
         let event_sink = events.sink();
         let tile_ctx = TileContext {
             runtime: handle.clone(),
@@ -859,12 +861,14 @@ impl Core {
         }
     }
 
-    /// A tile's latest audio level: peak and RMS, 0 to 1, measured by
-    /// [`Core::render_audio`] before the tile's volume (peak with a 0.3 s
-    /// release, RMS over about 0.1 s). Both are 0 for a tile that is not
-    /// audible, an unknown tile, or before rendering starts. Lock-free and
-    /// allocation-free: callable from any thread (and from callbacks) at
-    /// display rate.
+    /// A tile's audio level: peak and RMS, 0 to 1, of its decoded audio
+    /// before the tile's volume (peak with a 0.3 s release, RMS over about
+    /// 0.1 s), audible or not. For a tile that plays while the app renders,
+    /// [`Core::render_audio`] measures it (what is heard); otherwise it is
+    /// measured as records are decoded, and falls to 0 within a second when
+    /// no audio arrives. 0 for an unknown tile or one without audio.
+    /// Lock-free and allocation-free: callable from any thread (and from
+    /// callbacks) at display rate.
     pub fn tile_audio_level(&self, tile: u64) -> (f32, f32) {
         if tile == 0 {
             return (0.0, 0.0);

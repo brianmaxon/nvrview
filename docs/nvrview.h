@@ -266,11 +266,13 @@ NvStatus nv_tile_audio_set(NvCore *core, uint64_t tile, bool audible, float volu
  * on_audio_tap was NULL. */
 NvStatus nv_tile_audio_tap(NvCore *core, uint64_t tile, bool enabled);
 
-/* Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
- * last measured it, before the tile's volume (peak with a 0.3 s release,
- * RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
- * known, and before rendering starts. Lock-free and allocation-free;
- * callable from any thread, including callbacks, at display rate. */
+/* Peak and RMS level of a tile's decoded audio, 0..1, before the tile's
+ * volume (peak with a 0.3 s release, RMS over about 0.1 s), audible or not:
+ * as nv_audio_render measured it for a tile that plays while the app
+ * renders, otherwise as its audio was decoded, falling to 0 within a
+ * second when no audio arrives. Both read 0 for a tile without audio or
+ * not known. Lock-free and allocation-free; callable from any thread,
+ * including callbacks, at display rate. */
 NvStatus nv_tile_audio_level(NvCore *core, uint64_t tile, float *peak, float *rms);
 
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back

@@ -254,12 +254,21 @@ sends its own talk-back in) are never played: they are counted as
 
 ## Audio level
 
-`nv_tile_audio_level(core, tile, &peak, &rms)` reads a tile's level for a
-meter at display rate, from any thread, lock-free. `nv_audio_render`
-measures it on the samples it mixes, before the tile's volume (a muted
-tile still shows that sound arrives): peak with a 0.3 s release, RMS over
-about 0.1 s, both 0..1. A tile that is not audible (or not known) reads 0;
-the values freeze while nothing renders.
+`nv_tile_audio_level(core, tile, &peak, &rms)` reads the level of a
+tile's decoded audio, before the tile's volume, for a meter at display
+rate, from any thread (callbacks included), lock-free and allocation-free:
+peak with a 0.3 s release, RMS over about 0.1 s, both 0..1. It reads the
+same whether the tile is audible or not (a muted or silent tile still shows
+that sound arrives):
+
+- An audible tile whose audio is playing, while the app renders, reads what
+  `nv_audio_render` measured on the samples it mixes (what is heard).
+- Any other tile (silent, not yet playing, or the app has not rendered for
+  0.5 s) reads a level measured as its records are decoded (every record is
+  decoded, audible or not). Gaps of up to 0.2 s between records (arrival
+  jitter) hold the level; a longer stall lets it decay, and it reads 0
+  once no audio has arrived for 1 s, never a frozen value.
+- A tile without audio, or an unknown tile, reads 0.
 
 ## Layouts
 

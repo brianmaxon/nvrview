@@ -8,6 +8,8 @@
 //! - [`output()`]: makes the shared [`AudioOutput`] (tiles claim slots on it)
 //!   and the [`Renderer`] for the app's real-time callback.
 //! - [`tap()`]: a bounded, drop-oldest queue of timestamped 16 kHz blocks.
+//! - [`DecodeLevel`]: a tile's level measured as its audio is decoded, for
+//!   tiles that are not audible.
 //!
 //! No I/O, no threads, no platform APIs; the caller supplies every time.
 
@@ -16,6 +18,7 @@ pub mod adts;
 pub mod decode;
 pub mod delay;
 mod fit;
+pub mod level;
 pub mod output;
 mod playout;
 pub mod presentation;
@@ -25,6 +28,7 @@ mod tile;
 pub mod timestamp;
 
 pub use decode::{AudioCodec, PcmFormat};
+pub use level::DecodeLevel;
 pub use output::{
     AudioOutput, LEVEL_PEAK_RELEASE_S, LEVEL_RMS_WINDOW_S, OutputConfig, OutputFormat, Renderer,
     SlotLevel, output,

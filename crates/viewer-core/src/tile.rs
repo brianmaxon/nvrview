@@ -221,6 +221,7 @@ pub(crate) fn spawn(
     let closed_reported = Arc::new(AtomicBool::new(false));
     let events = ctx.events.clone();
     let hub = ctx.audio.clone();
+    let meter = audio.meter.clone();
     let state = TileThread {
         closed_reported: closed_reported.clone(),
         id,
@@ -238,6 +239,7 @@ pub(crate) fn spawn(
         audio: {
             let mut a = TileAudio::new(TileConfig::default());
             a.set_owner(id);
+            a.set_level_meter(meter);
             a
         },
         talkback_ignored: 0,

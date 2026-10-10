@@ -26,7 +26,7 @@
 use crate::in_callback;
 use crate::{Callbacks, CoreError};
 use audio_pipeline::{
-    AudioOutput, AudioRecord, OutputConfig, OutputFormat, TapReceiver, TapSender,
+    AudioOutput, AudioRecord, DecodeLevel, OutputConfig, OutputFormat, TapReceiver, TapSender,
 };
 use crossbeam_queue::ArrayQueue;
 use std::collections::HashMap;
@@ -93,6 +93,9 @@ pub(crate) struct TileAudioControl {
     /// The tap to attach (`Some`) or detach (`None`), taken by the tile.
     tap: Mutex<Option<Option<TapSender>>>,
     tapped: AtomicBool,
+    /// Where the tile measures its decoded audio ([`AudioHub::level`]);
+    /// `None` when every meter is taken.
+    pub(crate) meter: Option<Arc<DecodeLevel>>,
 }
 
 impl Default for TileAudioControl {
@@ -102,6 +105,7 @@ impl Default for TileAudioControl {
             volume: AtomicU32::new(1.0f32.to_bits()),
             tap: Mutex::new(None),
             tapped: AtomicBool::new(false),
+            meter: None,
         }
     }
 }
@@ -141,6 +145,8 @@ pub(crate) struct RenderHandoff {
     leaked: AtomicU64,
     busy: AtomicU64,
     installed: AtomicBool,
+    /// `host_time_ns` of the last successful render; 0: none yet.
+    rendered_ns: AtomicU64,
 }
 
 impl RenderHandoff {
@@ -154,6 +160,7 @@ impl RenderHandoff {
             leaked: AtomicU64::new(0),
             busy: AtomicU64::new(0),
             installed: AtomicBool::new(false),
+            rendered_ns: AtomicU64::new(0),
         }
     }
 
@@ -190,6 +197,8 @@ impl RenderHandoff {
             for (cell, l) in self.levels.iter().zip(r.levels()) {
                 cell.set(l.owner, l.peak, l.rms);
             }
+            self.rendered_ns
+                .store(host_time_ns.max(1), Ordering::Release);
             Ok(())
         } else {
             out.fill(0.0);
@@ -225,10 +234,26 @@ impl LevelCell {
     }
 }
 
+/// Render levels older than this (the last render's host time, ns) are not
+/// used: the app stopped rendering, so the decode-time level stands in.
+const RENDER_LEVEL_STALE_NS: u64 = 500_000_000;
+
+/// Meters beyond `max_tiles` (see [`AudioHub::new`]).
+const METER_SPARE: usize = 64;
+
+/// A tile's decode-time meter, claimed while the tile exists.
+struct MeterCell {
+    owner: AtomicU64,
+    level: Arc<DecodeLevel>,
+}
+
 /// The core's audio state.
 pub(crate) struct AudioHub {
     output: Mutex<Option<AudioOutput>>,
     handoff: RenderHandoff,
+    /// One decode-time meter per possible tile, found by owner without a
+    /// lock ([`AudioHub::level`]); claimed and released under `controls`.
+    meters: Box<[MeterCell]>,
     /// Bumped on every change a tile must pick up.
     generation: AtomicU64,
     controls: Mutex<HashMap<u64, Arc<TileAudioControl>>>,
@@ -236,10 +261,22 @@ pub(crate) struct AudioHub {
 }
 
 impl AudioHub {
-    pub(crate) fn new(callbacks: Arc<dyn Callbacks>) -> std::io::Result<AudioHub> {
+    /// `max_tiles`: how many tiles can exist at once. Each gets a meter;
+    /// a few spare ones cover tiles opened while closed ones are still
+    /// releasing theirs.
+    pub(crate) fn new(
+        callbacks: Arc<dyn Callbacks>,
+        max_tiles: usize,
+    ) -> std::io::Result<AudioHub> {
         Ok(AudioHub {
             output: Mutex::new(None),
             handoff: RenderHandoff::new(),
+            meters: (0..max_tiles.saturating_add(METER_SPARE))
+                .map(|_| MeterCell {
+                    owner: AtomicU64::new(0),
+                    level: Arc::new(DecodeLevel::new()),
+                })
+                .collect(),
             generation: AtomicU64::new(1),
             controls: Mutex::new(HashMap::new()),
             taps: TapHub::spawn(callbacks)?,
@@ -287,31 +324,62 @@ impl AudioHub {
         self.handoff.render(out, channels, host_time_ns)
     }
 
-    /// A tile's latest level (peak, RMS) as the last render measured it;
-    /// zero for a tile that is not playing. Lock-free.
+    /// A tile's level (peak, RMS) before volume: as the last render
+    /// measured it while the tile plays and the app renders, otherwise as
+    /// its audio was decoded (decaying to 0 when none arrives). Zero for an
+    /// unknown tile or one without audio. Lock-free and allocation-free.
     pub(crate) fn level(&self, tile: u64) -> (f32, f32) {
-        for c in self.handoff.levels.iter() {
-            if c.owner.load(Ordering::Acquire) == tile {
-                return (
-                    f32::from_bits(c.peak.load(Ordering::Relaxed)),
-                    f32::from_bits(c.rms.load(Ordering::Relaxed)),
-                );
+        let now_ns = crate::clock::now_ns();
+        let rendered = self.handoff.rendered_ns.load(Ordering::Acquire);
+        if rendered != 0 && now_ns <= rendered.saturating_add(RENDER_LEVEL_STALE_NS) {
+            for c in self.handoff.levels.iter() {
+                if c.owner.load(Ordering::Acquire) == tile {
+                    return (
+                        f32::from_bits(c.peak.load(Ordering::Relaxed)),
+                        f32::from_bits(c.rms.load(Ordering::Relaxed)),
+                    );
+                }
+            }
+        }
+        for m in self.meters.iter() {
+            if m.owner.load(Ordering::Acquire) == tile {
+                return m.level.read(now_ns / 1000);
             }
         }
         (0.0, 0.0)
     }
 
-    /// The control of a new tile.
+    /// The control of a new tile, with a decode-time meter when one is free.
     pub(crate) fn add_tile(&self, tile: u64) -> Arc<TileAudioControl> {
-        let c = Arc::new(TileAudioControl::default());
-        lock(&self.controls).insert(tile, c.clone());
+        let mut controls = lock(&self.controls);
+        let meter = self
+            .meters
+            .iter()
+            .find(|m| m.owner.load(Ordering::Acquire) == 0)
+            .map(|m| {
+                m.level.clear();
+                m.owner.store(tile, Ordering::Release);
+                m.level.clone()
+            });
+        let c = Arc::new(TileAudioControl {
+            meter,
+            ..TileAudioControl::default()
+        });
+        controls.insert(tile, c.clone());
         c
     }
 
     /// Forgets a tile that ended (its thread has been joined): no tap block
     /// for it is delivered after this returns.
     pub(crate) fn remove_tile(&self, tile: u64) {
-        lock(&self.controls).remove(&tile);
+        let mut controls = lock(&self.controls);
+        controls.remove(&tile);
+        for m in self.meters.iter() {
+            if m.owner.load(Ordering::Acquire) == tile {
+                m.owner.store(0, Ordering::Release);
+            }
+        }
+        drop(controls);
         self.taps.unregister(tile);
     }
 
@@ -535,5 +603,76 @@ mod tests {
         assert!(f.is_talkback());
         f.stream_index = 15;
         assert!(!f.is_talkback());
+    }
+
+    struct NoCallbacks;
+
+    impl Callbacks for NoCallbacks {
+        fn on_action(&self, _: u64, _: u32, _: &crate::Action<'_>) {}
+        fn on_event(&self, _: &str) {}
+    }
+
+    /// A playing tile reads the render's level while the app renders; any
+    /// other tile (or one whose renders stopped) reads its decode-time
+    /// meter; an unknown tile reads 0.
+    #[test]
+    fn levels_come_from_the_render_or_from_decoding() {
+        let hub = AudioHub::new(Arc::new(NoCallbacks), 2).unwrap();
+        let (a, b) = (7, 8);
+        let ca = hub.add_tile(a);
+        let cb = hub.add_tile(b);
+        let now_us = crate::clock::now_ns() / 1000;
+        let tone: Vec<f32> = (0..1024).map(|i| 0.4 * (i as f32 * 0.3).sin()).collect();
+        for c in [&ca, &cb] {
+            c.meter.as_ref().unwrap().observe(&tone, 1, 16_000, now_us);
+        }
+        let (peak, rms) = hub.level(b);
+        assert!(peak > 0.3 && rms > 0.1, "{peak} {rms}");
+        assert_eq!(hub.level(99), (0.0, 0.0));
+
+        // Tile a plays: a fresh render measured 0.9 for it.
+        hub.handoff.levels[0].set(a, 0.9, 0.5);
+        hub.handoff
+            .rendered_ns
+            .store(crate::clock::now_ns(), Ordering::Release);
+        assert_eq!(hub.level(a), (0.9, 0.5));
+        assert!(hub.level(b).0 < 0.5, "b is not playing: its own meter");
+        // The app stopped rendering: no frozen render value.
+        hub.handoff.rendered_ns.store(
+            crate::clock::now_ns() - 2 * RENDER_LEVEL_STALE_NS,
+            Ordering::Release,
+        );
+        assert!(hub.level(a).0 < 0.5);
+
+        // Meters are reused only after their tile is gone, and start at 0.
+        hub.remove_tile(b);
+        assert_eq!(hub.level(b), (0.0, 0.0));
+        let cc = hub.add_tile(9);
+        assert_eq!(hub.level(9), (0.0, 0.0));
+        assert!(cc.meter.is_some());
+        hub.shutdown();
+    }
+
+    /// Reading a level scans every meter without locking: cheap enough for
+    /// many tiles at display rate.
+    #[test]
+    fn reading_levels_is_cheap() {
+        let hub = AudioHub::new(Arc::new(NoCallbacks), 256).unwrap();
+        for t in 1..=256 {
+            hub.add_tile(t);
+        }
+        let start = std::time::Instant::now();
+        let mut sum = 0.0;
+        for i in 0..20_000u64 {
+            sum += hub.level(i % 300).0;
+        }
+        let per_read = start.elapsed() / 20_000;
+        assert_eq!(sum, 0.0);
+        // Even unoptimized, a read (a full scan) is a few microseconds.
+        assert!(
+            per_read < std::time::Duration::from_micros(50),
+            "{per_read:?}"
+        );
+        hub.shutdown();
     }
 }

@@ -910,11 +910,13 @@ pub unsafe extern "C" fn nv_tile_audio_tap(
     })
 }
 
-/// Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
-/// last measured it, before the tile's volume (peak with a 0.3 s release,
-/// RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
-/// known, and before rendering starts. Lock-free and allocation-free;
-/// callable from any thread, including callbacks, at display rate.
+/// Peak and RMS level of a tile's decoded audio, 0..1, before the tile's
+/// volume (peak with a 0.3 s release, RMS over about 0.1 s), audible or not:
+/// as nv_audio_render measured it for a tile that plays while the app
+/// renders, otherwise as its audio was decoded, falling to 0 within a
+/// second when no audio arrives. Both read 0 for a tile without audio or
+/// not known. Lock-free and allocation-free; callable from any thread,
+/// including callbacks, at display rate.
 ///
 /// # Safety
 /// `core` is a live handle; `peak` and `rms` are valid for one write each.

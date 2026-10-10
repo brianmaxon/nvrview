@@ -15,9 +15,10 @@
 > 4. Detection events also have `alarm` (other device states, such as a
 >    doorbell press) and an optional `lens` (second lens of a multi-lens
 >    camera); kinds are lowercase.
-> 5. `nv_tile_audio_level` is measured before the tile's volume and reads 0
->    for a tile that is not audible or not known (it never fails for an
->    unknown tile: it takes no lock to check).
+> 5. `nv_tile_audio_level` is measured before the tile's volume, audible
+>    or not (measured as audio is decoded for a tile that is not playing),
+>    and reads 0 for a tile without audio or not known (it never fails for
+>    an unknown tile: it takes no lock to check).
 > 6. Layouts: the core needs a directory, `NvConfig.data_dir` (new, last
 >    member); `nv_layouts_get` returns `{"revision":N,"layouts":[...]}` and
 >    uses `NV_ERR_BUFFER_TOO_SMALL` (new) to ask for a larger buffer; the
