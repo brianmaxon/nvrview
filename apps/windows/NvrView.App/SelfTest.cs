@@ -30,6 +30,12 @@
 //    the stream (main, extern, sub) and Auto follows zoom past 2x and back
 //    below 1.6x; a second-lens tile opens on mobile, and where the device
 //    refuses mobile it is reopened on extern for the run;
+// 10b. fisheye (docs/UX.md "Fisheye cameras"): the mock's fisheye channel is
+//    reported as one, its image circle is found from the decoded picture,
+//    every dewarped view draws through the dewarp shader and its pixels show
+//    the synthetic sphere's colors where the shared mapping says they should,
+//    the view is saved in the layout leaf, the Virtual PTZ zoom eases on a
+//    manual clock and ends on its target, and 0 resets it;
 // 11. layouts and windows: the arrangement saved as a layout (device keys),
 //    a split, a camera picked into the new tile, a swap, and a tile's
 //    quality are each stored; changing the content while a tile is focused
@@ -318,6 +324,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
 
         await TileFeatures(v, stage);
+        await FisheyeViews(v, stage, r);
         await LayoutsAndWindows(v);
 
         // Detections from the mock (camera AI) reached the tiles.
@@ -542,6 +549,135 @@ internal sealed class SelfTest(App app, AppOptions options)
             RemoveTile(stage, t);
         }
         Expect(Tiles.All(t => t.Lens == 0), "a second-lens tile stayed open");
+    }
+
+    // 10b. Fisheye views (docs/UX.md "Fisheye cameras", docs/RENDERING.md "Fisheye dewarping").
+    private async Task FisheyeViews(Viewer v, StageView stage, StageRenderer r)
+    {
+        StageTile? f = Tiles.FirstOrDefault(t => t.Channel == 2 && t.Lens == 0);
+        if (f is null || options.MockChannels < 3)
+        {
+            Say("fisheye: skipped (needs 3 mock channels)");
+            return;
+        }
+        bool known = await Until(() => v.IsFisheye(f.Camera), 10);
+        Expect(known, "the mock's fisheye channel was not reported as a fisheye camera");
+        Expect(!v.IsFisheye(Tiles.First(t => t.Channel == 0).Camera), "an ordinary channel was reported as a fisheye camera");
+        if (!known)
+        {
+            return;
+        }
+        stage.SetFisheyeMode(f, FisheyeViewMode.Panorama);
+        bool found = await Until(() => v.Circles.Circle(f.Camera) is not null, 10);
+        FisheyeCircle circle = v.Circles.Circle(f.Camera) ?? FisheyeCircle.Inscribed(384, 384);
+        Say($"fisheye circle: ({circle.Cx:F4}, {circle.Cy:F4}) r {circle.R:F4} (synthetic: 0.49, 0.505, 0.46), fell back {v.Circles.FellBack(f.Camera)}");
+        Expect(found && !v.Circles.FellBack(f.Camera), "the fisheye circle was not found");
+        Expect(Math.Abs(circle.Cx - 0.49) < 0.01 && Math.Abs(circle.Cy - 0.505) < 0.01 && Math.Abs(circle.R - 0.46) < 0.01,
+            "the fisheye circle is more than 1% off the synthetic one");
+
+        foreach (FisheyeViewMode mode in new[] { FisheyeViewMode.Panorama, FisheyeViewMode.DoublePanorama, FisheyeViewMode.Quad, FisheyeViewMode.Ptz })
+        {
+            stage.SetFisheyeMode(f, mode);
+            long before = r.DewarpDraws;
+            bool drawn = await Until(() => r.DewarpDraws > before + 3, 5);
+            Expect(drawn, $"fisheye {mode.Title()}: the dewarp shader did not draw");
+            Expect(StageView.TitleOf(f).Contains(mode.Title(), StringComparison.Ordinal), $"fisheye {mode.Title()}: the header does not name the view");
+            string? member = stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member);
+            Expect(FisheyeTileSetting.FromJson(member).Mode == mode, $"fisheye {mode.Title()}: the view was not kept in the layout leaf ({member})");
+            await CheckColors(mode.Title(), f, r, circle);
+        }
+
+        // Virtual PTZ zoom: eased on the viewer's clock, ends on the target, saved; 0 resets.
+        var clock = new ManualViewerClock(2000);
+        v.UseClock(clock);
+        double fov = f.Fisheye?.Aim.Fov ?? 0;
+        stage.ZoomFisheye(f, 2);
+        clock.Advance(1.0 / 60);
+        stage.StepFisheyeZoom(clock.Now);
+        double mid = f.Fisheye?.Aim.Fov ?? 0;
+        clock.Advance(2);
+        stage.StepFisheyeZoom(clock.Now);
+        double end = f.Fisheye?.Aim.Fov ?? 0;
+        v.UseClock(new SystemViewerClock());
+        FisheyeTileSetting saved = FisheyeTileSetting.FromJson(stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member));
+        Say($"fisheye PTZ zoom: {fov:0.#}° → {mid:0.#}° after one refresh → {end:0.#}°, saved {saved.Aim?.Fov:0.#}°");
+        Expect(mid < fov && mid > fov / 2 && Math.Abs(end - fov / 2) < 1e-9 && !stage.IsEasingFisheyeZoom, "the Virtual PTZ zoom did not ease to its target");
+        Expect(saved.Aim is { } a && Math.Abs(a.Fov - fov / 2) < 1e-9, "the Virtual PTZ zoom was not saved with the layout");
+        await CheckColors("Virtual PTZ zoomed", f, r, circle);
+        stage.Select(f.Path);
+        stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
+        Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera");
+
+        // Back to the camera's own picture.
+        stage.SetFisheyeMode(f, FisheyeViewMode.Original);
+        Expect(f.Fisheye is null && stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member) is null, "Original did not remove the leaf member");
+    }
+
+    // Samples the dewarped tile where the shared mapping says the synthetic sphere
+    // (fixtures/synthetic/make-fisheye.sh) has a known color: red, green, blue, or
+    // yellow by azimuth quadrant, away from the checkerboard's edges and the moving dot.
+    private async Task CheckColors(string what, StageTile f, StageRenderer r, FisheyeCircle circle)
+    {
+        if (f.Fisheye is not { } fe)
+        {
+            _problems.Add($"fisheye {what}: the tile is not dewarped");
+            return;
+        }
+        await Task.Delay(200);
+        Task<StageCapture> task = r.CaptureAsync();
+        if (await Task.WhenAny(task, Task.Delay(5000)) != task)
+        {
+            _problems.Add($"fisheye {what}: no frame was drawn");
+            return;
+        }
+        StageCapture c = await task;
+        (StageTile _, float x0, float y0, float w, float h) = c.Rects.FirstOrDefault(rect => rect.Tile == f);
+        int pw = Math.Max(f.PictureWidth, 1), ph = Math.Max(f.PictureHeight, 1);
+        FisheyeDewarp d = FisheyeDewarp.Of(new FisheyeLens(circle, pw / (double)ph), fe.Mount, fe.Mode, fe.Aim,
+            Math.Max((int)Math.Round(w), 1), Math.Max((int)Math.Round(h), 1));
+        int tried = 0, right = 0;
+        string? firstWrong = null;
+        for (int j = 0; j < 32; j++)
+        {
+            for (int i = 0; i < 32; i++)
+            {
+                var p = new UnitPoint((i + 0.5) / 32, (j + 0.5) / 32);
+                if (d.Direction(p) is not { } dir)
+                {
+                    continue;
+                }
+                (double pan, double tilt) = Fisheye.PanTilt(dir);
+                double psi = ((pan % 360) + 360) % 360;
+                static double Off(double a) => Math.Abs(a - Math.Round(a / 15) * 15);
+                if (tilt < 5 || tilt > 80 || Off(psi) < 3 || Off(tilt) < 3 || Math.Abs(tilt - 20) < 8)
+                {
+                    continue;
+                }
+                int sx = (int)(x0 + p.X * w), sy = (int)(y0 + p.Y * h);
+                if (sx < 0 || sy < 0 || sx >= c.Image.Width || sy >= c.Image.Height)
+                {
+                    continue;
+                }
+                int want = (int)(psi / 90) % 4;
+                (int cr, int cg, int cb) = c.Image.Rgb(sx, sy);
+                int got = cr > cb + 40 && cg > cb + 40 && cg > cr * 0.6 ? 3
+                    : cr > cg + 25 && cr > cb + 25 ? 0
+                    : cg > cr + 25 && cg > cb + 25 ? 1
+                    : cb > cr + 25 && cb > cg + 25 ? 2
+                    : -1;
+                tried++;
+                if (got == want)
+                {
+                    right++;
+                }
+                else
+                {
+                    firstWrong ??= $"at ({p.X:F2}, {p.Y:F2}) psi {psi:0} tau {tilt:0}: ({cr}, {cg}, {cb}), wanted quadrant {want}";
+                }
+            }
+        }
+        Say($"fisheye {what}: {right} of {tried} sampled pixels show the expected color{(firstWrong is null ? "" : $"; first miss {firstWrong}")}");
+        Expect(tried >= 20 && right >= tried * 9 / 10, $"fisheye {what}: dewarped pixels do not match the synthetic scene ({right} of {tried})");
     }
 
     // 11. Layouts, windows, and the sidebar (docs/UX.md "Layouts", "Sidebar").

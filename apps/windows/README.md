@@ -185,6 +185,16 @@ texture coordinates, the 3x4 matrix), sampling luma and chroma with a
 linear clamp sampler; the same shader as the macOS Metal pass. Layout is
 `nv_grid_layout` with each picture's visible size.
 
+A tile in a dewarped fisheye view (docs/RENDERING.md, "Fisheye
+dewarping") is drawn by a second pixel shader, `psDewarp`, with the
+22-row dewarp constants (`NvrView.Tiles.DewarpConstants`, computed by the
+pure `FisheyeDewarp`) in a second constant buffer (b1) and the visible
+picture's place in the textures in a third (b2); it samples with
+`SampleLevel` (the pictures have one mip level, and the sample sits in a
+loop over the views). `TilePicture.ReadLuma` copies the luma plane out
+through a staging texture for the few tries of finding a camera's image
+circle, never per frame.
+
 ### Threads and locking
 
 The device is multithread protected, and `GpuDevice.Lock()`
@@ -391,9 +401,18 @@ that is refused once, then streams):
     half a second after the pointer, without resizing the stage's buffers;
     the window's restore record says what it shows and that the sidebar is
     collapsed;
-13. stopping the mock makes every tile say it is reconnecting;
-14. no callback threw, no tile reported an error or a failed tier switch;
-15. with `--credential-test`, a throwaway credential is written, read back,
+13. fisheye, on the mock's channel 2 also made a fisheye camera streaming
+    `fixtures/synthetic/fisheye/h264-fisheye.h264`: the channel is reported
+    as fisheye (and channel 0 is not), its image circle is found within 1%
+    of the synthetic one, Panorama, Double Panorama, Quad and Virtual PTZ
+    each draw through the dewarp shader, name themselves in the header, are
+    kept in the layout leaf, and show the synthetic sphere's quadrant colors
+    at the pixels the shared mapping predicts (90% of the samples, away from
+    cell edges); the Virtual PTZ zoom eases on a manual clock to its target
+    and is saved, 0 resets the view, and Original removes the member;
+14. stopping the mock makes every tile say it is reconnecting;
+15. no callback threw, no tile reported an error or a failed tier switch;
+16. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
 
 It writes what it measured and `selftest: PASS` or `selftest: FAIL` to the
