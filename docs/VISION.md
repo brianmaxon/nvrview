@@ -380,7 +380,9 @@ a third of one core out of 14, and no GPU.
   clips around events (labels from device AI pushes, checked by eye): event
   recall and false events per hour for k-of-n rules (1 of 1, 2 of 3, 3 of 5),
   with and without tiles, and the time to first detection; then pick the
-  default that may make the optional verifier unnecessary.
+  default that may make the optional verifier unnecessary. The clips come
+  from playback (milestone P) once it exists: filter incidents by type and
+  download only those.
 - **Recall on video.** Picture-level recall on stills is measured above, for
   Vision, RT-DETR, and three vision-language models. Event-level recall
   needs recordings with real events. The cheapest ground truth
