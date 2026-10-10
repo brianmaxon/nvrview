@@ -28,6 +28,15 @@ cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   step "macOS app tests"
   (cd apps/macos && swift test)
+
+  # Opens a window briefly (without taking focus), so it needs a desktop session.
+  if [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
+    step "macOS demo self-test"
+    (cd apps/macos && swift build --product NVRViewDemo &&
+      .build/debug/NVRViewDemo --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+  else
+    step "macOS demo self-test skipped (no desktop session)"
+  fi
 fi
 
 printf '\nAll checks passed.\n'

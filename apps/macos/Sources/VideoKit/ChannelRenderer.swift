@@ -57,6 +57,10 @@ public final class ChannelRenderer: @unchecked Sendable {
 
     public var stats: RendererStats { shared.withLock { $0.stats } }
 
+    /// Whether the display path is in its failed state (it recovers on the
+    /// next frame by flushing and waiting for a keyframe).
+    public var hasFailed: Bool { videoRenderer.status == .failed }
+
     // MARK: Input (any thread, must return quickly)
 
     /// Submits one frame. The bytes are copied; the buffer is not retained.
