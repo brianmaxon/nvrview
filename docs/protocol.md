@@ -1010,8 +1010,9 @@ written little-endian, where `tid` is the header's transaction ID and `K` is
 
 `1F2D3C4B 5A6C7F8D 38172E4B 8271635A 863F1A2B A5C6F7D8 8371E1B4 17F2D3A5`
 
-(observed (client capture)). The first word is the fixed TCP XOR key's first
-four bytes read as a little-endian word, recovered by known plaintext; the
+(reported by other projects; confirmed against the client capture). The
+first word is the fixed TCP XOR key's first four bytes read as a
+little-endian word, recovered from the capture by known plaintext; the whole
 table was confirmed by every probe in the capture decoding to the same
 well-formed XML:
 
