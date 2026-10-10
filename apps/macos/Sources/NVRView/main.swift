@@ -5,207 +5,220 @@ import NVRCore
 import VideoKit
 
 // An unbundled executable gets no window from a SwiftUI `WindowGroup`, so
-// this uses the AppKit lifecycle (like NVRViewDemo). One window, one live
-// channel through CoreBridge, a status line under it.
+// this uses the AppKit lifecycle (like NVRViewDemo); SwiftUI draws the
+// sidebar and Settings inside AppKit windows.
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let options: Options
-    var session: LiveSession?
-    var window: NSWindow?
-    var grid: MetalGridView?
-    var coreGrid: CoreGrid?
-    let statusLabel = NSTextField(labelWithString: "Starting")
-    var timer: Timer?
+    private(set) var model: AppModel?
+    private(set) var windows: [ViewerWindowController] = []
+    private var settings: SettingsWindowController?
 
     init(options: Options) { self.options = options }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let model: AppModel
         do {
-            session = try makeSession()
+            model = try makeModel()
         } catch {
-            fail("cannot start the core: \(error.localizedDescription)")
+            fail("cannot start the core: \(error)")
         }
-        guard let session else { return }
-        let renderer: GridRenderer
-        do { renderer = try GridRenderer() } catch { return fail("cannot set up Metal: \(error)") }
-        let view = MetalGridView(renderer: renderer)
-        let layout = CoreGrid(bridge: session.bridge, gap: 0)
-        coreGrid = layout
-        view.prepare = { [weak session] renderer, size in
-            guard let tile = session?.tile else {
-                if !renderer.tiles.isEmpty { renderer.tiles = [] }
-                return
-            }
-            layout.update(renderer: renderer, tiles: [tile], viewport: size)
-        }
-        grid = view
+        self.model = model
+        model.openWindow = { [weak self] content in self?.openWindow(content) }
+        model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
+        if options.fake { seedFakeLayouts(model) }
 
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.translatesAutoresizingMaskIntoConstraints = false
-        let content = NSView()
-        content.addSubview(view)
-        content.addSubview(statusLabel)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: content.topAnchor),
-            view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            statusLabel.topAnchor.constraint(equalTo: view.bottomAnchor, constant: 4),
-            statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
-            statusLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-            statusLabel.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4),
-        ])
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 560), styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered, defer: false)
-        window.title = "NVRView"
-        window.contentMinSize = NSSize(width: 480, height: 300)
-        window.contentView = content
-        window.delegate = self
-        window.center()
-        self.window = window
-
-        session.onChange = { [weak self] in self?.statusLabel.stringValue = self?.session?.status.text ?? "" }
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.session?.refresh() }
-        }
-
-        if options.selfTestSeconds != nil {
-            // Never take focus from whatever the user is doing.
-            window.orderBack(nil)
-        } else {
-            buildMenu()
-            window.makeKeyAndOrderFront(nil)
+        if options.selfTestSeconds == nil { buildMenu() }
+        let first = model.layouts.first.map { WindowContent.layout(id: $0.id) } ?? ViewerWindowController.allCameras(model)
+        openWindow(first)
+        if options.selfTestSeconds == nil {
             NSApplication.shared.activate()
-        }
-
-        session.startAudio(muted: options.selfTestSeconds != nil)
-        if options.fake || options.host != nil {
-            startConnection()
-        } else {
-            showSettings()
+            if model.devices.isEmpty { showSettings(nil) }
         }
         if let seconds = options.selfTestSeconds { SelfTest(app: self).start(seconds: seconds) }
     }
 
     // MARK: Core
 
-    private func makeSession() throws -> LiveSession {
+    private func makeModel() throws -> AppModel {
         if options.fake {
             let clips = try options.files.map { try FakeClip.load($0) }
             var o = FakeCore.Options(clips: clips)
             o.pacing = .realtime(fps: 20)
-            o.channelCount = Int(options.channel) + 1
+            o.devices = [
+                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6),
+                "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
+            ]
+            o.detectionDemo = 12
             let box = FakeBox()
-            return try LiveSession(factory: FakeCore.factory(options: o) { box.core = $0 }, fakeBox: box)
+            let credentials = MemoryCredentials()
+            let model = try AppModel(
+                factory: FakeCore.factory(options: o) { box.core = $0 }, fakeBox: box, credentials: credentials,
+                deviceFile: JSONFileStore(file: nil), groupFile: JSONFileStore(file: nil))
+            return model
         }
-        guard let factory = LiveSession.realFactory() else {
+        guard let factory = AppModel.realFactory() else {
             throw CocoaError(.featureUnsupported, userInfo: [
-                NSLocalizedDescriptionKey: "this build has no core library; run with --fake and a fixture file"
+                NSLocalizedDescriptionKey: "this build has no core library; run with --fake and fixture files"
             ])
         }
-        return try LiveSession(factory: factory)
+        return try AppModel(
+            factory: factory, fakeBox: nil, credentials: KeychainCredentials(service: options.keychainService),
+            deviceFile: JSONFileStore(file: JSONFileStore<DeviceConfig>.appSupport("devices.json")),
+            groupFile: JSONFileStore(file: JSONFileStore<CameraGroup>.appSupport("groups.json")))
     }
 
-    func startConnection() {
+    /// `--host`/`--user`: one device for this run, password from
+    /// NVRVIEW_PASSWORD (development against mock-nvr) or the Keychain.
+    private func commandLineDevice() -> [(DeviceConfig, String)] {
         if options.fake {
-            connect(ConnectionSettings(
-                host: "192.0.2.1", port: 9000, user: "example-user", channel: options.channel, tier: options.tier),
-                password: "example")
-            return
-        }
-        guard let host = options.host, let user = options.user, let account = options.account else {
-            return showSettings()
-        }
-        // NVRVIEW_PASSWORD is for development against mock-nvr, like bc-cli;
-        // the Keychain is the normal source. Never from the command line.
-        let keychain = KeychainPassword(service: options.keychainService, account: account)
-        let fromEnvironment = ProcessInfo.processInfo.environment["NVRVIEW_PASSWORD"].flatMap { $0.isEmpty ? nil : $0 }
-        guard let password = fromEnvironment ?? keychain.read() else {
-            statusLabel.stringValue = "No password in the Keychain for \(account); enter it in Settings"
-            return showSettings()
-        }
-        connect(ConnectionSettings(host: host, port: options.port, user: user, channel: options.channel, tier: options.tier),
-                password: password)
-    }
-
-    func connect(_ settings: ConnectionSettings, password: String) {
-        do {
-            try session?.connect(settings, password: password)
-        } catch {
-            statusLabel.stringValue = "Cannot connect: \(error)"
-        }
-    }
-
-    // MARK: Settings
-
-    @objc func showSettings() {
-        guard let window else { return }
-        let sheet = SettingsSheet(options: options)
-        sheet.present(on: window) { [weak self] settings, password, save in
-            guard let self else { return }
-            if save {
-                KeychainPassword(
-                    service: options.keychainService, account: options.keychainAccount ?? "\(settings.user)@\(settings.host)")
-                    .save(password)
+            // Two made-up NVRs (FakeCore.Options.devices describes them).
+            return ["192.0.2.10", "192.0.2.11"].enumerated().map { i, host in
+                (DeviceConfig(key: "fake-\(i + 1)", name: "NVR \(i + 1)", host: host, port: 9000, user: "example-user"),
+                 "example-password")
             }
-            connect(settings, password: password)
         }
+        guard let host = options.host, let user = options.user else { return [] }
+        let fromEnvironment = ProcessInfo.processInfo.environment["NVRVIEW_PASSWORD"].flatMap { $0.isEmpty ? nil : $0 }
+        let keychain = KeychainPassword(service: options.keychainService, account: "\(user)@\(host)")
+        guard let password = fromEnvironment ?? keychain.read() else {
+            FileHandle.standardError.write(Data("no password for \(user)@\(host); add the device in Settings\n".utf8))
+            return []
+        }
+        let config = DeviceConfig(key: "cli-\(host)-\(options.port)", name: host, host: host, port: options.port, user: user)
+        return [(config, password)]
     }
+
+    /// Two example layouts for `--fake`, so the sidebar has something to show.
+    private func seedFakeLayouts(_ model: AppModel) {
+        guard model.layouts.isEmpty else { return }
+        let a = (0..<6).map { CameraRef(device: "fake-1", channel: $0) }
+        let b = (0..<4).map { CameraRef(device: "fake-2", channel: $0) }
+        model.createLayout(name: "Overview", root: LayoutNode.balanced(a + b))
+        model.createLayout(
+            name: "Split Example",
+            root: .split(
+                .row, ratio: 0.62, a: .leaf(a[0]),
+                b: .split(.col, ratio: 0.34, a: .leaf(b[1]), b: .split(.col, ratio: 0.5, a: .leaf(a[2]), b: .leaf(b[3])))))
+    }
+
+    // MARK: Windows
+
+    @discardableResult
+    func openWindow(_ content: WindowContent) -> ViewerWindowController? {
+        guard let model else { return nil }
+        let renderer: GridRenderer
+        do { renderer = try GridRenderer() } catch { fail("cannot set up Metal: \(error)") }
+        let controller = ViewerWindowController(model: model, content: content, renderer: renderer)
+        controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
+        windows.append(controller)
+        guard let window = controller.window else { return controller }
+        if let last = windows.dropLast().last?.window {
+            window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: last.frame.minX, y: last.frame.maxY)))
+        } else {
+            window.center()
+        }
+        if options.selfTestSeconds != nil {
+            // Never take focus from whatever the user is doing.
+            window.orderBack(nil)
+        } else {
+            controller.showWindow(nil)
+        }
+        return controller
+    }
+
+    @objc func newWindow(_ sender: Any?) {
+        guard let model else { return }
+        let key = NSApp.keyWindow?.windowController as? ViewerWindowController
+        openWindow(key?.state.content ?? ViewerWindowController.allCameras(model))
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        guard let model else { return }
+        if settings == nil { settings = SettingsWindowController(model: model) }
+        settings?.showWindow(nil)
+        settings?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { true }
 
     private func buildMenu() {
         let main = NSMenu()
-        let appItem = NSMenuItem()
-        main.addItem(appItem)
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit NVRView", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        appItem.submenu = menu
-
-        let audioItem = NSMenuItem()
-        main.addItem(audioItem)
-        let audio = NSMenu(title: "Audio")
-        // Cmd-L: listen to the shown tile.
-        audio.addItem(NSMenuItem(title: "Listen", action: #selector(toggleListening(_:)), keyEquivalent: "l"))
-        audioItem.submenu = audio
-        NSApplication.shared.mainMenu = main
-    }
-
-    // MARK: Audio
-
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(toggleListening(_:)) {
-            item.state = session?.listening == true ? .on : .off
-            return session?.tile != nil
+        func submenu(_ title: String, _ items: [NSMenuItem]) {
+            let item = NSMenuItem()
+            let menu = NSMenu(title: title)
+            for i in items { menu.addItem(i) }
+            item.submenu = menu
+            main.addItem(item)
         }
-        return true
-    }
-
-    @objc func toggleListening(_ sender: Any?) {
-        guard let session else { return }
-        session.setListening(!session.listening)
+        func item(_ title: String, _ action: Selector, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command)
+            -> NSMenuItem
+        {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.keyEquivalentModifierMask = mods
+            return i
+        }
+        submenu("NVRView", [
+            item("Settings…", #selector(showSettings(_:)), ","),
+            .separator(),
+            item("Hide NVRView", #selector(NSApplication.hide(_:)), "h"),
+            item("Quit NVRView", #selector(NSApplication.terminate(_:)), "q"),
+        ])
+        submenu("File", [
+            item("New Window", #selector(newWindow(_:)), "n"),
+            item("New Layout…", #selector(ViewerWindowController.newLayout(_:)), "n", [.command, .shift]),
+            item("Save as Layout…", #selector(ViewerWindowController.saveAsLayout(_:)), "s", [.command, .shift]),
+            .separator(),
+            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+        ])
+        submenu("Edit", [
+            item("Undo", Selector(("undo:")), "z"),
+            item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            .separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x"),
+            item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Paste", #selector(NSText.paste(_:)), "v"),
+            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ])
+        submenu("Layout", [
+            item("Edit Layout", #selector(ViewerWindowController.toggleEditing(_:)), "e"),
+            item("Split Side by Side", #selector(ViewerWindowController.splitSideBySide(_:)), "d"),
+            item("Split Stacked", #selector(ViewerWindowController.splitStacked(_:)), "d", [.command, .shift]),
+            item("Remove Tile", #selector(ViewerWindowController.removeTile(_:))),
+            .separator(),
+            item("Focus Tile", #selector(ViewerWindowController.toggleFocus(_:)), "f"),
+            item("Fill Tiles", #selector(ViewerWindowController.toggleFill(_:))),
+        ])
+        submenu("View", [
+            item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]),
+            item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+        ])
+        submenu("Audio", [
+            // Cmd-L: listen to the selected (or focused) tile, also in full screen.
+            item("Listen", #selector(ViewerWindowController.toggleListening(_:)), "l"),
+            item("Stop Listening", #selector(ViewerWindowController.stopListening(_:)), "l", [.command, .shift]),
+        ])
+        let window = NSMenu(title: "Window")
+        window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
+        let windowItem = NSMenuItem()
+        windowItem.submenu = window
+        main.addItem(windowItem)
+        NSApplication.shared.mainMenu = main
+        NSApplication.shared.windowsMenu = window
     }
 
     // MARK: Lifecycle
 
-    private func fail(_ message: String) {
+    func fail(_ message: String) -> Never {
         FileHandle.standardError.write(Data((message + "\n").utf8))
         exit(1)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        timer?.invalidate()
-        session?.shutdown()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
-        session?.shutdown()
+        model?.shutdown()
     }
 }
 

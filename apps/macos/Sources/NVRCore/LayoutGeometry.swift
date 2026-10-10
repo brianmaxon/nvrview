@@ -38,6 +38,11 @@ public struct LayoutFrames: Sendable, Equatable {
     public var leaves: [LeafFrame]
     public var dividers: [DividerFrame]
 
+    public init(leaves: [LeafFrame], dividers: [DividerFrame]) {
+        self.leaves = leaves
+        self.dividers = dividers
+    }
+
     public func leaf(at point: CGPoint) -> LeafFrame? { leaves.first { $0.rect.contains(point) } }
 
     public func leaf(_ path: NodePath) -> LeafFrame? { leaves.first { $0.path == path } }
