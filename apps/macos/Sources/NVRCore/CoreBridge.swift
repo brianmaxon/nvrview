@@ -218,6 +218,21 @@ public final class CoreBridge: Sendable {
         return (try? c.gridLayout(viewport: viewport, gap: gap, pictureSizes: pictureSizes, fill: fill)) ?? []
     }
 
+    // MARK: Discovery (minor 1)
+
+    /// `nv_discover_start`: answers arrive as `discovered` events. Call from
+    /// outside any callback.
+    public func discoverStart(seconds: Double? = nil) throws(CoreStatus) {
+        let json = seconds.map { "{\"seconds\":\($0)}" }
+        try live().discoverStart(json: json)
+    }
+
+    /// `nv_discover_stop`; nothing running is fine.
+    public func discoverStop() {
+        guard let c = core.withLock({ $0 }) else { return }
+        try? c.discoverStop()
+    }
+
     // MARK: Audio
 
     /// A player that renders this core's audio (`AudioPlayer`); it is stopped

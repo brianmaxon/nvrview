@@ -16,22 +16,60 @@ struct SettingsView: View {
     }
 }
 
+/// The add-device form's fields, kept outside the view so that choosing a
+/// found device (a click in the list, or the self-test) fills the same form.
+@MainActor
+@Observable
+final class DeviceForm {
+    static let defaultName = "NVR"
+    var draft = DeviceForm.blank()
+    var port = "9000"
+    var password = ""
+    var isNew = true
+
+    static func blank() -> DeviceConfig {
+        DeviceConfig(key: DeviceConfig.newKey(), name: defaultName, host: "", port: 9000, user: "")
+    }
+
+    func startNew() {
+        draft = Self.blank()
+        port = "9000"
+        password = ""
+        isNew = true
+    }
+
+    func load(_ config: DeviceConfig) {
+        draft = config
+        port = String(config.port)
+        password = ""
+        isNew = false
+    }
+
+    /// A device chosen in "Find Devices on This Network": its address and
+    /// port go into the form, and its name too while the form still has the
+    /// default one. The user and password stay theirs to type.
+    func fill(from found: DiscoveredDevice) {
+        if !isNew { startNew() }
+        draft.host = found.address
+        port = String(found.suggestedPort)
+        let current = draft.name.trimmingCharacters(in: .whitespaces)
+        if let name = found.name, !name.isEmpty, current.isEmpty || current == Self.defaultName {
+            draft.name = name
+        }
+    }
+}
+
 /// The devices (NVRs and cameras) to connect to. Passwords go to the
 /// Keychain only, never to a file or the defaults; the device list file
 /// holds no secret.
 struct DeviceSettingsView: View {
     let model: AppModel
     @State private var selection: String?
-    @State private var draft = DeviceSettingsView.blank()
-    @State private var port = "9000"
-    @State private var password = ""
-    @State private var isNew = true
 
-    static func blank() -> DeviceConfig {
-        DeviceConfig(key: DeviceConfig.newKey(), name: "NVR", host: "", port: 9000, user: "")
-    }
+    private var form: DeviceForm { model.deviceForm }
 
     var body: some View {
+        @Bindable var form = model.deviceForm
         HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selection) {
@@ -71,14 +109,17 @@ struct DeviceSettingsView: View {
             .frame(width: 220)
             Divider()
             Form {
-                Section(isNew ? "New device" : "Device") {
-                    TextField("Name", text: $draft.name)
-                    TextField("Address", text: $draft.host, prompt: Text("192.0.2.10"))
-                    TextField("Port", text: $port)
-                    TextField("User", text: $draft.user)
+                if form.isNew {
+                    FindDevicesSection(model: model)
+                }
+                Section(form.isNew ? "New device" : "Device") {
+                    TextField("Name", text: $form.draft.name)
+                    TextField("Address", text: $form.draft.host, prompt: Text("192.0.2.10"))
+                    TextField("Port", text: $form.port)
+                    TextField("User", text: $form.draft.user)
                     SecureField(
-                        "Password", text: $password,
-                        prompt: Text(!isNew && model.hasPassword(draft.key) ? "Saved in the Keychain" : "Required"))
+                        "Password", text: $form.password,
+                        prompt: Text(!form.isNew && model.hasPassword(form.draft.key) ? "Saved in the Keychain" : "Required"))
                 }
                 Section {
                     Text(
@@ -88,10 +129,10 @@ struct DeviceSettingsView: View {
                     .foregroundStyle(.secondary)
                     HStack {
                         Spacer()
-                        if !isNew {
-                            Button("Reconnect") { model.reconnect(draft.key) }
+                        if !form.isNew {
+                            Button("Reconnect") { model.reconnect(form.draft.key) }
                         }
-                        Button(isNew ? "Add Device" : "Save") { save() }
+                        Button(form.isNew ? "Add Device" : "Save") { save() }
                             .keyboardShortcut(.defaultAction)
                             .disabled(!valid)
                     }
@@ -103,7 +144,9 @@ struct DeviceSettingsView: View {
         .frame(minWidth: 620, minHeight: 360)
         .onChange(of: selection) { _, key in load(key) }
         .onAppear {
-            if let first = model.devices.first {
+            // With devices already added, show the first; with none, the
+            // new-device form opens with the network search.
+            if form.isNew, let first = model.devices.first {
                 selection = first.key
                 load(first.key)
             }
@@ -111,40 +154,137 @@ struct DeviceSettingsView: View {
     }
 
     private var valid: Bool {
-        guard let p = UInt16(port), p > 0 else { return false }
-        let needsPassword = isNew || !model.hasPassword(draft.key)
-        return !draft.host.trimmingCharacters(in: .whitespaces).isEmpty
-            && !draft.user.trimmingCharacters(in: .whitespaces).isEmpty
-            && !draft.name.trimmingCharacters(in: .whitespaces).isEmpty
-            && (!needsPassword || !password.isEmpty)
+        guard let p = UInt16(form.port), p > 0 else { return false }
+        let needsPassword = form.isNew || !model.hasPassword(form.draft.key)
+        return !form.draft.host.trimmingCharacters(in: .whitespaces).isEmpty
+            && !form.draft.user.trimmingCharacters(in: .whitespaces).isEmpty
+            && !form.draft.name.trimmingCharacters(in: .whitespaces).isEmpty
+            && (!needsPassword || !form.password.isEmpty)
     }
 
     private func load(_ key: String?) {
         guard let key, let d = model.runtime(key) else { return }
-        draft = d.config
-        port = String(d.config.port)
-        password = ""
-        isNew = false
+        form.load(d.config)
     }
 
     private func startNew() {
         selection = nil
-        draft = Self.blank()
-        port = "9000"
-        password = ""
-        isNew = true
+        form.startNew()
     }
 
     private func save() {
-        var config = draft
+        var config = form.draft
         config.host = config.host.trimmingCharacters(in: .whitespaces)
         config.user = config.user.trimmingCharacters(in: .whitespaces)
         config.name = config.name.trimmingCharacters(in: .whitespaces)
-        config.port = UInt16(port) ?? 9000
-        model.saveDevice(config, password: password.isEmpty ? nil : password)
-        password = ""
-        isNew = false
+        config.port = UInt16(form.port) ?? 9000
+        model.saveDevice(config, password: form.password.isEmpty ? nil : form.password)
+        form.password = ""
+        form.isNew = false
         selection = config.key
+    }
+}
+
+/// "Find Devices on This Network" (docs/UX.md "Finding devices"): a search
+/// starts when this section appears and stops when it goes away (or the
+/// Settings window closes); Search Again restarts it. Choosing a row fills
+/// the add form's address and port.
+struct FindDevicesSection: View {
+    let model: AppModel
+
+    var body: some View {
+        let list = model.discovery
+        Section("Find Devices on This Network") {
+            if list.devices.isEmpty, !list.isSearching {
+                Text(emptyText(list)).font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(list.devices) { found in row(found) }
+            HStack {
+                if list.isSearching {
+                    ProgressView().controlSize(.small)
+                    Text("Searching\u{2026}").font(.caption).foregroundStyle(.secondary)
+                } else if !list.devices.isEmpty {
+                    Text(list.devices.count == 1 ? "1 device found" : "\(list.devices.count) devices found")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !list.errors.isEmpty {
+                    Text("Some network interfaces could not be searched.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help(list.errors.joined(separator: "\n"))
+                }
+                Spacer()
+                Button("Search Again") { model.startDiscovery() }
+                    .accessibilityLabel("Search Again")
+            }
+        }
+        .onAppear {
+            model.discoveryPanelShown = true
+            model.startDiscovery()
+        }
+        .onDisappear {
+            model.discoveryPanelShown = false
+            model.stopDiscovery()
+        }
+    }
+
+    private func emptyText(_ list: DiscoveryList) -> String {
+        if list.unavailable { return "This build cannot search the network for devices." }
+        if list.permissionLikelyBlocked {
+            return
+                "Nothing answered, and macOS refused to send on the local network. Allow NVRView in System Settings \u{203A} Privacy & Security \u{203A} Local Network, then search again. You can also type the address below."
+        }
+        if list.foundNothing {
+            return
+                "No devices found. If macOS asked to allow Local Network access, allow it in System Settings \u{203A} Privacy & Security \u{203A} Local Network, then search again. You can also type the address below."
+        }
+        return "Devices that answer on this network appear here."
+    }
+
+    private func row(_ found: DiscoveredDevice) -> some View {
+        let added = model.isAdded(found)
+        return Button {
+            model.chooseDiscovered(found)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: Self.icon(found.kind)).frame(width: 20).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(found.title)
+                    Text(Self.detail(found)).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let c = found.channels {
+                    Text(c == 1 ? "1 channel" : "\(c) channels").font(.caption).foregroundStyle(.secondary)
+                }
+                if let b = found.batteryPercent {
+                    Text("\(b)%").font(.caption).foregroundStyle(.secondary)
+                }
+                if added {
+                    Text("Added").font(.caption).foregroundStyle(.secondary)
+                } else if !found.isNative {
+                    Text("Not supported yet").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(added || !found.isNative)
+        .accessibilityElement(children: .combine)
+    }
+
+    static func icon(_ kind: DiscoveredDevice.Kind) -> String {
+        switch kind {
+        case .nvr: return "server.rack"
+        case .camera: return "video"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    /// Model and address, as the list shows them.
+    static func detail(_ d: DiscoveredDevice) -> String {
+        var parts: [String] = []
+        if let m = d.model, !m.isEmpty { parts.append(m) }
+        parts.append(d.port.map { "\(d.address):\($0)" } ?? d.address)
+        return parts.joined(separator: " \u{00B7} ")
     }
 }
 
@@ -242,7 +382,13 @@ struct AlertSettingsView: View {
 /// The one settings window.
 @MainActor
 final class SettingsWindowController: NSWindowController {
+    private let model: AppModel
+    private var closing: NSObjectProtocol?
+    /// The window was closed since it was last shown (its search stopped).
+    private var wasClosed = false
+
     init(model: AppModel) {
+        self.model = model
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 660, height: 400), styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false)
@@ -251,6 +397,25 @@ final class SettingsWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.center()
+        // Closing the window ends the network search (its view may not
+        // disappear when the window is only ordered out).
+        closing = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.wasClosed = true
+                self?.model.stopDiscovery()
+            }
+        }
+    }
+
+    /// Shown again after a close: the add-device screen searches again.
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        if wasClosed {
+            wasClosed = false
+            if model.discoveryPanelShown { model.startDiscovery() }
+        }
     }
 
     @available(*, unavailable)

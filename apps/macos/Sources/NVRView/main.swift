@@ -232,6 +232,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         openWindow(key?.state.content ?? ViewerWindowController.allCameras(model))
     }
 
+    /// The Settings window for the self-test: ordered to the back, never key.
+    func settingsWindowForTest() -> SettingsWindowController? {
+        guard let model else { return nil }
+        if settings == nil { settings = SettingsWindowController(model: model) }
+        settings?.window?.orderBack(nil)
+        return settings
+    }
+
     @objc func showSettings(_ sender: Any?) {
         guard let model else { return }
         if settings == nil { settings = SettingsWindowController(model: model) }

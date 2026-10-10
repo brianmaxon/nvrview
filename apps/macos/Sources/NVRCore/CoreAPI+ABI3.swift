@@ -34,6 +34,13 @@ extension CoreAPI {
     public func layoutDelete(id: String) throws(CoreStatus) { throw .invalidArgument }
 }
 
+// Device discovery (minor 1). A core without it refuses, and the app shows
+// no list.
+extension CoreAPI {
+    public func discoverStart(json: String?) throws(CoreStatus) { throw .invalidArgument }
+    public func discoverStop() throws(CoreStatus) {}
+}
+
 // Talk-back (docs/FFI.md "Talk-back"): camera motion control, off for every
 // camera until the app passes the user's per-camera permission. A core
 // without it refuses everything, so nothing is ever sent.

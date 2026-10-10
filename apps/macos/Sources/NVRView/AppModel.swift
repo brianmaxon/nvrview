@@ -68,6 +68,14 @@ final class AppModel {
     @ObservationIgnored var openWindow: (WindowContent) -> Void = { _ in }
 
     private(set) var devices: [DeviceRuntime] = []
+    /// The "find devices" list (docs/UX.md "Finding devices"). The core
+    /// searches only while a screen that shows it asked for it.
+    private(set) var discovery = DiscoveryList()
+    /// Whether the add-device screen is on screen (it starts a search when
+    /// it appears, and again when its window is shown after a close).
+    @ObservationIgnored var discoveryPanelShown = false
+    /// The add-device form (shared so a chosen found device fills it).
+    @ObservationIgnored let deviceForm = DeviceForm()
     private(set) var layouts: [SavedLayout] = []
     private(set) var groups: [CameraGroup] = []
     /// Per-camera options (entrance, doorbell talk-back and ring), saved.
@@ -788,10 +796,48 @@ final class AppModel {
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
         case .talk(let t):
             calls.talkEvent(t)
+        case .discoveryStarted, .discovered, .discoveryDone:
+            discovery.apply(event)
         case .tileTier, .audioStats, .tileStats:
             break
         }
         notify()
+    }
+
+    // MARK: Finding devices
+
+    /// Starts a search of the local network (the core never searches on its
+    /// own); a search already running restarts. The list empties.
+    func startDiscovery() {
+        guard !closed else { return }
+        do throws(CoreStatus) {
+            try bridge.discoverStart()
+            discovery.requested()
+        } catch {
+            discovery.failedToStart()
+        }
+        notify()
+    }
+
+    /// Stops the search (the screen closed).
+    func stopDiscovery() {
+        guard !closed else { return }
+        bridge.discoverStop()
+        discovery.stopped()
+        notify()
+    }
+
+    /// A found device was chosen in the list: its address and port go into
+    /// the add form.
+    func chooseDiscovered(_ found: DiscoveredDevice) {
+        guard found.isNative, !isAdded(found) else { return }
+        deviceForm.fill(from: found)
+        notify()
+    }
+
+    /// Whether a found device is one the user already added.
+    func isAdded(_ found: DiscoveredDevice) -> Bool {
+        found.isAdded(among: devices.map { (host: $0.config.host, port: $0.config.port) })
     }
 
     /// The tier switch note for a tile while it is recent.

@@ -108,6 +108,39 @@ public enum CoreEvent: Sendable, Equatable {
     case timing(what: String, tile: UInt64?, nanos: UInt64, tierSwitch: TierSwitchTiming? = nil)
     /// Talk-back progress (docs/FFI.md "Talk-back").
     case talk(TalkEvent)
+    /// Minor 1: a search was started (docs/FFI.md, "Device discovery").
+    case discoveryStarted(search: UInt64)
+    /// Minor 1: a device answered, or answered again with more.
+    case discovered(DiscoveredDevice)
+    /// Minor 1: a search ended.
+    case discoveryDone(DiscoveryEnd)
+
+    /// The `discovered` event's own shape (its `channels` is a number, unlike
+    /// the `channels` event's list).
+    private struct DiscoveredWire: Decodable {
+        struct Service: Decodable {
+            var kind: String
+            var port: UInt16?
+            var url: String?
+        }
+        var search: UInt64
+        var key: String
+        var kind: String?
+        var name: String?
+        var model: String?
+        var address: String
+        var port: UInt16?
+        var channels: Int?
+        var battery_percent: Int?
+        var services: [Service]?
+    }
+
+    private struct DoneWire: Decodable {
+        var search: UInt64
+        var count: Int?
+        var stopped: Bool?
+        var errors: [String]?
+    }
 
     private struct Wire: Decodable {
         var type: String
@@ -170,6 +203,21 @@ public enum CoreEvent: Sendable, Equatable {
     public static func parse(_ json: Data) -> CoreEvent? {
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
         switch w.type {
+        case "discovery_started":
+            guard let search = (try? JSONDecoder().decode(DoneWire.self, from: json))?.search else { return nil }
+            return .discoveryStarted(search: search)
+        case "discovered":
+            guard let d = try? JSONDecoder().decode(DiscoveredWire.self, from: json) else { return nil }
+            return .discovered(
+                DiscoveredDevice(
+                    search: d.search, key: d.key, kind: d.kind.flatMap(DiscoveredDevice.Kind.init(rawValue:)) ?? .unknown,
+                    name: d.name, model: d.model, address: d.address, port: d.port, channels: d.channels,
+                    batteryPercent: d.battery_percent,
+                    services: (d.services ?? []).map { DiscoveredService(kind: $0.kind, port: $0.port, url: $0.url) }))
+        case "discovery_done":
+            guard let d = try? JSONDecoder().decode(DoneWire.self, from: json) else { return nil }
+            return .discoveryDone(
+                DiscoveryEnd(search: d.search, count: d.count ?? 0, stopped: d.stopped ?? false, errors: d.errors ?? []))
         case "device_state":
             guard let device = w.device, let state = w.state else { return nil }
             let s: DeviceState
