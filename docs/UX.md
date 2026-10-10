@@ -14,6 +14,17 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 - The same camera can appear in several tiles and windows; it is streamed
   once.
 - Several windows, each with its own layout, on any display.
+- A **layout** is a saved arrangement: its splits, divider positions, and
+  which camera is in which tile. Edits are saved back to it as they are made.
+- A **group** is a named set of cameras with no arrangement: showing it lays
+  its cameras out as an even grid. Edits to that grid stay in the window
+  until saved as a new layout, so a group is a quick way to see some cameras
+  together and a starting point for a layout.
+- **All Cameras** is the unsaved even grid of every camera (up to 16) that a
+  window shows when it has nothing else to show: the first window before any
+  layout exists, a window whose layout or group was deleted, and a new
+  window opened with no other window active. A device's context menu opens
+  the same grid for that device's cameras.
 
 ## Listening from any tile
 
