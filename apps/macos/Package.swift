@@ -32,6 +32,7 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .library(name: "VideoKit", targets: ["VideoKit"]),
+        .executable(name: "NVRView", targets: ["NVRView"]),
         .executable(name: "NVRViewDemo", targets: ["NVRViewDemo"]),
     ],
     targets: [
@@ -47,6 +48,9 @@ let package = Package(
         // pipeline it uses. Never a dependency of the shipping app path; the
         // app links it only for `--fake`.
         .target(name: "FakeCore", dependencies: ["NVRCore", "VideoKit"]),
+        .executableTarget(
+            name: "NVRView", dependencies: appDependencies,
+            swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
         .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit", "NVRCore", "FakeCore"]),
         .testTarget(name: "VideoKitTests", dependencies: ["VideoKit", "FakeCore"]),
         .testTarget(name: "NVRCoreTests", dependencies: ["NVRCore", "FakeCore", "VideoKit", "NVRViewCore"]),
