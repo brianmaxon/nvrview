@@ -202,8 +202,11 @@ fn a_tile_plays_through_the_c_interface() {
             NvStatus::NV_ERR_UNKNOWN_ID
         );
     }
-    wait_until("main-stream pictures", || {
+    // (The new generation may decode pictures before it is shown, while it
+    // catches up with the picture on screen.)
+    wait_until("main-stream pictures and the switch", || {
         ctx.gen_decodes[1].load(Ordering::SeqCst) >= 5
+            && ctx.gen_resets[0].load(Ordering::SeqCst) >= 1
     });
     assert_eq!(ctx.gen_resets[0].load(Ordering::SeqCst), 1);
     assert_eq!(ctx.configures.load(Ordering::SeqCst), 2);

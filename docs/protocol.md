@@ -204,7 +204,8 @@ and started again every 30 s (4 starts).
 | Rates and GOPs: sub 4.17 fps with a keyframe every 40 pictures (9.6 s), main 12.5 fps with a keyframe every 24 pictures (1.92 s), against 10 and 30 fps advertised in the stream info. | observed |
 | For pictures of the same moment, main arrived a median 36 ms *earlier* than sub (p10 157 ms earlier, p90 68 ms later). | observed |
 | Starting main while sub plays: the first record came 24–65 ms after the request and the first picture, always a keyframe, 125–217 ms after it (median 215 ms), with no burst of buffered older pictures: the device starts a preview at a fresh keyframe. Sub's single start took 346 ms. | observed |
-| Every video picture of both tiers carried the wall-clock seconds in its extra header. The µs timestamps are not Unix time (they differ from seconds × 10⁶ by a large constant). How tightly the two follow each other was not yet measured. | observed |
+| Every video picture of both tiers had an extra header of at least 8 bytes, but only keyframes carried the wall-clock seconds in bytes 0–3; every predicted frame of both tiers carried the same other value there (`0x09000006`), not seconds. The µs timestamps are not Unix time (they differ from seconds × 10⁶ by a large constant). | observed |
+| Over the keyframes, *pts − seconds × 10⁶* spread over 0.83 s (sub, 13 keyframes) and 0.99 s (main, 60 keyframes): one constant plus the truncated fraction of a second, so the µs timestamps follow the wall-clock seconds to within their 1 s resolution. One constant fits both tiers' keyframes; main's pin it to a window of about 15 ms. | observed |
 
 ### Audio payloads
 
@@ -383,6 +384,14 @@ the next session's first push is a fresh snapshot.
 | A separate per-channel `aiAnimalType` (0 or 1) marks support for the wildlife subtypes below. Other per-channel fields seen: `smartAI`, `eventTypeVersion`, `thumbnail`. | observed (fields); meaning of `aiAnimalType` reported (client) |
 | `AiCfg` (299, read per channel at login) has `detectType` (comma list such as `people,vehicle,dog_cat`) and AI tracking settings. Read-only use is viewing tier; 300 writes it (configuration, never sent). | observed |
 | `AbilityInfo` (151) has no AI-specific entries; its `alarm` module holds only permissions such as `motion_rw`. | observed |
+
+How nvrview uses this: the core reads each `item`'s `aitype` and its
+`subItem`s (lens number from the sub-item's `chnID`, and its `aitype`). A
+channel whose item has two or more sub-items is reported to the app as a
+multi-lens camera (`lenses`, and `lens_detects` per lens, in the `channels`
+event, docs/FFI.md), with `detects` the union of the item's and the lenses'
+kinds. Without sub-items (older firmware, single-lens cameras) only the
+item's `aitype` is used, and nothing marks a second lens.
 
 ### Animal type names
 

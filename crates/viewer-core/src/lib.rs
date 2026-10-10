@@ -155,6 +155,10 @@ pub struct CoreConfig {
     /// How long a tier switch may take to decode its first picture before
     /// it is abandoned (`tile_tier` `failed`, reason `timeout`).
     pub tier_switch_timeout: Duration,
+    /// Longest a tier switch between main and sub waits, after the new
+    /// tier's first decoded picture, for a picture that is not older than
+    /// the one shown (docs/FFI.md, "Switching a tile's stream tier").
+    pub tier_switch_align_cap: Duration,
 }
 
 impl Default for CoreConfig {
@@ -170,6 +174,7 @@ impl Default for CoreConfig {
             tick_interval: Duration::from_millis(100),
             stats_interval: Duration::from_secs(1),
             tier_switch_timeout: Duration::from_secs(15),
+            tier_switch_align_cap: Duration::from_millis(300),
         }
     }
 }
@@ -291,8 +296,10 @@ impl Core {
             .map_err(|_| CoreError::Internal)?;
         let handle = runtime.handle().clone();
         let events = EventThread::spawn(callbacks.clone()).map_err(|_| CoreError::Internal)?;
-        let audio =
-            Arc::new(audio::AudioHub::new(callbacks.clone()).map_err(|_| CoreError::Internal)?);
+        let audio = Arc::new(
+            audio::AudioHub::new(callbacks.clone(), config.max_tiles)
+                .map_err(|_| CoreError::Internal)?,
+        );
         let event_sink = events.sink();
         let tile_ctx = TileContext {
             runtime: handle.clone(),
@@ -303,6 +310,7 @@ impl Core {
             tick_interval: config.tick_interval.max(Duration::from_millis(1)),
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
             tier_switch_timeout: config.tier_switch_timeout,
+            tier_switch_align_cap: config.tier_switch_align_cap,
             audio,
         };
         let layouts = store::Layouts::open(config.data_dir.clone());
@@ -853,12 +861,14 @@ impl Core {
         }
     }
 
-    /// A tile's latest audio level: peak and RMS, 0 to 1, measured by
-    /// [`Core::render_audio`] before the tile's volume (peak with a 0.3 s
-    /// release, RMS over about 0.1 s). Both are 0 for a tile that is not
-    /// audible, an unknown tile, or before rendering starts. Lock-free and
-    /// allocation-free: callable from any thread (and from callbacks) at
-    /// display rate.
+    /// A tile's audio level: peak and RMS, 0 to 1, of its decoded audio
+    /// before the tile's volume (peak with a 0.3 s release, RMS over about
+    /// 0.1 s), audible or not. For a tile that plays while the app renders,
+    /// [`Core::render_audio`] measures it (what is heard); otherwise it is
+    /// measured as records are decoded, and falls to 0 within a second when
+    /// no audio arrives. 0 for an unknown tile or one without audio.
+    /// Lock-free and allocation-free: callable from any thread (and from
+    /// callbacks) at display rate.
     pub fn tile_audio_level(&self, tile: u64) -> (f32, f32) {
         if tile == 0 {
             return (0.0, 0.0);

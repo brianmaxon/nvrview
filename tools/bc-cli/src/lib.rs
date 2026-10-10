@@ -149,6 +149,32 @@ pub struct Listing {
 
 /// Lists the device's channels: the 145 push, then a 318 query per occupied
 /// slot, one at a time.
+/// The read-only info query for a command number: 80 (device version),
+/// 146 (stream info), 199 (capabilities), or 318 (a channel's version,
+/// which needs a channel). `None` for anything else: nothing outside the
+/// session's read-only queries is ever sent.
+pub fn info_command(number: u32, channel: Option<u8>) -> Option<Command> {
+    match (number, channel) {
+        (80, None) => Some(Command::VersionInfo),
+        (146, None) => Some(Command::StreamInfoList),
+        (199, None) => Some(Command::Support),
+        (318, Some(_)) => Some(Command::ChannelVersionInfo),
+        _ => None,
+    }
+}
+
+/// Logs in and sends one read-only info query (see [`info_command`]),
+/// returning the reply status and decrypted XML body.
+pub async fn info_query(
+    session: &DeviceSession,
+    cmd: Command,
+    channel: Option<u8>,
+    limit: Duration,
+) -> Result<bc_session::QueryReply, CliError> {
+    wait_logged_in(session, limit).await?;
+    Ok(session.query(cmd, channel).await?)
+}
+
 pub async fn list_channels(session: &DeviceSession, limit: Duration) -> Result<Listing, CliError> {
     wait_logged_in(session, limit).await?;
     let reply = session.query(Command::VersionInfo, None).await?;

@@ -177,7 +177,12 @@ fn render_through_the_c_interface_never_allocates() {
                 // SAFETY: the core outlives this thread; `buf` holds
                 // 480 frames of 2 channels.
                 let st = unsafe { nv_audio_render(c.0, buf.as_mut_ptr(), 480, 2, host) };
+                // A meter read from the same thread: no allocation either.
+                let (mut peak, mut rms) = (0.0f32, 0.0f32);
+                // SAFETY: the core outlives this thread; valid out pointers.
+                let lv = unsafe { nv_tile_audio_level(c.0, tile, &mut peak, &mut rms) };
                 ARMED.with(|a| a.set(false));
+                assert_eq!(lv, NvStatus::NV_OK);
                 calls += 1;
                 if st == NvStatus::NV_OK {
                     ok += 1;
@@ -233,7 +238,7 @@ fn render_through_the_c_interface_never_allocates() {
     assert_eq!(
         EVENTS.load(Ordering::SeqCst),
         0,
-        "allocation in nv_audio_render"
+        "allocation in nv_audio_render or nv_tile_audio_level"
     );
     assert!(calls > 900 && ok > 800, "{calls} calls, {ok} ok");
     assert!(other > 10, "the mono period was rendered as silence");

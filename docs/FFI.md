@@ -97,13 +97,28 @@ without a gap:
   Answers for a generation that has ended are ignored.
 - The core starts the new tier's stream first (shared with any tile already
   showing it) and runs the new generation beside the old one, whose actions
-  keep flowing. When the new generation's first `DECODE` has been answered
-  with `nv_tile_decoded`, the old generation gets one final
-  `NV_ACTION_RESET` (destroy that decoder; nothing of it follows), and its
-  stream stops unless another tile shows it. That Reset, on the action path
-  in order with the new generation's actions, is the moment to show the new
-  generation's pictures; the `tile_tier` `active` event says the same on the
-  event path.
+  keep flowing. When the new generation is ready (below), the old
+  generation gets one final `NV_ACTION_RESET` (destroy that decoder;
+  nothing of it follows), and its stream stops unless another tile shows
+  it. That Reset, on the action path in order with the new generation's
+  actions, is the moment to show the new generation's pictures; the
+  `tile_tier` `active` event says the same on the event path. Until then
+  the app keeps showing the old generation and does not present the new
+  one's pictures (it decodes them all the same).
+- **Ready, without stepping back in time.** Between main and sub, which
+  run on one timestamp clock (docs/protocol.md, "Sub and main of one
+  camera"), the new
+  generation is ready at its first picture answered with `nv_tile_decoded`
+  whose `pts_us` is at or after the `pts_us` of the old generation's
+  picture answered last (the picture on screen, near enough). Its earlier
+  pictures are decoded but never shown. If it has not caught up 300 ms after
+  its first decoded picture, it is ready anyway (the old picture is held at
+  most that long; no delay beyond it). Main usually arrives a little ahead
+  of sub, so the switch is normally immediate. Switches involving the
+  extern or mobile tier (whose clocks are not measured yet), switches whose
+  two timestamps are more than 5 s apart (evidently not one clock), and
+  switches before anything of the old generation was decoded are ready at
+  the new generation's first decoded picture.
 - Asking for the tier already requested changes nothing (with no switch in
   progress it reports `active` again). A newer request replaces one still
   starting. A generation that never shows (its stream refused or ended, it
@@ -136,13 +151,14 @@ change.
 {"type":"device_info","device":1,"name":"NVR","model":"EXAMPLE-MODEL"}
 {"type":"channels","device":1,"channels":[{"channel":0,"connected":true,"tiers":["main","sub"],"name":"Channel 1","model":"EXAMPLE-CAM"}]}
 {"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
+{"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
 {"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}
 {"type":"alarm","device":1,"channel":2,"kind":"visitor","state":"start","at_ns":790}
 {"type":"layouts_changed","revision":4}
 {"type":"timing","what":"first_picture","tile":7,"ns":123456789}
-{"type":"timing","what":"tier_switch","tile":7,"ns":2345678}
+{"type":"timing","what":"tier_switch","tile":7,"ns":2345678,"delta_ms":40,"held_ms":0,"capped":false}
 {"type":"tile_stats","tile":7,"tier":"sub","generation":0,"received":120,"decoded":118,"gated":0,"dropped":2,"failures":0,"resets":0}
 {"type":"tile_closed","tile":7,"reason":"device_removed"}
 {"type":"audio_stats","tile":7,"records":386,"bytes":26722,"decoded":386,"concealed":0,"rejected":0,"talkback_ignored":0,"epoch":0,"audible":true,"volume":1,"tapped":true,"no_free_slot":false,"playout_delay_ms":223.76,"outliers":0,"timestamp_resets":0,"codec":"aac","sample_rate":16000,"channels":1,"rate_estimate":15999.93,"playout_delay_target_ms":100,"av_offset_ms":0.092,"buffered_ms":199.104,"correction_ppm":1.819,"resyncs":0,"starts":1,"underruns":0,"underrun_frames":0,"overflow_frames":0,"blocks_not_played":0,"tap_blocks":386,"tap_dropped":0}
@@ -178,11 +194,25 @@ change.
   `stop` first.
 - `detects` in `channels` lists the detection kinds a channel's camera
   advertises (199 `aitype` bits), once known; `[]` for a camera without
-  AI. It may arrive in a later `channels` event than the slot list.
+  AI. For a multi-lens camera it is every kind of the camera (the
+  channel's own `aitype` and all its lenses' together). It may arrive in a
+  later `channels` event than the slot list.
+- `lenses` (with `detects`) is the number of lenses of a multi-lens camera,
+  present only when it has two or more: the 199 item of such a camera
+  holds one sub-item per lens (newer NVR firmware; docs/protocol.md "Which
+  channels detect what"). `lens_detects` then lists each lens's detection
+  kinds, lens 0 first. The `tiers` a channel advertises do not tell a
+  second lens apart (single-lens cameras can advertise `extern` too).
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from
-  `nv_tile_set_tier` to the switch.
+  `nv_tile_set_tier` to the switch, with `delta_ms` (the shown new
+  picture's timestamp minus the old generation's latest decoded picture's,
+  in ms: negative means the switch stepped back in time; absent when
+  nothing of the old generation was decoded), `held_ms` (how long the
+  switch waited for alignment after the new generation's first decoded
+  picture) and `capped` (true when that wait hit the 300 ms cap). See
+  "Switching a tile's stream tier".
 - `audio_stats` arrives about once a second for each tile whose stream has
   carried audio. Fields that are not known yet are left out: `codec`,
   `sample_rate`, `channels` and `rate_estimate` until a record decodes,
@@ -233,12 +263,21 @@ sends its own talk-back in) are never played: they are counted as
 
 ## Audio level
 
-`nv_tile_audio_level(core, tile, &peak, &rms)` reads a tile's level for a
-meter at display rate, from any thread, lock-free. `nv_audio_render`
-measures it on the samples it mixes, before the tile's volume (a muted
-tile still shows that sound arrives): peak with a 0.3 s release, RMS over
-about 0.1 s, both 0..1. A tile that is not audible (or not known) reads 0;
-the values freeze while nothing renders.
+`nv_tile_audio_level(core, tile, &peak, &rms)` reads the level of a
+tile's decoded audio, before the tile's volume, for a meter at display
+rate, from any thread (callbacks included), lock-free and allocation-free:
+peak with a 0.3 s release, RMS over about 0.1 s, both 0..1. It reads the
+same whether the tile is audible or not (a muted or silent tile still shows
+that sound arrives):
+
+- An audible tile whose audio is playing, while the app renders, reads what
+  `nv_audio_render` measured on the samples it mixes (what is heard).
+- Any other tile (silent, not yet playing, or the app has not rendered for
+  0.5 s) reads a level measured as its records are decoded (every record is
+  decoded, audible or not). Gaps of up to 0.2 s between records (arrival
+  jitter) hold the level; a longer stall lets it decay, and it reads 0
+  once no audio has arrived for 1 s, never a frozen value.
+- A tile without audio, or an unknown tile, reads 0.
 
 ## Layouts
 

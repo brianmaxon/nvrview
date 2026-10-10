@@ -102,6 +102,7 @@ pub struct TileAudio {
     pcm: Vec<f32>,
     stats: AudioStats,
     owner: u64,
+    level: Option<std::sync::Arc<crate::DecodeLevel>>,
 }
 
 impl std::fmt::Debug for TileAudio {
@@ -133,6 +134,7 @@ impl TileAudio {
             pcm: Vec::new(),
             stats: AudioStats::default(),
             owner: 0,
+            level: None,
         }
     }
 
@@ -140,6 +142,12 @@ impl TileAudio {
     /// renderer's levels ([`crate::Renderer::levels`]) name it.
     pub fn set_owner(&mut self, owner: u64) {
         self.owner = owner;
+    }
+
+    /// Measures every decoded record into `level` (`None` stops), audible
+    /// or not, at its arrival time.
+    pub fn set_level_meter(&mut self, level: Option<std::sync::Arc<crate::DecodeLevel>>) {
+        self.level = level;
     }
 
     /// One audio record, in stream order.
@@ -197,6 +205,9 @@ impl TileAudio {
     ) {
         let channels = format.channels.max(1);
         let frames = pcm.len() / channels;
+        if let Some(level) = &self.level {
+            level.observe(pcm, channels, format.sample_rate, arrived_us);
+        }
         if self.format != Some(format) {
             if self.format.is_some() {
                 self.decoder.reset();

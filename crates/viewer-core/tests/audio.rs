@@ -306,13 +306,47 @@ fn clicks_are_heard_their_playout_delay_after_their_picture() {
     assert!(play_level(&core, tile, 3.0) > THRESHOLD);
     assert_eq!(core.tile_audio_level(tile + 100), (0.0, 0.0));
 
-    // Silent: the slot is released, nothing more is heard.
+    // Silent: the slot is released, nothing more is heard; the meter still
+    // shows the decoded audio.
     core.set_tile_audio(tile, false, 1.0).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     assert!(play(&core, 1.5).is_empty());
-    assert_eq!(core.tile_audio_level(tile), (0.0, 0.0));
+    assert!(max_level(&core, tile, 1.5) > THRESHOLD);
     core.shutdown();
     nvr.shutdown();
+}
+
+/// The highest peak level read for `tile` over `seconds`, at display rate.
+fn max_level(core: &Core, tile: u64, seconds: f64) -> f32 {
+    let until = Instant::now() + Duration::from_secs_f64(seconds);
+    let mut max = 0.0f32;
+    while Instant::now() < until {
+        let (peak, rms) = core.tile_audio_level(tile);
+        assert!((0.0..=1.0).contains(&peak) && (0.0..=rms.max(peak)).contains(&rms));
+        max = max.max(peak);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    max
+}
+
+#[test]
+fn a_tile_never_made_audible_shows_its_level_until_its_audio_stops() {
+    let nvr = mock(5);
+    let (core, _rec) = start();
+    let dev = core
+        .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
+        .unwrap();
+    let tile = core.open_tile(dev, 0, StreamTier::Main).unwrap();
+    // No output, never audible: the level comes from decoding (clicks
+    // every half second, peak release 0.3 s).
+    assert!(max_level(&core, tile, 3.0) > THRESHOLD);
+    assert_eq!(core.tile_audio_level(tile + 100), (0.0, 0.0));
+    // The stream stalls (the device goes away): the level falls to 0
+    // instead of freezing.
+    nvr.shutdown();
+    std::thread::sleep(Duration::from_millis(1_300));
+    assert_eq!(core.tile_audio_level(tile), (0.0, 0.0));
+    core.shutdown();
 }
 
 #[test]

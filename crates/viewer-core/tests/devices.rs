@@ -173,3 +173,39 @@ fn device_keys_and_layouts_survive_a_restart() {
     assert_eq!(core.delete_layout("entrances"), Ok(()));
     core.shutdown();
 }
+
+#[test]
+fn a_multi_lens_camera_reports_its_lenses_and_what_each_detects() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+    cfg.channels = 3;
+    // Channel 1: a camera with two lenses; the others single-lens.
+    cfg.aitypes = vec![7, 7, 0];
+    cfg.lens_aitypes = vec![vec![], vec![7, 1 | (1 << 4)]];
+    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let (core, rec) = start(fast_config());
+    let dev = add(&core, &nvr);
+    wait_until("detects", 10, || {
+        of_device(&rec, "channels", dev)
+            .iter()
+            .any(|e| e["channels"][1].get("detects").is_some())
+    });
+    let e = of_device(&rec, "channels", dev).pop().unwrap();
+    let c = &e["channels"];
+    assert_eq!(c[1]["lenses"], 2, "{e}");
+    assert_eq!(
+        c[1]["detects"],
+        serde_json::json!(["people", "vehicle", "dog_cat"])
+    );
+    assert_eq!(
+        c[1]["lens_detects"],
+        serde_json::json!([["people", "vehicle"], ["dog_cat"]])
+    );
+    for single in [0, 2] {
+        assert!(c[single].get("lenses").is_none(), "{e}");
+        assert!(c[single].get("lens_detects").is_none(), "{e}");
+    }
+    assert_eq!(c[0]["detects"], serde_json::json!(["people", "vehicle"]));
+    core.shutdown();
+}

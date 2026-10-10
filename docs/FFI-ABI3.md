@@ -15,15 +15,22 @@
 > 4. Detection events also have `alarm` (other device states, such as a
 >    doorbell press) and an optional `lens` (second lens of a multi-lens
 >    camera); kinds are lowercase.
-> 5. `nv_tile_audio_level` is measured before the tile's volume and reads 0
->    for a tile that is not audible or not known (it never fails for an
->    unknown tile: it takes no lock to check).
+> 5. `nv_tile_audio_level` is measured before the tile's volume, audible
+>    or not (measured as audio is decoded for a tile that is not playing),
+>    and reads 0 for a tile without audio or not known (it never fails for
+>    an unknown tile: it takes no lock to check).
 > 6. Layouts: the core needs a directory, `NvConfig.data_dir` (new, last
 >    member); `nv_layouts_get` returns `{"revision":N,"layouts":[...]}` and
 >    uses `NV_ERR_BUFFER_TOO_SMALL` (new) to ask for a larger buffer; the
 >    core sets `version` itself; `layouts_changed` carries `revision`.
 >    Device keys come from `nv_device_key` (new) and `key` in
 >    `device_info`, one per device address.
+>
+> 7. The switch is not at the new generation's first decoded picture but at
+>    its first one no older than the picture shown, between main and sub
+>    (one clock), capped at 300 ms after its first decoded picture;
+>    `tier_switch` timing carries `delta_ms`, `held_ms`, and `capped`
+>    (FFI.md, "Switching a tile's stream tier").
 
 The additions M3 needs, agreed before the core and the app are built in
 parallel. Everything in [FFI.md](FFI.md) still holds; on implementation this

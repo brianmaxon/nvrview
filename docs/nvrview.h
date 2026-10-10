@@ -210,9 +210,11 @@ NvStatus nv_tile_open(NvCore *core, uint64_t device, uint8_t channel, NvStreamTi
 NvStatus nv_tile_close(NvCore *core, uint64_t tile);
 
 /* Asks the tile to show `tier` (for example main on focus, sub back in the
- * grid). The tile keeps presenting its current stream until the new one's
- * first picture has been decoded, then switches in one step: no gap, no
- * black frame. The new stream's actions carry the next generation; the
+ * grid). The tile keeps presenting its current stream until the new one
+ * has decoded a picture no older than the one shown (between main and sub;
+ * at most 300 ms after its first decoded picture) or its first
+ * picture (otherwise), then switches in one step: no gap, no black frame,
+ * no step back in time. The new stream's actions carry the next generation; the
  * switch is the old generation's final NV_ACTION_RESET (and a tile_tier
  * event). Returns at once; progress arrives as events. Asking for the tier
  * already requested changes nothing. */
@@ -264,11 +266,13 @@ NvStatus nv_tile_audio_set(NvCore *core, uint64_t tile, bool audible, float volu
  * on_audio_tap was NULL. */
 NvStatus nv_tile_audio_tap(NvCore *core, uint64_t tile, bool enabled);
 
-/* Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
- * last measured it, before the tile's volume (peak with a 0.3 s release,
- * RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
- * known, and before rendering starts. Lock-free and allocation-free;
- * callable from any thread, including callbacks, at display rate. */
+/* Peak and RMS level of a tile's decoded audio, 0..1, before the tile's
+ * volume (peak with a 0.3 s release, RMS over about 0.1 s), audible or not:
+ * as nv_audio_render measured it for a tile that plays while the app
+ * renders, otherwise as its audio was decoded, falling to 0 within a
+ * second when no audio arrives. Both read 0 for a tile without audio or
+ * not known. Lock-free and allocation-free; callable from any thread,
+ * including callbacks, at display rate. */
 NvStatus nv_tile_audio_level(NvCore *core, uint64_t tile, float *peak, float *rms);
 
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back

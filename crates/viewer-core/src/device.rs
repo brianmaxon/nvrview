@@ -169,8 +169,36 @@ pub(crate) fn closed_event(id: u64) -> String {
     state_event(id, &ConnState::Closed)
 }
 
+/// What one channel detects (from 199).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ChannelDetects {
+    /// Every kind the camera advertises: the item's own `aitype` and its
+    /// lenses' together.
+    kinds: Vec<&'static str>,
+    /// Per lens, for a camera with two or more lenses (`subItem`s); empty
+    /// for a single-lens camera.
+    lenses: Vec<Vec<&'static str>>,
+}
+
+impl ChannelDetects {
+    fn from_ai(c: &detection::ChannelAi) -> ChannelDetects {
+        let all = c.lenses.iter().fold(c.aitype, |a, l| a | l.aitype);
+        ChannelDetects {
+            kinds: detection::ai_kinds(all),
+            lenses: if c.lenses.len() >= 2 {
+                c.lenses
+                    .iter()
+                    .map(|l| detection::ai_kinds(l.aitype))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        }
+    }
+}
+
 /// What each channel detects (from 199), once known.
-type Detects = HashMap<u8, Vec<&'static str>>;
+type Detects = HashMap<u8, ChannelDetects>;
 
 fn channels_event(
     id: u64,
@@ -188,7 +216,19 @@ fn channels_event(
             None => o,
         };
         match detects {
-            Some(d) => o.strs("detects", d.get(&c.channel).into_iter().flatten().copied()),
+            Some(d) => {
+                let cd = d.get(&c.channel);
+                let o = o.strs(
+                    "detects",
+                    cd.into_iter().flat_map(|x| x.kinds.iter().copied()),
+                );
+                match cd {
+                    Some(x) if x.lenses.len() >= 2 => o
+                        .u64("lenses", x.lenses.len() as u64)
+                        .str_arrays("lens_detects", x.lenses.iter().map(|l| l.iter().copied())),
+                    _ => o,
+                }
+            }
             None => o,
         }
     });
@@ -212,8 +252,8 @@ async fn device_info(session: Arc<DeviceSession>) -> Option<Info> {
     xml::parse_version_info(&r.xml).ok().map(Info::Device)
 }
 
-/// What each channel detects, from the `aitype` bits of the capabilities
-/// (command 199).
+/// What each channel (and each lens of a multi-lens camera) detects, from
+/// the `aitype` bits of the capabilities (command 199).
 async fn channel_detects(session: Arc<DeviceSession>) -> Option<Info> {
     let r = session.query(Command::Support, None).await.ok()?;
     if r.status != 200 && r.status != 300 {
@@ -223,7 +263,7 @@ async fn channel_detects(session: Arc<DeviceSession>) -> Option<Info> {
     let ai = detection::parse_channel_ai(&r.xml).ok()?;
     Some(Info::Detects(
         ai.into_iter()
-            .map(|c| (c.channel, detection::ai_kinds(c.aitype)))
+            .map(|c| (c.channel, ChannelDetects::from_ai(&c)))
             .collect(),
     ))
 }
@@ -618,12 +658,54 @@ mod tests {
         assert!(c[1].get("name").is_none());
         assert!(c[0].get("detects").is_none());
         let mut detects = HashMap::new();
-        detects.insert(0, vec!["people", "vehicle"]);
+        detects.insert(
+            0,
+            ChannelDetects {
+                kinds: vec!["people", "vehicle"],
+                lenses: Vec::new(),
+            },
+        );
         let v: serde_json::Value =
             serde_json::from_str(&channels_event(1, &slots, &names, Some(&detects))).unwrap();
         let c = &v["channels"];
         assert_eq!(c[0]["detects"], serde_json::json!(["people", "vehicle"]));
+        assert!(c[0].get("lenses").is_none() && c[0].get("lens_detects").is_none());
         assert_eq!(c[1]["detects"], serde_json::json!([]));
+
+        // A multi-lens camera: every kind of the camera, and per lens.
+        let ai = detection::ChannelAi {
+            channel: 1,
+            aitype: 1 | 2,
+            lenses: vec![
+                detection::LensAi {
+                    lens: 0,
+                    aitype: 1 | 2 | 4,
+                },
+                detection::LensAi {
+                    lens: 1,
+                    aitype: 1 | 16,
+                },
+            ],
+        };
+        detects.insert(1, ChannelDetects::from_ai(&ai));
+        let v: serde_json::Value =
+            serde_json::from_str(&channels_event(1, &slots, &names, Some(&detects))).unwrap();
+        let c = &v["channels"];
+        assert_eq!(c[1]["lenses"], 2);
+        assert_eq!(
+            c[1]["detects"],
+            serde_json::json!(["people", "vehicle", "dog_cat"])
+        );
+        assert_eq!(
+            c[1]["lens_detects"],
+            serde_json::json!([["people", "vehicle"], ["dog_cat"]])
+        );
+        // One sub-item only: not a multi-lens camera.
+        let one = detection::ChannelAi {
+            lenses: ai.lenses[..1].to_vec(),
+            ..ai.clone()
+        };
+        assert!(ChannelDetects::from_ai(&one).lenses.is_empty());
     }
 
     fn push(connection: u64, states: Vec<(u8, u8, &str, &str)>) -> AlarmPush {

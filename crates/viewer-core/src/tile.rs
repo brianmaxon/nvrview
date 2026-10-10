@@ -89,6 +89,7 @@ pub(crate) struct TileContext {
     pub(crate) tick_interval: Duration,
     pub(crate) stats_interval: Duration,
     pub(crate) tier_switch_timeout: Duration,
+    pub(crate) tier_switch_align_cap: Duration,
     pub(crate) audio: Arc<AudioHub>,
 }
 
@@ -220,6 +221,7 @@ pub(crate) fn spawn(
     let closed_reported = Arc::new(AtomicBool::new(false));
     let events = ctx.events.clone();
     let hub = ctx.audio.clone();
+    let meter = audio.meter.clone();
     let state = TileThread {
         closed_reported: closed_reported.clone(),
         id,
@@ -237,6 +239,7 @@ pub(crate) fn spawn(
         audio: {
             let mut a = TileAudio::new(TileConfig::default());
             a.set_owner(id);
+            a.set_level_meter(meter);
             a
         },
         talkback_ignored: 0,
@@ -265,6 +268,10 @@ pub(crate) fn spawn(
     ))
 }
 
+/// Timestamps further apart than this (µs) in a switch between tiers of
+/// one lens are taken to be on different clocks: no waiting for alignment.
+const OTHER_CLOCK_US: i64 = 5_000_000;
+
 /// One generation of a tile: a stream tier, its subscription, and the
 /// pipeline that drives one platform decoder.
 struct Generation {
@@ -272,15 +279,58 @@ struct Generation {
     tier: StreamTier,
     sub: Option<Subscription>,
     p: TilePipeline,
+    /// Camera timestamp of the picture the app reported decoded last.
+    last_decoded_pts: Option<u64>,
 }
 
-/// A generation being started, shown once its first picture is decoded.
+impl Generation {
+    fn new(generation: u32, tier: StreamTier, sub: Option<Subscription>, p: TilePipeline) -> Self {
+        Generation {
+            generation,
+            tier,
+            sub,
+            p,
+            last_decoded_pts: None,
+        }
+    }
+}
+
+/// Whether two tiers of one channel are known to share one timestamp clock:
+/// main and sub (observed, docs/protocol.md "Sub and main of one camera").
+/// What the extern and mobile tiers show (another quality of the same lens,
+/// or a second lens) and how their clocks relate is not measured yet.
+fn one_clock(a: StreamTier, b: StreamTier) -> bool {
+    let first = |t| matches!(t, StreamTier::Main | StreamTier::Sub);
+    first(a) && first(b)
+}
+
+/// When a starting generation may be shown, and how it came to be.
+#[derive(Clone, Copy, Debug)]
+struct Ready {
+    /// New picture's timestamp minus the old generation's latest decoded
+    /// one, µs; `None` when nothing of the old generation was decoded.
+    delta_us: Option<i64>,
+    /// How long it waited for alignment after its first decoded picture.
+    held: Duration,
+    /// The wait hit the cap.
+    capped: bool,
+}
+
+/// A generation being started, shown once it has decoded a picture that is
+/// not older than the one shown (for tiers of one lens), or its first
+/// picture otherwise; see [`Streams::apply`].
 struct Starting {
     g: Generation,
     requested_ns: u64,
     deadline: Instant,
     /// Set when it can no longer succeed, with the reason.
     failed: Option<&'static str>,
+    /// Compare timestamps with the shown generation: tiers on one clock.
+    align: bool,
+    /// When its first picture was reported decoded.
+    first_decoded: Option<Instant>,
+    /// Set once it may be shown.
+    ready: Option<Ready>,
 }
 
 /// The tile's generations: the one shown, and at most one starting.
@@ -292,23 +342,94 @@ struct Streams {
 impl Streams {
     /// Applies a decoder result to the generation it belongs to. Results for
     /// a generation that is gone are dropped (counted).
+    ///
+    /// A starting generation becomes ready at its first decoded picture
+    /// whose timestamp is at or after that of the shown generation's latest
+    /// decoded picture (the picture on screen, near enough), so the switch
+    /// never steps back in time; earlier pictures are decoded but not
+    /// shown. Only for tiers on one clock ([`one_clock`]) and timestamps within
+    /// [`OTHER_CLOCK_US`]; otherwise its first decoded picture will do.
+    /// [`Streams::cap`] bounds the wait.
     fn apply(&mut self, r: DecoderResult, stale: &mut u64) {
-        let p = if r.generation == self.current.generation {
-            &mut self.current.p
+        let g = if r.generation == self.current.generation {
+            &mut self.current
         } else if let Some(s) = self
             .starting
             .as_mut()
             .filter(|s| s.g.generation == r.generation)
         {
-            &mut s.g.p
+            &mut s.g
         } else {
             *stale += 1;
             return;
         };
         match r.kind {
-            ResultKind::Decoded(pts) => p.decoded(pts),
-            ResultKind::Failed(kind) => p.decode_failed(kind),
+            ResultKind::Decoded(pts) => {
+                g.p.decoded(pts);
+                g.last_decoded_pts = Some(pts);
+            }
+            ResultKind::Failed(kind) => {
+                g.p.decode_failed(kind);
+                return;
+            }
         }
+        let shown = self.current.last_decoded_pts;
+        let Some(st) = self
+            .starting
+            .as_mut()
+            .filter(|s| s.g.generation == r.generation && s.ready.is_none())
+        else {
+            return;
+        };
+        let ResultKind::Decoded(pts) = r.kind else {
+            return;
+        };
+        let now = Instant::now();
+        let first = *st.first_decoded.get_or_insert(now);
+        let delta_us = shown.map(|o| pts as i64 - o as i64);
+        let go = match delta_us {
+            None => true,
+            Some(d) => !st.align || d >= 0 || d.abs() > OTHER_CLOCK_US,
+        };
+        if go {
+            st.ready = Some(Ready {
+                delta_us,
+                held: now - first,
+                capped: false,
+            });
+        }
+    }
+
+    /// When a starting generation stops waiting for alignment: `cap` after
+    /// its first decoded picture.
+    fn align_deadline(&self, cap: Duration) -> Option<Instant> {
+        let st = self.starting.as_ref()?;
+        if st.ready.is_some() || st.failed.is_some() {
+            return None;
+        }
+        st.first_decoded.map(|f| f + cap)
+    }
+
+    /// Makes a starting generation that has waited `cap` ready anyway: the
+    /// old picture is held no longer than that.
+    fn cap(&mut self, cap: Duration) {
+        let Some(deadline) = self.align_deadline(cap) else {
+            return;
+        };
+        let now = Instant::now();
+        if now < deadline {
+            return;
+        }
+        let shown = self.current.last_decoded_pts;
+        let st = self.starting.as_mut().expect("checked");
+        let first = st.first_decoded.expect("checked");
+        st.ready = Some(Ready {
+            delta_us: shown
+                .zip(st.g.last_decoded_pts)
+                .map(|(o, n)| n as i64 - o as i64),
+            held: now - first,
+            capped: true,
+        });
     }
 }
 
@@ -400,12 +521,12 @@ impl TileThread {
             _ = gate => {}
         }
         let mut s = Streams {
-            current: Generation {
-                generation: 0,
+            current: Generation::new(
+                0,
                 tier,
                 sub,
-                p: TilePipeline::new(self.id as u32, self.ctx.pipeline),
-            },
+                TilePipeline::new(self.id as u32, self.ctx.pipeline),
+            ),
             starting: None,
         };
         let mut tick = interval(self.ctx.tick_interval);
@@ -417,6 +538,7 @@ impl TileThread {
             if self.stop.load(Ordering::SeqCst) {
                 break;
             }
+            let align_deadline = s.align_deadline(self.ctx.tier_switch_align_cap);
             tokio::select! {
                 biased;
                 _ = &mut wake => break,
@@ -455,6 +577,12 @@ impl TileThread {
                     break;
                 },
                 _ = tick.tick() => {}
+                _ = async {
+                    match align_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
             self.link.apply(&mut self.audio);
             let now_us = self.ctx.clock.now_us();
@@ -466,6 +594,7 @@ impl TileThread {
                 }
             }
             self.deliver(&mut s);
+            s.cap(self.ctx.tier_switch_align_cap);
             self.settle(&mut s);
             let now = Instant::now();
             if now >= next_stats {
@@ -531,15 +660,18 @@ impl TileThread {
                     Priority::State,
                 );
                 s.starting = Some(Starting {
-                    g: Generation {
+                    g: Generation::new(
                         generation,
                         tier,
                         sub,
-                        p: TilePipeline::new(self.id as u32, self.ctx.pipeline),
-                    },
+                        TilePipeline::new(self.id as u32, self.ctx.pipeline),
+                    ),
                     requested_ns,
                     deadline: Instant::now() + self.ctx.tier_switch_timeout,
                     failed,
+                    align: one_clock(tier, s.current.tier),
+                    first_decoded: None,
+                    ready: None,
                 });
             }
         }
@@ -569,7 +701,7 @@ impl TileThread {
         drop(g);
     }
 
-    /// Finishes a switch whose first picture has been decoded, or abandons
+    /// Finishes a switch that is ready (see [`Streams::apply`]), or abandons
     /// one that failed.
     fn settle(&mut self, s: &mut Streams) {
         let Some(st) = s.starting.as_ref() else {
@@ -580,7 +712,10 @@ impl TileThread {
             self.abandon(st, reason);
             return;
         }
-        if st.g.p.stats().decoded == 0 || self.stop.load(Ordering::SeqCst) {
+        let Some(ready) = st.ready else {
+            return;
+        };
+        if self.stop.load(Ordering::SeqCst) {
             return;
         }
         let st = s.starting.take().expect("checked");
@@ -596,17 +731,26 @@ impl TileThread {
             generation = s.current.generation,
             tier = crate::device::tier_name(s.current.tier),
             ms = elapsed / 1_000_000,
+            delta_ms = ready.delta_us.map(|d| d / 1_000),
+            held_ms = ready.held.as_millis() as u64,
+            capped = ready.capped,
             "tier switched"
         );
         self.ctx.events.send(
             tier_event(self.id, s.current.tier, "active", s.current.generation).finish(),
             Priority::State,
         );
+        let mut timing = Object::event("timing")
+            .str("what", "tier_switch")
+            .u64("tile", self.id)
+            .u64("ns", elapsed);
+        if let Some(d) = ready.delta_us {
+            timing = timing.f64("delta_ms", d as f64 / 1e3);
+        }
         self.ctx.events.send(
-            Object::event("timing")
-                .str("what", "tier_switch")
-                .u64("tile", self.id)
-                .u64("ns", elapsed)
+            timing
+                .f64("held_ms", ready.held.as_secs_f64() * 1e3)
+                .bool("capped", ready.capped)
                 .finish(),
             Priority::State,
         );
