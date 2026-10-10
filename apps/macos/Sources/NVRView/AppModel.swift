@@ -71,6 +71,10 @@ final class AppModel {
     private(set) var layoutsStored = true
     /// The core's timing hooks, by `what` (nanoseconds).
     private(set) var timings: [String: UInt64] = [:]
+    /// The last tier switch of each tile (by core tile ID) and when it
+    /// happened; the frame-rate readout shows it briefly.
+    private(set) var switchNotes: [UInt64: (timing: TierSwitchTiming, at: UInt64)] = [:]
+    static let switchNoteSeconds: UInt64 = 6
     /// A message for the user (shown in the sidebar footer), if any.
     var notice: String?
     /// Tile headers show the device's and the shown frame rate (View menu;
@@ -547,8 +551,11 @@ final class AppModel {
             detections.apply(d, camera: d.camera(deviceKey: key))
         case .layoutsChanged:
             reloadLayouts()
-        case .timing(let what, _, let ns, _):
+        case .timing(let what, let tile, let ns, let detail):
             if timings[what] == nil { timings[what] = ns }
+            if let tile, let detail {
+                switchNotes[tile] = (detail, HostClock.nowNanos())
+            }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
         case .tileTier, .audioStats, .tileStats:
@@ -557,7 +564,20 @@ final class AppModel {
         notify()
     }
 
+    /// The tier switch note for a tile while it is recent.
+    func switchNote(forTile tile: UInt64) -> String? {
+        guard let n = switchNotes[tile], HostClock.nowNanos() &- n.at < Self.switchNoteSeconds * 1_000_000_000 else {
+            return nil
+        }
+        return n.timing.note
+    }
+
     private func expireDetections() {
+        let stale = switchNotes.filter { HostClock.nowNanos() &- $0.value.at >= Self.switchNoteSeconds * 1_000_000_000 }
+        if !stale.isEmpty {
+            for key in stale.keys { switchNotes[key] = nil }
+            notify()
+        }
         let before = detections
         // A stop lost to a reconnect must not leave a badge up for good.
         detections.expire(now: HostClock.nowNanos(), maxAgeNanos: 120_000_000_000)

@@ -260,6 +260,16 @@ public struct TierSwitchTiming: Sendable, Equatable {
     /// The wait hit the core's cap.
     public var capped: Bool
 
+    /// A short readout for the frame-rate line: "switch +40 ms" (the new
+    /// picture was that far ahead), "switch held 160 ms" (waited for it to
+    /// catch up), "capped −520 ms" (waited the most and stepped back).
+    public var note: String {
+        func signed(_ v: Int) -> String { (v < 0 ? "\u{2212}" : "+") + "\(abs(v)) ms" }
+        if capped { return deltaMs.map { "capped " + signed($0) } ?? "capped" }
+        if heldMs > 0 { return "switch held \(heldMs) ms" }
+        return deltaMs.map { "switch " + signed($0) } ?? "switch"
+    }
+
     public init(deltaMs: Int? = nil, heldMs: Int = 0, capped: Bool = false) {
         self.deltaMs = deltaMs
         self.heldMs = heldMs

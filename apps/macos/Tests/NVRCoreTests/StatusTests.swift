@@ -32,6 +32,18 @@ import Testing
     @Test func words() {
         #expect(FrameRateText.make(device: 15, shown: 14.96, displayHz: 120) == "Device 15.0 fps · Shown 15.0 fps · 120 Hz")
         #expect(FrameRateText.make(device: nil, shown: nil, displayHz: 0) == "Device – fps · Shown – fps")
+        #expect(
+            FrameRateText.make(device: 15, shown: 15, displayHz: 60, switchNote: "switch +40 ms")
+                == "Device 15.0 fps · Shown 15.0 fps · 60 Hz · switch +40 ms")
+    }
+
+    @Test func switchNotes() {
+        #expect(TierSwitchTiming(deltaMs: 40, heldMs: 0, capped: false).note == "switch +40 ms")
+        #expect(TierSwitchTiming(deltaMs: 0, heldMs: 0, capped: false).note == "switch +0 ms")
+        #expect(TierSwitchTiming(deltaMs: 5, heldMs: 160, capped: false).note == "switch held 160 ms")
+        #expect(TierSwitchTiming(deltaMs: -520, heldMs: 300, capped: true).note == "capped \u{2212}520 ms")
+        #expect(TierSwitchTiming(deltaMs: nil, heldMs: 0, capped: false).note == "switch")
+        #expect(TierSwitchTiming(deltaMs: nil, heldMs: 300, capped: true).note == "capped")
     }
 }
 

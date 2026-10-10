@@ -208,7 +208,9 @@ final class StageView: NSView {
         let device = model.leases.tile(for: camera)?.deviceRate
         let shown = renderedPaths.firstIndex(of: path).flatMap { grid.renderer.shownRate(ofTile: $0) }
         let hz = window?.screen?.maximumFramesPerSecond ?? 0
-        return FrameRateText.make(device: device, shown: shown, displayHz: hz)
+        // The switch to the focused tile's stream, for a few seconds.
+        let note = state.focused == path ? model.leases.tile(for: camera).flatMap { model.switchNote(forTile: $0.id) } : nil
+        return FrameRateText.make(device: device, shown: shown, displayHz: hz, switchNote: note)
     }
 
     static func color(for kind: String) -> NSColor {
