@@ -225,13 +225,19 @@ seconds from the system clock.
 | Reconnects are retried about every 2 s with no backoff and no limit for mains-powered devices (the client limits battery cameras to 5). Devices that are not yet open are retried every 10 s. | reported (client) |
 | Each request has its own reply timeout; the logout's is 2 s (the connection test's is probably 8 s). A request that times out is reported as a timeout; the dead-connection rule above is what triggers a reconnect. | reported (client) |
 
-**Logout.** All reported (client).
+**Logout.** Reported (client) unless marked observed.
 
 | Fact | Provenance |
 | --- | --- |
 | Before closing a session the client sends **command 2**, class `0x1464`, status 0, with body `<body><LoginUser version="1.1"><userVer>1</userVer></LoginUser></body>` (no user name or password). Encryption of this body was not traced; presumably like any other body after login. | reported (client) |
 | It waits for the reply (up to about 6 s) and then closes TCP. The client does not close a logged-in session any other way. | reported (client) |
 | This happens on every close: quitting the app (all devices are closed, then the app waits 0.5 s before tearing down, and exits 1 s later) and before every reconnect after a dead connection. Removing a device was not traced as far. | reported (client) |
+| An NVR answers this logout (body encrypted like any other after login) with status 200, and accepts a new login immediately afterwards; checked with five log-in, log-out cycles in a row. Whether skipping the logout keeps a login slot occupied was not measured. | observed |
+
+nvrview sends the same logout on every graceful close, after stopping its
+previews, and waits up to 2 s for the reply. Command 2 is on the read-only
+allowlist because it only ends our own session: it carries no credentials and
+changes no settings.
 
 ## Device information (useful for the UI)
 
@@ -266,8 +272,8 @@ Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
   (command 93 after 6 s of silence; dead after 10 s on a direct connection);
   confirm on hardware, including whether a device answers 93 while streaming
   and why the observed spacing was 30–140 s.
-- Logout: reported as command 2 with a `LoginUser`/`userVer` body; confirm on
-  hardware that the device answers it and frees the login slot at once.
+- Logout: confirmed that an NVR answers command 2 with 200; not yet measured
+  whether it frees the login slot sooner than a bare TCP close.
 - What the first character of a `..dc`/`..wb` magic denotes. The client
   ignores it.
 - Whether any camera model sends audio in another codec or sample rate (all

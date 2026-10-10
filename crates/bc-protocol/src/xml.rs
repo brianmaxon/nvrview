@@ -37,6 +37,11 @@ pub fn login_body(user_hash: &str, password_hash: &str) -> String {
     ))
 }
 
+/// Body of a logout (command 2): no credentials.
+pub fn logout_body() -> String {
+    wrap("<LoginUser version=\"1.1\">\n<userVer>1</userVer>\n</LoginUser>\n")
+}
+
 /// Body of a preview start (command 3).
 pub fn preview_start_body(channel: u8, tier: StreamTier, policy: PreviewPolicy) -> String {
     wrap(&format!(
@@ -126,6 +131,29 @@ pub fn parse_nonce(xml: &str) -> Result<String, XmlError> {
 /// `<remainTimes>` from a failed login's `<LoginErrInfo>`, if present.
 pub fn parse_remain_times(xml: &str) -> Result<Option<u32>, XmlError> {
     find_number(xml, "remainTimes")
+}
+
+/// `<unlockTime>` (seconds until a lockout ends) from a failed login's
+/// `<LoginErrInfo>`, if present.
+pub fn parse_unlock_time(xml: &str) -> Result<Option<u32>, XmlError> {
+    find_number(xml, "unlockTime")
+}
+
+/// What a failed login's status means (docs/protocol.md, "Login failures
+/// and limits"), for messages to the user.
+pub fn login_status_meaning(status: u16) -> &'static str {
+    match status {
+        401 => "wrong user name or password",
+        406 => "login refused",
+        407 => "account locked",
+        408 => "device not initialized",
+        409 => "too many users online",
+        410 => "too many client addresses connected",
+        411..=418 => "certificate, token, or password-reset condition",
+        419 => "device occupied",
+        501 => "device not authorized",
+        _ => "login refused",
+    }
 }
 
 /// Values read from an `<Extension>` on a media message.
@@ -287,6 +315,14 @@ mod tests {
         let err = "<body><LoginErrInfo><remainTimes>3</remainTimes></LoginErrInfo></body>";
         assert_eq!(parse_remain_times(err).unwrap(), Some(3));
         assert_eq!(parse_remain_times("<body/>").unwrap(), None);
+        let locked = "<body><LoginErrInfo><remainTimes>0</remainTimes><unlockTime>300</unlockTime></LoginErrInfo></body>";
+        assert_eq!(parse_unlock_time(locked).unwrap(), Some(300));
+        assert_eq!(parse_unlock_time(err).unwrap(), None);
+        assert_eq!(login_status_meaning(409), "too many users online");
+        let s = logout_body();
+        assert!(s.contains("<LoginUser") && s.contains("<userVer>1</userVer>"));
+        assert_eq!(find_text(&s, "userName").unwrap(), None);
+        assert_eq!(find_text(&s, "password").unwrap(), None);
         let ext = "<Extension version=\"1.1\"><binaryData>1</binaryData><encryptLen>1024</encryptLen></Extension>";
         assert_eq!(
             parse_extension(ext).unwrap(),

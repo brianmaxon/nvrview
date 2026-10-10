@@ -22,6 +22,9 @@ use std::fmt;
 pub enum Command {
     /// 1: handshake and login.
     Login = 1,
+    /// 2: logout, sent before closing a logged-in session. It carries no
+    /// credentials and changes no settings.
+    Logout = 2,
     /// 3: preview (live view) start.
     PreviewStart = 3,
     /// 4: preview stop.
@@ -50,6 +53,7 @@ impl Command {
     pub const fn from_number(n: u32) -> Option<Command> {
         Some(match n {
             1 => Command::Login,
+            2 => Command::Logout,
             3 => Command::PreviewStart,
             4 => Command::PreviewStop,
             80 => Command::VersionInfo,
@@ -147,6 +151,8 @@ pub enum Event {
         status: u16,
         /// Remaining attempts, when the device says so.
         remain_times: Option<u32>,
+        /// Seconds until a lockout ends, when the device says so.
+        unlock_secs: Option<u32>,
     },
     /// A reply to a control command.
     Control {
@@ -331,6 +337,14 @@ impl Session {
         Ok(encode_message(cmd.number(), id, Class::Client, &e, &b)?)
     }
 
+    /// Builds a logout (command 2). Send it before closing a logged-in
+    /// session and wait briefly for its reply; the device then frees the
+    /// login slot.
+    pub fn logout(&mut self) -> Result<Vec<u8>, SessionError> {
+        let id = self.alloc_id()?;
+        self.send(Command::Logout, id, &[], xml::logout_body().as_bytes())
+    }
+
     /// Builds a keepalive (command 93, empty body).
     pub fn keepalive(&mut self) -> Result<Vec<u8>, SessionError> {
         let id = self.alloc_id()?;
@@ -438,11 +452,17 @@ impl Session {
                     Ok(Event::LoginOk)
                 } else {
                     self.state = State::Failed;
-                    let remain_times = Self::clear_text(&msg.body, h.message_id)
-                        .and_then(|t| xml::parse_remain_times(&t).ok().flatten());
+                    let text = Self::clear_text(&msg.body, h.message_id);
+                    let remain_times = text
+                        .as_deref()
+                        .and_then(|t| xml::parse_remain_times(t).ok().flatten());
+                    let unlock_secs = text
+                        .as_deref()
+                        .and_then(|t| xml::parse_unlock_time(t).ok().flatten());
                     Ok(Event::LoginRejected {
                         status: h.status,
                         remain_times,
+                        unlock_secs,
                     })
                 }
             }
@@ -686,7 +706,8 @@ mod tests {
             s.handle(&decode_one(&r)).unwrap(),
             Event::LoginRejected {
                 status: 401,
-                remain_times: Some(2)
+                remain_times: Some(2),
+                unlock_secs: None,
             }
         );
         assert!(!s.is_logged_in());
@@ -694,11 +715,25 @@ mod tests {
     }
 
     #[test]
+    fn logout_is_encrypted_and_carries_no_credentials() {
+        let (mut s, key) = logged_in();
+        let m = decode_one(&s.logout().unwrap());
+        assert_eq!(m.header.command, 2);
+        assert_eq!(m.header.class, Class::Client);
+        let mut body = m.payload().to_vec();
+        key.decrypt(&mut body);
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("<LoginUser") && text.contains("<userVer>1</userVer>"));
+        assert!(!text.contains("userName") && !text.contains("password"));
+        assert!(Session::new(USER, PASSWORD).logout().is_err());
+    }
+
+    #[test]
     fn allowlist() {
-        for n in [1, 3, 4, 80, 93, 145, 146, 199, 318] {
+        for n in [1, 2, 3, 4, 80, 93, 145, 146, 199, 318] {
             assert!(Command::is_allowed(n));
         }
-        for n in [0, 2, 5, 10, 44, 58, 76, 102, 14, 15, 16, 142, 272, 511, 600] {
+        for n in [0, 5, 10, 44, 58, 76, 102, 14, 15, 16, 142, 272, 511, 600] {
             assert!(!Command::is_allowed(n), "{n}");
         }
         let (mut s, key) = logged_in();
