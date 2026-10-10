@@ -141,3 +141,30 @@ look at a detail.
 - How: zoom only changes the source rectangle the renderer samples from the
   decoded picture (no extra decoding or copies), so it costs nothing per
   frame beyond the drawing that already happens.
+
+## Alerts
+
+Some detections matter enough that the tile must not let them pass unseen:
+today the sound alarms (`smoke_alarm`, `co_alarm` from `local_audio`); the
+list is one setting so device alarms can be added later. When one starts:
+
+- **The tile raises an alert:** a red border around the camera's tile that
+  blinks about once a second (well below photosensitivity limits); with the
+  system's Reduce Motion setting it is a steady red border instead. Every
+  tile showing that camera, in every window and on every lens of a
+  multi-lens camera, shows it.
+- **The tile's header stays visible while the alert is active,** also in full
+  screen where other chrome hides, and states plainly:
+  - the reason ("Smoke alarm (sound)", "CO alarm (sound)");
+  - when it was first detected (local time, with the date if not today);
+  - how many times it has been detected since the alert was raised (each
+    detection start counts once), and when the last one was;
+  - whether it is still sounding now.
+- **The alert stays until the user dismisses it** with the Dismiss control in
+  that header (a click, or Return when the tile is selected). Detections
+  stopping do not clear it. Dismissing clears it for that camera everywhere
+  and resets the count; a new detection afterwards raises a new alert.
+- Alerts are kept for the running session and listed in the event log with
+  their times and counts; they are an aid for noticing and finding events,
+  never a replacement for alarm systems or monitoring (see "Corner
+  indicators": no alert never means "all clear").
