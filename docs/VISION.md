@@ -29,10 +29,13 @@ developer's machine and never committed. Only aggregate numbers appear here.
   tiny person box; RT-DETR (the permissively licensed modern option) fired
   "person" on a static object in 72 % of pictures at 0.5 confidence and in
   none at 0.7.
-- **Recall is not measured yet.** The recording had no person, vehicle, or
-  animal in it, so precision and false-alarm rates are real but recall and
-  event-level recall could not be computed. That needs a recording with
-  events (see open questions).
+- **Recall on real stills is poor for Vision, high for small vision-language
+  models.** On 400 hand-labeled stills (see "Recall on labeled stills"),
+  Vision's human detector raised no false alarm but found only about 35 % of
+  people; gemma4 (e4b) found 99 % of people and 97 % of vehicles with 6 % and
+  10 % false alarms; ministral-3 (8B) was the precise one (0.4 % and 2 %)
+  but missed about a quarter of people. Event-level recall on video is still
+  not measured.
 
 ## Method
 
@@ -215,6 +218,54 @@ it took for a person in most pictures.
 Not measured: recall (picture-level and event-level) and time to first
 detection, because there were no events to detect.
 
+### Recall on labeled stills
+
+Ground truth: 400 stills (1280x720 or larger) sampled, stratified by day and
+night, from a large archive of motion-triggered snapshots of real security
+cameras, each labeled by hand for whether a person, a vehicle (parked
+ones count), or an animal is present: 135 with a person (33 at night), 200
+with a vehicle (79 at night), none with an animal, 181 at night in all. The
+pictures and per-picture results stay on the developer's machine.
+
+Recall (share of labeled pictures found), false-positive rate (share of
+pictures without the class where it was reported), overall / day / night, in
+percent:
+
+| Detector | Person recall | Person false positives | Vehicle recall | Vehicle false positives |
+| --- | --- | --- | --- | --- |
+| Vision human rectangles (confidence ≥ 0.5) | 35 / 32 / 42 | 0 / 0 / 0 | — | — |
+| Vision scene classification, person labels ≥ 0.3 | 39 / 38 / 42 | 1.5 / 2.6 / 0.7 | — | — |
+| Vision scene classification, vehicle labels ≥ 0.1 | — | — | 72 / 73 / 71 | 3.5 / 6.1 / 1.0 |
+| Vision scene classification, vehicle labels ≥ 0.3 | — | — | 51 / 55 / 44 | 0 / 0 / 0 |
+| ministral-3 8B (Ollama, temperature 0) | 73 / 71 / 82 | 0.4 / 0.9 / 0 | 85 / 80 / 91 | 2.0 / 2.0 / 2.0 |
+| gemma4 e4b (Ollama, temperature 0) | 99 / 100 / 97 | 6.0 / 2.6 / 8.8 | 97 / 97 / 96 | 10.5 / 13.3 / 7.8 |
+| qwen3-vl 4B (206-picture shuffled subset; 9 % unusable answers excluded) | 97 / 98 / 94 | 5.2 / 2.0 / 7.7 | 98 / 96 / 100 | 15.3 / 17.0 / 13.3 |
+
+The language models were asked one fixed question per picture (which of
+person, vehicle, animal is present, answered as JSON). Animal false
+positives (no animal in any picture): Vision 0, ministral 10, gemma4 4,
+qwen3-vl 2 of 206.
+
+- **Vision misses people in daylight too.** Its recall is no better by day
+  than by night, so lighting is not the cause; small, distant figures in
+  large frames are the likely one (cropping or tiling untested). Lowering
+  thresholds trades badly: scene classification at 0.05 finds 80 % of people
+  with 42 % false positives.
+- **The language models find nearly everything but cost seconds.** Median
+  time per picture on a shared machine (load average 9–15 from other work,
+  so pessimistic): gemma4 3.0 s (about 18 GB of GPU memory), ministral 5.8 s
+  (about 7 GB), qwen3-vl 20 s (its reasoning cannot be turned off, and 9 % of
+  answers ran out of tokens). Vision took 12–14 ms per request on the Neural
+  Engine.
+- **They do not combine as a confirmation.** ministral never said "present"
+  when gemma4 said "absent", so gemma4 AND ministral equals ministral, and
+  gemma4 OR ministral equals gemma4. gemma4 AND Vision is limited by Vision's
+  recall (person 62 % at 2.6 % false positives).
+- **Caveats.** Labels mark presence, not whether a notification is
+  deserved: a parked vehicle counts, and some vehicle "false positives" may
+  be small or ambiguous objects the labeler left unmarked. One prompt per
+  model, no confidences (booleans only), no localization scored.
+
 ## Cost per camera at 1–2 fps
 
 From the real-time runs on this machine, for a 640x480 sub-stream:
@@ -237,7 +288,9 @@ a third of one core out of 14, and no GPU.
    behind (the bounded, lossy rule of the extension points).
 2. **Detectors: Vision's human and animal requests first**, for every camera
    without device AI. They are free to ship, cheap, ran on the Neural Engine
-   by default, and raised no false alarms here. Add **one COCO detector only
+   by default, and raised no false alarms here. On labeled stills they find
+   only about a third of people ("Recall on labeled stills"), so treat them
+   as a precise trigger, not the only detector. Add **one COCO detector only
    where vehicles matter** (or "other objects"), with a high threshold (0.7)
    and suppression of boxes that never move (a static object that looks like
    a person is the typical false alarm, as with RT-DETR above).
@@ -262,7 +315,9 @@ a third of one core out of 14, and no GPU.
 
 ## Open questions
 
-- **Recall.** Needs recordings with real events. The cheapest ground truth
+- **Recall on video.** Picture-level recall on stills is measured above; a
+  COCO detector (RT-DETR) on the same stills is next. Event-level recall
+  needs recordings with real events. The cheapest ground truth
   is the device itself: record a sub-stream from a camera with device AI
   while logging its `people`/`vehicle`/`dog_cat` pushes (command 33) and use
   them as labels for vision-lab's event-level score, then check a sample by
