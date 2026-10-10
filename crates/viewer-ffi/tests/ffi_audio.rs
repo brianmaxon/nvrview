@@ -9,18 +9,25 @@
 //! Lock freedom is by construction (viewer-core's `RenderHandoff` and
 //! audio-pipeline's renderer touch shared state only through atomics); this
 //! test checks the other half, no allocation or deallocation.
+//!
+//! The core and the mock run on a simulated clock (`simtime`): the render
+//! thread renders one callback per 10 ms step of it, in lockstep with the
+//! test thread, which makes the app's changes at their simulated times. The
+//! schedule is the same on every run and takes no real time to wait out.
 
 // Calling the C interface and writing a global allocator need `unsafe`.
 #![allow(unsafe_code)]
 
+use nvrview::test_support::{TestRuntime, clock_now_ns, core_new_on};
 use nvrview::*;
+use simtime::SimRuntime;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ffi::{CString, c_char, c_void};
 use std::path::PathBuf;
-use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 struct Counting;
@@ -99,7 +106,7 @@ unsafe extern "C" fn on_audio_tap(context: *mut c_void, _tile: u64, block: *cons
         .fetch_add(b.sample_count as u64, Ordering::SeqCst);
 }
 
-fn mock() -> mock_nvr::MockNvr {
+fn mock(sim: &SimRuntime) -> mock_nvr::MockNvr {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic");
     let mut cfg = mock_nvr::Config::new(
         mock_nvr::fixture::Fixture::load(&dir.join("h264-basic.h264")).unwrap(),
@@ -110,7 +117,7 @@ fn mock() -> mock_nvr::MockNvr {
     );
     a.jitter_us = 20_000;
     cfg.audio = Some(Arc::new(a));
-    mock_nvr::spawn(cfg).unwrap()
+    mock_nvr::spawn_in(cfg, sim.handle())
 }
 
 /// The core handle, shared with the render thread.
@@ -121,7 +128,8 @@ unsafe impl Send for CorePtr {}
 
 #[test]
 fn render_through_the_c_interface_never_allocates() {
-    let nvr = mock();
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim);
     let ctx = Box::new(Ctx::default());
     let cb = NvCallbacks {
         context: &*ctx as *const Ctx as *mut c_void,
@@ -129,14 +137,22 @@ fn render_through_the_c_interface_never_allocates() {
         on_event: Some(on_event),
         on_audio_tap: Some(on_audio_tap),
     };
-    let mut core: *mut NvCore = ptr::null_mut();
+    let runtime = TestRuntime {
+        runtime: sim.handle().clone(),
+        connect: Arc::new(|host: &str, port: u16| {
+            let ip = host
+                .parse()
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            mock_nvr::connect(std::net::SocketAddr::new(ip, port))
+        }),
+    };
+    let core: *mut NvCore = core_new_on(runtime, cb).unwrap();
     let user = CString::new("example-user").unwrap();
     let pass = CString::new("example-password").unwrap();
     let host = CString::new("127.0.0.1").unwrap();
     let (mut dev, mut tile) = (0u64, 0u64);
     // SAFETY: valid pointers throughout; the core is freed once, at the end.
     unsafe {
-        assert_eq!(nv_core_new(ptr::null(), cb, &mut core), NvStatus::NV_OK);
         ctx.core.store(core, Ordering::SeqCst);
         assert_eq!(nv_audio_set_output(core, 48_000, 2), NvStatus::NV_OK);
         assert_eq!(
@@ -154,25 +170,21 @@ fn render_through_the_c_interface_never_allocates() {
         assert_eq!(nv_tile_audio_set(core, tile, true, 1.0), NvStatus::NV_OK);
         assert_eq!(nv_tile_audio_tap(core, tile, true), NvStatus::NV_OK);
     }
+    // SAFETY: the core is live until nv_core_free below.
+    let now_ns = || clock_now_ns(unsafe { &*core });
 
     // The app's real-time thread: 10 ms callbacks on the core's clock,
-    // each 10 ms ahead of when it is heard.
-    let stop = Arc::new(AtomicBool::new(false));
+    // each 10 ms ahead of when it is heard. It renders when told to, so the
+    // test can step the simulated clock between callbacks.
+    let (go_tx, go_rx) = sync_channel::<u64>(0);
+    let (done_tx, done_rx) = sync_channel::<()>(0);
     let render = {
-        let stop = stop.clone();
         let c = CorePtr(core);
         std::thread::spawn(move || {
             let c = c;
             let mut buf = vec![0.0f32; 480 * 2];
             let (mut ok, mut other, mut loud, mut calls) = (0u64, 0u64, 0u64, 0u64);
-            let start = nv_clock_now_ns() + 10_000_000;
-            let mut k = 0u64;
-            while !stop.load(Ordering::SeqCst) {
-                let host = start + k * 10_000_000;
-                let now = nv_clock_now_ns();
-                if now + 10_000_000 < host {
-                    std::thread::sleep(Duration::from_nanos(host - 10_000_000 - now));
-                }
+            while let Ok(host) = go_rx.recv() {
                 ARMED.with(|a| a.set(true));
                 // SAFETY: the core outlives this thread; `buf` holds
                 // 480 frames of 2 channels.
@@ -192,47 +204,93 @@ fn render_through_the_c_interface_never_allocates() {
                 if buf.iter().any(|s| s.abs() > 0.3) {
                     loud += 1;
                 }
-                k += 1;
+                let _ = done_tx.send(());
             }
             (calls, ok, other, loud)
         })
     };
 
-    // The app changes things while audio plays.
-    let t0 = Instant::now();
-    let at = |s: f64| {
-        let d = Duration::from_secs_f64(s).saturating_sub(t0.elapsed());
-        std::thread::sleep(d);
-    };
-    // SAFETY: the core is live.
-    unsafe {
-        at(4.0);
-        assert_eq!(nv_tile_audio_set(core, tile, true, 0.5), NvStatus::NV_OK);
-        at(5.0);
+    // The app changes things while audio plays, at these simulated times
+    // (seconds after the first callback).
+    type Change = fn(*mut NvCore, u64);
+    let changes: [(f64, Change); 7] = [
+        // SAFETY (each): the core is live.
+        (4.0, |c, t| {
+            assert_eq!(
+                unsafe { nv_tile_audio_set(c, t, true, 0.5) },
+                NvStatus::NV_OK
+            )
+        }),
         // A device change: same channels, new rate (a new renderer).
-        assert_eq!(nv_audio_set_output(core, 44_100, 2), NvStatus::NV_OK);
-        at(7.0);
-        assert_eq!(nv_tile_audio_set(core, tile, false, 1.0), NvStatus::NV_OK);
-        at(7.5);
-        assert_eq!(nv_tile_audio_set(core, tile, true, 1.0), NvStatus::NV_OK);
-        at(8.0);
+        (5.0, |c, _| {
+            assert_eq!(
+                unsafe { nv_audio_set_output(c, 44_100, 2) },
+                NvStatus::NV_OK
+            )
+        }),
+        (7.0, |c, t| {
+            assert_eq!(
+                unsafe { nv_tile_audio_set(c, t, false, 1.0) },
+                NvStatus::NV_OK
+            )
+        }),
+        (7.5, |c, t| {
+            assert_eq!(
+                unsafe { nv_tile_audio_set(c, t, true, 1.0) },
+                NvStatus::NV_OK
+            )
+        }),
         // A change to mono: the render thread still renders stereo, so it
         // gets silence and NV_ERR_INVALID_ARGUMENT, safely.
-        assert_eq!(nv_audio_set_output(core, 48_000, 1), NvStatus::NV_OK);
-        at(8.5);
-        assert_eq!(nv_audio_set_output(core, 48_000, 2), NvStatus::NV_OK);
-        at(11.0);
-        assert_eq!(nv_tile_audio_tap(core, tile, false), NvStatus::NV_OK);
+        (8.0, |c, _| {
+            assert_eq!(
+                unsafe { nv_audio_set_output(c, 48_000, 1) },
+                NvStatus::NV_OK
+            )
+        }),
+        (8.5, |c, _| {
+            assert_eq!(
+                unsafe { nv_audio_set_output(c, 48_000, 2) },
+                NvStatus::NV_OK
+            )
+        }),
+        (11.0, |c, t| {
+            assert_eq!(unsafe { nv_tile_audio_tap(c, t, false) }, NvStatus::NV_OK)
+        }),
+    ];
+    let start = now_ns() + 10_000_000;
+    let mut next = 0;
+    for k in 0..1100u64 {
+        let host = start + k * 10_000_000;
+        let now = now_ns();
+        if now + 10_000_000 < host {
+            sim.advance(Duration::from_nanos(host - 10_000_000 - now));
+        }
+        while next < changes.len() && changes[next].0 * 1e9 <= (k * 10_000_000) as f64 {
+            (changes[next].1)(core, tile);
+            next += 1;
+        }
+        go_tx.send(host).unwrap();
+        done_rx.recv().unwrap();
     }
-    stop.store(true, Ordering::SeqCst);
+    while next < changes.len() {
+        (changes[next].1)(core, tile);
+        next += 1;
+    }
+    drop(go_tx);
     let (calls, ok, other, loud) = render.join().unwrap();
+    // Tap blocks reach the app on the core's tap thread, in real time.
+    let t0 = Instant::now();
+    while ctx.taps.load(Ordering::SeqCst) <= 100 && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let taps = ctx.taps.load(Ordering::SeqCst);
     println!(
         "{calls} render calls: {ok} ok, {other} silent (no output yet or wrong channel count), {loud} with clicks; {taps} tap blocks; allocation events while rendering: {}",
         EVENTS.load(Ordering::SeqCst)
     );
     // SAFETY: rendering has stopped; freed once.
-    unsafe { nv_core_free(core) };
+    sim.run_free(|| unsafe { nv_core_free(core) });
     nvr.shutdown();
 
     assert_eq!(

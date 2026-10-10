@@ -554,24 +554,73 @@ pub unsafe extern "C" fn nv_core_new(
                 max_total_bytes: c.log_max_total_bytes,
             });
         }
-        let cb = Arc::new(FfiCallbacks {
-            context: Context(callbacks.context),
-            on_action,
-            on_event,
-            on_audio_tap: callbacks.on_audio_tap,
-        });
-        let taps = callbacks.on_audio_tap.is_some();
-        match Core::new(cfg, cb) {
-            Ok(core) => {
-                let handle = Box::into_raw(Box::new(NvCore { core, taps }));
+        match new_core(cfg, callbacks, on_action, on_event) {
+            Ok(handle) => {
                 // SAFETY: `out` is non-null and valid for one write per the
                 // caller.
                 unsafe { put(out, handle) };
                 NvStatus::NV_OK
             }
-            Err(e) => error_status(e),
+            Err(e) => e,
         }
     })
+}
+
+type OnAction = unsafe extern "C" fn(*mut c_void, u64, *const NvAction);
+type OnEvent = unsafe extern "C" fn(*mut c_void, *const c_char, usize);
+
+/// Starts a core for [`nv_core_new`] (or [`test_support::core_new_on`]).
+fn new_core(
+    cfg: CoreConfig,
+    callbacks: NvCallbacks,
+    on_action: OnAction,
+    on_event: OnEvent,
+) -> Result<*mut NvCore, NvStatus> {
+    let cb = Arc::new(FfiCallbacks {
+        context: Context(callbacks.context),
+        on_action,
+        on_event,
+        on_audio_tap: callbacks.on_audio_tap,
+    });
+    let taps = callbacks.on_audio_tap.is_some();
+    match Core::new(cfg, cb) {
+        Ok(core) => Ok(Box::into_raw(Box::new(NvCore { core, taps }))),
+        Err(e) => Err(error_status(e)),
+    }
+}
+
+/// Test support, for Rust tests only (not part of the C interface): the C
+/// interface on a test's runtime and simulated clock
+/// ([`viewer_core::TestRuntime`]).
+#[doc(hidden)]
+pub mod test_support {
+    use super::{NvCallbacks, NvCore, NvStatus, new_core};
+    pub use viewer_core::TestRuntime;
+
+    /// [`super::nv_core_new`] with default settings on `runtime`. Free the
+    /// handle with [`super::nv_core_free`].
+    ///
+    /// # Errors
+    /// As `nv_core_new`.
+    pub fn core_new_on(
+        runtime: TestRuntime,
+        callbacks: NvCallbacks,
+    ) -> Result<*mut NvCore, NvStatus> {
+        let (Some(on_action), Some(on_event)) = (callbacks.on_action, callbacks.on_event) else {
+            return Err(NvStatus::NV_ERR_INVALID_ARGUMENT);
+        };
+        let cfg = viewer_core::CoreConfig {
+            test_runtime: Some(runtime),
+            ..viewer_core::CoreConfig::default()
+        };
+        new_core(cfg, callbacks, on_action, on_event)
+    }
+
+    /// Now on the core's clock (render host times are on it): the
+    /// simulated clock of a core from [`core_new_on`].
+    pub fn clock_now_ns(core: &NvCore) -> u64 {
+        core.core.clock_now_ns()
+    }
 }
 
 /// Stops every preview, closes every session, joins every core thread. No
