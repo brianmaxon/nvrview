@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior, interval};
-use tracing::warn;
+use tracing::{info, warn};
 use video_pipeline::{AccessUnit, Codec, DecodeFailureKind, PipelineConfig, TilePipeline};
 
 /// Decoder results waiting for a tile thread. Every `Decode` gets one result
@@ -63,9 +63,53 @@ pub(crate) struct TileContext {
     pub(crate) stats_interval: Duration,
 }
 
+/// Why a tile ended, as `tile_closed` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseReason {
+    /// The app closed it.
+    Closed,
+    /// The app removed its device.
+    DeviceRemoved,
+    /// Its device refused the login; the session is over.
+    LoginFailed,
+    /// The core is shutting down.
+    CoreShutdown,
+}
+
+impl CloseReason {
+    fn name(self) -> &'static str {
+        match self {
+            CloseReason::Closed => "closed",
+            CloseReason::DeviceRemoved => "device_removed",
+            CloseReason::LoginFailed => "login_failed",
+            CloseReason::CoreShutdown => "core_shutdown",
+        }
+    }
+}
+
+/// Sends `tile_closed` unless it was already sent for this tile: exactly one
+/// per tile, whoever ends it first.
+fn report_closed(events: &EventSink, claimed: &AtomicBool, id: u64, reason: CloseReason) {
+    if claimed.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    info!(tile = id, reason = reason.name(), "tile closed");
+    events.send(
+        Object::event("tile_closed")
+            .u64("tile", id)
+            .str("reason", reason.name())
+            .finish(),
+        Priority::State,
+    );
+}
+
 /// The core's handle on a running tile.
 pub(crate) struct TileHandle {
     pub(crate) device: u64,
+    id: u64,
+    events: EventSink,
+    /// Set once `tile_closed` has been sent.
+    closed_reported: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     wake: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -89,6 +133,13 @@ impl TileHandle {
             let _ = t.join();
         }
     }
+
+    /// Stops, joins, and then (after the last `on_action` has returned)
+    /// reports the tile closed, unless it already ended on its own.
+    pub(crate) fn end(&mut self, reason: CloseReason) {
+        self.stop_and_join();
+        report_closed(&self.events, &self.closed_reported, self.id, reason);
+    }
 }
 
 impl Drop for TileHandle {
@@ -97,19 +148,25 @@ impl Drop for TileHandle {
     }
 }
 
-/// Starts a tile thread. `sub` is `None` when the device session has ended
-/// (the tile then stays idle until closed).
+/// Starts a tile thread. It does nothing until `gate` resolves (or its
+/// sender is dropped), so no action runs before the app has the tile's ID.
+/// `sub` is `None` when the device session has already ended; the tile then
+/// ends at once with `login_failed`, as it does when its session ends later.
 pub(crate) fn spawn(
     id: u64,
     device: u64,
     sub: Option<Subscription>,
     ctx: TileContext,
+    gate: oneshot::Receiver<()>,
 ) -> std::io::Result<(TileHandle, ResultSink)> {
     let (tx, rx) = mpsc::channel(RESULTS_CAPACITY);
     let overflow = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let (wake_tx, wake_rx) = oneshot::channel();
+    let closed_reported = Arc::new(AtomicBool::new(false));
+    let events = ctx.events.clone();
     let state = TileThread {
+        closed_reported: closed_reported.clone(),
         id,
         ctx,
         stop: stop.clone(),
@@ -121,10 +178,13 @@ pub(crate) fn spawn(
     };
     let thread = std::thread::Builder::new()
         .name(format!("nvrview-tile-{id}"))
-        .spawn(move || state.run(sub, wake_rx))?;
+        .spawn(move || state.run(sub, wake_rx, gate))?;
     Ok((
         TileHandle {
             device,
+            id,
+            events,
+            closed_reported,
             stop,
             wake: Some(wake_tx),
             thread: Some(thread),
@@ -134,6 +194,7 @@ pub(crate) fn spawn(
 }
 
 struct TileThread {
+    closed_reported: Arc<AtomicBool>,
     id: u64,
     ctx: TileContext,
     stop: Arc<AtomicBool>,
@@ -169,16 +230,32 @@ async fn next_item(sub: &mut Option<Subscription>) -> Option<Item> {
 }
 
 impl TileThread {
-    fn run(mut self, sub: Option<Subscription>, wake: oneshot::Receiver<()>) {
+    fn run(
+        mut self,
+        sub: Option<Subscription>,
+        wake: oneshot::Receiver<()>,
+        gate: oneshot::Receiver<()>,
+    ) {
         in_callback::mark_core_thread();
         let runtime = self.ctx.runtime.clone();
         // This thread drives its own future; the runtime's workers only run
         // the sessions and timers, so a slow callback here holds up nothing
         // else.
-        runtime.block_on(self.serve(sub, wake));
+        runtime.block_on(self.serve(sub, wake, gate));
     }
 
-    async fn serve(&mut self, mut sub: Option<Subscription>, mut wake: oneshot::Receiver<()>) {
+    async fn serve(
+        &mut self,
+        mut sub: Option<Subscription>,
+        mut wake: oneshot::Receiver<()>,
+        gate: oneshot::Receiver<()>,
+    ) {
+        // Released (or dropped) once the app has the tile's ID.
+        tokio::select! {
+            biased;
+            _ = &mut wake => return,
+            _ = gate => {}
+        }
         let mut p = TilePipeline::new(self.id as u32, self.ctx.pipeline);
         let mut tick = interval(self.ctx.tick_interval);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -199,6 +276,19 @@ impl TileThread {
                 item = next_item(&mut sub) => match item {
                     Some(item) => self.item(&mut p, item),
                     None => sub = None,
+                },
+                // The session ended for good (the device refused the
+                // login): nothing will ever arrive.
+                _ = std::future::ready(()), if sub.is_none() => {
+                    if !self.stop.load(Ordering::SeqCst) {
+                        report_closed(
+                            &self.ctx.events,
+                            &self.closed_reported,
+                            self.id,
+                            CloseReason::LoginFailed,
+                        );
+                    }
+                    break;
                 },
                 _ = tick.tick() => {}
             }

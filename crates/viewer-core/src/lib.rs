@@ -21,6 +21,15 @@
 //!   socket is shut. After [`Core::shutdown`] (or dropping the core) returns,
 //!   no callback runs, every session is closed, and every core thread has
 //!   been joined.
+//! - **IDs first.** No event names a device, and no action or event names a
+//!   tile, until its ID is published: at the end of [`Core::add_device`] and
+//!   [`Core::open_tile`], or by [`Pending::publish`] for the `*_deferred`
+//!   variants the C interface uses (it publishes after writing the ID out).
+//!   Opening a tile never waits on any tile's `on_action`.
+//! - **`tile_closed`** is sent exactly once for every tile that ends, after
+//!   its last `on_action` returned: `closed`, `device_removed`,
+//!   `login_failed` (its session ended; the tile ends on its own), or
+//!   `core_shutdown` (delivered before [`Core::shutdown`] returns).
 //! - **Reentrancy.** From inside a callback only `decoded` and
 //!   `decode_failed` are allowed; anything else returns
 //!   [`CoreError::InvalidArgument`] instead of deadlocking.
@@ -40,16 +49,21 @@ pub use video_pipeline::{
     Action, ActionKind, Codec, ColorMatrix, DecodeFailureKind, PipelineConfig, TileStatus,
 };
 
+/// Grid layout, re-exported for the C interface's `nv_grid_layout`.
+pub mod layout {
+    pub use video_pipeline::layout::*;
+    pub use video_pipeline::{Rect, Size};
+}
+
 use device::{DeviceHandle, HostConnector};
 use events::{EventThread, Priority};
-use json::Object;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
-use tile::{DecoderResult, ResultSink, TileContext, TileHandle};
+use tile::{CloseReason, DecoderResult, ResultSink, TileContext, TileHandle};
 use tracing::{debug, info, warn};
 
 /// What the app receives. Both methods run on threads the core owns and must
@@ -170,6 +184,31 @@ struct Device {
     handle: DeviceHandle,
 }
 
+/// A device or tile whose ID is known to the caller of a `*_deferred` call
+/// but not yet to the app: nothing naming it (device events, tile actions)
+/// is delivered until [`Pending::publish`], or until it is dropped. The C
+/// interface publishes after writing the ID through its out pointer.
+#[derive(Debug)]
+pub struct Pending {
+    id: u64,
+    gate: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Pending {
+    /// The new ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Lets events and actions for this ID flow; returns the ID.
+    pub fn publish(mut self) -> u64 {
+        if let Some(g) = self.gate.take() {
+            let _ = g.send(());
+        }
+        self.id
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     devices: HashMap<u64, Device>,
@@ -180,8 +219,9 @@ struct Registry {
 pub struct Core {
     runtime: Mutex<Option<tokio::runtime::Runtime>>,
     handle: tokio::runtime::Handle,
-    /// Serializes the API calls that create and end things; held while
-    /// joining tile threads and closing sessions, never by core threads.
+    /// What exists. Held only to look up, insert, or take out entries (and
+    /// across a subscribe request), never while joining a thread or closing
+    /// a session, so no API call waits on another tile's `on_action`.
     registry: Mutex<Registry>,
     /// Decoder result channels by tile; held only for a lookup.
     sinks: Mutex<HashMap<u64, ResultSink>>,
@@ -280,9 +320,33 @@ impl Core {
             host: host.to_owned(),
             port,
         };
-        let id = self.add_device_with(connector, user, password)?;
-        debug!(device = id, host, port, "device address");
-        Ok(id)
+        let p = self.add_device_with_deferred(connector, user, password)?;
+        debug!(device = p.id(), host, port, "device address");
+        Ok(p.publish())
+    }
+
+    /// [`Core::add_device`], holding back the device's events until the
+    /// returned [`Pending`] is published.
+    ///
+    /// # Errors
+    /// As [`Core::add_device`].
+    pub fn add_device_deferred(
+        &self,
+        host: &str,
+        port: u16,
+        user: &str,
+        password: &str,
+    ) -> Result<Pending, CoreError> {
+        if host.is_empty() || port == 0 {
+            return Err(CoreError::InvalidArgument);
+        }
+        let connector = HostConnector {
+            host: host.to_owned(),
+            port,
+        };
+        let p = self.add_device_with_deferred(connector, user, password)?;
+        debug!(device = p.id(), host, port, "device address");
+        Ok(p)
     }
 
     /// Adds a device reached through `connector` (tests use this to observe
@@ -296,6 +360,21 @@ impl Core {
         user: &str,
         password: &str,
     ) -> Result<u64, CoreError> {
+        Ok(self
+            .add_device_with_deferred(connector, user, password)?
+            .publish())
+    }
+
+    /// [`Core::add_device_with`], holding back events until published.
+    ///
+    /// # Errors
+    /// As [`Core::add_device`].
+    pub fn add_device_with_deferred<C: Connector>(
+        &self,
+        connector: C,
+        user: &str,
+        password: &str,
+    ) -> Result<Pending, CoreError> {
         self.check_api()?;
         if user.is_empty() {
             return Err(CoreError::InvalidArgument);
@@ -312,14 +391,18 @@ impl Core {
         cfg.backoff = self.config.backoff;
         cfg.queue_frames = self.config.queue_frames.max(1);
         let events = self.event_sink.clone();
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
         let handle = {
             let _rt = self.handle.enter();
             let session = bc_session::DeviceSession::spawn(connector, cfg);
-            DeviceHandle::start(id, session, events)
+            DeviceHandle::start(id, session, events, gate_rx)
         };
         reg.devices.insert(id, Device { handle });
         info!(device = id, "device added");
-        Ok(id)
+        Ok(Pending {
+            id,
+            gate: Some(gate_tx),
+        })
     }
 
     /// Closes a device's tiles, then its session.
@@ -341,7 +424,8 @@ impl Core {
             .into_iter()
             .filter_map(|id| reg.tiles.remove(&id).map(|t| (id, t)))
             .collect();
-        self.end_tiles(tiles, "device_removed");
+        drop(reg);
+        self.end_tiles(tiles, CloseReason::DeviceRemoved);
         dev.handle.close_blocking(&self.handle);
         self.event_sink
             .send(device::closed_event(device), Priority::State);
@@ -356,6 +440,20 @@ impl Core {
     /// [`CoreError::UnknownId`] for an unknown device, [`CoreError::Limit`],
     /// [`CoreError::Closed`], [`CoreError::Internal`].
     pub fn open_tile(&self, device: u64, channel: u8, tier: StreamTier) -> Result<u64, CoreError> {
+        Ok(self.open_tile_deferred(device, channel, tier)?.publish())
+    }
+
+    /// [`Core::open_tile`], holding back the tile's actions and events until
+    /// the returned [`Pending`] is published.
+    ///
+    /// # Errors
+    /// As [`Core::open_tile`].
+    pub fn open_tile_deferred(
+        &self,
+        device: u64,
+        channel: u8,
+        tier: StreamTier,
+    ) -> Result<Pending, CoreError> {
         self.check_api()?;
         let mut reg = lock(&self.registry);
         let session = reg
@@ -367,15 +465,16 @@ impl Core {
         if reg.tiles.len() >= self.config.max_tiles {
             return Err(CoreError::Limit);
         }
-        // A session that has ended (refused login) yields an idle tile; the
-        // app learns why from the device's events.
+        // A session that has ended (refused login) yields a tile that ends at
+        // once with `login_failed`, once the app has its ID.
         let sub = match session {
             Some(s) => self.handle.block_on(s.subscribe(channel, tier)).ok(),
             None => None,
         };
         let id = self.new_id();
-        let (tile, sink) =
-            tile::spawn(id, device, sub, self.tile_ctx.clone()).map_err(|_| CoreError::Internal)?;
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+        let (tile, sink) = tile::spawn(id, device, sub, self.tile_ctx.clone(), gate_rx)
+            .map_err(|_| CoreError::Internal)?;
         lock(&self.sinks).insert(id, sink);
         reg.tiles.insert(id, tile);
         info!(
@@ -385,7 +484,10 @@ impl Core {
             tier = device::tier_name(tier),
             "tile opened"
         );
-        Ok(id)
+        Ok(Pending {
+            id,
+            gate: Some(gate_tx),
+        })
     }
 
     /// Closes a tile. No `on_action` for it runs after this returns.
@@ -397,12 +499,14 @@ impl Core {
         self.check_api()?;
         let mut reg = lock(&self.registry);
         let t = reg.tiles.remove(&tile).ok_or(CoreError::UnknownId)?;
-        self.end_tiles(vec![(tile, t)], "closed");
+        drop(reg);
+        self.end_tiles(vec![(tile, t)], CloseReason::Closed);
         Ok(())
     }
 
-    /// Stops tiles in parallel, then waits for each, and reports them closed.
-    fn end_tiles(&self, mut tiles: Vec<(u64, TileHandle)>, reason: &str) {
+    /// Stops tiles in parallel, then waits for each and reports it closed
+    /// (unless it already ended on its own and said so).
+    fn end_tiles(&self, mut tiles: Vec<(u64, TileHandle)>, reason: CloseReason) {
         {
             let mut sinks = lock(&self.sinks);
             for (id, t) in &mut tiles {
@@ -410,16 +514,8 @@ impl Core {
                 t.signal_stop();
             }
         }
-        for (id, mut t) in tiles {
-            t.stop_and_join();
-            self.event_sink.send(
-                Object::event("tile_closed")
-                    .u64("tile", id)
-                    .str("reason", reason)
-                    .finish(),
-                Priority::State,
-            );
-            info!(tile = id, reason, "tile closed");
+        for (_, mut t) in tiles {
+            t.end(reason);
         }
     }
 
@@ -452,6 +548,12 @@ impl Core {
         self.send_result(tile, DecoderResult::Failed(kind))
     }
 
+    /// True on threads the core owns (where callbacks run). The C interface
+    /// uses it to refuse freeing the core from inside a callback.
+    pub fn on_core_thread() -> bool {
+        in_callback::on_core_thread()
+    }
+
     /// Events dropped because `on_event` did not keep up.
     pub fn dropped_events(&self) -> u64 {
         self.event_sink.dropped()
@@ -473,19 +575,8 @@ impl Core {
         let tiles: Vec<(u64, TileHandle)> = reg.tiles.drain().collect();
         let devices: Vec<(u64, Device)> = reg.devices.drain().collect();
         drop(reg);
-        {
-            let mut sinks = lock(&self.sinks);
-            for (id, _) in &tiles {
-                sinks.remove(id);
-            }
-        }
-        let mut tiles = tiles;
-        for (_, t) in &mut tiles {
-            t.signal_stop();
-        }
-        for (_, mut t) in tiles {
-            t.stop_and_join();
-        }
+        // Their tile_closed events are delivered before this returns.
+        self.end_tiles(tiles, CloseReason::CoreShutdown);
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()

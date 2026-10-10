@@ -97,6 +97,17 @@ pub struct Recorder {
     /// Results of API calls attempted from inside a callback.
     pub reentrant: Mutex<Vec<Result<(), viewer_core::CoreError>>>,
     pub try_reentry: AtomicBool,
+    /// Every finished `on_action` (by tile) and every event, in the order
+    /// they happened across threads.
+    timeline: Mutex<Vec<Entry>>,
+}
+
+/// One entry of [`Recorder::timeline`].
+#[derive(Clone, Debug)]
+pub enum Entry {
+    /// An `on_action` for this tile returned.
+    ActionDone(u64),
+    Event(serde_json::Value),
 }
 
 impl Recorder {
@@ -126,6 +137,42 @@ impl Recorder {
             Seen::Status(s) => Some(*s),
             _ => None,
         })
+    }
+
+    pub fn timeline(&self) -> Vec<Entry> {
+        self.timeline.lock().unwrap().clone()
+    }
+
+    /// Asserts that every tile in `tiles` got exactly one `tile_closed`, and
+    /// that no `on_action` for it finished after that event; returns the
+    /// reasons.
+    pub fn check_closed_once(&self, tiles: &[u64]) -> Vec<String> {
+        let tl = self.timeline();
+        tiles
+            .iter()
+            .map(|&t| {
+                let closes: Vec<usize> = tl
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| {
+                        matches!(e, Entry::Event(v) if v["type"] == "tile_closed" && v["tile"] == t)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                assert_eq!(closes.len(), 1, "tile_closed for tile {t}: {tl:?}");
+                let at = closes[0];
+                assert!(
+                    !tl[at..]
+                        .iter()
+                        .any(|e| matches!(e, Entry::ActionDone(x) if *x == t)),
+                    "on_action for tile {t} after its tile_closed"
+                );
+                match &tl[at] {
+                    Entry::Event(v) => v["reason"].as_str().unwrap().to_owned(),
+                    Entry::ActionDone(_) => unreachable!(),
+                }
+            })
+            .collect()
     }
 
     pub fn events(&self) -> Vec<serde_json::Value> {
@@ -248,6 +295,7 @@ impl Callbacks for Recorder {
                 self.reentrant.lock().unwrap().push(core.close_tile(tile));
             }
         }
+        self.timeline.lock().unwrap().push(Entry::ActionDone(tile));
         busy.store(false, Ordering::SeqCst);
     }
 
@@ -256,6 +304,7 @@ impl Callbacks for Recorder {
         let v: serde_json::Value = serde_json::from_str(json)
             .unwrap_or_else(|e| panic!("event is not JSON ({e}): {json}"));
         assert!(v["type"].is_string(), "{json}");
+        self.timeline.lock().unwrap().push(Entry::Event(v.clone()));
         self.events.lock().unwrap().push(v);
         if self.try_reentry.load(Ordering::SeqCst) {
             if let Some(core) = self.core() {

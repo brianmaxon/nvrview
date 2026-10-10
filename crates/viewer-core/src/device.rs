@@ -51,11 +51,18 @@ pub(crate) struct DeviceHandle {
 }
 
 impl DeviceHandle {
-    /// Starts watching `session`; must be called inside the runtime.
-    pub(crate) fn start(id: u64, session: DeviceSession, events: EventSink) -> DeviceHandle {
+    /// Starts watching `session`; must be called inside the runtime. No
+    /// event is sent until `gate` resolves (or its sender is dropped), so
+    /// none names the device before the app has its ID.
+    pub(crate) fn start(
+        id: u64,
+        session: DeviceSession,
+        events: EventSink,
+        gate: oneshot::Receiver<()>,
+    ) -> DeviceHandle {
         let session = Arc::new(session);
         let (stop_tx, stop_rx) = oneshot::channel();
-        let watcher = tokio::spawn(watch(id, session.clone(), events, stop_rx));
+        let watcher = tokio::spawn(watch(id, session.clone(), events, stop_rx, gate));
         DeviceHandle {
             session: Some(session),
             stop: Some(stop_tx),
@@ -211,7 +218,13 @@ async fn watch(
     session: Arc<DeviceSession>,
     events: EventSink,
     mut stop: oneshot::Receiver<()>,
+    gate: oneshot::Receiver<()>,
 ) {
+    tokio::select! {
+        biased;
+        _ = &mut stop => return,
+        _ = gate => {}
+    }
     let mut state_rx = session.watch_state();
     let mut channels_rx = session.watch_channels();
     let mut tasks: JoinSet<Option<Info>> = JoinSet::new();

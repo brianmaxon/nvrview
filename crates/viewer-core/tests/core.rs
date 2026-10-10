@@ -317,8 +317,19 @@ fn refused_login_is_reported_once_and_not_retried() {
     assert_eq!(states, ["connecting", "login_failed"]);
     assert_eq!(rec.decodes(t), 0);
     assert_eq!(nvr.active_logins(), 0);
+    // The device's tiles end with it, and so does one opened afterward.
+    let late = core.open_tile(dev, 1, StreamTier::Sub).unwrap();
+    wait_until("tile_closed for both tiles", 5, || {
+        rec.events_of("tile_closed").len() == 2
+    });
     // The app removes the device and adds it again with new credentials.
     core.remove_device(dev).unwrap();
+    assert_eq!(core.close_tile(t), Err(CoreError::UnknownId));
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        rec.check_closed_once(&[t, late]),
+        ["login_failed", "login_failed"]
+    );
     let again = core
         .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
         .unwrap();
