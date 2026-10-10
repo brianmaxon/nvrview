@@ -1,0 +1,23 @@
+# Real device data never leaves the machine (docs/SANITIZATION.md)
+/captures/
+/fixtures/private/
+*.pcap
+*.pcapng
+.env
+.env.*
+*.local.*
+
+# Rust
+/target/
+
+# Apple
+.DS_Store
+xcuserdata/
+DerivedData/
+*.xcframework/
+/build/
+
+# Windows
+apps/windows/**/bin/
+apps/windows/**/obj/
+.vs/

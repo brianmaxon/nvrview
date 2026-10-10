@@ -1,0 +1,20 @@
+#!/bin/sh
+# Refuse commits that could leak identifying information. See docs/SANITIZATION.md.
+set -e
+
+email=$(git config user.email || true)
+case "$email" in
+  *@users.noreply.github.com) ;;
+  *)
+    echo "pre-commit: user.email is '$email'." >&2
+    echo "This repository is public; set a GitHub noreply address first:" >&2
+    echo '  git config user.email "<id>+<username>@users.noreply.github.com"' >&2
+    exit 1
+    ;;
+esac
+
+python3 -I "$(git rev-parse --show-toplevel)/scripts/check-sanitized.py" --staged
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --redact --no-banner
+fi
