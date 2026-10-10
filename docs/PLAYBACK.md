@@ -49,6 +49,13 @@ files need no C library on any platform.
   the file each belongs to.
 - **Cover images** (298): one keyframe per event or file, decoded to a small
   thumbnail and cached.
+  The core fetches the keyframe (`recordings::thumbs::cover_thumbnail`) and
+  keeps it in an on-disk cache bounded by entry count (default 4096) and total
+  bytes (default 64 MB), least recently used first. The core does not decode
+  pictures: the app decodes the keyframe, shrinks it, and may store the small
+  image in its place, which is how thousands of thumbnails fit. Entries are
+  keyed by device, channel, stream, and requested range; an empty answer (no
+  recording in the range) is not cached.
 
 The index fills in the background (recent days first, then older ones),
 refreshes the current day periodically, and is shared by every window. All of
