@@ -1,9 +1,9 @@
-// TEMPORARY: a stand-in for the shared Rust `video-pipeline` crate, used only
-// by the tests and NVRViewDemo until the C interface lands in M2. The app must
-// never ship it, and it must not grow: real policy (gating details,
-// backpressure, recovery escalation, VUI parsing, layout modes, stats) belongs
-// in the Rust pipeline (docs/RENDERING.md). Delete this target when the
-// pipeline drives `TileDecoder` and `GridRenderer` through the C interface.
+// The stand-in for the shared Rust `video-pipeline` crate, used by FakeCore
+// (the Swift test double of the C core) and by the VideoKit tests. It must not
+// grow: real policy (gating details, backpressure, recovery escalation, VUI
+// parsing, layout modes, stats) belongs in the Rust pipeline
+// (docs/RENDERING.md). The shipping app never links this target except for
+// its `--fake` development mode.
 
 import CoreGraphics
 import CoreMedia

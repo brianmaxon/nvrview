@@ -11,9 +11,9 @@ import VideoKit
 // never takes focus or shows a Dock icon. Off screen it cannot draw at all.
 //
 // Renderers:
-//   metal (default)  TileDecoder (VideoToolbox) per tile and one GridRenderer
-//                    (Metal) pass for the grid, driven by the temporary
-//                    stand-in pipeline until the Rust one arrives in M2.
+//   metal (default)  a CoreBridge over FakeCore (a Swift double of the C core)
+//                    runs a TileDecoder (VideoToolbox) per tile; one
+//                    GridRenderer (Metal) pass draws the grid.
 //   layer            one AVSampleBufferDisplayLayer per tile. Double-click a
 //                    tile to show it alone; double-click again to go back.
 
@@ -169,12 +169,14 @@ struct GridView: View {
 final class DemoDelegate: NSObject, NSApplicationDelegate {
     let makeContent: () -> NSView
     let startSelfTest: ((NSWindow) -> Void)?
+    let onTerminate: () -> Void
     var placement = WindowPlacement.front
     var window: NSWindow?
 
-    init(content: @escaping () -> NSView, selfTest: ((NSWindow) -> Void)?) {
+    init(content: @escaping () -> NSView, selfTest: ((NSWindow) -> Void)?, onTerminate: @escaping () -> Void = {}) {
         makeContent = content
         startSelfTest = selfTest
+        self.onTerminate = onTerminate
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -208,6 +210,10 @@ final class DemoDelegate: NSObject, NSApplicationDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate()
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onTerminate()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -265,18 +271,13 @@ func layerDemo(_ options: Options) -> DemoDelegate {
 
 @MainActor
 func metalDemo(_ options: Options) -> DemoDelegate {
-    var players: [MetalFilePlayer] = []
-    for i in 0..<options.tiles {
-        let file = options.files[i % options.files.count]
-        guard let p = MetalFilePlayer(file: file, fps: options.fps) else {
-            FileHandle.standardError.write(Data("cannot read \(file.lastPathComponent)\n".utf8))
-            exit(1)
-        }
-        players.append(p)
+    guard let core = DemoCore(files: options.files, tiles: options.tiles, fps: options.fps) else {
+        FileHandle.standardError.write(Data("cannot start the core on those files\n".utf8))
+        exit(1)
     }
     let grid: MetalGrid
     do {
-        grid = try MetalGrid(players: players)
+        grid = try MetalGrid(core: core)
     } catch {
         FileHandle.standardError.write(Data("cannot set up Metal: \(error)\n".utf8))
         exit(1)
@@ -284,7 +285,8 @@ func metalDemo(_ options: Options) -> DemoDelegate {
     let selfTest = options.selfTestSeconds.map { MetalSelfTest(grid: grid, seconds: $0) }
     return DemoDelegate(
         content: { grid.view },
-        selfTest: selfTest.map { test in { test.start(window: $0) } })
+        selfTest: selfTest.map { test in { test.start(window: $0) } },
+        onTerminate: { core.shutdown() })
 }
 
 MainActor.assumeIsolated { runDemo() }

@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import PipelineStandIn
+import FakeCore
 import Testing
 import VideoKit
 
