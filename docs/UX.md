@@ -92,6 +92,26 @@ Selection is visible as a thin outline that fades with the other chrome, and
 follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
 
+Details settled while building it (macOS):
+
+- The window takes these keys before the focused view and the menus, except
+  while text is edited. When a sidebar list has the keyboard focus it keeps
+  its own arrows, Space and Return; F, S and 0 still act on the window.
+  Command, Control or Option make a key a menu shortcut instead (⌃⌘F and
+  ⌃⌘S keep working, unlisted). Toggles ignore key repeat; arrows repeat.
+- An arrow moves only to a tile whose center lies beyond the selected tile's
+  edge in that direction. Tiles touching that edge come first (the nearest
+  edge, then the one across from the selected tile's center); otherwise the
+  nearest center, counting the offset across the direction twice. From a tile
+  spanning the whole height, up and down do nothing.
+- Return (or Enter) on the selected tile dismisses its alert if it has one
+  (see "Alerts"), and otherwise toggles focus, as Space does.
+- The menus show F (View > Enter Full Screen), S (View > Hide Sidebar),
+  0 (View > Reset Zoom) and Space (Layout > Focus Tile) as their keys. The
+  arrows are listed by name under Layout > Select Tile without being key
+  equivalents: AppKit lets a menu's arrow key equivalent swallow the key even
+  while its item is disabled, which would take the arrows from lists.
+
 ## Full screen chrome
 
 In full screen, every header, toolbar, sidebar edge, and hover control moves
@@ -99,6 +119,18 @@ out of the way about 3 seconds after the last interaction (pointer movement,
 a click, a key, a scroll) and comes back on the next one. The video is never
 resized or redrawn when the chrome comes and goes: overlays slide or fade
 above it. Corner indicators (below) stay.
+
+- The pointer hides with the chrome and returns when it moves.
+- The header of a tile with an active alert stays (see "Alerts").
+- The toolbar and menu bar use the system's full-screen auto-hide: hidden,
+  and sliding in over the picture when the pointer reaches the top edge.
+- The sidebar closes when the window enters full screen (the transition
+  resizes the stage anyway) and reopens on the way out if it was open. S
+  still shows it in full screen; it then stays until S again, since hiding it
+  on a timer would resize the video.
+- Out of full screen the headers keep their hover timing and the pointer
+  stays; the selection outline and the zoom map fade after the same idle
+  delay (the outline stays while editing the layout).
 
 ## Corner indicators
 
@@ -141,3 +173,18 @@ look at a detail.
 - How: zoom only changes the source rectangle the renderer samples from the
   decoded picture (no extra decoding or copies), so it costs nothing per
   frame beyond the drawing that already happens.
+
+Details settled while building it (macOS):
+
+- A plain drag in a tile zoomed past 1x pans its picture. At 1x, and always
+  while editing the layout, a drag drags the tile to swap, as before.
+- A mouse wheel (line-based scrolling) zooms, each notch 1.25x, eased over
+  the next refreshes. Precise scrolling (trackpad, Magic Mouse) pans a zoomed
+  tile and does nothing at 1x; with Option held it zooms instead, for devices
+  without a pinch. A pinch zooms continuously.
+- The zoom is kept per camera in each window, so it follows the picture
+  through swaps, layout changes, focus and stream switches; two tiles of the
+  same camera in one window share it.
+- The inset map is an outline of the whole picture with the visible region
+  marked, drawn as overlay layers (no second picture, so no extra drawing or
+  texture work), in the shown picture's bottom left corner.
