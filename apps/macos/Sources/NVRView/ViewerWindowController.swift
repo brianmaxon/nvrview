@@ -105,7 +105,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     /// Shows a layout, group or scratch arrangement in this window.
     func show(_ content: WindowContent) {
-        if stage.isFocused { stage.tearDown() }
+        stage.cancelFocus()
         state.content = content
         state.selected = nil
         switch content {

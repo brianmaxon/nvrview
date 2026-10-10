@@ -51,7 +51,9 @@ final class SelfTest {
     func start(seconds: Double) {
         after(seconds) { [self] in checkGrid() }
         // A hard limit for the whole run.
-        after(seconds + 30) { [self] in finish(problems + ["timed out"]) }
+        // The checks after the playing time take about a minute (focus, listening,
+        // quality, lenses, keys, zoom, chrome).
+        after(seconds + 90) { [self] in finish(problems + ["timed out"]) }
     }
 
     private func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
@@ -146,6 +148,13 @@ final class SelfTest {
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera else {
             finish(problems + ["no camera to focus"])
         }
+        // Replacing the window's content while a tile is focused must only
+        // end the focus: the renderer keeps following the stage (it once
+        // kept drawing the old arrangement under the new tiles).
+        window.stage.focus(leaf.path)
+        window.show(window.state.content)
+        if window.stage.isFocused { problems.append("focus survived a change of content") }
+        if window.stage.grid.prepare == nil { problems.append("a change of content during focus stopped the renderer") }
         window.stage.focus(leaf.path)
         // The animation, then the switch after the main stream's first keyframe.
         after(StageView.focusDuration + 4) { [self] in
@@ -347,6 +356,8 @@ final class SelfTest {
             if stage.chromeVisible || header || map { problems.append("the chrome did not hide when idle") }
             if pinned == false { problems.append("the header of a tile with an active alert hid") }
             if grid.drawableResizes != resizes { problems.append("hiding the chrome resized the drawable") }
+            // 0 resets the selected tile's zoom: select the zoomed one.
+            window.state.selected = path
             press("0", keyCode: 29)
             // The key brings the chrome back at once (it may hide again,
             // with the short delay, before the zoom has eased back).

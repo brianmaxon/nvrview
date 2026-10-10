@@ -640,6 +640,18 @@ final class StageView: NSView {
     }
 
     /// Leaves focus without animating (the window closes, the tree changes).
+    /// Ends focus at once, without animation, when the window's content is
+    /// replaced (another layout, group, or camera). Unlike `tearDown` the
+    /// stage keeps drawing: tearing it down here left the video surface
+    /// showing the old arrangement under the new tiles.
+    func cancelFocus() {
+        guard state.focused != nil else { return }
+        endFocusImmediately()
+        syncDemands()
+    }
+
+    /// The window is closing: ends focus, withdraws every stream request,
+    /// and stops the renderer asking this stage for frames.
     func tearDown() {
         endFocusImmediately()
         syncDemands(clearAll: true)

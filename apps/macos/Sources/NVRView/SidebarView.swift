@@ -185,6 +185,12 @@ struct SidebarView: View {
             }
         }
         .contextMenu { groupMenu(group) }
+        // Cameras dragged from the sidebar or a tile join the group.
+        .dropDestination(for: String.self) { items, _ in
+            let cameras = items.compactMap(StageView.camera(fromDrag:))
+            for camera in cameras { model.addCamera(camera, toGroup: group.id) }
+            return !cameras.isEmpty
+        }
     }
 
     private func deviceRow(_ device: AppModel.DeviceRuntime) -> some View {
