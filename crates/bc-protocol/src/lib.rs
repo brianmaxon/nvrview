@@ -15,6 +15,9 @@
 //!   parsers; the session builds the messages).
 //! - [`detection`]: detection events (the alarm-state pushes of command 33)
 //!   and which channels detect what (the `aitype` bits of command 199).
+//! - [`talk`]: talk-back to a camera's speaker: which channels can talk,
+//!   the ability reply, request texts, and the IMA ADPCM coding of the
+//!   audio (the session builds the messages, motion tier only).
 //! - [`recording`]: a file format for a received stream with arrival times,
 //!   for replaying real streams in development.
 //! - [`crypto`], [`xml`], [`stream`]: the building blocks used by the above.
@@ -30,4 +33,5 @@ pub mod media;
 pub mod recording;
 pub mod session;
 pub mod stream;
+pub mod talk;
 pub mod xml;

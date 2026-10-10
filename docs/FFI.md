@@ -338,6 +338,84 @@ that sound arrives):
   once no audio has arrived for 1 s, never a frozen value.
 - A tile without audio, or an unknown tile, reads 0.
 
+## Talk-back
+
+Sound from the app (the computer's microphone, or system text-to-speech
+for a typed reply) through a camera's or doorbell's speaker, for the
+doorbell call in [UX.md](UX.md) ("Doorbell calls"). Talk-back is **camera
+motion control** (docs/ARCHITECTURE.md, "Device commands"): off for every
+camera until the app enables it, sent only when the app asks, rate-limited,
+and logged. The protocol is in docs/protocol.md, "Talk-back (motion)".
+
+**Additive to ABI 3.** ABI 3 is not released yet, so these functions,
+`NV_ERR_NOT_PERMITTED`, and the `talk` event join it without a version
+change; an app built against an earlier ABI 3 header keeps working
+(`NV_ABI_VERSION` stays 3).
+
+```c
+NvStatus nv_talk_set_permission(NvCore *core, uint64_t device, uint8_t channel, bool allowed);
+NvStatus nv_talk_start(NvCore *core, uint64_t tile);
+NvStatus nv_talk_push(NvCore *core, uint64_t tile, const float *samples, size_t count,
+                      uint32_t sample_rate);
+NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
+```
+
+1. **Permission.** `nv_talk_set_permission(core, device, channel, true)`
+   enables talk-back on one channel of a device, for this run of the core.
+   The app keeps the user's per-camera setting and passes it after each
+   `nv_device_add`; the core stores nothing. Withdrawing it (`false`) stops
+   a running talk at once (`stopped`, reason `permission_revoked`).
+2. **Start.** `nv_talk_start(core, tile)` asks to talk to the tile's camera
+   and returns at once. Without the permission it returns
+   `NV_ERR_NOT_PERMITTED` and sends `talk` `refused` (`not_permitted`);
+   nothing goes to the device. Otherwise the device session (no extra
+   login) checks that the channel supports talk-back (its 199 item has
+   `ipcAudioTalk` 1, and its ability offers the observed configuration),
+   applies the rate limit (at most 6 starts per channel per minute), and
+   opens the talk. Progress arrives as `talk` events. Starting a tile whose
+   talk is starting or active changes nothing.
+3. **Audio.** `nv_talk_push(core, tile, samples, count, sample_rate)`
+   queues mono float samples (-1..1) at the app's rate (8 to 192 kHz;
+   typically 16 kHz from a speech pipeline or 48 kHz from the microphone).
+   The core resamples them to the device's 16 kHz, encodes them as IMA ADPCM,
+   and sends one 64 ms record every 64 ms of its own clock (real time, as
+   the official client). Audio pushed while the talk is starting is held
+   (up to about 1 s) and sent once it is active. Audio pushed faster than
+   real time is buffered up to 10 s; beyond that it is dropped (counted as
+   `dropped_ms`), never queued without bound. Returns `NV_ERR_UNKNOWN_ID`
+   for an unknown tile; samples for a tile without a talk are ignored
+   (`NV_OK`). Callable from any app thread; it takes a short lock and may
+   allocate, so not from the real-time audio callback.
+4. **Stop.** `nv_talk_stop(core, tile, false)` stops at once;
+   `nv_talk_stop(core, tile, true)` stops after the audio already pushed has
+   been sent (for a text-to-speech reply pushed in one go). Closing the
+   tile, removing its device, freeing the core, the session dropping, a
+   device error, 10 s without pushed audio, and 5 minutes of talk also
+   stop it. Every stop sends the device's close (command 11) unless the
+   connection is already gone.
+
+```json
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"starting"}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"active"}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"stopped","reason":"stopped","sent_ms":4096,"dropped_ms":0}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"not_permitted"}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"rate_limited","retry_ms":41000}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"device_refused","status":400}
+```
+
+- Each start ends with exactly one `refused` or `stopped`.
+- `refused` reasons: `not_permitted`, `rate_limited` (with `retry_ms`),
+  `not_supported` (no `ipcAudioTalk`), `unsupported_ability`, `busy`
+  (another talk on that channel), `device_refused` (with the reply
+  `status`), `session_closed`, `connection_lost`, `timed_out`,
+  `query_failed`.
+- `stopped` reasons: `stopped` (`nv_talk_stop`), `finished` (a draining
+  stop), `tile_closed`, `permission_revoked`, `idle`, `max_duration`,
+  `device_error` (with `status`), `session_closed`, `connection_lost`,
+  `dropped`. `sent_ms` is the audio sent, `dropped_ms` the audio dropped.
+- The core logs every start, stop and refusal with its reason (refusals
+  at most one line every few seconds).
+
 ## Layouts
 
 Layouts are split trees ([UX.md](UX.md)) the core stores, so every app on
@@ -400,7 +478,10 @@ added audio: `on_audio_tap` at the end of `NvCallbacks`, `NvAudioBlock`,
 `nv_tile_decode_failed`), `nv_tile_audio_level`, the layouts store
 (`nv_layouts_get`, `nv_layout_put`, `nv_layout_delete`, `nv_device_key`,
 `NvConfig.data_dir`), `NV_ERR_BUFFER_TOO_SMALL`, and the detection,
-`tile_tier`, `layouts_changed`, and `timing` events. Apps check
+`tile_tier`, `layouts_changed`, and `timing` events, and talk-back
+(`nv_talk_set_permission`, `nv_talk_start`, `nv_talk_push`,
+`nv_talk_stop`, `NV_ERR_NOT_PERMITTED`, and the `talk` event; added
+before ABI 3 was released, see "Talk-back"). Apps check
 `nv_abi_version()` at startup and refuse to run on a mismatch.
 
 ## Builds

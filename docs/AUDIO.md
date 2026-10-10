@@ -167,6 +167,19 @@ releases its output slot). Measured on Apple silicon: one tile's decode,
 timestamping, and resampling to 48 kHz stereo take about 0.1% of one core,
 and its share of rendering about 0.01%.
 
+## Talk-back (sending)
+
+The other direction: the app's microphone, or system text-to-speech for a
+typed reply, through a doorbell's or camera's speaker (UX.md, "Doorbell
+calls"). It is camera motion control, off per camera until the app enables
+it (FFI.md, "Talk-back"). The app pushes mono float samples at its own
+rate; the core resamples them to 16 kHz with the same windowed-sinc
+resampler as playout, the device session encodes them as IMA ADPCM
+(1024 samples, 64 ms, per record; docs/protocol.md, "Talk-back (motion)")
+and sends one record per 64 ms of its own clock, with a bounded buffer
+that drops rather than queues when the app pushes faster than real time.
+Received talk-back records (`01wb`) are still never played.
+
 ## Speech recognition (later)
 
 The core provides the tap; recognition runs outside it at first, in the app

@@ -44,6 +44,8 @@ pub enum CliError {
     SessionEnded,
     /// Writing the output failed.
     Io(std::io::Error),
+    /// Talk-back did not start.
+    TalkRefused(bc_session::Refusal),
 }
 
 impl fmt::Display for CliError {
@@ -69,6 +71,7 @@ impl fmt::Display for CliError {
             CliError::StreamRefused(s) => write!(f, "the device refused the stream (status {s})"),
             CliError::SessionEnded => write!(f, "the session ended"),
             CliError::Io(e) => write!(f, "write failed: {e}"),
+            CliError::TalkRefused(r) => write!(f, "talk-back refused: {r}"),
         }
     }
 }

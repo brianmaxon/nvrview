@@ -44,6 +44,10 @@ typedef enum NvStatus {
    * the output buffer is too small; *len holds the size needed
    */
   NV_ERR_BUFFER_TOO_SMALL = -6,
+  /**
+   * talk-back (camera motion control) is not enabled for that camera
+   */
+  NV_ERR_NOT_PERMITTED = -7,
 } NvStatus;
 
 typedef enum NvActionKind {
@@ -468,6 +472,56 @@ enum NvStatus nv_tile_audio_tap(struct NvCore *core, uint64_t tile, bool enabled
  * `core` is a live handle; `peak` and `rms` are valid for one write each.
  */
 enum NvStatus nv_tile_audio_level(struct NvCore *core, uint64_t tile, float *peak, float *rms);
+
+/**
+ * Enables or disables talk-back (camera motion control) on one channel of
+ * a device, for this run of the core. Off until enabled; the app passes
+ * the user's per-camera setting after each nv_device_add. Disabling stops
+ * a running talk on that channel.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_talk_set_permission(struct NvCore *core,
+                                     uint64_t device,
+                                     uint8_t channel,
+                                     bool allowed);
+
+/**
+ * Starts talk-back to a tile's camera and returns at once; progress
+ * arrives as `talk` events. NV_ERR_NOT_PERMITTED (and a `talk` `refused`
+ * event; nothing is sent to the device) unless nv_talk_set_permission
+ * enabled the camera.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_talk_start(struct NvCore *core, uint64_t tile);
+
+/**
+ * Queues `count` mono float samples (-1..1) at `sample_rate` Hz (8000 to
+ * 192000) for a tile's talk; the core resamples to 16 kHz, encodes, and
+ * sends them in real time. Samples for a tile without a talk are ignored.
+ * Short lock, may allocate: not from a real-time audio callback.
+ *
+ * # Safety
+ * `core` is a live handle; `samples` is valid for reading `count` floats
+ * (or `count` is 0).
+ */
+enum NvStatus nv_talk_push(struct NvCore *core,
+                           uint64_t tile,
+                           const float *samples,
+                           size_t count,
+                           uint32_t sample_rate);
+
+/**
+ * Ends a tile's talk: at once, or with `drain` after the audio already
+ * pushed has been sent. The device's close is sent either way.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_talk_stop(struct NvCore *core, uint64_t tile, bool drain);
 
 /**
  * The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,

@@ -6,7 +6,11 @@
 //! [`Session::login`] after [`Event::NonceReceived`], and once
 //! [`Event::LoginOk`] arrives start previews and send keepalives.
 //!
-//! Only commands on the read-only allowlist ([`Command`]) can be produced.
+//! Only commands on the allowlist ([`Command`]) can be produced. Each has a
+//! [`Tier`]: viewing commands are always allowed; motion commands (talk-back)
+//! only for a channel the caller enabled with
+//! [`Session::set_motion_allowed`]. Nothing that changes device settings is
+//! on the list.
 
 use crate::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
@@ -15,12 +19,14 @@ use crate::crypto::{SessionKey, credential_hash, xor_obfuscate};
 use crate::framer::{EncodeError, RawMessage, encode_message, encode_message_with_status};
 use crate::header::Class;
 use crate::stream::StreamTier;
+use crate::talk::{self, TalkConfig};
 use crate::xml::{self, PreviewPolicy, XmlError};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// Commands this crate can send (plus 145, which devices push). Anything
-/// that could change device settings is deliberately absent.
+/// that could change device settings is deliberately absent. See
+/// [`Command::tier`] for when each may be sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// 1: handshake and login.
@@ -67,6 +73,25 @@ pub enum Command {
     /// 192: start alarm report: subscribes this session to the device's
     /// detection pushes (33). Viewing tier: it changes no settings.
     AlarmReport = 192,
+    /// 10: a channel's talk-back ability (viewing tier: a read-only query).
+    TalkAbility = 10,
+    /// 201: open talk-back (motion tier).
+    TalkOpen = 201,
+    /// 202: one talk-back audio record (motion tier).
+    TalkStream = 202,
+    /// 11: close talk-back (motion tier).
+    TalkClose = 11,
+}
+
+/// When a command may be sent (docs/ARCHITECTURE.md, "Device commands").
+/// There is no configuration tier: such commands are not on the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    /// Read-only: always allowed.
+    Viewing,
+    /// Camera motion control (here: talk-back): only for a channel the
+    /// caller enabled ([`Session::set_motion_allowed`]).
+    Motion,
 }
 
 impl Command {
@@ -99,8 +124,20 @@ impl Command {
             274 => Command::EventSearchClose,
             298 => Command::Cover,
             192 => Command::AlarmReport,
+            10 => Command::TalkAbility,
+            201 => Command::TalkOpen,
+            202 => Command::TalkStream,
+            11 => Command::TalkClose,
             _ => return None,
         })
+    }
+
+    /// The command's tier.
+    pub const fn tier(self) -> Tier {
+        match self {
+            Command::TalkOpen | Command::TalkStream | Command::TalkClose => Tier::Motion,
+            _ => Tier::Viewing,
+        }
     }
 
     /// Whether `n` is on the allowlist.
@@ -122,6 +159,8 @@ pub enum SessionError {
     WrongState(&'static str),
     /// A command outside the allowlist was requested.
     CommandNotAllowed(u32),
+    /// A motion-tier command for a channel the caller has not enabled.
+    MotionNotEnabled(u8),
     /// A received message is not expected in the current state.
     Unexpected {
         /// Command number of the message.
@@ -146,6 +185,9 @@ impl fmt::Display for SessionError {
         match self {
             SessionError::WrongState(s) => write!(f, "wrong session state: {s}"),
             SessionError::CommandNotAllowed(c) => write!(f, "command {c} is not on the allowlist"),
+            SessionError::MotionNotEnabled(c) => {
+                write!(f, "camera motion control is not enabled for channel {c}")
+            }
             SessionError::Unexpected { command } => {
                 write!(f, "unexpected message, command {command}")
             }
@@ -274,6 +316,10 @@ pub struct Session {
     next_id: u32,
     previews: HashMap<u32, Preview>,
     transfers: HashMap<u32, Transfer>,
+    /// Channels the caller enabled motion-tier commands for.
+    motion: HashSet<u8>,
+    /// Channels with a talk opened (201 sent) and not yet closed.
+    talks: HashSet<u8>,
 }
 
 impl fmt::Debug for Session {
@@ -306,6 +352,8 @@ impl Session {
             next_id: 1,
             previews: HashMap::new(),
             transfers: HashMap::new(),
+            motion: HashSet::new(),
+            talks: HashSet::new(),
         }
     }
 
@@ -631,6 +679,118 @@ impl Session {
         let bytes = self.send(Command::DownloadStop, start_id, &[], &[])?;
         self.transfers.remove(&start_id);
         Ok(bytes)
+    }
+
+    /// Enables or disables motion-tier commands (talk-back) for a channel.
+    /// Off for every channel until enabled. Disabling does not close a
+    /// talk; [`Session::talk_close`] stays possible so the caller can.
+    pub fn set_motion_allowed(&mut self, channel: u8, allowed: bool) {
+        if allowed {
+            self.motion.insert(channel);
+        } else {
+            self.motion.remove(&channel);
+        }
+    }
+
+    /// Whether motion-tier commands are enabled for `channel`.
+    pub fn motion_allowed(&self, channel: u8) -> bool {
+        self.motion.contains(&channel)
+    }
+
+    fn check_motion(&self, channel: u8) -> Result<(), SessionError> {
+        if self.state != State::LoggedIn {
+            return Err(SessionError::WrongState("not logged in"));
+        }
+        if !self.motion.contains(&channel) {
+            return Err(SessionError::MotionNotEnabled(channel));
+        }
+        Ok(())
+    }
+
+    /// Builds a talk ability query (command 10, viewing tier) for a
+    /// channel; parse the reply with [`talk::parse_talk_ability`].
+    pub fn talk_ability(&mut self, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+        let id = self.alloc_id()?;
+        let ext = talk::ability_extension(channel);
+        Ok((
+            id,
+            self.send(Command::TalkAbility, id, ext.as_bytes(), &[])?,
+        ))
+    }
+
+    /// Builds a talk open (command 201, motion tier) with a body made from
+    /// the fixed template ([`talk::open_body`]). Refused unless motion is
+    /// enabled for the channel and no talk is open on it. The reply (empty,
+    /// status 200 when accepted) carries the returned message ID.
+    pub fn talk_open(
+        &mut self,
+        channel: u8,
+        cfg: &TalkConfig,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        self.check_motion(channel)?;
+        if self.talks.contains(&channel) {
+            return Err(SessionError::WrongState(
+                "talk already open on this channel",
+            ));
+        }
+        let id = self.alloc_id()?;
+        let ext = talk::channel_extension(channel);
+        let body = talk::open_body(channel, cfg);
+        let bytes = self.send(Command::TalkOpen, id, ext.as_bytes(), body.as_bytes())?;
+        self.talks.insert(channel);
+        Ok((id, bytes))
+    }
+
+    /// Builds one talk audio message (command 202, motion tier): message ID
+    /// 0, the stream extension (encrypted), and a plain payload of one
+    /// `01wb` record holding `payload` (one record from
+    /// [`talk::AdpcmEncoder::encode_record`]). Refused unless a talk is open
+    /// on the channel and motion is still enabled for it.
+    pub fn talk_audio(&mut self, channel: u8, payload: &[u8]) -> Result<Vec<u8>, SessionError> {
+        self.check_motion(channel)?;
+        if !self.talks.contains(&channel) {
+            return Err(SessionError::WrongState("no talk open on this channel"));
+        }
+        if payload.len() != talk::RECORD_PAYLOAD_LEN {
+            return Err(SessionError::WrongState("talk record has the wrong length"));
+        }
+        let mut ext = talk::stream_extension(channel).into_bytes();
+        if let Some(key) = &self.key {
+            key.encrypt(&mut ext);
+        }
+        let record = crate::media::encode_audio(talk::STREAM_INDEX, payload);
+        Ok(encode_message(
+            Command::TalkStream.number(),
+            0,
+            Class::Client,
+            &ext,
+            &record,
+        )?)
+    }
+
+    /// Builds the talk close (command 11, extension only) for the channel's
+    /// open talk, and forgets it. Allowed even after motion was disabled,
+    /// so a talk can always be closed.
+    pub fn talk_close(&mut self, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+        if !self.talks.contains(&channel) {
+            return Err(SessionError::WrongState("no talk open on this channel"));
+        }
+        let id = self.alloc_id()?;
+        let ext = talk::channel_extension(channel);
+        let bytes = self.send(Command::TalkClose, id, ext.as_bytes(), &[])?;
+        self.talks.remove(&channel);
+        Ok((id, bytes))
+    }
+
+    /// Forgets the channel's talk without closing it (the device refused
+    /// the open).
+    pub fn forget_talk(&mut self, channel: u8) {
+        self.talks.remove(&channel);
+    }
+
+    /// Channels with an open talk (201 sent, 11 not yet).
+    pub fn open_talks(&self) -> impl Iterator<Item = u8> + '_ {
+        self.talks.iter().copied()
     }
 
     fn key(&self) -> Result<&SessionKey, SessionError> {
@@ -1060,17 +1220,28 @@ mod tests {
     #[test]
     fn allowlist() {
         for n in [
-            1, 2, 3, 4, 14, 15, 16, 80, 93, 142, 143, 144, 145, 146, 192, 199, 272, 273, 274, 298,
-            318,
+            1, 2, 3, 4, 10, 11, 14, 15, 16, 80, 93, 142, 143, 144, 145, 146, 192, 199, 201, 202,
+            272, 273, 274, 298, 318,
         ] {
             assert!(Command::is_allowed(n));
             assert_eq!(Command::from_number(n).unwrap().number(), n);
         }
+        // Only talk-back is motion; everything else is viewing.
+        for n in [11, 201, 202] {
+            assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Motion);
+        }
+        for n in [1, 2, 3, 4, 10, 93, 143, 199] {
+            assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Viewing);
+        }
         // Never: playback by file (5, 7, 123, 381–383, 8, 9: not needed yet),
         // 193 (stop alarm report: the session simply logs out), 300 (writes
         // the AI configuration) and, above all, 303 (delete recording files).
+        // Not yet: the PTZ motion commands (18, 19, 295) and the talk
+        // variants the client does not use (12, 203–205); 20 and 331 change
+        // settings.
         for n in [
-            0, 5, 7, 8, 9, 10, 13, 33, 44, 58, 76, 102, 123, 193, 300, 303, 381, 511, 600,
+            0, 5, 7, 8, 9, 12, 13, 18, 19, 20, 33, 44, 58, 76, 102, 123, 193, 203, 204, 205, 295,
+            300, 303, 331, 381, 511, 600,
         ] {
             assert!(!Command::is_allowed(n), "{n}");
         }
@@ -1579,5 +1750,94 @@ mod tests {
                 status: 300
             }
         );
+    }
+
+    #[test]
+    fn talk_back_is_motion_tier_and_builds_the_observed_messages() {
+        use crate::talk::{AdpcmEncoder, AudioStreamMode, Duplex, SAMPLES_PER_RECORD};
+        let (mut s, key) = logged_in();
+        let cfg = TalkConfig {
+            duplex: Duplex::Full,
+            stream_mode: AudioStreamMode::FollowVideoStream,
+        };
+        // The ability query is viewing tier: no permission needed.
+        let (aid, bytes) = s.talk_ability(3).unwrap();
+        let m = decode_one(&bytes);
+        assert_eq!((m.header.command, m.header.message_id), (10, aid));
+        let mut ext = m.extension().to_vec();
+        key.decrypt(&mut ext);
+        let ext = String::from_utf8(ext).unwrap();
+        assert!(ext.contains("<channelId>3</channelId>") && ext.contains("<chnType>0</chnType>"));
+        assert!(m.payload().is_empty());
+
+        // Motion is off by default: nothing that talks can be built.
+        assert_eq!(s.talk_open(3, &cfg), Err(SessionError::MotionNotEnabled(3)));
+        assert_eq!(
+            s.talk_audio(3, &[0; talk::RECORD_PAYLOAD_LEN]),
+            Err(SessionError::MotionNotEnabled(3))
+        );
+        assert!(s.talk_close(3).is_err());
+
+        s.set_motion_allowed(3, true);
+        assert!(s.motion_allowed(3) && !s.motion_allowed(4));
+        assert!(s.talk_audio(3, &[0; talk::RECORD_PAYLOAD_LEN]).is_err());
+        let (oid, bytes) = s.talk_open(3, &cfg).unwrap();
+        assert!(s.talk_open(3, &cfg).is_err(), "one talk per channel");
+        assert_eq!(s.talk_open(4, &cfg), Err(SessionError::MotionNotEnabled(4)));
+        let m = decode_one(&bytes);
+        assert_eq!((m.header.command, m.header.message_id), (201, oid));
+        let mut ext = m.extension().to_vec();
+        key.decrypt(&mut ext);
+        assert_eq!(String::from_utf8(ext).unwrap(), talk::channel_extension(3));
+        let mut body = m.payload().to_vec();
+        key.decrypt(&mut body);
+        assert_eq!(String::from_utf8(body).unwrap(), talk::open_body(3, &cfg));
+
+        // Audio: ID 0, encrypted extension, plain `01wb` payload.
+        let mut enc = AdpcmEncoder::new();
+        let rec = enc.encode_record(&[100; SAMPLES_PER_RECORD]);
+        let m = decode_one(&s.talk_audio(3, &rec).unwrap());
+        assert_eq!(
+            (m.header.command, m.header.message_id, m.header.status),
+            (202, 0, 0)
+        );
+        assert_eq!(m.header.class, Class::Client);
+        let mut ext = m.extension().to_vec();
+        assert_eq!(ext.len(), 131);
+        key.decrypt(&mut ext);
+        let ext = String::from_utf8(ext).unwrap();
+        assert!(ext.contains("<binaryData>1</binaryData>"));
+        assert_eq!(m.payload().len(), 528);
+        let mut d = Demuxer::new();
+        d.push(m.payload());
+        match d.next_record().unwrap().unwrap() {
+            Record::Audio { stream_index, data } => {
+                assert_eq!(stream_index, 1);
+                assert_eq!(data, rec);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(s.talk_audio(3, &rec[..100]).is_err());
+        assert_eq!(s.open_talks().collect::<Vec<_>>(), vec![3]);
+
+        // Withdrawing permission stops audio but never the close.
+        s.set_motion_allowed(3, false);
+        assert_eq!(
+            s.talk_audio(3, &rec),
+            Err(SessionError::MotionNotEnabled(3))
+        );
+        let (cid, bytes) = s.talk_close(3).unwrap();
+        let m = decode_one(&bytes);
+        assert_eq!((m.header.command, m.header.message_id), (11, cid));
+        assert_eq!(m.header.payload_offset, Some(m.body.len() as u32));
+        assert!(s.talk_close(3).is_err());
+        assert_eq!(s.open_talks().count(), 0);
+
+        // A refused open is forgotten without a close.
+        s.set_motion_allowed(3, true);
+        s.talk_open(3, &cfg).unwrap();
+        s.forget_talk(3);
+        assert!(s.talk_close(3).is_err());
+        assert!(s.talk_open(3, &cfg).is_ok());
     }
 }
