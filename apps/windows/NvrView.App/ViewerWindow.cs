@@ -197,11 +197,25 @@ internal sealed class ViewerWindow
 
     private void Place(SavedWindow? restore)
     {
+        // The test runs read the displays too: the start path is the same as
+        // a double-click's but for where the window ends up.
+        List<Rect> screens = Screens();
+        if (restore is not null && SavedWindow.Placement(restore.Frame, screens, MinWidth, MinHeight) is { } f)
+        {
+            AppWindow.MoveAndResize(new RectInt32((int)f.X, (int)f.Y, (int)f.Width, (int)f.Height));
+        }
+        else if (_background)
+        {
+            AppWindow.MoveAndResize(new RectInt32(40, 40, 1024, 640));
+        }
+        else
+        {
+            AppWindow.Resize(new SizeInt32(1280, 800));
+        }
         if (_background)
         {
             // Behind every other window, without activation: the person at the
-            // computer keeps working (the self-test never takes focus).
-            AppWindow.MoveAndResize(new RectInt32(40, 40, 1024, 640));
+            // computer keeps working (a test run never takes focus).
             AppWindow.Show(false);
             nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(Window);
             unsafe
@@ -212,34 +226,43 @@ internal sealed class ViewerWindow
         }
         else
         {
-            List<Rect> screens = [];
-            try
-            {
-                screens.Add(Work(DisplayArea.Primary));
-                foreach (DisplayArea d in DisplayArea.FindAll())
-                {
-                    Rect r = Work(d);
-                    if (!screens.Contains(r))
-                    {
-                        screens.Add(r);
-                    }
-                }
-            }
-            catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
-            {
-                AppLog.Warn($"reading the displays failed: {e.Message}");
-            }
-            if (restore is not null && SavedWindow.Placement(restore.Frame, screens, MinWidth, MinHeight) is { } f)
-            {
-                AppWindow.MoveAndResize(new RectInt32((int)f.X, (int)f.Y, (int)f.Width, (int)f.Height));
-            }
-            else
-            {
-                AppWindow.Resize(new SizeInt32(1280, 800));
-            }
             Window.Activate();
         }
         RememberFrame();
+    }
+
+    /// <summary>Times reading the displays failed (the startup test wants none).</summary>
+    public static int ScreenReadFailures { get; private set; }
+
+    /// <summary>The work areas of the displays, the primary first (empty when they cannot be read).</summary>
+    public static List<Rect> Screens()
+    {
+        List<Rect> screens = [];
+        try
+        {
+            screens.Add(Work(DisplayArea.Primary));
+            // By index, never foreach: the list FindAll returns does not
+            // answer the QueryInterface for IIterable that the projection's
+            // enumerator asks for (E_NOINTERFACE, an InvalidCastException
+            // that ended the app at its first window), while Count and the
+            // indexer work.
+            IReadOnlyList<DisplayArea> all = DisplayArea.FindAll();
+            for (int i = 0; i < all.Count; i++)
+            {
+                Rect r = Work(all[i]);
+                if (!screens.Contains(r))
+                {
+                    screens.Add(r);
+                }
+            }
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or InvalidCastException
+            or System.Runtime.InteropServices.COMException)
+        {
+            ScreenReadFailures++;
+            AppLog.Warn($"reading the displays failed: {e.Message}");
+        }
+        return screens;
     }
 
     private static Rect Work(DisplayArea d) => new(d.WorkArea.X, d.WorkArea.Y, d.WorkArea.Width, d.WorkArea.Height);
