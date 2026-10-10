@@ -1,0 +1,4 @@
+# False positives, one per line (gitleaks fingerprints). Each must be
+# synthetic example data, never a real secret (docs/SANITIZATION.md).
+# Example incident key in the recordings C interface draft:
+1cc2ad5b8e22144485d3f14679c43ac4f48f830c:docs/FFI-RECORDINGS.md:generic-api-key:172

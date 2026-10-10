@@ -13,6 +13,22 @@ step() { printf '\n== %s\n' "$*"; }
 step "sanitization"
 python3 -I scripts/check-sanitized.py --all
 
+# The same full-history secret scan as CI, when Docker or gitleaks is
+# available. NVRVIEW_SECRET_SCAN=0 skips it. False positives go in
+# .gitleaksignore (synthetic examples only).
+if [ "${NVRVIEW_SECRET_SCAN:-1}" = "0" ]; then
+  step "secret scan skipped (NVRVIEW_SECRET_SCAN=0)"
+elif command -v gitleaks >/dev/null 2>&1; then
+  step "secret scan (full history)"
+  gitleaks detect --source=. --redact --no-banner
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  step "secret scan (full history, Docker)"
+  docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.18.4 \
+    detect --source=/repo --redact --no-banner
+else
+  step "secret scan skipped (no gitleaks or Docker)"
+fi
+
 step "rustfmt"
 cargo fmt --all --check
 
