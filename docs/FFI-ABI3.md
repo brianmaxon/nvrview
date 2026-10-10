@@ -24,6 +24,12 @@
 >    core sets `version` itself; `layouts_changed` carries `revision`.
 >    Device keys come from `nv_device_key` (new) and `key` in
 >    `device_info`, one per device address.
+>
+> 7. The switch is not at the new generation's first decoded picture but at
+>    its first one no older than the picture shown, between main and sub
+>    (one clock), capped at 300 ms after its first decoded picture;
+>    `tier_switch` timing carries `delta_ms`, `held_ms`, and `capped`
+>    (FFI.md, "Switching a tile's stream tier").
 
 The additions M3 needs, agreed before the core and the app are built in
 parallel. Everything in [FFI.md](FFI.md) still holds; on implementation this

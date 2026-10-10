@@ -354,9 +354,11 @@ enum NvStatus nv_tile_close(struct NvCore *core, uint64_t tile);
 
 /**
  * Asks the tile to show `tier` (for example main on focus, sub back in the
- * grid). The tile keeps presenting its current stream until the new one's
- * first picture has been decoded, then switches in one step: no gap, no
- * black frame. The new stream's actions carry the next generation; the
+ * grid). The tile keeps presenting its current stream until the new one
+ * has decoded a picture no older than the one shown (between main and sub;
+ * at most 300 ms after its first decoded picture) or its first
+ * picture (otherwise), then switches in one step: no gap, no black frame,
+ * no step back in time. The new stream's actions carry the next generation; the
  * switch is the old generation's final NV_ACTION_RESET (and a tile_tier
  * event). Returns at once; progress arrives as events. Asking for the tier
  * already requested changes nothing.

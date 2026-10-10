@@ -155,6 +155,10 @@ pub struct CoreConfig {
     /// How long a tier switch may take to decode its first picture before
     /// it is abandoned (`tile_tier` `failed`, reason `timeout`).
     pub tier_switch_timeout: Duration,
+    /// Longest a tier switch between main and sub waits, after the new
+    /// tier's first decoded picture, for a picture that is not older than
+    /// the one shown (docs/FFI.md, "Switching a tile's stream tier").
+    pub tier_switch_align_cap: Duration,
 }
 
 impl Default for CoreConfig {
@@ -170,6 +174,7 @@ impl Default for CoreConfig {
             tick_interval: Duration::from_millis(100),
             stats_interval: Duration::from_secs(1),
             tier_switch_timeout: Duration::from_secs(15),
+            tier_switch_align_cap: Duration::from_millis(300),
         }
     }
 }
@@ -303,6 +308,7 @@ impl Core {
             tick_interval: config.tick_interval.max(Duration::from_millis(1)),
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
             tier_switch_timeout: config.tier_switch_timeout,
+            tier_switch_align_cap: config.tier_switch_align_cap,
             audio,
         };
         let layouts = store::Layouts::open(config.data_dir.clone());
