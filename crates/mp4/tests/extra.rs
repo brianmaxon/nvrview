@@ -305,6 +305,29 @@ fn small_files_use_stco() {
 
 // ---- property tests --------------------------------------------------------
 
+/// Found by the property test on Linux: a single frame presented later than
+/// it decodes made the edit-list duration underflow.
+#[test]
+fn presentation_offset_larger_than_media_duration() {
+    let aus = h264();
+    let mut w = Mp4Writer::new(
+        Cursor::new(Vec::new()),
+        VideoCodec::H264,
+        Options::default(),
+    )
+    .unwrap();
+    let t = 123_456_789i64;
+    w.write_video(VideoFrame {
+        data: &aus[0].data,
+        keyframe: true,
+        dts_us: t,
+        pts_us: t + 40_006,
+    })
+    .unwrap();
+    let (file, _) = w.finish().unwrap();
+    assert_eq!(tracks(&file.into_inner())[0].stsz.len(), 1);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 

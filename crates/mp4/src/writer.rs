@@ -121,6 +121,9 @@ struct VideoTrack {
     last_delta: u32,
     min_pts_ticks: i64,
     min_pts_us: i64,
+    /// Latest presentation time seen; with `min_pts_ticks` it bounds the
+    /// presentation span the edit list covers.
+    max_pts_ticks: i64,
 }
 
 fn push_run(runs: &mut Vec<(u32, u32)>, value: u32) {
@@ -288,6 +291,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
             last_delta: 0,
             min_pts_ticks: pts,
             min_pts_us: f.pts_us,
+            max_pts_ticks: pts,
         });
         debug_assert_eq!(v.codec, codec);
         if let Some(e) = new_entry {
@@ -329,6 +333,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
             v.min_pts_ticks = pts;
             v.min_pts_us = f.pts_us;
         }
+        v.max_pts_ticks = v.max_pts_ticks.max(pts);
         if dts - v.pending.first_ticks >= CHUNK_TICKS || v.pending.buf.len() >= CHUNK_BYTES {
             flush(&mut self.out, &mut self.pos, &mut v.pending, &mut v.chunks)?;
         }
@@ -541,6 +546,11 @@ impl Plan {
         let video_media_duration =
             (video.last_dts_ticks - video.first_dts_ticks) as u64 + u64::from(video.last_delta);
         let media_time = video.min_pts_ticks - video.first_dts_ticks;
+        // The presented span: from the earliest presentation time to the
+        // latest plus one frame. (Media duration minus the offset underflows
+        // when presentation offsets exceed the media duration.)
+        let video_presented =
+            (video.max_pts_ticks - video.min_pts_ticks) as u64 + u64::from(video.last_delta);
         let mut audio_media_duration = 0;
         let mut audio_start = None;
         if let Some(a) = audio {
@@ -556,7 +566,7 @@ impl Plan {
             });
         }
         video_edits.push(Edit {
-            duration: video_media_duration - media_time as u64,
+            duration: video_presented,
             media_time,
         });
         let mut audio_edits = Vec::new();
