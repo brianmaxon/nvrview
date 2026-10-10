@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- C# bindings for the nvrview core's C interface (docs/FFI.md, ABI 3). -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>NvrView.Interop</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+</Project>
