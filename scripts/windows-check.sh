@@ -78,7 +78,10 @@ echo "sending the working tree to $host (worker $worker)"
 # shellcheck disable=SC2086,SC2029
 # COPYFILE_DISABLE and --no-mac-metadata keep macOS from adding ._* files
 # (MSBuild took one for a second project file).
-git ls-files -z --cached --others --exclude-standard |
+# Untracked files go too (work not yet committed), but never build output or
+# other checkouts nested in this one.
+git ls-files -z --cached --others --exclude-standard -- . \
+  ':(exclude,glob)**/target/**' ':(exclude).claude/worktrees' ':(exclude).worktrees' |
   COPYFILE_DISABLE=1 tar --no-mac-metadata --null -T - -cf - |
   ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
 

@@ -32,8 +32,7 @@ apps/windows/**/obj/
 apps/macos/.build/
 tools/vision-lab/.build/
 
-# Agent worktrees
+# Agent worktrees (ours and Claude Code's), and browser tool scratch
 /.worktrees/
-
-# Agent worktrees
-/.worktrees/
+/.claude/worktrees/
+/.playwright-cli/
