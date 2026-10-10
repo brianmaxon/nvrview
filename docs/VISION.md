@@ -345,9 +345,13 @@ a third of one core out of 14, and no GPU.
 3. **Model choice: RT-DETR converted by our script** (Apache-2.0 code and
    weights), for people as well as vehicles: R18 (39 MB, 14 ms) with tiles
    at 0.5 found 96 % of people on labeled stills, against Vision's 35 %. R50
-   (83 MB, 23 ms) is better on vehicles. Confirm its hits with a
-   vision-language model (gemma4) before notifying, failing open. Never AGPL
-   models.
+   (83 MB, 23 ms) is better on vehicles. The default pipeline is RT-DETR
+   plus the cheap filters (static-scene memory, repeat suppression, zones;
+   ARCHITECTURE.md). Confirming hits with a vision-language model (gemma4
+   cut person false alarms from 7.2 % to 0.8 %) is **optional and off by
+   default**: it held about 18 GB of GPU memory here (ministral about 7 GB)
+   and takes seconds per event, too much to impose on every user. Never
+   AGPL models.
 4. **Neural Engine only.** Set Vision's main-stage device to the Neural
    Engine explicitly and Core ML's compute units to `cpuAndNeuralEngine`.
    The GPU belongs to the renderer: GPU inference made it 57–80 % busy for one
