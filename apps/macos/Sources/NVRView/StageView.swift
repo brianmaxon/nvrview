@@ -172,8 +172,7 @@ final class StageView: NSView {
         let multiLens = model.isMultiLens(camera)
         let badges = active.map { a in
             TileChromeContent.Badge(
-                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : "")
-                    + (multiLens ? " · " + AppModel.lensName(camera.lens) : ""),
+                text: DetectionTracker.badgeText(a, lensName: multiLens ? AppModel.lensName(camera.lens) : nil),
                 color: Self.color(for: a.kind))
         }
         var detail: [String] = [model.deviceName(camera.device)]
@@ -219,6 +218,8 @@ final class StageView: NSView {
         case "vehicle": NSColor(calibratedRed: 0.9, green: 0.54, blue: 0.18, alpha: 1)
         case "dog_cat": NSColor(calibratedRed: 0.13, green: 0.65, blue: 0.56, alpha: 1)
         case "package": NSColor(calibratedRed: 0.62, green: 0.42, blue: 0.85, alpha: 1)
+        // Sound: a calm slate, apart from the object colors.
+        case "smoke_alarm", "co_alarm": NSColor(calibratedRed: 0.4, green: 0.47, blue: 0.58, alpha: 1)
         default: NSColor(calibratedWhite: 0.45, alpha: 0.9)
         }
     }

@@ -425,6 +425,12 @@ public final class FakeCore: CoreAPI {
         }
     }
 
+    /// Emits a sound detection (`kind` `smoke_alarm` or `co_alarm`) the way
+    /// the core does: `source` `local_audio`, no `lens`.
+    public func emitSoundDetection(device: UInt64, channel: Int, kind: String = "smoke_alarm", start: Bool) {
+        emitDetection(device: device, channel: channel, kind: kind, start: start, source: "local_audio")
+    }
+
     fileprivate func event(_ json: String) { emitEvent(json) }
 
     // MARK: ABI 3: layouts
@@ -784,6 +790,8 @@ private final class FakeTile: Sendable {
             var audioBlocks = 0
             var detectionCycle = 0
             var detectionActive: String?
+            var soundActive: String?
+            var soundCycle = 0
             let detectionStart = ContinuousClock.now
             while !cancel.load(ordering: .acquiring) {
                 _ = pump(count: 1)
@@ -807,6 +815,24 @@ private final class FakeTile: Sendable {
                     } else if !inWindow, let kind = detectionActive {
                         detectionActive = nil
                         owner.emitDetection(device: device, channel: Int(channel), kind: kind, start: false)
+                    }
+                }
+                if let every = owner.options.detectionDemo, every > 0 {
+                    // A sound episode about every fourth cycle, on its own
+                    // schedule: it starts later than a picture detection would.
+                    let elapsed = (ContinuousClock.now - detectionStart) / .seconds(1)
+                    let cycle = Int(elapsed / every)
+                    let inSound = cycle % 4 == Int(channel) % 4
+                        && elapsed.truncatingRemainder(dividingBy: every) > every * 0.5
+                        && elapsed.truncatingRemainder(dividingBy: every) < every * 0.5 + 3
+                    if inSound, soundActive == nil {
+                        let kind = soundCycle % 2 == 0 ? "smoke_alarm" : "co_alarm"
+                        soundCycle += 1
+                        soundActive = kind
+                        owner.emitSoundDetection(device: device, channel: Int(channel), kind: kind, start: true)
+                    } else if !inSound, let kind = soundActive {
+                        soundActive = nil
+                        owner.emitSoundDetection(device: device, channel: Int(channel), kind: kind, start: false)
                     }
                 }
                 next += .seconds(period)

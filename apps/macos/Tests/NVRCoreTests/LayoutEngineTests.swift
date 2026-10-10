@@ -420,6 +420,42 @@ private struct SplitMix {
         #expect(DetectionTracker.sourceLabel(.local) == "this Mac")
     }
 
+    @Test func soundDetections() {
+        func cam(_ lens: Int) -> CameraRef { CameraRef(device: "dev-a", channel: 2, lens: lens) }
+        var t = DetectionTracker()
+        let start = DetectionEvent(
+            device: 1, channel: 2, kind: "smoke_alarm", active: true, source: .localAudio, atNanos: 50)
+        // No lens: the first lens's camera is named, and both lenses show it.
+        t.apply(start, camera: start.camera(deviceKey: "dev-a"))
+        for lens in 0...1 {
+            let a = t.active(for: cam(lens))
+            #expect(a.map(\.kind) == ["smoke_alarm"])
+            #expect(DetectionTracker.badgeText(a[0]) == "Smoke alarm · sound")
+        }
+        #expect(t.active(for: CameraRef(device: "dev-a", channel: 3, lens: 0)).isEmpty)
+        // It sits with the lens's own detections, never replacing them.
+        t.apply(DetectionEvent(device: 1, channel: 2, kind: "people", active: true, lens: 1), camera: cam(1))
+        #expect(t.active(for: cam(1)).map(\.kind) == ["people", "smoke_alarm"])
+        #expect(t.active(for: cam(0)).map(\.kind) == ["smoke_alarm"])
+        #expect(DetectionTracker.badgeText(t.active(for: cam(1))[0], lensName: "Lens 2") == "Person · Lens 2")
+        #expect(DetectionTracker.badgeText(t.active(for: cam(1))[1], lensName: "Lens 2") == "Smoke alarm · sound")
+        #expect(DetectionTracker.label("co_alarm") == "CO alarm")
+        #expect(DetectionTracker.sourceLabel(.localAudio) == "sound")
+        // A stop clears it from every lens; nothing is shown in its place.
+        t.apply(
+            DetectionEvent(device: 1, channel: 2, kind: "smoke_alarm", active: false, source: .localAudio),
+            camera: cam(0))
+        #expect(t.active(for: cam(0)).isEmpty)
+        #expect(t.active(for: cam(1)).map(\.kind) == ["people"])
+        // A lost stop expires, and a disconnect forgets.
+        t.apply(start, camera: cam(0))
+        t.expire(now: 1_000, maxAgeNanos: 100)
+        #expect(t.active(for: cam(0)).isEmpty)
+        t.apply(start, camera: cam(0))
+        t.clear(device: "dev-a")
+        #expect(t.active(for: cam(1)).isEmpty)
+    }
+
     @Test func listenPolicy() {
         let a = cam(1), b = cam(2)
         #expect(ListenPolicy.toggle(a, in: [], additive: false) == [a])

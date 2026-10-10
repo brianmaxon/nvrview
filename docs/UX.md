@@ -69,6 +69,11 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   picture is the interface.
 - A tile that is reconnecting says so in words with its retry countdown;
   detections show as small type badges (people, vehicle, animal) with the
-  source (camera AI or this Mac).
+  source (camera AI or this Mac). A smoke or CO alarm heard in a tile's
+  audio shows as "Smoke alarm · sound" or "CO alarm · sound" in a calm slate,
+  on every lens tile of the channel (a microphone belongs to no lens), and
+  in the sidebar's dot. It goes away when the core reports the stop; the
+  absence of a sound badge is never shown as "no alarm", since a camera
+  microphone is not an alarm sensor.
 - Measured against the budgets in ARCHITECTURE.md: the interface must never
   cost frames. Overlays are lightweight layers above the Metal surface.
