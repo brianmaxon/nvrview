@@ -3,16 +3,18 @@
 
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
+use crate::lens::{self, Camera, LensContext, LensProbes, ProbeJob, TileStarts};
 use bc_protocol::detection::{self, AlarmState};
 use bc_protocol::session::Command;
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, ChannelInfo, VersionInfo};
-use bc_session::{AlarmPush, ConnState, DeviceSession};
+use bc_session::{AlarmPush, ConnState, DeviceSession, LensProbe};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::runtime::Handle;
@@ -49,6 +51,7 @@ pub(crate) struct DeviceHandle {
     session: Option<Arc<DeviceSession>>,
     stop: Option<oneshot::Sender<()>>,
     watcher: Option<JoinHandle<()>>,
+    tiles: Arc<TileStarts>,
 }
 
 impl DeviceHandle {
@@ -61,19 +64,36 @@ impl DeviceHandle {
         session: DeviceSession,
         events: EventSink,
         gate: oneshot::Receiver<()>,
+        lens: LensContext,
     ) -> DeviceHandle {
         let session = Arc::new(session);
+        let tiles = Arc::new(TileStarts::default());
         let (stop_tx, stop_rx) = oneshot::channel();
-        let watcher = tokio::spawn(watch(id, key, session.clone(), events, stop_rx, gate));
+        let ctx = WatchCtx {
+            id,
+            key,
+            session: session.clone(),
+            events,
+            lens,
+            tiles: tiles.clone(),
+        };
+        let watcher = tokio::spawn(watch(ctx, stop_rx, gate));
         DeviceHandle {
             session: Some(session),
             stop: Some(stop_tx),
             watcher: Some(watcher),
+            tiles,
         }
     }
 
     pub(crate) fn session(&self) -> Option<Arc<DeviceSession>> {
         self.session.clone()
+    }
+
+    /// A tile is starting a stream on `channel` (opened, or switching
+    /// tiers): a second-lens probe of that channel waits a little.
+    pub(crate) fn tile_starting(&self, channel: u8) {
+        self.tiles.note(channel);
     }
 
     /// Stops the watcher and its queries. After this the core holds the only
@@ -205,6 +225,7 @@ fn channels_event(
     slots: &[ChannelInfo],
     names: &HashMap<u8, VersionInfo>,
     detects: Option<&Detects>,
+    probed: &HashMap<u8, u8>,
 ) -> String {
     let channels = slots.iter().map(|c| {
         let o = Object::new()
@@ -215,21 +236,22 @@ fn channels_event(
             Some(v) => o.str("name", &v.name).str("model", &v.model),
             None => o,
         };
-        match detects {
-            Some(d) => {
-                let cd = d.get(&c.channel);
-                let o = o.strs(
-                    "detects",
-                    cd.into_iter().flat_map(|x| x.kinds.iter().copied()),
-                );
-                match cd {
-                    Some(x) if x.lenses.len() >= 2 => o
-                        .u64("lenses", x.lenses.len() as u64)
-                        .str_arrays("lens_detects", x.lenses.iter().map(|l| l.iter().copied())),
-                    _ => o,
-                }
-            }
+        let cd = detects.and_then(|d| d.get(&c.channel));
+        let o = match detects {
+            Some(_) => o.strs(
+                "detects",
+                cd.into_iter().flat_map(|x| x.kinds.iter().copied()),
+            ),
             None => o,
+        };
+        match (cd, probed.get(&c.channel)) {
+            (Some(x), _) if x.lenses.len() >= 2 => o
+                .u64("lenses", x.lenses.len() as u64)
+                .str_arrays("lens_detects", x.lenses.iter().map(|l| l.iter().copied())),
+            // Found by a probe: what each lens detects is unknown, so
+            // `lens_detects` is left out.
+            (_, Some(n)) if *n >= 2 => o.u64("lenses", u64::from(*n)),
+            _ => o,
         }
     });
     Object::event("channels")
@@ -241,7 +263,9 @@ fn channels_event(
 enum Info {
     Device(VersionInfo),
     Channels(Vec<VersionInfo>),
-    Detects(Detects),
+    /// The capabilities, or `None` when they could not be read.
+    Detects(Option<Detects>),
+    Probe(ProbeJob, LensProbe),
 }
 
 async fn device_info(session: Arc<DeviceSession>) -> Option<Info> {
@@ -255,17 +279,49 @@ async fn device_info(session: Arc<DeviceSession>) -> Option<Info> {
 /// What each channel (and each lens of a multi-lens camera) detects, from
 /// the `aitype` bits of the capabilities (command 199).
 async fn channel_detects(session: Arc<DeviceSession>) -> Option<Info> {
+    Some(Info::Detects(read_detects(session).await))
+}
+
+async fn read_detects(session: Arc<DeviceSession>) -> Option<Detects> {
     let r = session.query(Command::Support, None).await.ok()?;
     if r.status != 200 && r.status != 300 {
         debug!(status = r.status, "capabilities refused");
         return None;
     }
     let ai = detection::parse_channel_ai(&r.xml).ok()?;
-    Some(Info::Detects(
+    Some(
         ai.into_iter()
             .map(|c| (c.channel, ChannelDetects::from_ai(&c)))
             .collect(),
-    ))
+    )
+}
+
+/// The channels that need a second-lens probe (docs/protocol.md, "Second
+/// lenses"): connected, not listing `externStream`, and not already shown
+/// as multi-lens by the capabilities; each with its camera's identity.
+fn lens_candidates(
+    slots: &[ChannelInfo],
+    names: &HashMap<u8, VersionInfo>,
+    detects: Option<&Detects>,
+    uids: &HashMap<u8, String>,
+) -> Vec<ProbeJob> {
+    slots
+        .iter()
+        .filter(|c| c.connected && !c.tiers.contains(&StreamTier::Extern))
+        .filter(|c| {
+            !detects
+                .and_then(|d| d.get(&c.channel))
+                .is_some_and(|d| d.lenses.len() >= 2)
+        })
+        .map(|c| ProbeJob {
+            channel: c.channel,
+            camera: Camera {
+                uid: uids.get(&c.channel).filter(|u| !u.is_empty()).cloned(),
+                model: names.get(&c.channel).map(|v| v.model.clone()),
+                name: names.get(&c.channel).map(|v| v.name.clone()),
+            },
+        })
+        .collect()
 }
 
 /// Names and models of the given channels (command 318), one query at a
@@ -439,22 +495,35 @@ impl Detections {
     }
 }
 
-/// Turns session state into events until stopped: `device_state` on every
-/// change, `device_info` after each login, and `channels` whenever the
-/// device pushes its list, again once the channel names are known.
-async fn watch(
+/// What a device's watcher works with.
+struct WatchCtx {
     id: u64,
     key: String,
     session: Arc<DeviceSession>,
     events: EventSink,
-    mut stop: oneshot::Receiver<()>,
-    gate: oneshot::Receiver<()>,
-) {
+    lens: LensContext,
+    tiles: Arc<TileStarts>,
+}
+
+/// Turns session state into events until stopped: `device_state` on every
+/// change, `device_info` after each login, and `channels` whenever the
+/// device pushes its list, again once the channel names are known, and
+/// again when a second-lens probe finds a lens. Probes run one at a time,
+/// once the channel list, names, and capabilities are in.
+async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Receiver<()>) {
     tokio::select! {
         biased;
         _ = &mut stop => return,
         _ = gate => {}
     }
+    let WatchCtx {
+        id,
+        key,
+        session,
+        events,
+        lens,
+        tiles,
+    } = ctx;
     let mut state_rx = session.watch_state();
     let mut channels_rx = session.watch_channels();
     let mut alarms_rx = session.alarms();
@@ -463,6 +532,19 @@ async fn watch(
     let mut names: HashMap<u8, VersionInfo> = HashMap::new();
     let mut detects: Option<Detects> = None;
     let mut detections = Detections::default();
+    let timing = lens.timing;
+    let mut probes = LensProbes::new(key.clone(), lens);
+    // Name and capability queries in flight; probes wait for them.
+    let (names_pending, detects_pending) = (AtomicU32::new(0), AtomicU32::new(0));
+    let add = |c: &AtomicU32| c.fetch_add(1, Ordering::Relaxed);
+    // Only this task changes them; atomics only because the future must be
+    // `Send`.
+    let finished = |c: &AtomicU32| {
+        c.store(
+            c.load(Ordering::Relaxed).saturating_sub(1),
+            Ordering::Relaxed,
+        )
+    };
     let (mut state_open, mut channels_open, mut alarms_open) = (true, true, true);
     let send_all = |list: Vec<String>| {
         for e in list {
@@ -475,7 +557,7 @@ async fn watch(
     let mut on_state =
         |s: &ConnState, tasks: &mut JoinSet<Option<Info>>, detections: &mut Detections| {
             if last.as_ref() == Some(s) {
-                return;
+                return false;
             }
             last = Some(s.clone());
             if *s != ConnState::Connected {
@@ -486,8 +568,10 @@ async fn watch(
             events.send(state_event(id, s), Priority::State);
             if *s == ConnState::Connected {
                 tasks.spawn(device_info(session.clone()));
+                add(&detects_pending);
                 tasks.spawn(channel_detects(session.clone()));
             }
+            true
         };
     // Every device starts by connecting; report that even when the session
     // has already moved on by the time this task runs, so apps always see
@@ -497,6 +581,36 @@ async fn watch(
         on_state(&ConnState::Connecting, &mut tasks, &mut detections);
     }
     on_state(&first, &mut tasks, &mut detections);
+
+    // Plans and starts second-lens probes once everything they depend on is
+    // in; sends `channels` when what the app should see changed.
+    let advance = |probes: &mut LensProbes,
+                   tasks: &mut JoinSet<Option<Info>>,
+                   slots: &Option<Vec<ChannelInfo>>,
+                   names: &HashMap<u8, VersionInfo>,
+                   detects: &Option<Detects>| {
+        let Some(list) = slots else { return };
+        if names_pending.load(Ordering::Relaxed) > 0
+            || detects_pending.load(Ordering::Relaxed) > 0
+            || session.state() != ConnState::Connected
+        {
+            return;
+        }
+        let candidates = lens_candidates(list, names, detects.as_ref(), &session.channel_uids());
+        if probes.plan(candidates) {
+            events.send(
+                channels_event(id, list, names, detects.as_ref(), probes.known()),
+                Priority::State,
+            );
+        }
+        if let Some(job) = probes.next() {
+            let (s, t) = (session.clone(), tiles.clone());
+            tasks.spawn(async move {
+                let (job, r) = lens::run_probe(s, t, timing, job).await;
+                Some(Info::Probe(job, r))
+            });
+        }
+    };
 
     loop {
         tokio::select! {
@@ -508,7 +622,9 @@ async fn watch(
             r = state_rx.changed(), if state_open => match r {
                 Ok(()) => {
                     let s = state_rx.borrow_and_update().clone();
-                    on_state(&s, &mut tasks, &mut detections);
+                    if on_state(&s, &mut tasks, &mut detections) {
+                        probes.reset_connection();
+                    }
                 }
                 Err(_) => state_open = false,
             },
@@ -517,13 +633,15 @@ async fn watch(
                     let list = channels_rx.borrow_and_update().clone();
                     if let Some(list) = list {
                         events.send(
-                            channels_event(id, &list, &names, detects.as_ref()),
+                            channels_event(id, &list, &names, detects.as_ref(), probes.known()),
                             Priority::State,
                         );
                         let wanted = list.iter().filter(|c| c.connected).map(|c| c.channel).collect();
+                        add(&names_pending);
                         tasks.spawn(channel_names(session.clone(), wanted));
                         // Cameras may have changed: read their abilities again.
                         if slots.is_some() {
+                            add(&detects_pending);
                             tasks.spawn(channel_detects(session.clone()));
                         }
                         slots = Some(list);
@@ -539,46 +657,54 @@ async fn watch(
                 }
                 Err(broadcast::error::RecvError::Closed) => alarms_open = false,
             },
-            Some(done) = tasks.join_next(), if !tasks.is_empty() => match done {
-                Ok(Some(Info::Device(v))) => {
-                    let mut o = Object::event("device_info")
-                        .u64("device", id)
-                        .str("key", &key)
-                        .str("name", &v.name)
-                        .str("model", &v.model);
-                    if let Some(f) = &v.firmware {
-                        o = o.str("firmware", f);
-                    }
-                    events.send(o.finish(), Priority::State);
-                }
-                Ok(Some(Info::Channels(found))) => {
-                    let mut changed = false;
-                    for v in found {
-                        let Some(ch) = v.channel else { continue };
-                        if names.get(&ch) != Some(&v) {
-                            names.insert(ch, v);
-                            changed = true;
+            Some(done) = tasks.join_next(), if !tasks.is_empty() => {
+                match done {
+                    Ok(Some(Info::Device(v))) => {
+                        let mut o = Object::event("device_info")
+                            .u64("device", id)
+                            .str("key", &key)
+                            .str("name", &v.name)
+                            .str("model", &v.model);
+                        if let Some(f) = &v.firmware {
+                            o = o.str("firmware", f);
                         }
+                        events.send(o.finish(), Priority::State);
                     }
-                    if let (true, Some(list)) = (changed, &slots) {
-                        events.send(
-                            channels_event(id, list, &names, detects.as_ref()),
-                            Priority::State,
-                        );
-                    }
-                }
-                Ok(Some(Info::Detects(d))) => {
-                    if detects.as_ref() != Some(&d) {
-                        detects = Some(d);
-                        if let Some(list) = &slots {
+                    Ok(Some(Info::Channels(found))) => {
+                        finished(&names_pending);
+                        let mut changed = false;
+                        for v in found {
+                            let Some(ch) = v.channel else { continue };
+                            if names.get(&ch) != Some(&v) {
+                                names.insert(ch, v);
+                                changed = true;
+                            }
+                        }
+                        if let (true, Some(list)) = (changed, &slots) {
                             events.send(
-                                channels_event(id, list, &names, detects.as_ref()),
+                                channels_event(id, list, &names, detects.as_ref(), probes.known()),
                                 Priority::State,
                             );
                         }
                     }
+                    Ok(Some(Info::Detects(d))) => {
+                        finished(&detects_pending);
+                        if let Some(d) = d
+                            && detects.as_ref() != Some(&d)
+                        {
+                            detects = Some(d);
+                            if let Some(list) = &slots {
+                                events.send(
+                                    channels_event(id, list, &names, detects.as_ref(), probes.known()),
+                                    Priority::State,
+                                );
+                            }
+                        }
+                    }
+                    Ok(Some(Info::Probe(job, r))) => probes.finish(&job, r),
+                    Ok(None) | Err(_) => {}
                 }
-                Ok(None) | Err(_) => {}
+                advance(&mut probes, &mut tasks, &slots, &names, &detects);
             },
         }
     }
@@ -648,7 +774,8 @@ mod tests {
             },
         );
         let v: serde_json::Value =
-            serde_json::from_str(&channels_event(1, &slots, &names, None)).unwrap();
+            serde_json::from_str(&channels_event(1, &slots, &names, None, &HashMap::new()))
+                .unwrap();
         assert_eq!(v["type"], "channels");
         let c = &v["channels"];
         assert_eq!(c[0]["tiers"], serde_json::json!(["main", "sub", "extern"]));
@@ -665,8 +792,14 @@ mod tests {
                 lenses: Vec::new(),
             },
         );
-        let v: serde_json::Value =
-            serde_json::from_str(&channels_event(1, &slots, &names, Some(&detects))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&channels_event(
+            1,
+            &slots,
+            &names,
+            Some(&detects),
+            &HashMap::new(),
+        ))
+        .unwrap();
         let c = &v["channels"];
         assert_eq!(c[0]["detects"], serde_json::json!(["people", "vehicle"]));
         assert!(c[0].get("lenses").is_none() && c[0].get("lens_detects").is_none());
@@ -688,8 +821,14 @@ mod tests {
             ],
         };
         detects.insert(1, ChannelDetects::from_ai(&ai));
-        let v: serde_json::Value =
-            serde_json::from_str(&channels_event(1, &slots, &names, Some(&detects))).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&channels_event(
+            1,
+            &slots,
+            &names,
+            Some(&detects),
+            &HashMap::new(),
+        ))
+        .unwrap();
         let c = &v["channels"];
         assert_eq!(c[1]["lenses"], 2);
         assert_eq!(

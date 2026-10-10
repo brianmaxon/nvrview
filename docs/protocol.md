@@ -226,7 +226,13 @@ camera B with a wide lens and a pan-tilt-zoom telephoto lens (120 s and 30 s).
 How nvrview detects a second lens (ours, from the facts above): two or more
 `subItem`s in 199; otherwise, for a channel that does not list
 `externStream`, one short `externStream` preview: video within about 2 s
-means a second lens. The answer is kept per device key and channel.
+means a second lens. A stream-info record alone does not decide (the
+second lens's own info record says 0×0 too); only the first picture does.
+A refusal, a 400 included (the probe does not wait for a third-party
+stream), or no picture within the window means a single lens. The
+preview is stopped on every path, probes run one at a time per device on
+its one session, and the answer is kept per device key and channel until
+the channel's camera changes (`uid` in 145, else name and model from 318).
 
 ### Audio payloads
 
@@ -425,7 +431,8 @@ channel whose item has two or more sub-items is reported to the app as a
 multi-lens camera (`lenses`, and `lens_detects` per lens, in the `channels`
 event, docs/FFI.md), with `detects` the union of the item's and the lenses'
 kinds. Without sub-items (older firmware, single-lens cameras) only the
-item's `aitype` is used, and nothing marks a second lens.
+item's `aitype` is used; a second lens can then still be found by the
+probe in "Second lenses", without per-lens kinds.
 
 ### Animal type names
 

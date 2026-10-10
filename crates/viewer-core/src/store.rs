@@ -1,6 +1,7 @@
 //! What the core keeps between runs, in the app's data directory: layouts
 //! (split trees, docs/FFI.md "Layouts") and the stable key of each device
-//! the app has added.
+//! the app has added. (Second-lens probe answers live in `lenses.json`,
+//! written the same way by `crate::lens`.)
 //!
 //! Each is one small JSON file, rewritten whole and atomically (a temporary
 //! file in the same directory, flushed, then renamed over the old one), so
@@ -130,7 +131,7 @@ pub fn validate(v: &Value) -> Result<String, LayoutError> {
 }
 
 /// Writes `value` to `dir/name` atomically.
-fn write_atomic(dir: &Path, name: &str, value: &Value) -> io::Result<()> {
+pub(crate) fn write_atomic(dir: &Path, name: &str, value: &Value) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{name}.tmp"));
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
@@ -144,7 +145,7 @@ fn write_atomic(dir: &Path, name: &str, value: &Value) -> io::Result<()> {
 
 /// Reads `dir/name`; `None` when missing. An unreadable file is moved
 /// aside so it is neither lost nor read again.
-fn read(dir: &Path, name: &str) -> Option<Value> {
+pub(crate) fn read(dir: &Path, name: &str) -> Option<Value> {
     let path = dir.join(name);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
