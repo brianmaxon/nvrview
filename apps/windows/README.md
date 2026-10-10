@@ -13,6 +13,7 @@ headless demo.
 | `layout/nvlayout.c` | prints struct sizes, field offsets, and constants as the C compiler sees `nvrview.h` |
 | `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer (Windows only) |
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
+| `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping) and its tests on simulated time; builds and runs on Windows and Linux |
 | `NvrView.App/` | the app: a WinUI 3 window with the live tile grid, focus, listening, Settings, and a `--selftest` (Windows only) |
 
 Every project targets .NET 10 (the current LTS). The bindings and the smoke
@@ -323,7 +324,22 @@ that is refused once, then streams):
 9. digital zoom draws a non-flat zoomed picture;
 10. no Decode failed so far; a simulated GPU device loss replaces the
     device, rebuilds every decoder, and every tile plays again;
-11. detection events from the mock reached the tiles;
+11. the tile features, on a mock whose channel 1 is a two-lens camera and
+    channel 2 refuses the second lens's tiers: detections from the mock show
+    as corner indicators in the configured corner (the symbols are rendered
+    to a bitmap and checked, and saved as `indicators.png` beside the log); a
+    smoke alarm injected as a core event raises an alert on both lens tiles
+    of its camera and no other (blinking red border, pinned header with the
+    reason, count, times, and state); on a manual clock, full screen (pretended,
+    the window never changes) hides the chrome and the pointer after 3 s idle
+    while the alert and the symbols stay, and the next interaction brings
+    them back; a stop keeps the alert and holds the symbol 2 s; Enter dismisses
+    it on every tile of the camera and the next detection raises a fresh one;
+    Clear, Balanced, and Auto switch the stream (main, extern, sub) and Auto
+    follows zoom (main at 2.5x, still main at 1.7x, sub at 1.5x); a
+    second-lens tile opens on mobile, and an injected `tile_error`
+    `start_rejected` reopens it on extern for the run (the core ends a real
+    refusal only after its 60 s wait);
 12. stopping the mock makes every tile say it is reconnecting;
 13. no callback threw, no tile reported an error or a failed tier switch;
 14. with `--credential-test`, a throwaway credential is written, read back,
@@ -368,9 +384,11 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
 | Type | What |
 | --- | --- |
 | `CoreHost` | the core and the shared GPU device; actions go straight to each tile's `VideoTile` inside the read side of a device gate; events are parsed and handed to the UI thread |
-| `Viewer` | the UI thread's state: devices (state, retry time, channels), tiles (status, tier, listening, detections, zoom); opens a sub-stream tile for every connected channel; the render thread reads an immutable tile array |
+| `Viewer` | the UI thread's state: devices (state, retry time, channels), tiles (status, tier, quality, listening, zoom); opens a tile for every connected channel on the tier the planner picks, and for any lens on request (`OpenCameraTile`); owns the detection tracker, the indicator board, the alert center, and the quality demands; the render thread reads an immutable tile array |
 | `StageRenderer` | the render thread: the swap chain, layout, focus animation, zoom, drawing, presenting, device-loss recovery, readback for the self-test |
-| `StageView`, `TileChrome` | the XAML above the swap chain: hover header, speaker, level meter, status line, badges, selection outline, diagnostics; input |
+| `StageView`, `TileChrome` | the XAML above the swap chain: hover header, speaker, level meter, status line, corner indicators, sound badges, alert strip and border, selection outline, diagnostics; input |
+| `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator corner (`view-settings.json`) |
+| `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `WindowsCredentials`, `DeviceStore`, `SettingsDialog` | passwords in Credential Manager, the device list in `settings.json`, the Settings dialog |
 | `SelfTest`, `MockNvr` | the self-test and the mock it starts |
@@ -446,11 +464,49 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
   (`tile_waiting`), the device refused the stream (`tile_error`), starting,
   recovering, cannot be decoded, and, when a Configure fails because no
   H.265 decoder is installed, that the HEVC Video Extension is needed.
-- **Detections** (`detection`, `motion`, `alarm`, any `source`) show as small
-  badges at the bottom of the tile: what, and who detected it ("camera" for
-  `device`, "this PC" for `local_audio` and `local_video`), smoke and CO
-  alarms in red. They are always visible for now; the corner indicators of
-  docs/UX.md replace them in the next milestone.
+- **Corner indicators** (docs/UX.md). `Viewer.Detections` (a `DetectionTracker`)
+  follows `detection`, `motion`, and `alarm` events per camera (device key,
+  channel, lens), with sound (`local_audio`) per channel shown on every lens;
+  `Viewer.Board` adds the 2 s hold after a stop. `IndicatorStrip` draws one
+  small symbol per active kind (Segoe Fluent Icons; a vector paw, which the
+  font lacks) in white with a baked-in second copy as the shadow, amber for the
+  sound alarms, with a tooltip and automation name ("Person (camera AI)").
+  It updates on events and the 250 ms tick only; nothing runs per frame. The
+  corner (default top right) is in Settings and the right-click menu and is
+  saved in `view-settings.json`. A sidebar row hosts the same control:
+  `strip.SetItems(viewer.Board.Items(deviceKey, channel))` (a collapsed device:
+  `Items(deviceKey)`), refreshed on `Viewer.IndicatorsChanged`. A sound alarm
+  also shows as a slate badge ("Smoke alarm · sound") at the bottom left.
+- **Alerts.** A smoke or CO sound alarm raises an alert per (device, channel)
+  in `Viewer.Alerts`: every tile of that camera, on any lens, shows a red
+  border that blinks about once a second (steady when Windows' "Show
+  animations" is off) and a header strip pinned at the top (so full screen
+  hiding the chrome does not hide it) with the reason, the first time (with the
+  date when not today), the count, the last time, and whether it is sounding
+  now, and a Dismiss button; Enter on the selected tile does the same. A stop
+  does not clear it; dismissing clears it on every tile and resets the count.
+  Raises and dismissals go to the app log.
+- **Quality and tiers.** A tile's context menu has Quality > Auto, Clear,
+  Fluent, Balanced (Balanced only for a single-lens channel whose tiers list
+  `extern`), with a check mark and a note on the main stream's cost;
+  `QualityMenu.Create(tile.Quality, viewer.OffersBalanced(tile), q => viewer.SetQuality(tile, q))`
+  builds it for any window. `CoreHost.Tiers` (a `TierPlanner`) maps what every
+  tile asks (quality, focus, zoom: Auto goes to the main stream at 2x and back
+  below 1.6x) to one tier per camera, highest wins, through the core's aligned
+  tier switch. A second lens (`OpenCameraTile(device, channel, 1)`) opens on
+  `mobile` and uses `extern` focused or zoomed or on Clear; when the core
+  reports `tile_error` `start_rejected` for its `mobile` start (or a
+  `mobile` switch fails), the tile is reopened on `extern` for the rest of the
+  run. A layout leaf stores the choice as its `quality` member:
+  `TileQualities.ToMember` and `FromMember` (Auto is no member).
+- **Full screen chrome.** In full screen the headers and the pointer hide
+  3 s after the last interaction (pointer move, click, key, scroll) and return
+  on the next; the video is never resized, and the alert strips and corner
+  indicators stay. The timer is a `ChromeIdle` on the viewer's injectable
+  clock; the self-test pretends full screen (`FullScreenOverride`) so the window
+  never changes.
+- **M** (or Ctrl+L) listens to the selected tile; the key mapping
+  (`TileKeyMap`) is in `NvrView.Tiles`.
 - **Credentials.** `CredWriteW`/`CredReadW`/`CredDeleteW`, generic
   credentials persisted for this user on this computer
   (`CRED_PERSIST_LOCAL_MACHINE`, never roamed), named after the app's own
@@ -497,6 +553,9 @@ mounted read-only; output in the `nvrview-csharp-*` volumes). About 10 s when
 warm. `scripts/check.sh` runs it when Docker is up (`NVRVIEW_CSHARP_TESTS=0`
 skips it); `scripts/clean-docker.sh` removes the volumes.
 
+The tile features' tests (`apps/windows/NvrView.Tiles.Tests`, simulated time:
+a manual clock, nothing sleeps) run in the same container.
+
 ### On Windows
 
 With the Rust toolchain, the .NET 10 SDK, and Visual Studio's C++ tools (or
@@ -512,6 +571,8 @@ dotnet build/csharp/artifacts/bin/NvrView.Smoke/release/NvrView.Smoke.dll \
   --mock-nvr target/release/mock-nvr.exe --fixtures fixtures/synthetic \
   --lib target/release/nvrview.dll --layout build/csharp/layout.txt \
   --header crates/viewer-ffi/include/nvrview.h
+dotnet build apps/windows/NvrView.Tiles.Tests -c Release --artifacts-path build/csharp/artifacts
+dotnet build/csharp/artifacts/bin/NvrView.Tiles.Tests/release/NvrView.Tiles.Tests.dll
 ```
 
 Then the video self-test (GPU, then WARP):

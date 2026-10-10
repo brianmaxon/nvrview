@@ -57,4 +57,6 @@ docker run --rm \
       --layout /src/target/csharp/layout.txt \
       --header /src/crates/viewer-ffi/include/nvrview.h
     dotnet build NvrView.Shell.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
-    dotnet /build/artifacts/bin/NvrView.Shell.Tests/debug/NvrView.Shell.Tests.dll'
+    dotnet /build/artifacts/bin/NvrView.Shell.Tests/debug/NvrView.Shell.Tests.dll
+    dotnet build NvrView.Tiles.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
+    dotnet /build/artifacts/bin/NvrView.Tiles.Tests/debug/NvrView.Tiles.Tests.dll'

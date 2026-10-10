@@ -18,7 +18,19 @@
 //    decoder, and every tile plays again;
 // 9. no callback threw, no tile reported an error or a failed tier switch,
 //    and no Decode failed before the device loss;
-// 10. with --credential-test, a throwaway credential is written, read back,
+// 10. the tile features (docs/UX.md): detections from the mock reach a tile's
+//    corner indicators, which sit in the configured corner and render; a
+//    sound alarm injected as a core event raises an alert on every lens tile
+//    of its camera (red border, pinned header with reason, count, times),
+//    which survives the stop and the full screen auto-hide on a manual clock
+//    (chrome and pointer hide after 3 s idle, the alert and indicators stay,
+//    the next interaction brings the chrome back), is dismissed with Enter,
+//    and raises a fresh one on the next detection; the indicator hold ends 2 s
+//    after a stop; the Quality menu choices Clear, Balanced, and Auto switch
+//    the stream (main, extern, sub) and Auto follows zoom past 2x and back
+//    below 1.6x; a second-lens tile opens on mobile, and where the device
+//    refuses mobile it is reopened on extern for the run;
+// 11. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
 // Writes what it measured and PASS or FAIL to the --log file and exits 0 or 1.
@@ -26,6 +38,7 @@
 using System.Diagnostics;
 using System.Text;
 using Microsoft.UI.Windowing;
+using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
 
@@ -46,7 +59,7 @@ internal sealed class SelfTest(App app, AppOptions options)
 
     private async Task Watchdog()
     {
-        await Task.Delay(TimeSpan.FromSeconds(options.SelfTestSeconds + 90));
+        await Task.Delay(TimeSpan.FromSeconds(options.SelfTestSeconds + 150));
         Finish(["timed out"]);
     }
 
@@ -279,9 +292,11 @@ internal sealed class SelfTest(App app, AppOptions options)
             await CheckFrame("after device loss", v.Tiles);
         }
 
-        // Detections from the mock (camera AI) reached the tiles as badges.
-        Say($"detection events: {v.DetectionEvents}, active now: " +
-            string.Join(", ", v.Tiles.SelectMany(t => t.Detections.Select(TileChrome.BadgeText)).Distinct()));
+        await TileFeatures(v, stage);
+
+        // Detections from the mock (camera AI) reached the tiles.
+        Say($"detection events: {v.DetectionEvents}, shown now: " +
+            string.Join(", ", v.Tiles.SelectMany(t => v.Board.Items(t.Camera).Select(i => i.Description)).Distinct()));
         if (v.DetectionEvents == 0)
         {
             _problems.Add("no detection events arrived");
@@ -312,6 +327,240 @@ internal sealed class SelfTest(App app, AppOptions options)
         foreach ((string what, long ns) in v.Timings.OrderBy(x => x.Key))
         {
             Say($"timing {what}: {Ms(ns)}");
+        }
+    }
+
+    private static CoreEvent Detect(StageTile tile, string kind, string source, bool start) => new()
+    {
+        Type = "detection",
+        Device = tile.Device.Id,
+        Channel = tile.Channel,
+        Kind = kind,
+        Source = source,
+        State = start ? "start" : "stop",
+    };
+
+    private void Expect(bool ok, string what)
+    {
+        if (!ok)
+        {
+            _problems.Add(what);
+        }
+    }
+
+    // 10. The tile features.
+    private async Task TileFeatures(Viewer v, StageView stage)
+    {
+        // Camera AI detections from the mock reach the corner indicators.
+        bool shown = await Until(() => v.Tiles.Any(t => stage.ChromeFor(t) is { Indicators.Count: > 0 }), 15);
+        StageTile? withSymbols = v.Tiles.FirstOrDefault(t => stage.ChromeFor(t) is { Indicators.Count: > 0 });
+        Say($"corner indicators: {(shown ? string.Join(", ", stage.ChromeFor(withSymbols!)!.Indicators.Select(i => i.Description)) : "none")}, " +
+            $"corner {v.Settings.IndicatorCorner}");
+        Expect(shown, "no tile showed a corner indicator from the mock's detections");
+        Expect(v.Settings.IndicatorCorner == ChromeCorner.TopRight, "the indicator corner is not top right by default");
+        if (withSymbols is not null)
+        {
+            v.Settings.IndicatorCorner = ChromeCorner.BottomLeft;
+            stage.SyncOverlays();
+            Expect(stage.ChromeFor(withSymbols)!.Corner == ChromeCorner.BottomLeft, "the indicator corner setting did not move the symbols");
+            v.Settings.IndicatorCorner = ChromeCorner.TopRight;
+        }
+        await RenderStrip(stage);
+
+        // Alerts, auto-hide, and the hold, on a clock that moves only when told to.
+        var clock = new ManualViewerClock(1000);
+        v.UseClock(clock);
+        StageTile lens0 = v.Tiles.First(t => t.Channel == 1 && t.Lens == 0);
+        DeviceEntry device = lens0.Device;
+        StageTile? lens1 = v.OpenCameraTile(device, 1, 1);
+        Expect(lens1 is not null, "the second-lens tile did not open");
+        if (lens1 is null)
+        {
+            return;
+        }
+        bool lensPlays = await Until(() => lens1.Video.Counters.Decoded > 5 && lens1.PictureWidth > 0, 15);
+        Say($"second lens: opened on {lens1.OpenedTier}, showing {lens1.ShownTier}, decoded {lens1.Video.Counters.Decoded}");
+        Expect(lens1.OpenedTier == StreamTier.Mobile, "a second-lens tile did not open on mobile");
+        Expect(lensPlays, "the second-lens tile did not play");
+        TileChrome c0 = stage.ChromeFor(lens0)!, c1 = stage.ChromeFor(lens1)!;
+        StageTile other = v.Tiles.First(t => t.Channel == 0);
+        TileChrome cOther = stage.ChromeFor(other)!;
+
+        v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
+        stage.Tick();
+        bool both = c0.AlertShown && c1.AlertShown && !cOther.AlertShown;
+        Say($"alert raised: lens 0 {c0.AlertShown}, lens 1 {c1.AlertShown}, other camera {cOther.AlertShown}; " +
+            $"border {(c0.AlertBlinking ? "blinking" : "steady")} (animations {(v.AnimationsEnabled() ? "on" : "off")}); " +
+            $"\"{c0.AlertText.Replace('\n', '|')}\"");
+        Expect(both, "a sound alarm did not raise the alert on both lens tiles of its camera only");
+        Expect(c0.AlertBlinking == v.AnimationsEnabled(), "the alert border does not follow the animation setting");
+        Expect(c0.AlertText.Contains("Smoke alarm (sound)", StringComparison.Ordinal) && c0.AlertText.Contains("Detected 1 time", StringComparison.Ordinal) &&
+            c0.AlertText.Contains("Sounding now", StringComparison.Ordinal), "the alert header lacks the reason, count, or state");
+        Expect(c0.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm) && c1.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm),
+            "the sound alarm is not an indicator on both lenses");
+        Expect(!cOther.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm), "the sound alarm showed on another camera");
+
+        // Full screen: the chrome and pointer hide after 3 s idle; the alert and indicators stay.
+        stage.FullScreenOverride = true;
+        stage.Interact();
+        c0.SetHover(true, true);
+        clock.Advance(2.9);
+        stage.Tick();
+        Expect(stage.ChromeShown && !stage.CursorHidden, "the chrome hid before 3 s");
+        clock.Advance(0.2);
+        stage.Tick();
+        Say($"full screen idle 3.1 s: chrome shown {stage.ChromeShown}, pointer hidden {stage.CursorHidden}, header {c0.HeaderShown}, alert {c0.AlertShown}, symbols {c0.Indicators.Count}");
+        Expect(!stage.ChromeShown && stage.CursorHidden && !c0.HeaderShown, "the chrome and pointer did not hide after 3 s idle in full screen");
+        Expect(c0.AlertShown && c0.Indicators.Count > 0, "the alert or the indicators hid with the chrome");
+        stage.Interact();
+        stage.Tick();
+        Expect(stage.ChromeShown && !stage.CursorHidden, "an interaction did not bring the chrome and pointer back");
+        clock.Advance(4);
+        stage.Tick();
+        Expect(stage.CursorHidden, "the pointer did not hide again");
+        stage.FullScreenOverride = false;
+        stage.Interact();
+        clock.Advance(4);
+        stage.Tick();
+        Expect(!stage.CursorHidden, "the pointer hid outside full screen");
+        stage.FullScreenOverride = null;
+
+        // A stop does not clear the alert; the symbol is held 2 s.
+        v.Apply(Detect(lens0, "smoke_alarm", "local_audio", false));
+        stage.Tick();
+        Expect(c0.AlertShown && c0.AlertText.Contains("Not sounding now", StringComparison.Ordinal), "the stop cleared the alert or did not say it stopped");
+        Expect(c0.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm), "the symbol went the moment the sound stopped");
+        clock.Advance(1.9);
+        stage.Tick();
+        bool held = c0.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm);
+        clock.Advance(0.2);
+        stage.Tick();
+        bool gone = !c0.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm);
+        Say($"indicator hold: after 1.9 s {(held ? "held" : "gone")}, after 2.1 s {(gone ? "gone" : "held")}");
+        Expect(held && gone, "the symbol was not held for 2 s and then removed");
+
+        // Again counts; Enter dismisses for every tile of the camera; a new one starts fresh.
+        v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
+        stage.Tick();
+        Expect(c1.AlertText.Contains("Detected 2 times", StringComparison.Ordinal), "a second detection was not counted");
+        stage.ApplyAction(TileKeyMap.Map(TileKey.Enter, false, false, false, v.Alerts.IsActive(lens1.Camera)), lens1);
+        stage.Tick();
+        Say($"dismissed with Enter: alert on lens 0 {c0.AlertShown}, lens 1 {c1.AlertShown}, log: {string.Join(" / ", v.Alerts.Log.Select(l => l.Text))}");
+        Expect(!c0.AlertShown && !c1.AlertShown && !v.Alerts.IsActive(lens0.Camera), "Enter did not dismiss the alert on every tile of the camera");
+        Expect(v.Alerts.Log.Count >= 3, "the session log lacks the alert lines");
+        v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
+        stage.Tick();
+        Expect(c0.AlertShown && c0.AlertText.Contains("Detected 1 time", StringComparison.Ordinal), "a detection after the dismissal did not raise a fresh alert");
+        v.Apply(Detect(lens0, "smoke_alarm", "local_audio", false));
+        v.DismissAlert(lens0.Camera);
+        stage.Tick();
+        Expect(!c1.AlertShown, "the Dismiss path did not clear the alert");
+        v.UseClock(new SystemViewerClock());
+
+        // Quality: Clear, Balanced, and Auto switch the stream; zoom moves Auto.
+        StageTile q = other;
+        Expect(v.OffersBalanced(q), "Balanced is not offered for a single-lens channel that lists extern");
+        Expect(!v.OffersBalanced(lens0), "Balanced is offered for a two-lens camera");
+        Expect(QualityMenu.Choices(true).SequenceEqual(["Auto", "Clear", "Fluent", "Balanced"]) && QualityMenu.Choices(false).SequenceEqual(["Auto", "Clear", "Fluent"]),
+            "the Quality menu lists the wrong choices");
+        v.SetQuality(q, TileQuality.Clear);
+        bool main = await Until(() => q.ShownTier == "main" && q.PictureWidth > 0, 10);
+        Say($"quality Clear: showing {q.ShownTier} {q.PictureWidth}x{q.PictureHeight}, header \"{StageView.TitleOf(q)}\"");
+        Expect(main, "Clear did not switch the tile to the main stream");
+        Expect(StageView.TitleOf(q).Contains("Clear", StringComparison.Ordinal), "the header does not name the quality");
+        v.SetQuality(q, TileQuality.Balanced);
+        bool mid = await Until(() => q.ShownTier == "extern" && q.PictureWidth > 0, 10);
+        Say($"quality Balanced: showing {q.ShownTier}");
+        Expect(mid, "Balanced did not switch the tile to the extern stream");
+        v.SetQuality(q, TileQuality.Auto);
+        bool sub = await Until(() => q.ShownTier == "sub", 10);
+        Say($"quality Auto: showing {q.ShownTier}");
+        Expect(sub, "Auto did not return the tile to the sub stream");
+        q.Zoom = 2.5f;
+        v.Tick();
+        bool zoomedMain = await Until(() => q.ShownTier == "main", 10);
+        q.Zoom = 1.7f;
+        v.Tick();
+        await Task.Delay(1500);
+        bool stays = q.ShownTier == "main" && q.RequestedTier == StreamTier.Main;
+        q.Zoom = 1.5f;
+        v.Tick();
+        bool back = await Until(() => q.ShownTier == "sub", 10);
+        Say($"auto zoom: 2.5x {(zoomedMain ? "main" : q.ShownTier)}, 1.7x {(stays ? "still main" : "changed")}, 1.5x {(back ? "sub" : q.ShownTier)}");
+        Expect(zoomedMain && stays && back, "Auto did not follow the zoom (main past 2x, still main at 1.7x, sub below 1.6x)");
+        StageView.ResetZoom(q);
+        v.Tick();
+        await Until(() => q.ShownTier == "sub", 10);
+
+        // A camera whose device refuses the second lens's mobile stream: reopened on extern. The core ends
+        // a refused start with tile_error start_rejected only after its 60 s wait (docs/FFI.md), so the event is
+        // injected, as a fake core would.
+        StageTile onCh2 = v.Tiles.First(t => t.Channel == 2 && t.Lens == 0);
+        StageTile? refused = v.OpenCameraTile(onCh2.Device, 2, 1);
+        CameraRef camera = new(onCh2.Device.Config.Key, 2, 1);
+        Expect(refused is { OpenedTier: StreamTier.Mobile }, "the refused second lens did not open on mobile first");
+        ulong firstId = refused?.Id ?? 0;
+        if (refused is not null)
+        {
+            v.Apply(new CoreEvent { Type = "tile_error", Tile = refused.Id, Reason = "start_rejected", Status = 400 });
+        }
+        StageTile? now = v.Tiles.FirstOrDefault(t => t.Camera == camera);
+        bool reopened = now is { OpenedTier: StreamTier.Extern } && now.Id != firstId && v.Planner.NoMobile(camera);
+        Say($"second lens refused on mobile: reopened on {now?.OpenedTier.ToString() ?? "n/a"} as a new tile {now is not null && now.Id != firstId} (no mobile for the run: {v.Planner.NoMobile(camera)}), " +
+            $"a first lens is left alone: {!v.Planner.StartFailed(onCh2.Camera, StreamTier.Sub, "start_rejected")}");
+        Expect(reopened, "a second lens whose mobile start was refused was not reopened on extern");
+        foreach (StageTile t in v.Tiles.Where(t => t.Lens > 0).ToArray())
+        {
+            // The mock refuses extern too on this channel; that refusal is expected.
+            v.Problems.RemoveAll(p => p.StartsWith($"tile_error tile {t.Id}:", StringComparison.Ordinal));
+            v.CloseCameraTile(t);
+        }
+        Expect(v.Tiles.All(t => t.Lens == 0), "a second-lens tile stayed open");
+    }
+
+    // Renders every indicator symbol once on a gray ground, checks that pixels were drawn, and saves the
+    // picture next to the log so a person can look at it.
+    private async Task RenderStrip(StageView stage)
+    {
+        var strip = new IndicatorStrip(24);
+        strip.SetItems([.. IndicatorKinds.All.Select(k => new IndicatorItem(k, "camera AI"))]);
+        var ground = new Microsoft.UI.Xaml.Controls.Border
+        {
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x55, 0x55, 0x55)),
+            Padding = new Microsoft.UI.Xaml.Thickness(8),
+            Child = strip,
+        };
+        var rtb = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
+        stage.HostTemporarily(ground, true);
+        await Task.Delay(300);
+        await rtb.RenderAsync(ground);
+        stage.HostTemporarily(ground, false);
+        byte[] pixels = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(await rtb.GetPixelsAsync());
+        int bright = 0;
+        for (int i = 0; i + 3 < pixels.Length; i += 4)
+        {
+            if (pixels[i] > 0xB0 && pixels[i + 1] > 0xB0 && pixels[i + 2] > 0xB0)
+            {
+                bright++;
+            }
+        }
+        Say($"indicator strip render: {rtb.PixelWidth}x{rtb.PixelHeight}, {bright} bright pixels for {strip.Items.Count} symbols");
+        Expect(bright > 200, "the indicator symbols did not draw");
+        try
+        {
+            using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            Windows.Graphics.Imaging.BitmapEncoder encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, stream);
+            encoder.SetPixelData(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8, Windows.Graphics.Imaging.BitmapAlphaMode.Premultiplied,
+                (uint)rtb.PixelWidth, (uint)rtb.PixelHeight, 96, 96, pixels);
+            await encoder.FlushAsync();
+            stream.Seek(0);
+            var png = new byte[stream.Size];
+            _ = await stream.ReadAsync(System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(png), (uint)stream.Size, Windows.Storage.Streams.InputStreamOptions.None);
+            File.WriteAllBytes(Path.Combine(Path.GetDirectoryName(options.Log!)!, "indicators.png"), png);
+        }
+        catch (Exception e) when (e is IOException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            Say($"could not save the indicator picture: {e.Message}");
         }
     }
 

@@ -92,7 +92,8 @@ public partial class App : Application
         _viewer = new Viewer(
             _host,
             memoryOnly ? new MemoryCredentials() : new WindowsCredentials(),
-            new DeviceStore(memoryOnly ? null : Path.Combine(dataDir, "settings.json")));
+            new DeviceStore(memoryOnly ? null : Path.Combine(dataDir, "settings.json")),
+            new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")));
 
         _window = new Window { Title = "nvrview" };
         AppWindow appWindow = _window.AppWindow;
@@ -143,6 +144,12 @@ public partial class App : Application
                 "--aitype", "7",
                 "--detections", "3",
             };
+            if (o.SelfTest && o.MockChannels >= 3)
+            {
+                // Channel 1 is a two-lens camera (its second lens streams on mobile and extern);
+                // channel 2 refuses those tiers, as a camera without a second lens does.
+                mockArgs.AddRange(["--multi-lens", "1:7,7", "--extern", "2:refused"]);
+            }
             if (o.SelfTest && o.MockChannels >= 2)
             {
                 // The last channel behaves like a third-party camera behind an
