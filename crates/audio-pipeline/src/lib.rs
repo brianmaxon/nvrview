@@ -10,6 +10,8 @@
 //! - [`tap()`]: a bounded, drop-oldest queue of timestamped 16 kHz blocks.
 //! - [`DecodeLevel`]: a tile's level measured as its audio is decoded, for
 //!   tiles that are not audible.
+//! - [`MonoBlock`]: each record as 16 kHz mono, for sound analysis
+//!   ([`TileAudio::set_mono_output`]).
 //!
 //! No I/O, no threads, no platform APIs; the caller supplies every time.
 
@@ -19,6 +21,7 @@ pub mod decode;
 pub mod delay;
 mod fit;
 pub mod level;
+mod mono;
 pub mod output;
 mod playout;
 pub mod presentation;
@@ -29,6 +32,7 @@ pub mod timestamp;
 
 pub use decode::{AudioCodec, PcmFormat};
 pub use level::DecodeLevel;
+pub use mono::MonoBlock;
 pub use output::{
     AudioOutput, LEVEL_PEAK_RELEASE_S, LEVEL_RMS_WINDOW_S, OutputConfig, OutputFormat, Renderer,
     SlotLevel, output,

@@ -157,7 +157,9 @@ the crate's `Renderer`.
   is what speech models (Qwen-ASR, Whisper-class models) take. Taps work on
   any number of tiles, audible or not, through bounded lock-free queues that
   drop the oldest blocks with a counter; a slow consumer never touches
-  playout.
+  playout. The same 16 kHz mono samples feed the core's sound analysis
+  (alarm patterns and loudness, `viewer_core::sound`) on every tile with
+  audio, tapped or not (`TileAudio::set_mono_output`, `mono_block`).
 
 Only one tile is audible at a time by default (the focused one); volume and
 mute are per tile (mute keeps the tile's timing; making a tile silent
