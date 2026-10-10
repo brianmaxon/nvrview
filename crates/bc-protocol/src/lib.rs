@@ -17,5 +17,6 @@
 pub mod crypto;
 pub mod framer;
 pub mod header;
+pub mod media;
 pub mod stream;
 pub mod xml;
