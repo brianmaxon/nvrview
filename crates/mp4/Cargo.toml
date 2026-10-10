@@ -1,0 +1,16 @@
+[package]
+name = "mp4-remux"
+version = "0.1.0"
+description = "Platform-free MP4 (ISO BMFF) writer that remuxes H.264/H.265 and AAC without re-encoding, with bounded memory"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
