@@ -218,7 +218,12 @@ final class AppModel {
 
     private func index(_ key: String) -> Int? { devices.firstIndex { $0.key == key || $0.config.key == key } }
 
-    func hasPassword(_ key: String) -> Bool { runtime(key).flatMap { password($0.config.key) } != nil }
+    /// Whether a password is known, without reading the Keychain's secret
+    /// (Settings shows "Saved in the Keychain" with no permission prompt).
+    func hasPassword(_ key: String) -> Bool {
+        guard let configKey = runtime(key)?.config.key else { return false }
+        return transient[configKey] != nil || credentials.hasPassword(for: configKey)
+    }
 
     /// By configuration key (the Keychain account).
     private func password(_ configKey: String) -> String? {

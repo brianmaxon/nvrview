@@ -37,21 +37,44 @@ struct CameraGroup: Codable, Equatable, Identifiable, Sendable {
 @MainActor
 protocol CredentialStore {
     func password(for key: String) -> String?
+    /// Whether a password is saved, without reading it (no Keychain prompt).
+    func hasPassword(for key: String) -> Bool
     @discardableResult func setPassword(_ password: String, for key: String) -> Bool
     func deletePassword(for key: String)
 }
 
-/// The macOS Keychain: one generic password per device key.
-struct KeychainCredentials: CredentialStore {
-    var service: String
+/// The macOS Keychain: one generic password per device key. Each password is
+/// read from the Keychain at most once per launch and then kept in memory
+/// (never on disk), so reconnects do not ask the Keychain again: every read
+/// can show a permission prompt when the app's signature is not trusted yet.
+@MainActor
+final class KeychainCredentials: CredentialStore {
+    let service: String
+    private var cache: [String: String] = [:]
 
-    func password(for key: String) -> String? { KeychainPassword(service: service, account: key).read() }
+    init(service: String) { self.service = service }
 
-    func setPassword(_ password: String, for key: String) -> Bool {
-        KeychainPassword(service: service, account: key).save(password) == errSecSuccess
+    func password(for key: String) -> String? {
+        if let cached = cache[key] { return cached }
+        let read = KeychainPassword(service: service, account: key).read()
+        if let read { cache[key] = read }
+        return read
     }
 
-    func deletePassword(for key: String) { KeychainPassword(service: service, account: key).delete() }
+    func hasPassword(for key: String) -> Bool {
+        cache[key] != nil || KeychainPassword(service: service, account: key).exists()
+    }
+
+    func setPassword(_ password: String, for key: String) -> Bool {
+        let ok = KeychainPassword(service: service, account: key).save(password) == errSecSuccess
+        if ok { cache[key] = password }
+        return ok
+    }
+
+    func deletePassword(for key: String) {
+        cache[key] = nil
+        KeychainPassword(service: service, account: key).delete()
+    }
 }
 
 /// For `--fake`: kept in memory only, so development never writes made-up
@@ -60,6 +83,7 @@ struct KeychainCredentials: CredentialStore {
 final class MemoryCredentials: CredentialStore {
     private var passwords: [String: String] = [:]
     func password(for key: String) -> String? { passwords[key] }
+    func hasPassword(for key: String) -> Bool { passwords[key] != nil }
     func setPassword(_ password: String, for key: String) -> Bool {
         passwords[key] = password
         return true

@@ -12,6 +12,16 @@ struct KeychainPassword {
     }
 
     /// The stored password, or nil when there is none (or it cannot be read).
+    /// Whether the item exists, from its attributes only: the secret is not
+    /// read, so this never shows a Keychain permission prompt.
+    func exists() -> Bool {
+        var q = query
+        q[kSecReturnAttributes] = true
+        q[kSecMatchLimit] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        return SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess
+    }
+
     func read() -> String? {
         var q = query
         q[kSecReturnData] = true

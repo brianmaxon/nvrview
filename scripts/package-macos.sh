@@ -58,10 +58,22 @@ set_icon 512 512x512;  set_icon 1024 "512x512${at}2x"
 iconutil -c icns "$work/AppIcon.iconset" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$work"
 
-codesign --force --deep --sign - --options runtime \
+# Sign with a stable identity when one is available, so the Keychain keeps
+# trusting the app across rebuilds (an ad hoc signature changes with every
+# build, and macOS then asks again for each saved password).
+# NVRVIEW_SIGN_IDENTITY picks one ("-" forces ad hoc); otherwise the first
+# "Apple Development" identity in the login keychain is used, if any.
+identity="${NVRVIEW_SIGN_IDENTITY:-}"
+if [ -z "$identity" ]; then
+  identity=$(security find-identity -v -p codesigning 2>/dev/null |
+    sed -n 's/.*\([0-9A-F]\{40\}\) "Apple Development:.*/\1/p' | head -n 1)
+fi
+if [ -z "$identity" ]; then identity=-; fi
+if [ "$identity" = - ]; then echo "signing ad hoc"; else echo "signing with identity $identity"; fi
+codesign --force --deep --sign "$identity" --options runtime \
   --entitlements "$pack/NVRView.entitlements" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
-# An ad hoc signature is expected to be rejected here (not notarized).
+# Expected to be rejected here: the app is not notarized.
 spctl --assess --type execute --verbose=2 "$app" || echo "spctl: rejected, as expected without notarization"
 
 echo "$(pwd)/$app"
