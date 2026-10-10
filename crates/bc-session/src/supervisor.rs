@@ -1,12 +1,14 @@
 //! The supervisor task: the only code that connects, talks, and reconnects.
 
 use crate::Shared;
+use crate::archive::{TransferItem, TransferKind, TransferSink};
 use crate::config::{Jitter, SessionConfig};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::transport::Connector;
+use bc_protocol::archive;
 use bc_protocol::framer::Decoder;
 use bc_protocol::media::{Demuxer, Record};
-use bc_protocol::session::{Command, Event, Session};
+use bc_protocol::session::{Command, Event, Session, SessionError};
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, ChannelInfo};
 use std::collections::{HashMap, VecDeque};
@@ -15,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, info, warn};
@@ -103,18 +105,55 @@ impl std::error::Error for QueryError {}
 /// Queries outstanding at once (waiting for login plus in flight).
 const MAX_QUERIES: usize = 32;
 
-struct QueryReq {
-    cmd: Command,
-    channel: Option<u8>,
-    reply: oneshot::Sender<Result<QueryReply, QueryError>>,
+/// A reply to a request sent through the supervisor.
+#[derive(Clone, Debug)]
+pub(crate) struct Reply {
+    pub(crate) status: u16,
+    pub(crate) xml: String,
+    pub(crate) message_id: u32,
+    /// Connection generation the request went out on.
+    pub(crate) conn: u64,
 }
 
-enum Request {
+type ReplyTx = oneshot::Sender<Result<Reply, QueryError>>;
+
+/// Builds one request with the protocol session (so only its allowlisted
+/// builders can produce bytes). Returns the message ID the reply carries.
+pub(crate) type Build =
+    Box<dyn FnOnce(&mut Session) -> Result<(u32, Vec<u8>), SessionError> + Send>;
+
+enum Pending {
+    Info {
+        cmd: Command,
+        channel: Option<u8>,
+    },
+    /// A request built by a closure; with `conn`, only sent on that
+    /// connection generation (a follow-up step that reuses a message ID).
+    Call {
+        build: Build,
+        conn: Option<u64>,
+    },
+}
+
+pub(crate) struct QueryReq {
+    what: Pending,
+    reply: ReplyTx,
+}
+
+/// A request whose reply is a media stream (download or cover image).
+pub(crate) struct TransferReq {
+    pub(crate) kind: TransferKind,
+    pub(crate) build: Build,
+    pub(crate) sink: Arc<TransferSink>,
+}
+
+pub(crate) enum Request {
     Subscribe(NewSub),
     Query(QueryReq),
+    Transfer(TransferReq),
 }
 
-struct NewSub {
+pub(crate) struct NewSub {
     channel: u8,
     tier: StreamTier,
     queue: Arc<FrameQueue>,
@@ -122,12 +161,19 @@ struct NewSub {
 
 /// Handle to a running device session. Dropping it closes the session.
 pub struct DeviceSession {
-    shared: Arc<Shared>,
-    cmd_tx: mpsc::Sender<Request>,
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) cmd_tx: mpsc::Sender<Request>,
     state_rx: watch::Receiver<ConnState>,
     channels_rx: watch::Receiver<Option<Vec<ChannelInfo>>>,
-    query_timeout: Duration,
+    channel_uids_rx: watch::Receiver<HashMap<u8, String>>,
+    pub(crate) query_timeout: Duration,
     queue_frames: usize,
+    /// Searches and cover requests in progress at once.
+    pub(crate) search_permits: Arc<Semaphore>,
+    /// Downloads in progress at once.
+    pub(crate) download_permits: Arc<Semaphore>,
+    pub(crate) download_stall_timeout: Duration,
+    pub(crate) download_buffer_bytes: usize,
     join: Option<JoinHandle<()>>,
 }
 
@@ -142,16 +188,24 @@ impl DeviceSession {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let (state_tx, state_rx) = watch::channel(ConnState::Connecting);
         let (channels_tx, channels_rx) = watch::channel(None);
+        let (channel_uids_tx, channel_uids_rx) = watch::channel(HashMap::new());
         let queue_frames = config.queue_frames;
         let query_timeout = config.query_timeout;
+        let search_permits = Arc::new(Semaphore::new(config.max_searches.max(1)));
+        let download_permits = Arc::new(Semaphore::new(config.max_downloads.max(1)));
+        let download_stall_timeout = config.download_stall_timeout;
+        let download_buffer_bytes = config.download_buffer_bytes;
         let ctx = Ctx {
             cfg: config,
             shared: shared.clone(),
             cmd_rx,
             state_tx,
             channels_tx,
+            channel_uids_tx,
             subs: Subs::default(),
             queries: Queries::default(),
+            transfers: Transfers::default(),
+            conn_gen: 0,
             limiter: LogLimiter::new(Duration::from_secs(5)),
         };
         let join = tokio::spawn(supervise(connector, ctx));
@@ -160,8 +214,13 @@ impl DeviceSession {
             cmd_tx,
             state_rx,
             channels_rx,
+            channel_uids_rx,
             query_timeout,
             queue_frames,
+            search_permits,
+            download_permits,
+            download_stall_timeout,
+            download_buffer_bytes,
             join: Some(join),
         }
     }
@@ -212,13 +271,20 @@ impl DeviceSession {
         if self.shared.is_closing() {
             return Err(QueryError::Closed);
         }
+        let r = self.request(Pending::Info { cmd, channel }).await?;
+        Ok(QueryReply {
+            status: r.status,
+            xml: r.xml,
+        })
+    }
+
+    async fn request(&self, what: Pending) -> Result<Reply, QueryError> {
+        if self.shared.is_closing() {
+            return Err(QueryError::Closed);
+        }
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Request::Query(QueryReq {
-                cmd,
-                channel,
-                reply: tx,
-            }))
+            .send(Request::Query(QueryReq { what, reply: tx }))
             .await
             .map_err(|_| QueryError::Closed)?;
         self.shared.wake.notify_one();
@@ -227,6 +293,20 @@ impl DeviceSession {
             Ok(Err(_)) => Err(QueryError::Closed),
             Err(_) => Err(QueryError::TimedOut),
         }
+    }
+
+    /// Sends a request built by `build` and waits for its reply. With
+    /// `conn`, the request goes out only on that connection generation and
+    /// otherwise fails with [`QueryError::ConnectionLost`] (a follow-up step
+    /// that reuses a message ID is meaningless on a new connection).
+    pub(crate) async fn call(&self, build: Build, conn: Option<u64>) -> Result<Reply, QueryError> {
+        self.request(Pending::Call { build, conn }).await
+    }
+
+    /// Each channel's camera device ID (`uid`), from the latest channel list
+    /// the device pushed (command 145). Recording searches send it.
+    pub fn channel_uids(&self) -> HashMap<u8, String> {
+        self.channel_uids_rx.borrow().clone()
     }
 
     /// The device's channel list, as last pushed by the device (command 145)
@@ -405,7 +485,7 @@ impl Subs {
 #[derive(Default)]
 struct Queries {
     waiting: VecDeque<QueryReq>,
-    in_flight: HashMap<u32, oneshot::Sender<Result<QueryReply, QueryError>>>,
+    in_flight: HashMap<u32, ReplyTx>,
 }
 
 impl Queries {
@@ -436,14 +516,61 @@ impl Queries {
     }
 }
 
+/// One running download or cover request.
+struct ActiveTransfer {
+    kind: TransferKind,
+    sink: Arc<TransferSink>,
+    demux: Demuxer,
+    /// The sink refused data (overflow) or the media was corrupt: stop it.
+    abort: bool,
+}
+
+/// Downloads and cover requests waiting for login, and those running.
+#[derive(Default)]
+struct Transfers {
+    waiting: VecDeque<TransferReq>,
+    active: HashMap<u32, ActiveTransfer>,
+}
+
+impl Transfers {
+    fn add(&mut self, t: TransferReq) {
+        self.waiting.retain(|w| !w.sink.is_cancelled());
+        if self.waiting.len() + self.active.len() >= MAX_QUERIES {
+            t.sink.fail(TransferItem::Busy);
+        } else {
+            self.waiting.push_back(t);
+        }
+    }
+
+    /// Running transfers fail; waiting ones are sent on the next connection.
+    fn connection_lost(&mut self) {
+        for (_, t) in self.active.drain() {
+            t.sink.fail(TransferItem::ConnectionLost);
+        }
+    }
+
+    fn close_all(&mut self) {
+        for (_, t) in self.active.drain() {
+            t.sink.fail(TransferItem::Closed);
+        }
+        for t in self.waiting.drain(..) {
+            t.sink.fail(TransferItem::Closed);
+        }
+    }
+}
+
 struct Ctx {
     cfg: SessionConfig,
     shared: Arc<Shared>,
     cmd_rx: mpsc::Receiver<Request>,
     state_tx: watch::Sender<ConnState>,
     channels_tx: watch::Sender<Option<Vec<ChannelInfo>>>,
+    channel_uids_tx: watch::Sender<HashMap<u8, String>>,
     subs: Subs,
     queries: Queries,
+    transfers: Transfers,
+    /// Incremented on every successful login.
+    conn_gen: u64,
     limiter: LogLimiter,
 }
 
@@ -452,6 +579,7 @@ impl Ctx {
         match r {
             Request::Subscribe(n) => self.subs.add(n),
             Request::Query(q) => self.queries.add(q),
+            Request::Transfer(t) => self.transfers.add(t),
         }
     }
 
@@ -459,6 +587,7 @@ impl Ctx {
     fn connection_lost(&mut self) {
         self.subs.connection_lost();
         self.queries.connection_lost();
+        self.transfers.connection_lost();
     }
 
     /// Ends the session for good: refuses new subscriptions, and closes every
@@ -471,6 +600,7 @@ impl Ctx {
         }
         self.subs.close_all();
         self.queries.close_all();
+        self.transfers.close_all();
     }
 }
 
@@ -708,6 +838,7 @@ where
         }
     }
     info!("logged in");
+    ctx.conn_gen += 1;
     ctx.state_tx.send_replace(ConnState::Connected);
     match connected_loop(ctx, &mut c).await {
         Ok(()) => {
@@ -727,6 +858,19 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
 ) {
+    // Stop running downloads first (144), so the device stops sending.
+    let downloads: Vec<u32> = c.session.active_downloads().collect();
+    for id in downloads {
+        if let Ok(bytes) = c.session.stop_download(id)
+            && c.send(&bytes).await.is_err()
+        {
+            break;
+        }
+        if let Some(t) = ctx.transfers.active.remove(&id) {
+            t.sink.mark_stopped();
+            t.sink.fail(TransferItem::Closed);
+        }
+    }
     let ids: Vec<u32> = c.session.active_previews().collect();
     for id in ids {
         match c.session.stop_preview(id) {
@@ -797,7 +941,7 @@ async fn sync_previews<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Sends info queries that were waiting for login.
+/// Sends queries and calls that were waiting for login.
 async fn sync_queries<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
@@ -806,12 +950,21 @@ async fn sync_queries<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         if q.reply.is_closed() {
             continue;
         }
-        match c.session.query_info(q.cmd, q.channel) {
+        let built = match q.what {
+            Pending::Info { cmd, channel } => c.session.query_info(cmd, channel),
+            Pending::Call { conn: Some(g), .. } if g != ctx.conn_gen => {
+                let _ = q.reply.send(Err(QueryError::ConnectionLost));
+                continue;
+            }
+            Pending::Call { build, .. } => build(&mut c.session),
+        };
+        match built {
             Ok((id, bytes)) => {
                 ctx.queries.in_flight.insert(id, q.reply);
                 c.send(&bytes).await?;
             }
-            Err(_) => {
+            Err(e) => {
+                debug!(%e, "request not built");
                 let _ = q.reply.send(Err(QueryError::NotAllowed));
             }
         }
@@ -819,8 +972,122 @@ async fn sync_queries<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Starts downloads and cover requests that were waiting, and stops those
+/// whose owner cancelled them (144 for a download) or whose data could not
+/// be taken.
+async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    ctx: &mut Ctx,
+    c: &mut Conn<R, W>,
+) -> Result<(), Failure> {
+    let stop: Vec<u32> = ctx
+        .transfers
+        .active
+        .iter()
+        .filter(|(_, t)| t.abort || t.sink.is_cancelled())
+        .map(|(id, _)| *id)
+        .collect();
+    for id in stop {
+        let Some(t) = ctx.transfers.active.remove(&id) else {
+            continue;
+        };
+        if t.kind == TransferKind::Download {
+            match c.session.stop_download(id) {
+                Ok(bytes) => {
+                    c.send(&bytes).await?;
+                    debug!(id, "download stopped");
+                }
+                Err(e) => debug!(%e, "stop_download failed"),
+            }
+        }
+        t.sink.mark_stopped();
+        t.sink.fail(TransferItem::Cancelled);
+    }
+    while let Some(t) = ctx.transfers.waiting.pop_front() {
+        if t.sink.is_cancelled() {
+            t.sink.fail(TransferItem::Cancelled);
+            continue;
+        }
+        match (t.build)(&mut c.session) {
+            Ok((id, bytes)) => {
+                t.sink.started(id);
+                ctx.transfers.active.insert(
+                    id,
+                    ActiveTransfer {
+                        kind: t.kind,
+                        sink: t.sink,
+                        demux: Demuxer::new(),
+                        abort: false,
+                    },
+                );
+                c.send(&bytes).await?;
+            }
+            Err(e) => {
+                debug!(%e, "transfer not built");
+                t.sink.fail(TransferItem::NotAllowed);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hands a download's or cover's media to its sink.
+fn transfer_media(t: &mut ActiveTransfer, data: &[u8], demux_log: &mut LogLimiter) {
+    if t.abort {
+        return;
+    }
+    t.demux.push(data);
+    loop {
+        match t.demux.next_record() {
+            Ok(Some(r)) => {
+                if !t.sink.push(TransferItem::Record(r)) {
+                    t.abort = true;
+                    return;
+                }
+            }
+            Ok(None) => return,
+            Err(e) => {
+                if let Some(n) = demux_log.allow() {
+                    warn!(suppressed = n, error = %e, "bad media record in a download");
+                }
+                // A gap in recorded media cannot be skipped like live
+                // video: fail it so the caller fetches it again.
+                t.sink.fail(TransferItem::BadMedia);
+                t.abort = true;
+                return;
+            }
+        }
+    }
+}
+
 fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
     match ev {
+        Event::Media { message_id, data } if ctx.transfers.active.contains_key(&message_id) => {
+            if let Some(t) = ctx.transfers.active.get_mut(&message_id) {
+                transfer_media(t, &data, demux_log);
+            }
+        }
+        Event::Control {
+            command: 143 | 298,
+            message_id,
+            xml,
+            ..
+        } if ctx.transfers.active.contains_key(&message_id) => {
+            if let Some(t) = ctx.transfers.active.get(&message_id)
+                && t.kind == TransferKind::Download
+                && let Ok(Some(n)) = archive::parse_download_estimate(&xml)
+            {
+                t.sink.push(TransferItem::Estimate(n));
+            }
+        }
+        Event::TransferEnd {
+            message_id, status, ..
+        } => {
+            if let Some(t) = ctx.transfers.active.remove(&message_id)
+                && !t.abort
+            {
+                t.sink.push(TransferItem::End(status));
+            }
+        }
         Event::Media { message_id, data } => {
             let Some(st) = ctx
                 .subs
@@ -875,6 +1142,8 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             command: 145, xml, ..
         } => match xml::parse_channel_info_list(&xml) {
             Ok(list) => {
+                ctx.channel_uids_tx
+                    .send_replace(crate::archive::parse_channel_uids(&xml));
                 ctx.channels_tx.send_replace(Some(list));
             }
             Err(e) => {
@@ -890,7 +1159,12 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             ..
         } => {
             if let Some(tx) = ctx.queries.in_flight.remove(&message_id) {
-                let _ = tx.send(Ok(QueryReply { status, xml }));
+                let _ = tx.send(Ok(Reply {
+                    status,
+                    xml,
+                    message_id,
+                    conn: ctx.conn_gen,
+                }));
             }
         }
         _ => {}
@@ -932,6 +1206,7 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         sync_previews(ctx, c).await?;
         sync_queries(ctx, c).await?;
+        sync_transfers(ctx, c).await?;
         let probe_due = last_rx.max(last_probe) + probe_after;
         let dead_due = last_rx + dead_after;
         tokio::select! {

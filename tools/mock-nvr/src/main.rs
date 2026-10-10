@@ -1,6 +1,8 @@
 //! Command-line mock NVR. The password comes from the `MOCK_NVR_PASSWORD`
 //! environment variable (default `example-password`), never from an argument.
 
+use bc_protocol::archive::DateTime;
+use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::audio::{AudioConfig, AudioFixture};
 use mock_nvr::replay::{Replay, ReplayConfig};
 use mock_nvr::{Config, fixture::Fixture, spawn};
@@ -12,6 +14,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--user NAME] [--max-logins N] [--fps N] [--width N] [--height N]\n\
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
+    \x20               [--recordings DAYS]\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -25,6 +28,7 @@ fn run() -> Result<(), String> {
     let (mut audio_clock, mut audio_jitter_ms) = (16_000.0f64, 0u32);
     let mut replay: Option<PathBuf> = None;
     let (mut replay_loop, mut replay_speed) = (false, 1.0f64);
+    let mut recording_days = 0u32;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -56,6 +60,9 @@ fn run() -> Result<(), String> {
                 audio_jitter_ms = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--replay" => replay = Some(PathBuf::from(v)),
+            "--recordings" => {
+                recording_days = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
             "--replay-speed" => {
                 replay_speed = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
@@ -90,6 +97,17 @@ fn run() -> Result<(), String> {
         rc.speed = replay_speed;
         rc.looped = replay_loop;
         cfg.replay = Some(rc);
+    }
+    if recording_days > 0 {
+        // Recordings on the last N days by this computer's UTC date (the
+        // mock has no time zone; device times are wall-clock times).
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let days = (0..i64::from(recording_days))
+            .filter_map(|i| DateTime::from_naive_secs(now - i * 86_400))
+            .collect();
+        cfg.archive = Some(ArchiveConfig::new(days));
     }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;

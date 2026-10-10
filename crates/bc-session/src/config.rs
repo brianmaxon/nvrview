@@ -72,8 +72,25 @@ pub struct SessionConfig {
     /// Capacity, in frames, of each subscription's queue.
     pub queue_frames: usize,
     /// How long [`crate::DeviceSession::query`] waits for its reply,
-    /// including time spent waiting for the session to log in.
+    /// including time spent waiting for the session to log in. Also the
+    /// limit for each step of a recording search and for a cover image.
     pub query_timeout: Duration,
+    /// Recording searches and cover requests running at once on this device
+    /// (each holds its search open across several requests). Default 1:
+    /// searches are serialized.
+    pub max_searches: usize,
+    /// Downloads (143) running at once on this device. Default 1: the
+    /// device's limit is not known, and live view keeps its share.
+    pub max_downloads: usize,
+    /// A download that delivers nothing for this long has stalled
+    /// ([`crate::DownloadError::Stalled`]). Default 10 s.
+    pub download_stall_timeout: Duration,
+    /// Received download data a consumer may leave unread before the
+    /// download is stopped as overflowed. Downloads are not paced (about
+    /// 20 MB for a minute of a main stream arrived in 1.5 s), and the
+    /// session cannot slow one down without stalling live view. Default
+    /// 64 MiB.
+    pub download_buffer_bytes: usize,
 }
 
 impl SessionConfig {
@@ -91,6 +108,10 @@ impl SessionConfig {
             backoff: BackoffConfig::default(),
             queue_frames: 64,
             query_timeout: Duration::from_secs(15),
+            max_searches: 1,
+            max_downloads: 1,
+            download_stall_timeout: Duration::from_secs(10),
+            download_buffer_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -102,6 +123,7 @@ impl fmt::Debug for SessionConfig {
             .field("dead_after", &self.dead_after)
             .field("backoff", &self.backoff)
             .field("queue_frames", &self.queue_frames)
+            .field("max_downloads", &self.max_downloads)
             .finish_non_exhaustive()
     }
 }

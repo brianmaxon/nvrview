@@ -34,8 +34,12 @@ way people actually use recordings. Protocol facts are in
 
 ## Index
 
-Per device, the core keeps a local index (a small embedded database under the
-app's data directory, bounded by age and size):
+Per device, the core keeps a local index under the app's data directory,
+bounded by age and size. It is one small file per day (every channel's files
+and events of that day, replaced atomically) plus a calendar of recorded
+days, held in memory for queries: searches return a whole day of one channel
+at a time, so a day is the natural unit of refresh and expiry, and plain
+files need no C library on any platform.
 
 - **Days with recordings** per channel (command 142, one request per month).
 - **Recording files** per channel and day (14/15/16): time ranges, sizes,
@@ -63,7 +67,11 @@ Events from all cameras are grouped into incidents:
   on cameras the user groups as covering the same area (for example "front of
   the house": three cameras). Without groups, any cameras.
 - An incident keeps the union of its events' time ranges per camera plus a
-  margin before and after (default 5 s), and its types.
+  margin before and after (default 5 s), and its types. A download takes
+  one continuous range per camera, from its first event to its last, with
+  the margins.
+- Grouping is deterministic: the same events give the same incidents and
+  IDs.
 - Users can merge, split, add or remove a camera, and rename an incident.
 
 ## Finding
@@ -87,11 +95,24 @@ Events from all cameras are grouped into incidents:
   chunks (default 60 s, cut on keyframes by the device). A chunk that stalls
   past a timeout or fails is retried, then the job resumes at the first
   missing chunk; completed chunks are never fetched twice.
+- **Chunks overlap.** The device starts each window at the keyframe at or
+  before its start, so a chunk repeats the end of the previous one (up to a
+  GOP). Windows are requested so that each ends where the next begins, and
+  joining drops frames at or before the previous chunk's last timestamp.
+  Raw chunks (Annex-B video, ADTS audio from the first keyframe on, and an
+  index of timestamps) are kept in the incident folder's `.parts` until the
+  MP4 is written.
+- **Buffering.** Downloads arrive unpaced, and slowing one would stall live
+  view on the same connection, so the session buffers a bounded amount and
+  stops (144) a download whose consumer falls that far behind; the chunk is
+  fetched again.
 - **Scheduling**: jobs from a whole incident are queued together. Devices
   work in parallel; per device, downloads share one session with a small
-  concurrency limit so live view keeps its stream (whether a device can carry
-  live and download traffic on one session at once is to be measured; the
-  official client stops live view during playback).
+  concurrency limit (one download and one search at a time by default) so
+  live view keeps its stream. Whether a device carries live and download
+  traffic on one session at once is to be measured: the official client
+  stops live view during playback, though it ran searches and cover
+  requests beside its download.
 - **Progress** per incident and per camera, pausable, survives app restarts.
 - **No re-encoding** for plain downloads: chunks are joined and remuxed into
   MP4 (H.264 or H.265 video, AAC audio) with correct timestamps.
