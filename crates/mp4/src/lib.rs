@@ -57,8 +57,81 @@
 //!   a stream from an encoder that primes play as decoded.
 //! * Gaps in audio are filled with silent frames only for mono AAC-LC.
 //! * Timestamps must increase by at least one 90 kHz tick (11 µs).
-//! * Fragmented MP4 is not produced; a crash before `finish` leaves a file
-//!   without `moov`.
+//! * [`Mp4Writer`] does not produce fragmented MP4; a crash before `finish`
+//!   leaves a file without `moov`. Use the fragmented API below where that
+//!   matters.
+//!
+//! # Fragmented MP4
+//!
+//! [`Fragmenter`] turns the same input (Annex-B access units, ADTS frames)
+//! into an init segment (`ftyp` + `moov` with `mvex`/`trex`, no samples) and
+//! media segments (`moof` + `mdat`), as owned byte vectors: nothing needs a
+//! file, so a WebSocket can send each [`Segment`] as one binary message.
+//! [`FragmentedFile`] writes the same segments progressively to a file, and
+//! [`finalize_to_mp4`] turns such a file into a regular MP4.
+//!
+//! * **Cutting.** A fragment ends when the next frame is a keyframe (one GOP
+//!   per fragment), when it would span [`FragmentOptions::max_fragment_us`]
+//!   (default 500 ms live, 2 s for files), or when its video reaches
+//!   `max_fragment_bytes`. A fragment closes when the next frame arrives, so
+//!   its last sample's duration is exact; the live delay is therefore up to
+//!   one fragment. Frames before the first keyframe are dropped; the first
+//!   segment after any init always starts with a keyframe, other segments may
+//!   start mid-GOP (their samples say so in the `trun` flags). Segments carry
+//!   `starts_with_keyframe` so a client that joins late can be sent the
+//!   current init ([`Fragmenter::current_init`]) and then segments from the
+//!   next one that starts with a keyframe.
+//! * **Timing.** Times start at 0 at the first video frame and continue
+//!   across inits. `tfdt` is 64-bit; video uses 90 kHz and audio its sample
+//!   rate. Every video sample has its own duration, size, and flags (sync is
+//!   `0x02000000`, non-sync `0x01010000`); composition offsets are written
+//!   only when presentation differs from decode time. Audio is timed by
+//!   sample count; gaps extend the previous frame's duration, duplicates are
+//!   dropped, no silence is made. There is no edit list: audio and video are
+//!   aligned by their `tfdt`.
+//! * **Audio.** The AAC format is declared up front
+//!   ([`FragmentOptions::audio`], from [`parse_adts`]) so the init can carry
+//!   it. [`AudioLayout::Muxed`] (default) puts both tracks in one init and one
+//!   `moof` per fragment (video `traf`, then audio `traf`; one MSE
+//!   `SourceBuffer`). [`AudioLayout::Separate`] makes a video stream and an
+//!   audio stream with their own inits and one-track fragments (CMAF style;
+//!   two `SourceBuffer`s; route by [`Segment::track`]).
+//! * **Codec strings** for `addSourceBuffer` come with each init
+//!   ([`InitInfo::mime`]): `avc1.PPCCLL` (profile, constraint flags, level from
+//!   the SPS) and `hvc1.<profile>.<compat>.<L|H><level>[.<constraints>]`
+//!   for H.265, `mp4a.40.<object type>` for AAC. Sample entries are `avc1`
+//!   and `hvc1` with the sets in `avcC`/`hvcC` only.
+//! * **Parameter-set or resolution change.** At a keyframe whose sets differ
+//!   ([`ChangePolicy::NewInit`]) the open fragment is closed, a new init is
+//!   emitted with `reset: true` and a higher `generation`, and the next
+//!   fragment starts with that keyframe. A client resets its buffer
+//!   (`changeType`, or a new `SourceBuffer`) before appending that init.
+//! * **Memory.** One fragment of video (bounded by time and bytes) and up to
+//!   1 MiB of audio waiting for video; segments are handed to the caller and
+//!   not kept (only the current init is).
+//!
+//! ## Files and downloads
+//!
+//! [`FragmentedFile`] writes `ftyp`, `moov`, then one `moof`+`mdat` per
+//! fragment, flushing after each, optionally ending with a `mfra` random
+//! access index ([`FileOptions::mfra`]). A file cut at any fragment boundary
+//! (or after a crash) plays everything before the cut in ffmpeg; a cut inside
+//! a fragment loses at most that fragment. A file has one `moov`, so a
+//! parameter-set change returns [`Error::ParameterSetsChanged`]: finish the
+//! file and start another with that frame.
+//!
+//! Recommendation for downloads: write the fragmented file while downloading
+//! (crash-safe, nothing to repair, the partial file is playable), and when
+//! the download completes run [`finalize_to_mp4`] to produce the standard
+//! faststart MP4 the user gets (PLAYBACK.md: "standard MP4 files"), then
+//! delete the fragmented file. After a crash, the same function recovers a
+//! truncated fragmented file into a normal MP4. Keep the fragmented file as
+//! the deliverable only for streaming or progressive-play uses (it plays in
+//! players that support fragments, but seeks less well and some editors
+//! refuse it). [`finalize_to_mp4`] reads files written by this crate only.
+//!
+//! The `examples/mse_sample.rs` generator and `tests/mse/` page check
+//! playback in a browser by hand; see `tests/mse/README.md`.
 
 mod adts;
 mod bits;

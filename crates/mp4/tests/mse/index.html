@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MSE fMP4 check</title>
+<style>
+  :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+  body { margin: 1rem auto; max-width: 52rem; padding: 0 1rem; }
+  video { width: 100%; background: #000; max-height: 50vh; }
+  .row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin: .5rem 0; }
+  pre { background: #8883; padding: .5rem; height: 16rem; overflow: auto; font-size: .8rem; }
+  .ok { color: #0a7a2f; } .bad { color: #c0392b; }
+</style>
+</head>
+<body>
+<h1>MSE fMP4 check</h1>
+<p>Plays fragmented MP4 segments from <code>mp4-remux</code> through Media Source
+Extensions, the way a web viewer would receive them. See <code>README.md</code>.</p>
+<div class="row">
+  <label>Sample <select id="sample"></select></label>
+  <label><input type="checkbox" id="live" checked> pace like a live stream</label>
+  <button id="go">Play</button>
+</div>
+<video id="v" controls muted playsinline></video>
+<p id="verdict"></p>
+<pre id="log"></pre>
+<script src="main.js"></script>
+</body>
+</html>
