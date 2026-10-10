@@ -1,10 +1,12 @@
 // Settings: the devices to connect to (address, port, user, password). The
 // list and the form share one dialog; saving reconnects that device. The
 // password goes straight to the credential store and is never shown again:
-// leaving the box empty when editing keeps the saved one.
+// leaving the box empty when editing keeps the saved one. The corner of the
+// tiles' detection symbols is chosen here too.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using NvrView.Tiles;
 
 namespace NvrView.App;
 
@@ -128,15 +130,34 @@ internal static class SettingsDialog
         left.Children.Add(list);
         left.Children.Add(add);
 
+        // Where the tiles' detection symbols sit (docs/UX.md "Corner indicators"): kept in view-settings.json.
+        var corner = new ComboBox { Header = "Detection symbols on tiles", MinWidth = 200 };
+        foreach (ChromeCorner c in Enum.GetValues<ChromeCorner>())
+        {
+            corner.Items.Add(new ComboBoxItem { Content = c.Title(), Tag = c });
+        }
+        corner.SelectedIndex = (int)viewer.Settings.IndicatorCorner;
+        corner.SelectionChanged += (_, _) =>
+        {
+            if (corner.SelectedItem is ComboBoxItem { Tag: ChromeCorner chosen })
+            {
+                viewer.Settings.IndicatorCorner = chosen;
+            }
+        };
+
         var layout = new Grid { ColumnSpacing = 16, RowSpacing = 12 };
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition());
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.Children.Add(left);
         Grid.SetColumn(form, 1);
         layout.Children.Add(form);
-        Grid.SetRow(note, 1);
+        Grid.SetRow(corner, 1);
+        Grid.SetColumnSpan(corner, 2);
+        layout.Children.Add(corner);
+        Grid.SetRow(note, 2);
         Grid.SetColumnSpan(note, 2);
         layout.Children.Add(note);
 

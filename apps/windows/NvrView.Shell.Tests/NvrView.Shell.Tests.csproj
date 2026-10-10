@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Tests of NvrView.Shell (layouts and their JSON, geometry, leases, the
+       sidebar reveal on a manual clock, groups, window restore). A console
+       program with no test framework to restore: prints one line per failed
+       check, a summary, and exits 1 on any failure. Runs on Linux (Docker,
+       scripts/csharp-check.sh) and Windows (scripts/windows-worker.sh). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NvrView.Shell.Tests</RootNamespace>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Shell/NvrView.Shell.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The tile features' pure logic (detection tracking, corner indicators,
+       alerts, stream quality and tier selection, full screen auto-hide, key
+       mapping): no window, no clock of its own, no platform API, so it builds
+       and is tested on Windows and Linux (NvrView.Tiles.Tests). -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>NvrView.Tiles</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+</Project>

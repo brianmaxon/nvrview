@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Tests of NvrView.Tiles on simulated time (a manual clock; nothing
+       sleeps or reads the system clock). Run it with dotnet run. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>NvrView.Tiles.Tests</RootNamespace>
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+  </ItemGroup>
+</Project>

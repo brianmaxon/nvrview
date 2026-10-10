@@ -2,7 +2,8 @@
 # Runs on a Windows computer under Git Bash, in a copy of the tree that
 # scripts/windows-check.sh unpacked: the Windows part of CI (clippy, tests,
 # the C interface library, the C# smoke test), the video self-test on the
-# real GPU, and a build of the Windows app. Stops at the first failure.
+# real GPU, the C# shell tests, and a build of the Windows app. Stops at the
+# first failure.
 #
 #   NVRVIEW_APP_SELFTEST=1   also run the app's self-test in the logged-in
 #                            user's desktop session (scripts/windows-app.sh)
@@ -39,6 +40,10 @@ if [ "$only" != app ]; then
   step "Windows video self-test (GPU, then WARP)"
   scripts/csharp-video-selftest.sh
 fi
+
+step "C# shell tests (layouts, leases, sidebar reveal, window restore)"
+dotnet build apps/windows/NvrView.Shell.Tests -c Release --artifacts-path target/dotnet -v quiet -clp:ErrorsOnly -nologo
+dotnet target/dotnet/bin/NvrView.Shell.Tests/release/NvrView.Shell.Tests.dll
 
 step "Windows app (build)"
 scripts/windows-app.sh build

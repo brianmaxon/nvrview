@@ -1,6 +1,7 @@
-// The render thread: draws the tile grid into the window's swap chain once
-// per display refresh (docs/UX.md "Full screen and focus", docs/RENDERING.md
-// "The platform renderer").
+// One window's render thread: draws its tiles into the window's swap chain
+// once per display refresh (docs/UX.md "Full screen and focus",
+// docs/RENDERING.md "The platform renderer"). Every window has its own; they
+// share the GPU device and its lock.
 //
 // - Pacing: waits on the swap chain's frame latency waitable, then lays the
 //   tiles out, draws, and presents. It keeps doing so during resizes and
@@ -9,28 +10,32 @@
 //   ResizeBuffers at most every 100 ms while it keeps changing, then once
 //   more at the exact size; in between the old buffers are shown stretched
 //   (SetMatrixTransform), so presentation never stops.
-// - Layout: nv_grid_layout in panel pixels, the focused tile's rectangle
-//   animated between its grid cell and the whole stage, digital zoom as a
-//   smaller source rectangle. Each tile's rectangle (in DIPs) is published
-//   on its StageTile for the UI thread's chrome and hit testing.
+// - Layout: the window's split tree, laid out by the UI thread into cells
+//   (DIPs) whenever it or the size changes (StageLayout); here each picture
+//   is fitted into its cell, the focused tile's rectangle animated between
+//   its cell and the whole stage, and digital zoom applied as a smaller
+//   source rectangle. Each tile's rectangle (DIPs) is published on its
+//   StageTile for the chrome and hit testing.
 // - Device loss: a Present that reports the device removed or reset (or a
 //   simulated loss in the self-test) releases the swap chain and renderer,
-//   has CoreHost replace the device and move every tile to it, and starts
-//   again with a new swap chain, which the UI thread attaches to the panel.
+//   has CoreHost replace the device once (other windows' render threads see
+//   the new device and rebuild their own swap chains), and starts again; the
+//   UI thread attaches the new swap chain to the panel.
 
 using System.Diagnostics;
 using NvrView.Interop;
+using NvrView.Shell;
 using NvrView.Video;
 using static TerraFX.Interop.DirectX.DXGI;
 
 namespace NvrView.App;
 
 /// <summary>The focused tile and its animation (immutable; replaced on each change).</summary>
-internal sealed class FocusAnimation(ulong tile, long start, bool entering, float from)
+internal sealed class FocusAnimation(StageTile tile, long start, bool entering, float from)
 {
     public const double Seconds = 0.25;
 
-    public ulong Tile { get; } = tile;
+    public StageTile Tile { get; } = tile;
 
     public long Start { get; } = start;
 
@@ -50,16 +55,27 @@ internal sealed class FocusAnimation(ulong tile, long start, bool entering, floa
     public static float Ease(float p) => p * p * (3 - 2 * p);
 }
 
-/// <summary>A swap chain frame read back for the self-test.</summary>
-internal sealed record StageCapture(RenderedImage Image, float ScaleX, float ScaleY, (ulong Tile, float X, float Y, float W, float H)[] Rects);
+/// <summary>What one window draws: its tiles and their cells in DIPs for a stage of Width x Height (immutable; replaced on each change).</summary>
+internal sealed class StageLayout(StageTile[] tiles, Rect[] cells, double width, double height)
+{
+    public static readonly StageLayout Empty = new([], [], 0, 0);
 
-/// <summary>The render thread (see the file comment).</summary>
+    public StageTile[] Tiles { get; } = tiles;
+
+    public Rect[] Cells { get; } = cells;
+
+    public double Width { get; } = width;
+
+    public double Height { get; } = height;
+}
+
+/// <summary>A swap chain frame read back for the self-test.</summary>
+internal sealed record StageCapture(RenderedImage Image, float ScaleX, float ScaleY, (StageTile Tile, float X, float Y, float W, float H)[] Rects);
+
+/// <summary>A window's render thread (see the file comment).</summary>
 internal sealed unsafe class StageRenderer : IDisposable
 {
-    private const uint Gap = 4;
-
     private readonly CoreHost _host;
-    private readonly Viewer _viewer;
     private readonly Action<nint> _attach;
     private readonly Thread _thread;
     private readonly Lock _sizeLock = new();
@@ -68,25 +84,22 @@ internal sealed unsafe class StageRenderer : IDisposable
     private float _dipWidth, _dipHeight, _scaleX = 1, _scaleY = 1;
     private SwapChainTarget? _target;
     private GridRenderer? _renderer;
+    private GpuDevice? _targetGpu;
     private long _lastResize;
     private float _transformX, _transformY;
     private FocusAnimation? _focus;
+    private StageLayout _layout = StageLayout.Empty;
     private TaskCompletionSource<StageCapture>? _capture;
+    private string? _recover;
 
-    private NvSize[] _sizes = new NvSize[Viewer.MaxTiles];
-    private NvTileLayout[] _layout = new NvTileLayout[Viewer.MaxTiles];
-    private TileDraw[] _draws = new TileDraw[Viewer.MaxTiles];
-    private ulong[] _sequences = new ulong[Viewer.MaxTiles];
-    private readonly NvSize[] _one = new NvSize[1];
-    private readonly NvTileLayout[] _oneLayout = new NvTileLayout[1];
+    private TileDraw[] _draws = new TileDraw[16];
+    private ulong[] _sequences = new ulong[16];
 
     /// <param name="host">The core and device.</param>
-    /// <param name="viewer">The tiles.</param>
     /// <param name="attach">Called (on this thread) with a new swap chain, AddRef'd for the callee to attach and release on the UI thread.</param>
-    public StageRenderer(CoreHost host, Viewer viewer, Action<nint> attach)
+    public StageRenderer(CoreHost host, Action<nint> attach)
     {
         _host = host;
-        _viewer = viewer;
         _attach = attach;
         _thread = new Thread(Run) { Name = "render", IsBackground = true };
     }
@@ -102,14 +115,14 @@ internal sealed unsafe class StageRenderer : IDisposable
     /// <summary>Waits that timed out (window hidden or occluded).</summary>
     public long Timeouts { get; private set; }
 
-    /// <summary>Times the swap chain buffers were resized.</summary>
-    public long Resizes => _target?.Resizes ?? 0;
-
     /// <summary>Total buffer resizes over every swap chain.</summary>
     public long TotalResizes { get; private set; }
 
-    /// <summary>GPU devices replaced.</summary>
+    /// <summary>GPU devices this thread replaced.</summary>
     public int Recoveries { get; private set; }
+
+    /// <summary>Swap chains created (the first, and one after each device change).</summary>
+    public int SwapChains { get; private set; }
 
     /// <summary>The swap chain's current buffer size.</summary>
     public (uint Width, uint Height) BufferSize => _target is { } t ? (t.Width, t.Height) : (0, 0);
@@ -133,6 +146,13 @@ internal sealed unsafe class StageRenderer : IDisposable
     {
         get => Volatile.Read(ref _focus);
         set => Volatile.Write(ref _focus, value);
+    }
+
+    /// <summary>The tiles and cells to draw (set by the UI thread).</summary>
+    public StageLayout Layout
+    {
+        get => Volatile.Read(ref _layout);
+        set => Volatile.Write(ref _layout, value);
     }
 
     public void Start() => _thread.Start();
@@ -164,6 +184,7 @@ internal sealed unsafe class StageRenderer : IDisposable
     {
         while (!_stop)
         {
+            _host.FrameGate.EnterReadLock();
             try
             {
                 Frame();
@@ -175,12 +196,21 @@ internal sealed unsafe class StageRenderer : IDisposable
                 AppLog.Limited("render", 5, $"render: {e.Message}");
                 if (_host.Gpu.IsRemoved)
                 {
-                    Recover($"device removed (0x{_host.Gpu.RemovedReason:X8})");
+                    _recover = $"device removed (0x{_host.Gpu.RemovedReason:X8})";
                 }
                 else
                 {
                     Thread.Sleep(100);
                 }
+            }
+            finally
+            {
+                _host.FrameGate.ExitReadLock();
+            }
+            if (_recover is { } why)
+            {
+                _recover = null;
+                Recover(why);
             }
         }
         ReleaseTarget();
@@ -195,12 +225,20 @@ internal sealed unsafe class StageRenderer : IDisposable
             Thread.Sleep(16);
             return;
         }
+        GpuDevice gpu = _host.Gpu;
+        if (_target is not null && !ReferenceEquals(_targetGpu, gpu))
+        {
+            // Another window replaced the device: start over on the new one.
+            ReleaseTarget();
+        }
         if (_target is null)
         {
-            _renderer = new GridRenderer(_host.Gpu, 0, 0, Gap);
-            _target = new SwapChainTarget(_host.Gpu, wantW, wantH);
+            _renderer = new GridRenderer(gpu, 0, 0, 0);
+            _target = new SwapChainTarget(gpu, wantW, wantH);
+            _targetGpu = gpu;
             _lastResize = Stopwatch.GetTimestamp();
             _transformX = _transformY = 0;
+            SwapChains++;
             ((TerraFX.Interop.Windows.IUnknown*)_target.NativeSwapChain)->AddRef();
             _attach(_target.NativeSwapChain);
         }
@@ -230,25 +268,23 @@ internal sealed unsafe class StageRenderer : IDisposable
             _transformY = ty;
         }
 
-        StageTile[] tiles = _viewer.Tiles;
+        StageLayout layout = Layout;
+        StageTile[] tiles = layout.Tiles;
         int count = tiles.Length;
         if (_draws.Length < count)
         {
-            _sizes = new NvSize[count];
-            _layout = new NvTileLayout[count];
             _draws = new TileDraw[count];
             _sequences = new ulong[count];
         }
-        GpuDevice gpu = _host.Gpu;
         using (gpu.Lock())
         {
-            Layout(tiles, wantW, wantH, now, target.Width / (float)wantW, target.Height / (float)wantH, sx, sy);
+            Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
             _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
         }
         for (int i = 0; i < count; i++)
         {
             ulong seq = _sequences[i];
-            StageTile t = DrawnTile(i, tiles);
+            StageTile t = (StageTile)_draws[i].Tag!;
             if (seq != 0 && seq != t.LastSequence)
             {
                 t.Shown++;
@@ -260,11 +296,11 @@ internal sealed unsafe class StageRenderer : IDisposable
             try
             {
                 RenderedImage image = target.ReadBack();
-                var rects = new (ulong, float, float, float, float)[count];
+                var rects = new (StageTile, float, float, float, float)[count];
                 for (int i = 0; i < count; i++)
                 {
                     TileDraw d = _draws[i];
-                    rects[i] = (DrawnTile(i, tiles).Id, d.DestX, d.DestY, d.DestWidth, d.DestHeight);
+                    rects[i] = ((StageTile)d.Tag!, d.DestX, d.DestY, d.DestWidth, d.DestHeight);
                 }
                 capture.SetResult(new StageCapture(image, target.Width / Math.Max(dipW, 1), target.Height / Math.Max(dipH, 1), rects));
             }
@@ -283,19 +319,15 @@ internal sealed unsafe class StageRenderer : IDisposable
         else if (_simulateLoss)
         {
             _simulateLoss = false;
-            Recover("simulated device loss");
+            _recover = "simulated device loss";
         }
     }
-
-    // Draw order puts the focused tile last; this maps a draw back to its tile.
-    private StageTile DrawnTile(int drawIndex, StageTile[] tiles) =>
-        (StageTile?)_draws[drawIndex].Tag ?? tiles[drawIndex];
 
     private void CheckLoss(int hr, string what)
     {
         if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || _host.Gpu.IsRemoved)
         {
-            Recover($"{what} reported 0x{hr:X8} (reason 0x{_host.Gpu.RemovedReason:X8})");
+            _recover = $"{what} reported 0x{hr:X8} (reason 0x{_host.Gpu.RemovedReason:X8})";
         }
         else
         {
@@ -305,13 +337,15 @@ internal sealed unsafe class StageRenderer : IDisposable
         }
     }
 
+    // Outside the frame gate: replacing the device waits for every window's frame to end.
     private void Recover(string why)
     {
         AppLog.Warn($"GPU device lost: {why}; recreating it");
+        GpuDevice? lost = _targetGpu;
         ReleaseTarget();
         try
         {
-            _host.ReplaceGpu();
+            _host.ReplaceGpu(lost);
             Recoveries++;
         }
         catch (VideoException e)
@@ -328,6 +362,7 @@ internal sealed unsafe class StageRenderer : IDisposable
         _renderer = null;
         _target?.Dispose();
         _target = null;
+        _targetGpu = null;
     }
 
     private (float, float, float, float) ReadSize()
@@ -338,98 +373,79 @@ internal sealed unsafe class StageRenderer : IDisposable
         }
     }
 
-    // Lays the tiles out in panel pixels (w x h), writes the draws in buffer
-    // pixels (bx, by: buffer per panel pixel), and publishes each tile's
-    // rectangle in DIPs (sx, sy: panel pixels per DIP). Under the device lock,
-    // so the picture sizes match the pictures drawn.
-    private void Layout(StageTile[] tiles, uint w, uint h, long now, float bx, float by, float sx, float sy)
+    // Writes the draws in buffer pixels (bx, by: buffer pixels per DIP) and
+    // publishes each tile's rectangle in DIPs. The cells were laid out for
+    // the layout's size; while a resize is still on its way they are scaled
+    // to the panel's. Under the device lock, so picture sizes match the
+    // pictures drawn. The focused tile is drawn last, over the others,
+    // which stop being drawn once it covers the stage.
+    private void Place(StageLayout layout, float dipW, float dipH, long now, float bx, float by)
     {
+        StageTile[] tiles = layout.Tiles;
+        Rect[] cells = layout.Cells;
         int count = tiles.Length;
-        for (int i = 0; i < count; i++)
-        {
-            TilePicture? p = tiles[i].Video.ShownPicture;
-            _sizes[i] = p is { HasPicture: true } ? p.PictureSize : default;
-            tiles[i].PictureWidth = (int)_sizes[i].Width;
-            tiles[i].PictureHeight = (int)_sizes[i].Height;
-        }
-        if (count > 0)
-        {
-            NvCore.GridLayout(new NvSize(w, h), Gap, _sizes.AsSpan(0, count), false, _layout.AsSpan(0, count));
-        }
+        double kx = layout.Width > 0 ? dipW / layout.Width : 1, ky = layout.Height > 0 ? dipH / layout.Height : 1;
         FocusAnimation? focus = Focus;
         int focused = -1;
         float progress = 0;
         if (focus is not null)
         {
-            for (int i = 0; i < count; i++)
-            {
-                if (tiles[i].Id == focus.Tile)
-                {
-                    focused = i;
-                    break;
-                }
-            }
+            focused = Array.IndexOf(tiles, focus.Tile);
             progress = FocusAnimation.Ease(focus.Progress(now));
             if (progress <= 0)
             {
                 focused = -1;
             }
         }
-        // Grid tiles first, the focused tile last (on top); fully focused,
-        // only the focused tile is drawn.
         int n = 0;
-        for (int i = 0; i < count; i++)
+        for (int i = 0; i <= count; i++)
         {
-            StageTile t = tiles[i];
-            bool hidden = focused >= 0 && i != focused && progress >= 1;
-            if (i == focused)
+            // The focused tile last.
+            int k = i < count ? i : focused;
+            if (k < 0 || (i < count && i == focused))
             {
                 continue;
             }
-            NvTileLayout l = _layout[i];
-            Place(ref _draws[n], t, l.Dest.X, l.Dest.Y, l.Dest.Width, l.Dest.Height, l.Source, hidden, bx, by, sx, sy);
-            n++;
-        }
-        if (focused >= 0)
-        {
-            StageTile t = tiles[focused];
-            NvTileLayout cell = _layout[focused];
-            _one[0] = _sizes[focused];
-            NvCore.GridLayout(new NvSize(w, h), 0, _one, false, _oneLayout);
-            NvTileLayout full = _oneLayout[0];
-            float x = Lerp(cell.Dest.X, full.Dest.X, progress), y = Lerp(cell.Dest.Y, full.Dest.Y, progress);
-            float dw = Lerp(cell.Dest.Width, full.Dest.Width, progress), dh = Lerp(cell.Dest.Height, full.Dest.Height, progress);
-            Place(ref _draws[n], t, x, y, dw, dh, full.Source, false, bx, by, sx, sy);
+            StageTile t = tiles[k];
+            TilePicture? p = t.Video?.ShownPicture;
+            int pw = p is { HasPicture: true } ? (int)p.PictureSize.Width : 0, ph = p is { HasPicture: true } ? (int)p.PictureSize.Height : 0;
+            t.PictureWidth = pw;
+            t.PictureHeight = ph;
+            Rect c = cells[k];
+            var cell = new Rect(c.X * kx, c.Y * ky, c.Width * kx, c.Height * ky);
+            Rect dest = LayoutGeometry.Fit(pw, ph, cell);
+            if (k == focused)
+            {
+                dest = Rect.Lerp(dest, LayoutGeometry.Fit(pw, ph, new Rect(0, 0, dipW, dipH)), progress);
+            }
+            bool hidden = focused >= 0 && k != focused && progress >= 1;
+            Draw(ref _draws[n], t, dest, pw, ph, hidden, bx, by);
             n++;
         }
     }
 
-    private static void Place(ref TileDraw d, StageTile t, float x, float y, float w, float h, NvRect source,
-        bool hidden, float bx, float by, float sx, float sy)
+    private static void Draw(ref TileDraw d, StageTile t, Rect dest, int pw, int ph, bool hidden, float bx, float by)
     {
         d.Tile = hidden ? null : t.Video;
         d.Tag = t;
-        d.DestX = x * bx;
-        d.DestY = y * by;
-        d.DestWidth = w * bx;
-        d.DestHeight = h * by;
+        d.DestX = (float)dest.X * bx;
+        d.DestY = (float)dest.Y * by;
+        d.DestWidth = (float)dest.Width * bx;
+        d.DestHeight = (float)dest.Height * by;
         // Digital zoom: a smaller source around the tile's center, kept inside the picture.
         float zoom = Math.Clamp(t.Zoom, 1, 8);
-        float sw = source.Width / zoom, sh = source.Height / zoom;
-        float pw = t.PictureWidth, ph = t.PictureHeight;
+        float sw = pw / zoom, sh = ph / zoom;
         float cx = t.CenterX * pw, cy = t.CenterY * ph;
         d.SrcWidth = sw;
         d.SrcHeight = sh;
-        d.SrcX = zoom > 1 ? Math.Clamp(cx - sw / 2, source.X, source.X + source.Width - sw) : source.X;
-        d.SrcY = zoom > 1 ? Math.Clamp(cy - sh / 2, source.Y, source.Y + source.Height - sh) : source.Y;
-        t.X = x / sx;
-        t.Y = y / sy;
-        t.Width = w / sx;
-        t.Height = h / sy;
+        d.SrcX = zoom > 1 ? Math.Clamp(cx - sw / 2, 0, pw - sw) : 0;
+        d.SrcY = zoom > 1 ? Math.Clamp(cy - sh / 2, 0, ph - sh) : 0;
+        t.X = (float)dest.X;
+        t.Y = (float)dest.Y;
+        t.Width = (float)dest.Width;
+        t.Height = (float)dest.Height;
         t.Visible = !hidden;
     }
-
-    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
 
     /// <summary>Stops the thread and releases the swap chain (detach it from the panel after).</summary>
     public void Dispose()

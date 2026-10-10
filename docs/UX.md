@@ -347,5 +347,15 @@ with Windows conventions:
   leaving focus).
 - A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel;
   touch-screen pinch is not handled yet.
-- Until the corner indicators exist on Windows, detections show as small
-  always-visible badges at the bottom of the tile, with their source.
+- Corner indicators use Segoe Fluent Icons (a vector paw for animals); the
+  corner is chosen in Settings or the right-click menu. A sound alarm also
+  shows as a slate badge at the bottom left. Alerts, the Quality submenu, M,
+  and the full screen idle hiding of the chrome and the pointer follow the
+  sections above; the red border is steady when Windows' "Show animations" is
+  off, as Reduce Motion is on the Mac.
+- Layouts, groups, and windows follow the sections above. Edit Layout is
+  Ctrl+E or the right-click menu (the edit bar holds the name, split, remove,
+  presets, and Save as layout); Ctrl+N opens a new window. Layouts are the
+  same documents the macOS app stores. The edge reveal, its timing, and its
+  pin are as described under "Sidebar"; the sidebar's width is remembered
+  with the window.

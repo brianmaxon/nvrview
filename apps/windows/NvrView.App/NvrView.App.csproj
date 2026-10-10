@@ -27,6 +27,8 @@
   <ItemGroup>
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
     <ProjectReference Include="../NvrView.Video/NvrView.Video.csproj" />
+    <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+    <ProjectReference Include="../NvrView.Shell/NvrView.Shell.csproj" />
     <!-- Microsoft Software License Terms (redistributable; see
          apps/windows/README.md, "Windows App SDK"). Pinned: the 1.8
          metapackage pins each component package exactly. -->

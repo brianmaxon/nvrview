@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The app's shell logic without a user interface: split-pane layouts and
+       their JSON (the same documents the macOS app stores through the core),
+       layout geometry, tile leases, the sidebar's edge reveal, camera groups,
+       and window restore. Plain .NET, so it builds and is tested on Linux
+       too (NvrView.Shell.Tests); the WinUI app (NvrView.App) uses it. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>NvrView.Shell</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- CameraRef and the clock come from the tile features' logic. -->
+    <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+  </ItemGroup>
+</Project>

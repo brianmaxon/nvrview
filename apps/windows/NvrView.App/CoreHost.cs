@@ -11,6 +11,7 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using NvrView.Interop;
+using NvrView.Tiles;
 using NvrView.Video;
 
 namespace NvrView.App;
@@ -37,12 +38,14 @@ internal sealed class CoreEvent
     public long RetryMs;
     public long Generation = -1;
     public long Ns;
+    public long AtNs;
     public double? DeltaMs;
     public double? HeldMs;
     public long Received;
     public long Decoded;
     public long Dropped;
     public long Failures;
+    public long Revision;
     public List<ChannelInfo>? Channels;
 
     /// <summary>The raw JSON of audio_stats events (diagnostics only).</summary>
@@ -86,6 +89,7 @@ internal sealed class CoreEvent
                 case "attempt" when v.ValueKind == JsonValueKind.Number: e.Attempt = (int)Long(v); break;
                 case "retry_ms" when v.ValueKind == JsonValueKind.Number: e.RetryMs = Long(v); break;
                 case "generation" when v.ValueKind == JsonValueKind.Number: e.Generation = Long(v); break;
+                case "at_ns" when v.ValueKind == JsonValueKind.Number: e.AtNs = Long(v); break;
                 case "ns" when v.ValueKind == JsonValueKind.Number: e.Ns = Long(v); break;
                 case "delta_ms" when v.ValueKind == JsonValueKind.Number: e.DeltaMs = v.GetDouble(); break;
                 case "held_ms" when v.ValueKind == JsonValueKind.Number: e.HeldMs = v.GetDouble(); break;
@@ -93,6 +97,7 @@ internal sealed class CoreEvent
                 case "decoded" when v.ValueKind == JsonValueKind.Number: e.Decoded = Long(v); break;
                 case "dropped" when v.ValueKind == JsonValueKind.Number: e.Dropped = Long(v); break;
                 case "failures" when v.ValueKind == JsonValueKind.Number: e.Failures = Long(v); break;
+                case "revision" when v.ValueKind == JsonValueKind.Number: e.Revision = Long(v); break;
                 case "channels" when v.ValueKind == JsonValueKind.Array:
                     e.Channels = [];
                     foreach (JsonElement c in v.EnumerateArray())
@@ -173,8 +178,40 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
 
     public NvCore Core { get; }
 
+    /// <summary>
+    /// Which tier each camera's tiles run at (quality, focus, zoom, second-lens tiers); shared by
+    /// every window, so the highest ask for a camera wins across all of them.
+    /// </summary>
+    public TierPlanner Tiers { get; } = new();
+
+    /// <summary>The core's tier for a planned one.</summary>
+    public static NvStreamTier ToCore(StreamTier tier) => tier switch
+    {
+        StreamTier.Main => NvStreamTier.Main,
+        StreamTier.Mobile => NvStreamTier.Mobile,
+        StreamTier.Extern => NvStreamTier.Extern,
+        _ => NvStreamTier.Sub,
+    };
+
+    /// <summary>The planned tier for a tile_tier event's tier name.</summary>
+    public static StreamTier? ParseTier(string? name) => name switch
+    {
+        "main" => StreamTier.Main,
+        "sub" => StreamTier.Sub,
+        "mobile" => StreamTier.Mobile,
+        "extern" => StreamTier.Extern,
+        _ => null,
+    };
+
     /// <summary>The current device (replaced after a loss); read it on the render thread or inside the gate.</summary>
     public GpuDevice Gpu { get; private set; }
+
+    /// <summary>
+    /// Held (read) by every window's render thread for a frame; replacing
+    /// the device takes it (write), so no frame draws on a device being
+    /// released.
+    /// </summary>
+    public ReaderWriterLockSlim FrameGate { get; } = new(LockRecursionPolicy.NoRecursion);
 
     /// <summary>GPU devices replaced after a loss.</summary>
     public int DeviceReplacements { get; private set; }
@@ -235,13 +272,21 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
     /// Replaces a lost GPU device (render thread): holds back every action,
     /// creates a new device, moves every tile to it, releases the old one.
     /// The renderer's own objects must be released before and recreated after.
+    /// With several windows, each render thread may see the loss: passing the
+    /// device it lost makes the replacement happen once.
     /// </summary>
-    public void ReplaceGpu()
+    public void ReplaceGpu(GpuDevice? lost = null)
     {
+        FrameGate.EnterWriteLock();
         _gate.EnterWriteLock();
         try
         {
             GpuDevice old = Gpu;
+            if (lost is not null && !ReferenceEquals(lost, old))
+            {
+                // Another window's render thread already replaced it.
+                return;
+            }
             GpuDevice fresh = GpuDevice.Create(_gpuChoice);
             lock (_tilesLock)
             {
@@ -258,6 +303,7 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         finally
         {
             _gate.ExitWriteLock();
+            FrameGate.ExitWriteLock();
         }
     }
 
@@ -314,5 +360,6 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         Core.Dispose();
         Gpu.Dispose();
         _gate.Dispose();
+        FrameGate.Dispose();
     }
 }
