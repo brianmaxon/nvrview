@@ -91,6 +91,18 @@ impl fmt::Display for XmlError {
 
 impl std::error::Error for XmlError {}
 
+/// The text an entity or character reference (`&lt;`, `&#38;`) stands for.
+/// The reader reports references separately from the text around them.
+pub(crate) fn resolve_ref(r: &quick_xml::events::BytesRef<'_>) -> Result<String, XmlError> {
+    if let Some(c) = r.resolve_char_ref().map_err(|_| XmlError::Malformed)? {
+        return Ok(c.to_string());
+    }
+    let name = r.xml10_content().map_err(|_| XmlError::Malformed)?;
+    quick_xml::escape::resolve_predefined_entity(&name)
+        .map(str::to_owned)
+        .ok_or(XmlError::Malformed)
+}
+
 /// Text of the first element named `tag` (trimmed), `Ok(None)` if absent.
 pub fn find_text(xml: &str, tag: &str) -> Result<Option<String>, XmlError> {
     let mut reader = Reader::from_str(xml);
@@ -107,6 +119,7 @@ pub fn find_text(xml: &str, tag: &str) -> Result<Option<String>, XmlError> {
             Event::Text(t) if inside => {
                 text.push_str(&t.xml10_content().map_err(|_| XmlError::Malformed)?);
             }
+            Event::GeneralRef(r) if inside => text.push_str(&resolve_ref(&r)?),
             Event::End(_) if inside => return Ok(Some(text.trim().to_owned())),
             Event::Eof => return Ok(None),
             _ => {}
@@ -169,8 +182,13 @@ pub struct Extension {
 
 /// Parses an extension; unknown elements are ignored.
 pub fn parse_extension(xml: &str) -> Result<Extension, XmlError> {
+    // Cover-image replies (298) spell it `EncryptLen` (docs/protocol.md).
+    let encrypt_len = match find_number(xml, "encryptLen")? {
+        Some(n) => Some(n),
+        None => find_number(xml, "EncryptLen")?,
+    };
     Ok(Extension {
-        encrypt_len: find_number(xml, "encryptLen")?,
+        encrypt_len,
         binary_data: find_number(xml, "binaryData")?.is_some_and(|v| v != 0),
         channel_id: find_number(xml, "channelId")?,
     })
@@ -331,6 +349,12 @@ mod tests {
                 binary_data: true,
                 channel_id: None
             }
+        );
+        assert_eq!(
+            parse_extension("<Extension><EncryptLen>1024</EncryptLen></Extension>")
+                .unwrap()
+                .encrypt_len,
+            Some(1024)
         );
         assert_eq!(
             parse_extension("<Extension/>").unwrap(),
