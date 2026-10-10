@@ -9,7 +9,7 @@
 //! Only commands on the read-only allowlist ([`Command`]) can be produced.
 
 use crate::crypto::{SessionKey, credential_hash, xor_obfuscate};
-use crate::framer::{EncodeError, RawMessage, encode_message};
+use crate::framer::{EncodeError, RawMessage, encode_message, encode_message_with_status};
 use crate::header::Class;
 use crate::stream::StreamTier;
 use crate::xml::{self, PreviewPolicy, XmlError};
@@ -67,6 +67,12 @@ impl Command {
         Command::from_number(n).is_some()
     }
 }
+
+/// Message ID of the handshake (and of the login, which reuses it).
+const HANDSHAKE_ID: u32 = 0;
+const LOGIN_ID: u32 = 0;
+/// Status field the handshake request carries (`12 dc` on the wire).
+const HANDSHAKE_STATUS: u16 = 0xdc12;
 
 /// Session errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,30 +248,37 @@ impl Session {
         self.previews.keys().copied()
     }
 
-    fn alloc_id(&mut self) -> u32 {
+    /// Allocates the next message ID (post-login only: refuses, without
+    /// consuming an ID, before login).
+    fn alloc_id(&mut self) -> Result<u32, SessionError> {
+        if self.state != State::LoggedIn {
+            return Err(SessionError::WrongState("not logged in"));
+        }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        id
+        Ok(id)
     }
 
-    /// Builds the first message: command 1, empty body.
+    /// Builds the first message: command 1, empty body, class 0x1465,
+    /// message ID 0, status 0xdc12.
     pub fn handshake(&mut self) -> Result<Vec<u8>, SessionError> {
         if self.state != State::New {
             return Err(SessionError::WrongState("handshake already sent"));
         }
-        let id = self.alloc_id();
         self.state = State::HandshakeSent;
-        Ok(encode_message(
+        Ok(encode_message_with_status(
             Command::Login.number(),
-            id,
+            HANDSHAKE_ID,
+            HANDSHAKE_STATUS,
             Class::ClientHandshake,
             &[],
             &[],
         )?)
     }
 
-    /// Builds the login message from the received nonce. The body is
-    /// XOR-obfuscated.
+    /// Builds the login message from the received nonce: command 1, class
+    /// 0x1464 with payload offset 0, message ID 0, status 0. The body is
+    /// XOR-obfuscated keyed on ID 0. Later messages start at ID 1.
     pub fn login(&mut self) -> Result<Vec<u8>, SessionError> {
         if self.state != State::NonceReceived {
             return Err(SessionError::WrongState("no nonce received"));
@@ -278,14 +291,13 @@ impl Session {
             &credential_hash(&self.user, nonce),
             &credential_hash(&self.password, nonce),
         );
-        let id = self.alloc_id();
         let mut bytes = body.into_bytes();
-        xor_obfuscate(id, &mut bytes);
+        xor_obfuscate(LOGIN_ID, &mut bytes);
         self.state = State::LoginSent;
         Ok(encode_message(
             Command::Login.number(),
-            id,
-            Class::ClientHandshake,
+            LOGIN_ID,
+            Class::Client,
             &[],
             &bytes,
         )?)
@@ -321,7 +333,7 @@ impl Session {
 
     /// Builds a keepalive (command 93, empty body).
     pub fn keepalive(&mut self) -> Result<Vec<u8>, SessionError> {
-        let id = self.alloc_id();
+        let id = self.alloc_id()?;
         self.send(Command::Keepalive, id, &[], &[])
     }
 
@@ -332,7 +344,7 @@ impl Session {
         cmd: Command,
         channel: Option<u8>,
     ) -> Result<Vec<u8>, SessionError> {
-        let id = self.alloc_id();
+        let id = self.alloc_id()?;
         match cmd {
             Command::VersionInfo | Command::StreamInfoList | Command::Support => {
                 self.send(cmd, id, &[], &[])
@@ -352,7 +364,7 @@ impl Session {
         channel: u8,
         tier: StreamTier,
     ) -> Result<(u32, Vec<u8>), SessionError> {
-        let id = self.alloc_id();
+        let id = self.alloc_id()?;
         let body = xml::preview_start_body(channel, tier, PreviewPolicy::NewestIFrame);
         let bytes = self.send(Command::PreviewStart, id, &[], body.as_bytes())?;
         self.previews.insert(
@@ -374,7 +386,7 @@ impl Session {
             .get(&start_id)
             .ok_or(SessionError::UnknownStream(start_id))?;
         let body = xml::preview_stop_body(p.channel, p.tier);
-        let id = self.alloc_id();
+        let id = self.alloc_id()?;
         let bytes = self.send(Command::PreviewStop, id, &[], body.as_bytes())?;
         self.previews.remove(&start_id);
         Ok(bytes)
@@ -564,19 +576,33 @@ mod tests {
             Err(SessionError::WrongState("no nonce received"))
         );
         assert!(s.keepalive().is_err());
-        let hs = decode_one(&s.handshake().unwrap());
+        let hs_bytes = s.handshake().unwrap();
+        assert_eq!(
+            hs_bytes,
+            [
+                0xf0, 0xde, 0xbc, 0x0a, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0xdc, 0x65, 0x14
+            ]
+        );
+        let hs = decode_one(&hs_bytes);
         assert!(s.handshake().is_err());
         assert_eq!(
             s.handle(&decode_one(&device_nonce_reply(&hs))).unwrap(),
             Event::NonceReceived
         );
         // Device side recovers the credential hashes.
-        let login = decode_one(&s.login().unwrap());
-        assert_eq!(login.header.command, 1);
+        let login_bytes = s.login().unwrap();
+        let login = decode_one(&login_bytes);
+        assert_eq!(&login_bytes[..4], &[0xf0, 0xde, 0xbc, 0x0a]);
+        assert_eq!(login_bytes[4..8], 1u32.to_le_bytes());
+        assert_eq!(login_bytes[8..12], (login.body.len() as u32).to_le_bytes());
+        assert_eq!(login_bytes[12..16], [0, 0, 0, 0]);
+        assert_eq!(login_bytes[16..24], [0, 0, 0x64, 0x14, 0, 0, 0, 0]);
+        assert_eq!(login.header.message_id, 0);
         let mut body = login.body.clone();
         xor_obfuscate(login.header.message_id, &mut body);
         let text = String::from_utf8(body).unwrap();
         assert!(text.starts_with(xml::XML_DECLARATION));
+        assert!(text.contains("<type>LAN</type>\n<udpPort>0</udpPort>"));
         assert_eq!(
             find_text(&text, "userName").unwrap().unwrap(),
             credential_hash(USER, NONCE)
@@ -596,6 +622,7 @@ mod tests {
         let key = SessionKey::derive(NONCE, PASSWORD);
         let ka = decode_one(&s.keepalive().unwrap());
         assert_eq!((ka.header.command, ka.header.class), (93, Class::Client));
+        assert_eq!((ka.header.message_id, ka.header.status), (1, 0));
         assert!(ka.body.is_empty());
         let mut reply = b"<body><LinkType><type>LAN</type></LinkType></body>".to_vec();
         key.encrypt(&mut reply);

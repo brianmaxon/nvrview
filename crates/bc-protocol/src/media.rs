@@ -2,6 +2,11 @@
 //!
 //! The payloads of one stream (one message ID), concatenated in order, form a
 //! sequence of records, each padded so the next starts on an 8-byte boundary.
+//!
+//! Confirmed on hardware: the info record's header-size field is the total
+//! record length from the record start; video extra-header sizes were always
+//! multiples of 8 (so padding the payload alone or the whole record agree);
+//! in audio records the u16 at +6 equals the u16 at +4.
 
 use std::fmt;
 

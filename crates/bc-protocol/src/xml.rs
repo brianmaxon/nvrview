@@ -33,7 +33,7 @@ fn wrap(inner: &str) -> String {
 pub fn login_body(user_hash: &str, password_hash: &str) -> String {
     wrap(&format!(
         "<LoginUser version=\"1.1\">\n<userName>{user_hash}</userName>\n<password>{password_hash}</password>\n\
-         <userVer>1</userVer>\n</LoginUser>\n<LoginNet version=\"1.1\">\n<type>LAN</type>\n</LoginNet>\n"
+         <userVer>1</userVer>\n</LoginUser>\n<LoginNet version=\"1.1\">\n<type>LAN</type>\n<udpPort>0</udpPort>\n</LoginNet>\n"
     ))
 }
 
