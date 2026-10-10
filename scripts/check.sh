@@ -34,6 +34,9 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
     step "macOS demo self-test"
     (cd apps/macos && swift build --product NVRViewDemo &&
       .build/debug/NVRViewDemo --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+    step "macOS demo self-test, Metal renderer"
+    (cd apps/macos &&
+      .build/debug/NVRViewDemo --renderer metal --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
   else
     step "macOS demo self-test skipped (no desktop session)"
   fi
