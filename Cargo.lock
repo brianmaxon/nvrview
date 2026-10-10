@@ -528,6 +528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "viewer-ffi"
+version = "0.1.0"
+dependencies = [
+ "mock-nvr",
+ "viewer-core",
+]
+
+[[package]]
 name = "viewer-log"
 version = "0.1.0"
 dependencies = [
