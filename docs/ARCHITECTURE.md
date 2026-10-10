@@ -269,7 +269,7 @@ Not scheduled; recorded so the extension points stay able to carry them.
 | M2 | C interface plus one live channel in the macOS app | the boundary |
 | M2a | Listening on one tile: AAC decode, timestamping, drift-corrected playback, audio tap | audio that stays in sync |
 | M3 | Grid, full-screen focus, several windows (any camera in any window, the same camera in more than one), reconnect, Keychain, an app bundle | a usable macOS app |
-| P | Playback: find recorded clips quickly (timeline, thumbnails, detections) and download them fast, resumably, and reliably | better than the official app's slow, error-prone downloads |
+| P | Playback by incident ([PLAYBACK.md](PLAYBACK.md)): search by event type, every angle of an event at once, background resumable downloads, readable output, follow cuts and 2-up/4-up edits | better than the official app's slow, error-prone downloads |
 | M4 | Windows app, one channel, then the grid | Windows |
 
 ## Lessons from the official app
