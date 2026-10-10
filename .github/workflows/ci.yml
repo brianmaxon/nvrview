@@ -40,3 +40,28 @@ jobs:
         if: hashFiles('Cargo.toml') != ''
       - run: cargo test --workspace
         if: hashFiles('Cargo.toml') != ''
+      # The C interface as apps link it: static library and shared library
+      # (nvrview.dll plus its import library on Windows).
+      - name: Build the C interface library
+        run: cargo build --release -p viewer-ffi
+      - name: Check the C interface artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: ls -l target/release/libnvrview.a target/release/libnvrview.so
+      - name: Check the C interface artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: ls -l target/release/nvrview.lib target/release/nvrview.dll target/release/nvrview.dll.lib
+      - name: C smoke test against mock-nvr (Linux)
+        if: runner.os == 'Linux'
+        run: scripts/test-c-ffi.sh
+
+  # The committed header must be what cbindgen generates from the source.
+  header:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen
+      - run: scripts/gen-header.sh --check

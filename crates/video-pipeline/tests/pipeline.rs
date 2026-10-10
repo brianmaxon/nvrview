@@ -171,7 +171,12 @@ fn intermittent_failures_flush_without_resets() {
 fn persistent_failures_escalate_boundedly_then_give_up() {
     for (_, codec) in CODECS {
         let (_, aus) = load(&name("basic", codec));
-        let config = PipelineConfig::default();
+        // One give-up cycle; timed retries are covered by the
+        // `undecodable_*` tests below.
+        let config = PipelineConfig {
+            undecodable_retry_us: 0,
+            ..PipelineConfig::default()
+        };
         let mut h =
             Harness::new(config).with_decoder(|_, _| Answer::Fail(DecodeFailureKind::DecodeError));
         // Ten simulated minutes of the same stream.
@@ -575,7 +580,11 @@ fn every_platform_failure_kind_is_bounded() {
         NoPicture,
     ] {
         let (_, aus) = load("h264-basic.h264");
-        let config = PipelineConfig::default();
+        // One give-up cycle; see `undecodable_retries_stay_bounded`.
+        let config = PipelineConfig {
+            undecodable_retry_us: 0,
+            ..PipelineConfig::default()
+        };
         let mut h = Harness::new(config).with_decoder(move |_, _| Answer::Fail(kind));
         for round in 0..200u64 {
             feed_all(&mut h, Codec::H264, &aus, round * 60 * FRAME_US);
@@ -587,5 +596,111 @@ fn every_platform_failure_kind_is_bounded() {
         );
         assert!(s.configures <= 1 + u64::from(config.max_resets_per_window));
         assert_eq!(h.p.status(), TileStatus::Undecodable, "{kind:?}");
+    }
+}
+
+/// Seconds of stream in one pass over a 60-picture fixture.
+const ROUND_US: u64 = 60 * FRAME_US;
+
+#[test]
+fn undecodable_tile_retries_after_the_delay() {
+    for (_, codec) in CODECS {
+        let (_, aus) = load(&name("basic", codec));
+        let config = PipelineConfig::default();
+        let mut h = Harness::new(config);
+        // The first decoder creation fails with rejected parameter sets; the
+        // same parameter sets work later (a transient platform failure).
+        h.configure = Box::new(|n| (n == 0).then_some(DecodeFailureKind::InvalidParameterSets));
+        feed_all(&mut h, codec, &aus, 0);
+        assert_eq!(h.p.status(), TileStatus::Undecodable);
+        assert_eq!(h.p.stats().configures, 1);
+
+        // Nothing is tried again before the delay, however many keyframes
+        // arrive.
+        let rounds_before = config.undecodable_retry_us / ROUND_US - 1;
+        for round in 1..=rounds_before {
+            feed_all(&mut h, codec, &aus, round * ROUND_US);
+        }
+        assert_eq!(h.p.stats().configures, 1);
+        assert_eq!(h.p.stats().decoded, 0);
+        assert_eq!(h.p.status(), TileStatus::Undecodable);
+
+        // After it, the next keyframe configures the same format again.
+        for round in rounds_before + 1..rounds_before + 3 {
+            feed_all(&mut h, codec, &aus, round * ROUND_US);
+        }
+        let s = h.p.stats();
+        assert_eq!(s.configures, 2, "{codec:?}");
+        assert!(s.decoded > 0);
+        assert_eq!(h.p.status(), TileStatus::Playing);
+        let configures: Vec<u64> = h
+            .events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Configure { .. }))
+            .map(|(t, _)| *t)
+            .collect();
+        assert!(configures[1] - configures[0] >= config.undecodable_retry_us);
+    }
+}
+
+#[test]
+fn undecodable_retries_stay_bounded() {
+    use DecodeFailureKind::*;
+    for (answer, configure_failure) in [
+        (Answer::Fail(DecodeError), None),
+        (Answer::Ok, Some(InvalidParameterSets)),
+        (Answer::Ok, Some(SessionCreateFailed)),
+    ] {
+        let (_, aus) = load("h264-basic.h264");
+        let config = PipelineConfig::default();
+        let fail = matches!(answer, Answer::Fail(_));
+        let mut h = Harness::new(config).with_decoder(move |_, _| {
+            if fail {
+                Answer::Fail(DecodeError)
+            } else {
+                Answer::Ok
+            }
+        });
+        h.configure = Box::new(move |_| configure_failure);
+        // Two simulated hours of a stream the decoder never accepts.
+        let hours = 2;
+        let rounds = hours * 3600 * 1_000_000 / ROUND_US;
+        for round in 0..rounds {
+            feed_all(&mut h, Codec::H264, &aus, round * ROUND_US);
+        }
+        let s = h.p.stats();
+        let label = format!("{configure_failure:?}");
+        assert_eq!(s.decoded, 0, "{label}");
+        let window = config.window_us;
+        assert!(
+            h.max_in_window(window, |e| matches!(e, Event::Configure { .. }))
+                <= config.max_configures_per_window as usize,
+            "{label}"
+        );
+        assert!(
+            h.max_in_window(window, |e| *e == Event::Reset)
+                <= config.max_resets_per_window as usize + 1,
+            "{label}"
+        );
+        // Each retry cycle costs at most one decoder plus the capped resets,
+        // and cycles are at least the retry delay apart.
+        let cycles = rounds * ROUND_US / config.undecodable_retry_us + 1;
+        let per_cycle = 1 + u64::from(config.max_resets_per_window);
+        assert!(s.configures <= cycles * per_cycle, "{label}: {s:?}");
+        // It did retry: more than one cycle's worth of decoders.
+        assert!(s.configures > per_cycle, "{label}: {s:?}");
+        // Between retries the tile is quiet: no two Configures closer than
+        // the reset cooldown, and long gaps of at least the retry delay.
+        let configures: Vec<u64> = h
+            .events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Configure { .. }))
+            .map(|(t, _)| *t)
+            .collect();
+        let long_gaps = configures
+            .windows(2)
+            .filter(|w| w[1] - w[0] >= config.undecodable_retry_us)
+            .count() as u64;
+        assert!(long_gaps + 1 >= s.configures / per_cycle, "{label}");
     }
 }

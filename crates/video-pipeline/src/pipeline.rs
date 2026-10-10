@@ -28,7 +28,11 @@
 //!   each time (capped); at most `max_resets_per_window` resets per window.
 //!   Beyond that, or when the decoder rejects the parameter sets, the
 //!   tile releases its decoder, clears, and is `Undecodable` until the
-//!   stream's parameter sets change. Every decoder creation (including
+//!   stream's parameter sets change, or until `undecodable_retry_us` has
+//!   passed: then the next random access point tries the same parameter
+//!   sets again (so a decoder that failed for a transient reason, such as
+//!   the system running out of hardware sessions, comes back on its own).
+//!   Every decoder creation (including
 //!   format changes) is also capped per window, so no input can make the
 //!   pipeline rebuild decoders in a tight loop. A failed `Configure` is
 //!   reported through `decode_failed` like a picture failure.
@@ -180,6 +184,11 @@ pub struct PipelineConfig {
     pub log_burst: u32,
     /// Log window (default 60 s).
     pub log_window_us: u64,
+    /// An `Undecodable` tile tries its current parameter sets again at the
+    /// first random access point after this long (default 5 minutes; 0
+    /// never retries). A retry goes through the same recovery, so it is
+    /// bounded by the limits above and gives up again if it keeps failing.
+    pub undecodable_retry_us: u64,
 }
 
 impl Default for PipelineConfig {
@@ -199,6 +208,7 @@ impl Default for PipelineConfig {
             clear_after_us: 10_000_000,
             log_burst: 5,
             log_window_us: 60_000_000,
+            undecodable_retry_us: 300_000_000,
         }
     }
 }
@@ -460,6 +470,8 @@ pub struct TilePipeline {
     configures: Window,
     cooldown_until: u64,
     undecodable: Option<ParameterSets>,
+    /// When the tile last became `Undecodable`.
+    gave_up_at: u64,
 
     log: LogLimiter,
 }
@@ -495,6 +507,7 @@ impl TilePipeline {
             configures: Window::new(cfg.max_configures_per_window),
             cooldown_until: 0,
             undecodable: None,
+            gave_up_at: 0,
             log: LogLimiter {
                 window_start: 0,
                 in_window: 0,
@@ -595,11 +608,15 @@ impl TilePipeline {
                 } else {
                     stashed.as_ref().is_some_and(|s| s != given_up)
                 };
-            if !changed {
+            let retry = self.cfg.undecodable_retry_us;
+            let retry_due = ra.is_random_access()
+                && retry > 0
+                && self.now >= self.gave_up_at.saturating_add(retry);
+            if !changed && !retry_due {
                 self.stats.gated += 1;
                 return;
             }
-            self.revive();
+            self.revive(changed);
         }
 
         if self.now < self.cooldown_until {
@@ -1011,19 +1028,30 @@ impl TilePipeline {
         self.push_reset();
         self.clear_picture();
         self.undecodable = Some(sets);
+        self.gave_up_at = self.now;
         self.set_status(TileStatus::Undecodable);
         let msg = format!("{reason}; tile is undecodable until the stream format changes");
         self.warn(&msg);
     }
 
-    fn revive(&mut self) {
+    /// Leaves `Undecodable`: on new parameter sets with a clean slate, on a
+    /// timed retry of the same ones keeping the recovery window, so the
+    /// retry stays within the per-window reset cap.
+    fn revive(&mut self, format_changed: bool) {
         self.undecodable = None;
         self.consecutive_failures = 0;
         self.resets_since_success = 0;
-        self.resets.times.clear();
         self.cooldown_until = 0;
         self.set_status(TileStatus::Waiting);
-        info!(tile = self.tile, "stream format changed; trying again");
+        if format_changed {
+            self.resets.times.clear();
+            info!(tile = self.tile, "stream format changed; trying again");
+        } else {
+            info!(
+                tile = self.tile,
+                "retrying the same stream format after a long pause"
+            );
+        }
     }
 
     fn set_status(&mut self, status: TileStatus) {
