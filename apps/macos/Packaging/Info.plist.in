@@ -37,7 +37,7 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>NVRView transcribes doorbell calls on this Mac, so you can read what a visitor says without unmuting. Nothing leaves this Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>NVRView connects to your NVRs and cameras on the local network to show their live video.</string>
+	<string>NVRView connects to your NVRs and cameras on the local network to show their live video, and searches the network for them when you add a device.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

@@ -184,17 +184,29 @@ internal sealed class SelfTest(App app, AppOptions options)
                 _problems.Add("saving and removing a device did not connect and remove it");
             }
 
-            // The dialog itself opens and closes.
-            var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true);
+            // The dialog itself opens and closes. Its device search is real but
+            // limited to loopback (nothing answers there); the answers are made up
+            // and fed in as the core's events.
+            v.DiscoveryRequest = "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}";
+            var hooks = new SettingsDialogHooks();
+            var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true, hooks);
             _ = dialog.ShowAsync();
             await Task.Delay(500);
             bool shown = dialog.IsLoaded;
-            dialog.Hide();
             Say($"settings dialog shown: {shown}");
             if (!shown)
             {
                 _problems.Add("the Settings dialog did not open");
             }
+            await FindDevices(v, hooks, mock);
+            dialog.Hide();
+            bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
+            Say($"find devices: search stopped when the dialog closed: {stopped}");
+            if (!stopped)
+            {
+                _problems.Add("closing Settings did not stop the device search");
+            }
+            v.DiscoveryRequest = null;
         }
 
         // 2. Live resize.
@@ -382,6 +394,87 @@ internal sealed class SelfTest(App app, AppOptions options)
     }
 
     // 10. The tile features.
+    /// <summary>
+    /// The add-device screen's "Find Devices on This Network" list (docs/UX.md,
+    /// "Finding devices"): it searches when shown, fills from the core's
+    /// events, marks added devices, and a click fills the form.
+    /// </summary>
+    private async Task FindDevices(Viewer v, SettingsDialogHooks hooks, (string Host, ushort Port) mock)
+    {
+        static CoreEvent Event(string json) =>
+            new() { Type = "discovered", Discovery = DiscoveryEvent.Parse(System.Text.Encoding.UTF8.GetBytes(json)) };
+        static string Found(ulong search, string key, string rest) =>
+            $$"""{"type":"discovered","search":{{search}},"key":"{{key}}",{{rest}}}""";
+
+        hooks.NewDevice();
+        bool started = await Until(() => v.Discovery.IsSearching && v.Discovery.CurrentSearch is not null, 5);
+        if (!started)
+        {
+            _problems.Add("the add-device screen did not start a search");
+            return;
+        }
+        ulong search = v.Discovery.CurrentSearch!.Value;
+        v.Apply(Event(Found(search, "d1", """" "kind":"nvr","name":"NVR 3","address":"192.0.2.12","port":9000,"channels":16,"services":[{"kind":"native","port":9000}]"""")));
+        v.Apply(Event(Found(search, "d2", $$"""
+            "kind":"nvr","name":"Mock","address":"{{mock.Host}}","port":{{mock.Port}},"channels":2,"services":[{"kind":"native","port":{{mock.Port}}}]
+            """)));
+        v.Apply(Event(Found(search, "d3", """" "kind":"camera","address":"192.0.2.30","battery_percent":80,"services":[{"kind":"native"}]"""")));
+        v.Apply(Event(Found(search, "d4", """" "kind":"camera","name":"Camera 2","model":"EXAMPLE-CAM","address":"192.0.2.40","services":[{"kind":"onvif","port":8000}]"""")));
+        // The same device again with more: one row.
+        v.Apply(Event(Found(search, "d1", """" "kind":"nvr","name":"NVR 3","model":"EXAMPLE-MODEL","address":"192.0.2.12","port":9000,"channels":16,"services":[{"kind":"native","port":9000}]"""")));
+        var panel = hooks.Panel();
+        Say($"find devices: {v.Discovery.Devices.Count} found, {panel.Rows.Count} rows, \"{panel.Status}\"");
+        if (!panel.Visible || panel.Rows.Count != 4 || v.Discovery.Devices.Count != 4 || !v.Discovery.IsSearching)
+        {
+            _problems.Add($"the found-devices list did not fill: {panel.Rows.Count} rows, visible {panel.Visible}");
+            return;
+        }
+        if (panel.Rows[0].Detail != "EXAMPLE-MODEL \u00B7 192.0.2.12:9000")
+        {
+            _problems.Add($"a repeated answer did not update its row: \"{panel.Rows[0].Detail}\"");
+        }
+        // The mock device is already added; the ONVIF camera cannot be.
+        if (!panel.Rows[0].Enabled || panel.Rows[1].Enabled || !panel.Rows[2].Enabled || panel.Rows[3].Enabled)
+        {
+            _problems.Add($"rows enabled {string.Join(",", panel.Rows.Select(r => r.Enabled))}, expected True,False,True,False");
+        }
+        // Clicks.
+        hooks.Choose(v.Discovery.Devices[0]);
+        var form = hooks.Form();
+        Say($"find devices: chosen {form.Host}:{form.Port} \"{form.Name}\"");
+        if (form.Host != "192.0.2.12" || form.Port != 9000 || form.Name != "NVR 3")
+        {
+            _problems.Add($"choosing a device did not fill the form: {form}");
+        }
+        hooks.Choose(v.Discovery.Devices[2]);
+        hooks.Choose(v.Discovery.Devices[3]);
+        hooks.Choose(v.Discovery.Devices[1]);
+        form = hooks.Form();
+        if (form.Host != "192.0.2.30" || form.Port != 9000 || form.Name != "NVR 3")
+        {
+            _problems.Add($"the second choice went wrong, or an unavailable device was chosen: {form}");
+        }
+        // The search's time is up; the list stays.
+        v.Apply(new CoreEvent
+        {
+            Type = "discovery_done",
+            Discovery = DiscoveryEvent.Parse(System.Text.Encoding.UTF8.GetBytes($$"""{"type":"discovery_done","search":{{search}},"count":4,"stopped":false,"errors":[]}""")),
+        });
+        if (v.Discovery.IsSearching || v.Discovery.Devices.Count != 4 || v.Discovery.FoundNothing || hooks.Panel().Rows.Count != 4)
+        {
+            _problems.Add("the list changed when the search ended");
+        }
+        // Search again twice in a row: the list empties and shows only the last search.
+        hooks.SearchAgain();
+        hooks.SearchAgain();
+        bool again = await Until(() => v.Discovery.IsSearching && v.Discovery.CurrentSearch > search + 1, 5);
+        Say($"find devices: after Search again twice: search {v.Discovery.CurrentSearch}, {v.Discovery.Devices.Count} found");
+        if (!again || v.Discovery.Devices.Count != 0 || hooks.Panel().Rows.Count != 0)
+        {
+            _problems.Add("a restarted search did not start from an empty list");
+        }
+    }
+
     private async Task TileFeatures(Viewer v, StageView stage)
     {
         // Camera AI detections from the mock reach the corner indicators.

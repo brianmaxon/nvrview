@@ -181,6 +181,11 @@ public final class FakeCore: CoreAPI {
         /// A permitted talk goes from `starting` to `active` at once; off, it
         /// stays `starting` until `activateTalk` (tests of the wait).
         public var talkStartsActive = true
+        /// The made-up devices a discovery search finds, in order.
+        public var discoverable = FakeDiscoverable.samples
+        /// A search ends by itself after this much real time; nil: only
+        /// `discoverStop` or `finishDiscovery` end it (the self-test).
+        public var discoveryDuration: Duration?
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -211,7 +216,8 @@ public final class FakeCore: CoreAPI {
         var freed = false
     }
 
-    fileprivate let options: Options
+    let options: Options
+    let discovery = FakeDiscoveryState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()
@@ -391,6 +397,8 @@ public final class FakeCore: CoreAPI {
 
     public func free() {
         requireOutsideCallback("nv_core_free")
+        // A running search ends with its `discovery_done`, before anything is torn down.
+        try? discoverEnd(stopped: true)
         let tiles = world.withLock { w -> [FakeTile] in
             if w.freed { return [] }
             w.freed = true

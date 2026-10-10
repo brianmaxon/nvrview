@@ -11,6 +11,7 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using NvrView.Interop;
+using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 
@@ -48,6 +49,9 @@ internal sealed class CoreEvent
     public long Revision;
     public List<ChannelInfo>? Channels;
 
+    /// <summary>A discovery event (discovery_started, discovered, discovery_done), parsed whole.</summary>
+    public DiscoveryEvent? Discovery;
+
     /// <summary>The raw JSON of audio_stats events (diagnostics only).</summary>
     public string? Raw;
 
@@ -63,6 +67,11 @@ internal sealed class CoreEvent
             return null;
         }
         var e = new CoreEvent { Type = t.GetString() ?? "" };
+        if (e.Type is "discovery_started" or "discovered" or "discovery_done")
+        {
+            e.Discovery = DiscoveryEvent.Parse(json);
+            return e.Discovery is null ? null : e;
+        }
         if (e.Type == "audio_stats")
         {
             e.Raw = System.Text.Encoding.UTF8.GetString(json);

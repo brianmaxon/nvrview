@@ -481,6 +481,45 @@ Details settled while building it (macOS):
   transcript goes there only with "Save call transcripts" (Settings >
   Alerts), never to the system log.
 
+## Finding devices
+
+Adding a device starts from a list of what answers on the network, so the
+user types a password instead of an address. The core does the searching
+(docs/FFI.md, "Device discovery"); the apps only ask and show.
+
+- **Where.** The add-device screen (Settings > Devices, the new-device
+  form) opens with "Find Devices on This Network" above the form. A search
+  starts when the screen is shown (also when its window is shown again after
+  a close) and stops when the user picks an existing device, closes the
+  window, or leaves the form. Nothing searches in the background; the app
+  never searches on its own.
+- **The list.** One row per device, in the order they answered: a kind icon
+  (recorder, camera, unknown), the name (else "NVR", "Camera" or "Device"),
+  the model when known, the address (and port), and the channel count or a
+  battery percentage when the answer carried one. A device that answers
+  again with more updates its row. While the search runs a spinner and
+  "Searching..." show; afterwards the count. **Search Again** restarts the
+  search and empties the list. At most 1024 rows.
+- **Already added.** A device whose address and port match one the user
+  added shows "Added" and cannot be chosen. A found device that offers no
+  protocol the viewer speaks (an ONVIF-only camera) shows "Not supported
+  yet" and cannot be chosen.
+- **Choosing a row** fills the form's address and port (9000 when the answer
+  had no port), and the name while it still has the default one; the user
+  types the user name and password. Nothing is added or logged in to until
+  the user presses Add Device.
+- **Nothing found.** The list says so and points at the usual cause on a Mac,
+  Local Network access still waiting for the user (macOS drops the
+  broadcasts without an error): allow the app in System Settings > Privacy &
+  Security > Local Network, then Search Again. On Windows the first search may
+  raise a Windows Firewall prompt for the app (it listens on UDP port 3000
+  for the answers); allowing it on private networks is what makes answers
+  arrive, and the same hint applies. Typing the address stays possible
+  throughout. Interfaces that could not be searched (a busy port) show as a
+  line with the details in a tooltip.
+- **Privacy.** Device IDs and MAC addresses are never shown or logged;
+  addresses appear on this screen only.
+
 ## Sidebar
 
 - Whether a window's sidebar is open or collapsed is saved with the window

@@ -68,6 +68,15 @@ public protocol CoreAPI: Sendable {
     func gridLayout(viewport: PixelSize, gap: UInt32, pictureSizes: [PixelSize], fill: Bool)
         throws(CoreStatus) -> [TileLayout]
 
+    /// Minor 1 `nv_discover_start`: searches the local network for devices.
+    /// `json` nil: the defaults; otherwise `{"seconds":3,"interfaces":[...],"onvif":true}`.
+    /// Answers arrive as `discovered` events, the end as `discovery_done`.
+    /// A search already running is stopped first.
+    func discoverStart(json: String?) throws(CoreStatus)
+
+    /// Minor 1 `nv_discover_stop`: ends the running search, if any.
+    func discoverStop() throws(CoreStatus)
+
     /// `nv_audio_set_output`: the format the real-time callback renders
     /// (1 or 2 interleaved channels). Call again after a device change.
     func audioSetOutput(sampleRate: UInt32, channels: UInt32) throws(CoreStatus)

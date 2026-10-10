@@ -20,7 +20,11 @@ public final class CCore: CoreAPI {
 
     /// `nv_abi_version` and the header's `NV_ABI_VERSION` must agree
     /// (docs/FFI.md Versioning): checked here, at startup.
-    public static var abiMatches: Bool { nv_abi_version() == UInt32(NV_ABI_VERSION) }
+    /// The minor version may be newer than the header's, never older (the
+    /// bindings call functions of the minor they were written for).
+    public static var abiMatches: Bool {
+        nv_abi_version() == UInt32(NV_ABI_VERSION) && nv_abi_minor() >= UInt32(NV_ABI_MINOR)
+    }
 
     /// `dataDirectory` is where the core keeps layouts and device keys
     /// (nil: in memory for the run).
@@ -167,6 +171,17 @@ public final class CCore: CoreAPI {
     public func layoutDelete(id: String) throws(CoreStatus) {
         let c = try core()
         let status = CoreStatus(nv_layout_delete(c, id))
+        if !status.isOK { throw status }
+    }
+
+    public func discoverStart(json: String?) throws(CoreStatus) {
+        let c = try core()
+        let status = Self.withOptionalCString(json) { CoreStatus(nv_discover_start(c, $0)) }
+        if !status.isOK { throw status }
+    }
+
+    public func discoverStop() throws(CoreStatus) {
+        let status = CoreStatus(nv_discover_stop(try core()))
         if !status.isOK { throw status }
     }
 

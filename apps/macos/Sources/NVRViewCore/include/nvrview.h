@@ -19,6 +19,11 @@ extern "C" {
 /* Bumped on any incompatible change; apps compare it with nv_abi_version(). */
 #define NV_ABI_VERSION 3
 
+/* Bumped for each addition that leaves every existing declaration unchanged
+ * (new functions, events, status codes); resets to 0 with a new
+ * NV_ABI_VERSION. Minor 1: device discovery. */
+#define NV_ABI_MINOR 1
+
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
     NV_OK = 0,
@@ -184,6 +189,11 @@ typedef struct NvCore NvCore;
 
 uint32_t nv_abi_version(void);
 
+/* The core's minor version: additions to this ABI version. An app checks
+ * nv_abi_version() for equality and nv_abi_minor() >= the minor that
+ * introduced a function before calling it. */
+uint32_t nv_abi_minor(void);
+
 /* Starts the core. `out` receives the handle. `config` is read only during
  * the call. */
 NvStatus nv_core_new(const NvConfig *config, NvCallbacks callbacks, NvCore **out);
@@ -320,6 +330,25 @@ NvStatus nv_layout_put(NvCore *core, const char *json);
 /* Deletes a layout by id and sends layouts_changed. NV_ERR_UNKNOWN_ID if
  * there is none. */
 NvStatus nv_layout_delete(NvCore *core, const char *id);
+
+/* Device discovery (minor 1; docs/FFI.md, "Device discovery").
+ *
+ * Starts a search for devices on the local network: a few rounds of UDP
+ * broadcasts, and the WS-Discovery multicast, on each IPv4 interface that is
+ * up (or on the interfaces named in json), then listening until the time is
+ * up. Returns at once. Answers arrive as "discovered" events and the end as
+ * one "discovery_done" event. json may be NULL or empty for the defaults, or:
+ * {"seconds":3,"interfaces":["192.0.2.5"],"onvif":true}
+ * (seconds 0.5 to 30; interfaces are IPv4 addresses of this computer).
+ * NV_ERR_INVALID_ARGUMENT for invalid JSON or values. One search per core:
+ * a start while one runs stops it (its discovery_done has "stopped":true)
+ * and starts the new one. The core never searches on its own. */
+NvStatus nv_discover_start(NvCore *core, const char *json);
+
+/* Stops the running search, if any, and closes its sockets; its
+ * discovery_done event ("stopped":true) is queued before this returns.
+ * NV_OK when nothing is running. */
+NvStatus nv_discover_stop(NvCore *core);
 
 /* Grid layout (pure; no core needed). Fills `out` (tile_count entries) with
  * the destination rectangle in the viewport and the source rectangle in the

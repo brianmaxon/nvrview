@@ -167,6 +167,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "smoke: ABI mismatch\n");
         return 1;
     }
+    if (nv_abi_minor() != NV_ABI_MINOR) {
+        fprintf(stderr, "smoke: ABI minor mismatch\n");
+        return 1;
+    }
 
     NvCallbacks cb = {NULL, on_action, on_event, on_audio_tap};
     NvCore *core = NULL;
@@ -281,6 +285,18 @@ int main(int argc, char **argv) {
     if (nv_grid_layout(2, (NvSize){800, 300}, 2, sizes, false, layout) != NV_OK ||
         layout[0].dest.width == 0 || layout[1].source.width != 0) {
         problem("nv_grid_layout");
+    }
+
+    /* Discovery (minor 1): bad requests are refused; a search on loopback
+     * only (nothing answers there) starts and stops, and a search still
+     * running when the core is freed ends with it. */
+    if (nv_discover_start(core, "{\"seconds\":0}") != NV_ERR_INVALID_ARGUMENT ||
+        nv_discover_start(NULL, NULL) != NV_ERR_INVALID_ARGUMENT ||
+        nv_discover_stop(core) != NV_OK ||
+        nv_discover_start(core, "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}") !=
+            NV_OK ||
+        nv_discover_stop(core) != NV_OK || nv_discover_start(core, NULL) != NV_OK) {
+        problem("discovery start/stop");
     }
 
     nv_core_free(core);

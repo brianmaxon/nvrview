@@ -19,6 +19,13 @@
 #define NV_ABI_VERSION 3
 
 /**
+ * Bumped for each addition that leaves every existing declaration
+ * unchanged (new functions, events, status codes); resets to 0 with a new
+ * NV_ABI_VERSION. Minor 1: device discovery.
+ */
+#define NV_ABI_MINOR 1
+
+/**
  * Return codes. Every function that can fail returns one.
  */
 typedef enum NvStatus {
@@ -285,6 +292,13 @@ extern "C" {
 #endif // __cplusplus
 
 uint32_t nv_abi_version(void);
+
+/**
+ * The core's minor version: additions to this ABI version. An app checks
+ * nv_abi_version() for equality and nv_abi_minor() >= the minor that
+ * introduced a function before calling it.
+ */
+uint32_t nv_abi_minor(void);
 
 /**
  * Starts the core. `out` receives the handle. `config` is read only during
@@ -570,6 +584,34 @@ enum NvStatus nv_layout_put(struct NvCore *core, const char *json);
  * `core` is a live handle; `id` is a NUL-terminated string.
  */
 enum NvStatus nv_layout_delete(struct NvCore *core, const char *id);
+
+/**
+ * Starts a search for devices on the local network (minor 1): a few rounds
+ * of UDP broadcasts, and the WS-Discovery multicast, on each IPv4 interface
+ * that is up (or on the interfaces named in json), then listening until
+ * the time is up. Returns at once. Answers arrive as "discovered" events
+ * and the end as one "discovery_done" event (docs/FFI.md, "Device
+ * discovery"). json may be NULL or empty for the defaults, or:
+ * {"seconds":3,"interfaces":["192.0.2.5"],"onvif":true}
+ * (seconds 0.5 to 30; interfaces are IPv4 addresses of this computer).
+ * NV_ERR_INVALID_ARGUMENT for invalid JSON or values. One search per core:
+ * a start while one runs stops it (its discovery_done has "stopped":true)
+ * and starts the new one. The core never searches on its own.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is null or a NUL-terminated string.
+ */
+enum NvStatus nv_discover_start(struct NvCore *core, const char *json);
+
+/**
+ * Stops the running search, if any, and closes its sockets; its
+ * discovery_done event ("stopped":true) is queued before this returns.
+ * NV_OK when nothing is running.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_discover_stop(struct NvCore *core);
 
 /**
  * Grid layout (pure; no core needed). Fills `out` (tile_count entries) with

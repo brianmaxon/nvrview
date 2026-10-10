@@ -44,6 +44,7 @@
 pub mod audio;
 pub mod clock;
 mod device;
+pub mod discover;
 mod events;
 mod json;
 mod lens;
@@ -323,6 +324,8 @@ pub struct Core {
     lens: lens::LensContext,
     /// Talk-back permissions and every tile's talk.
     talk: talk::TalkHub,
+    /// The one LAN device search ([`discover`]).
+    discover: discover::DiscoverHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -395,6 +398,7 @@ impl Core {
             },
         };
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
+        let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -415,6 +419,7 @@ impl Core {
             device_keys: Mutex::new(device_keys),
             lens,
             talk,
+            discover,
         })
     }
 
@@ -640,6 +645,34 @@ impl Core {
                 .finish(),
             Priority::State,
         );
+    }
+
+    /// Starts a search for devices on the local network ([`discover`],
+    /// docs/FFI.md, "Device discovery"). Returns the search's ID at once;
+    /// answers arrive as `discovered` events and the end as one
+    /// `discovery_done`. A search already running is stopped first (its
+    /// `discovery_done` has `stopped` true): one search per core. Build
+    /// `options` with [`discover::parse_options`] from the app's JSON.
+    ///
+    /// # Errors
+    /// [`CoreError::Closed`], [`CoreError::InvalidArgument`] from inside a
+    /// callback.
+    pub fn discover_start(&self, options: discovery::Options) -> Result<u64, CoreError> {
+        self.check_api()?;
+        Ok(self.discover.start(options))
+    }
+
+    /// Stops the running search, if any; its `discovery_done` (`stopped`
+    /// true) is queued before this returns. Nothing running is not an
+    /// error.
+    ///
+    /// # Errors
+    /// [`CoreError::Closed`], [`CoreError::InvalidArgument`] from inside a
+    /// callback.
+    pub fn discover_stop(&self) -> Result<(), CoreError> {
+        self.check_api()?;
+        self.discover.stop();
+        Ok(())
     }
 
     /// Closes a device's tiles, then its session.
@@ -1138,6 +1171,8 @@ impl Core {
         // No on_audio_tap after this; the renderer renders silence.
         self.tile_ctx.audio.shutdown();
         self.talk.shutdown();
+        // A running search ends with its `discovery_done` (stopped).
+        self.discover.stop();
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()

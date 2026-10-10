@@ -438,6 +438,52 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         set => Settings.HideOfflineChannels = value;
     }
 
+    // ---- finding devices (docs/UX.md "Finding devices") ----
+
+    /// <summary>The add-device screen's list of what answered a search.</summary>
+    public DiscoveryList Discovery { get; } = new();
+
+    /// <summary>The search request (JSON); null: the core's defaults, every interface. The self-test limits it to loopback.</summary>
+    public string? DiscoveryRequest { get; set; }
+
+    /// <summary>
+    /// Starts a search of the local network (the core never searches on its
+    /// own); one already running restarts. The list empties.
+    /// </summary>
+    public void StartDiscovery()
+    {
+        try
+        {
+            Core.DiscoverStart(DiscoveryRequest);
+            Discovery.Requested();
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"device search refused: {e.Status}");
+            Discovery.FailedToStart();
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>Stops the search (the screen closed or went away).</summary>
+    public void StopDiscovery()
+    {
+        try
+        {
+            Core.DiscoverStop();
+        }
+        catch (NvException)
+        {
+            // Closing or already closed: nothing runs.
+        }
+        Discovery.Stopped();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Whether a found device is one the user already added.</summary>
+    public bool IsAdded(DiscoveredDevice found) =>
+        found.IsAdded(_devices.Select(d => (d.Config.Host, (int)d.Config.Port)));
+
     // ---- devices ----
 
     /// <summary>Adds every device saved in settings, with its password from the credential store.</summary>
@@ -1197,6 +1243,14 @@ internal sealed class Viewer : ITileBackend<CameraTile>
             case "alarm":
                 DetectionEvents++;
                 ApplyDetection(e);
+                break;
+            case "discovery_started":
+            case "discovered":
+            case "discovery_done":
+                if (e.Discovery is { } found)
+                {
+                    Discovery.Apply(found);
+                }
                 break;
             case "layouts_changed":
                 if (e.Revision != LayoutsRevision)
