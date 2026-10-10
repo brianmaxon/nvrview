@@ -52,6 +52,19 @@ impl Object {
         self
     }
 
+    /// Adds a number member; a value that is not finite is written as null.
+    pub(crate) fn f64(mut self, key: &str, value: f64) -> Object {
+        self.key(key);
+        if value.is_finite() {
+            // Three decimals are plenty for diagnostics. Display never uses
+            // exponent notation, so the text is a valid JSON number.
+            let _ = write!(self.buf, "{}", (value * 1e3).round() / 1e3);
+        } else {
+            self.buf.push_str("null");
+        }
+        self
+    }
+
     /// Adds a boolean member.
     pub(crate) fn bool(mut self, key: &str, value: bool) -> Object {
         self.key(key);
@@ -126,6 +139,8 @@ mod tests {
         let j = Object::event("channels")
             .u64("device", 1)
             .bool("ok", true)
+            .f64("x", 1.23456)
+            .f64("nan", f64::NAN)
             .strs("tiers", ["main", "sub"])
             .objects(
                 "channels",
@@ -137,7 +152,7 @@ mod tests {
             .finish();
         assert_eq!(
             j,
-            r#"{"type":"channels","device":1,"ok":true,"tiers":["main","sub"],"channels":[{"channel":0,"name":"Channel 1"},{}]}"#
+            r#"{"type":"channels","device":1,"ok":true,"x":1.235,"nan":null,"tiers":["main","sub"],"channels":[{"channel":0,"name":"Channel 1"},{}]}"#
         );
         let v: serde_json::Value = serde_json::from_str(&j).unwrap();
         assert_eq!(v["channels"][0]["name"], "Channel 1");

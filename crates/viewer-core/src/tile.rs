@@ -8,7 +8,7 @@
 //! pipeline's own backpressure bounds what is handed to the decoder. Decoder
 //! results come in through a bounded channel that never blocks the sender.
 
-use crate::audio::{AudioFrame, AudioSink, CountingAudioSink};
+use crate::audio::{AudioFrame, AudioHub, TileAudio, TileAudioControl, TileAudioLink, TileConfig};
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
 use crate::{Callbacks, Clock, in_callback};
@@ -17,7 +17,7 @@ use bc_session::{Item, Subscription};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior, interval};
@@ -61,6 +61,7 @@ pub(crate) struct TileContext {
     pub(crate) clock: Clock,
     pub(crate) tick_interval: Duration,
     pub(crate) stats_interval: Duration,
+    pub(crate) audio: Arc<AudioHub>,
 }
 
 /// Why a tile ended, as `tile_closed` reports it.
@@ -157,6 +158,7 @@ pub(crate) fn spawn(
     device: u64,
     sub: Option<Subscription>,
     ctx: TileContext,
+    audio: Arc<TileAudioControl>,
     gate: oneshot::Receiver<()>,
 ) -> std::io::Result<(TileHandle, ResultSink)> {
     let (tx, rx) = mpsc::channel(RESULTS_CAPACITY);
@@ -165,6 +167,7 @@ pub(crate) fn spawn(
     let (wake_tx, wake_rx) = oneshot::channel();
     let closed_reported = Arc::new(AtomicBool::new(false));
     let events = ctx.events.clone();
+    let hub = ctx.audio.clone();
     let state = TileThread {
         closed_reported: closed_reported.clone(),
         id,
@@ -172,7 +175,14 @@ pub(crate) fn spawn(
         stop: stop.clone(),
         results: rx,
         overflow: overflow.clone(),
-        audio: CountingAudioSink::default(),
+        link: TileAudioLink {
+            hub,
+            control: audio,
+            seen: 0,
+            tapped: false,
+        },
+        audio: TileAudio::new(TileConfig::default()),
+        talkback_ignored: 0,
         sequence: 0,
         last_video_pts: None,
     };
@@ -201,7 +211,11 @@ struct TileThread {
     results: mpsc::Receiver<DecoderResult>,
     overflow: Arc<AtomicU64>,
     /// Audio goes here, in stream order (see [`crate::audio`]).
-    audio: CountingAudioSink,
+    audio: TileAudio,
+    /// The app's settings for it.
+    link: TileAudioLink,
+    /// Talk-back records dropped.
+    talkback_ignored: u64,
     /// Media items seen, video and audio alike.
     sequence: u64,
     last_video_pts: Option<u64>,
@@ -292,6 +306,7 @@ impl TileThread {
                 },
                 _ = tick.tick() => {}
             }
+            self.link.apply(&mut self.audio);
             p.tick(self.ctx.clock.now_us());
             self.deliver(&mut p);
             let now = Instant::now();
@@ -335,13 +350,24 @@ impl TileThread {
                 });
             }
             Item::Media(Record::Audio { stream_index, data }) => {
-                self.audio.push(AudioFrame {
+                let frame = AudioFrame {
                     stream_index,
                     data,
                     sequence: self.sequence,
                     after_video_pts_us: self.last_video_pts,
                     arrived_us: self.ctx.clock.now_us(),
-                });
+                    wall_clock_us: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .ok()
+                        .and_then(|d| i64::try_from(d.as_micros()).ok()),
+                };
+                if frame.is_talkback() {
+                    self.talkback_ignored += 1;
+                    return;
+                }
+                self.link.apply(&mut self.audio);
+                self.audio.push(frame.record());
+                self.link.pushed();
             }
             Item::Media(Record::Info { .. }) => {}
             Item::Discontinuity => {
@@ -396,9 +422,79 @@ impl TileThread {
                 .u64("dropped", s.dropped + queue_dropped)
                 .u64("failures", s.failures)
                 .u64("resets", s.resets)
-                .u64("audio_frames", self.audio.frames)
+                .u64("audio_frames", self.audio.stats().records)
                 .finish(),
             Priority::Diagnostics,
         );
+        self.audio_stats();
+    }
+
+    /// `audio_stats`, for tiles whose stream carries audio.
+    fn audio_stats(&self) {
+        let a = self.audio.stats();
+        if a.records == 0 && self.talkback_ignored == 0 {
+            return;
+        }
+        let c = &self.link.control;
+        let mut o = Object::event("audio_stats")
+            .u64("tile", self.id)
+            .u64("records", a.records)
+            .u64("bytes", a.bytes)
+            .u64("decoded", a.decoded)
+            .u64("concealed", a.concealed)
+            .u64("rejected", a.rejected)
+            .u64("talkback_ignored", self.talkback_ignored)
+            .u64("epoch", u64::from(a.epoch))
+            .bool("audible", c.audible())
+            .f64("volume", f64::from(c.volume()))
+            .bool("tapped", c.tapped())
+            .bool("no_free_slot", a.no_free_slot)
+            .f64("playout_delay_ms", a.playout_delay_us / 1e3)
+            .u64("outliers", a.timestamps.outliers)
+            .u64("timestamp_resets", a.timestamps.resets);
+        if let Some(codec) = a.codec {
+            o = o.str(
+                "codec",
+                match codec {
+                    audio_pipeline::AudioCodec::Aac => "aac",
+                    audio_pipeline::AudioCodec::ImaAdpcm => "ima_adpcm",
+                    audio_pipeline::AudioCodec::MuLaw => "mulaw",
+                },
+            );
+        }
+        if let Some(f) = a.format {
+            o = o
+                .u64("sample_rate", u64::from(f.sample_rate))
+                .u64("channels", f.channels as u64);
+        }
+        if let Some(r) = a.rate_estimate {
+            o = o.f64("rate_estimate", r);
+        }
+        if let Some(t) = a.playout_delay_target_us {
+            o = o.f64("playout_delay_target_ms", t / 1e3);
+        }
+        if let Some(p) = a.playout {
+            if let Some(off) = p.av_offset_us {
+                o = o.f64("av_offset_ms", off / 1e3);
+            }
+            let rate = self
+                .link
+                .hub
+                .output()
+                .map_or(48_000.0, |out| f64::from(out.format().sample_rate));
+            o = o
+                .f64("buffered_ms", p.buffered_frames as f64 * 1e3 / rate)
+                .f64("correction_ppm", p.correction * 1e6)
+                .u64("resyncs", p.resyncs)
+                .u64("starts", p.starts)
+                .u64("underruns", p.underruns)
+                .u64("underrun_frames", p.underrun_frames)
+                .u64("overflow_frames", p.overflow_frames)
+                .u64("blocks_not_played", p.blocks_not_played);
+        }
+        if let Some(t) = a.tap {
+            o = o.u64("tap_blocks", t.pushed).u64("tap_dropped", t.dropped);
+        }
+        self.ctx.events.send(o.finish(), Priority::Diagnostics);
     }
 }

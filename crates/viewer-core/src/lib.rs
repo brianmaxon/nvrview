@@ -38,6 +38,7 @@
 //!   are never logged; addresses only at debug level.
 
 pub mod audio;
+pub mod clock;
 mod device;
 mod events;
 mod json;
@@ -62,7 +63,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tile::{CloseReason, DecoderResult, ResultSink, TileContext, TileHandle};
 use tracing::{debug, info, warn};
 
@@ -74,6 +75,12 @@ pub trait Callbacks: Send + Sync + 'static {
     fn on_action(&self, tile: u64, action: &Action<'_>);
     /// One JSON object, serialized across the core.
     fn on_event(&self, json: &str);
+    /// One block of a tapped tile's audio ([`Core::set_tile_audio_tap`]):
+    /// 16 kHz mono with its timestamps. Serialized across the core on the
+    /// tap thread; the block is borrowed for the duration of the call.
+    fn on_audio_tap(&self, tile: u64, block: &audio::TapBlock) {
+        let _ = (tile, block);
+    }
 }
 
 /// Why a call failed. The values match `NvStatus` in the C interface.
@@ -152,13 +159,14 @@ impl Default for CoreConfig {
     }
 }
 
-/// Monotonic microseconds since the core started; the pipelines' clock.
+/// The pipelines' clock: microseconds on the host clock ([`clock`]), the
+/// clock of the audio callback's host times.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Clock(Instant);
+pub(crate) struct Clock;
 
 impl Clock {
     pub(crate) fn now_us(&self) -> u64 {
-        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
+        clock::now_ns() / 1000
     }
 }
 
@@ -259,15 +267,18 @@ impl Core {
             .map_err(|_| CoreError::Internal)?;
         let handle = runtime.handle().clone();
         let events = EventThread::spawn(callbacks.clone()).map_err(|_| CoreError::Internal)?;
+        let audio =
+            Arc::new(audio::AudioHub::new(callbacks.clone()).map_err(|_| CoreError::Internal)?);
         let event_sink = events.sink();
         let tile_ctx = TileContext {
             runtime: handle.clone(),
             callbacks,
             events: event_sink.clone(),
             pipeline: config.pipeline,
-            clock: Clock(Instant::now()),
+            clock: Clock,
             tick_interval: config.tick_interval.max(Duration::from_millis(1)),
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
+            audio,
         };
         info!("core started");
         Ok(Core {
@@ -473,8 +484,15 @@ impl Core {
         };
         let id = self.new_id();
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
-        let (tile, sink) = tile::spawn(id, device, sub, self.tile_ctx.clone(), gate_rx)
-            .map_err(|_| CoreError::Internal)?;
+        let control = self.tile_ctx.audio.add_tile(id);
+        let (tile, sink) =
+            match tile::spawn(id, device, sub, self.tile_ctx.clone(), control, gate_rx) {
+                Ok(t) => t,
+                Err(_) => {
+                    self.tile_ctx.audio.remove_tile(id);
+                    return Err(CoreError::Internal);
+                }
+            };
         lock(&self.sinks).insert(id, sink);
         reg.tiles.insert(id, tile);
         info!(
@@ -514,8 +532,9 @@ impl Core {
                 t.signal_stop();
             }
         }
-        for (_, mut t) in tiles {
+        for (id, mut t) in tiles {
             t.end(reason);
+            self.tile_ctx.audio.remove_tile(id);
         }
     }
 
@@ -548,6 +567,85 @@ impl Core {
         self.send_result(tile, DecoderResult::Failed(kind))
     }
 
+    /// Sets the app's audio output format: `sample_rate` frames per second
+    /// and 1 or 2 interleaved channels. Replaces any earlier output (after a
+    /// device or sample-rate change); audible tiles move to the new one
+    /// within a tick and start over in sync.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for a rate outside
+    /// [`audio::OUTPUT_RATES`], other channel counts, or a call from inside a
+    /// callback; [`CoreError::Closed`].
+    pub fn set_audio_output(&self, sample_rate: u32, channels: u32) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !audio::OUTPUT_RATES.contains(&sample_rate) || !(1..=2).contains(&channels) {
+            return Err(CoreError::InvalidArgument);
+        }
+        self.tile_ctx
+            .audio
+            .set_output(Some(audio_pipeline::OutputFormat {
+                sample_rate,
+                channels: channels as usize,
+            }));
+        info!(sample_rate, channels, "audio output set");
+        Ok(())
+    }
+
+    /// Fills `out` (interleaved, `channels` per frame) with the mix of the
+    /// audible tiles; `host_time_ns` is when `out`'s first frame will be
+    /// heard, on the host clock ([`clock`]). For the app's real-time audio
+    /// callback: it never blocks, takes no lock, and never allocates or
+    /// frees. Writes silence (and returns false) before an output is set,
+    /// when `channels` differs from it, or while another thread is
+    /// rendering (render from one thread at a time).
+    pub fn render_audio(&self, out: &mut [f32], channels: usize, host_time_ns: u64) -> bool {
+        self.tile_ctx.audio.render(out, channels, host_time_ns)
+    }
+
+    /// Makes a tile audible (it claims a playout slot; up to eight play at
+    /// once) or silent (it releases its slot), at `volume` (0 to 1; 0 keeps
+    /// its slot and timing, a mute).
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::InvalidArgument`] for a
+    /// volume that is negative or not finite, or a call from inside a
+    /// callback; [`CoreError::Closed`].
+    pub fn set_tile_audio(&self, tile: u64, audible: bool, volume: f32) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !volume.is_finite() || volume < 0.0 {
+            return Err(CoreError::InvalidArgument);
+        }
+        if self.tile_ctx.audio.set_tile(tile, audible, volume) {
+            Ok(())
+        } else {
+            Err(CoreError::UnknownId)
+        }
+    }
+
+    /// Starts or stops a tile's audio tap: its decoded audio as 16 kHz mono
+    /// blocks to [`Callbacks::on_audio_tap`], whether or not it is audible.
+    /// The tap queue holds [`audio::TAP_CAPACITY`] blocks and drops the
+    /// oldest when the app falls behind. No block for the tile is delivered
+    /// after stopping returns.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn set_tile_audio_tap(&self, tile: u64, enabled: bool) -> Result<(), CoreError> {
+        self.check_api()?;
+        if self.tile_ctx.audio.set_tap(tile, enabled) {
+            Ok(())
+        } else {
+            Err(CoreError::UnknownId)
+        }
+    }
+
+    /// Render calls that found another in progress (and rendered silence),
+    /// and renderers leaked rather than freed on the real-time thread.
+    pub fn audio_render_counters(&self) -> (u64, u64) {
+        self.tile_ctx.audio.render_counters()
+    }
+
     /// True on threads the core owns (where callbacks run). The C interface
     /// uses it to refuse freeing the core from inside a callback.
     pub fn on_core_thread() -> bool {
@@ -577,6 +675,8 @@ impl Core {
         drop(reg);
         // Their tile_closed events are delivered before this returns.
         self.end_tiles(tiles, CloseReason::CoreShutdown);
+        // No on_audio_tap after this; the renderer renders silence.
+        self.tile_ctx.audio.shutdown();
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()
