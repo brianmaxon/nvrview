@@ -273,6 +273,7 @@ Reply details:
 | Fact | Provenance |
 | --- | --- |
 | The 146 reply carries status **300**, not 200, together with a complete body (seen on two NVRs). Treat 300 as success for this command. | observed |
+| The newer-firmware NVR also answered 199 with status 300 and a complete body (the older one with 200). Treat 300 as success for 199 too. | observed |
 | `StreamInfoList` holds one `StreamInfo` per distinct stream configuration, not one per channel. Its `channelBits` is a bitmask of the channels that share it (bit *n* = channel *n*), and it contains one `encodeTable` per tier with `type` (`mainStream`, `subStream`), `resolution/width`, `resolution/height`, `videoEncType`, `defaultFramerate`, `defaultBitrate`, `defaultGop`, `framerateTable`, `bitrateTable`. | observed |
 | `videoEncType` takes the values 0 and 1. | observed |
 | The official client ignores `videoEncType` in the 146 reply; it reads only `channelBits` and, per `encodeTable`, `type`, resolution, the defaults and the two tables. `type` can also be `externStream` or `mobileStream`. | reported (client) |
