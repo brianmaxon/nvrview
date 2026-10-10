@@ -132,6 +132,8 @@ typedef struct NvAction {
  *   NUL-terminated, valid only during the call.
  * From inside a callback an app may call nv_tile_decoded and
  * nv_tile_decode_failed, and nothing else.
+ * No event names a device before nv_device_add returns its ID, and no
+ * on_action for a tile runs before nv_tile_open returns its ID.
  */
 typedef void (*NvActionCallback)(void *context, uint64_t tile, const NvAction *action);
 typedef void (*NvEventCallback)(void *context, const char *json, size_t len);
@@ -153,7 +155,8 @@ typedef struct NvCore NvCore;
 
 uint32_t nv_abi_version(void);
 
-/* Starts the core. `out` receives the handle. */
+/* Starts the core. `out` receives the handle. `config` is read only during
+ * the call. */
 NvStatus nv_core_new(const NvConfig *config, NvCallbacks callbacks, NvCore **out);
 
 /* Stops every preview, closes every session, joins every core thread. No
