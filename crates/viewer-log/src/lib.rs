@@ -26,11 +26,15 @@
 //! are routinely attached to bug reports.
 
 mod nonblocking;
+mod ratelimit;
 mod redact;
 mod rotate;
 mod stats;
 
 pub use nonblocking::{NonBlockingWriter, WriterThread};
+pub use ratelimit::{
+    Clock, ManualClock, RateLimitConfig, RateLimitLayer, SummarySink, SystemClock, group_digits,
+};
 pub use redact::{MASK, Redacted, RedactedTail};
 pub use rotate::{RotatingFileWriter, RotationConfig, total_bytes_on_disk};
 pub use stats::{LogStats, LogStatsSnapshot};
