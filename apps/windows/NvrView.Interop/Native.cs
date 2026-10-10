@@ -59,6 +59,8 @@ public enum NvStatus
     [CName("NV_ERR_INTERNAL")] Internal = -5,
     /// <summary>The output buffer is too small; *len holds the size needed.</summary>
     [CName("NV_ERR_BUFFER_TOO_SMALL")] BufferTooSmall = -6,
+    /// <summary>Talk-back (camera motion control) is not enabled for that camera.</summary>
+    [CName("NV_ERR_NOT_PERMITTED")] NotPermitted = -7,
 }
 
 /// <summary>An action's kind. Unknown kinds (a newer core) need no answer.</summary>
@@ -416,6 +418,27 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_tile_audio_level(nint core, ulong tile, float* peak, float* rms);
+
+    /// <summary>Allows or forbids talk-back to a channel (camera motion control; off by default).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_talk_set_permission(
+        nint core, ulong device, byte channel, [MarshalAs(UnmanagedType.U1)] bool allowed);
+
+    /// <summary>Starts talk-back to a tile's camera; progress arrives as talk events.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_talk_start(nint core, ulong tile);
+
+    /// <summary>Queues mono samples (any rate the core accepts) for the tile's talk-back.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_talk_push(nint core, ulong tile, float* samples, nuint count, uint sampleRate);
+
+    /// <summary>Stops talk-back, after sending what is queued when drain is true.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_talk_stop(nint core, ulong tile, [MarshalAs(UnmanagedType.U1)] bool drain);
 
     /// <summary>The device's stable key into a buffer.</summary>
     [LibraryImport(Library)]

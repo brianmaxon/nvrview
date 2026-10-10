@@ -129,6 +129,8 @@ public struct CoreStatus: Sendable, Equatable, Error {
     public static let `internal` = CoreStatus(-5)
     /// ABI 3: the output buffer is too small; the length needed came back.
     public static let bufferTooSmall = CoreStatus(-6)
+    /// Talk-back (camera motion control) is not enabled for that camera.
+    public static let notPermitted = CoreStatus(-7)
 
     public var isOK: Bool { code == 0 }
 }
