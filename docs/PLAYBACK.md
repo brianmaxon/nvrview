@@ -120,6 +120,23 @@ monitoring; a missed sound is never shown as "no alarm".
   standard smoke-alarm (three beeps, T3) and CO-alarm (four beeps, T4)
   rhythms of a tone near 3 kHz, with no model; it is tested on synthetic
   audio, and a camera's alarm test button is the hardware check.
+  Implemented, with the loudness envelope, in `crates/sound-events` (not
+  yet wired into the core): T3 is 0.5 s on, 0.5 s off, three times, then
+  1.5 s off (ISO 8201, ANSI/ASA S3.41, NFPA 72); T4 is 0.1 s on, 0.1 s off,
+  four times, then about 5 s off (NFPA 720, now NFPA 72; UL 2034). The tone
+  band defaults to 2.9 to 3.5 kHz, durations are accepted within 30% plus
+  40 ms, and two linked cycles are needed before an episode is reported
+  (about 7.5 s after a T3 starts, 10 s after a T4). On synthetic audio it
+  finds every alarm down to a tone 5 dB below broadband noise, with AAC-like
+  coding, resampling, reverberation, and ±20% timing jitter, and reports
+  none of 25 distractors (steady tones, ring cadences, microwave and backup
+  beepers, alarms outside the band, speech-like noise, music-like chords).
+  On 10 minutes of real camera audio it reported nothing, and found alarms
+  mixed into that audio at down to -40 dBFS, also after an AAC round trip.
+  Cost: about 0.1 ms of CPU per second of audio for the detector and 0.01 ms
+  for the envelope (Apple M3 Max, release build; `cargo run --release -p
+  sound-events --example bench`), about 0.01% of one core per camera.
+  Not yet checked: a real alarm through a real camera microphone.
 - **Sound labels.** On macOS, SoundAnalysis's built-in classifier labels
   sirens, glass breaking, barking, a baby crying, knocking, and similar
   sounds; the app hands the labels to the core, which stores them as events
