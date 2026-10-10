@@ -27,8 +27,13 @@ Inputs:
   decoder, possibly late and from another thread (the caller serializes them).
   A `Configure` that fails is reported as `decode_failed` too. Pictures still
   in flight when `Flush`, `Reset`, or `Configure` runs are discarded with no
-  result, so not every `Decode` gets one.
+  result, so not every `Decode` gets one; every other `Decode` gets exactly
+  one, including pictures the decoder drops (`noPicture`). The failure kinds
+  are shared: `invalidParameterSets` and `sessionCreateFailed` answer a
+  `Configure`; `notConfigured`, `invalidAccessUnit`, `submitFailed`,
+  `decodeError`, and `noPicture` answer the oldest `Decode` in flight.
 - `tick(now)`: drives time-based policy (recovery cooldowns, stall detection).
+- `discontinuity()`: the stream restarted (reconnect); flush and gate.
 
 Actions, drained in order with `next_action()`:
 
@@ -49,7 +54,8 @@ Policy, all in the pipeline:
   nothing is decoded until a keyframe (judged by NAL types, not only the flag).
 - **Format changes.** New parameter sets or codec in a keyframe produce
   `Reset` + `Configure` before that keyframe's `Decode`.
-- **Backpressure.** A bounded queue of access units; on overflow, drop to the
+- **Backpressure.** A few pictures in flight (submitted, not yet answered)
+  and a bounded queue of access units behind them; on overflow, drop to the
   next keyframe. Counted, never unbounded.
 - **Recovery.** A decode failure leads to `Flush` and gating to the next
   keyframe. Repeated failures with the same format escalate to `Reset` +
@@ -70,7 +76,7 @@ platform asks its decoder for output in the stream's range (VideoToolbox
 otherwise converts to whatever range the output format names), so the
 samples match the matrix.
 Without a VUI color description: BT.709 for heights of 720 and above, BT.601
-below, video range.
+below, video range unless the VUI sets its full-range flag.
 
 ## Layout (shared)
 
