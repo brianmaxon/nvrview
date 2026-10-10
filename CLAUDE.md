@@ -62,17 +62,32 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 
 ## Checking your work
 
+`scripts/check.sh` runs everything below in order and stops at the first
+failure. Run it before every commit.
+
 | what | command |
 | --- | --- |
 | sanitization, whole tree | `python3 -I scripts/check-sanitized.py --all` |
-| Rust core | `cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
-| Windows portability (from macOS) | `cargo check --workspace --target x86_64-pc-windows-msvc` |
+| Rust core | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
+| Windows portability (from macOS) | `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc` |
+| macOS app | `cd apps/macos && swift test` |
+
+When chaining checks in a shell, make failures stop the chain (`set -e`, and
+`set -o pipefail` when piping output); a filtered pipeline can otherwise hide
+a failing step.
 
 ## Commits
 
 - Commit identity must be a GitHub noreply address (the pre-commit hook
   enforces it). Run `scripts/setup-dev.sh` in a fresh clone.
-- Commit as work completes, in small focused commits, after the local checks
-  above pass. Push to `main` once those checks pass. Never create releases or
-  tags without explicit approval.
+- Commit locally as work completes, in small focused commits, after
+  `scripts/check.sh` passes.
+- **Build and test locally; do not push to find out.** Push only when a change
+  needs verification on a platform this machine cannot run (Windows or Linux
+  tests in CI), at a milestone, or when the user asks. Batch commits into those
+  pushes. Never create releases or tags without explicit approval.
+- Parallel agents work in git worktrees under `.worktrees/` (git-ignored), one
+  branch each; review, verify, and merge them locally. After merging branches
+  that both touched `Cargo.lock`, regenerate it rather than trusting the
+  textual merge.
 - Never bypass the pre-commit hook (`--no-verify`).

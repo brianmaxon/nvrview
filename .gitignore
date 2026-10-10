@@ -24,3 +24,9 @@ apps/windows/**/obj/
 
 # Swift package
 apps/macos/.build/
+
+# Agent worktrees
+/.worktrees/
+
+# Agent worktrees
+/.worktrees/
