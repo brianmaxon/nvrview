@@ -282,6 +282,34 @@ not in a separate system window.
 - Insets never take the keyboard focus or change what the user is listening
   to, except for the doorbell rules below.
 
+Details settled while building it (macOS):
+
+- An inset is one more tile of the window's Metal grid, drawn last (on top)
+  from the camera's shared tile: no second decode, no extra login. Its
+  header, border and controls are lightweight views above the picture.
+- "Visible" means on this window's stage now: the swapped-in camera, else the
+  focused tile, else any tile of the layout. A sound alarm counts as visible
+  when any lens of its channel is. A doorbell press opens the call inset
+  unless the doorbell fills the stage (focused, swapped in, or the only
+  tile); its call controls then show over the stage instead.
+- Entrance is a per-camera option (the tile's context menu, Settings >
+  Cameras), off by default, saved in the app's data directory.
+- The insets stack from their corner, newest nearest it; those that do not
+  fit the stage's height count in "+N more". The corner is a setting
+  (Settings > Alerts), opposite the corner indicators by default.
+- Swapping with a layout that is not focused puts the selected (or first)
+  tile's camera into the return inset ("Back to the view"); clicking it, its
+  close control, or Tab swaps back. Clicking another inset while swapped puts
+  that camera on the stage and keeps the way back. The swapped-in camera gets
+  the main stream (the same aligned switch as focus) and a header along the
+  top of the stage.
+- Esc dismisses the swapped-in camera (the stage returns to its view), else
+  the top inset; only when there is no inset does Esc leave focus as before.
+  Tab and Esc go to the insets only while the stage has the keyboard.
+- A detection whose stop never arrives counts as ended 120 s after its last
+  start, so its inset still closes. Using an inset (a click, hovering, its
+  call's activity) restarts the minute.
+
 ## Doorbell calls
 
 A doorbell press opens the doorbell's inset as a call:
@@ -321,6 +349,33 @@ A doorbell press opens the doorbell's inset as a call:
 - The call ends when the user closes it or about 60 s after the last activity
   (press, speech, talk-back), and is listed in the event log with its times
   and, if saved, its transcript.
+
+Details settled while building it (macOS):
+
+- The Unmute control covers the inset's picture (or the stage's, when the
+  doorbell fills it); the Talk control and the reply box stay reachable below
+  it. Cameras muted for the call play again when it ends, unless the user
+  changed what plays meanwhile.
+- Talk: hold the button, or turn on "Keep talking". Both, and Send, ask the
+  core for talk-back; without the doorbell's "Allow talk-back" (Settings >
+  Cameras, off by default) the core refuses with `not_permitted` and the call
+  says so. The permission is passed to the core after every connection and
+  whenever it changes. The microphone is asked for (the system prompt) only
+  when Talk is first pressed; a typed reply needs no microphone.
+- A typed reply is rendered by the system voice into buffers (never played
+  locally), converted to 16 kHz mono, held until talk-back is active, pushed
+  in one go, and ended with a draining stop unless Talk is held.
+- The visitor's transcript comes from the doorbell tile's audio tap (16 kHz
+  mono), enabled for the call; the user's from the microphone while talking,
+  not while the doorbell's audio is audible and carrying sound (and 0.4 s
+  after). Apple's SpeechTranscriber (volatile and fast results) runs on the
+  Mac; while it installs its English assets the call says "Preparing speech
+  recognition", and without them, or without the speech recognition
+  permission, the call goes on without a transcript.
+- The app logs every talk-back start, refusal and stop, typed replies (their
+  length, not their text) and the call's end in the session's event log; the
+  transcript goes there only with "Save call transcripts" (Settings >
+  Alerts), never to the system log.
 
 ## Sidebar
 
