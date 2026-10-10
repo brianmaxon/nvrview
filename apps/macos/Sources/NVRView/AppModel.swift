@@ -511,6 +511,19 @@ final class AppModel {
         devices.flatMap { d in d.channels.flatMap { cameras(device: d.key, channel: $0) } }
     }
 
+    /// The cameras "All Cameras" shows: every online channel of every
+    /// connected device, in sidebar order, up to the layout limit.
+    var onlineCameras: [CameraRef] { AllCameras.select(devices.map(Self.allCamerasDevice)) }
+
+    /// The online cameras of one device (the device menu's own window).
+    func onlineCameras(of device: DeviceRuntime) -> [CameraRef] {
+        Array(AllCameras.cameras(of: Self.allCamerasDevice(device)).prefix(LayoutNode.maxLeaves))
+    }
+
+    private static func allCamerasDevice(_ d: DeviceRuntime) -> AllCamerasDevice {
+        AllCamerasDevice(key: d.key, connected: d.link.state == .connected, channels: d.channels)
+    }
+
     /// What a tile showing `camera` says instead of a picture, if anything.
     func veil(for camera: CameraRef) -> TileVeil? {
         guard let d = runtime(camera.device) else { return TileVeil(title: "Device removed") }

@@ -20,11 +20,45 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   its cameras out as an even grid. Edits to that grid stay in the window
   until saved as a new layout, so a group is a quick way to see some cameras
   together and a starting point for a layout.
-- **All Cameras** is the unsaved even grid of every camera (up to 16) that a
-  window shows when it has nothing else to show: the first window before any
-  layout exists, a window whose layout or group was deleted, and a new
-  window opened with no other window active. A device's context menu opens
-  the same grid for that device's cameras.
+- **All Cameras** is the unsaved even grid of every camera (every lens of
+  each channel) of every online channel of every connected device, in
+  sidebar order, up to 64 (the most a layout can hold). A window shows it
+  when it has nothing else to show: the first window before any layout
+  exists, a window whose layout or group was deleted, and a new window
+  opened with no other window active. Channels known to be offline are left
+  out, and so are devices that are not connected yet (they are added when
+  they connect). While the window is unedited it follows the devices: when a
+  device connects or drops, or a channel goes online or offline, the grid is
+  rebuilt from the new list (only when the list actually changes; cameras
+  that stay keep their streams). Splitting, swapping, resizing, or entering
+  Edit Layout stops the following. With no online camera the window shows
+  its empty state. A device's context menu, "Show This Device's Cameras in
+  New Window", opens the same kind of grid for that device alone.
+- **New Layout from Template** (File menu and the sidebar) offers ready-made
+  shapes, smallest first, each shown with its icon and tile count. The new
+  layout is filled with the online cameras in All Cameras order (empty tiles
+  when there are fewer cameras than tiles), saved as an ordinary layout, and
+  opened in Edit Layout. The templates:
+  - even grids of 1, 4 (2 x 2), 9 (3 x 3), 16 (4 x 4), 25 (5 x 5), and 36
+    (6 x 6) tiles; 2 side by side; 2 stacked;
+  - 6: one large tile (2/3 of the width and height) top-left, a column of 2
+    to its right, a row of 3 along the bottom;
+  - 8: one large tile (3/4 of the width and height) top-left, a column of 3
+    to its right, a row of 4 along the bottom;
+  - 10: two large tiles side by side across the top half, two rows of 4
+    small tiles in the bottom half;
+  - 13: on a 4 x 4 grid, a 2 x 2 large tile top-left, a 2 x 2 block of small
+    tiles to its right, two rows of 4 below;
+  - 14: two large tiles across the top (2 of 5 rows), three rows of 4 below;
+  - 32: on a 7 x 5 grid, a 2 x 2 large tile top-left, a 5 x 2 block of small
+    tiles to its right, three rows of 7 below.
+  Every template is an ordinary split tree (nested splits with ratios), so
+  its tiles resize, split, and swap like any layout's.
+- **Layout icons** show a layout's shape: every tile of its tree as a small
+  rounded rectangle with a gap between tiles, in one color that follows the
+  sidebar's tint (and dark mode and selection). Each saved layout's row has
+  one and it follows edits; a group's row shows the even grid for its
+  camera count; the template menu items show their shapes.
 
 ## Listening from any tile
 

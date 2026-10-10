@@ -201,7 +201,7 @@ internal sealed partial class SidebarView : UserControl
         {
             SavedLayout l = layout;
             Grid row = Row(l.Name, $"{l.Root.LeafCount}", 0, _window.State.Content is WindowContent.Layout { Id: var id } && id == l.Id,
-                () => _window.Show(new WindowContent.Layout(l.Id)));
+                () => _window.Show(new WindowContent.Layout(l.Id)), icon: LayoutIcon.Create(l.Root));
             ContextMenu(row, m =>
             {
                 Item(m, "Open in new window", () => App.Instance.OpenWindow(new WindowContent.Layout(l.Id)));
@@ -218,6 +218,7 @@ internal sealed partial class SidebarView : UserControl
             });
             _rows.Children.Add(row);
         }
+        TemplateButton();
 
         Header("Groups", "New group…", async () =>
         {
@@ -231,7 +232,7 @@ internal sealed partial class SidebarView : UserControl
             CameraGroup g = group;
             bool collapsed = _collapsedGroups.Contains(g.Id);
             Grid row = Row(g.Name, $"{g.Cameras.Count}", 0, _window.State.Content is WindowContent.Group { Id: var gid } && gid == g.Id,
-                () => _window.Show(new WindowContent.Group(g.Id)), chevron: collapsed ? false : true, toggle: () =>
+                () => _window.Show(new WindowContent.Group(g.Id)), icon: LayoutIcon.ForGrid(g.Cameras.Count), chevron: collapsed ? false : true, toggle: () =>
                 {
                     if (!_collapsedGroups.Remove(g.Id))
                     {
@@ -297,8 +298,8 @@ internal sealed partial class SidebarView : UserControl
             {
                 Item(m, "Reconnect", () => _viewer.Reconnect(d));
                 Item(m, "New group from this device", () => _viewer.CreateGroup(d.DisplayName, listed.SelectMany(c => Viewer.CamerasOf(d, c))));
-                Item(m, "Show all cameras in new window", () => App.Instance.OpenWindow(new WindowContent.Scratch(d.DisplayName,
-                    LayoutNode.Balanced(listed.SelectMany(c => Viewer.CamerasOf(d, c)).Take(LayoutNode.MaxLeaves)))));
+                Item(m, "Show this device's cameras in new window", () => App.Instance.OpenWindow(new WindowContent.Scratch(d.DisplayName,
+                    LayoutNode.Balanced(Viewer.OnlineCamerasOf(d)))));
                 Item(m, "Settings…", () => _window.OpenSettings());
             });
             _rows.Children.Add(row);
@@ -383,7 +384,8 @@ internal sealed partial class SidebarView : UserControl
 
     /// <summary>A clickable row: optional disclosure chevron, title, symbols, detail on the right.</summary>
     private Grid Row(string title, string detail, int depth, bool selected, Action? click, bool? chevron = null, Action? toggle = null,
-        bool bold = false, SidebarSymbolScope? symbols = null, (string Text, SolidColorBrush Brush)? state = null, Brush? dot = null, bool listening = false)
+        bool bold = false, SidebarSymbolScope? symbols = null, (string Text, SolidColorBrush Brush)? state = null, Brush? dot = null, bool listening = false,
+        PathIcon? icon = null)
     {
         var row = new Grid
         {
@@ -415,6 +417,13 @@ internal sealed partial class SidebarView : UserControl
             var e = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 7, Height = 7, Fill = dot, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(e, 1);
             row.Children.Add(e);
+        }
+        if (icon is not null)
+        {
+            icon.Foreground = Secondary;
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(icon, 1);
+            row.Children.Add(icon);
         }
         var text = new TextBlock
         {
@@ -458,6 +467,24 @@ internal sealed partial class SidebarView : UserControl
             };
         }
         return row;
+    }
+
+    /// <summary>"New layout from template": each template with its shape and tile count, like a picker.</summary>
+    private void TemplateButton()
+    {
+        var menu = new MenuFlyout();
+        _window.AddTemplateItems(menu.Items);
+        var button = new Button
+        {
+            Content = "New layout from template",
+            Flyout = menu,
+            Background = Clear,
+            BorderThickness = new Thickness(0),
+            Margin = new Thickness(2, 0, 0, 0),
+            Padding = new Thickness(6, 3, 6, 3),
+            FontSize = 12,
+        };
+        _rows.Children.Add(button);
     }
 
     private Grid CameraRow(CameraRef camera, string title, int depth, SidebarSymbolScope symbols, bool? chevron = null, Action? toggle = null,
