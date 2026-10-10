@@ -377,13 +377,14 @@ async fn previews_restart_after_reconnect() {
     let fake = Fake::start(Mode::DropFirstAfterStart).await;
     let s = DeviceSession::spawn(TcpConnector::new(fake.addr), config());
     let mut sub = s.subscribe(3, StreamTier::Sub).await.unwrap();
-    // First connection: media, then the device hangs up.
+    // First connection: media, then the device hangs up. Unread media is
+    // flushed on disconnect, so only what follows the gap is guaranteed.
     let mut saw_gap = false;
-    let mut keyframes = 0;
-    while keyframes < 2 {
+    let mut keyframe_after_gap = false;
+    while !keyframe_after_gap {
         match recv(&mut sub).await {
             Item::Discontinuity => saw_gap = true,
-            i if video_pts(&i).is_some_and(|(k, _)| k) => keyframes += 1,
+            i if saw_gap && video_pts(&i).is_some_and(|(k, _)| k) => keyframe_after_gap = true,
             _ => {}
         }
     }
