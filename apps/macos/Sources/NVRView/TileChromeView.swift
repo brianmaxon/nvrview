@@ -11,6 +11,8 @@ struct TileChromeContent: Equatable {
     /// What is detected now for the camera (corner indicators).
     var indicators: [IndicatorItem] = []
     var corner: ChromeCorner = .fallback
+    /// The camera's raised alert, as the header's lines (docs/UX.md "Alerts").
+    var alertLines: [String]?
     var veil: TileVeil?
     var hasCamera: Bool
     var audible: Bool
@@ -35,6 +37,7 @@ final class TileChromeView: NSView {
     static let fadeOutAfterExit: TimeInterval = 0.8
 
     var onSpeaker: (_ additive: Bool) -> Void = { _ in }
+    var onDismissAlert: () -> Void = {}
     /// The header's reset-zoom control (shown while the tile is zoomed).
     var onResetZoom: () -> Void = {}
 
@@ -46,6 +49,13 @@ final class TileChromeView: NSView {
     private let speaker = NSButton()
     private let cornerView = CornerIndicatorView()
     private let resetZoom = NSButton()
+    /// The alert's red border (blinks, or stays steady with Reduce Motion).
+    private let alertBorder = CALayer()
+    private let alertStrip = NSView()
+    private let alertText = NSTextField(labelWithString: "")
+    private let alertDismiss = NSButton()
+    private var reduceMotionObserver: NSObjectProtocol?
+    private static let alertLineHeight: CGFloat = 14
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
     private let veilDetail = NSTextField(labelWithString: "")
@@ -168,6 +178,31 @@ final class TileChromeView: NSView {
         outline.borderColor = NSColor.controlAccentColor.cgColor
         outline.borderWidth = 0
         layer?.addSublayer(outline)
+
+        alertBorder.borderColor = NSColor.systemRed.cgColor
+        alertBorder.borderWidth = 4
+        alertBorder.isHidden = true
+        layer?.addSublayer(alertBorder)
+        alertStrip.wantsLayer = true
+        alertStrip.layer?.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.05, blue: 0.05, alpha: 0.85).cgColor
+        alertStrip.layer?.cornerRadius = 6
+        alertText.font = .systemFont(ofSize: 11, weight: .medium)
+        alertText.textColor = .white
+        alertText.maximumNumberOfLines = 0
+        alertText.lineBreakMode = .byTruncatingTail
+        alertDismiss.title = "Dismiss"
+        alertDismiss.bezelStyle = .rounded
+        alertDismiss.controlSize = .small
+        alertDismiss.target = self
+        alertDismiss.action = #selector(dismissAlertClicked(_:))
+        alertDismiss.toolTip = "Dismiss this alert (Return)"
+        alertStrip.addSubview(alertText)
+        alertStrip.addSubview(alertDismiss)
+        alertStrip.isHidden = true
+        header.addSubview(alertStrip)
+        reduceMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.styleAlertBorder() } }
     }
 
     @available(*, unavailable)
@@ -177,7 +212,7 @@ final class TileChromeView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard header.alphaValue > 0.05, !header.isHidden else { return nil }
         let p = convert(point, from: superview)
-        for button in [speaker, resetZoom] where !button.isHidden {
+        for button in [speaker, resetZoom, alertDismiss] where !button.isHidden && (button !== alertDismiss || !alertStrip.isHidden) {
             if button.convert(button.bounds, to: self).contains(p) { return button }
         }
         return nil
@@ -203,6 +238,7 @@ final class TileChromeView: NSView {
             accessibilityDescription: c.audible ? "Listening" : "Muted")
         speaker.setAccessibilityLabel(c.audible ? "Stop listening" : "Listen")
         cornerView.corner = c.corner
+        setAlert(c.alertLines)
         cornerView.set(active: c.indicators)
         veil.isHidden = c.veil == nil || !c.hasCamera
         veilTitle.stringValue = c.veil?.title ?? ""
@@ -258,7 +294,8 @@ final class TileChromeView: NSView {
     override func layout() {
         super.layout()
         let w = bounds.width, h = bounds.height
-        let headerHeight: CGFloat = (subtitle.isHidden ? 30 : 40) + (rates.isHidden ? 0 : 14)
+        let alertHeight: CGFloat = alertStrip.isHidden ? 0 : CGFloat(alertLineCount) * Self.alertLineHeight + 12
+        let headerHeight: CGFloat = (subtitle.isHidden ? 30 : 40) + (rates.isHidden ? 0 : 14) + alertHeight
         header.frame = CGRect(x: 0, y: 0, width: w, height: min(headerHeight, h))
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -282,6 +319,16 @@ final class TileChromeView: NSView {
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
         rates.frame = CGRect(x: 10, y: subtitle.isHidden ? 22 : 36, width: max(w - 20, 0), height: 14)
         veil.frame = bounds
+        alertBorder.frame = bounds
+        if !alertStrip.isHidden {
+            let top = header.bounds.height - alertHeight + 2
+            alertStrip.frame = CGRect(x: 6, y: top, width: max(w - 12, 0), height: alertHeight - 4)
+            let dismissWidth: CGFloat = 74
+            alertDismiss.frame = CGRect(x: alertStrip.bounds.width - dismissWidth - 6, y: 6, width: dismissWidth, height: 20)
+            alertText.frame = CGRect(
+                x: 8, y: 6, width: max(alertStrip.bounds.width - dismissWidth - 22, 0),
+                height: CGFloat(alertLineCount) * Self.alertLineHeight)
+        }
         veilTitle.frame = CGRect(x: 8, y: h / 2 - 18, width: max(w - 16, 0), height: 18)
         veilDetail.frame = CGRect(x: 8, y: h / 2 + 2, width: max(w - 16, 0), height: 16)
         emptyHint.frame = CGRect(x: 8, y: h / 2 - 8, width: max(w - 16, 0), height: 16)
@@ -388,6 +435,46 @@ final class TileChromeView: NSView {
         outline.add(animation, forKey: "opacity")
         outline.opacity = shown || editing ? 1 : 0
     }
+
+    private var alertLineCount = 0
+
+    /// Shows or clears the alert: the red border and the header's strip.
+    private func setAlert(_ lines: [String]?) {
+        let wasShown = !alertStrip.isHidden
+        alertStrip.isHidden = lines == nil
+        alertBorder.isHidden = lines == nil
+        if let lines {
+            alertLineCount = lines.count
+            alertText.stringValue = lines.joined(separator: "\n")
+            alertText.setAccessibilityLabel("Alert: " + lines.joined(separator: ", "))
+            if !wasShown { styleAlertBorder() }
+        } else {
+            alertBorder.removeAnimation(forKey: "blink")
+        }
+        needsLayout = true
+    }
+
+    /// Blinking (a layer animation: no main-thread work) or steady.
+    private func styleAlertBorder() {
+        alertBorder.removeAnimation(forKey: "blink")
+        guard !alertBorder.isHidden else { return }
+        let mode = AlertBorder.mode(reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        alertBorder.opacity = 1
+        if mode == .blinking {
+            let blink = CAKeyframeAnimation(keyPath: "opacity")
+            blink.values = [1.0, 0.0]
+            blink.keyTimes = [0, 0.5]
+            blink.calculationMode = .discrete
+            blink.duration = AlertBorder.blinkPeriod
+            blink.repeatCount = .infinity
+            alertBorder.add(blink, forKey: "blink")
+        }
+    }
+
+    @objc private func dismissAlertClicked(_ sender: NSButton) { onDismissAlert() }
+
+    /// Whether the alert strip is showing (for the self-test).
+    var isAlertShown: Bool { !alertStrip.isHidden }
 
     @objc private func resetZoomClicked(_ sender: NSButton) {
         onResetZoom()

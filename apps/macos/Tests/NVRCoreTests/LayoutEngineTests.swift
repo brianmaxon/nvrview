@@ -678,3 +678,114 @@ private struct SplitMix {
         #expect(!quiet)
     }
 }
+
+@Suite struct AlertTests {
+    private func sound(_ kind: String = "smoke_alarm", channel: Int = 2, start: Bool) -> DetectionEvent {
+        DetectionEvent(device: 1, channel: channel, kind: kind, active: start, source: .localAudio)
+    }
+    private func cam(_ lens: Int = 0, channel: Int = 2, device: String = "dev-a") -> CameraRef {
+        CameraRef(device: device, channel: channel, lens: lens)
+    }
+    private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func raiseCountStopDismissRaiseAgain() {
+        var c = AlertCenter()
+        #expect(!c.isActive(cam()))
+        let raised = c.apply(sound(start: true), deviceKey: "dev-a", at: t0)
+        #expect(raised)
+        var a = c.alert(for: cam())
+        #expect(a?.count == 1 && a?.sounding == true && a?.firstAt == t0)
+        // Each start counts once; the last time moves, the first does not.
+        c.apply(sound(start: false), deviceKey: "dev-a", at: t0 + 5)
+        c.apply(sound(start: true), deviceKey: "dev-a", at: t0 + 60)
+        a = c.alert(for: cam())
+        #expect(a?.count == 2 && a?.firstAt == t0 && a?.lastAt == t0 + 60 && a?.sounding == true)
+        // A stop never clears it.
+        c.apply(sound(start: false), deviceKey: "dev-a", at: t0 + 70)
+        #expect(c.isActive(cam()))
+        #expect(c.alert(for: cam())?.sounding == false)
+        // Dismissal clears it and resets the count; a new start raises anew.
+        #expect(c.dismiss(cam(), at: t0 + 80)?.count == 2)
+        #expect(!c.isActive(cam()))
+        #expect(c.dismiss(cam(), at: t0 + 81) == nil)
+        c.apply(sound("co_alarm", start: true), deviceKey: "dev-a", at: t0 + 90)
+        #expect(c.alert(for: cam())?.count == 1)
+        #expect(c.alert(for: cam())?.kind == "co_alarm")
+        // The session log has the raise, the repeat, the dismissal, the raise.
+        #expect(c.log.count == 4)
+        #expect(c.log[0].text == "Alert raised: Smoke alarm (sound), channel 3")
+        #expect(c.log[2].text.hasPrefix("Alert dismissed"))
+    }
+
+    @Test func routingAcrossLensesAndCameras() {
+        var c = AlertCenter()
+        c.apply(sound(start: true), deviceKey: "dev-a", at: t0)
+        // Every lens of the channel's camera (and so every tile, in any
+        // window, since the center is shared); no other camera.
+        #expect(c.isActive(cam(0)) && c.isActive(cam(1)))
+        #expect(!c.isActive(cam(0, channel: 3)))
+        #expect(!c.isActive(cam(0, device: "dev-b")))
+        // Dismissing from the second lens clears the first too.
+        c.dismiss(cam(1), at: t0 + 1)
+        #expect(!c.isActive(cam(0)))
+    }
+
+    @Test func onlyConfiguredKindsRaise() {
+        var c = AlertCenter()
+        let people = DetectionEvent(device: 1, channel: 2, kind: "people", active: true, source: .localAudio)
+        let device = DetectionEvent(device: 1, channel: 2, kind: "smoke_alarm", active: true, source: .device)
+        let motion = DetectionEvent(device: 1, channel: 2, kind: "motion", active: true)
+        for e in [people, device, motion] {
+            let changed = c.apply(e, deviceKey: "dev-a", at: t0)
+            #expect(!changed)
+        }
+        #expect(c.all.isEmpty)
+        #expect(AlertPolicy.raises(kind: "co_alarm", source: .localAudio))
+        // A lost session leaves it up, but no longer known to be sounding.
+        c.apply(sound(start: true), deviceKey: "dev-a", at: t0)
+        c.deviceLost("dev-a")
+        #expect(c.alert(for: cam())?.sounding == false)
+    }
+
+    @Test func headerLines() {
+        var c = AlertCenter()
+        c.apply(sound(start: true), deviceKey: "dev-a", at: t0)
+        c.apply(sound(start: false), deviceKey: "dev-a", at: t0 + 3)
+        c.apply(sound(start: true), deviceKey: "dev-a", at: t0 + 3600)
+        let a = c.alert(for: cam())!
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let sameDay = a.lines(now: t0 + 3600, calendar: utc, locale: Locale(identifier: "en_US"))
+        #expect(sameDay.count == 4)
+        #expect(sameDay[0] == "Smoke alarm (sound)")
+        #expect(sameDay[2].hasPrefix("Detected 2 times, last "))
+        #expect(sameDay[3] == "Sounding now")
+        // The date appears when it was not today.
+        let later = a.lines(now: t0 + 3 * 86_400, calendar: utc, locale: Locale(identifier: "en_US"))
+        #expect(later[1].count > sameDay[1].count)
+        #expect(later[1].contains("2027"))
+        #expect(!sameDay[1].contains("2027"))
+    }
+
+    @Test func reduceMotionChoosesSteady() {
+        #expect(AlertBorder.mode(reduceMotion: true) == .steady)
+        #expect(AlertBorder.mode(reduceMotion: false) == .blinking)
+        #expect(AlertBorder.visible(.blinking, at: 0.2))
+        #expect(!AlertBorder.visible(.blinking, at: 0.7))
+        #expect(AlertBorder.visible(.blinking, at: 1.2))
+        #expect(AlertBorder.visible(.steady, at: 0.7))
+    }
+
+    @Test func fakeCoreSoundEventsRaiseAndStopKeeps() throws {
+        let rig = try Rig(try Fixtures.clip("h264-basic.h264"))
+        defer { rig.bridge.shutdown() }
+        rig.fake.emitSoundDetection(device: rig.device, channel: 2, kind: "smoke_alarm", start: true)
+        rig.fake.emitSoundDetection(device: rig.device, channel: 2, kind: "smoke_alarm", start: false)
+        var c = AlertCenter()
+        for e in rig.events.get() {
+            if case .detection(let d) = e { c.apply(d, deviceKey: "dev-a", at: t0) }
+        }
+        #expect(c.alert(for: cam())?.count == 1)
+        #expect(c.alert(for: cam())?.sounding == false)
+    }
+}

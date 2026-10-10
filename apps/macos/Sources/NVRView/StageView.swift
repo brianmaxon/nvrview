@@ -133,6 +133,8 @@ final class StageView: NSView {
         addSubview(grid)
         addSubview(overlay)
         overlay.registerForDraggedTypes([.string])
+        alertActive = { [weak model] in model?.alerts.isActive($0) == true }
+        dismissAlert = { [weak model] in model?.dismissAlert($0) }
         grid.prepare = { [weak self] renderer, size in
             MainActor.assumeIsolated { self?.prepare(renderer: renderer, drawable: size) }
         }
@@ -171,6 +173,11 @@ final class StageView: NSView {
         for leaf in frames.leaves where chromes[leaf.path] == nil {
             let view = TileChromeView()
             let path = leaf.path
+            view.onDismissAlert = { [weak self] in
+                guard let self, let camera = self.frames.leaves.first(where: { $0.path == path })?.camera else { return }
+                self.dismissAlert(camera)
+                self.refreshChrome()
+            }
             view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
             view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
@@ -241,6 +248,10 @@ final class StageView: NSView {
         }
     }
 
+    private func alertLines(for camera: CameraRef) -> [String]? {
+        model.alerts.alert(for: camera)?.lines(now: Date())
+    }
+
     private func content(for leaf: LeafFrame) -> TileChromeContent {
         let selected = state.selected == leaf.path && (state.editing || state.focused == nil)
         guard let camera = leaf.camera else {
@@ -266,6 +277,7 @@ final class StageView: NSView {
             title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
             rates: model.showFrameRates ? rateText(leaf.path, camera) : nil,
             indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
+            alertLines: alertLines(for: camera),
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }

@@ -435,9 +435,20 @@ public final class FakeCore: CoreAPI {
 
     /// Emits a sound detection (`kind` `smoke_alarm` or `co_alarm`) the way
     /// the core does: `source` `local_audio`, no `lens`.
+    ///
+    /// Like the core, one episode per channel however many tiles show it: a
+    /// start while one is active, or a stop with none, emits nothing.
     public func emitSoundDetection(device: UInt64, channel: Int, kind: String = "smoke_alarm", start: Bool) {
+        let key = "\(device)/\(channel)/\(kind)"
+        let emit: Bool = soundLock.withLock {
+            start ? soundActive.insert(key).inserted : soundActive.remove(key) != nil
+        }
+        guard emit else { return }
         emitDetection(device: device, channel: channel, kind: kind, start: start, source: "local_audio")
     }
+
+    private let soundLock = NSLock()
+    private nonisolated(unsafe) var soundActive: Set<String> = []
 
     fileprivate func event(_ json: String) { emitEvent(json) }
 
