@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use video_pipeline::{
-    AccessUnit, Action, Codec, DecodeFailure, PipelineConfig, Rect, Size, TilePipeline, TileStatus,
-    analyze, nal_units,
+    AccessUnit, Action, Codec, DecodeFailureKind, PipelineConfig, Rect, Size, TilePipeline,
+    TileStatus, analyze, nal_units,
 };
 
 /// 20 fps.
@@ -98,7 +98,7 @@ pub enum Event {
 /// How the fake decoder answers a submitted picture.
 pub enum Answer {
     Ok,
-    Fail(DecodeFailure),
+    Fail(DecodeFailureKind),
     /// Never answer.
     Silent,
 }
@@ -116,6 +116,14 @@ pub struct Harness {
     need_keyframe: bool,
     pending: VecDeque<u64>,
     pub decide: Box<dyn FnMut(u64, usize) -> Answer>,
+    /// Answers each `Configure` (argument: how many came before); `Some`
+    /// fails it, reported right after the action like a platform would.
+    pub configure: Box<dyn FnMut(usize) -> Option<DecodeFailureKind>>,
+    session_ok: bool,
+    configures_seen: usize,
+    /// Check the fake decoder's own count of pictures in flight against the
+    /// limit. Off when a test sends spurious results the fake cannot see.
+    pub strict_in_flight: bool,
     submitted: usize,
 }
 
@@ -130,6 +138,10 @@ impl Harness {
             need_keyframe: true,
             pending: VecDeque::new(),
             decide: Box::new(|_, _| Answer::Ok),
+            configure: Box::new(|_| None),
+            session_ok: false,
+            configures_seen: 0,
+            strict_in_flight: true,
             submitted: 0,
         }
     }
@@ -164,6 +176,7 @@ impl Harness {
     pub fn drain(&mut self) {
         let mut count = 0;
         while let Some(a) = self.p.next_action() {
+            let mut configure_failure = None;
             count += 1;
             assert!(count < 10_000, "action loop does not end");
             let ev = match a {
@@ -177,6 +190,9 @@ impl Harness {
                     assert!(!parameter_sets.is_empty());
                     assert_eq!(parameter_sets.codec(), codec);
                     self.configured = true;
+                    configure_failure = (self.configure)(self.configures_seen);
+                    self.configures_seen += 1;
+                    self.session_ok = configure_failure.is_none();
                     self.codec = Some(codec);
                     self.need_keyframe = true;
                     self.pending.clear();
@@ -193,6 +209,7 @@ impl Harness {
                     pts,
                 } => {
                     assert!(self.configured, "Decode without a configured decoder");
+                    assert!(self.session_ok, "Decode after a failed Configure");
                     let codec = self.codec.expect("codec while decoding");
                     let info = analyze(codec, access_unit);
                     assert!(info.has_picture);
@@ -206,11 +223,15 @@ impl Harness {
                     }
                     self.pending.push_back(pts);
                     self.submitted += 1;
-                    assert!(self.pending.len() <= self.p.config().max_in_flight as usize);
+                    assert!(
+                        !self.strict_in_flight
+                            || self.pending.len() <= self.p.config().max_in_flight as usize
+                    );
                     Event::Decode { pts, keyframe }
                 }
                 Action::Flush => {
                     assert!(self.configured, "Flush without a decoder");
+                    assert!(self.session_ok, "Flush after a failed Configure");
                     self.need_keyframe = true;
                     self.pending.clear();
                     Event::Flush
@@ -228,6 +249,9 @@ impl Harness {
                 }
             };
             self.events.push((self.now, ev));
+            if let Some(kind) = configure_failure {
+                self.p.decode_failed(kind);
+            }
         }
         assert!(self.p.queued_units() <= self.p.config().max_queued_units as usize);
         assert!(self.p.in_flight() <= self.p.config().max_in_flight as usize);

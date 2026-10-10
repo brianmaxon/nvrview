@@ -26,11 +26,16 @@
 //!   `failures_before_reset` failures with no picture decoded in between,
 //!   each further failure resets the decoder, after a cooldown that doubles
 //!   each time (capped); at most `max_resets_per_window` resets per window.
-//!   Beyond that, or when the decoder says the format is unsupported, the
+//!   Beyond that, or when the decoder rejects the parameter sets, the
 //!   tile releases its decoder, clears, and is `Undecodable` until the
 //!   stream's parameter sets change. Every decoder creation (including
 //!   format changes) is also capped per window, so no input can make the
-//!   pipeline rebuild decoders in a tight loop.
+//!   pipeline rebuild decoders in a tight loop. A failed `Configure` is
+//!   reported through `decode_failed` like a picture failure.
+//! - **Results.** Every `Decode` gets exactly one `decoded` or
+//!   `decode_failed`, except pictures still in flight when a `Flush`,
+//!   `Reset`, or `Configure` runs: the platform discards those silently, and
+//!   the pipeline stops waiting for them at that point.
 //! - **Logging.** Warnings go through `tracing`, at most `log_burst` per
 //!   `log_window_us` per tile; the next allowed line reports how many were
 //!   suppressed. Everything else is in [`TileStats`].
@@ -89,19 +94,48 @@ pub enum TileStatus {
     Undecodable = 3,
 }
 
-/// Why the platform decoder could not decode a picture.
+/// Why the platform could not configure its decoder or decode a picture.
+/// Shared by every platform; each maps its own error codes onto these.
+///
+/// The first two answer a `Configure`; the rest answer the oldest `Decode`
+/// in flight.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DecodeFailure {
-    /// The picture was rejected or decoded with errors (bad data). Leads to a
-    /// flush, then to resets if it keeps happening.
-    Corrupt = 0,
-    /// The decoder itself stopped working (for example a session invalidated
-    /// by the system). Leads straight to a reset.
-    DecoderLost = 1,
-    /// The decoder cannot handle this format at all. The tile becomes
-    /// `Undecodable` until the parameter sets change.
-    Unsupported = 2,
+pub enum DecodeFailureKind {
+    /// `Configure`: the decoder rejected the parameter sets (macOS: creating
+    /// the format description failed). The tile is `Undecodable` until the
+    /// parameter sets change.
+    InvalidParameterSets = 0,
+    /// `Configure`: the decoder could not be created (macOS: creating the
+    /// decompression session failed; Windows: no decoder or media types
+    /// refused). Retried through bounded resets, then `Undecodable`.
+    SessionCreateFailed = 1,
+    /// `Decode` arrived with no decoder. Leads to a reset.
+    NotConfigured = 2,
+    /// The access unit could not be wrapped for the decoder (malformed
+    /// NAL units). Handled like a decode error.
+    InvalidAccessUnit = 3,
+    /// Submitting the picture failed synchronously. Handled like a decode
+    /// error: flush, then resets if it keeps happening (which also covers a
+    /// session the system invalidated).
+    SubmitFailed = 4,
+    /// The decoder reported an error for the picture. Flush and gate; after
+    /// repeated failures, reset.
+    DecodeError = 5,
+    /// The decoder finished the picture without producing one (for example
+    /// dropped it). Not an error by itself: nothing is flushed, but a long
+    /// run of these with no picture counts as a decode error.
+    NoPicture = 6,
+}
+
+impl DecodeFailureKind {
+    /// True for the kinds that answer a `Configure` rather than a `Decode`.
+    pub const fn is_configure_failure(self) -> bool {
+        matches!(
+            self,
+            DecodeFailureKind::InvalidParameterSets | DecodeFailureKind::SessionCreateFailed
+        )
+    }
 }
 
 /// Tunables; all times in microseconds. [`Default`] gives the documented
@@ -121,6 +155,9 @@ pub struct PipelineConfig {
     /// Failures without a decoded picture in between before the first reset
     /// (default 3; at least 1).
     pub failures_before_reset: u32,
+    /// `NoPicture` results in a row that count as one decode error
+    /// (default 40, two seconds at 20 fps; at least 1).
+    pub no_picture_limit: u32,
     /// Resets allowed per window before giving up (default 3; at most 64).
     pub max_resets_per_window: u32,
     /// Decoder creations of any cause per window (default 10; 1 to 64).
@@ -152,6 +189,7 @@ impl Default for PipelineConfig {
             max_queued_bytes: 8 << 20,
             max_in_flight: 4,
             failures_before_reset: 3,
+            no_picture_limit: 40,
             max_resets_per_window: 3,
             max_configures_per_window: 10,
             window_us: 60_000_000,
@@ -170,6 +208,7 @@ impl PipelineConfig {
         self.max_queued_units = self.max_queued_units.max(1);
         self.max_in_flight = self.max_in_flight.max(1);
         self.failures_before_reset = self.failures_before_reset.max(1);
+        self.no_picture_limit = self.no_picture_limit.max(1);
         self.max_resets_per_window = self.max_resets_per_window.min(64);
         self.max_configures_per_window = self.max_configures_per_window.clamp(1, 64);
         self.max_reset_cooldown_us = self.max_reset_cooldown_us.max(self.reset_cooldown_us);
@@ -190,8 +229,11 @@ pub struct TileStats {
     pub gated: u64,
     /// Access units dropped by backpressure.
     pub dropped: u64,
-    /// Decode failures reported (or stalls detected).
+    /// Configure and decode failures reported, and stalls detected
+    /// (`NoPicture` results are counted separately).
     pub failures: u64,
+    /// `NoPicture` results.
+    pub no_pictures: u64,
     /// Decoder resets decided by recovery.
     pub resets: u64,
     /// Changes of parameter sets or codec that rebuilt the decoder.
@@ -217,11 +259,15 @@ pub struct TileStats {
 /// call into the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action<'a> {
-    /// Create a decoder for this format, replacing any existing one.
+    /// Create a decoder for this format, replacing any existing one (whose
+    /// pictures in flight are dropped without results). Ask the decoder for
+    /// output in `color.full_range`, so its samples match
+    /// `color.ycbcr_to_rgb`. A failure is reported with `decode_failed`.
     Configure {
         /// Codec.
         codec: Codec,
-        /// Parameter sets in VPS, SPS, PPS order.
+        /// Parameter sets in VPS, SPS, PPS order, each a NAL unit without
+        /// start code.
         parameter_sets: &'a ParameterSets,
         /// Decoded picture size before cropping.
         coded_size: Size,
@@ -240,10 +286,11 @@ pub enum Action<'a> {
         /// `decoded`.
         pts: u64,
     },
-    /// Drop everything in flight; keep the decoder. Results for pictures
-    /// submitted before this are ignored.
+    /// Drop everything in flight without reporting results; keep the
+    /// decoder.
     Flush,
-    /// Destroy the decoder. A `Configure` comes before any further `Decode`.
+    /// Destroy the decoder, dropping everything in flight without reporting
+    /// results. A `Configure` comes before any further `Decode`.
     Reset,
     /// Show nothing (black) for this tile until a new picture decodes.
     Clear,
@@ -407,6 +454,7 @@ pub struct TilePipeline {
 
     // Recovery.
     consecutive_failures: u32,
+    consecutive_no_pictures: u32,
     resets_since_success: u32,
     resets: Window,
     configures: Window,
@@ -441,6 +489,7 @@ impl TilePipeline {
             picture_held: false,
             last_picture_at: 0,
             consecutive_failures: 0,
+            consecutive_no_pictures: 0,
             resets_since_success: 0,
             resets: Window::new(cfg.max_resets_per_window),
             configures: Window::new(cfg.max_configures_per_window),
@@ -611,6 +660,7 @@ impl TilePipeline {
         self.in_flight.remove(i);
         self.stats.decoded += 1;
         self.consecutive_failures = 0;
+        self.consecutive_no_pictures = 0;
         self.resets_since_success = 0;
         self.picture_held = true;
         self.last_picture_at = self.now;
@@ -619,27 +669,60 @@ impl TilePipeline {
         }
     }
 
-    /// The platform could not decode the oldest picture in flight. Failures
-    /// with nothing in flight (late, after a flush) are ignored.
-    pub fn decode_failed(&mut self, kind: DecodeFailure) {
+    /// The platform could not carry out the last `Configure`
+    /// ([`DecodeFailureKind::is_configure_failure`]) or decode the oldest
+    /// picture in flight (every other kind). Reports that match nothing (no
+    /// decoder configured, or nothing in flight because a `Flush`, `Reset`,
+    /// or `Configure` discarded it) are ignored and counted as stale.
+    pub fn decode_failed(&mut self, kind: DecodeFailureKind) {
+        if kind.is_configure_failure() {
+            if !self.decoder_configured {
+                self.stats.stale_results += 1;
+                return;
+            }
+            self.stats.failures += 1;
+            // The platform has no decoder now.
+            self.decoder_dirty = false;
+            if kind == DecodeFailureKind::InvalidParameterSets {
+                self.give_up_on_current("the decoder rejected the parameter sets");
+            } else {
+                self.escalate("the decoder could not be created");
+            }
+            return;
+        }
         if self.in_flight.pop_front().is_none() {
             self.stats.stale_results += 1;
             return;
         }
-        self.stats.failures += 1;
         match kind {
-            DecodeFailure::Unsupported => {
-                self.give_up_on_current("the decoder does not support this format");
-            }
-            DecodeFailure::DecoderLost => self.escalate("the decoder stopped working"),
-            DecodeFailure::Corrupt => {
-                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                if self.consecutive_failures >= self.cfg.failures_before_reset {
-                    self.escalate("pictures keep failing to decode");
-                } else {
-                    self.flush_and_gate();
+            DecodeFailureKind::NoPicture => {
+                self.stats.no_pictures += 1;
+                self.consecutive_no_pictures = self.consecutive_no_pictures.saturating_add(1);
+                if self.consecutive_no_pictures < self.cfg.no_picture_limit {
+                    return;
                 }
+                self.consecutive_no_pictures = 0;
+                self.stats.failures += 1;
+                self.picture_failed("the decoder keeps producing no pictures");
             }
+            DecodeFailureKind::NotConfigured => {
+                self.stats.failures += 1;
+                self.escalate("a picture reached the platform with no decoder");
+            }
+            _ => {
+                self.stats.failures += 1;
+                self.picture_failed("picture failed to decode");
+            }
+        }
+    }
+
+    /// A picture failed: flush and gate, or reset after repeated failures.
+    fn picture_failed(&mut self, reason: &str) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures >= self.cfg.failures_before_reset {
+            self.escalate(reason);
+        } else {
+            self.flush_and_gate(reason);
         }
     }
 
@@ -800,7 +883,22 @@ impl TilePipeline {
         true
     }
 
+    /// Pictures in flight when a `Flush`, `Reset`, or `Configure` runs are
+    /// discarded by the platform without a result.
+    fn discard_in_flight(&mut self) {
+        self.in_flight.clear();
+    }
+
+    /// Drops `Decode`s not yet handed out, so nothing reaches a decoder that
+    /// is about to be reset or failed to be created.
+    fn drop_pending_decodes(&mut self) {
+        let before = self.ops.len();
+        self.ops.retain(|o| !matches!(o, Op::Decode(_)));
+        self.stats.gated += (before - self.ops.len()) as u64;
+    }
+
     fn push_configure(&mut self) {
+        self.discard_in_flight();
         self.ops.push_back(Op::Configure);
         self.stats.configures += 1;
         self.decoder_configured = true;
@@ -809,6 +907,7 @@ impl TilePipeline {
 
     fn push_reset(&mut self) {
         if self.decoder_configured {
+            self.discard_in_flight();
             self.ops.push_back(Op::Reset);
             self.decoder_configured = false;
             self.decoder_dirty = false;
@@ -816,6 +915,7 @@ impl TilePipeline {
     }
 
     fn flush_decoder(&mut self) {
+        self.discard_in_flight();
         if self.decoder_dirty {
             self.ops.push_back(Op::Flush);
             self.stats.flushes += 1;
@@ -857,18 +957,20 @@ impl TilePipeline {
         self.warn("decoder is behind; dropping to the next keyframe");
     }
 
-    fn flush_and_gate(&mut self) {
+    fn flush_and_gate(&mut self, reason: &str) {
         self.in_flight.clear();
         self.drop_queue();
         self.flush_decoder();
         self.set_status(TileStatus::Recovering);
-        self.warn("picture failed to decode; flushing and waiting for the next keyframe");
+        let msg = format!("{reason}; flushing and waiting for the next keyframe");
+        self.warn(&msg);
     }
 
     /// Resets the decoder, or gives up when resets are exhausted.
     fn escalate(&mut self, reason: &str) {
         self.in_flight.clear();
         self.drop_queue();
+        self.drop_pending_decodes();
         let span = self.cfg.window_us;
         if self.resets.full(self.now, span) {
             self.give_up_on_current(reason);
@@ -905,6 +1007,7 @@ impl TilePipeline {
     fn give_up(&mut self, sets: ParameterSets, reason: &str) {
         self.in_flight.clear();
         self.drop_queue();
+        self.drop_pending_decodes();
         self.push_reset();
         self.clear_picture();
         self.undecodable = Some(sets);
