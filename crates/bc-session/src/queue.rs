@@ -216,6 +216,7 @@ mod tests {
             keyframe: key,
             pts_us: pts,
             data: vec![0],
+            extra_header: Vec::new(),
         }
     }
 

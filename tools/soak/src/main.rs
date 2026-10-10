@@ -1,6 +1,8 @@
 //! Soak binary: `soak [--recording FILE] [--speed N] [--hours H | --seconds S]
 //! [--tiles N] [--sample-secs N] [--no-audio] [--csv FILE]`. Without
-//! `--recording` it uses a synthetic stream. Prints a Markdown report.
+//! `--recording` it uses a synthetic stream. A recording may be `NVRREC01`
+//! or `NVRREC02`; of the latter the tiles play the sub-stream tier (or the
+//! first tier recorded). Prints a Markdown report.
 
 use soak::{SoakConfig, load, run, synth};
 use std::path::PathBuf;

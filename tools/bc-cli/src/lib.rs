@@ -266,6 +266,7 @@ pub async fn record<W: Write>(
                 keyframe,
                 pts_us,
                 data,
+                ..
             })) => {
                 if *stats.codec.get_or_insert(codec) != codec {
                     // One file holds one codec; a mixed stream would not play.

@@ -62,6 +62,11 @@ pub enum Record {
         pts_us: u64,
         /// Annex-B NAL unit bytes.
         data: Vec<u8>,
+        /// The record's extra header, exactly as received (often empty).
+        /// When at least 8 bytes long, bytes 0-3 are a u32 count of seconds
+        /// of the device's wall clock ([`wall_clock_secs`]); see
+        /// "Records as the official client reads them" in docs/protocol.md.
+        extra_header: Vec<u8>,
     },
     /// An audio frame.
     Audio {
@@ -231,6 +236,7 @@ impl Demuxer {
                     keyframe,
                     pts_us: u64::from_le_bytes(ts),
                     data: b[VIDEO_HEADER_LEN + extra..end].to_vec(),
+                    extra_header: b[VIDEO_HEADER_LEN..VIDEO_HEADER_LEN + extra].to_vec(),
                 };
                 self.finish(end + pad8(end));
                 Ok(Some(rec))
@@ -274,6 +280,13 @@ impl Demuxer {
             self.pos += off;
         }
     }
+}
+
+/// The device wall-clock seconds in a video extra header: the u32
+/// little-endian at bytes 0-3, when the header is at least 8 bytes long
+/// (docs/protocol.md, "Records as the official client reads them").
+pub fn wall_clock_secs(extra_header: &[u8]) -> Option<u32> {
+    (extra_header.len() >= 8).then(|| u32_at(extra_header, 0))
 }
 
 /// Encodes a stream-info record (32-byte header).
@@ -360,6 +373,7 @@ mod tests {
                 keyframe: true,
                 pts_us: 1_000,
                 data: k,
+                extra_header: Vec::new(),
             },
         );
         for (i, len) in [1usize, 7, 8, 9, 300].into_iter().enumerate() {
@@ -372,6 +386,7 @@ mod tests {
                     keyframe: false,
                     pts_us: 2_000 + i as u64,
                     data: p,
+                    extra_header: extra.to_vec(),
                 },
             );
             let a: Vec<u8> = (0..(i * 5 + 1)).map(|x| x as u8).collect();
@@ -391,6 +406,7 @@ mod tests {
                 keyframe: true,
                 pts_us: 9,
                 data: h,
+                extra_header: Vec::new(),
             },
         );
         (bytes, recs)
@@ -425,6 +441,24 @@ mod tests {
             &encode_video(1, false, Codec::H265, 0, &[], &[])[..4],
             b"11dc"
         );
+    }
+
+    #[test]
+    fn extra_header_is_kept_and_wall_clock_read() {
+        let mut extra = 1_700_000_123u32.to_le_bytes().to_vec();
+        extra.extend([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        let rec = encode_video(0, true, Codec::H264, 42, &extra, &[0, 0, 0, 1, 0x65]);
+        let mut d = Demuxer::new();
+        d.push(&rec);
+        match d.next_record().unwrap() {
+            Some(Record::Video { extra_header, .. }) => {
+                assert_eq!(extra_header, extra);
+                assert_eq!(wall_clock_secs(&extra_header), Some(1_700_000_123));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(wall_clock_secs(&[1, 2, 3, 4]), None);
+        assert_eq!(wall_clock_secs(&[]), None);
     }
 
     #[test]

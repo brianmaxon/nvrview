@@ -1144,6 +1144,7 @@ mod tests {
             keyframe: true,
             pts_us: 100,
             data: key_nal,
+            extra_header: Vec::new(),
         });
         for i in 0..6u64 {
             let p: Vec<u8> = (0..(50 + i * 131) as usize)
@@ -1155,6 +1156,7 @@ mod tests {
                 keyframe: false,
                 pts_us: 200 + i,
                 data: p,
+                extra_header: Vec::new(),
             });
             let a: Vec<u8> = (0..(20 + i as usize * 3)).map(|x| x as u8 ^ 0x5a).collect();
             stream.extend(encode_audio(5, &a));

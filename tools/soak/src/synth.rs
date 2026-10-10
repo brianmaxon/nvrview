@@ -53,6 +53,7 @@ pub fn recording(fixtures: &Path, seconds: u64, fps: u64) -> Result<Replay, Stri
                     keyframe: f.keyframe,
                     pts_us,
                     data: f.data.clone(),
+                    extra_header: Vec::new(),
                 }
             }
             Item::Audio { k } => {
