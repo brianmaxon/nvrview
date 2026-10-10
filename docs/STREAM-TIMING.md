@@ -54,7 +54,9 @@ bc-cli analyze captures/timing.nvrrec > timing.md
 ```
 
 prints a Markdown report (aggregates only: no absolute times, wall-clock
-values, or picture contents). The reference tier is the sub-stream.
+values, or picture contents). Every pair of recorded tiers is compared
+(main against sub, extern against mobile, and the rest); the reference of
+a pair is the first of sub, mobile, main, extern in it.
 
 - **Tiers**: frame rate from timestamps and from arrivals, GOP length in
   frames and seconds, keyframe and other frame sizes, bit rate, timestamp
@@ -71,7 +73,8 @@ values, or picture contents). The reference tier is the sub-stream.
   both tiers, and both tiers' keyframe spreads of *pts − seconds × 10⁶*
   relative to the reference's median: whether they overlap, and whether one
   constant fits both (the seconds are truncated, so each tier allows the
-  constant in *[max − 1 s, min]*).
+  constant in *[max − 1 s, min]*, widened by 100 ms either way for jitter
+  between the seconds and the timestamp).
 - **Latency difference**: for pictures of the same moment (nearest
   timestamps, closer than half the shorter frame interval of the two
   tiers), how much later the other tier arrived, corrected by the timestamp

@@ -33,8 +33,10 @@
 //!   live (back to its steady latency).
 //!
 //! Output is Markdown with aggregates only: no absolute times, wall-clock
-//! values, or picture contents, so it may be quoted in docs. The reference
-//! tier is the sub-stream when recorded.
+//! values, or picture contents, so it may be quoted in docs. Every pair of
+//! recorded tiers is compared; the reference of a pair is the first of sub,
+//! mobile, main, extern in it (so mobile against extern gives the second
+//! lens's relation, when those tiers are a second lens).
 //!
 //! `bc-cli capture` receives records through the session's subscriber
 //! queue, which holds back predicted frames and audio until the first
@@ -154,6 +156,17 @@ fn drift_significant(f: Fit) -> bool {
     f.slope.abs() > 200.0 && f.slope.abs() > 3.0 * f.se
 }
 
+/// Which tier of a pair is the reference: the lower rank.
+fn reference_rank(t: Option<StreamTier>) -> u8 {
+    match t {
+        Some(StreamTier::Sub) => 0,
+        Some(StreamTier::Mobile) => 1,
+        Some(StreamTier::Main) => 2,
+        Some(StreamTier::Extern) => 3,
+        None => 4,
+    }
+}
+
 fn tier_name(t: Option<StreamTier>) -> &'static str {
     match t {
         Some(StreamTier::Main) => "main",
@@ -179,6 +192,11 @@ fn signed_ms(us: f64) -> String {
         format!("{:+.1}", us / 1000.0)
     }
 }
+
+/// Jitter allowed (µs, either way) between a keyframe's wall-clock seconds
+/// and its timestamp: in a capture of four tiers, single tiers' spreads
+/// exceeded one second by up to about 30 ms.
+const WALL_JITTER_US: i64 = 100_000;
 
 /// How a tier's `pts − wall seconds × 10⁶` (µs) spreads over its keyframes.
 /// On one clock it stays within one second (the seconds are truncated) up
@@ -214,6 +232,12 @@ impl WallSpread {
         self.max - self.min < 1_000_000 + 1_000
     }
 
+    /// Whether one constant plus a truncated fraction explains these
+    /// keyframes, allowing [`WALL_JITTER_US`] either way.
+    fn fits_one_constant(&self) -> bool {
+        self.max - self.min <= 1_000_000 + 2 * WALL_JITTER_US
+    }
+
     /// Whether the two spreads `[min, max]` share any value (1 ms slack).
     fn overlaps(&self, other: &WallSpread) -> bool {
         self.min.max(other.min) <= self.max.min(other.max) + 1_000
@@ -221,18 +245,22 @@ impl WallSpread {
 
     /// The seconds are truncated, so on a clock that follows them
     /// `pts − seconds × 10⁶ = C + (fraction of a second)` for one constant
-    /// `C`: the window of `C` values these keyframes allow, `[max − 1 s,
-    /// min]` (empty, `lo > hi`, when the spread exceeds a second).
-    fn window(&self) -> (i64, i64) {
-        (self.max - 999_999, self.min)
+    /// `C`, up to the jitter between when the device takes the seconds and
+    /// the timestamp: the window of `C` values these keyframes allow,
+    /// `[max − 1 s − jitter, min + jitter]`, lowest first; `None` when the
+    /// spread is too wide for any.
+    fn window(&self) -> Option<(i64, i64)> {
+        let lo = self.max - 1_000_000 - WALL_JITTER_US;
+        let hi = self.min + WALL_JITTER_US;
+        (lo <= hi).then_some((lo, hi))
     }
 
-    /// Whether one constant `C` fits both tiers' keyframes (1 ms slack).
+    /// Whether one constant `C` fits both tiers' keyframes.
     fn compatible(&self, other: &WallSpread) -> bool {
-        let (a, b) = (self.window(), other.window());
-        self.within_one_second()
-            && other.within_one_second()
-            && a.0.max(b.0) <= a.1.min(b.1) + 1_000
+        match (self.window(), other.window()) {
+            (Some(a), Some(b)) => a.0.max(b.0) <= a.1.min(b.1),
+            _ => false,
+        }
     }
 }
 
@@ -392,13 +420,6 @@ impl Analysis {
         Ok(Analysis { version, tiers })
     }
 
-    fn reference(&self) -> Option<&Tier> {
-        self.tiers
-            .iter()
-            .find(|t| t.tier == Some(StreamTier::Sub) && !t.frames.is_empty())
-            .or_else(|| self.tiers.iter().find(|t| !t.frames.is_empty()))
-    }
-
     /// The report, as Markdown.
     pub fn to_markdown(&self) -> String {
         let mut s = String::new();
@@ -543,6 +564,9 @@ impl Analysis {
                 Some(w) if w.within_one_second() => {
                     format!("yes (spread {} ms)", ms((w.max - w.min) as f64))
                 }
+                Some(w) if w.fits_one_constant() => {
+                    format!("within jitter (spread {} ms)", ms((w.max - w.min) as f64))
+                }
                 Some(w) => format!("no (spread {} ms)", ms((w.max - w.min) as f64)),
             },
         );
@@ -551,21 +575,26 @@ impl Analysis {
 
     /// The clock comparison; returns the verdict line.
     fn clocks(&self, s: &mut String) -> String {
-        let Some(reference) = self.reference() else {
-            return "shared clock: unknown (no video)".into();
-        };
-        let others: Vec<&Tier> = self
-            .tiers
-            .iter()
-            .filter(|t| t.tier != reference.tier && !t.frames.is_empty())
-            .collect();
-        if others.is_empty() {
-            return "shared clock: unknown (only one tier recorded)".into();
+        let mut present: Vec<&Tier> = self.tiers.iter().filter(|t| !t.frames.is_empty()).collect();
+        match present.len() {
+            0 => return "shared clock: unknown (no video)".into(),
+            1 => return "shared clock: unknown (only one tier recorded)".into(),
+            _ => {}
         }
-        let rname = tier_name(reference.tier);
-        let _ = writeln!(s, "## Clock relation (reference: {rname})\n");
+        present.sort_by_key(|t| reference_rank(t.tier));
+        let _ = writeln!(
+            s,
+            "## Clock relation\n\nEvery pair of tiers, each compared with the first of sub, \
+             mobile, main, extern in the pair (the low tier of a lens first).\n"
+        );
+        let pairs: Vec<(&Tier, &Tier)> = present
+            .iter()
+            .enumerate()
+            .flat_map(|(i, r)| present[i + 1..].iter().map(move |o| (*r, *o)))
+            .collect();
         let mut verdicts = Vec::new();
-        for o in others {
+        for (reference, o) in pairs {
+            let rname = tier_name(reference.tier);
             let oname = tier_name(o.tier);
             let _ = writeln!(s, "### {oname} vs {rname}\n");
             let _ = writeln!(
@@ -700,7 +729,19 @@ impl Analysis {
                 (Some(r), Some(w)) => {
                     let agree = r.compatible(&w);
                     let rel = |x: i64| signed_ms((x - r.median) as f64);
-                    let (rw, ow) = (r.window(), w.window());
+                    let window = |name: &str, w: &WallSpread| match w.window() {
+                        Some((lo, hi)) => {
+                            format!(
+                                "{name}'s keyframes allow it from {} to {} ms",
+                                rel(lo),
+                                rel(hi)
+                            )
+                        }
+                        None => format!(
+                            "{name}'s keyframes spread over {} ms, too wide for any",
+                            ms((w.max - w.min) as f64)
+                        ),
+                    };
                     let _ = writeln!(
                         s,
                         "Wall-clock seconds (keyframes): pts − seconds × 10⁶ relative to \
@@ -708,9 +749,8 @@ impl Analysis {
                          | tier | keyframes | min | median | max |\n|---|---|---|---|---|\n\
                          | {rname} | {} | {} | {} | {} |\n| {oname} | {} | {} | {} | {} |\n\n\
                          The spreads {}. Seconds are truncated, so on a clock that follows them \
-                         pts − seconds × 10⁶ is one constant plus a fraction of a second: {rname}'s \
-                         keyframes allow that constant from {} to {} ms, {oname}'s from {} to {} ms; \
-                         {}.\n",
+                         pts − seconds × 10⁶ is one constant plus a fraction of a second (allowing \
+                         {} ms of jitter either way): {}; {}; {}.\n",
                         r.n,
                         rel(r.min),
                         rel(r.median),
@@ -724,10 +764,9 @@ impl Analysis {
                         } else {
                             "do not overlap"
                         },
-                        rel(rw.0),
-                        rel(rw.1),
-                        rel(ow.0),
-                        rel(ow.1),
+                        ms(WALL_JITTER_US as f64),
+                        window(rname, &r),
+                        window(oname, &w),
                         if agree {
                             "one constant fits both tiers"
                         } else {
@@ -744,11 +783,11 @@ impl Analysis {
                     None
                 }
             };
-            verdicts.push((oname, offsets, pooled, lat.len(), exact, wall));
+            verdicts.push((rname, oname, offsets, pooled, lat.len(), exact, wall));
         }
 
         let mut lines = Vec::new();
-        for (oname, offsets, pooled, matched, exact, wall) in verdicts {
+        for (rname, oname, offsets, pooled, matched, exact, wall) in verdicts {
             // Identical timestamps on (nearly) every picture of the same
             // moment: separate clocks cannot do that.
             let identical = exact >= 10 && exact * 10 >= matched * 9;
@@ -1235,6 +1274,79 @@ mod tests {
         let far = w(37_000_000, 37_900_000);
         assert!(!sub.overlaps(&far) && !far.overlaps(&sub));
         assert!(sub.within_one_second() && !w(0, 1_200_000).within_one_second());
+    }
+
+    /// Bug: a tier whose keyframes spread a little over one second (jitter
+    /// between the seconds and the timestamp) had its window printed
+    /// reversed ("from -12.0 to -40.0 ms") and was said to fit no constant
+    /// shared with another tier whose window contained it.
+    #[test]
+    fn a_window_is_ordered_and_jitter_does_not_break_the_fit() {
+        let w = |min: i64, max: i64| WallSpread {
+            n: 10,
+            min,
+            median: (min + max) / 2,
+            max,
+        };
+        // Relative to some median: sub spreads over 1028 ms, main over 68.
+        let sub = w(-40_000, 988_000);
+        let main = w(12_000 - 80_000, 12_000 - 12_000);
+        let (lo, hi) = sub.window().unwrap();
+        assert!(lo <= hi, "{lo} {hi}");
+        assert!(sub.fits_one_constant() && !sub.within_one_second());
+        assert!(sub.compatible(&main) && main.compatible(&sub));
+        let (mlo, mhi) = main.window().unwrap();
+        assert!(mlo <= mhi);
+        // Far apart, or one tier far wider than a second: no fit.
+        assert!(!sub.compatible(&w(5_000_000, 5_100_000)));
+        let wide = w(0, 1_500_000);
+        assert!(wide.window().is_none() && !wide.compatible(&main));
+    }
+
+    /// Four tiers: every pair is compared, mobile against extern too.
+    #[test]
+    fn every_pair_of_tiers_is_compared() {
+        use bc_protocol::recording::TierWriter;
+        let tiers = [
+            StreamTier::Sub,
+            StreamTier::Main,
+            StreamTier::Mobile,
+            StreamTier::Extern,
+        ];
+        let mut w = TierWriter::new(Vec::new()).unwrap();
+        for t in tiers {
+            w.start_requested(t, 0).unwrap();
+        }
+        for i in 0..300u64 {
+            let c = i * 100_000;
+            for (k, t) in tiers.iter().enumerate() {
+                // The second lens's tiers on a clock 40 s off the first's.
+                let shift = if k >= 2 { 40_000_000 } else { 0 };
+                let pts = 9_000_000_000 + c + shift;
+                let wall = Some(2_000_000 + ((c + shift) / 1_000_000) as u32);
+                w.record(
+                    *t,
+                    c + 20_000 + k as u64 * 5_000,
+                    &pic(i % 10 == 0, pts, wall),
+                )
+                .unwrap();
+            }
+        }
+        let a = Analysis::read(&w.finish().unwrap()[..]).unwrap();
+        let md = a.to_markdown();
+        for pair in [
+            "main vs sub",
+            "mobile vs sub",
+            "extern vs sub",
+            "main vs mobile",
+            "extern vs mobile",
+            "extern vs main",
+        ] {
+            assert!(md.contains(&format!("### {pair}")), "{pair}: {md}");
+        }
+        assert!(md.contains("shared clock (main/sub): yes"), "{md}");
+        assert!(md.contains("shared clock (extern/mobile): yes"), "{md}");
+        assert!(md.contains("shared clock (mobile/sub): no"), "{md}");
     }
 
     #[test]
