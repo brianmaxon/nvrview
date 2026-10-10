@@ -316,6 +316,7 @@ fn write_chunk(dir: &Path, n: u32, fx: &Fixture, frames: std::ops::Range<usize>)
             keyframe: fr.keyframe,
             pts_us: f as u64 * 100_000,
             data: fr.data.clone(),
+            extra_header: Vec::new(),
         })
         .unwrap();
         if f % 2 == 0 {

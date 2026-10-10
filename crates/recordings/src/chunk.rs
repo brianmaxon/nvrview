@@ -194,6 +194,7 @@ impl ChunkWriter {
                 keyframe,
                 pts_us,
                 data,
+                ..
             } => {
                 if !self.seen_key && !keyframe {
                     self.idx.dropped_before_keyframe += 1;
@@ -287,6 +288,7 @@ mod tests {
             keyframe: key,
             pts_us: pts,
             data: vec![key as u8; n],
+            extra_header: Vec::new(),
         }
     }
 

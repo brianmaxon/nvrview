@@ -18,9 +18,11 @@
 //!   was sent, with a configurable audio clock skew and arrival jitter
 //!   ([`audio`]).
 //!
-//! - optionally, a recorded stream instead (`NVRREC01`): the records are sent
-//!   as recorded, at their recorded times, optionally accelerated or looped
-//!   ([`replay`]).
+//! - optionally, a recorded stream instead (`NVRREC01`), or several tiers of
+//!   one channel recorded on one clock (`NVRREC02`): the records are sent as
+//!   recorded, at their recorded times, optionally accelerated or looped;
+//!   with several tiers, all previews share one replay clock, so a tier
+//!   started later joins at the same capture moment ([`replay`]).
 //! - detection events ([`alarms`]): the alarm-report subscription (192)
 //!   and alarm-state pushes (33) whenever a test changes a channel's state
 //!   ([`MockNvr::set_alarm`]) or a scripted cycle does
@@ -54,7 +56,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -142,6 +144,9 @@ struct Shared {
     command_counts: Mutex<HashMap<u32, u64>>,
     alarms: alarms::Board,
     next_conn: AtomicU64,
+    /// Start of the shared replay clock of an `NVRREC02` replay: the first
+    /// preview started on this server.
+    replay_epoch: OnceLock<Instant>,
 }
 
 /// Most downloads remembered for [`MockNvr::download_log`].
@@ -173,6 +178,7 @@ pub fn spawn(config: Config) -> io::Result<MockNvr> {
         command_counts: Mutex::new(HashMap::new()),
         alarms,
         next_conn: AtomicU64::new(1),
+        replay_epoch: OnceLock::new(),
     });
     let s = Arc::clone(&shared);
     let accept = thread::spawn(move || accept_loop(listener, s));
@@ -644,12 +650,7 @@ impl Conn {
         let cfg = &self.shared.config;
         // 0 = H.264 and 1 = H.265 is unconfirmed (docs/protocol.md); clients
         // must take the codec from the media records.
-        let codec = cfg
-            .replay
-            .as_ref()
-            .and_then(|r| r.replay.codec())
-            .unwrap_or_else(|| cfg.fixture.codec());
-        let enc_type = match codec {
+        let enc_type = |codec| match codec {
             bc_protocol::media::Codec::H264 => 0,
             bc_protocol::media::Codec::H265 => 1,
         };
@@ -659,14 +660,27 @@ impl Conn {
         let mut s = String::from("<StreamInfoList version=\"1.1\">\n<StreamInfo>\n");
         s.push_str(&format!("<channelBits>{bits}</channelBits>\n"));
         for t in [StreamTier::Main, StreamTier::Sub] {
+            // A replay of several tiers describes each recorded tier itself.
+            let replayed = cfg
+                .replay
+                .as_ref()
+                .map(|r| &r.replay)
+                .filter(|r| r.tiers().contains(&t));
+            let (width, height, fps) = replayed
+                .and_then(|r| r.info_of(Some(t)))
+                .map_or((cfg.width, cfg.height, cfg.fps), |(w, h, f)| {
+                    (w, h, u32::from(f))
+                });
+            let codec = replayed
+                .and_then(|r| r.codec_of(Some(t)))
+                .or_else(|| cfg.replay.as_ref().and_then(|r| r.replay.codec()))
+                .unwrap_or_else(|| cfg.fixture.codec());
             s.push_str(&format!(
-                "<encodeTable>\n<type>{}</type>\n<resolution>\n<width>{}</width>\n<height>{}</height>\n\
-                 </resolution>\n<videoEncType>{enc_type}</videoEncType>\n\
-                 <defaultFramerate>{}</defaultFramerate>\n</encodeTable>\n",
+                "<encodeTable>\n<type>{}</type>\n<resolution>\n<width>{width}</width>\n<height>{height}</height>\n\
+                 </resolution>\n<videoEncType>{}</videoEncType>\n\
+                 <defaultFramerate>{fps}</defaultFramerate>\n</encodeTable>\n",
                 t.name(),
-                cfg.width,
-                cfg.height,
-                cfg.fps
+                enc_type(codec),
             ));
         }
         s.push_str("</StreamInfo>\n");
@@ -684,7 +698,7 @@ impl Conn {
 
     fn start_preview(&mut self, m: &RawMessage) -> io::Result<()> {
         let id = m.header.message_id;
-        let Some((handle, _, _)) = self.preview_target(m) else {
+        let Some((handle, _, tier)) = self.preview_target(m) else {
             return self.reply_xml(3, id, 400, "");
         };
         if self.streams.contains_key(&handle) {
@@ -696,7 +710,7 @@ impl Conn {
         // Like a real device, send no separate reply: the first media message
         // (status 200) is the answer.
         let join = thread::spawn(move || {
-            let _ = stream_media(&cfg_shared, &writer, &key, id, &stop2);
+            let _ = stream_media(&cfg_shared, &writer, &key, id, tier, &stop2);
         });
         self.streams.insert(handle, Stream { stop, join });
         Ok(())
@@ -755,11 +769,12 @@ fn stream_media(
     writer: &Writer,
     key: &SessionKey,
     id: u32,
+    tier: StreamTier,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let cfg = &shared.config;
     if let Some(r) = &cfg.replay {
-        return stream_replay(shared, writer, key, id, stop, r);
+        return stream_replay(shared, writer, key, id, tier, stop, r);
     }
     let fix = &cfg.fixture;
     let fps = cfg.fps.max(1);
@@ -818,12 +833,15 @@ fn stream_media(
 
 /// Sends a recording: each record in a message of its own (chunked like any
 /// other), at its recorded time divided by the speed, until stopped, the
-/// recording ends (unless looping), or the connection fails.
+/// recording ends (unless looping), or the connection fails. An `NVRREC01`
+/// recording plays from its start on a clock that starts now; an `NVRREC02`
+/// one joins the server's shared replay clock (see [`replay`]).
 fn stream_replay(
     shared: &Shared,
     writer: &Writer,
     key: &SessionKey,
     id: u32,
+    tier: StreamTier,
     stop: &AtomicBool,
     r: &ReplayConfig,
 ) -> io::Result<()> {
@@ -832,9 +850,26 @@ fn stream_replay(
     } else {
         1.0
     };
-    let start = Instant::now();
     let mut out = Vec::new();
-    for (at_us, step) in r.replay.playback(r.looped) {
+    let (start, playback) = if r.replay.version() >= 2 {
+        let epoch = *shared.replay_epoch.get_or_init(Instant::now);
+        let now_us = (epoch.elapsed().as_secs_f64() * speed * 1e6) as u64;
+        let Some(join) = r.replay.join(Some(tier), now_us, r.looped) else {
+            return Ok(());
+        };
+        if let Some(info) = join.info {
+            media_message(key, id, info, &mut out)?;
+            let mut w = lock(writer);
+            if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            w.write_all(&out)?;
+        }
+        (epoch, join.playback)
+    } else {
+        (Instant::now(), r.replay.playback(r.looped))
+    };
+    for (at_us, step) in playback {
         let Step::Record(record) = step else { continue };
         let due = start + Duration::from_secs_f64(at_us as f64 / speed / 1e6);
         while let Some(left) = due.checked_duration_since(Instant::now()) {

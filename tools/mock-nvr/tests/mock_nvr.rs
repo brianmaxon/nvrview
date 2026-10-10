@@ -249,6 +249,7 @@ fn preview_delivers_fixture_from_first_keyframe_then_stops() {
                 keyframe,
                 pts_us,
                 data,
+                ..
             } => Some((*codec, *keyframe, *pts_us, data.clone())),
             _ => None,
         })

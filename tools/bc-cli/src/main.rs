@@ -1,11 +1,17 @@
-//! bc-cli: log in to an NVR or camera, list its channels, or record one live
-//! channel to a raw `.h264`/`.h265` file that ffplay and VLC can open.
+//! bc-cli: log in to an NVR or camera, list its channels, record one live
+//! channel to a raw `.h264`/`.h265` file that ffplay and VLC can open,
+//! capture several tiers of a channel for timing analysis, or analyze such a
+//! capture.
 //!
 //! The password is never taken from the command line (it would end up in
 //! shell history and process listings): it comes from the environment
 //! variable `NVRVIEW_PASSWORD` or, on macOS, from a Keychain item.
 
-use bc_cli::{CliError, ExtraOutputs, RecordLimits, list_channels, record, wait_logged_in};
+use bc_cli::analyze::Analysis;
+use bc_cli::{
+    CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, list_channels, record,
+    wait_logged_in,
+};
 use bc_protocol::recording;
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, SessionConfig, TcpConnector};
@@ -22,6 +28,10 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] record
          --channel N [--tier main|sub|extern|mobile] --out FILE
          [--audio FILE.aac] [--raw FILE.nvrrec] [--seconds S] [--frames N]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] capture
+         --channel N --raw FILE.nvrrec [--tiers sub,main] [--seconds S]
+         [--stagger S] [--restart TIER:EVERY_S] [--restart-gap S]
+  bc-cli analyze FILE.nvrrec
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
 The password comes from NVRVIEW_PASSWORD or, on macOS, from the Keychain
@@ -29,7 +39,13 @@ item named with --keychain; never from the command line.
 record writes video (Annex-B), starting at a keyframe, until Ctrl-C,
 --seconds, or --frames. --audio also writes the audio as received (ADTS AAC).
 --raw also writes every record with its arrival time, for replaying the
-stream later; keep real recordings in the git-ignored captures/ directory.";
+stream later; keep real recordings in the git-ignored captures/ directory.
+capture records several tiers of one channel on one session and one clock
+(NVRREC02): the tiers start in the order given, --stagger seconds apart
+(default 2); --restart stops one tier after EVERY_S seconds and starts it
+again --restart-gap seconds later (default 2), repeatedly, to sample start
+latency. Only preview start and stop are sent.
+analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
 const LOGIN_LIMIT: Duration = Duration::from_secs(20);
@@ -45,6 +61,34 @@ enum Action {
         seconds: Option<u64>,
         frames: Option<u64>,
     },
+    Capture {
+        cfg: CaptureConfig,
+        raw: PathBuf,
+        seconds: Option<u64>,
+    },
+}
+
+enum Parsed {
+    Device(Args),
+    Analyze(PathBuf),
+}
+
+fn parse_tier(name: &str) -> Result<StreamTier, String> {
+    Ok(match name {
+        "main" => StreamTier::Main,
+        "sub" => StreamTier::Sub,
+        "extern" => StreamTier::Extern,
+        "mobile" => StreamTier::Mobile,
+        other => return Err(format!("unknown tier {other}")),
+    })
+}
+
+fn parse_secs(name: &str, v: &str) -> Result<std::time::Duration, String> {
+    v.parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(std::time::Duration::from_secs_f64)
+        .ok_or_else(|| format!("bad {name}"))
 }
 
 struct Args {
@@ -54,7 +98,7 @@ struct Args {
     action: Action,
 }
 
-fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut host = None;
     let mut user = std::env::var("NVRVIEW_USER").ok();
     let mut keychain = None;
@@ -62,6 +106,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut channel, mut tier, mut out, mut seconds, mut frames) =
         (None, StreamTier::Sub, None, None, None);
     let (mut audio, mut raw) = (None, None);
+    let mut tiers = vec![StreamTier::Sub, StreamTier::Main];
+    let mut stagger = Duration::from_secs(2);
+    let (mut restart, mut restart_gap) = (None, Duration::from_secs(2));
+    let mut file = None;
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -73,14 +121,21 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             "--channel" => {
                 channel = Some(value("--channel")?.parse().map_err(|_| "bad --channel")?);
             }
-            "--tier" => {
-                tier = match value("--tier")?.as_str() {
-                    "main" => StreamTier::Main,
-                    "sub" => StreamTier::Sub,
-                    "extern" => StreamTier::Extern,
-                    "mobile" => StreamTier::Mobile,
-                    other => return Err(format!("unknown tier {other}")),
-                }
+            "--tier" => tier = parse_tier(&value("--tier")?)?,
+            "--tiers" => {
+                tiers = value("--tiers")?
+                    .split(',')
+                    .map(parse_tier)
+                    .collect::<Result<_, _>>()?;
+            }
+            "--stagger" => stagger = parse_secs("--stagger", &value("--stagger")?)?,
+            "--restart" => {
+                let v = value("--restart")?;
+                let (t, every) = v.split_once(':').ok_or("--restart needs TIER:EVERY_S")?;
+                restart = Some((parse_tier(t)?, parse_secs("--restart", every)?));
+            }
+            "--restart-gap" => {
+                restart_gap = parse_secs("--restart-gap", &value("--restart-gap")?)?;
             }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--audio" => audio = Some(PathBuf::from(value("--audio")?)),
@@ -92,7 +147,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
                 frames = Some(value("--frames")?.parse().map_err(|_| "bad --frames")?);
             }
             "-h" | "--help" => return Err(String::new()),
-            "channels" | "record" if command.is_none() => command = Some(a),
+            "channels" | "record" | "capture" | "analyze" if command.is_none() => {
+                command = Some(a);
+            }
+            _ if command.as_deref() == Some("analyze") && file.is_none() => {
+                file = Some(PathBuf::from(a));
+            }
             other => return Err(format!("unexpected argument {other}")),
         }
     }
@@ -107,14 +167,51 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             seconds,
             frames,
         },
+        Some("capture") => {
+            if tiers.is_empty()
+                || tiers
+                    .iter()
+                    .enumerate()
+                    .any(|(i, t)| tiers[..i].contains(t))
+            {
+                return Err("--tiers must name distinct tiers".into());
+            }
+            let restart = match restart {
+                Some((tier, every)) => {
+                    if !tiers.contains(&tier) {
+                        return Err("--restart names a tier not in --tiers".into());
+                    }
+                    if every.is_zero() {
+                        return Err("--restart needs a positive period".into());
+                    }
+                    Some(Restart {
+                        tier,
+                        every,
+                        gap: restart_gap,
+                    })
+                }
+                None => None,
+            };
+            Action::Capture {
+                cfg: CaptureConfig {
+                    channel: channel.ok_or("capture needs --channel")?,
+                    tiers,
+                    stagger,
+                    restart,
+                },
+                raw: raw.ok_or("capture needs --raw FILE.nvrrec")?,
+                seconds,
+            }
+        }
+        Some("analyze") => return Ok(Parsed::Analyze(file.ok_or("analyze needs a file")?)),
         _ => return Err("missing command".into()),
     };
-    Ok(Args {
+    Ok(Parsed::Device(Args {
         host: host.ok_or("missing --host")?,
         user: user.ok_or("missing --user (or NVRVIEW_USER)")?,
         keychain,
         action,
-    })
+    }))
 }
 
 fn password(keychain: Option<&str>) -> Result<String, String> {
@@ -305,12 +402,65 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             }
             Ok(())
         }
+        Action::Capture { cfg, raw, seconds } => {
+            tokio::select! {
+                r = wait_logged_in(session, LOGIN_LIMIT) => r?,
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            }
+            let file = BufWriter::new(File::create(&raw)?);
+            let mut out = recording::TierWriter::new(file)?;
+            let names: Vec<&str> = cfg.tiers.iter().map(|t| t.name()).collect();
+            eprintln!(
+                "capturing channel {} ({}) to {}; Ctrl-C to stop",
+                cfg.channel,
+                names.join(", "),
+                raw.display()
+            );
+            let result = capture(session, &cfg, &mut out, ctrl_c_or(seconds)).await;
+            out.finish()?;
+            let stats = result?;
+            eprintln!("captured {:.1} s", stats.duration.as_secs_f64());
+            eprintln!(
+                "{:<12} {:>6} {:>6} {:>8} {:>8} {:>9} {:>5} {:>8}",
+                "tier", "starts", "stops", "records", "video", "keyframes", "gaps", "dropped"
+            );
+            for (tier, c) in &stats.tiers {
+                eprintln!(
+                    "{:<12} {:>6} {:>6} {:>8} {:>8} {:>9} {:>5} {:>8}",
+                    tier.name(),
+                    c.starts,
+                    c.stops,
+                    c.records,
+                    c.videos,
+                    c.keyframes,
+                    c.discontinuities,
+                    c.dropped
+                );
+            }
+            eprintln!("analyze with: bc-cli analyze {}", raw.display());
+            Ok(())
+        }
+    }
+}
+
+fn analyze(path: &std::path::Path) -> ExitCode {
+    let result = File::open(path).and_then(Analysis::read);
+    match result {
+        Ok(a) => {
+            print!("{}", a.to_markdown());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("bc-cli: {}: {e}", path.display());
+            ExitCode::FAILURE
+        }
     }
 }
 
 fn main() -> ExitCode {
     let args = match parse_args(std::env::args().skip(1)) {
-        Ok(a) => a,
+        Ok(Parsed::Device(a)) => a,
+        Ok(Parsed::Analyze(path)) => return analyze(&path),
         Err(e) => {
             if !e.is_empty() {
                 eprintln!("bc-cli: {e}\n");

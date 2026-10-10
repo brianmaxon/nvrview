@@ -620,6 +620,7 @@ impl DeviceSession {
                     keyframe: true,
                     pts_us,
                     data,
+                    ..
                 })) if picture.is_none() => picture = Some((codec, pts_us, data)),
                 Some(TransferItem::Record(_) | TransferItem::Estimate(_)) => {}
                 Some(TransferItem::End(200 | 300)) => break Ok(()),

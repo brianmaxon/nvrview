@@ -47,6 +47,7 @@ fn synthetic() -> (Vec<u8>, Vec<(u64, Vec<u8>)>) {
                 keyframe: i % 10 == 0,
                 pts_us: 777_000 + i * SPACING_US,
                 data: (0..(100 + i * 700)).map(|b| (b * 7 + i) as u8).collect(),
+                extra_header: Vec::new(),
             },
         );
         if i % 3 == 2 {
@@ -228,5 +229,162 @@ fn looping_starts_over_with_later_timestamps() {
         } else {
             assert_eq!(got, &rec[..]);
         }
+    }
+}
+
+/// Two tiers on one clock, as `bc-cli capture` records them: sub pictures
+/// every 100 ms (keyframe every 10), arriving 20 ms after their capture
+/// time; main pictures every 50 ms (keyframe every 20), arriving 120 ms
+/// after theirs. Both use one picture clock.
+fn two_tiers() -> Vec<u8> {
+    use bc_protocol::recording::TierWriter;
+    let mut items: Vec<(u64, StreamTier, Record)> = vec![
+        (
+            1_000,
+            StreamTier::Sub,
+            Record::Info {
+                width: 64,
+                height: 48,
+                fps: 10,
+            },
+        ),
+        (
+            2_000,
+            StreamTier::Main,
+            Record::Info {
+                width: 640,
+                height: 480,
+                fps: 20,
+            },
+        ),
+    ];
+    let pic = |keyframe, pts_us| Record::Video {
+        codec: Codec::H264,
+        keyframe,
+        pts_us,
+        data: vec![0, 0, 0, 1, if keyframe { 0x65 } else { 0x41 }, 1, 2, 3],
+        extra_header: Vec::new(),
+    };
+    for i in 0..80u64 {
+        items.push((
+            i * 100_000 + 20_000,
+            StreamTier::Sub,
+            pic(i % 10 == 0, i * 100_000),
+        ));
+    }
+    for i in 0..160u64 {
+        items.push((
+            i * 50_000 + 120_000,
+            StreamTier::Main,
+            pic(i % 20 == 0, i * 50_000),
+        ));
+    }
+    items.sort_by_key(|(at, t, _)| (*at, t.number()));
+    let mut w = TierWriter::new(Vec::new()).unwrap();
+    w.start_requested(StreamTier::Sub, 0).unwrap();
+    w.start_requested(StreamTier::Main, 0).unwrap();
+    for (at, tier, r) in &items {
+        w.record(*tier, *at, r).unwrap();
+    }
+    w.finish().unwrap()
+}
+
+fn login(nvr: &MockNvr) -> Client {
+    let tcp = TcpStream::connect(nvr.addr()).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut c = Client {
+        tcp,
+        dec: Decoder::new(),
+        session: Session::new("example-user", "example-password"),
+    };
+    let hs = c.session.handshake().unwrap();
+    c.tcp.write_all(&hs).unwrap();
+    let m = c.next();
+    assert_eq!(c.session.handle(&m).unwrap(), Event::NonceReceived);
+    let login = c.session.login().unwrap();
+    c.tcp.write_all(&login).unwrap();
+    let m = c.next();
+    assert_eq!(c.session.handle(&m).unwrap(), Event::LoginOk);
+    c
+}
+
+/// A client watching the sub-stream starts main: main joins at the same
+/// capture moment, at its most recent keyframe, with the recorded latency
+/// between the tiers.
+#[test]
+fn a_tier_started_later_joins_the_shared_clock() {
+    use bc_protocol::media::Demuxer;
+    const SPEED: f64 = 2.0;
+    let rep = Replay::from_reader(&two_tiers()[..]).unwrap();
+    assert_eq!(rep.version(), 2);
+    let nvr = start(rep, SPEED, false);
+    let mut c = login(&nvr);
+    let (sub_id, bytes) = c.session.start_preview(0, StreamTier::Sub).unwrap();
+    c.tcp.write_all(&bytes).unwrap();
+    let t0 = Instant::now();
+    let (mut sub_demux, mut main_demux) = (Demuxer::new(), Demuxer::new());
+    // (arrival since t0, record) per tier.
+    let (mut sub, mut main) = (Vec::new(), Vec::new());
+    let mut main_id = None;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while main.len() < 40 {
+        assert!(Instant::now() < deadline, "timed out");
+        let m = c.next();
+        let Event::Media { message_id, data } = c.session.handle(&m).unwrap() else {
+            continue;
+        };
+        let (demux, out) = if message_id == sub_id {
+            (&mut sub_demux, &mut sub)
+        } else {
+            assert_eq!(Some(message_id), main_id);
+            (&mut main_demux, &mut main)
+        };
+        demux.push(&data);
+        while let Some(r) = demux.next_record().unwrap() {
+            out.push((t0.elapsed(), r));
+        }
+        // Start main once sub has shown the picture captured at 3.4 s
+        // (replay time 3.42 s): main's latest keyframe then is the one
+        // captured at 3.0 s (arrived at 3.12 s).
+        let seen = sub
+            .iter()
+            .any(|(_, r)| matches!(r, Record::Video { pts_us, .. } if *pts_us >= 3_400_000));
+        if main_id.is_none() && seen {
+            let (id, bytes) = c.session.start_preview(0, StreamTier::Main).unwrap();
+            c.tcp.write_all(&bytes).unwrap();
+            main_id = Some(id);
+        }
+    }
+    // Main begins with its own stream info, then that keyframe.
+    assert!(matches!(main[0].1, Record::Info { width: 640, .. }));
+    let pts = |r: &Record| match r {
+        Record::Video {
+            pts_us, keyframe, ..
+        } => Some((*keyframe, *pts_us)),
+        _ => None,
+    };
+    let videos: Vec<(Duration, bool, u64)> = main
+        .iter()
+        .filter_map(|(t, r)| pts(r).map(|(k, p)| (*t, k, p)))
+        .collect();
+    assert_eq!((videos[0].1, videos[0].2), (true, 3_000_000));
+    // Pictures 3.0..3.4 s are due already: they come as a burst, then the
+    // pace is the recorded one.
+    let burst = videos.iter().filter(|(_, _, p)| *p <= 3_300_000).count();
+    assert!(burst >= 6, "burst of {burst}");
+    let burst_span = videos[burst - 1].0 - videos[0].0;
+    assert!(burst_span < Duration::from_millis(60), "{burst_span:?}");
+    // Same capture moment on both tiers: main arrives (120 - 20) ms / speed
+    // after sub, as recorded.
+    for (t, _, p) in videos.iter().filter(|(_, _, p)| *p >= 3_800_000) {
+        let Some((ts, _)) = sub
+            .iter()
+            .find(|(_, r)| pts(r).is_some_and(|(_, q)| q == *p))
+        else {
+            continue;
+        };
+        let lag = t.as_secs_f64() - ts.as_secs_f64();
+        let want = 0.100 / SPEED;
+        assert!((lag - want).abs() < 0.03, "lag {lag} at pts {p}");
     }
 }

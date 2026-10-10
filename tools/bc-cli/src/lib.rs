@@ -3,6 +3,10 @@
 //!
 //! Everything goes through one [`DeviceSession`], so one run is one login,
 //! and the session is closed (previews stopped, socket shut) on every path.
+//! [`capture`] records several tiers of a channel for timing analysis
+//! ([`analyze`]).
+
+pub mod analyze;
 
 use bc_protocol::media::{Codec, Record};
 use bc_protocol::recording;
@@ -13,7 +17,8 @@ use bc_session::{ConnState, DeviceSession, Item, QueryError};
 use std::fmt;
 use std::future::Future;
 use std::io::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 /// Why a command failed.
@@ -266,6 +271,7 @@ pub async fn record<W: Write>(
                 keyframe,
                 pts_us,
                 data,
+                ..
             })) => {
                 if *stats.codec.get_or_insert(codec) != codec {
                     // One file holds one codec; a mixed stream would not play.
@@ -316,4 +322,219 @@ pub async fn record<W: Write>(
     }
     stats.dropped = sub.dropped();
     Ok(stats)
+}
+
+/// Stops and restarts one tier periodically during a [`capture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Restart {
+    /// The tier to restart.
+    pub tier: StreamTier,
+    /// How long each run of the tier lasts before it is stopped.
+    pub every: Duration,
+    /// How long it stays stopped. The stop must reach the device before the
+    /// new start, or the session would keep the old preview: a second or
+    /// more.
+    pub gap: Duration,
+}
+
+/// What [`capture`] records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptureConfig {
+    /// Channel number.
+    pub channel: u8,
+    /// Tiers, in start order: the first starts at once, each next one
+    /// `stagger` later.
+    pub tiers: Vec<StreamTier>,
+    /// Time between the starts of consecutive tiers.
+    pub stagger: Duration,
+    /// An optional periodic restart of one tier.
+    pub restart: Option<Restart>,
+}
+
+/// Counts for one tier of a [`capture`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TierCounts {
+    /// Start requests.
+    pub starts: u64,
+    /// Stop requests.
+    pub stops: u64,
+    /// Media records written.
+    pub records: u64,
+    /// Of which video.
+    pub videos: u64,
+    /// Of which keyframes.
+    pub keyframes: u64,
+    /// Discontinuities (reconnects, queue overflow).
+    pub discontinuities: u64,
+    /// Frames the subscription dropped because the writer fell behind.
+    pub dropped: u64,
+}
+
+/// What a [`capture`] wrote, per tier in the configured order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CaptureStats {
+    /// Per tier, in [`CaptureConfig::tiers`] order.
+    pub tiers: Vec<(StreamTier, TierCounts)>,
+    /// Length of the capture.
+    pub duration: Duration,
+}
+
+/// One running subscription of a capture: a task forwards its items, and
+/// dropping this sender ends the task, which drops the subscription (the
+/// session then stops the preview). The task returns the subscription's
+/// drop count.
+type Running = oneshot::Sender<()>;
+
+type Forwarded = (usize, Option<Item>);
+
+fn forward(
+    mut sub: bc_session::Subscription,
+    index: usize,
+    tx: mpsc::Sender<Forwarded>,
+) -> (Running, tokio::task::JoinHandle<u64>) {
+    let (stop, mut stop_rx) = oneshot::channel::<()>();
+    let join = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut stop_rx => break,
+                item = sub.recv() => {
+                    let end = item.is_none();
+                    if tx.send((index, item)).await.is_err() || end {
+                        break;
+                    }
+                }
+            }
+        }
+        sub.dropped()
+    });
+    (stop, join)
+}
+
+fn ended(session: &DeviceSession) -> CliError {
+    match session.state() {
+        ConnState::LoginFailed {
+            status,
+            remain_times,
+            unlock_secs,
+        } => CliError::LoginRefused {
+            status,
+            remain_times,
+            unlock_secs,
+        },
+        _ => CliError::SessionEnded,
+    }
+}
+
+/// Records several tiers of one channel on one session into an `NVRREC02`
+/// recording ([`recording::TierWriter`]) until `stop` resolves or the
+/// session ends: every record with its arrival time on one clock, and a
+/// marker whenever a tier's preview is requested to start or stop. Tiers
+/// start in order, `stagger` apart; with a [`Restart`], one tier is stopped
+/// and started again periodically, giving several start-latency samples.
+/// Only preview start and stop are sent (through subscriptions); dropping
+/// everything at the end stops every preview.
+pub async fn capture<W: Write>(
+    session: &DeviceSession,
+    cfg: &CaptureConfig,
+    out: &mut recording::TierWriter<W>,
+    stop: impl Future<Output = ()>,
+) -> Result<CaptureStats, CliError> {
+    let n = cfg.tiers.len();
+    let started = Instant::now();
+    let arrival = || started.elapsed().as_micros() as u64;
+    let (tx, mut rx) = mpsc::channel::<Forwarded>(256);
+    let mut running: Vec<Option<Running>> = (0..n).map(|_| None).collect();
+    let mut joins: Vec<(usize, tokio::task::JoinHandle<u64>)> = Vec::new();
+    let mut counts = vec![TierCounts::default(); n];
+    let mut next_start: Vec<Option<Instant>> = (0..n)
+        .map(|i| Some(started + cfg.stagger * i as u32))
+        .collect();
+    let mut next_stop: Vec<Option<Instant>> = vec![None; n];
+    let mut flush_at = started + Duration::from_secs(1);
+    tokio::pin!(stop);
+
+    let result: Result<(), CliError> = async {
+        loop {
+            let now = Instant::now();
+            for i in 0..n {
+                let tier = cfg.tiers[i];
+                if next_stop[i].is_some_and(|t| t <= now) {
+                    out.stop_requested(tier, arrival())?;
+                    running[i] = None;
+                    counts[i].stops += 1;
+                    next_stop[i] = None;
+                    next_start[i] = cfg.restart.map(|r| now + r.gap);
+                }
+                if next_start[i].is_some_and(|t| t <= now) {
+                    out.start_requested(tier, arrival())?;
+                    let sub = session
+                        .subscribe(cfg.channel, tier)
+                        .await
+                        .map_err(|_| CliError::SessionEnded)?;
+                    let (r, join) = forward(sub, i, tx.clone());
+                    running[i] = Some(r);
+                    joins.push((i, join));
+                    counts[i].starts += 1;
+                    next_start[i] = None;
+                    next_stop[i] = cfg
+                        .restart
+                        .filter(|r| r.tier == tier)
+                        .map(|r| Instant::now() + r.every);
+                }
+            }
+            let wake = next_start
+                .iter()
+                .chain(&next_stop)
+                .flatten()
+                .copied()
+                .fold(flush_at, Instant::min);
+            tokio::select! {
+                () = &mut stop => return Ok(()),
+                m = rx.recv() => {
+                    let Some((i, item)) = m else { return Err(CliError::SessionEnded) };
+                    let tier = cfg.tiers[i];
+                    let c = &mut counts[i];
+                    match item {
+                        Some(Item::Media(r)) => {
+                            out.record(tier, arrival(), &r)?;
+                            c.records += 1;
+                            if let Record::Video { keyframe, .. } = r {
+                                c.videos += 1;
+                                c.keyframes += u64::from(keyframe);
+                            }
+                        }
+                        Some(Item::Discontinuity) => {
+                            out.discontinuity(tier, arrival())?;
+                            c.discontinuities += 1;
+                        }
+                        Some(Item::StartRejected { status }) => {
+                            return Err(CliError::StreamRefused(status));
+                        }
+                        None => return Err(ended(session)),
+                    }
+                }
+                () = tokio::time::sleep_until(wake.into()) => {}
+            }
+            if Instant::now() >= flush_at {
+                out.flush()?;
+                flush_at += Duration::from_secs(1);
+            }
+        }
+    }
+    .await;
+
+    // Stop every preview: end the forwarders (dropping their subscriptions),
+    // even if one is blocked sending.
+    drop(running);
+    drop(rx);
+    for (i, join) in joins {
+        counts[i].dropped += join.await.unwrap_or(0);
+    }
+    out.flush()?;
+    result?;
+    Ok(CaptureStats {
+        tiers: cfg.tiers.iter().copied().zip(counts).collect(),
+        duration: started.elapsed(),
+    })
 }

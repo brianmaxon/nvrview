@@ -627,6 +627,7 @@ impl TileThread {
                 keyframe,
                 pts_us,
                 data,
+                ..
             }) => {
                 st.g.p.tick(ctx.clock.now_us());
                 st.g.p.push(AccessUnit {
@@ -656,6 +657,7 @@ impl TileThread {
                 keyframe,
                 pts_us,
                 data,
+                ..
             }) => {
                 p.tick(self.ctx.clock.now_us());
                 self.last_video_pts = Some(pts_us);

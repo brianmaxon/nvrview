@@ -294,12 +294,12 @@ pub fn run(cfg: &SoakConfig) -> Result<Report, String> {
         .audio
         .then(|| audio_sim::simulate(&cfg.replay, cfg.simulated.as_micros() as u64));
 
+    // The stream the tiles play (an `NVRREC02` recording's default tier).
     let videos_per_pass = cfg
         .replay
-        .entries()
-        .iter()
-        .filter(|e| {
-            matches!(e, bc_protocol::recording::Entry::Record { bytes, .. }
+        .playback(false)
+        .filter(|(_, step)| {
+            matches!(step, mock_nvr::replay::Step::Record(bytes)
                 if bytes.len() >= 24 && &bytes[2..4] == b"dc")
         })
         .count() as f64;
