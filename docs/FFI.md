@@ -246,13 +246,14 @@ change.
   - otherwise, for a connected channel whose `tiers` do not include
     `extern`, the core runs a one-time probe: a short `extern` preview on
     the device's session (no extra login), stopped again after its first
-    picture or about 2 s. A picture means a second lens. Such a `lenses`
-    has **no `lens_detects`** (what each lens detects is unknown), and may
-    come without `detects` (when 199 could not be read). Probes run one at
-    a time per device, after the channel list, names, and capabilities are
-    in, and wait (up to 15 s) while a tile is starting on the channel, so
-    on a device's first connection `lenses` can appear in a `channels`
-    event seconds after the others. Each answer, lens or not, is kept per
+    picture or about 3 s (`CoreConfig::lens_probe_window`). A picture
+    means a second lens. Such a `lenses` has **no `lens_detects`** (what
+    each lens detects is unknown), and may come without `detects` (when
+    199 could not be read). Probes run one at a time per device, after the
+    channel list, names, and capabilities are in, and wait (up to 15 s)
+    while a tile is starting on the channel, so on a device's first
+    connection `lenses` can appear in a `channels` event seconds after the
+    others. Each answer, lens or not, is kept per
     device key and channel in `lenses.json` in the data directory and
     reused on later connections and runs, until the channel's camera
     changes (its `uid` from the channel list, or else its name and model);

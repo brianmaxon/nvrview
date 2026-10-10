@@ -316,9 +316,20 @@ async fn three_camera_download_survives_a_stall_and_a_disconnect() {
         skip: 2,
     });
     let (sa, sb) = (session(&a), session(&b));
-    // Live view on device A runs throughout.
+    // Live view on device A runs throughout. The downloads start once its
+    // first frame is in, and the worst gap between frames is measured from
+    // then on: time to the first frame is stream startup, not a stall.
     let mut live = sa.subscribe(0, StreamTier::Sub).await.unwrap();
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
     let live_task = tokio::spawn(async move {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), live.recv()).await {
+                Ok(Some(Item::Media(Record::Video { .. }))) => break,
+                Ok(Some(_)) => {}
+                other => panic!("no live video: {other:?}"),
+            }
+        }
+        let _ = first_tx.send(());
         let mut worst = Duration::ZERO;
         let mut frames = 0u32;
         let mut last = Instant::now();
@@ -334,6 +345,7 @@ async fn three_camera_download_survives_a_stall_and_a_disconnect() {
         }
         (frames, worst)
     });
+    first_rx.await.expect("live view started");
 
     let root = tempfile::tempdir().unwrap();
     let sched = Scheduler::new(fast(root.path()), None);
@@ -412,11 +424,11 @@ async fn three_camera_download_survives_a_stall_and_a_disconnect() {
     assert_eq!(json["start"], "2026-10-10 07:42:05");
 
     let (frames, worst) = live_task.await.unwrap();
-    // The mock sends 25 fps, so about 75 frames in the 3 s window. A debug
-    // build sharing a small machine with the file's other end-to-end tests
-    // delivered 46 (this test alone: all of them), so the count only proves
-    // the stream kept flowing; the worst gap is the guarantee that downloads
-    // never stall live view.
+    // The mock sends 25 fps, so about 75 frames in the 3 s window; the
+    // count only proves the stream kept flowing. The worst gap is the
+    // guarantee that downloads never stall live view. (Chunk writes and job
+    // saves used to sync to disk on async workers; on a small loaded
+    // machine that held the session's reader up for most of a second.)
     assert!(frames >= 30, "live frames during the downloads: {frames}");
     assert!(
         worst < Duration::from_millis(400),

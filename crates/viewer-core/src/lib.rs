@@ -168,6 +168,10 @@ pub struct CoreConfig {
     /// How long after the first 400 the session keeps waiting before the
     /// tile reports `tile_error` `start_rejected`; zero makes a 400 final.
     pub preview_wait_limit: Duration,
+    /// How long a second-lens probe (docs/FFI.md, `lenses`) waits for the
+    /// first picture of a channel's `extern` stream before deciding the
+    /// channel has one lens.
+    pub lens_probe_window: Duration,
     /// Sound analysis of every live tile with audio: smoke and CO alarm
     /// patterns as `detection` events, and per-second loudness
     /// ([`Core::tile_loudness`]). See [`sound`].
@@ -190,6 +194,7 @@ impl Default for CoreConfig {
             tier_switch_align_cap: Duration::from_millis(300),
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            lens_probe_window: lens::ProbeTiming::default().window,
             sound: sound::SoundSettings::default(),
         }
     }
@@ -337,7 +342,10 @@ impl Core {
         let device_keys = store::DeviceKeys::open(config.data_dir.clone());
         let lens = lens::LensContext {
             cache: Arc::new(Mutex::new(lens::LensCache::open(config.data_dir.clone()))),
-            timing: lens::ProbeTiming::default(),
+            timing: lens::ProbeTiming {
+                window: config.lens_probe_window,
+                ..lens::ProbeTiming::default()
+            },
         };
         info!("core started");
         Ok(Core {
