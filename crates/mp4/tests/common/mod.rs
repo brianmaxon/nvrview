@@ -21,7 +21,7 @@ pub struct Au {
     pub key: bool,
 }
 
-fn nals(d: &[u8]) -> Vec<(usize, usize)> {
+pub fn nals(d: &[u8]) -> Vec<(usize, usize)> {
     // (start, end) of each NAL payload, start codes excluded.
     let mut starts = Vec::new();
     let mut i = 0;
