@@ -217,6 +217,17 @@ Rules for every extension:
 - **Measured.** Each extension states its CPU, memory, and energy cost against
   the budgets above.
 
+### Feature ideas and the points they build on
+
+Not scheduled; recorded so the extension points stay able to carry them.
+
+| Feature | Builds on | Notes |
+| --- | --- | --- |
+| Timelapse | frame tap (one frame every N seconds per camera), hardware encoder in the app | storage capped by size and age like every cache; needs a small viewer of its own. Could later use the NVR's own recordings through read-only playback commands. |
+| MQTT events | control events, detections, triggers (as an action) | publishes to a broker on the local network; implemented once in the core; the bridge to home-automation systems. |
+| Private facial recognition | frame tap, on-device face detection and embeddings, detections | off by default and opt-in; enrolled faces stored locally and encrypted; one-step deletion; biometric data is regulated in some jurisdictions even when processed locally. |
+| Local API and MCP server | control events, detections, transcripts, snapshots, triggers | localhost only, authenticated; exposes viewing data and app actions (such as focusing a tile), never device commands, so goal 4 holds for agents too; implemented once in the core. |
+
 ## Build and CI
 
 - `cargo build` targets `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, and
