@@ -138,7 +138,11 @@ git -C $RepoDir config core.longpaths true
 if ($EnableSsh) {
   Step 'OpenSSH server (key-only, local subnet only)'
   $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
-  if ($cap.State -ne 'Installed') {
+  if (Get-Service -Name sshd -ErrorAction SilentlyContinue) {
+    # Already installed some other way (for example the winget package
+    # Microsoft.OpenSSH.Preview when Windows Update cannot deliver the feature).
+    Write-Host 'an sshd service already exists; not installing the Windows feature'
+  } elseif ($cap.State -ne 'Installed') {
     Write-Host 'installing the OpenSSH server from Windows Update: this often takes 2-10 minutes'
     Write-Host 'with no progress shown (check from another window with:'
     Write-Host "  Get-WindowsCapability -Online -Name OpenSSH.Server*)"
@@ -169,7 +173,11 @@ if ($EnableSsh) {
   Restart-Service sshd
 
   # Replace the default rule (any address) with one for the local subnet only.
-  Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue |
+  # The Windows feature names its rule OpenSSH-Server-In-TCP; the winget
+  # package may use another name. Disable every OpenSSH inbound rule but ours.
+  Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -ne 'nvrview-ssh-local' -and
+      ($_.Name -like 'OpenSSH*' -or $_.DisplayName -like '*OpenSSH*' -or $_.DisplayName -like '*sshd*') } |
     Disable-NetFirewallRule
   if (-not (Get-NetFirewallRule -Name 'nvrview-ssh-local' -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule -Name 'nvrview-ssh-local' -DisplayName 'OpenSSH (local subnet only)' `
