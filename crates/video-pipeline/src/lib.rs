@@ -13,6 +13,7 @@
 //!   of ITU-T H.264 and H.265) for picture size, cropping, and VUI color.
 //! - [`format`]: parameter set collections and the decoder format.
 //! - [`color`]: YCbCr to RGB matrices.
+//! - [`layout`]: grid layout with fit and fill modes.
 
 mod bits;
 pub mod color;
@@ -20,6 +21,7 @@ pub mod format;
 pub mod geometry;
 pub mod h264;
 pub mod h265;
+pub mod layout;
 pub mod nal;
 mod vui;
 
@@ -27,6 +29,7 @@ pub use bits::ParseError;
 pub use color::{ColorDescription, ColorInfo, ColorMatrix, VideoSignal, YcbcrToRgb};
 pub use format::{ParameterSet, ParameterSets, SequenceInfo, VideoFormat};
 pub use geometry::{Rect, Size};
+pub use layout::{FitMode, TileLayout, grid_dimensions, grid_layout, grid_layout_into};
 pub use nal::{
     AccessUnitInfo, Codec, NalUnits, ParameterSetKind, RandomAccess, analyze, nal_units,
 };
