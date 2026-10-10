@@ -54,4 +54,6 @@ docker run --rm \
       --fixtures /src/fixtures/synthetic \
       --lib /src/target/debug/libnvrview.so \
       --layout /src/target/csharp/layout.txt \
-      --header /src/crates/viewer-ffi/include/nvrview.h'
+      --header /src/crates/viewer-ffi/include/nvrview.h
+    dotnet build NvrView.Tiles.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
+    dotnet /build/artifacts/bin/NvrView.Tiles.Tests/debug/NvrView.Tiles.Tests.dll'

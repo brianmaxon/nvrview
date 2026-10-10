@@ -88,6 +88,9 @@ jobs:
             --mock-nvr "target/release/mock-nvr$exe" --fixtures fixtures/synthetic \
             --lib "$lib" --layout "$out/layout.txt" \
             --header crates/viewer-ffi/include/nvrview.h
+          # The tile features' logic (apps/windows/NvrView.Tiles), on simulated time.
+          dotnet build apps/windows/NvrView.Tiles.Tests -c Release --artifacts-path "$out/artifacts"
+          dotnet "$out/artifacts/bin/NvrView.Tiles.Tests/release/NvrView.Tiles.Tests.dll"
       # The Windows video layer (apps/windows/NvrView.Video) on WARP with
       # CPU decoding, checked by reading rendered pixels back: hosted runners
       # have no GPU and no HEVC Video Extension, so H.264 only. Not required

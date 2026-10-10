@@ -35,3 +35,6 @@ dotnet "$out/artifacts/bin/NvrView.Smoke/release/NvrView.Smoke.dll" \
   --mock-nvr "target/release/mock-nvr$exe" --fixtures fixtures/synthetic \
   --lib "$lib" --layout "$out/layout.txt" \
   --header crates/viewer-ffi/include/nvrview.h
+# The tile features' logic, on simulated time.
+dotnet build apps/windows/NvrView.Tiles.Tests -c Release --artifacts-path "$out/artifacts"
+dotnet "$out/artifacts/bin/NvrView.Tiles.Tests/release/NvrView.Tiles.Tests.dll"
