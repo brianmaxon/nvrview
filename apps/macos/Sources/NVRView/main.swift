@@ -119,8 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let host = options.host, let user = options.user, let account = options.account else {
             return showSettings()
         }
+        // NVRVIEW_PASSWORD is for development against mock-nvr, like bc-cli;
+        // the Keychain is the normal source. Never from the command line.
         let keychain = KeychainPassword(service: options.keychainService, account: account)
-        guard let password = keychain.read() else {
+        let fromEnvironment = ProcessInfo.processInfo.environment["NVRVIEW_PASSWORD"].flatMap { $0.isEmpty ? nil : $0 }
+        guard let password = fromEnvironment ?? keychain.read() else {
             statusLabel.stringValue = "No password in the Keychain for \(account); enter it in Settings"
             return showSettings()
         }
