@@ -1,0 +1,13 @@
+[package]
+name = "bc-protocol"
+version = "0.1.0"
+description = "Sans-I/O implementation of the Reolink Baichuan protocol: framing, login, encryption, and media records"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "viewer-log"
+version = "0.1.0"
+description = "Bounded, rate-limited file logging for nvrview: rotation capped by file count and total size"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
