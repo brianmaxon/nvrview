@@ -347,6 +347,20 @@ Reply details:
 | In the encoder configuration (command 56) the field of the same name means 0 = H.264, 1 = H.265, and the client knows no other value. That 146 uses the same coding is likely but unconfirmed; take the codec from the media records. | reported (client) |
 | `ChannelInfoList` (145) is pushed with message ID 0 and lists every channel slot. Each `ChannelInfo` has `channelId`, `state` (`connect` for a slot with a camera, `none` for an empty one), `changed`, `uid`, `streamSupport` (a comma-separated tier list such as `mainStream,subStream,externStream`), `abilityChanged`, `wifiState`. It has no channel name; names come from 318. | observed |
 
+**The device's time settings** are read with command **104**
+(`NET_GET_SYSGENERAL_CFG`, the general system configuration, which carries the
+device's time and time zone), command **106** (`NET_GET_DST_CFG`,
+daylight-saving configuration), and command **38** (`NET_GET_NTPCFG`, NTP
+configuration). When the user opened the NVR's Date &amp; Time settings screen
+in the official client and closed it without saving, the client sent exactly
+these three reads (each answered status 200) alongside the rest of a settings
+page's reads (102 HDD, 511 users, 76 local link, 80 version, 26 color, 115
+Wi-Fi, 574 sleep) and **no write command at all**: opening and closing the
+screen without saving changed nothing on the device. The bodies of the replies
+could not be decrypted in that capture (it had no login handshake), so the
+field layout — time-zone format, DST rule, NTP server and offset — is not yet
+recorded; the commands and their read-only use are. (observed (client capture))
+
 Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 299, 511, 527–551, 574 (configuration and capability queries), 192 (event
 subscription; see "Detection events"), and 14–16, 142, 272–274 (recording
@@ -871,6 +885,27 @@ observed (client capture); the rest are reported (client) and did not appear.
    a new `seq` and `seekTime`, then a new 5. Seven plays were made this way;
    none ran to the end of a file, so how a play ends is unknown.
 
+#### Speed, file boundaries, and concurrent plays
+
+A second capture of the official client's playback tab added the facts below.
+It began after the sessions had logged in (live view was already open), so its
+session key could not be recovered and **XML field values and BCMEDIA record
+headers in it could not be decrypted**: everything here is read from the
+unencrypted message header (command, message ID, status, body length, payload
+offset), timing, and byte volume only. Field-level detail (the `playSpeed`
+value, frame rates, keyframe counts) is therefore still unconfirmed. All
+observed (client capture).
+
+| Fact | Provenance |
+| --- | --- |
+| **Changing speed is stop, seek, play**, the same three commands as scrubbing: every rate change (1×, 2×, 4×, 8×, 16× were exercised) was a 7, then a 123 with a new `seq` and `seekTime`, then a 5. No dedicated speed command, no keyframe-only command (150), and no play-by-time (381/383) appeared. The rate rides in the 5 body's `playSpeed`; the play request grew by one byte at two-digit speeds, consistent with that. | observed (client capture) |
+| **Faster rates deliver far less than N× the data.** Per play, the command-5 media delivered (D→C bytes over the play's wall time): 1× about 1.0 MB/s, 2× about 1.2, 4× about 2.5, 8× about 2.5, 16× about 3.0. The rate rises then plateaus at roughly 3× the 1× byte rate, not 16×, so the device serves a thinned (keyframe-biased) stream at higher speeds rather than every frame faster. Which frames are kept could not be read (records encrypted). | observed (client capture) |
+| **Each play starts with a burst, then paces.** A few MB arrived in the first ~0.5 s (about 3 MB at 1×, up to ~8 MB at 4×–8×), then media came in roughly 2 s chunks about 2 s apart — the same burst-then-pace shape as a single-speed play, at every rate. | observed (client capture) |
+| **A play crosses a recording-file boundary with no visible event.** One 1× play ran for about 180 s (one command-5 stream, one status-200 reply then only media) spanning a file boundary, with no stop/seek/replay from the client, no status change, no empty message, and no stall beyond the normal ~2 s pacing. So the device continues across files within a single play; the boundary is not marked on the wire. (The boundary time inside the stream could not be read.) | observed (client capture) |
+| **One session carried several plays at once.** Up to four simultaneous command-5 plays ran on the one session, each with its own message ID (two started together, and four within 40 ms), all answered status 200 with no refusal, demultiplexed by message ID like live streams. The synchronized multi-view plays were low bit rate (about 0.05 MB/s each, media every ~4 s) against about 1 MB/s for a single main-stream play, so the client plays the **sub-stream** for synchronized views. No concurrency limit was reached at four. | observed (client capture) |
+| **The client stops live view when the playback tab opens.** Live media (command 3) flowed only before playback began; once the playback tab was open, no command-3 media arrived on either NVR for the rest of the capture (the client sent a stop (4) for each live stream). So this capture shows concurrent *replay* streams but not live and replay media together; whether one session can carry both at once is still unmeasured (the download step was not exercised here). | observed (client capture) |
+| **No error status appeared.** Across the whole capture every seek (123) and play (5) was answered status 200 (the only non-200 statuses were the 300 that commands 146 and 199 use for large replies). A seek to a time with no recording produced no error reply; the client decides "no recording" from the search results (142/14–16/272–274) and does not start a play. How a play or seek reports an error is therefore still unknown. | observed (client capture) |
+
 ### Cover images: command 298
 
 Observed (client capture). While a download ran, the client asked for one
@@ -1065,12 +1100,20 @@ port as `N`). Nothing else was sent.
   like talk-back records.
 - Recordings: whether 15 must be repeated for days with many files; the
   meaning of `dayType` entries for days without recordings and the full
-  mapping of the numeric `streamType` in 272; how a play (5) ends at the end
-  of a file; whether the device or TCP sets the replay pace; why 123 carried
-  `channelId` 0; why our own client's 143 media had `encryptLen` 0 when the
-  official client's did not; the playback commands 381 and 383 (unused by
-  the client so far) and why it sends 382 at quit; how a 143 error (bad
-  stream name, no disk) is reported.
+  mapping of the numeric `streamType` in 272; whether the device or TCP sets
+  the replay pace; why 123 carried `channelId` 0; why our own client's 143
+  media had `encryptLen` 0 when the official client's did not; the playback
+  commands 381 and 383 (unused by the client so far) and why it sends 382 at
+  quit; how a 143 error (bad stream name, no disk) is reported. A play across a
+  file boundary is now observed to continue with no wire event, and a play at
+  2×–16× is served by stop/seek/play with `playSpeed` (not 150 or 381/383);
+  still open at the frame level (needs a decryptable capture): which frames a
+  fast rate keeps (keyframe-only?), the frames-per-second and keyframe ratio
+  per rate, the `playSpeed` values the client sends, and how a play (5) *ends*
+  at the end of the last file.
+- Time settings: the field layout of the 104, 106 and 38 replies (time-zone
+  format, DST rule, NTP server and offset); the reads are observed, the
+  bodies not yet decrypted.
 - Detection events: 192 → 33 and the type names `people` and `dog_cat` are
   observed. Still open: whether a device pushes 33 without 192; how
   `vehicle`, `face`, `package`, a doorbell press (`visitor`) and two types
@@ -1101,7 +1144,10 @@ port as `N`). Nothing else was sent.
   µ-law at 8 kHz (reported).
 - Behavior at the device's limits: how many concurrent streams per session and
   per device. The statuses are reported (409, 410 at login; 430 at stream
-  start); the numbers are not.
+  start); the numbers are not. Four simultaneous replay plays on one session
+  were seen with no refusal (observed (client capture)), and live media and
+  replay media together were *not* seen (the client stops live view when the
+  playback tab opens), so whether a session carries both at once is still open.
 - LAN discovery: what record bytes 51, 52 and 57 mean; whether devices on
   other firmware send a different record size; why the battery camera did
   not answer the official client's UDP 2015 probes (asleep at the time, or
