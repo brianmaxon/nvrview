@@ -336,3 +336,48 @@ fn bundled_fixtures_split_into_expected_pictures() {
         assert_eq!(f.first_keyframe(), first_key, "{name}");
     }
 }
+
+#[test]
+fn audio_records_are_interleaved_like_a_device() {
+    use mock_nvr::audio::{AudioConfig, AudioFixture};
+    let afix = AudioFixture::load(&fixture_path("aac-clicks.aac")).unwrap();
+    let frames = afix.frames().to_vec();
+    let nvr = start(|c| {
+        c.fps = 10;
+        let mut a = AudioConfig::new(afix);
+        a.clock_hz = 16_013.0;
+        a.jitter_us = 20_000;
+        c.audio = Some(std::sync::Arc::new(a));
+    });
+    let mut c = Client::connect(&nvr, USER, PASSWORD);
+    assert_eq!(c.login(), Event::LoginOk);
+    let (id, bytes) = c.session.start_preview(0, StreamTier::Sub).unwrap();
+    c.tcp.write_all(&bytes).unwrap();
+    let mut demux = Demuxer::new();
+    let started = Instant::now();
+    // 2 s of stream.
+    let recs = read_until_video(&mut c, id, &mut demux, 21);
+    let elapsed = started.elapsed();
+
+    let mut last_pts: Option<u64> = None;
+    let mut k = 0u64;
+    for r in &recs {
+        match r {
+            Record::Video { pts_us, .. } => last_pts = Some(*pts_us),
+            Record::Audio { stream_index, data } => {
+                assert_eq!(*stream_index, 5);
+                assert_eq!(data, &frames[k as usize % frames.len()]);
+                // Sent once its last sample exists: after the picture
+                // captured at or before then, before the next one.
+                let send_us = (k + 1) as f64 * 1024.0 / 16_013.0 * 1e6;
+                let p = last_pts.expect("a picture comes first") as f64;
+                assert!(p <= send_us && send_us < p + 100_000.0, "record {k}");
+                k += 1;
+            }
+            Record::Info { .. } => {}
+        }
+    }
+    // 2 s of video time hold about 31 records; paced in real time.
+    assert!((30..=32).contains(&k), "{k} audio records");
+    assert!(elapsed >= Duration::from_millis(1900), "{elapsed:?}");
+}

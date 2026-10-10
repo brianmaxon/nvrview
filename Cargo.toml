@@ -13,3 +13,14 @@ unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# Audio DSP (decoding, resampling) and its multi-hour simulations run in
+# every `cargo test`; unoptimized they are too slow to be useful.
+[profile.dev.package.audio-pipeline]
+opt-level = 2
+
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 2
+
+[profile.dev.package.symphonia-core]
+opt-level = 2

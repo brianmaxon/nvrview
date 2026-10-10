@@ -1,6 +1,7 @@
 //! Command-line mock NVR. The password comes from the `MOCK_NVR_PASSWORD`
 //! environment variable (default `example-password`), never from an argument.
 
+use mock_nvr::audio::{AudioConfig, AudioFixture};
 use mock_nvr::{Config, fixture::Fixture, spawn};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--fixture FILE]\n\
     \x20               [--user NAME] [--max-logins N] [--fps N] [--width N] [--height N]\n\
+    \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -17,6 +19,8 @@ fn run() -> Result<(), String> {
     let (mut channels, mut max_logins, mut fps) = (4u8, 4usize, 25u32);
     let (mut width, mut height) = (320u32, 240u32);
     let mut user = String::from("example-user");
+    let mut audio: Option<PathBuf> = None;
+    let (mut audio_clock, mut audio_jitter_ms) = (16_000.0f64, 0u32);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -36,6 +40,13 @@ fn run() -> Result<(), String> {
             "--fps" => fps = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
             "--width" => width = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
             "--height" => height = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
+            "--audio" => audio = Some(PathBuf::from(v)),
+            "--audio-clock" => {
+                audio_clock = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
+            "--audio-jitter-ms" => {
+                audio_jitter_ms = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
     }
@@ -48,6 +59,12 @@ fn run() -> Result<(), String> {
     cfg.width = width;
     cfg.height = height;
     cfg.user = user;
+    if let Some(path) = audio {
+        let mut a = AudioConfig::new(AudioFixture::load(&path).map_err(|e| e.to_string())?);
+        a.clock_hz = audio_clock;
+        a.jitter_us = audio_jitter_ms.saturating_mul(1000);
+        cfg.audio = Some(std::sync::Arc::new(a));
+    }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;
     }
