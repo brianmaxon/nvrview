@@ -358,6 +358,14 @@ that is refused once, then streams):
 3. a second device with a wrong password ends in `login_failed`, said in
    words; saving a device the way the Settings dialog does connects it and
    opens its tiles, removing it closes them, and the dialog opens and closes;
+   its "Find Devices on This Network" list (docs/UX.md, "Finding devices")
+   starts a real core search, limited to loopback so nothing leaves the
+   computer, when the new-device form is shown; four made-up devices fed in
+   as the core's events fill it (a repeated answer updates its row, the mock
+   itself shows as added, an ONVIF-only camera cannot be chosen), choosing
+   rows fills the form's address, port, and name, Search again twice leaves
+   an empty list for the last search only, and closing the dialog stops the
+   search;
 4. resizing the window on every refresh for about a second keeps the grid
    presenting while the buffers are resized at most every 100 ms, and they
    settle at the panel's exact pixel size;
@@ -441,6 +449,21 @@ Settings…" link, the app idles for the given seconds with no unhandled or
 callback exception, and `windows.json` is written. First-chance exceptions
 are listed but do not fail it. `NVRVIEW_APP_SELFTEST=1` runs it before the
 self-test.
+
+### Finding devices and the Windows Firewall
+
+The add-device form searches the local network when it is shown
+(docs/UX.md, "Finding devices"). The core binds UDP port 3000 on each
+interface's own address to hear the answers to its search broadcast, so
+Windows Defender Firewall may ask the first time whether `NvrView.App.exe`
+may communicate on private networks. Allow it there: with the prompt
+dismissed or on a public profile the answers are dropped without an error,
+the list stays empty, and it says so ("No devices found. If Windows Firewall
+asked about NvrView, allow it...") while typing the address keeps working.
+The search is never started in the background, only while that form is on
+screen. Nothing else in the app listens for incoming traffic. (Not verified
+on a real network from this repository's checks: the self-test limits its
+search to loopback.)
 
 ### Windows App SDK
 

@@ -91,6 +91,7 @@ internal static class Program
         StoreTests.Run();
         AllCamerasTests.Run();
         LayoutTemplateTests.Run();
+        DiscoveryTests.Run();
         return T.Summary();
     }
 }

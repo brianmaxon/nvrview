@@ -43,7 +43,10 @@ scripts/package-macos.sh    # builds build/NVRView.app with the Rust core
 open build/NVRView.app
 ```
 
-Add your NVR or camera in **Settings** (address, port 9000, user, password);
+Add your NVR or camera in **Settings**: the new-device form lists what answers
+on the network (macOS asks once to allow Local Network access; Windows may ask
+the firewall), and choosing one fills the address and port, or type them
+(port 9000), then the user and password;
 the password is kept in the macOS Keychain. `package-macos.sh` signs with an
 Apple Development identity from your keychain when there is one (otherwise ad
 hoc), so the Keychain keeps trusting the app across rebuilds;
