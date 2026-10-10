@@ -11,6 +11,7 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using NvrView.Interop;
+using NvrView.Tiles;
 using NvrView.Video;
 
 namespace NvrView.App;
@@ -37,6 +38,7 @@ internal sealed class CoreEvent
     public long RetryMs;
     public long Generation = -1;
     public long Ns;
+    public long AtNs;
     public double? DeltaMs;
     public double? HeldMs;
     public long Received;
@@ -86,6 +88,7 @@ internal sealed class CoreEvent
                 case "attempt" when v.ValueKind == JsonValueKind.Number: e.Attempt = (int)Long(v); break;
                 case "retry_ms" when v.ValueKind == JsonValueKind.Number: e.RetryMs = Long(v); break;
                 case "generation" when v.ValueKind == JsonValueKind.Number: e.Generation = Long(v); break;
+                case "at_ns" when v.ValueKind == JsonValueKind.Number: e.AtNs = Long(v); break;
                 case "ns" when v.ValueKind == JsonValueKind.Number: e.Ns = Long(v); break;
                 case "delta_ms" when v.ValueKind == JsonValueKind.Number: e.DeltaMs = v.GetDouble(); break;
                 case "held_ms" when v.ValueKind == JsonValueKind.Number: e.HeldMs = v.GetDouble(); break;
@@ -172,6 +175,31 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
     }
 
     public NvCore Core { get; }
+
+    /// <summary>
+    /// Which tier each camera's tiles run at (quality, focus, zoom, second-lens tiers); shared by
+    /// every window, so the highest ask for a camera wins across all of them.
+    /// </summary>
+    public TierPlanner Tiers { get; } = new();
+
+    /// <summary>The core's tier for a planned one.</summary>
+    public static NvStreamTier ToCore(StreamTier tier) => tier switch
+    {
+        StreamTier.Main => NvStreamTier.Main,
+        StreamTier.Mobile => NvStreamTier.Mobile,
+        StreamTier.Extern => NvStreamTier.Extern,
+        _ => NvStreamTier.Sub,
+    };
+
+    /// <summary>The planned tier for a tile_tier event's tier name.</summary>
+    public static StreamTier? ParseTier(string? name) => name switch
+    {
+        "main" => StreamTier.Main,
+        "sub" => StreamTier.Sub,
+        "mobile" => StreamTier.Mobile,
+        "extern" => StreamTier.Extern,
+        _ => null,
+    };
 
     /// <summary>The current device (replaced after a loss); read it on the render thread or inside the gate.</summary>
     public GpuDevice Gpu { get; private set; }

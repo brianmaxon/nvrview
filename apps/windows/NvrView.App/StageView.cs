@@ -11,7 +11,11 @@
 //   Ctrl+D diagnostics, Ctrl+, Settings, F1 the list of shortcuts;
 // - mouse wheel (or a touchpad pinch, which arrives as Ctrl+wheel) zooms
 //   around the pointer and dragging pans, by changing only the source
-//   rectangle the renderer samples.
+//   rectangle the renderer samples;
+// - the tile features: the corner indicators and sound badges, the alert strip
+//   and its Dismiss (Enter), the Quality menu, M to listen, and, in full
+//   screen, the chrome and the pointer hiding 3 s after the last interaction
+//   (alert strips and indicators stay).
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -24,6 +28,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using NvrView.Interop;
+using NvrView.Tiles;
 using Windows.Foundation;
 using Windows.System;
 using Windows.UI.Core;
@@ -32,7 +37,6 @@ namespace NvrView.App;
 
 internal sealed partial class StageView : UserControl
 {
-    private const double HideAfterSeconds = 3;
 
     // ISwapChainPanelNative of WinUI 3 (microsoft.ui.xaml.media.dxinterop.h).
     private static readonly Guid SwapChainPanelNativeId = new("63aad0b8-7c24-40ff-85a8-640d944cc325");
@@ -60,7 +64,8 @@ internal sealed partial class StageView : UserControl
     private readonly DispatcherQueueTimerHolder _timer;
     private StageTile[] _chromeTiles = [];
     private StageTile? _hovered;
-    private long _lastPointer;
+    private readonly ChromeIdle _idle;
+    private bool _cursorHidden;
     private bool _diagnostics;
     private StageTile? _dragTile;
     private Point _dragFrom;
@@ -70,6 +75,7 @@ internal sealed partial class StageView : UserControl
     {
         _viewer = viewer;
         _appWindow = appWindow;
+        _idle = new ChromeIdle(viewer.Clock);
         IsTabStop = true;
         UseSystemFocusVisuals = false;
         Background = new SolidColorBrush(Colors.Black);
@@ -102,7 +108,9 @@ internal sealed partial class StageView : UserControl
                     "F                            full screen",
                     "Esc                          leave focus, then full screen",
                     "Mouse wheel, drag            digital zoom and pan; 0 resets",
-                    "Speaker button, Ctrl+L       listen (Ctrl+click listens to several)",
+                    "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
+                    "Enter                        dismiss the selected tile's alert (else focus)",
+                    "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
                     "Ctrl+D                       diagnostics",
                     "Ctrl+,                       Settings (devices)",
                     "F1                           this list"),
@@ -115,6 +123,8 @@ internal sealed partial class StageView : UserControl
         _panel.SizeChanged += (_, _) => PushSize();
         _panel.CompositionScaleChanged += (_, _) => PushSize();
         _viewer.Changed += RefreshAll;
+        _viewer.IndicatorsChanged += SyncOverlays;
+        _viewer.Settings.Changed += SyncOverlays;
         _timer = new DispatcherQueueTimerHolder(DispatcherQueue, TimeSpan.FromMilliseconds(250), Tick);
         Loaded += (_, _) =>
         {
@@ -136,6 +146,24 @@ internal sealed partial class StageView : UserControl
 
     /// <summary>True while a tile is focused (or animating into focus).</summary>
     public bool IsFocused => Renderer.Focus is { Entering: true };
+
+    /// <summary>Puts an element in the stage's overlay for a moment (the self-test renders it to a bitmap); true adds, false removes.</summary>
+    public void HostTemporarily(FrameworkElement element, bool add)
+    {
+        if (add)
+        {
+            Canvas.SetLeft(element, 20);
+            Canvas.SetTop(element, 20);
+            _chromeLayer.Children.Add(element);
+        }
+        else
+        {
+            _chromeLayer.Children.Remove(element);
+        }
+    }
+
+    /// <summary>The chrome of a tile (for the self-test).</summary>
+    public TileChrome? ChromeFor(StageTile tile) => _chromes.FirstOrDefault(c => c.Tile == tile);
 
     /// <summary>Frames the UI thread updated the chrome (for the self-test).</summary>
     public long ChromeFrames { get; private set; }
@@ -191,9 +219,9 @@ internal sealed partial class StageView : UserControl
         if (current is { Entering: true } && current.Tile != tile.Id && _viewer.FindTile(current.Tile) is { } previous)
         {
             // Switch the focused camera: no animation, tiers swap at once.
-            _viewer.RequestTier(previous, NvStreamTier.Sub);
+            _viewer.SetFocused(previous, false);
             Renderer.Focus = new FocusAnimation(tile.Id, now, true, 1);
-            _viewer.RequestTier(tile, NvStreamTier.Main);
+            _viewer.SetFocused(tile, true);
             Selected = tile;
             RefreshAll();
             return;
@@ -207,7 +235,7 @@ internal sealed partial class StageView : UserControl
         {
             if (ReferenceEquals(Renderer.Focus, animation))
             {
-                _viewer.RequestTier(tile, NvStreamTier.Main);
+                _viewer.SetFocused(tile, true);
             }
         });
         RefreshAll();
@@ -226,7 +254,7 @@ internal sealed partial class StageView : UserControl
         if (_viewer.FindTile(f.Tile) is { } tile)
         {
             // The sub stream is ready almost at once; the tile shrinks meanwhile.
-            _viewer.RequestTier(tile, NvStreamTier.Sub);
+            _viewer.SetFocused(tile, false);
         }
         After(p * FocusAnimation.Seconds + 0.05, () =>
         {
@@ -259,9 +287,15 @@ internal sealed partial class StageView : UserControl
 
     // ---- full screen ----
 
+    /// <summary>Whether the window is full screen (<see cref="FullScreenOverride"/> stands in for it in the self-test).</summary>
+    public bool IsFullScreen => FullScreenOverride ?? _appWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen;
+
+    /// <summary>Self-test: pretends the window is (or is not) full screen without changing the window.</summary>
+    public bool? FullScreenOverride { get; set; }
+
     public void ToggleFullScreen()
     {
-        bool full = _appWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen;
+        bool full = IsFullScreen;
         _appWindow.SetPresenter(full ? AppWindowPresenterKind.Overlapped : AppWindowPresenterKind.FullScreen);
     }
 
@@ -315,7 +349,7 @@ internal sealed partial class StageView : UserControl
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
         Point p = e.GetCurrentPoint(this).Position;
-        _lastPointer = Stopwatch.GetTimestamp();
+        Interact();
         if (_dragTile is { } drag && e.GetCurrentPoint(this).Properties.IsLeftButtonPressed && drag.Width > 0)
         {
             double dx = (p.X - _dragFrom.X) / drag.Width / drag.Zoom, dy = (p.Y - _dragFrom.Y) / drag.Height / drag.Zoom;
@@ -339,6 +373,7 @@ internal sealed partial class StageView : UserControl
 
     protected override void OnPointerPressed(PointerRoutedEventArgs e)
     {
+        Interact();
         _ = Focus(FocusState.Pointer);
         PointerPoint pp = e.GetCurrentPoint(this);
         if (pp.Properties.IsLeftButtonPressed && TileAt(pp.Position) is { } t)
@@ -383,7 +418,7 @@ internal sealed partial class StageView : UserControl
             double fx = (pp.Position.X - t.X) / t.Width, fy = (pp.Position.Y - t.Y) / t.Height;
             ZoomAround(t, fx, fy, Math.Pow(1.0015, pp.Properties.MouseWheelDelta));
             e.Handled = true;
-            _lastPointer = Stopwatch.GetTimestamp();
+            Interact();
         }
     }
 
@@ -406,8 +441,14 @@ internal sealed partial class StageView : UserControl
             Item(IsFocused && Renderer.Focus?.Tile == t.Id ? "Back to the grid" : "Focus", () => ToggleFocus(t));
             Item(t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(t, false));
             Item("Reset zoom", () => ResetZoom(t), t.Zoom > 1);
+            menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => _viewer.SetQuality(t, q)));
+            if (_viewer.Alerts.IsActive(t.Camera))
+            {
+                Item("Dismiss alert", () => _viewer.DismissAlert(t.Camera));
+            }
             menu.Items.Add(new MenuFlyoutSeparator());
         }
+        menu.Items.Add(IndicatorCornerMenu());
         Item("Full screen", ToggleFullScreen);
         Item(_diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
         Item("Keyboard shortcuts", ToggleHelp);
@@ -416,13 +457,65 @@ internal sealed partial class StageView : UserControl
         e.Handled = true;
     }
 
+    /// <summary>The "Indicator corner" submenu: where the tiles' symbols sit (a setting, saved).</summary>
+    private MenuFlyoutSubItem IndicatorCornerMenu()
+    {
+        var sub = new MenuFlyoutSubItem { Text = "Indicator corner" };
+        foreach (ChromeCorner corner in Enum.GetValues<ChromeCorner>())
+        {
+            var item = new RadioMenuFlyoutItem { Text = corner.Title(), GroupName = "indicator-corner", IsChecked = corner == _viewer.Settings.IndicatorCorner };
+            ChromeCorner choice = corner;
+            item.Click += (_, _) => _viewer.Settings.IndicatorCorner = choice;
+            sub.Items.Add(item);
+        }
+        return sub;
+    }
+
+    private static TileKey ToTileKey(VirtualKey key) => key switch
+    {
+        VirtualKey.Enter => TileKey.Enter,
+        VirtualKey.Space => TileKey.Space,
+        VirtualKey.M => TileKey.M,
+        VirtualKey.L => TileKey.L,
+        _ => TileKey.Other,
+    };
+
+    /// <summary>Carries out what a key means for the selected tile (see <see cref="TileKeyMap"/>).</summary>
+    public void ApplyAction(TileAction action, StageTile tile)
+    {
+        switch (action)
+        {
+            case TileAction.Dismiss:
+                _viewer.DismissAlert(tile.Camera);
+                break;
+            case TileAction.ToggleFocus:
+                ToggleFocus(tile);
+                break;
+            case TileAction.ToggleListening:
+                _viewer.ToggleListening(tile, false);
+                Selected = tile;
+                break;
+        }
+    }
+
     protected override void OnKeyDown(KeyRoutedEventArgs e)
     {
-        bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
+        Interact();
+        bool KeyDown(VirtualKey k) => InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(CoreVirtualKeyStates.Down);
+        bool ctrl = KeyDown(VirtualKey.Control);
         StageTile[] tiles = _viewer.Tiles;
         Selected ??= tiles.FirstOrDefault();
         StageTile? s = Selected;
         e.Handled = true;
+        if (s is not null)
+        {
+            TileAction action = TileKeyMap.Map(ToTileKey(e.Key), ctrl, KeyDown(VirtualKey.Menu), KeyDown(VirtualKey.Shift), _viewer.Alerts.IsActive(s.Camera));
+            if (action != TileAction.None)
+            {
+                ApplyAction(action, s);
+                return;
+            }
+        }
         switch (e.Key)
         {
             case VirtualKey.F when !ctrl:
@@ -433,13 +526,14 @@ internal sealed partial class StageView : UserControl
                 {
                     Unfocus();
                 }
-                else if (_appWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen)
+                else if (IsFullScreen)
                 {
                     ToggleFullScreen();
                 }
                 break;
             case VirtualKey.Space or VirtualKey.Enter when s is not null:
-                ToggleFocus(s);
+                // Shift+Space and the like are not shortcuts of ours.
+                e.Handled = false;
                 break;
             case VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down when s is not null:
                 if (Neighbor(s, e.Key) is { } next)
@@ -449,15 +543,12 @@ internal sealed partial class StageView : UserControl
                         FocusOn(next);
                     }
                     Selected = next;
-                    _lastPointer = Stopwatch.GetTimestamp();
+                    Interact();
                     UpdateHover();
                 }
                 break;
             case VirtualKey.Number0 or VirtualKey.NumberPad0 when s is not null:
                 ResetZoom(s);
-                break;
-            case VirtualKey.L when ctrl && s is not null:
-                _viewer.ToggleListening(s, false);
                 break;
             case VirtualKey.D when ctrl:
                 ToggleDiagnostics();
@@ -539,7 +630,7 @@ internal sealed partial class StageView : UserControl
         _chromes.Clear();
         foreach (StageTile t in tiles)
         {
-            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked);
+            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera) };
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
         }
@@ -556,8 +647,9 @@ internal sealed partial class StageView : UserControl
         foreach (TileChrome c in _chromes)
         {
             StageTile t = c.Tile;
-            c.Refresh(t.Name, StatusText(t), t.Audible, _diagnostics ? DiagnosticsText(t) : null);
+            c.Refresh(TitleOf(t), StatusText(t), t.Audible, _diagnostics ? DiagnosticsText(t) : null);
         }
+        SyncOverlays();
         bool empty = _viewer.Tiles.Length == 0;
         _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         if (empty)
@@ -565,6 +657,36 @@ internal sealed partial class StageView : UserControl
             _emptyText.Text = EmptyText();
         }
         UpdateHover();
+    }
+
+    /// <summary>The header's title: the camera's name, and the quality when it is not Auto.</summary>
+    public static string TitleOf(StageTile t) =>
+        t.Quality.HeaderNote() is { } note ? $"{t.Name} · {note}" : t.Name;
+
+    /// <summary>
+    /// The corner indicators, the sound badges, and the alert strip of every tile, from the viewer's
+    /// state. On events and the slow tick, never per frame.
+    /// </summary>
+    public void SyncOverlays()
+    {
+        ChromeCorner corner = _viewer.Settings.IndicatorCorner;
+        DateTime now = _viewer.WallClock();
+        bool blink = AlertBorder.ModeFor(_viewer.AnimationsEnabled()) == AlertBorder.Mode.Blinking;
+        foreach (TileChrome c in _chromes)
+        {
+            CameraRef camera = c.Tile.Camera;
+            c.SetAlert(_viewer.Alerts.For(camera)?.Lines(now), blink);
+            c.SetIndicators(_viewer.Board.Items(camera), corner);
+            List<string> sound = [];
+            foreach (DetectionTracker.Active a in _viewer.Detections.For(camera))
+            {
+                if (a.Source == DetectionSource.LocalAudio)
+                {
+                    sound.Add(DetectionTracker.SoundBadgeText(a.Kind));
+                }
+            }
+            c.SetSoundBadges(sound);
+        }
     }
 
     private string EmptyText()
@@ -642,8 +764,7 @@ internal sealed partial class StageView : UserControl
 
     private void UpdateHover()
     {
-        long now = Stopwatch.GetTimestamp();
-        bool recent = (now - _lastPointer) < HideAfterSeconds * Stopwatch.Frequency;
+        bool recent = _idle.ChromeShown;
         foreach (TileChrome c in _chromes)
         {
             bool header = recent && c.Tile == _hovered;
@@ -659,8 +780,14 @@ internal sealed partial class StageView : UserControl
         }
     }
 
-    private void Tick()
+    /// <summary>
+    /// The slow tick (every 250 ms): countdowns, the indicator hold, zoom-driven stream quality,
+    /// the hover chrome's and the pointer's idle timeout. The self-test calls it directly on a manual clock.
+    /// </summary>
+    public void Tick()
     {
+        _viewer.Tick();
+        UpdateCursor();
         // Countdowns and fades that depend on time alone.
         UpdateHover();
         if (_viewer.Devices.Any(d => d.State == "backoff"))
@@ -671,7 +798,7 @@ internal sealed partial class StageView : UserControl
         {
             foreach (TileChrome c in _chromes)
             {
-                c.Refresh(c.Tile.Name, StatusText(c.Tile), c.Tile.Audible, DiagnosticsText(c.Tile));
+                c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, DiagnosticsText(c.Tile));
             }
         }
         else
@@ -679,8 +806,41 @@ internal sealed partial class StageView : UserControl
             // Status lines that follow the video (starting, recovering).
             foreach (TileChrome c in _chromes)
             {
-                c.Refresh(c.Tile.Name, StatusText(c.Tile), c.Tile.Audible, null);
+                c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, null);
             }
+        }
+    }
+
+    // ---- interaction and the pointer ----
+
+    /// <summary>Pointer movement, a click, a key, or a scroll: the chrome (and, in full screen, the pointer) comes back.</summary>
+    public void Interact()
+    {
+        _idle.Interact();
+        UpdateCursor();
+    }
+
+    /// <summary>Whether the pointer is hidden (full screen, idle).</summary>
+    public bool CursorHidden => _cursorHidden;
+
+    /// <summary>Whether the hover chrome may show (not idle for 3 s).</summary>
+    public bool ChromeShown => _idle.ChromeShown;
+
+    [LibraryImport("user32.dll")]
+    private static partial int ShowCursor([MarshalAs(UnmanagedType.Bool)] bool show);
+
+    private void UpdateCursor()
+    {
+        bool hide = _idle.PointerHidden(IsFullScreen);
+        if (hide == _cursorHidden)
+        {
+            return;
+        }
+        _cursorHidden = hide;
+        if (FullScreenOverride is null)
+        {
+            // A count: every hide is paired with one show.
+            _ = ShowCursor(!hide);
         }
     }
 
@@ -700,6 +860,14 @@ internal sealed partial class StageView : UserControl
 
     public void StopTimers()
     {
+        if (_cursorHidden)
+        {
+            _cursorHidden = false;
+            if (FullScreenOverride is null)
+            {
+                _ = ShowCursor(true);
+            }
+        }
         _timer.Stop();
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
     }
