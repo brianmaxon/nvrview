@@ -42,11 +42,19 @@ public struct FakeDeviceSpec: Sendable {
     /// `channels` event); the others report only motion.
     public var detectingChannels: Set<Int>
     public var detects: [String]
+    /// Channels whose camera has two lenses (`lenses` 2 in `channels`); the
+    /// second lens is served on the same channel's `extern` and `mobile`.
+    public var multiLensChannels: Set<Int>
+    /// Channels whose camera sends no audio (their level reads 0).
+    public var channelsWithoutAudio: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
-        detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"]
+        detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
+        multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = []
     ) {
+        self.multiLensChannels = multiLensChannels
+        self.channelsWithoutAudio = channelsWithoutAudio
         self.name = name
         self.model = model
         self.channelCount = channelCount
@@ -246,7 +254,10 @@ public final class FakeCore: CoreAPI {
                 #"{"type":"device_info","device":\#(id),"name":"\#(spec.name)","model":"\#(spec.model)","key":"\#(Self.key(host: host, port: port))"}"#)
             let channels = (0..<spec.channelCount).map { c in
                 let detects = spec.detectingChannels.contains(c) ? spec.detects.map { "\"\($0)\"" }.joined(separator: ",") : ""
-                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]}"#
+                // Like the devices observed: a multi-lens camera advertises
+                // only main and sub, and says how many lenses it has.
+                let lenses = spec.multiLensChannels.contains(c) ? #","lenses":2"# : ""
+                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
         }
@@ -278,7 +289,8 @@ public final class FakeCore: CoreAPI {
             w.nextID += 1
             let tile = FakeTile(
                 id: id, device: device, channel: channel, tier: tier, detects: d.spec.detectingChannels.contains(Int(channel))
-                    ? d.spec.detects : [], silent: d.failed, owner: self)
+                    ? d.spec.detects : [], silent: d.failed,
+                hasAudio: !d.failed && !d.spec.channelsWithoutAudio.contains(Int(channel)), owner: self)
             d.tiles.append(id)
             w.devices[device] = d
             w.tiles[id] = tile
@@ -451,21 +463,21 @@ public final class FakeCore: CoreAPI {
         }
     }
 
-    /// ABI 3 `nv_tile_audio_level`. Measured by the render path on what it
-    /// mixes, before the tile's volume (a muted audible tile still shows a
-    /// level); a tile that is not audible, or not known, reads 0 (never an
-    /// error). An audible tile reads a level set with `setAudioLevel`, or
-    /// else a slowly varying synthetic one.
+    /// ABI 3 `nv_tile_audio_level`: the level of the tile's decoded audio,
+    /// before volume, whether the tile is audible or not (the core measures
+    /// muted tiles as their audio is decoded, audible ones as they are
+    /// mixed); 0 for a tile with no audio or not known (never an error). It
+    /// reads a level set with `setAudioLevel`, or else a slowly varying
+    /// synthetic one.
     public func tileAudioLevel(_ tile: UInt64) throws(CoreStatus) -> AudioLevel {
-        let a = audioTiles.withLock { $0[tile] }
-        guard let a, a.audible else { return .silent }
+        guard let known = world.withLock({ $0.tiles[tile] }), known.hasAudio else { return .silent }
         if let level = levels.withLock({ $0[tile] }) { return level }
         let t = Double(HostClock.nowNanos()) / 1e9
         let peak = Float(0.35 + 0.3 * sin(t * 5.3) * sin(t * 1.7))
         return AudioLevel(peak: max(peak, 0.02), rms: max(peak, 0.02) * 0.6)
     }
 
-    /// Fixes the level `tileAudioLevel` reports for an audible tile.
+    /// Fixes the level `tileAudioLevel` reports for a tile with audio.
     public func setAudioLevel(tile: UInt64, _ level: AudioLevel?) {
         levels.withLock { $0[tile] = level }
     }
@@ -661,6 +673,8 @@ private final class FakeTile: Sendable {
     let openedTier: StreamTier
     let detects: [String]
     let silent: Bool
+    /// The camera sends audio.
+    let hasAudio: Bool
     private unowned let owner: FakeCore
 
     /// One pipeline: the tile has one, and two while a tier switch runs.
@@ -715,8 +729,9 @@ private final class FakeTile: Sendable {
 
     init(
         id: UInt64, device: UInt64, channel: UInt8, tier: StreamTier, detects: [String], silent: Bool,
-        owner: FakeCore
+        hasAudio: Bool, owner: FakeCore
     ) {
+        self.hasAudio = hasAudio
         self.id = id
         self.device = device
         self.channel = channel

@@ -9,6 +9,13 @@ import Foundation
 /// call (the picture sharpens in place) and back to `gridTier` when no view
 /// focuses it any more.
 ///
+/// The second lens of a multi-lens camera (`CameraRef.lens` 1) is its own
+/// camera here, with its own tile, on the same channel's lens-2 tiers:
+/// `mobile` in a grid and `extern` when focused. Its tile opens on
+/// `extern`, which the device is known to serve, and switches to `mobile`
+/// for the grid; if that switch fails (the device does not serve `mobile`),
+/// the camera stays on `extern` for the rest of the run.
+///
 /// Use from one thread (the main thread in the app): every call here may
 /// open or close tiles, which must not happen inside a core callback.
 public final class TileLeases {
@@ -20,6 +27,8 @@ public final class TileLeases {
 
     private let bridge: CoreBridge
     private var entries: [CameraRef: Entry] = [:]
+    /// Second lenses whose `mobile` tier failed: they stay on `extern`.
+    private var noMobile: Set<CameraRef> = []
 
     /// The stream a tile shows in a grid, and when focused.
     public var gridTier: StreamTier
@@ -97,6 +106,29 @@ public final class TileLeases {
 
     public func isFocused(_ camera: CameraRef) -> Bool { (entries[camera]?.focus ?? 0) > 0 }
 
+    /// The tiers a camera uses in a grid and when focused.
+    public func tiers(for camera: CameraRef) -> (grid: StreamTier, focus: StreamTier) {
+        guard camera.lens > 0 else { return (gridTier, focusTier) }
+        return (noMobile.contains(camera) ? .extern : .mobile, .extern)
+    }
+
+    /// The tier `camera` should show now.
+    public func wantedTier(_ camera: CameraRef) -> StreamTier {
+        let t = tiers(for: camera)
+        return isFocused(camera) ? t.focus : t.grid
+    }
+
+    /// A tier switch failed (`tile_tier` `failed`). For a second lens whose
+    /// `mobile` failed for any reason but being superseded, the grid uses
+    /// `extern` from now on (the old tier keeps showing meanwhile).
+    public func tierFailed(tile id: UInt64, tier: StreamTier?, reason: String?) {
+        guard let camera = camera(forTile: id), camera.lens > 0, tier == .mobile, reason != "superseded" else {
+            return
+        }
+        noMobile.insert(camera)
+        applyTier(camera)
+    }
+
     /// Closes a device's tiles (it is being removed or re-added); their
     /// leases stay, so `reopen` brings them back.
     public func closeTiles(device key: String) {
@@ -138,18 +170,22 @@ public final class TileLeases {
         guard let e = entries[camera] else { return nil }
         if let tile = e.tile { return tile }
         guard let device = resolve(camera.device), (0...255).contains(camera.channel) else { return nil }
-        let tier = e.focus > 0 ? focusTier : gridTier
+        let wanted = wantedTier(camera)
+        // A second lens opens on `extern` (served whether or not `mobile`
+        // is), then switches if the grid wants `mobile`.
+        let tier = camera.lens > 0 ? StreamTier.extern : wanted
         guard let tile = try? bridge.openTile(device: device, channel: UInt8(camera.channel), tier: tier) else {
             return nil
         }
         entries[camera]?.tile = tile
         onTileChange(camera, tile)
+        if wanted != tier { try? bridge.setTileTier(tile, wanted) }
         return tile
     }
 
     private func applyTier(_ camera: CameraRef) {
-        guard let e = entries[camera], let tile = e.tile else { return }
-        let tier = e.focus > 0 ? focusTier : gridTier
+        guard entries[camera] != nil, let tile = entries[camera]?.tile else { return }
+        let tier = wantedTier(camera)
         // A core without the tier switch keeps the stream it has.
         try? bridge.setTileTier(tile, tier)
     }

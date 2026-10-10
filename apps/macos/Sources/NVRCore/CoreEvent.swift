@@ -25,13 +25,17 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
     /// capabilities, in the device's names: `people`, `vehicle`, `dog_cat`,
     /// ...). Empty when the camera has no detection of its own.
     public var detects: [String]
+    /// How many lenses the camera has (`lenses`; absent means 1). A second
+    /// lens is served on the same channel as its own tiers.
+    public var lenses: Int
 
-    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects }
+    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects, lenses }
 
     public init(
         channel: Int, connected: Bool = false, tiers: [String] = [], name: String? = nil,
-        model: String? = nil, detects: [String] = []
+        model: String? = nil, detects: [String] = [], lenses: Int = 1
     ) {
+        self.lenses = lenses
         self.channel = channel
         self.connected = connected
         self.tiers = tiers
@@ -48,7 +52,11 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
         name = try c.decodeIfPresent(String.self, forKey: .name)
         model = try c.decodeIfPresent(String.self, forKey: .model)
         detects = (try? c.decodeIfPresent([String].self, forKey: .detects)) ?? []
+        lenses = max((try? c.decodeIfPresent(Int.self, forKey: .lenses)) ?? 1, 1)
     }
+
+    /// Whether the camera has a second lens the app can show.
+    public var isMultiLens: Bool { lenses >= 2 }
 }
 
 public struct TileStats: Sendable, Equatable {

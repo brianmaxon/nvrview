@@ -134,6 +134,9 @@ public final class CoreTile: TilePictureSource {
     /// The decoder of the shown generation.
     public var decoder: TileDecoder { state.withLock { s in s.current?.decoder ?? s.generations[0].decoder } }
 
+    /// The rate the device sends the shown stream (`TileDecoder.deviceRate`).
+    public var deviceRate: Double? { decoder.deviceRate }
+
     /// Every decoder alive (one, or two during a switch), for tests.
     public var decoders: [TileDecoder] { state.withLock { $0.generations.map(\.decoder) } }
 

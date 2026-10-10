@@ -56,6 +56,10 @@ public final class GridRenderer {
     /// Per tile: the picture sequence last looked at and its textures.
     private var seen: [UInt64] = []
     private var textures: [TileTextures?] = []
+    /// Per tile: host times of new pictures drawn (the rate shown), and the
+    /// picture source they were counted for.
+    private var shown: [RateMeter] = []
+    private var shownSources: [ObjectIdentifier?] = []
     private var layoutChanged = true
     private var lastTargetSize = (width: 0, height: 0)
 
@@ -113,6 +117,14 @@ public final class GridRenderer {
             return true
         }
         return false
+    }
+
+    /// Distinct new pictures drawn per second for the tile at `index` over
+    /// the last two seconds (what the viewer actually sees); nil until two
+    /// were drawn, or when none was for two seconds.
+    public func shownRate(ofTile index: Int) -> Double? {
+        guard shown.indices.contains(index) else { return nil }
+        return shown[index].rate(now: hostMicros())
     }
 
     /// The size of the picture a tile is drawing now, or nil when it draws black.
@@ -205,13 +217,22 @@ public final class GridRenderer {
         if seen.count != tiles.count {
             seen = Array(repeating: UInt64.max, count: tiles.count)
             textures = Array(repeating: nil, count: tiles.count)
+            shown = Array(repeating: RateMeter(), count: tiles.count)
+            shownSources = Array(repeating: nil, count: tiles.count)
         }
+        let now = hostMicros()
         for (i, tile) in tiles.enumerated() {
+            let source = ObjectIdentifier(tile.picture)
+            if shownSources[i] != source {
+                shown[i].reset()
+                shownSources[i] = source
+            }
             let sequence = tile.picture.pictureSequence
             guard sequence != seen[i] else { continue }
             let picture = tile.picture.latestPicture()
             seen[i] = picture?.sequence ?? sequence
             textures[i] = picture.flatMap { makeTextures($0.pixelBuffer) }
+            if textures[i] != nil { shown[i].add(now) }
         }
     }
 

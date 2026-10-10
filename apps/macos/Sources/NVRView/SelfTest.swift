@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import Foundation
 import NVRCore
 import VideoKit
@@ -8,12 +9,19 @@ import VideoKit
 ///
 /// 1. a device is connected, a tile is playing, and a non-flat picture is on
 ///    screen;
-/// 2. focusing a tile animates it to the whole stage and then switches its
+/// 2. resizing the window continuously keeps the grid drawing and
+///    resizes its drawable only now and then, then to the exact size;
+/// 3. focusing a tile animates it to the whole stage and then switches its
 ///    camera to the main stream (with `--fake`, whose core models the tier
 ///    switch), still showing a picture;
-/// 3. listening makes the camera audible and its level meter reads a level;
-/// 4. leaving focus asks for the sub-stream again;
-/// 5. with `--fake`, the fake core saw no contract violation.
+/// 4. a muted camera reads a level (for its hover meter); listening makes
+///    it audible and its level meter reads a level;
+/// 5. leaving focus asks for the sub-stream again;
+/// 6. with `--fake`, the fake core saw no contract violation;
+/// 7. the sidebar took rows added and removed in several places in one
+///    update (a group and a layout at once);
+/// 8. with `--fake`, a second lens plays as its own tile on its grid tier;
+/// 9. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
@@ -22,6 +30,9 @@ final class SelfTest {
     private var problems: [String] = []
 
     init(app: AppDelegate) { self.app = app }
+
+    /// Lines AppKit must never log (it says the first will become an assert).
+    static let forbiddenLog = ["reentrant operation in its NSTableView delegate"]
 
     func start(seconds: Double) {
         after(seconds) { [self] in checkGrid() }
@@ -43,8 +54,63 @@ final class SelfTest {
         let cameras = window.state.tree.cameras
         let playing = cameras.filter { model.leases.tile(for: $0)?.snapshot.status == .playing }.count
         print("window \"\(window.state.name)\": \(window.state.tree.leafCount) tiles, \(cameras.count) cameras, \(playing) playing")
+        if let f = window.window?.frame {
+            print("windows: \(app.windows.count), first at \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))")
+        }
         if playing == 0 { problems.append("no tile is playing") }
-        capture("grid") { [self] in focusStep() }
+        if let first = cameras.first(where: { model.leases.tile(for: $0) != nil }), let tile = model.leases.tile(for: first) {
+            let shown = window.stage.shownRate(of: first)
+            print("rates: " + FrameRateText.make(
+                device: tile.deviceRate, shown: shown, displayHz: window.window?.screen?.maximumFramesPerSecond ?? 0))
+            // The fake sends 20 pictures per second of camera time.
+            if model.fake != nil, abs((tile.deviceRate ?? 0) - 20) > 1 { problems.append("device rate not measured") }
+            if shown == nil { problems.append("shown rate not measured") }
+        }
+        capture("grid") { [self] in resizeStep() }
+    }
+
+    /// Resizes the window on every refresh for half a second, like a
+    /// full-screen transition: the grid keeps drawing while the drawable
+    /// size follows only now and then, and exactly once it settles.
+    private func resizeStep() {
+        guard let window, let nsWindow = window.window else { finish(problems) }
+        let grid = window.stage.grid
+        let start = nsWindow.frame
+        let resizes = grid.drawableResizes, refreshes = grid.refreshes, drawn = grid.framesDrawn
+        let began = CACurrentMediaTime()
+        let steps = 60
+        func advance(_ step: Int) {
+            let t = Double(step) / Double(steps)
+            var f = start
+            f.size.width += 240 * t
+            f.size.height += 135 * t
+            nsWindow.setFrame(f, display: true)
+            if step < steps {
+                after(0.5 / Double(steps)) { advance(step + 1) }
+                return
+            }
+            after(0.3) { [self] in
+                let elapsed = CACurrentMediaTime() - began
+                let r = grid.drawableResizes - resizes
+                let shown = grid.refreshes - refreshes, made = grid.framesDrawn - drawn
+                let scale = nsWindow.backingScaleFactor
+                let want = CGSize(
+                    width: (grid.bounds.width * scale).rounded(), height: (grid.bounds.height * scale).rounded())
+                let have = grid.drawableSize
+                print(String(
+                    format: "resize: %d steps in %.2f s, %d drawable sizes, %d refreshes, %d frames drawn, drawable %.0fx%.0f for %.0fx%.0f",
+                    steps, elapsed, r, shown, made, have.width, have.height, want.width, want.height))
+                // At most one size per 100 ms, plus the first and the settled one.
+                if Double(r) > elapsed / 0.1 + 2 {
+                    problems.append("the drawable was resized \(r) times in \(String(format: "%.2f", elapsed)) s")
+                }
+                if have != want { problems.append("the drawable did not settle at the view's size") }
+                if made < shown / 2 { problems.append("the grid stopped drawing during the resize") }
+                nsWindow.setFrame(start, display: true)
+                after(0.3) { [self] in focusStep() }
+            }
+        }
+        advance(1)
     }
 
     private func focusStep() {
@@ -65,6 +131,10 @@ final class SelfTest {
 
     private func listenStep(_ camera: CameraRef) {
         guard let model = app.model else { finish(problems) }
+        // A muted camera's meter (on hover) reads its decoded audio too.
+        let muted = model.level(camera)
+        print("muted level \(muted.map { String(format: "%.2f", $0.peak) } ?? "n/a")")
+        if model.fake != nil, (muted?.peak ?? 0) <= 0 { problems.append("no audio level while muted") }
         model.toggleListening(camera, additive: false)
         after(0.5) { [self] in
             let level = model.level(camera)
@@ -90,8 +160,57 @@ final class SelfTest {
             if let fake = model.fake {
                 problems += fake.violations.map { "core contract: \($0)" }
             }
-            finish(problems)
+            sidebarStep()
         }
+    }
+
+    /// Rows inserted and removed in two places of the sidebar in one update:
+    /// what made a table-backed sidebar re-enter its row-height cache.
+    private func sidebarStep() {
+        guard let model = app.model else { finish(problems) }
+        // Only with `--fake`: never touch the user's stored groups.
+        guard model.fake != nil else { return checkLog() }
+        let cameras = model.allCameras
+        let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
+        let layout = model.createLayout(name: "Self-Test", root: LayoutNode.balanced(Array(cameras.prefix(2))))
+        after(0.5) { [self] in
+            model.deleteGroup(group)
+            if let layout { model.deleteLayout(layout) }
+            after(0.5) { [self] in lensStep() }
+        }
+    }
+
+    /// With `--fake` (one made-up channel has two lenses): the second lens
+    /// streams as its own tile on the grid's lens-2 tier.
+    private func lensStep() {
+        guard let model = app.model else { finish(problems) }
+        guard let lens = model.allCameras.first(where: { $0.lens == 1 }) else {
+            problems.append("no second lens among the cameras")
+            return checkLog()
+        }
+        model.leases.acquire(lens)
+        after(2) { [self] in
+            let tile = model.leases.tile(for: lens)
+            print("\(model.name(of: lens)): showing \(tile?.tierState.shown.name ?? "nothing"), picture \(tile?.latestPicture() != nil)")
+            if tile?.tierState.shown != .mobile || tile?.latestPicture() == nil {
+                problems.append("the second lens is not playing on its grid tier")
+            }
+            model.leases.release(lens)
+            checkLog()
+        }
+    }
+
+    private func checkLog() {
+        if let watch = app.logWatch {
+            for p in watch.patterns {
+                let n = watch.count(p)
+                print("AppKit warning \"\(p)\": \(n)")
+                if n > 0 { problems.append("AppKit logged \"\(p)\" \(n) times") }
+            }
+        } else {
+            problems.append("could not watch standard error")
+        }
+        finish(problems)
     }
 
     private func capture(_ what: String, then next: @escaping @MainActor () -> Void) {

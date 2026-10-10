@@ -73,6 +73,15 @@ final class AppModel {
     private(set) var timings: [String: UInt64] = [:]
     /// A message for the user (shown in the sidebar footer), if any.
     var notice: String?
+    /// Tile headers show the device's and the shown frame rate (View menu;
+    /// remembered in the user's defaults, off by default).
+    var showFrameRates = UserDefaults.standard.bool(forKey: AppModel.showFrameRatesKey) {
+        didSet {
+            UserDefaults.standard.set(showFrameRates, forKey: Self.showFrameRatesKey)
+            notify()
+        }
+    }
+    static let showFrameRatesKey = "showFrameRates"
 
     /// Gives the core's event thread a way back to the model on the main queue.
     private final class Target: @unchecked Sendable {
@@ -229,10 +238,10 @@ final class AppModel {
             deviceFile.save(devices.filter { transient[$0.config.key] == nil }.map(\.config))
         }
         for g in groups.indices {
-            groups[g].cameras = groups[g].cameras.map { $0.device == old ? CameraRef(device: coreKey, channel: $0.channel) : $0 }
+            groups[g].cameras = groups[g].cameras.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 }
         }
         groupFile.save(groups)
-        audible = Set(audible.map { $0.device == old ? CameraRef(device: coreKey, channel: $0.channel) : $0 })
+        audible = Set(audible.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 })
         for layout in layouts where layout.root.cameras.contains(where: { $0.device == old }) {
             var l = layout
             l.root = layout.root.rekeying(device: old, to: coreKey)
@@ -306,10 +315,29 @@ final class AppModel {
         runtime(camera.device)?.channels.first { $0.channel == camera.channel }
     }
 
+    /// The channel's name; for a multi-lens camera with the lens ("Lens 2").
     func name(of camera: CameraRef) -> String {
-        if let name = channelInfo(camera)?.name, !name.isEmpty { return name }
-        return "Channel \(camera.channel + 1)"
+        let info = channelInfo(camera)
+        let base = info?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "Channel \(camera.channel + 1)"
+        guard info?.isMultiLens == true || camera.lens > 0 else { return base }
+        return "\(base) · \(Self.lensName(camera.lens))"
     }
+
+    /// The channel's name without the lens.
+    func channelName(_ camera: CameraRef) -> String {
+        channelInfo(camera)?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "Channel \(camera.channel + 1)"
+    }
+
+    /// Generic lens words: "Lens 1", "Lens 2".
+    static func lensName(_ lens: Int) -> String { "Lens \(lens + 1)" }
+
+    /// The cameras of a channel: one per lens.
+    func cameras(device key: String, channel c: ChannelInfo) -> [CameraRef] {
+        (0..<min(c.lenses, CameraRef.maxLens + 1)).map { CameraRef(device: key, channel: c.channel, lens: $0) }
+    }
+
+    /// Whether `camera` is one lens of a multi-lens camera.
+    func isMultiLens(_ camera: CameraRef) -> Bool { channelInfo(camera)?.isMultiLens == true }
 
     func deviceName(_ key: String) -> String { runtime(key)?.config.name ?? "Removed device" }
 
@@ -319,7 +347,7 @@ final class AppModel {
 
     /// Every camera of every device, in order.
     var allCameras: [CameraRef] {
-        devices.flatMap { d in d.channels.map { CameraRef(device: d.key, channel: $0.channel) } }
+        devices.flatMap { d in d.channels.flatMap { cameras(device: d.key, channel: $0) } }
     }
 
     /// What a tile showing `camera` says instead of a picture, if anything.
@@ -471,9 +499,9 @@ final class AppModel {
         notify()
     }
 
-    /// The level meter's value for an audible camera.
+    /// The level meter's value: the camera's decoded audio, audible or not.
     func level(_ camera: CameraRef) -> AudioLevel? {
-        guard audible.contains(camera), let tile = leases.tile(for: camera) else { return nil }
+        guard let tile = leases.tile(for: camera) else { return nil }
         return bridge.audioLevel(tile)
     }
 
@@ -516,11 +544,13 @@ final class AppModel {
             leases.tileEnded(tile)
         case .detection(let d):
             guard let key = key(forDevice: d.device) else { return }
-            detections.apply(d, camera: CameraRef(device: key, channel: d.channel))
+            detections.apply(d, camera: d.camera(deviceKey: key))
         case .layoutsChanged:
             reloadLayouts()
         case .timing(let what, _, let ns):
             if timings[what] == nil { timings[what] = ns }
+        case .tileTier(let tile, let tier, .failed, _, let reason):
+            leases.tierFailed(tile: tile, tier: tier, reason: reason)
         case .tileTier, .audioStats, .tileStats:
             break
         }

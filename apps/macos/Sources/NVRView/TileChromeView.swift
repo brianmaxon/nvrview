@@ -6,6 +6,8 @@ import QuartzCore
 struct TileChromeContent: Equatable {
     var title: String
     var subtitle: String?
+    /// The frame-rate readout, when the user turned it on.
+    var rates: String?
     var badges: [Badge] = []
     var veil: TileVeil?
     var hasCamera: Bool
@@ -23,8 +25,9 @@ struct TileChromeContent: Equatable {
 /// The lightweight layer above one tile of the Metal surface (docs/UX.md
 /// "Chrome"): a header with the camera's name and a speaker button that
 /// fades in at once on hover and out a few seconds after the pointer stops
-/// or leaves; detection badges; a thin level meter along the top while the
-/// camera is audible (it stays when the header fades); and words over the
+/// or leaves; detection badges; a thin level meter along the top
+/// (`LevelMeterMode`: green and always shown while the camera is audible,
+/// monochrome with the header while it is muted); and words over the
 /// picture while the device is reconnecting.
 ///
 /// It never takes clicks except on its button, so the stage below handles
@@ -40,13 +43,18 @@ final class TileChromeView: NSView {
     private let headerGradient = CAGradientLayer()
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
+    private let rates = NSTextField(labelWithString: "")
     private let speaker = NSButton()
     private let badges = NSStackView()
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
     private let veilDetail = NSTextField(labelWithString: "")
+    /// The audible meter (green, on the tile, stays when the header fades).
     private let meter = CALayer()
     private let meterTrack = CALayer()
+    /// The muted meter (monochrome, in the header, fades with it).
+    private let hoverMeter = CALayer()
+    private let hoverTrack = CALayer()
     private let outline = CALayer()
     private let drop = NSTextField(labelWithString: "Swap here")
     private let emptyHint = NSTextField(labelWithString: "Drag a camera here")
@@ -68,7 +76,7 @@ final class TileChromeView: NSView {
         header.alphaValue = 0
         addSubview(header)
 
-        for label in [title, subtitle, veilTitle, veilDetail, drop, emptyHint] {
+        for label in [title, subtitle, rates, veilTitle, veilDetail, drop, emptyHint] {
             label.textColor = .white
             label.lineBreakMode = .byTruncatingTail
             label.shadow = {
@@ -82,8 +90,12 @@ final class TileChromeView: NSView {
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         subtitle.font = .systemFont(ofSize: 10)
         subtitle.textColor = NSColor.white.withAlphaComponent(0.75)
+        rates.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        rates.textColor = NSColor.white.withAlphaComponent(0.75)
+        rates.isHidden = true
         header.addSubview(title)
         header.addSubview(subtitle)
+        header.addSubview(rates)
 
         speaker.isBordered = false
         speaker.bezelStyle = .shadowlessSquare
@@ -125,11 +137,17 @@ final class TileChromeView: NSView {
         addSubview(drop)
 
         meterTrack.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        meter.backgroundColor = NSColor.white.withAlphaComponent(0.7).cgColor
+        meter.backgroundColor = NSColor.systemGreen.withAlphaComponent(0.85).cgColor
         meterTrack.isHidden = true
         meter.isHidden = true
         layer?.addSublayer(meterTrack)
         layer?.addSublayer(meter)
+        hoverTrack.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        hoverMeter.backgroundColor = NSColor.white.withAlphaComponent(0.6).cgColor
+        hoverTrack.isHidden = true
+        hoverMeter.isHidden = true
+        header.layer?.addSublayer(hoverTrack)
+        header.layer?.addSublayer(hoverMeter)
 
         outline.borderColor = NSColor.controlAccentColor.cgColor
         outline.borderWidth = 0
@@ -156,6 +174,11 @@ final class TileChromeView: NSView {
         title.stringValue = c.title
         subtitle.stringValue = c.subtitle ?? ""
         subtitle.isHidden = c.subtitle == nil
+        rates.stringValue = c.rates ?? ""
+        if rates.isHidden != (c.rates == nil) {
+            rates.isHidden = c.rates == nil
+            needsLayout = true
+        }
         speaker.isHidden = !c.hasCamera
         speaker.image = NSImage(
             systemSymbolName: c.audible ? "speaker.wave.2.fill" : "speaker.slash.fill",
@@ -177,23 +200,40 @@ final class TileChromeView: NSView {
         CATransaction.setDisableActions(true)
         outline.borderWidth = c.selected ? 2 : (c.editing ? 1 : 0)
         outline.borderColor = (c.selected ? NSColor.controlAccentColor : NSColor.white.withAlphaComponent(0.12)).cgColor
-        meterTrack.isHidden = !c.audible
-        meter.isHidden = !c.audible
-        if !c.audible { level = 0 }
+        let mode = LevelMeterMode(hasCamera: c.hasCamera, audible: c.audible)
+        meterTrack.isHidden = mode != .audible
+        meter.isHidden = mode != .audible
+        hoverTrack.isHidden = mode != .muted
+        hoverMeter.isHidden = mode != .muted
+        if old.map({ LevelMeterMode(hasCamera: $0.hasCamera, audible: $0.audible) }) != mode { level = 0 }
         CATransaction.commit()
         if !c.hasCamera { layer?.backgroundColor = NSColor(white: 0.08, alpha: 1).cgColor } else { layer?.backgroundColor = nil }
         needsLayout = true
     }
 
-    /// The level meter (0...1), called at display rate while audible.
+    private var meterMode: LevelMeterMode {
+        content.map { LevelMeterMode(hasCamera: $0.hasCamera, audible: $0.audible) } ?? .hidden
+    }
+
+    /// Whether the stage should read this tile's level now: only while its
+    /// meter is on screen (audible, or muted with the header shown).
+    var wantsLevel: Bool { meterMode.polls(headerShown: header.alphaValue > 0) }
+
+    /// The level meter (0...1), called at display rate while `wantsLevel`.
     func setLevel(_ value: Float) {
-        guard content?.audible == true else { return }
+        guard wantsLevel else { return }
         // Fast attack, slower release, so it reads as a level, not a flicker.
         level = value > level ? value : max(value, level * 0.85)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        meter.frame = CGRect(x: 0, y: 0, width: bounds.width * CGFloat(min(max(level, 0), 1)), height: 3)
+        layoutMeters()
         CATransaction.commit()
+    }
+
+    private func layoutMeters() {
+        let w = bounds.width * CGFloat(min(max(level, 0), 1))
+        meter.frame = CGRect(x: 0, y: 0, width: w, height: 3)
+        hoverMeter.frame = CGRect(x: 0, y: 0, width: w, height: 3)
     }
 
     private static func badge(_ b: TileChromeContent.Badge) -> NSView {
@@ -223,13 +263,14 @@ final class TileChromeView: NSView {
     override func layout() {
         super.layout()
         let w = bounds.width, h = bounds.height
-        let headerHeight: CGFloat = subtitle.isHidden ? 30 : 40
+        let headerHeight: CGFloat = (subtitle.isHidden ? 30 : 40) + (rates.isHidden ? 0 : 14)
         header.frame = CGRect(x: 0, y: 0, width: w, height: min(headerHeight, h))
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         headerGradient.frame = header.bounds
         meterTrack.frame = CGRect(x: 0, y: 0, width: w, height: 3)
-        meter.frame = CGRect(x: 0, y: 0, width: w * CGFloat(min(max(level, 0), 1)), height: 3)
+        hoverTrack.frame = CGRect(x: 0, y: 0, width: w, height: 3)
+        layoutMeters()
         outline.frame = bounds
         CATransaction.commit()
         let button: CGFloat = 26
@@ -240,6 +281,7 @@ final class TileChromeView: NSView {
         let titleRight = (badges.arrangedSubviews.isEmpty ? badgeRight : badges.frame.minX) - 6
         title.frame = CGRect(x: 10, y: 7, width: max(titleRight - 10, 0), height: 16)
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
+        rates.frame = CGRect(x: 10, y: subtitle.isHidden ? 22 : 36, width: max(w - 20, 0), height: 14)
         veil.frame = bounds
         veilTitle.frame = CGRect(x: 8, y: h / 2 - 18, width: max(w - 16, 0), height: 18)
         veilDetail.frame = CGRect(x: 8, y: h / 2 + 2, width: max(w - 16, 0), height: 16)

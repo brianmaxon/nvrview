@@ -6,6 +6,12 @@ import QuartzCore
 /// `CAMetalDisplayLink` on the main run loop. Every refresh it calls
 /// `prepare` (where the owner updates the layout) and then draws only if
 /// something changed; otherwise the layer keeps showing the last frame.
+///
+/// Size changes are coalesced (`DrawableSizePolicy`): while the view is
+/// resized continuously (full screen, window resize) the layer keeps the
+/// drawable it has, scaled to its bounds, and takes a new drawable size at
+/// most every 100 ms and once the size settles. It presents every refresh
+/// throughout; `prepare` gets the drawable size actually in use.
 @MainActor
 public final class MetalGridView: NSView {
     public let renderer: GridRenderer
@@ -17,6 +23,13 @@ public final class MetalGridView: NSView {
     /// Refreshes seen and frames actually drawn.
     public private(set) var refreshes = 0
     public private(set) var framesDrawn = 0
+    /// How many times the drawable size changed.
+    public private(set) var drawableResizes = 0
+
+    /// The size of the drawables the layer hands out now, in pixels.
+    public var drawableSize: CGSize { metalLayer.drawableSize }
+
+    private var sizePolicy = DrawableSizePolicy()
 
     private let metalLayer = CAMetalLayer()
     private var displayLink: CAMetalDisplayLink?
@@ -32,6 +45,10 @@ public final class MetalGridView: NSView {
         metalLayer.backgroundColor = NSColor.black.cgColor
         metalLayer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         metalLayer.maximumDrawableCount = 3
+        // A drawable of the previous size is stretched to the bounds until
+        // the new size is applied.
+        metalLayer.contentsGravity = .resize
+        layerContentsPlacement = .scaleAxesIndependently
         wantsLayer = true
     }
 
@@ -79,13 +96,19 @@ public final class MetalGridView: NSView {
         let scale = window?.backingScaleFactor ?? 1
         metalLayer.contentsScale = scale
         let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
-        if size != metalLayer.drawableSize && size.width > 0 && size.height > 0 {
-            metalLayer.drawableSize = size
-        }
+        if let apply = sizePolicy.want(size, now: CACurrentMediaTime()) { setDrawableSize(apply) }
+    }
+
+    private func setDrawableSize(_ size: CGSize) {
+        guard size != metalLayer.drawableSize else { return }
+        metalLayer.drawableSize = size
+        drawableResizes += 1
     }
 
     fileprivate func refresh(_ drawable: any CAMetalDrawable) {
         refreshes += 1
+        // Takes effect from the next drawable; this one is still presented.
+        if let apply = sizePolicy.tick(now: CACurrentMediaTime()) { setDrawableSize(apply) }
         let texture = drawable.texture
         prepare?(renderer, CGSize(width: texture.width, height: texture.height))
         let capture = !captureRequests.isEmpty

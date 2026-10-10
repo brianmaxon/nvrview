@@ -14,8 +14,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private(set) var model: AppModel?
     private(set) var windows: [ViewerWindowController] = []
     private var settings: SettingsWindowController?
+    /// With `--selftest`: AppKit's warnings on standard error, counted.
+    let logWatch: LogWatch?
+    /// The windows to reopen on the next launch (with `--fake` or
+    /// `--selftest` only when given a `--data-dir`: their layouts and
+    /// devices are made up).
+    private let windowFile: JSONFileStore<SavedWindow>
+    private var saveScheduled = false
+    private var terminating = false
 
-    init(options: Options) { self.options = options }
+    init(options: Options) {
+        self.options = options
+        logWatch = options.selfTestSeconds == nil ? nil : LogWatch(patterns: SelfTest.forbiddenLog)
+        let remembers = options.dataDirectory != nil || (!options.fake && options.selfTestSeconds == nil)
+        windowFile = JSONFileStore(
+            file: remembers
+                ? options.dataDirectory?.appendingPathComponent("windows.json")
+                    ?? JSONFileStore<SavedWindow>.appSupport("windows.json")
+                : nil)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model: AppModel
@@ -30,8 +47,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if options.fake { seedFakeLayouts(model) }
 
         if options.selfTestSeconds == nil { buildMenu() }
-        let first = model.layouts.first.map { WindowContent.layout(id: $0.id) } ?? ViewerWindowController.allCameras(model)
-        openWindow(first)
+        if !restoreWindows() {
+            let first = model.layouts.first.map { WindowContent.layout(id: $0.id) } ?? ViewerWindowController.allCameras(model)
+            openWindow(first)
+        }
         if options.selfTestSeconds == nil {
             NSApplication.shared.activate()
             if model.devices.isEmpty { showSettings(nil) }
@@ -47,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             var o = FakeCore.Options(clips: clips)
             o.pacing = .realtime(fps: 20)
             o.devices = [
-                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6),
+                "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6, multiLensChannels: [5]),
                 "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
             ]
             o.detectionDemo = 12
@@ -112,15 +131,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: Windows
 
     @discardableResult
-    func openWindow(_ content: WindowContent) -> ViewerWindowController? {
+    func openWindow(_ content: WindowContent, frame: CGRect? = nil) -> ViewerWindowController? {
         guard let model else { return nil }
         let renderer: GridRenderer
         do { renderer = try GridRenderer() } catch { fail("cannot set up Metal: \(error)") }
         let controller = ViewerWindowController(model: model, content: content, renderer: renderer)
-        controller.onClose = { [weak self] c in self?.windows.removeAll { $0 === c } }
+        controller.onClose = { [weak self] c in
+            guard let self else { return }
+            windows.removeAll { $0 === c }
+            if !terminating { saveWindows() }
+        }
+        controller.onChange = { [weak self] in self?.scheduleSaveWindows() }
         windows.append(controller)
+        defer { scheduleSaveWindows() }
         guard let window = controller.window else { return controller }
-        if let last = windows.dropLast().last?.window {
+        if let frame {
+            window.setFrame(frame, display: false)
+        } else if let last = windows.dropLast().last?.window {
             window.setFrameTopLeftPoint(window.cascadeTopLeft(from: NSPoint(x: last.frame.minX, y: last.frame.maxY)))
         } else {
             window.center()
@@ -132,6 +159,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             controller.showWindow(nil)
         }
         return controller
+    }
+
+    // MARK: Restoring windows
+
+    /// Reopens the windows that were open when the app last quit, each with
+    /// what it showed and where it was. Returns false if there were none.
+    private func restoreWindows() -> Bool {
+        guard let model else { return false }
+        let saved = windowFile.load()
+        let screens = NSScreen.screens.map(\.visibleFrame)
+        var reopened = false
+        for w in saved {
+            let content: WindowContent
+            switch w.content {
+            case .layout(let id):
+                content = model.layout(id) != nil ? .layout(id: id) : ViewerWindowController.allCameras(model)
+            case .group(let id):
+                content = model.group(id) != nil ? .group(id: id) : ViewerWindowController.allCameras(model)
+            case .scratch(let name, let root):
+                content = .scratch(name: name, root: root)
+            }
+            let frame = SavedWindow.placement(of: w.frame, screens: screens, minSize: ViewerWindowController.minSize)
+            guard let controller = openWindow(content, frame: frame) else { continue }
+            reopened = true
+            if w.fullScreen, options.selfTestSeconds == nil { controller.window?.toggleFullScreen(nil) }
+        }
+        return reopened
+    }
+
+    private func scheduleSaveWindows() {
+        guard windowFile.file != nil, !saveScheduled, !terminating else { return }
+        saveScheduled = true
+        // Coalesces a window drag or a run of edits into one write.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.saveScheduled = false
+                if !self.terminating { self.saveWindows() }
+            }
+        }
+    }
+
+    private func saveWindows() {
+        guard windowFile.file != nil else { return }
+        windowFile.save(windows.compactMap(\.savedWindow))
     }
 
     @objc func newWindow(_ sender: Any?) {
@@ -147,7 +219,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         settings?.window?.makeKeyAndOrderFront(nil)
     }
 
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { true }
+    @objc func toggleFrameRates(_ sender: Any?) { model?.showFrameRates.toggle() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
+        return true
+    }
 
     private func buildMenu() {
         let main = NSMenu()
@@ -199,6 +276,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         submenu("View", [
             item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]),
             item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
+            .separator(),
+            item("Show Frame Rates", #selector(toggleFrameRates(_:))),
         ])
         submenu("Audio", [
             // Cmd-L: listen to the selected (or focused) tile, also in full screen.
@@ -222,6 +301,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // The windows open now are the ones to reopen; closing them on the
+        // way out must not forget them.
+        saveWindows()
+        terminating = true
+        return .terminateNow
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         model?.shutdown()

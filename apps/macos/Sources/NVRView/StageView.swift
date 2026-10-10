@@ -68,6 +68,8 @@ final class StageView: NSView {
     }
     private var gesture: Gesture?
     private var dropTarget: NodePath?
+    /// The leaf each of the renderer's tiles draws, in its order.
+    private var renderedPaths: [NodePath] = []
 
     var gap: CGFloat { state.editing ? 6 : 2 }
 
@@ -167,9 +169,11 @@ final class StageView: NSView {
                 dropTarget: dropTarget == leaf.path)
         }
         let active = model.detections.active(for: camera)
+        let multiLens = model.isMultiLens(camera)
         let badges = active.map { a in
             TileChromeContent.Badge(
-                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : ""),
+                text: DetectionTracker.label(a.kind) + (a.source == .local ? " · Mac" : "")
+                    + (multiLens ? " · " + AppModel.lensName(camera.lens) : ""),
                 color: Self.color(for: a.kind))
         }
         var detail: [String] = [model.deviceName(camera.device)]
@@ -184,9 +188,27 @@ final class StageView: NSView {
         detail.append(model.hasCameraAI(camera) ? "detection: camera AI" : "detection: this Mac")
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
-            title: model.name(of: camera), subtitle: detail.joined(separator: " · "), badges: badges,
+            title: model.name(of: camera), subtitle: detail.joined(separator: " · "),
+            rates: model.showFrameRates ? rateText(leaf.path, camera) : nil, badges: badges,
             veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
+    }
+
+    /// The rate the first tile showing `camera` drew new pictures at.
+    func shownRate(of camera: CameraRef) -> Double? {
+        guard let path = frames.leaves.first(where: { $0.camera == camera })?.path,
+            let i = renderedPaths.firstIndex(of: path)
+        else { return nil }
+        return grid.renderer.shownRate(ofTile: i)
+    }
+
+    /// "Device 15.0 fps · Shown 15.0 fps · 120 Hz": what the camera sends
+    /// (camera timestamps), what this tile actually drew, and the display.
+    private func rateText(_ path: NodePath, _ camera: CameraRef) -> String {
+        let device = model.leases.tile(for: camera)?.deviceRate
+        let shown = renderedPaths.firstIndex(of: path).flatMap { grid.renderer.shownRate(ofTile: $0) }
+        let hz = window?.screen?.maximumFramesPerSecond ?? 0
+        return FrameRateText.make(device: device, shown: shown, displayHz: hz)
     }
 
     static func color(for kind: String) -> NSColor {
@@ -215,12 +237,16 @@ final class StageView: NSView {
         stepAnimation()
         let points = overlay.bounds
         guard points.width > 0, points.height > 0 else { return }
-        let scale = drawable.width / points.width
+        // Per axis: during a resize the drawable may lag the view (it is
+        // stretched to the bounds until its size catches up).
+        let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
         var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [])
         var tiles: [GridTile] = []
+        var paths: [NodePath] = []
         for leaf in currentLeaves {
             guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
-            let cell = leaf.rect.pixels(scale: scale)
+            paths.append(leaf.path)
+            let cell = leaf.rect.pixels(scaleX: scaleX, scaleY: scaleY)
             let snapshot = tile.snapshot
             let picture = tile.latestPicture()
             let size = picture.map { PixelSize(width: UInt32($0.width), height: UInt32($0.height)) }
@@ -232,9 +258,19 @@ final class StageView: NSView {
             if mapping.layoutSize == .zero {
                 gridTile = GridTile(picture: tile, color: matrix, destination: cell, source: nil)
             } else {
-                let fit = PictureFit.fit(picture: pictureSize, in: cell, fill: state.fill)
+                // Fitted where the picture appears (even scale), then mapped
+                // into the possibly stretched drawable, so the picture keeps
+                // its shape while the drawable catches up with a resize.
+                let stretch = scaleY / scaleX
+                let shown = abs(stretch - 1) < 0.001 ? cell : leaf.rect.pixels(scale: scaleX)
+                let fit = PictureFit.fit(picture: pictureSize, in: shown, fill: state.fill)
+                let destination = shown == cell
+                    ? fit.destination
+                    : CGRect(
+                        x: fit.destination.minX, y: fit.destination.minY * stretch,
+                        width: fit.destination.width, height: fit.destination.height * stretch)
                 gridTile = GridTile(
-                    picture: tile, color: matrix, destination: fit.destination,
+                    picture: tile, color: matrix, destination: destination,
                     source: fit.source.offsetBy(dx: CGFloat(mapping.offset.x), dy: CGFloat(mapping.offset.y)))
             }
             tiles.append(gridTile)
@@ -242,13 +278,15 @@ final class StageView: NSView {
             key.rects.append(cell)
             key.versions.append(snapshot.version)
             key.sizes.append(pictureSize)
-            if model.audible.contains(camera), let level = model.level(camera) {
-                chromes[leaf.path]?.setLevel(level.peak)
+            // Read only for meters on screen (audible, or hovered).
+            if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
+                chrome.setLevel(level.peak)
             }
         }
         if key != lastKey || renderer.tiles.count != tiles.count {
             lastKey = key
             renderer.tiles = tiles
+            renderedPaths = paths
         }
     }
 
@@ -449,14 +487,21 @@ final class StageView: NSView {
 
     static let cameraPrefix = "nvrview-camera:"
 
-    static func dragString(_ camera: CameraRef) -> String { "\(cameraPrefix)\(camera.channel)@\(camera.device)" }
+    /// "nvrview-camera:CHANNEL[.LENS]@DEVICE".
+    static func dragString(_ camera: CameraRef) -> String {
+        "\(cameraPrefix)\(camera.channel)\(camera.lens == 0 ? "" : ".\(camera.lens)")@\(camera.device)"
+    }
 
     static func camera(fromDrag s: String) -> CameraRef? {
         guard s.hasPrefix(cameraPrefix) else { return nil }
         let rest = s.dropFirst(cameraPrefix.count)
-        guard let at = rest.firstIndex(of: "@"), let channel = Int(rest[..<at]) else { return nil }
+        guard let at = rest.firstIndex(of: "@") else { return nil }
+        let numbers = rest[..<at].split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...2).contains(numbers.count), let channel = Int(numbers[0]) else { return nil }
+        let lens = numbers.count == 2 ? Int(numbers[1]) : 0
+        guard let lens, (0...CameraRef.maxLens).contains(lens) else { return nil }
         let device = String(rest[rest.index(after: at)...])
-        return device.isEmpty ? nil : CameraRef(device: device, channel: channel)
+        return device.isEmpty ? nil : CameraRef(device: device, channel: channel, lens: lens)
     }
 
     fileprivate func dragUpdated(at p: CGPoint, camera: CameraRef?) -> NSDragOperation {
@@ -524,8 +569,7 @@ final class StageView: NSView {
         for d in model.devices {
             guard !d.channels.isEmpty else { continue }
             cameras.addItem(NSMenuItem.sectionHeader(title: d.config.name))
-            for c in d.channels {
-                let camera = CameraRef(device: d.key, channel: c.channel)
+            for camera in d.channels.flatMap({ model.cameras(device: d.key, channel: $0) }) {
                 let i = ClosureMenuItem(title: model.name(of: camera)) { [weak self] in self?.assign(camera, at: leaf.path) }
                 i.state = leaf.camera == camera ? .on : .off
                 cameras.addItem(i)

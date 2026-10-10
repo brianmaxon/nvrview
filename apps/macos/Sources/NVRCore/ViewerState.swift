@@ -162,3 +162,50 @@ public struct TileVeil: Sendable, Equatable {
         }
     }
 }
+
+/// The frame-rate readout of a tile header.
+public enum FrameRateText {
+    public static func make(device: Double?, shown: Double?, displayHz: Int) -> String {
+        func fps(_ v: Double?) -> String { v.map { String(format: "%.1f fps", $0) } ?? "– fps" }
+        var parts = ["Device \(fps(device))", "Shown \(fps(shown))"]
+        if displayHz > 0 { parts.append("\(displayHz) Hz") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+extension DetectionEvent {
+    /// The camera (lens included) whose tiles show this detection: `lens` 1
+    /// is the second lens of a multi-lens camera; absent means the first.
+    public func camera(deviceKey: String) -> CameraRef {
+        CameraRef(device: deviceKey, channel: channel, lens: min(max(lens ?? 0, 0), CameraRef.maxLens))
+    }
+}
+
+/// How a tile shows its audio level meter (docs/UX.md "Listening from any
+/// tile"): along the top of the tile, green and always visible while the
+/// tile is audible; monochrome, with the header's hover fade, while muted;
+/// not at all without a camera.
+public enum LevelMeterMode: Sendable, Equatable {
+    case hidden
+    /// Shown only while the header is (hovered); white on gray.
+    case muted
+    /// Always shown; green.
+    case audible
+
+    public init(hasCamera: Bool, audible: Bool) {
+        self = !hasCamera ? .hidden : (audible ? .audible : .muted)
+    }
+
+    /// Whether the meter is on screen, given whether the header is.
+    public func visible(headerShown: Bool) -> Bool {
+        switch self {
+        case .hidden: false
+        case .muted: headerShown
+        case .audible: true
+        }
+    }
+
+    /// Whether to read the tile's level this refresh: only for meters on
+    /// screen, so hidden tiles cost nothing.
+    public func polls(headerShown: Bool) -> Bool { visible(headerShown: headerShown) }
+}

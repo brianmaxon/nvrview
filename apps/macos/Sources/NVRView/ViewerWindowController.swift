@@ -26,6 +26,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     let stage: StageView
     let sidebar = SidebarState()
     var onClose: (ViewerWindowController) -> Void = { _ in }
+    /// What the window shows or where it is changed (to remember it).
+    var onChange: () -> Void = {}
+    /// The frame before entering full screen, while in full screen.
+    private var windowedFrame: NSRect?
+
+    static let minSize = CGSize(width: 640, height: 400)
 
     private var held: [CameraRef: Int] = [:]
     private var token: UUID?
@@ -45,7 +51,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             contentRect: NSRect(x: 0, y: 0, width: 1180, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
-        window.minSize = NSSize(width: 640, height: 400)
+        window.minSize = Self.minSize
         window.collectionBehavior = [.fullScreenPrimary, .managed]
         window.titlebarSeparatorStyle = .automatic
         window.tabbingMode = .disallowed
@@ -108,6 +114,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         syncLeases()
         updateTitle()
         stageDidChangeState(stage)
+        onChange()
     }
 
     /// Every camera (up to 16) as an even grid, unsaved.
@@ -182,6 +189,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .group, .scratch:
             state.content = .scratch(name: state.name, root: tree)
             sidebar.current = state.content
+            onChange()
         }
         updateTitle()
     }
@@ -283,7 +291,9 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         state.name = name
         switch state.content {
         case .layout(let id): model.renameLayout(id, to: name)
-        case .group, .scratch: state.content = .scratch(name: name, root: state.tree)
+        case .group, .scratch:
+            state.content = .scratch(name: name, root: state.tree)
+            onChange()
         }
         updateTitle()
     }
@@ -315,6 +325,28 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     }
 
     // MARK: Window
+
+    /// What to reopen on the next launch.
+    var savedWindow: SavedWindow? {
+        guard let window else { return nil }
+        let content: SavedWindow.Content
+        switch state.content {
+        case .layout(let id): content = .layout(id: id)
+        case .group(let id): content = .group(id: id)
+        case .scratch(let name, let root): content = .scratch(name: name, root: root)
+        }
+        let fullScreen = window.styleMask.contains(.fullScreen)
+        return SavedWindow(content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen)
+    }
+
+    func windowDidMove(_ notification: Notification) { onChange() }
+    func windowDidEndLiveResize(_ notification: Notification) { onChange() }
+    func windowWillEnterFullScreen(_ notification: Notification) { windowedFrame = window?.frame }
+    func windowDidEnterFullScreen(_ notification: Notification) { onChange() }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        windowedFrame = nil
+        onChange()
+    }
 
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()

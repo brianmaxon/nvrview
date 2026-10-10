@@ -227,6 +227,12 @@ public final class TileDecoder: TilePictureSource {
     public func latestPicture() -> DecodedPicture? { output.latestPicture() }
     public var pictureSequence: UInt64 { output.pictureSequence }
 
+    /// The rate the device sends, from the decoded pictures' camera
+    /// timestamps over the last two seconds; nil until two pictures have
+    /// decoded, or when none has for two seconds. A new decoder (each tier
+    /// switch generation has its own) starts over.
+    public var deviceRate: Double? { output.deviceRate(nowMicros: hostMicros()) }
+
     private func invalidate(_ s: inout Session) {
         output.discardInFlight()
         if let session = s.session {
@@ -251,6 +257,9 @@ private final class Output: Sendable {
         /// Configure start a new epoch, and results from older ones are dropped.
         var epoch: UInt64 = 1
         var stats = TileDecoderStats()
+        /// The decoded pictures' camera timestamps, for the device's rate.
+        var ptsRate = RateMeter()
+        var lastDecodedHostMicros: Int64 = 0
     }
 
     private let slot = Mutex(Slot())
@@ -262,6 +271,14 @@ private final class Output: Sendable {
     }
 
     var stats: TileDecoderStats { slot.withLock { $0.stats } }
+
+    func deviceRate(nowMicros: Int64) -> Double? {
+        slot.withLock { s in
+            // Stalled: no picture decoded for a whole window.
+            nowMicros - s.lastDecodedHostMicros > s.ptsRate.windowMicros ? nil : s.ptsRate.rate()
+        }
+    }
+
     var pictureSequence: UInt64 { sequence.load(ordering: .acquiring) }
 
     func latestPicture() -> DecodedPicture? {
@@ -320,12 +337,17 @@ private final class Output: Sendable {
             s.picture = image
             s.ptsMicros = micros
             s.stats.decoded += 1
+            if pts.isValid { s.ptsRate.add(micros) }
+            s.lastDecodedHostMicros = hostMicros()
             bump(&s)
             return .decoded(ptsMicros: micros)
         }
         if let event { onEvent(event) }
     }
 }
+
+/// Monotonic host time in microseconds.
+func hostMicros() -> Int64 { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
 
 private func decompressionOutput(
     refCon: UnsafeMutableRawPointer?, frameRefCon: UnsafeMutableRawPointer?,
