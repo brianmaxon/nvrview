@@ -22,6 +22,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 step "tests"
 cargo test --workspace
 
+step "C header up to date"
+if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
+  scripts/gen-header.sh --check
+else
+  echo "cbindgen not installed (cargo install cbindgen --locked); skipped"
+fi
+
+step "C interface smoke test"
+scripts/test-c-ffi.sh
+if [ "$(uname)" = "Darwin" ]; then
+  step "C interface smoke test, AddressSanitizer"
+  scripts/test-c-ffi.sh --asan
+fi
+
 step "Windows compile check"
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 
