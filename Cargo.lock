@@ -582,6 +582,8 @@ dependencies = [
  "bc-protocol",
  "mock-nvr",
  "serde_json",
+ "simtime",
+ "tokio",
  "viewer-core",
 ]
 

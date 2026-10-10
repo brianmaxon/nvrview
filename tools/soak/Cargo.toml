@@ -12,6 +12,8 @@ publish = false
 audio-pipeline = { path = "../../crates/audio-pipeline" }
 bc-protocol = { path = "../../crates/bc-protocol" }
 mock-nvr = { path = "../mock-nvr" }
+simtime = { path = "../simtime" }
+tokio = { version = "1", features = ["time"] }
 viewer-core = { path = "../../crates/viewer-core" }
 serde_json = "1"
 
