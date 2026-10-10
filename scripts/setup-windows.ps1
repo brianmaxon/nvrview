@@ -18,7 +18,8 @@
   Run from an elevated PowerShell (Run as administrator):
     Set-ExecutionPolicy -Scope Process Bypass
     .\setup-windows.ps1 [-RepoDir C:\src\nvrview] [-SkipTests] [-Optional]
-                        [-EnableSsh -AuthorizedKey "ssh-ed25519 AAAA... name"]
+                        [-EnableSsh [-SshSource winget|feature]
+                         -AuthorizedKey "ssh-ed25519 AAAA... name"]
 
 .PARAMETER RepoDir
   Where to clone the repository (default: $HOME\src\nvrview).
@@ -30,6 +31,11 @@
 .PARAMETER EnableSsh
   Install and start the OpenSSH server, key-only, reachable from the local
   subnet only.
+.PARAMETER SshSource
+  Where the OpenSSH server comes from when none is installed: 'winget' (the
+  default: Microsoft's Win32-OpenSSH package, Microsoft.OpenSSH.Preview) or
+  'feature' (the Windows optional feature from Windows Update, which can hang
+  when Windows Update cannot deliver it).
 .PARAMETER AuthorizedKey
   A public key (one line) allowed to log in over SSH. For an administrator
   account it goes to C:\ProgramData\ssh\administrators_authorized_keys, as
@@ -41,6 +47,8 @@ param(
   [switch]$SkipTests,
   [switch]$Optional,
   [switch]$EnableSsh,
+  [ValidateSet('winget', 'feature')]
+  [string]$SshSource = 'winget',
   [string]$AuthorizedKey = ''
 )
 
@@ -137,24 +145,24 @@ git -C $RepoDir config core.longpaths true
 
 if ($EnableSsh) {
   Step 'OpenSSH server (key-only, local subnet only)'
-  $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
   if (Get-Service -Name sshd -ErrorAction SilentlyContinue) {
-    # Already installed some other way (for example the winget package
-    # Microsoft.OpenSSH.Preview when Windows Update cannot deliver the feature).
-    Write-Host 'an sshd service already exists; not installing the Windows feature'
-  } elseif ($cap.State -ne 'Installed') {
+    Write-Host 'an sshd service already exists; not installing another OpenSSH server'
+  } elseif ($SshSource -eq 'winget') {
+    Install-WingetPackage 'Microsoft.OpenSSH.Preview'
+  } else {
+    $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
     Write-Host 'installing the OpenSSH server from Windows Update: this often takes 2-10 minutes'
-    Write-Host 'with no progress shown (check from another window with:'
-    Write-Host "  Get-WindowsCapability -Online -Name OpenSSH.Server*)"
+    Write-Host 'with no progress shown (if it stays NotPresent, stop and use -SshSource winget)'
     try {
       Add-WindowsCapability -Online -Name $cap.Name | Out-Null
     } catch {
       Write-Host "Add-WindowsCapability failed ($($_.Exception.Message)); trying DISM"
       dism /Online /Add-Capability /CapabilityName:$($cap.Name) /NoRestart
-      if ($LASTEXITCODE -ne 0) {
-        throw 'Could not install the OpenSSH server; try: winget install --id Microsoft.OpenSSH.Preview -e'
-      }
+      if ($LASTEXITCODE -ne 0) { throw 'Could not install the OpenSSH server; try -SshSource winget' }
     }
+  }
+  if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+    throw 'No sshd service after installing the OpenSSH server.'
   }
   Set-Service -Name sshd -StartupType Automatic
   Start-Service sshd
