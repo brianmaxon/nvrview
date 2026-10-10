@@ -201,6 +201,38 @@ pub fn encode_message_with_status(
         status,
         class,
         payload_offset: class.has_payload_offset().then_some(extension.len() as u32),
+        replay_seq: None,
+    };
+    let mut out = Vec::with_capacity(header.len() + body_len as usize);
+    header.encode_into(&mut out);
+    out.extend_from_slice(extension);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+/// Encodes a media message of a recording playback (command 5): a 24-byte
+/// header with the replay `seq` in bytes 16 to 19 in place of status and
+/// class (docs/protocol.md, "Replay media headers"). For device simulators
+/// and tests.
+pub fn encode_replay_media(
+    message_id: u32,
+    seq: u32,
+    extension: &[u8],
+    payload: &[u8],
+) -> Result<Vec<u8>, EncodeError> {
+    let body_len = extension
+        .len()
+        .checked_add(payload.len())
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or(EncodeError::BodyTooLarge)?;
+    let header = Header {
+        command: crate::header::REPLAY_COMMAND,
+        body_len,
+        message_id,
+        status: 0,
+        class: Class::Device,
+        payload_offset: Some(extension.len() as u32),
+        replay_seq: Some(seq),
     };
     let mut out = Vec::with_capacity(header.len() + body_len as usize);
     header.encode_into(&mut out);
@@ -212,6 +244,36 @@ pub fn encode_message_with_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stream of replay media messages whose sequence numbers read as every
+    /// kind of class stays in step: no error, and no misplaced header end.
+    #[test]
+    fn replay_media_messages_frame_whatever_the_sequence_number() {
+        let seqs = [0x6a00_1234u32, 0x6414_0001, 0x6514_0000, 0x6614_0000, 7];
+        let mut wire = Vec::new();
+        for (i, seq) in seqs.iter().enumerate() {
+            wire.extend(
+                encode_replay_media(9, *seq, b"<binaryData>1</binaryData>", &[i as u8; 33])
+                    .unwrap(),
+            );
+        }
+        // Delivered a byte at a time, as a slow link might.
+        let mut d = Decoder::new();
+        let mut got = Vec::new();
+        for b in &wire {
+            d.push(&[*b]);
+            while let Some(m) = d.next_message().unwrap() {
+                got.push(m);
+            }
+        }
+        assert_eq!(got.len(), seqs.len());
+        for (i, (m, seq)) in got.iter().zip(seqs).enumerate() {
+            assert_eq!(m.header.replay_seq, Some(seq));
+            assert_eq!(m.header.message_id, 9);
+            assert_eq!(m.extension(), b"<binaryData>1</binaryData>");
+            assert_eq!(m.payload(), &[i as u8; 33][..]);
+        }
+    }
 
     fn sample_stream() -> (Vec<u8>, Vec<RawMessage>) {
         type Spec<'a> = (u32, u32, Class, &'a [u8], &'a [u8]);

@@ -51,12 +51,11 @@ const JOB_FILE: &str = "job.json";
 
 /// The final step of a camera job: join its complete chunks into one file.
 ///
-/// **Hook for the MP4 muxer (playback part 2).** The implementation reads
-/// chunks `0..chunks` from `parts_dir` (see [`crate::chunk`]: drop each
-/// chunk's frames at or before the previous chunk's last timestamp, align
-/// audio by its position after video frames) and writes `output`. It runs on
-/// a blocking thread. Until a muxer exists, camera jobs end at
-/// [`CameraState::ChunksComplete`].
+/// The implementation reads chunks `0..chunks` from `parts_dir` (see
+/// [`crate::chunk`]) and writes `output`; [`crate::finalize::Mp4Finalizer`]
+/// is the one the apps use. It runs on a blocking thread and must leave
+/// `output` absent or complete, never partial. Without a finalizer, camera
+/// jobs end at [`CameraState::ChunksComplete`].
 pub trait Finalizer: Send + Sync {
     /// Joins the chunks into `output`.
     fn finalize(&self, parts_dir: &Path, chunks: u32, output: &Path) -> io::Result<()>;
@@ -822,7 +821,7 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
     inner.update(&p.incident, p.cam, |c, _| {
         c.state = CameraState::ChunksComplete
     });
-    // HOOK(mp4): the final MP4 step. Runs the muxer when one is installed.
+    // The final MP4 step, when a finalizer is installed.
     let Some(fin) = inner.finalizer.clone() else {
         inner.update(&p.incident, p.cam, |_, r| *r = false);
         return;
