@@ -39,6 +39,9 @@
 //!   [`SessionConfig::preview_retry_interval`] while no media has arrived,
 //!   and is given up after [`SessionConfig::preview_wait_limit`]
 //!   ([`Item::WaitingForDevice`], then media or [`Item::StartRejected`]).
+//! - **Second-lens probes stop**: [`DeviceSession::probe_second_lens`]
+//!   opens one short `externStream` preview on the existing connection and
+//!   stops it on every path; a 400 ends it at once (no wait).
 //! - **No retry storm on bad credentials**: a refused login ends the session
 //!   in [`ConnState::LoginFailed`] and is not retried; devices lock out after
 //!   a few failures.
@@ -48,12 +51,14 @@
 
 mod archive;
 mod config;
+mod lens;
 mod queue;
 mod supervisor;
 mod transport;
 
 pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
 pub use config::{BackoffConfig, SessionConfig};
+pub use lens::LensProbe;
 pub use queue::{Item, Subscription};
 pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
 pub use transport::{Connector, TcpConnector};

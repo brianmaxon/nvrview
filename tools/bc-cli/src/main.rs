@@ -33,6 +33,8 @@ usage:
          [--stagger S] [--restart TIER:EVERY_S] [--restart-gap S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] query
          80|146|199|318 [--channel N]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] lenses
+         [--channel N] [--seconds S]
   bc-cli analyze FILE.nvrrec
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
@@ -52,6 +54,10 @@ query sends one read-only info query (80 device version, 146 stream info,
 the decrypted XML reply body to stdout, the reply status to stderr. Nothing
 else can be sent. The output can contain device identifiers (UIDs, serial
 numbers): keep it in the git-ignored captures/ directory, never commit it.
+lenses runs the viewer's second-lens probe (docs/protocol.md, \"Second
+lenses\") on each connected channel whose list does not name externStream,
+or on --channel N whatever it lists: one externStream preview, up to
+--seconds (default 2) for the first picture, then a stop; one at a time.
 analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
@@ -76,6 +82,10 @@ enum Action {
     Query {
         cmd: bc_protocol::session::Command,
         channel: Option<u8>,
+    },
+    Lenses {
+        channel: Option<u8>,
+        window: Duration,
     },
 }
 
@@ -159,7 +169,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 frames = Some(value("--frames")?.parse().map_err(|_| "bad --frames")?);
             }
             "-h" | "--help" => return Err(String::new()),
-            "channels" | "record" | "capture" | "analyze" | "query" if command.is_none() => {
+            "channels" | "record" | "capture" | "analyze" | "query" | "lenses"
+                if command.is_none() =>
+            {
                 command = Some(a);
             }
             _ if command.as_deref() == Some("query") && number.is_none() => {
@@ -219,6 +231,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
         }
         Some("analyze") => return Ok(Parsed::Analyze(file.ok_or("analyze needs a file")?)),
+        Some("lenses") => Action::Lenses {
+            channel,
+            window: seconds.map_or(Duration::from_secs(2), Duration::from_secs),
+        },
         Some("query") => {
             let n = number.ok_or("query needs a command number: 80, 146, 199, or 318")?;
             let cmd = info_command(n, channel).ok_or_else(|| {
@@ -343,6 +359,50 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
                     tiers.join(","),
                     version
                 );
+            }
+            Ok(())
+        }
+        Action::Lenses { channel, window } => {
+            let listing = tokio::select! {
+                r = list_channels(session, LOGIN_LIMIT) => r?,
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+            };
+            println!("{:>3}  {:<36}  probe", "ch", "tiers");
+            for c in listing.channels {
+                let lists_extern = c.tiers.contains(&StreamTier::Extern);
+                let wanted = match channel {
+                    Some(n) => n == c.channel,
+                    None => c.connected && !lists_extern,
+                };
+                if !wanted {
+                    continue;
+                }
+                let tiers: Vec<&str> = c.tiers.iter().map(|t| t.name()).collect();
+                let r = tokio::select! {
+                    r = session.probe_second_lens(c.channel, window) => r,
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                };
+                let what = match r {
+                    bc_session::LensProbe::SecondLens { after } => {
+                        format!("second lens (first picture after {} ms)", after.as_millis())
+                    }
+                    bc_session::LensProbe::NoVideo { info: true } => {
+                        "single lens (stream info only, no video)".to_owned()
+                    }
+                    bc_session::LensProbe::NoVideo { info: false } => {
+                        "single lens (no answer)".to_owned()
+                    }
+                    bc_session::LensProbe::Refused { status } => {
+                        format!("single lens (refused, status {status})")
+                    }
+                    bc_session::LensProbe::Inconclusive => "inconclusive".to_owned(),
+                };
+                let note = if lists_extern {
+                    "  (lists externStream: video does not prove a second lens)"
+                } else {
+                    ""
+                };
+                println!("{:>3}  {:<36}  {what}{note}", c.channel, tiers.join(","));
             }
             Ok(())
         }
