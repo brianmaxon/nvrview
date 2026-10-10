@@ -61,6 +61,25 @@ import VideoKit
             parse(#"{"type":"timing","what":"tier_switch","tile":7,"ns":2345678}"#)
                 == .timing(what: "tier_switch", tile: 7, nanos: 2_345_678))
         #expect(
+            parse(#"{"type":"timing","what":"tier_switch","tile":7,"ns":2345678,"delta_ms":40,"held_ms":0,"capped":false}"#)
+                == .timing(
+                    what: "tier_switch", tile: 7, nanos: 2_345_678,
+                    tierSwitch: TierSwitchTiming(deltaMs: 40, heldMs: 0, capped: false)))
+        #expect(
+            parse(#"{"type":"timing","what":"tier_switch","tile":7,"ns":9,"delta_ms":-520,"held_ms":300,"capped":true}"#)
+                == .timing(
+                    what: "tier_switch", tile: 7, nanos: 9,
+                    tierSwitch: TierSwitchTiming(deltaMs: -520, heldMs: 300, capped: true)))
+        // Nothing of the old generation decoded: no delta_ms.
+        #expect(
+            parse(#"{"type":"timing","what":"tier_switch","tile":7,"ns":9,"held_ms":0,"capped":false}"#)
+                == .timing(
+                    what: "tier_switch", tile: 7, nanos: 9, tierSwitch: TierSwitchTiming(deltaMs: nil, heldMs: 0, capped: false)))
+        // Other timings ignore the fields.
+        #expect(
+            parse(#"{"type":"timing","what":"first_picture","tile":7,"ns":5,"held_ms":3}"#)
+                == .timing(what: "first_picture", tile: 7, nanos: 5))
+        #expect(
             parse(#"{"type":"channels","device":1,"channels":[{"channel":0,"detects":["people","vehicle","dog_cat"]},{"channel":1}]}"#)
                 == .channels(
                     device: 1,
@@ -127,7 +146,7 @@ import VideoKit
         #expect(tile.pictureSequence != sequenceBefore)
         #expect(tile.snapshot.version != versionBefore)
         let timings = rig.events.get().compactMap { e -> String? in
-            if case .timing(let what, let t, _) = e, t == tile.id { return what }
+            if case .timing(let what, let t, _, _) = e, t == tile.id { return what }
             return nil
         }
         #expect(timings.contains("tier_switch"))
@@ -490,7 +509,7 @@ import VideoKit
         rig.play(tile, 3)
         rig.fake.flushEvents()
         let timings = rig.events.get().compactMap { e -> (String, UInt64?, UInt64)? in
-            if case .timing(let what, let t, let ns) = e { return (what, t, ns) }
+            if case .timing(let what, let t, let ns, _) = e { return (what, t, ns) }
             return nil
         }
         #expect(timings.count == 1)

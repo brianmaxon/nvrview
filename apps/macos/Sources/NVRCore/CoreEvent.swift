@@ -97,7 +97,7 @@ public enum CoreEvent: Sendable, Equatable {
     /// with every change.
     case layoutsChanged(revision: Int? = nil)
     /// ABI 3: a timing hook for the budgets (section 5), nanoseconds.
-    case timing(what: String, tile: UInt64?, nanos: UInt64)
+    case timing(what: String, tile: UInt64?, nanos: UInt64, tierSwitch: TierSwitchTiming? = nil)
 
     private struct Wire: Decodable {
         var type: String
@@ -133,6 +133,9 @@ public enum CoreEvent: Sendable, Equatable {
         var tap_dropped: Int?
         var channel: Int?
         var tier: String?
+        var delta_ms: Double?
+        var held_ms: Double?
+        var capped: Bool?
         var generation: UInt32?
         var kind: String?
         var source: String?
@@ -232,10 +235,35 @@ public enum CoreEvent: Sendable, Equatable {
             return .layoutsChanged(revision: w.revision)
         case "timing":
             guard let what = w.what, let ns = w.ns else { return nil }
-            return .timing(what: what, tile: w.tile, nanos: ns)
+            var detail: TierSwitchTiming?
+            if what == "tier_switch", w.delta_ms != nil || w.held_ms != nil || w.capped != nil {
+                detail = TierSwitchTiming(
+                    deltaMs: w.delta_ms.map { Int($0.rounded()) }, heldMs: Int((w.held_ms ?? 0).rounded()),
+                    capped: w.capped ?? false)
+            }
+            return .timing(what: what, tile: w.tile, nanos: ns, tierSwitch: detail)
         default:
             return nil
         }
+    }
+}
+
+/// How a tier switch lined up the new generation with the old (the
+/// `tier_switch` timing's extra fields, docs/FFI.md).
+public struct TierSwitchTiming: Sendable, Equatable {
+    /// The shown new picture's timestamp minus the old generation's latest
+    /// decoded one, in ms (negative: stepped back in time); nil when nothing
+    /// of the old generation was decoded.
+    public var deltaMs: Int?
+    /// How long the switch waited for alignment, in ms.
+    public var heldMs: Int
+    /// The wait hit the core's cap.
+    public var capped: Bool
+
+    public init(deltaMs: Int? = nil, heldMs: Int = 0, capped: Bool = false) {
+        self.deltaMs = deltaMs
+        self.heldMs = heldMs
+        self.capped = capped
     }
 }
 

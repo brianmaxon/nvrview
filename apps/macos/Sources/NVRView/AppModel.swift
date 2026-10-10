@@ -547,7 +547,7 @@ final class AppModel {
             detections.apply(d, camera: d.camera(deviceKey: key))
         case .layoutsChanged:
             reloadLayouts()
-        case .timing(let what, _, let ns):
+        case .timing(let what, _, let ns, _):
             if timings[what] == nil { timings[what] = ns }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
