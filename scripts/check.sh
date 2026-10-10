@@ -8,7 +8,17 @@ if [ -d /opt/homebrew/opt/rustup/bin ]; then
   PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 fi
 
-step() { printf '\n== %s\n' "$*"; }
+# Each step prints how long the previous one took, and the end prints the total.
+check_start=$(date +%s)
+step_start=$check_start
+step_name=""
+step() {
+  now=$(date +%s)
+  if [ -n "$step_name" ]; then printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"; fi
+  step_start=$now
+  step_name="$*"
+  printf '\n== %s\n' "$*"
+}
 
 step "sanitization"
 python3 -I scripts/check-sanitized.py --all
@@ -107,4 +117,6 @@ else
   step "browser playback check skipped (NVRVIEW_BROWSER_TESTS=1 runs it)"
 fi
 
-printf '\nAll checks passed.\n'
+now=$(date +%s)
+printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
+printf '\nAll checks passed in %ss.\n' "$((now - check_start))"
