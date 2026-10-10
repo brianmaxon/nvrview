@@ -292,7 +292,7 @@ Not planned; recorded so the core and the local API keep it cheap.
 | M1 | `bc-protocol`, `bc-session`, `bc-cli` writing a channel to a playable file; CI green on Linux and Windows | the core, portably |
 | M2 | C interface plus one live channel in the macOS app | the boundary |
 | M2a | Listening on one tile: AAC decode, timestamping, drift-corrected playback, audio tap | audio that stays in sync |
-| M3 | Grid, full-screen focus, several windows (any camera in any window, the same camera in more than one), reconnect, Keychain, an app bundle | a usable macOS app |
+| M3 | Split-pane layouts, several windows (any camera in any window, the same camera in more than one), listening from any tile, seamless full screen and focus ([UX.md](UX.md)), reconnect, Keychain, an app bundle | a usable macOS app |
 | P | Playback by incident ([PLAYBACK.md](PLAYBACK.md)): search by event type, every angle of an event at once, background resumable downloads, readable output, follow cuts and 2-up/4-up edits | better than the official app's slow, error-prone downloads |
 | M4 | Windows app, one channel, then the grid | Windows |
 
