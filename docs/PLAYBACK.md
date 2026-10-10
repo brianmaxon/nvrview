@@ -307,10 +307,25 @@ compositor and encoder.
   an event, the device's cost and limits for repeated searches, and whether
   text search can work without the vendor's encoder.
 - Animal event type names from the device (needs a capture with an animal
-  event).
+  event). The live state push already reports `dog_cat`; the event-search
+  reply names were not decryptable in the latest capture.
 - Whether live view and 143 downloads can share a session, and the
-  device's limits on concurrent downloads.
-- How 143 reports errors, and how a play ends at the end of a file.
+  device's limits on concurrent downloads. A capture showed four synchronized
+  replay plays on one session with no refusal, but the client stops live view
+  when the playback tab opens, so live-plus-replay (and live-plus-download) on
+  one session is still unconfirmed.
+- How 143 reports errors, and how a play ends at the end of a file. A play is
+  now observed to continue across a file boundary with no wire event; the end
+  of the last file was not reached, and no seek or play ever returned an error
+  status (a time with no recording is read from the search results, not from a
+  play error).
+- How fast rates (2×–16×) are served at the frame level. The latest capture
+  showed the client switches rate with stop/seek/play (`playSpeed` in the play
+  request, no dedicated speed or keyframe-only command) and that higher rates
+  deliver only about three times the 1× byte rate, not N× — so the device
+  appears to thin the stream toward keyframes — but the records were encrypted,
+  so the frames-per-second and keyframe ratio per rate still need a
+  decryptable capture.
 - Clock agreement between cameras behind one NVR (recorded times come from
   the NVR; offsets between cameras with their own clocks need measuring).
 - Which cameras to keep watching for sound when they are not on screen

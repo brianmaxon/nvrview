@@ -953,10 +953,25 @@ it says so; nothing below depends on an unmeasured fact.
 2. **Live view keeps running during playback.** Plays and live tiles share
    the device's one session; how many plays a device allows next to live
    view is measured before the limit is set (protocol.md, "Open questions").
-3. **Rates up to 16x,** as the official client offers. How it serves fast
-   rates (keyframe-only playback, command 150, or the device's own pacing)
-   is captured from the official client at 4x, 8x, and 16x before the core
-   implements rates above 2x; until then 0.25x to 2x by seeks and pacing.
+   A capture of the official client showed four synchronized replay plays on
+   one session with no refusal (so the session multiplexes several plays by
+   message ID), but it also **stopped live view when its playback tab opened**,
+   so it did not demonstrate live and replay media on one session at once. Our
+   design still keeps live tiles running during playback; that one session can
+   carry both live and replay media is the assumption to confirm when playback
+   is built (protocol.md, "Open questions").
+3. **Rates up to 16x,** as the official client offers. A capture of the client
+   at 1×, 2×, 4×, 8×, and 16× settled the mechanism: it changes rate with
+   **stop, seek, play** — the `playSpeed` field in the play request (command 5)
+   — not a dedicated speed command, not keyframe-only playback (150), and not
+   play-by-time (381/383). Higher rates delivered only about three times the 1×
+   byte rate, not N×, so the device serves a thinned, keyframe-biased stream at
+   speed rather than every frame faster; each play still begins with a burst
+   and then paces. The frame-level detail (which frames are kept, the
+   frames-per-second and keyframe ratio per rate, the exact `playSpeed` values)
+   was encrypted in that capture and needs a decryptable one; the core can
+   implement rate changes as stop/seek/play now and tune fast-rate decoding
+   once the frames are read. Until then 0.25× to 2× by seeks and pacing.
 4. **Synchronization to tens of milliseconds, not a second.** Every recorded
    video frame carries a microsecond timestamp, as in live view; only the
    anchor to wall-clock time comes from whole seconds at keyframes. Each
@@ -969,12 +984,21 @@ it says so; nothing below depends on an unmeasured fact.
    two cameras' clocks differ.
 5. **A short stall at file boundaries is acceptable** unless a way to avoid
    it is found (for example asking for the next file before the current one
-   ends; measured when playback is built).
+   ends; measured when playback is built). A capture of the official client
+   showed a single play run across a recording-file boundary with no stop,
+   seek, or re-play and no stall beyond its normal pacing — the device
+   continues across files within one play — so following the client's own flow
+   (one play per lane, left running) may need no boundary handling at all; this
+   is observed only at the byte/timing level and is confirmed on a real
+   recording when playback is built.
 6. **Time zone: the NVR's.** Index and incident times are the device's own
    wall-clock time, which is what the cameras burn into their picture. The
-   core reads the NVR's time settings through a read-only query once that
-   query is observed and recorded in protocol.md; until then the app passes
-   `utc_offset_s`.
+   read-only queries are now identified: the client reads the device time and
+   zone with command 104 (general system config), daylight saving with command
+   106, and NTP with command 38 (protocol.md, "Device information"), and sends
+   no write when the settings screen is closed without saving. Their reply
+   fields (zone format, DST rule, NTP offset) still need a decryptable capture
+   before the core parses them; until then the app passes `utc_offset_s`.
 7. **Protocol neutrality:** ABI additions take a `lens` argument instead of
    new uses of `NV_TIER_MOBILE`/`NV_TIER_EXTERN`; the Baichuan tier names stay
    for compatibility, marked as such (docs/ARCHITECTURE.md "Other
