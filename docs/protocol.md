@@ -283,7 +283,7 @@ Reply details:
 | Fact | Provenance |
 | --- | --- |
 | The 146 reply carries status **300**, not 200, together with a complete body (seen on two NVRs). Treat 300 as success for this command. | observed |
-| The newer-firmware NVR also answered 199 with status 300 and a complete body (the older one with 200). Treat 300 as success for 199 too. | observed |
+| An NVR on newer firmware also answered 199 with status 300 and a complete body (one on older firmware with 200). Treat 300 as success for 199 too. | observed |
 | `StreamInfoList` holds one `StreamInfo` per distinct stream configuration, not one per channel. Its `channelBits` is a bitmask of the channels that share it (bit *n* = channel *n*), and it contains one `encodeTable` per tier with `type` (`mainStream`, `subStream`), `resolution/width`, `resolution/height`, `videoEncType`, `defaultFramerate`, `defaultBitrate`, `defaultGop`, `framerateTable`, `bitrateTable`. | observed |
 | `videoEncType` takes the values 0 and 1. | observed |
 | The official client ignores `videoEncType` in the 146 reply; it reads only `channelBits` and, per `encodeTable`, `type`, resolution, the defaults and the two tables. `type` can also be `externStream` or `mobileStream`. | reported (client) |
@@ -341,7 +341,7 @@ message ID.
 | --- | --- |
 | 33 is a **state snapshot, not an event**: every push lists every channel slot of the NVR, idle ones included (`status` `none`, `AItype` `none`). A start is a channel's values leaving `none`; a stop is them returning to `none` in a later push. | observed |
 | Pushes come only on change: of about 90 pushes, all but one differed from the previous push on that session. Gaps ranged from 0.2 s to about 60 s; no periodic refresh was seen. | observed |
-| A multi-lens camera has one entry per lens, told apart by `subChannel` (0, 1). The newer-firmware NVR also sends `subChannel` and a trailing `range` (`start`, `end`: the slot range this push covers); the older one sent neither. | observed |
+| A multi-lens camera has one entry per lens, told apart by `subChannel` (0, 1). NVRs on newer firmware also send `subChannel` and a trailing `range` (`start`, `end`: the slot range this push covers); older firmware sent neither. | observed |
 | `status` values seen: `none`, `MD`. `AItype` values seen: `none`, `people`, `dog_cat`. | observed |
 | `AItype` is independent of `status`: one channel's pushes during a `people` detection went `MD`/`none`, `MD`/`people`, `MD`/`none`, `MD`/`people`, …, `none`/`people`, `none`/`none`; a `dog_cat` detection showed as `none`/`dog_cat` with no `MD` at all. So a detection's span is the span of its `AItype`, not of `MD`. | observed |
 | `timeStamp` was always 0 and `recording` always 0 on both NVRs, so event times must be taken from the arrival time. | observed |
@@ -363,7 +363,7 @@ the next session's first push is a fresh snapshot.
 
 | Fact | Provenance |
 | --- | --- |
-| `Support` (199) lists one `item` per channel slot, numbered by `chnID` from 0 (the same numbering as `channelId` in 145 and 33; one item for each of the `channelNum` slots, empty slots included with `aitype` 0). On the newer-firmware NVR, the item of a multi-lens camera also holds one `subItem` per lens, each with its own `chnID` (0 and 1, apparently the lens that 33 calls `subChannel`), `aitype`, and PTZ fields; the item's own `chnID` and `aitype` come before them. | observed |
+| `Support` (199) lists one `item` per channel slot, numbered by `chnID` from 0 (the same numbering as `channelId` in 145 and 33; one item for each of the `channelNum` slots, empty slots included with `aitype` 0). On newer NVR firmware, the item of a multi-lens camera also holds one `subItem` per lens, each with its own `chnID` (0 and 1, apparently the lens that 33 calls `subChannel`), `aitype`, and PTZ fields; the item's own `chnID` and `aitype` come before them. | observed |
 | `Support` (199) gives each channel `item` an integer `aitype`, which the client reads as a bitmask: bit 0 AI present, 1 people, 2 vehicle, 3 face, 4 dog/cat, 6 other, 17 package, 22 baby cry, 23 user-defined (YOLO world) objects. Other bits are configuration features (5 detection area, 7 AI tracking, 8 stay time, 9 sensitivity, 10 target size, 24 always-on video, 25 tamper alarm). | reported (client); the copy from `aitype` to the client's bitfield was not traced, medium confidence |
 | The bitmask fits the captures: `AiCfg` (299) listed `dog_cat` in `detectType` on exactly the channels with bit 4, and left out `vehicle` on a channel without bit 2. Channels with `aitype` 7 (AI, people, vehicle) produced `people` events. | observed |
 | A separate per-channel `aiAnimalType` (0 or 1) marks support for the wildlife subtypes below. Other per-channel fields seen: `smartAI`, `eventTypeVersion`, `thumbnail`. | observed (fields); meaning of `aiAnimalType` reported (client) |
@@ -701,7 +701,7 @@ boxes in a hit; the closest are `structInfo` entries of the 759 detail.
 
 | Fact | Provenance |
 | --- | --- |
-| Support is advertised per NVR as a set of bits (event log as a whole, and per type: motion, people, vehicle, animal, package, visitor, cry, crossline, nonmotorized vehicle, tamper, …), most likely the 199 `eventLogVersion`, which only the newer-firmware NVR sent. The mapping from that element to the bits was not traced. | reported (client); `eventLogVersion` observed |
+| Support is advertised per NVR as a set of bits (event log as a whole, and per type: motion, people, vehicle, animal, package, visitor, cry, crossline, nonmotorized vehicle, tamper, …), most likely the 199 `eventLogVersion`, which only newer NVR firmware sent. The mapping from that element to the bits was not traced. | reported (client); `eventLogVersion` observed |
 | The desktop event-log window opens one search for every channel with the selected types ORed into one set, `notSearchVideo` 1 and `desc` 0, then calls 517 until `bFinished`, dropping duplicate hits (same camera, channel, start and end). | reported (client) |
 | The client allows **120 s for each 517 page** (25 s for open, close and 519; 30 s in the newer search screen; the desktop values are timeout arguments, presumably seconds), which suggests the device can take long to answer. | reported (client) |
 | Text search: the typed phrase is turned into a feature vector on the computer by a downloaded text-encoder model, or, when a vendor feature flag is on, by the vendor's server (which can also record search texts). The vector, not the text, goes to the NVR in 516, with a `similarity` threshold. If the NVR reports a feature-version conflict (`version`, `text`), the client re-encodes with the other model version. | reported (client) |
