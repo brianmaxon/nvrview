@@ -135,7 +135,8 @@ the crate's `Renderer`.
   ±40 ms of its moving target. A caller can still fix the delay
   (`TileConfig::playout_delay_us`).
 - **Start**: playout waits until the estimated presentation map has
-  settled (the first 2 s of a stream; an explicit map is used at once).
+  settled and has a second of deliveries for its median (the first 3 s of
+  a stream; an explicit map is used at once).
   Placing audio on the rough early map and correcting it a second later
   cost two or three audible jumps after every (re)start.
 - **Soak** (`tools/soak`, a real 10-minute LAN recording looped for 24 h of
@@ -144,7 +145,7 @@ the crate's `Renderer`.
   +35.1 ms (mean +0.4), up to 47.9 ms in the first minute, with 436 resyncs
   (all in the first seconds after a restart) and 144 underruns (one per
   loop seam). With the adaptive delay, the warm-up allowance, and playout
-  waiting for a settled map: −15.7 to +34.2 ms (mean +0.6), up to 40.4 ms
+  waiting for a settled map: −15.1 to +34.9 ms (mean +1.1), up to 27.2 ms
   in the first minute, no resyncs, the same 144 seam underruns, and a
   delay of 256 ms. The rate estimate at the end of every pass is
   16,000.12 Hz; a run that ends seconds after a restart reports the young

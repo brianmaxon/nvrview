@@ -245,11 +245,17 @@ impl TileAudio {
                 pcm,
                 timeline: stamp.timeline,
                 // Playout starts once the map has settled (the first two
-                // seconds of an estimated one are rough): placing audio on
-                // the rough map and correcting it a second later cost two or
-                // three audible jumps after every (re)start in a replayed LAN
-                // recording; waiting costs two seconds of audio once.
-                map: map.filter(|_| self.explicit_map.is_some() || self.estimator_settled),
+                // seconds of an estimated one are rough, and it starts over
+                // then) and has a second of deliveries for its median:
+                // placing audio on the rough map and correcting it a second
+                // later cost two or three audible jumps after every
+                // (re)start in a replayed LAN recording; waiting costs three
+                // seconds of audio once.
+                map: map.filter(|_| {
+                    self.explicit_map.is_some()
+                        || (self.estimator_settled
+                            && stamp.first_sample >= u64::from(format.sample_rate) * 3)
+                }),
                 playout_delay_us: delay.us,
                 delay_rate: delay.rate,
                 now_us: arrived_us as f64,
