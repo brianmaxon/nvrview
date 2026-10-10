@@ -19,8 +19,15 @@
 //!   a slow one never affects another. A subscriber that attaches mid-stream
 //!   gets the stream info, then video from the next keyframe.
 //! - **Read-only**: only commands the protocol crate's allowlist can build are
-//!   ever sent (login, preview start and stop, keepalive, and the read-only
-//!   info queries behind [`DeviceSession::query`]).
+//!   ever sent (login, preview start and stop, keepalive, the read-only
+//!   info queries behind [`DeviceSession::query`], and the recording
+//!   searches, cover images, and downloads of [`DeviceSession::search_files`]
+//!   and its siblings).
+//! - **Recordings share the session**: searches, cover images, and downloads
+//!   run on the same connection as live view, routed by message ID; at most
+//!   [`SessionConfig::max_searches`] searches and
+//!   [`SessionConfig::max_downloads`] downloads run at once (1 each by
+//!   default), and dropping or cancelling a [`Download`] sends its stop (144).
 //! - **Bounded memory**: each [`Subscription`] has a fixed-capacity queue; a
 //!   slow consumer loses frames up to the next keyframe, and the loss is
 //!   reported ([`Item::Discontinuity`], [`Subscription::dropped`]).
@@ -31,11 +38,13 @@
 //!   once every few seconds, with a count of the suppressed ones. Credentials
 //!   are never logged; addresses are not logged at all.
 
+mod archive;
 mod config;
 mod queue;
 mod supervisor;
 mod transport;
 
+pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
 pub use config::{BackoffConfig, SessionConfig};
 pub use queue::{Item, Subscription};
 pub use supervisor::{ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
