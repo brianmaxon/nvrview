@@ -34,6 +34,24 @@ public protocol CoreAPI: Sendable {
     func gridLayout(viewport: PixelSize, gap: UInt32, pictureSizes: [PixelSize], fill: Bool)
         throws(CoreStatus) -> [TileLayout]
 
+    /// `nv_audio_set_output`: the format the real-time callback renders
+    /// (1 or 2 interleaved channels). Call again after a device change.
+    func audioSetOutput(sampleRate: UInt32, channels: UInt32) throws(CoreStatus)
+
+    /// `nv_tile_audio_set`: audible (claims a playout slot) or silent, at
+    /// `volume` 0 (muted, keeping its slot) to 1.
+    func tileAudioSet(_ tile: UInt64, audible: Bool, volume: Float) throws(CoreStatus)
+
+    /// `nv_tile_audio_tap`: the tile's audio as 16 kHz blocks to the sink.
+    func tileAudioTap(_ tile: UInt64, enabled: Bool) throws(CoreStatus)
+
+    /// `nv_audio_render` and its context, for the real-time callback. Valid
+    /// until `free`; stop rendering before that.
+    var audioRenderHook: AudioRenderHook { get }
+
+    /// `nv_clock_now_ns`: the clock `audioRenderHook`'s host times are on.
+    func clockNowNanos() -> UInt64
+
     /// `nv_core_free`: stops everything, joins the core's threads; no
     /// callback runs after it returns. Idempotent. Never call it from a
     /// callback.
@@ -52,10 +70,14 @@ public protocol CoreSink: AnyObject, Sendable {
     /// not know (docs/FFI.md): answer it with `failure` so the core is not
     /// left waiting.
     func core(didReject failure: CoreDecodeFailure, tile: UInt64)
+    /// `on_audio_tap`: serialized across the core on its tap thread; the
+    /// block's samples are borrowed for the duration of the call.
+    func core(didTap block: CoreAudioBlock, tile: UInt64)
 }
 
 extension CoreSink {
     public func core(didReject failure: CoreDecodeFailure, tile: UInt64) {}
+    public func core(didTap block: CoreAudioBlock, tile: UInt64) {}
 }
 
 /// Creates a core that delivers to `sink`. `CCore.factory(...)` makes the

@@ -87,6 +87,17 @@ extension CoreAction {
     }
 }
 
+extension CoreAudioBlock {
+    /// Borrows the C block's samples: use it only inside the callback.
+    public init(_ b: NvAudioBlock) {
+        self.init(
+            samples: UnsafeBufferPointer(start: b.samples, count: b.samples == nil ? 0 : b.sample_count),
+            sampleRate: b.sample_rate, epoch: b.epoch, firstSample: b.first_sample,
+            cameraTimeMicros: b.has_camera_time ? b.camera_time_us : nil,
+            wallClockMicros: b.has_wall_clock ? b.wall_clock_us : nil, discontinuity: b.discontinuity)
+    }
+}
+
 /// What the C callbacks' `context` points at.
 public final class CallbackContext: Sendable {
     public let sink: any CoreSink
@@ -121,7 +132,11 @@ public enum CCallbacks {
                 let sink = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue().sink
                 sink.core(didEmit: UnsafeRawBufferPointer(start: json, count: length))
             },
-            on_audio_tap: nil)
+            on_audio_tap: { context, tile, block in
+                guard let context, let block else { return }
+                let sink = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue().sink
+                sink.core(didTap: CoreAudioBlock(block.pointee), tile: tile)
+            })
         return (callbacks, context)
     }
 }

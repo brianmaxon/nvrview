@@ -6,6 +6,8 @@ public struct ConnectionStatus: Sendable, Equatable {
     public var deviceModel: String?
     public var tile: TileStatus?
     public var tileEnded = false
+    /// The tile's latest `audio_stats`, if its stream has audio.
+    public var audio: AudioStatsEvent?
 
     public init() {}
 
@@ -21,6 +23,8 @@ public struct ConnectionStatus: Sendable, Equatable {
             deviceModel = model
         case .tileClosed:
             tileEnded = true
+        case .audioStats(_, let stats):
+            audio = stats
         case .channels, .tileStats:
             break
         }
@@ -46,6 +50,10 @@ public struct ConnectionStatus: Sendable, Equatable {
                 case .recovering: text += ", recovering"
                 case .undecodable: text += ", video cannot be decoded"
                 }
+            }
+            if let audio, audio.audible {
+                text += ", listening"
+                if let d = audio.playoutDelayMilliseconds { text += String(format: " (audio %.0f ms behind)", d) }
             }
             if tileEnded { text += " (stream ended)" }
             return text

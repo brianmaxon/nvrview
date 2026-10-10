@@ -53,7 +53,12 @@ let package = Package(
             swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
         .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit", "NVRCore", "FakeCore"]),
         .testTarget(name: "VideoKitTests", dependencies: ["VideoKit", "FakeCore"]),
-        .testTarget(name: "NVRCoreTests", dependencies: ["NVRCore", "FakeCore", "VideoKit", "NVRViewCore"]),
+        // With the real core, the tests also run it end to end (against a
+        // spawned mock-nvr; see RealCoreAudioTests).
+        .testTarget(
+            name: "NVRCoreTests",
+            dependencies: ["NVRCore", "FakeCore", "VideoKit", "NVRViewCore"] + (realCore ? ["NVRCoreC"] : []),
+            swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
     ],
     swiftLanguageModes: [.v6]
 )

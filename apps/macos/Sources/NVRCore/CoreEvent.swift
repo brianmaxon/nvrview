@@ -72,6 +72,7 @@ public enum CoreEvent: Sendable, Equatable {
     case channels(device: UInt64, channels: [ChannelInfo])
     case tileStats(tile: UInt64, stats: TileStats)
     case tileClosed(tile: UInt64, reason: String?)
+    case audioStats(tile: UInt64, stats: AudioStatsEvent)
 
     private struct Wire: Decodable {
         var type: String
@@ -85,7 +86,9 @@ public enum CoreEvent: Sendable, Equatable {
         var unlock_s: Int?
         var name: String?
         var model: String?
-        var channels: [ChannelInfo]?
+        /// The `channels` event's list; other events use the key for a
+        /// number (`audio_stats`: audio channels), which reads as nil.
+        var channels: ChannelList?
         var received: Int?
         var decoded: Int?
         var gated: Int?
@@ -93,6 +96,23 @@ public enum CoreEvent: Sendable, Equatable {
         var failures: Int?
         var resets: Int?
         var reason: String?
+        var records: Int?
+        var audible: Bool?
+        var tapped: Bool?
+        var codec: String?
+        var playout_delay_ms: Double?
+        var playout_delay_target_ms: Double?
+        var av_offset_ms: Double?
+        var underruns: Int?
+        var resyncs: Int?
+        var tap_dropped: Int?
+    }
+
+    struct ChannelList: Decodable {
+        var list: [ChannelInfo]?
+        init(from decoder: any Decoder) throws {
+            list = try? decoder.singleValueContainer().decode([ChannelInfo].self)
+        }
     }
 
     /// Nil for malformed JSON, an unknown type, or a known type missing the
@@ -119,7 +139,7 @@ public enum CoreEvent: Sendable, Equatable {
             return .deviceInfo(device: device, name: w.name, model: w.model)
         case "channels":
             guard let device = w.device else { return nil }
-            return .channels(device: device, channels: w.channels ?? [])
+            return .channels(device: device, channels: w.channels?.list ?? [])
         case "tile_stats":
             guard let tile = w.tile else { return nil }
             return .tileStats(
@@ -130,6 +150,21 @@ public enum CoreEvent: Sendable, Equatable {
         case "tile_closed":
             guard let tile = w.tile else { return nil }
             return .tileClosed(tile: tile, reason: w.reason)
+        case "audio_stats":
+            guard let tile = w.tile else { return nil }
+            var a = AudioStatsEvent()
+            a.records = w.records ?? 0
+            a.decoded = w.decoded ?? 0
+            a.audible = w.audible ?? false
+            a.tapped = w.tapped ?? false
+            a.codec = w.codec
+            a.playoutDelayMilliseconds = w.playout_delay_ms
+            a.playoutDelayTargetMilliseconds = w.playout_delay_target_ms
+            a.avOffsetMilliseconds = w.av_offset_ms
+            a.underruns = w.underruns ?? 0
+            a.resyncs = w.resyncs ?? 0
+            a.tapDropped = w.tap_dropped ?? 0
+            return .audioStats(tile: tile, stats: a)
         default:
             return nil
         }

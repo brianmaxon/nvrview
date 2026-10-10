@@ -9,7 +9,7 @@ import VideoKit
 // channel through CoreBridge, a status line under it.
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let options: Options
     var session: LiveSession?
     var window: NSWindow?
@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApplication.shared.activate()
         }
 
+        session.startAudio(muted: options.selfTestSeconds != nil)
         if options.fake || options.host != nil {
             startConnection()
         } else {
@@ -164,7 +165,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit NVRView", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         appItem.submenu = menu
+
+        let audioItem = NSMenuItem()
+        main.addItem(audioItem)
+        let audio = NSMenu(title: "Audio")
+        // Cmd-L: listen to the shown tile.
+        audio.addItem(NSMenuItem(title: "Listen", action: #selector(toggleListening(_:)), keyEquivalent: "l"))
+        audioItem.submenu = audio
         NSApplication.shared.mainMenu = main
+    }
+
+    // MARK: Audio
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleListening(_:)) {
+            item.state = session?.listening == true ? .on : .off
+            return session?.tile != nil
+        }
+        return true
+    }
+
+    @objc func toggleListening(_ sender: Any?) {
+        guard let session else { return }
+        session.setListening(!session.listening)
     }
 
     // MARK: Lifecycle

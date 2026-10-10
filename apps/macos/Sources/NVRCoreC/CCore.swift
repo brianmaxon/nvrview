@@ -97,6 +97,35 @@ public final class CCore: CoreAPI {
         }
     }
 
+    // MARK: Audio
+
+    public func audioSetOutput(sampleRate: UInt32, channels: UInt32) throws(CoreStatus) {
+        let status = CoreStatus(nv_audio_set_output(try core(), sampleRate, channels))
+        if !status.isOK { throw status }
+    }
+
+    public func tileAudioSet(_ tile: UInt64, audible: Bool, volume: Float) throws(CoreStatus) {
+        let status = CoreStatus(nv_tile_audio_set(try core(), tile, audible, volume))
+        if !status.isOK { throw status }
+    }
+
+    public func tileAudioTap(_ tile: UInt64, enabled: Bool) throws(CoreStatus) {
+        let status = CoreStatus(nv_tile_audio_tap(try core(), tile, enabled))
+        if !status.isOK { throw status }
+    }
+
+    /// `nv_audio_render` with the core handle as its context. Players stop
+    /// rendering before `free` (CoreBridge.shutdown sees to it).
+    public var audioRenderHook: AudioRenderHook {
+        guard let c = handle.withLock({ $0.core }) else { return .silent }
+        return AudioRenderHook(
+            function: { context, out, frames, channels, host in
+                nv_audio_render(OpaquePointer(context), out, frames, channels, host).rawValue
+            }, context: UnsafeMutableRawPointer(c))
+    }
+
+    public func clockNowNanos() -> UInt64 { nv_clock_now_ns() }
+
     public func gridLayout(viewport: PixelSize, gap: UInt32, pictureSizes: [PixelSize], fill: Bool)
         throws(CoreStatus) -> [TileLayout]
     {
