@@ -1,0 +1,14 @@
+[package]
+name = "video-pipeline"
+version = "0.1.0"
+description = "Sans-I/O per-tile decoder decisions for nvrview: keyframe gating, backpressure, recovery, parameter-set parsing, color matrices, and grid layout"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
