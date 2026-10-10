@@ -58,7 +58,9 @@ fn text<'a>(o: &'a Map<String, Value>, key: &str, empty_ok: bool) -> Result<&'a 
 }
 
 /// Checks one node of a split tree: a leaf `{"camera": null}` or
-/// `{"camera": {"device": key, "channel": n}}`, or a split
+/// `{"camera": {"device": key, "channel": n, "lens": l}}` (`lens` optional:
+/// 0, the default, is a camera's first lens, 1 the second lens of a
+/// multi-lens camera), or a split
 /// `{"split": "row"|"col", "ratio": r, "a": node, "b": node}`. Other
 /// members are kept as they are (apps may store their own settings).
 fn check_node(v: &Value, depth: usize, leaves: &mut usize) -> Result<(), LayoutError> {
@@ -77,8 +79,13 @@ fn check_node(v: &Value, depth: usize, leaves: &mut usize) -> Result<(), LayoutE
                 Value::Object(c) => {
                     text(c, "device", false)?;
                     match c.get("channel").and_then(Value::as_u64) {
-                        Some(ch) if ch <= u64::from(u8::MAX) => Ok(()),
-                        _ => invalid("\"channel\" must be an integer from 0 to 255"),
+                        Some(ch) if ch <= u64::from(u8::MAX) => {}
+                        _ => return invalid("\"channel\" must be an integer from 0 to 255"),
+                    }
+                    match c.get("lens") {
+                        None => Ok(()),
+                        Some(l) if l.as_u64().is_some_and(|l| l <= 1) => Ok(()),
+                        Some(_) => invalid("\"lens\" must be 0 or 1"),
                     }
                 }
                 _ => invalid("\"camera\" must be null or an object"),
@@ -401,6 +408,8 @@ mod tests {
             r#"{"id":"x","name":"x","root":{"camera":null,"split":"row"}}"#,
             r#"{"id":"x","name":"x","root":{"camera":{"device":"d","channel":256}}}"#,
             r#"{"id":"x","name":"x","root":{"camera":{"channel":1}}}"#,
+            r#"{"id":"x","name":"x","root":{"camera":{"device":"d","channel":1,"lens":2}}}"#,
+            r#"{"id":"x","name":"x","root":{"camera":{"device":"d","channel":1,"lens":"1"}}}"#,
             r#"{"id":"x","name":"x","root":{"split":"diagonal","ratio":0.5,"a":{"camera":null},"b":{"camera":null}}}"#,
             r#"{"id":"x","name":"x","root":{"split":"row","ratio":1.5,"a":{"camera":null},"b":{"camera":null}}}"#,
             r#"{"id":"x","name":"x","root":{"split":"row","ratio":0.5,"a":{"camera":null}}}"#,
@@ -422,6 +431,11 @@ mod tests {
         ));
         assert_eq!(l.revision(), 0);
         assert_eq!(l.to_json(), r#"{"layouts":[],"revision":0}"#);
+        // The second lens of a multi-lens camera.
+        assert!(
+            l.put(r#"{"id":"x","name":"x","root":{"camera":{"device":"d","channel":1,"lens":1}}}"#)
+                .is_ok()
+        );
     }
 
     #[test]

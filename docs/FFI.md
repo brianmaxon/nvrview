@@ -253,7 +253,9 @@ the machine (and later the web viewer) shares them.
 ```
 
 - A node is a leaf `{"camera": null}` (an empty tile) or
-  `{"camera": {"device": key, "channel": 0..255}}`, or a split
+  `{"camera": {"device": key, "channel": 0..255, "lens": 0..1}}` (`lens` is
+  optional: 0, the default, is the camera's first lens, 1 the second lens of
+  a multi-lens camera, shown through the `extern`/`mobile` tiers), or a split
   `{"split": "row"|"col", "ratio": 0.02..0.98, "a": node, "b": node}`
   (`row`: `a` left of `b`; `col`: `a` above `b`). At most 16 splits deep
   and 64 tiles; `id` (non-empty), `name` and device keys up to 256 bytes;
