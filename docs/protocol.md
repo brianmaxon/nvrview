@@ -222,12 +222,14 @@ camera B with a wide lens and a pan-tilt-zoom telephoto lens (120 s and 30 s).
 | `Support` (199) gave camera A one `subItem` per lens (lens 1 with `ptzType` 3), but camera B, on older camera firmware behind the same NVR, no `subItem` at all; its item had `ptzType` 3 and a `channelType` other than `ipc`. So 199 identifies some multi-lens cameras, not all. | observed |
 | Each tier pair of one lens shares one clock (sub/main: 2213 of 2213 and 557 of 557 matched pictures with identical timestamps). The second lens has timestamps of its own: none identical to the first lens's; camera A's second lens sat about 100 ms from the first lens with no measurable drift over 2 minutes (−20 to −28 ± 25 ppm) and ran at 20.17 fps against 20.02, camera B's within 4–16 ms. | observed |
 | Stream info gave the second lens's size as 0×0 (dimensions come from the SPS). Starts: camera A's `mobileStream` took 2.05 s to its first picture (one sample), its `externStream` 160 ms; camera B's four tiers each 136–213 ms. Camera A's main sometimes began with a burst of 3–10 buffered pictures (camera B and the earlier single-lens camera: none). | observed |
+| A second lens's `externStream` once took 1.18 s to its first picture. | observed |
 
 How nvrview detects a second lens (ours, from the facts above): two or more
 `subItem`s in 199; otherwise, for a channel that does not list
-`externStream`, one short `externStream` preview: video within about 2 s
-means a second lens. A stream-info record alone does not decide (the
-second lens's own info record says 0×0 too); only the first picture does.
+`externStream`, one short `externStream` preview: video within about 3 s
+(configurable; the slowest `externStream` start seen was 1.18 s) means a
+second lens. A stream-info record alone does not decide (the second lens's
+own info record says 0×0 too); only the first picture does.
 A refusal, a 400 included (the probe does not wait for a third-party
 stream), or no picture within the window means a single lens. The
 preview is stopped on every path, probes run one at a time per device on
