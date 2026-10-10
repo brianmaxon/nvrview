@@ -74,8 +74,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
             ]
             o.detectionDemo = 12
-            // The self-test's tier switches need not wait for the clip's next keyframe.
-            o.newTierStartsAtKeyframe = options.selfTestSeconds != nil
             let box = FakeBox()
             let credentials = MemoryCredentials()
             let model = try AppModel(

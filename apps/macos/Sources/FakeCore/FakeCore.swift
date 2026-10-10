@@ -149,10 +149,12 @@ public final class FakeCore: CoreAPI {
         public var tierAlignCap: Duration = .milliseconds(300)
         /// A new tier's stream starts with the clip's latest keyframe (its
         /// pictures keep the camera's timestamps), so a switch does not wait
-        /// up to a whole group of pictures for the next one. Off by default:
-        /// the stream then joins the clip where the shown tier is. The app's
-        /// self-test turns it on to keep its tier switches short.
-        public var newTierStartsAtKeyframe = false
+        /// up to a whole group of pictures for the next one. On by default,
+        /// as the real device behaves: a new preview starts at a fresh
+        /// keyframe (observed; docs/protocol.md "Sub and main of one
+        /// camera"). Off, the stream joins the clip where the shown tier is
+        /// and waits for its next keyframe (for tests of that path).
+        public var newTierStartsAtKeyframe = true
         /// The clock (nanoseconds) the tier switch's timeout and alignment
         /// cap count on: the host clock, or a test's manual one so a test
         /// need not sleep through them.
