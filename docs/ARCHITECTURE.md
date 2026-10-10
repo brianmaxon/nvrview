@@ -120,10 +120,15 @@ Rules the core guarantees:
   receives nothing until a keyframe arrives.
 - **Backpressure.** A slow consumer causes drops up to the next keyframe, not a
   growing queue.
-- **Format changes.** Parameter sets (SPS/PPS/VPS) and dimensions arrive as an
-  event before the frames that need them. NAL units are delivered without start
-  codes; each platform adds Annex-B start codes or length prefixes as its
-  decoder requires.
+- **Frame format.** One callback is one access unit (one picture), delivered
+  as Annex-B exactly as the device sends it, so the core never copies or
+  rewrites video. Keyframes carry their parameter sets (VPS/SPS/PPS) in band.
+  Each platform converts to whatever its decoder needs (the macOS renderer
+  rewrites start codes to 4-byte lengths). The keyframe flag must be accurate:
+  apps use it for queue policy, though gating trusts the NAL types.
+- **Format changes.** A "format changed" event (new codec or parameter sets)
+  arrives before the frames that need it; apps flush and gate until the next
+  keyframe. Disconnects are signaled so apps can flush.
 
 ## Platform apps
 
