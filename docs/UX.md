@@ -297,7 +297,15 @@ A doorbell press opens the doorbell's inset as a call:
   possibly a different engine on each; nothing leaves the house): the
   doorbell's audio and, while talking back, the microphone, labeled by side,
   so the visitor can be read when the user cannot unmute (in a meeting, for
-  example). Shown live in the call; saved with the event only if the user
+  example). Engines (measured 2026-10-10 on doorbell-quality speech: 16 kHz,
+  outdoor noise, low-bitrate AAC): Apple's SpeechAnalyzer on macOS (about 4%
+  word errors on clean speech, about 1% of a core, no model to ship) and
+  Moonshine's streaming models (MIT) on Windows (about 4-5% clean; the tiny
+  and base models are tried first on modest CPUs, with sherpa-onnx as a
+  lighter fallback), behind one engine interface in each app. One session per
+  source (doorbell, microphone), so the speaker label is the source; while
+  doorbell audio plays through the speakers the microphone session is muted
+  or echo-cancelled so it does not transcribe the visitor twice. Shown live in the call; saved with the event only if the user
   turned saving on (recording a conversation may need the other person's
   consent in some places).
 - **Typed reply:** a text box in the call speaks what the user types through
