@@ -52,6 +52,9 @@ internal sealed class ViewerWindow
     private readonly SidebarReveal _reveal = new();
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _revealTimer;
     private Dictionary<CameraRef, int> _held = [];
+
+    /// <summary>Set while this window shows an unedited All Cameras grid, which follows the devices.</summary>
+    private AllCamerasWatch? _allCamerasWatch;
     private bool _sidebarCollapsed;
     private bool _fullScreenSidebar;
     private double _sidebarWidth = SidebarView.DefaultWidth;
@@ -306,15 +309,16 @@ internal sealed class ViewerWindow
 
     // ---- content ----
 
-    /// <summary>Every camera (up to 16) as an even grid, unsaved.</summary>
+    /// <summary>Every online camera of every connected device (up to the layout limit) as an even grid, unsaved.</summary>
     public static WindowContent AllCameras(Viewer viewer) =>
-        new WindowContent.Scratch("All Cameras", LayoutNode.Balanced(viewer.AllCameras.Take(16)));
+        new WindowContent.Scratch(NvrView.Shell.AllCameras.Name, LayoutNode.Balanced(viewer.OnlineCameras));
 
     /// <summary>Shows a layout, group, or arrangement in this window. A focused tile only loses its focus (nothing is torn down).</summary>
     public void Show(WindowContent content)
     {
         Stage.CancelFocus();
         State.Selected = null;
+        _allCamerasWatch = null;
         switch (content)
         {
             case WindowContent.Layout(string id) when _viewer.Layout(id) is { } l:
@@ -331,6 +335,10 @@ internal sealed class ViewerWindow
                 State.Content = content;
                 State.Name = name;
                 State.Tree = root;
+                if (name == NvrView.Shell.AllCameras.Name)
+                {
+                    _allCamerasWatch = new AllCamerasWatch([.. root.CameraList.OfType<CameraRef>()]);
+                }
                 break;
             default:
                 // A layout or group that no longer exists.
@@ -355,6 +363,7 @@ internal sealed class ViewerWindow
 
     private void OnEdited(LayoutNode tree)
     {
+        _allCamerasWatch?.MarkEdited();
         SyncLeases();
         if (State.Content is WindowContent.Layout(string id))
         {
@@ -401,9 +410,15 @@ internal sealed class ViewerWindow
 
     private void OnViewerChanged()
     {
-        // The first window fills itself once cameras are known.
-        if (State.Content is WindowContent.Scratch && State.Tree.Cameras.Count == 0 && State.Tree.LeafCount == 1 && !State.Editing
-            && _viewer.AllCameras.Any())
+        // An unedited All Cameras window follows devices connecting and channels
+        // going on and offline. Rebuilding keeps the cameras that stay (the
+        // leases are shared per camera, so their streams do not restart). Not
+        // while a tile is focused or the window is being edited.
+        if (State.Editing)
+        {
+            _allCamerasWatch?.MarkEdited();
+        }
+        if (_allCamerasWatch is { } watch && !Stage.IsFocused && watch.Refresh(_viewer.OnlineCameras))
         {
             Show(AllCameras(_viewer));
         }

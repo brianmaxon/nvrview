@@ -89,6 +89,7 @@ internal static class Program
         LeaseTests.Run();
         RevealTests.Run();
         StoreTests.Run();
+        AllCamerasTests.Run();
         return T.Summary();
     }
 }

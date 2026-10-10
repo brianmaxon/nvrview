@@ -34,6 +34,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     static let minSize = CGSize(width: 640, height: 400)
 
     private var held: [CameraRef: Int] = [:]
+    /// Set while this window shows an unedited All Cameras grid.
+    private var allCamerasWatch: AllCamerasWatch?
     private var token: UUID?
     private var timer: Timer?
     private let editBar: EditBar
@@ -145,6 +147,12 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             state.name = name
             state.tree = root
         }
+        // An All Cameras grid follows the devices until it is edited.
+        if case .scratch(AllCameras.name, _) = content {
+            allCamerasWatch = AllCamerasWatch(shown: state.tree.cameraList.compactMap(\.self))
+        } else {
+            allCamerasWatch = nil
+        }
         sidebar.current = content
         stage.reload()
         syncLeases()
@@ -153,9 +161,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         onChange()
     }
 
-    /// Every camera (up to 16) as an even grid, unsaved.
+    /// Every online camera of every connected device (up to the layout
+    /// limit) as an even grid, unsaved.
     static func allCameras(_ model: AppModel) -> WindowContent {
-        .scratch(name: "All Cameras", root: LayoutNode.balanced(Array(model.allCameras.prefix(16))))
+        .scratch(name: AllCameras.name, root: LayoutNode.balanced(model.onlineCameras))
     }
 
     /// The window's cameras, leased so each is streamed once however many
@@ -206,9 +215,17 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
                 updateTitle()
             }
         case .scratch:
-            // The first window fills itself once cameras are known.
-            if state.tree.cameras.isEmpty, state.tree.leafCount == 1, !model.allCameras.isEmpty, !state.editing {
-                show(Self.allCameras(model))
+            // An unedited All Cameras window follows devices connecting and
+            // channels going on and offline. Rebuilding keeps the cameras
+            // that stay (leases are shared per camera, so their streams do
+            // not restart). Not while a tile is focused: it retries on the
+            // next change.
+            if var watch = allCamerasWatch, !state.editing, !stage.isFocused {
+                if watch.refresh(to: model.onlineCameras) {
+                    show(Self.allCameras(model))  // makes a fresh watch
+                } else {
+                    allCamerasWatch = watch
+                }
             }
         case .group:
             break
@@ -219,6 +236,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     // MARK: StageDelegate
 
     func stage(_ stage: StageView, didEdit tree: LayoutNode) {
+        allCamerasWatch?.markEdited()
         syncLeases()
         switch state.content {
         case .layout(let id):
@@ -277,6 +295,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     @objc func toggleEditing(_ sender: Any?) {
         if stage.isFocused { stage.unfocus() }
         state.editing.toggle()
+        if state.editing { allCamerasWatch?.markEdited() }
         if state.editing, state.selected == nil { state.selected = state.tree.leaves.first?.path }
         stage.reload()
         editButton?.title = state.editing ? "Done" : "Edit Layout"

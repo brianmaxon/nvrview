@@ -297,8 +297,8 @@ internal sealed partial class SidebarView : UserControl
             {
                 Item(m, "Reconnect", () => _viewer.Reconnect(d));
                 Item(m, "New group from this device", () => _viewer.CreateGroup(d.DisplayName, listed.SelectMany(c => Viewer.CamerasOf(d, c))));
-                Item(m, "Show all cameras in new window", () => App.Instance.OpenWindow(new WindowContent.Scratch(d.DisplayName,
-                    LayoutNode.Balanced(listed.SelectMany(c => Viewer.CamerasOf(d, c)).Take(LayoutNode.MaxLeaves)))));
+                Item(m, "Show this device's cameras in new window", () => App.Instance.OpenWindow(new WindowContent.Scratch(d.DisplayName,
+                    LayoutNode.Balanced(Viewer.OnlineCamerasOf(d)))));
                 Item(m, "Settings…", () => _window.OpenSettings());
             });
             _rows.Children.Add(row);

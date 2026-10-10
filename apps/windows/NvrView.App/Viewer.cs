@@ -542,9 +542,18 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     public IEnumerable<ChannelInfo> ListedChannels(DeviceEntry d) =>
         ChannelFilter.Visible(d.Channels.Values.OrderBy(c => c.Channel), c => c.Connected, HideOfflineChannels);
 
-    /// <summary>Every camera of every device, in order (for "All Cameras").</summary>
+    /// <summary>Every camera of every device, in order (listed channels).</summary>
     public IEnumerable<CameraRef> AllCameras =>
         _devices.SelectMany(d => ListedChannels(d).SelectMany(c => CamerasOf(d, c)));
+
+    /// <summary>The cameras "All Cameras" shows: every online channel of every connected device, in sidebar order, up to the layout limit.</summary>
+    public List<CameraRef> OnlineCameras => NvrView.Shell.AllCameras.Select(_devices.Select(AsAllCameras));
+
+    /// <summary>The online cameras of one device, up to the layout limit.</summary>
+    public static List<CameraRef> OnlineCamerasOf(DeviceEntry d) => NvrView.Shell.AllCameras.Select([AsAllCameras(d)]);
+
+    private static AllCamerasDevice AsAllCameras(DeviceEntry d) =>
+        new(d.Key, d.State == "connected", [.. d.Channels.Values.OrderBy(c => c.Channel).Select(c => new AllCamerasChannel(c.Channel, c.Connected, c.Lenses))]);
 
     // ---- tiles (ITileBackend: the leases open and close them) ----
 

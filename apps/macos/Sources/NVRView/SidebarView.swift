@@ -211,13 +211,9 @@ struct SidebarView: View {
                     name: device.config.name,
                     cameras: model.listedChannels(device).flatMap { model.cameras(device: device.key, channel: $0) })
             }
-            Button("Show All Cameras in New Window") {
+            Button("Show This Device's Cameras in New Window") {
                 model.openWindow(
-                    .scratch(
-                        name: device.config.name,
-                        root: LayoutNode.balanced(
-                            Array(model.listedChannels(device).flatMap { model.cameras(device: device.key, channel: $0) }
-                                .prefix(LayoutNode.maxLeaves)))))
+                    .scratch(name: device.config.name, root: LayoutNode.balanced(model.onlineCameras(of: device))))
             }
         }
     }

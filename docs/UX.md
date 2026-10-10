@@ -20,11 +20,20 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   its cameras out as an even grid. Edits to that grid stay in the window
   until saved as a new layout, so a group is a quick way to see some cameras
   together and a starting point for a layout.
-- **All Cameras** is the unsaved even grid of every camera (up to 16) that a
-  window shows when it has nothing else to show: the first window before any
-  layout exists, a window whose layout or group was deleted, and a new
-  window opened with no other window active. A device's context menu opens
-  the same grid for that device's cameras.
+- **All Cameras** is the unsaved even grid of every camera (every lens of
+  each channel) of every online channel of every connected device, in
+  sidebar order, up to 64 (the most a layout can hold). A window shows it
+  when it has nothing else to show: the first window before any layout
+  exists, a window whose layout or group was deleted, and a new window
+  opened with no other window active. Channels known to be offline are left
+  out, and so are devices that are not connected yet (they are added when
+  they connect). While the window is unedited it follows the devices: when a
+  device connects or drops, or a channel goes online or offline, the grid is
+  rebuilt from the new list (only when the list actually changes; cameras
+  that stay keep their streams). Splitting, swapping, resizing, or entering
+  Edit Layout stops the following. With no online camera the window shows
+  its empty state. A device's context menu, "Show This Device's Cameras in
+  New Window", opens the same kind of grid for that device alone.
 
 ## Listening from any tile
 
