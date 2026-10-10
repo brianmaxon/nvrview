@@ -1,0 +1,27 @@
+[package]
+name = "viewer-core"
+version = "0.1.0"
+description = "The nvrview core behind the C interface: devices, tiles, per-tile pipelines and delivery threads, control events, and logging"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bc-protocol = { path = "../bc-protocol" }
+bc-session = { path = "../bc-session" }
+video-pipeline = { path = "../video-pipeline" }
+viewer-log = { path = "../viewer-log" }
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+mock-nvr = { path = "../../tools/mock-nvr" }
+# Tests parse every event with a real JSON parser; the core itself writes
+# its few small events by hand (see src/json.rs).
+serde_json = "1"
+tempfile = "3"
+viewer-log = { path = "../viewer-log" }
+
+[lints]
+workspace = true
