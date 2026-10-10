@@ -1,11 +1,18 @@
-// What the window shows, kept on the UI thread: the devices with their
-// connection state, and one tile per connected channel (sub stream in the
-// grid), with each tile's status, tier, listening state, and detections.
-// The render thread reads the tile list through an immutable snapshot
-// (Tiles) that is replaced, never changed, when tiles come and go.
+// The app's state, shared by every window and kept on the UI thread: the
+// devices with their connection state and channels, one core tile per camera
+// shown anywhere (leased by the windows' layouts, NvrView.Shell.TileLeases),
+// the stream tier each camera runs at (one TierPlanner for every window: the
+// highest ask wins), the layouts (stored by the core), the camera groups, who
+// is listening, the detections with their corner indicators and alerts.
+//
+// Each window has its own arrangement (ViewerWindow, StageView); its tiles
+// (StageTile) point at the shared CameraTile of their camera, so a camera in
+// several tiles and windows is streamed once. Cameras are named by the
+// device's stable key (the core's, nv_device_key), as layouts name them.
 
 using System.Diagnostics;
 using NvrView.Interop;
+using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 
@@ -35,26 +42,25 @@ internal sealed class DeviceEntry(DeviceConfig config, ulong id)
     public Dictionary<byte, ChannelInfo> Channels { get; } = [];
 
     public string DisplayName => Config.Name.Length > 0 ? Config.Name : DeviceName ?? "Device";
+
+    /// <summary>The name layouts, groups, indicators, and tiers give the device's cameras: the core's stable key once known, else the app's.</summary>
+    public string Key => Config.CoreKey ?? Config.Key;
 }
 
-/// <summary>One tile of the grid.</summary>
-internal sealed class StageTile(ulong id, DeviceEntry device, byte channel, int lens, VideoTile video)
+/// <summary>One core tile: a camera shown in one or more tiles of one or more windows.</summary>
+internal sealed class CameraTile(ulong id, DeviceEntry device, CameraRef camera, VideoTile video)
 {
     public ulong Id { get; } = id;
 
     public DeviceEntry Device { get; } = device;
 
-    public byte Channel { get; } = channel;
+    public CameraRef Camera { get; } = camera;
 
-    /// <summary>0, or 1 for the second lens of a multi-lens camera (shown through the mobile and extern tiers).</summary>
-    public int Lens { get; } = lens;
+    public byte Channel => (byte)Camera.Channel;
 
-    /// <summary>The camera this tile shows (device key, channel, lens): the key alerts, indicators, and tiers use.</summary>
-    public CameraRef Camera { get; } = new(device.Config.Key, channel, lens);
+    public int Lens => Camera.Lens;
 
     public VideoTile Video { get; } = video;
-
-    public string Name { get; set; } = lens > 0 ? $"Channel {channel + 1} · lens {lens + 1}" : $"Channel {channel + 1}";
 
     // UI thread.
     public string? Waiting { get; set; }
@@ -73,15 +79,6 @@ internal sealed class StageTile(ulong id, DeviceEntry device, byte channel, int 
 
     public long TierFailures { get; set; }
 
-    /// <summary>The tile's quality choice (docs/UX.md "Stream quality per tile"); a layout leaf stores it as its "quality" member.</summary>
-    public TileQuality Quality { get; set; } = TileQuality.Auto;
-
-    /// <summary>Whether the tile is focused (fills the stage); part of what it asks of its camera's stream.</summary>
-    public bool Focused { get; set; }
-
-    /// <summary>The zoom last reported to the tier planner (Auto switches to the main stream past 2x).</summary>
-    public float DemandZoom { get; set; } = 1;
-
     public long LastReceived { get; set; }
 
     public double ReceivedRate { get; set; }
@@ -90,6 +87,73 @@ internal sealed class StageTile(ulong id, DeviceEntry device, byte channel, int 
 
     /// <summary>The latest audio_stats event (JSON), for diagnostics.</summary>
     public string? AudioStats { get; set; }
+}
+
+/// <summary>
+/// One tile of one window: a leaf of its layout, showing a camera (whose
+/// shared core tile may be open or not yet) or nothing. Camera state reads
+/// through to the shared <see cref="CameraTile"/>; placement, zoom, quality,
+/// focus, and draw counters are this tile's own. It is also what the tier
+/// planner keys this tile's demand by.
+/// </summary>
+internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera, TileQuality quality)
+{
+    public NodePath Path { get; } = path;
+
+    /// <summary>The camera, or null for an empty tile.</summary>
+    public CameraRef? CameraOrNone { get; } = camera;
+
+    /// <summary>The camera (an empty tile's is a placeholder no device has).</summary>
+    public CameraRef Camera => CameraOrNone ?? new CameraRef("", -1);
+
+    public bool IsEmpty => CameraOrNone is null;
+
+    private CameraTile? _shared;
+
+    /// <summary>The shared core tile, while it is open (set on the UI thread when the leases open or close it; read by the render thread).</summary>
+    public CameraTile? Shared
+    {
+        get => Volatile.Read(ref _shared);
+        set => Volatile.Write(ref _shared, value);
+    }
+
+    /// <summary>The core tile's ID, 0 while none is open.</summary>
+    public ulong Id => Shared?.Id ?? 0;
+
+    public DeviceEntry? Device => CameraOrNone is { } c ? viewer.FindDevice(c.Device) : null;
+
+    public byte Channel => (byte)Math.Max(Camera.Channel, 0);
+
+    public int Lens => Camera.Lens;
+
+    public VideoTile? Video => Shared?.Video;
+
+    public string Name => CameraOrNone is { } c ? viewer.CameraName(c) : "Empty tile";
+
+    public string? Waiting => Shared?.Waiting;
+
+    public string? Error => Shared?.Error;
+
+    public bool Audible => CameraOrNone is { } c && viewer.IsAudible(c);
+
+    public string ShownTier => Shared?.ShownTier ?? "";
+
+    public StreamTier RequestedTier => Shared?.RequestedTier ?? StreamTier.Sub;
+
+    public StreamTier OpenedTier => Shared?.OpenedTier ?? StreamTier.Sub;
+
+    public string? AudioStats => Shared?.AudioStats;
+
+    public double ReceivedRate => Shared?.ReceivedRate ?? 0;
+
+    /// <summary>The tile's quality choice (docs/UX.md "Stream quality per tile"), kept in the layout leaf's "quality" member.</summary>
+    public TileQuality Quality { get; set; } = quality;
+
+    /// <summary>Whether the tile is focused (fills the stage); part of what it asks of its camera's stream.</summary>
+    public bool Focused { get; set; }
+
+    /// <summary>The zoom last reported to the tier planner (Auto switches to the main stream past 2x).</summary>
+    public float DemandZoom { get; set; } = 1;
 
     // Digital zoom: written by the UI thread, read by the render thread.
     // Zoom 1..8; the center in visible-picture coordinates 0..1, so it is
@@ -122,34 +186,44 @@ internal sealed class SwitchableClock : IViewerClock
 }
 
 /// <summary>The viewer's state (see the file comment). UI thread only, except Tiles.</summary>
-internal sealed class Viewer
+internal sealed class Viewer : ITileBackend<CameraTile>
 {
-    /// <summary>The most tiles one window shows (W2 has no layouts yet).</summary>
-    public const int MaxTiles = 36;
+    /// <summary>The most tiles one window shows (a layout's limit).</summary>
+    public const int MaxTiles = LayoutNode.MaxLeaves;
 
     private readonly CoreHost _host;
     private readonly ICredentialStore _credentials;
     private readonly DeviceStore _store;
+    private readonly GroupStore _groupStore;
     private readonly List<DeviceEntry> _devices = [];
-    private readonly Dictionary<ulong, StageTile> _tilesById = [];
-    private StageTile[] _tiles = [];
+    private readonly Dictionary<ulong, CameraTile> _tilesById = [];
+    private readonly HashSet<CameraRef> _audible = [];
+    private CameraTile[] _tiles = [];
     private int _alertsLogged;
 
-    public Viewer(CoreHost host, ICredentialStore credentials, DeviceStore store, ViewSettings? settings = null)
+    public Viewer(CoreHost host, ICredentialStore credentials, DeviceStore store, ViewSettings? settings = null, GroupStore? groups = null)
     {
         _host = host;
         _credentials = credentials;
         _store = store;
+        _groupStore = groups ?? new GroupStore(null);
         Settings = settings ?? new ViewSettings(null);
+        Leases = new TileLeases<CameraTile>(this);
+        Groups = _groupStore.Load();
         host.SetSink(Apply);
         host.Tiers.HasMiddleTier = HasMiddleTier;
+        Settings.Changed += () => Changed?.Invoke();
+        ReloadLayouts();
     }
 
-    /// <summary>View preferences (the indicator corner).</summary>
+    /// <summary>View preferences (the indicator corner, hiding offline channels).</summary>
     public ViewSettings Settings { get; }
 
     /// <summary>The tier planner every window shares (quality, focus, zoom, second lenses).</summary>
     public TierPlanner Planner => _host.Tiers;
+
+    /// <summary>One core tile per camera any window shows.</summary>
+    public TileLeases<CameraTile> Leases { get; }
 
     private readonly SwitchableClock _clock = new();
 
@@ -199,13 +273,12 @@ internal sealed class Viewer
 
     /// <summary>Whether Balanced is offered: a single-lens channel whose tiers list extern.</summary>
     private bool HasMiddleTier(CameraRef camera) =>
-        camera.Lens == 0 && _devices.FirstOrDefault(d => d.Config.Key == camera.Device) is { } d &&
-        d.Channels.TryGetValue((byte)camera.Channel, out ChannelInfo? c) && c.Lenses < 2 && c.Tiers.Contains("extern");
+        camera.Lens == 0 && ChannelOf(camera) is { } c && c.Lenses < 2 && c.Tiers.Contains("extern");
 
-    public bool OffersBalanced(StageTile tile) => Planner.OffersBalanced(tile.Camera);
+    public bool OffersBalanced(StageTile tile) => !tile.IsEmpty && Planner.OffersBalanced(tile.Camera);
 
-    /// <summary>The tiles in grid order; an immutable snapshot, any thread.</summary>
-    public StageTile[] Tiles => Volatile.Read(ref _tiles);
+    /// <summary>The open core tiles; an immutable snapshot, any thread.</summary>
+    public CameraTile[] Tiles => Volatile.Read(ref _tiles);
 
     public IReadOnlyList<DeviceEntry> Devices => _devices;
 
@@ -213,10 +286,16 @@ internal sealed class Viewer
 
     public CoreHost Host => _host;
 
-    /// <summary>Raised on the UI thread when tiles, statuses, or detections change.</summary>
+    /// <summary>Raised on the UI thread when devices, tiles, statuses, or detections change.</summary>
     public event Action? Changed;
 
-    /// <summary>Every event seen, for the self-test (type, tile, state, generation).</summary>
+    /// <summary>Raised when the stored layouts changed (here or in another window or app).</summary>
+    public event Action? LayoutsChanged;
+
+    /// <summary>Raised when the groups changed.</summary>
+    public event Action? GroupsChanged;
+
+    /// <summary>Every tile_tier event seen, for the self-test (type, tile, state, generation).</summary>
     public List<(string Type, ulong Tile, string? State, long Generation)> TierEvents { get; } = [];
 
     public List<string> Problems { get; } = [];
@@ -236,6 +315,15 @@ internal sealed class Viewer
     public double? TierSwitchHeldMs { get; private set; }
 
     public ICredentialStore Credentials => _credentials;
+
+    /// <summary>The sidebar lists only connected channels (a view setting, remembered).</summary>
+    public bool HideOfflineChannels
+    {
+        get => Settings.HideOfflineChannels;
+        set => Settings.HideOfflineChannels = value;
+    }
+
+    // ---- devices ----
 
     /// <summary>Adds every device saved in settings, with its password from the credential store.</summary>
     public void LoadSavedDevices()
@@ -280,15 +368,68 @@ internal sealed class Viewer
         {
             _devices.Add(entry);
         }
+        if (id != 0)
+        {
+            // Layouts and groups name the device by the core's stable key.
+            try
+            {
+                string key = Core.DeviceKey(id);
+                if (key.Length > 0 && key != entry.Key)
+                {
+                    AdoptCoreKey(entry, key);
+                }
+            }
+            catch (NvException e)
+            {
+                AppLog.Warn($"device key for {config.Key}: {e.Status}");
+            }
+        }
+        Changed?.Invoke();
         return entry;
+    }
+
+    /// <summary>
+    /// The core names the device differently from what layouts and groups
+    /// used so far (a first run with core keys, or a new address): rename its
+    /// cameras everywhere the app can.
+    /// </summary>
+    private void AdoptCoreKey(DeviceEntry device, string key)
+    {
+        string old = device.Key;
+        Leases.CloseTiles(old);
+        device.Config.CoreKey = key;
+        _store.Save(_devices.Select(x => x.Config));
+        if (Groups.Any(g => g.Cameras.Any(c => c.Device == old)))
+        {
+            SetGroups([.. Groups.Select(g => g with { Cameras = [.. g.Cameras.Select(c => c.Device == old ? c.Rekeyed(key) : c)] })]);
+        }
+        foreach (CameraRef c in _audible.Where(c => c.Device == old).ToArray())
+        {
+            _audible.Remove(c);
+            _audible.Add(c.Rekeyed(key));
+        }
+        foreach (SavedLayout l in Layouts.Where(l => l.Root.Cameras.Any(c => c.Device == old)).ToArray())
+        {
+            SaveLayout(l with { Root = l.Root.Rekeying(old, key) });
+        }
     }
 
     /// <summary>Removes a device from the core and closes its tiles (not from settings).</summary>
     public void Disconnect(DeviceEntry device)
     {
-        foreach (StageTile t in _tiles.Where(t => t.Device == device).ToArray())
+        // Only this entry's tiles: another entry may name the same device
+        // (the same address added twice gets the same core key).
+        bool twin = _devices.Any(o => o != device && o.Key == device.Key);
+        if (twin)
         {
-            CloseTile(t);
+            foreach (CameraTile t in _tiles.Where(t => t.Device == device).ToArray())
+            {
+                Leases.TileEnded(t);
+            }
+        }
+        else
+        {
+            Leases.CloseTiles(device.Key);
         }
         if (device.Id != 0)
         {
@@ -301,7 +442,28 @@ internal sealed class Viewer
             }
         }
         _devices.Remove(device);
+        if (twin)
+        {
+            Leases.Reopen(device.Key);
+        }
+        else
+        {
+            Detections.Clear(device.Key);
+            Alerts.DeviceLost(device.Key);
+            UpdateBoard();
+        }
         Changed?.Invoke();
+    }
+
+    /// <summary>Removes the device from the core and adds it again with its current password.</summary>
+    public void Reconnect(DeviceEntry device)
+    {
+        if (_credentials.Read(device.Config.Key) is not { } password)
+        {
+            return;
+        }
+        Disconnect(device);
+        Connect(device.Config, password);
     }
 
     /// <summary>Saves, connects, or reconnects a device from the Settings dialog.</summary>
@@ -315,6 +477,8 @@ internal sealed class Viewer
         string? password = newPassword is { Length: > 0 } ? newPassword : _credentials.Read(config.Key);
         if (old is not null)
         {
+            // Kept until the core says otherwise (a new address gets a new key).
+            config.CoreKey ??= old.Config.CoreKey;
             Disconnect(old);
         }
         if (password is null)
@@ -329,17 +493,427 @@ internal sealed class Viewer
         Changed?.Invoke();
     }
 
-    /// <summary>Removes a device from the core, settings, and the credential store.</summary>
+    /// <summary>Removes a device from the core, settings, the credential store, and every group.</summary>
     public void ForgetDevice(string key)
     {
         if (_devices.FirstOrDefault(d => d.Config.Key == key) is { } device)
         {
+            string cameraKey = device.Key;
             Disconnect(device);
+            if (Groups.Any(g => g.Cameras.Any(c => c.Device == cameraKey)))
+            {
+                SetGroups([.. Groups.Select(g => g with { Cameras = [.. g.Cameras.Where(c => c.Device != cameraKey)] })]);
+            }
+            _audible.RemoveWhere(c => c.Device == cameraKey);
         }
         _credentials.Delete(key);
         _store.Save(_devices.Select(d => d.Config));
         Changed?.Invoke();
     }
+
+    /// <summary>A device by camera key or configuration key.</summary>
+    public DeviceEntry? FindDevice(string key) => _devices.FirstOrDefault(d => d.Key == key || d.Config.Key == key);
+
+    private DeviceEntry? FindDevice(ulong id) => id == 0 ? null : _devices.FirstOrDefault(d => d.Id == id);
+
+    // ---- cameras ----
+
+    public ChannelInfo? ChannelOf(CameraRef c) =>
+        FindDevice(c.Device) is { } d && c.Channel is >= 0 and <= 255 ? d.Channels.GetValueOrDefault((byte)c.Channel) : null;
+
+    /// <summary>Generic lens words: "Lens 1", "Lens 2".</summary>
+    public static string LensName(int lens) => $"Lens {lens + 1}";
+
+    /// <summary>The channel's name without the lens.</summary>
+    public string ChannelName(CameraRef c) => ChannelOf(c)?.Name is { Length: > 0 } n ? n : $"Channel {c.Channel + 1}";
+
+    /// <summary>The channel's name; for a multi-lens camera with the lens ("Channel 3 · Lens 2").</summary>
+    public string CameraName(CameraRef c)
+    {
+        string name = ChannelName(c);
+        return (ChannelOf(c)?.Lenses ?? 0) >= 2 || c.Lens > 0 ? $"{name} · {LensName(c.Lens)}" : name;
+    }
+
+    /// <summary>The cameras of a channel: one per lens (two for a multi-lens camera).</summary>
+    public static IEnumerable<CameraRef> CamerasOf(DeviceEntry d, ChannelInfo c) =>
+        Enumerable.Range(0, Math.Clamp(c.Lenses, 1, CameraRef.MaxLens + 1)).Select(lens => new CameraRef(d.Key, c.Channel, lens));
+
+    /// <summary>The channels the sidebar lists for a device.</summary>
+    public IEnumerable<ChannelInfo> ListedChannels(DeviceEntry d) =>
+        ChannelFilter.Visible(d.Channels.Values.OrderBy(c => c.Channel), c => c.Connected, HideOfflineChannels);
+
+    /// <summary>Every camera of every device, in order (for "All Cameras").</summary>
+    public IEnumerable<CameraRef> AllCameras =>
+        _devices.SelectMany(d => ListedChannels(d).SelectMany(c => CamerasOf(d, c)));
+
+    // ---- tiles (ITileBackend: the leases open and close them) ----
+
+    CameraTile? ITileBackend<CameraTile>.Open(CameraRef camera, bool focused)
+    {
+        if (FindDevice(camera.Device) is not { Id: not 0 } device || device.State != "connected"
+            || ChannelOf(camera) is not { Connected: true } || camera.Channel is < 0 or > 255)
+        {
+            return null;
+        }
+        // Open on the tier the camera should show now: the low one in a grid
+        // (sub, or a second lens's mobile), never the high one first.
+        StreamTier tier = Planner.WantedTier(camera);
+        try
+        {
+            (ulong id, VideoTile video) = _host.OpenTile(device.Id, (byte)camera.Channel, CoreHost.ToCore(tier));
+            var tile = new CameraTile(id, device, camera, video) { RequestedTier = tier, OpenedTier = tier, ShownTier = TierName(tier) };
+            _tilesById[id] = tile;
+            Volatile.Write(ref _tiles, [.. _tiles, tile]);
+            if (_audible.Contains(camera))
+            {
+                Core.SetTileAudio(id, true, 1);
+                tile.Audible = true;
+            }
+            return tile;
+        }
+        catch (NvException ex)
+        {
+            AppLog.Warn($"opening channel {camera.Channel} failed: {ex.Status}");
+            return null;
+        }
+    }
+
+    void ITileBackend<CameraTile>.Close(CameraRef camera, CameraTile tile)
+    {
+        Volatile.Write(ref _tiles, [.. _tiles.Where(t => t != tile)]);
+        _tilesById.Remove(tile.Id);
+        _host.CloseTile(tile.Id);
+    }
+
+    // Focus reaches the planner through each tile's demand (SetFocused).
+    void ITileBackend<CameraTile>.FocusChanged(CameraRef camera, CameraTile tile, bool focused) => ApplyTier(camera);
+
+    private static string TierName(StreamTier tier) => tier switch
+    {
+        StreamTier.Main => "main",
+        StreamTier.Mobile => "mobile",
+        StreamTier.Extern => "extern",
+        _ => "sub",
+    };
+
+    public CameraTile? FindTile(ulong id) => _tilesById.GetValueOrDefault(id);
+
+    // ---- tiers (one planner for every window) ----
+
+    /// <summary>
+    /// A tile's quality choice (Auto, Clear, Fluent, Balanced): the tile asks its camera for the
+    /// matching stream; the highest ask across every tile of the camera wins. The window keeps
+    /// the choice in the layout leaf (StageView.SetQuality).
+    /// </summary>
+    public void SetQuality(StageTile tile, TileQuality quality)
+    {
+        if (tile.Quality == quality)
+        {
+            return;
+        }
+        tile.Quality = quality;
+        UpdateDemand(tile);
+        Changed?.Invoke();
+    }
+
+    /// <summary>A tile fills the stage (or stops): Auto asks for the main stream while it does.</summary>
+    public void SetFocused(StageTile tile, bool focused)
+    {
+        if (tile.Focused == focused)
+        {
+            return;
+        }
+        tile.Focused = focused;
+        UpdateDemand(tile);
+    }
+
+    /// <summary>States what the tile asks of its camera (quality, focus, zoom) and carries out any tier switch that follows.</summary>
+    public void UpdateDemand(StageTile tile)
+    {
+        tile.DemandZoom = tile.Zoom;
+        if (tile.IsEmpty)
+        {
+            WithdrawDemand(tile);
+            return;
+        }
+        foreach (CameraRef camera in Planner.SetDemand(tile, tile.Camera, tile.Quality, tile.Focused, tile.Zoom))
+        {
+            ApplyTier(camera);
+        }
+    }
+
+    /// <summary>The tile went away: everything it asked for is withdrawn.</summary>
+    public void WithdrawDemand(StageTile tile)
+    {
+        if (Planner.ClearDemands(tile) is { } camera)
+        {
+            ApplyTier(camera);
+        }
+    }
+
+    /// <summary>Switches a camera's open tile to the tier it should show now (nothing when it already asks for it).</summary>
+    private void ApplyTier(CameraRef camera)
+    {
+        if (Leases.Tile(camera) is not { } tile)
+        {
+            return;
+        }
+        StreamTier wanted = Planner.WantedTier(camera);
+        if (tile.RequestedTier == wanted)
+        {
+            return;
+        }
+        try
+        {
+            Core.SetTier(tile.Id, CoreHost.ToCore(wanted));
+            tile.RequestedTier = wanted;
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"tier switch on tile {tile.Id} failed: {e.Status}");
+        }
+    }
+
+    // ---- listening ----
+
+    public bool IsAudible(CameraRef camera) => _audible.Contains(camera);
+
+    /// <summary>Makes a camera audible or silent (cameras start silent); unmuting only routes audio the core already has.</summary>
+    public void SetListening(CameraRef camera, bool audible)
+    {
+        if (audible ? !_audible.Add(camera) : !_audible.Remove(camera))
+        {
+            return;
+        }
+        if (Leases.Tile(camera) is { } tile)
+        {
+            try
+            {
+                Core.SetTileAudio(tile.Id, audible, 1);
+                tile.Audible = audible;
+            }
+            catch (NvException e)
+            {
+                AppLog.Warn($"listening on tile {tile.Id} failed: {e.Status}");
+            }
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>A speaker click: listen to this camera alone, or also to it when <paramref name="additive"/> (Ctrl); a second click mutes it.</summary>
+    public void ToggleListening(CameraRef camera, bool additive)
+    {
+        if (_audible.Contains(camera))
+        {
+            SetListening(camera, false);
+            return;
+        }
+        if (!additive)
+        {
+            foreach (CameraRef other in _audible.ToArray())
+            {
+                SetListening(other, false);
+            }
+        }
+        SetListening(camera, true);
+    }
+
+    // ---- detections, indicators, alerts ----
+
+    private void ApplyDetection(CoreEvent e)
+    {
+        if (FindDevice(e.Device) is not { } device || e.Channel < 0)
+        {
+            return;
+        }
+        string kind = e.Type == "motion" ? "motion" : e.Kind ?? e.Type;
+        var detection = new DetectionEvent(
+            device.Key, e.Channel, kind, e.State == "start", e.Source ?? DetectionSource.Device, e.AtNs, e.Lens, e.Type == "alarm");
+        Detections.Apply(detection);
+        if (Alerts.Apply(detection, HeardAt(e.AtNs)))
+        {
+            AlertChanges++;
+            LogAlerts();
+        }
+        UpdateBoard();
+    }
+
+    /// <summary>When a detection was first heard, in local time (a sound's start arrives seconds after it).</summary>
+    private DateTime HeardAt(long atNs)
+    {
+        DateTime now = WallClock();
+        long ago = atNs > 0 ? CoreNowNs() - atNs : 0;
+        return ago > 0 && ago < 3_600_000_000_000 ? now - TimeSpan.FromTicks(ago / 100) : now;
+    }
+
+    private void LogAlerts()
+    {
+        for (; _alertsLogged < Alerts.Log.Count; _alertsLogged++)
+        {
+            AppLog.Info(Alerts.Log[_alertsLogged].Text);
+        }
+    }
+
+    private void UpdateBoard()
+    {
+        if (Board.Update(Detections, Clock.Now))
+        {
+            IndicatorsChanged?.Invoke();
+        }
+    }
+
+    /// <summary>The user dismissed a camera's alert: gone for every tile of that camera.</summary>
+    public void DismissAlert(CameraRef camera)
+    {
+        if (Alerts.Dismiss(camera, WallClock()) is not null)
+        {
+            AlertChanges++;
+            LogAlerts();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The slow tick (a few times a second, never per frame): ends held indicators. Each window reports its tiles' zoom changes (StageView.Tick).</summary>
+    public void Tick() => UpdateBoard();
+
+    // ---- layouts (stored by the core) ----
+
+    public List<SavedLayout> Layouts { get; private set; } = [];
+
+    public long LayoutsRevision { get; private set; }
+
+    public SavedLayout? Layout(string id) => Layouts.FirstOrDefault(l => l.Id == id);
+
+    /// <summary>A message for the user about the last layout operation, if it failed.</summary>
+    public string? Notice { get; set; }
+
+    private void ReloadLayouts()
+    {
+        try
+        {
+            Layouts = SavedLayout.List(Core.LayoutsJson(), out long revision);
+            LayoutsRevision = revision;
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"reading the layouts failed: {e.Status}");
+        }
+        LayoutsChanged?.Invoke();
+    }
+
+    /// <summary>Stores a layout (insert or replace); false (with a notice) when the core refuses it.</summary>
+    public bool SaveLayout(SavedLayout layout)
+    {
+        try
+        {
+            Core.PutLayout(layout.ToJson());
+        }
+        catch (NvException e)
+        {
+            Notice = e.Status == NvStatus.Limit ? "Too many layouts; delete some first." : $"The layout could not be saved ({e.Status}).";
+            AppLog.Warn($"storing layout {layout.Id} failed: {e.Status}");
+            Changed?.Invoke();
+            return false;
+        }
+        ReloadLayouts();
+        return true;
+    }
+
+    /// <summary>A new layout from a tree; its id, or null.</summary>
+    public string? CreateLayout(string name, LayoutNode root)
+    {
+        var l = new SavedLayout(SavedLayout.NewId(), name, root);
+        return SaveLayout(l) ? l.Id : null;
+    }
+
+    public void RenameLayout(string id, string name)
+    {
+        if (Layout(id) is { } l && name.Length > 0 && name != l.Name)
+        {
+            SaveLayout(l with { Name = name });
+        }
+    }
+
+    public string? DuplicateLayout(string id) =>
+        Layout(id) is { } l ? CreateLayout(UniqueLayoutName(l.Name), l.Root) : null;
+
+    public void DeleteLayout(string id)
+    {
+        try
+        {
+            Core.DeleteLayout(id);
+        }
+        catch (NvException e) when (e.Status == NvStatus.UnknownId)
+        {
+        }
+        ReloadLayouts();
+    }
+
+    public string UniqueLayoutName(string name)
+    {
+        var names = Layouts.Select(l => l.Name).ToHashSet();
+        if (!names.Contains(name))
+        {
+            return name;
+        }
+        int n = 2;
+        while (names.Contains($"{name} {n}"))
+        {
+            n++;
+        }
+        return $"{name} {n}";
+    }
+
+    // ---- groups ----
+
+    public List<CameraGroup> Groups { get; private set; }
+
+    public CameraGroup? Group(string id) => Groups.FirstOrDefault(g => g.Id == id);
+
+    private void SetGroups(List<CameraGroup> groups)
+    {
+        Groups = groups;
+        try
+        {
+            _groupStore.Save(groups);
+        }
+        catch (IOException e)
+        {
+            AppLog.Warn($"saving the groups failed: {e.Message}");
+        }
+        GroupsChanged?.Invoke();
+        Changed?.Invoke();
+    }
+
+    public string CreateGroup(string name, IEnumerable<CameraRef> cameras)
+    {
+        var g = new CameraGroup(CameraGroup.NewId(), name, [.. cameras.Distinct()]);
+        SetGroups([.. Groups, g]);
+        return g.Id;
+    }
+
+    public void RenameGroup(string id, string name)
+    {
+        if (name.Length > 0)
+        {
+            SetGroups([.. Groups.Select(g => g.Id == id ? g with { Name = name } : g)]);
+        }
+    }
+
+    public void DeleteGroup(string id) => SetGroups([.. Groups.Where(g => g.Id != id)]);
+
+    public void AddToGroup(string id, CameraRef camera)
+    {
+        if (Group(id) is { } g && !g.Cameras.Contains(camera))
+        {
+            SetGroups([.. Groups.Select(x => x.Id == id ? x with { Cameras = [.. x.Cameras, camera] } : x)]);
+        }
+    }
+
+    public void RemoveFromGroup(string id, CameraRef camera) =>
+        SetGroups([.. Groups.Select(x => x.Id == id ? x with { Cameras = [.. x.Cameras.Where(c => c != camera)] } : x)]);
+
+    // ---- events ----
 
     /// <summary>Applies one core event (UI thread).</summary>
     public void Apply(CoreEvent e)
@@ -349,6 +923,7 @@ internal sealed class Viewer
             case "device_state":
                 if (FindDevice(e.Device) is { } d)
                 {
+                    string before = d.State;
                     d.State = e.State ?? d.State;
                     d.Attempt = e.Attempt;
                     d.LoginStatus = e.Status;
@@ -356,13 +931,19 @@ internal sealed class Viewer
                     if (d.State != "connected")
                     {
                         // A lost session says nothing about what is still going on.
-                        Detections.Clear(d.Config.Key);
-                        Alerts.DeviceLost(d.Config.Key);
+                        Detections.Clear(d.Key);
+                        Alerts.DeviceLost(d.Key);
                         UpdateBoard();
                     }
                     if (e.State == "login_failed")
                     {
                         AppLog.Warn($"device {d.Config.Key}: login failed (status {e.Status})");
+                        // Terminal: the tiles end; new credentials in Settings add it again.
+                        Leases.CloseTiles(d.Key);
+                    }
+                    else if (d.State == "connected" && before != "connected")
+                    {
+                        Leases.Reopen(d.Key);
                     }
                 }
                 break;
@@ -371,10 +952,9 @@ internal sealed class Viewer
                 {
                     info.DeviceName = e.Name;
                     info.Model = e.Model;
-                    if (e.Key is { } key && info.Config.CoreKey != key)
+                    if (e.Key is { Length: > 0 } key && info.Key != key)
                     {
-                        info.Config.CoreKey = key;
-                        _store.Save(_devices.Select(x => x.Config));
+                        AdoptCoreKey(info, key);
                     }
                 }
                 break;
@@ -383,20 +963,19 @@ internal sealed class Viewer
                 {
                     foreach (ChannelInfo c in channels)
                     {
-                        if (dev.Channels.TryGetValue(c.Channel, out ChannelInfo? before) && c.Name is null)
+                        if (dev.Channels.TryGetValue(c.Channel, out ChannelInfo? before))
                         {
-                            c.Name = before.Name;
+                            // Names, detection kinds, and lenses may come in a later list than the slots.
+                            c.Name ??= before.Name;
+                            c.Detects ??= before.Detects;
+                            if (c.Lenses == 0)
+                            {
+                                c.Lenses = before.Lenses;
+                            }
                         }
                         dev.Channels[c.Channel] = c;
                     }
-                    OpenTilesFor(dev);
-                    foreach (StageTile t in _tiles.Where(t => t.Device == dev))
-                    {
-                        if (dev.Channels.TryGetValue(t.Channel, out ChannelInfo? ci) && ci.Name is { Length: > 0 } n)
-                        {
-                            t.Name = n;
-                        }
-                    }
+                    Leases.Reopen(dev.Key);
                 }
                 break;
             case "tile_waiting":
@@ -416,7 +995,7 @@ internal sealed class Viewer
                     {
                         // The device refuses this lens's mobile stream: extern for the rest of the run.
                         AppLog.Info($"second lens of channel {failed.Channel + 1}: mobile refused, reopening on extern");
-                        ReopenTile(failed);
+                        Leases.Reopen(failed.Camera);
                         break;
                     }
                     failed.Waiting = null;
@@ -470,7 +1049,10 @@ internal sealed class Viewer
             case "tile_closed":
                 if (e.Reason != "closed" && FindTile(e.Tile) is { } closed)
                 {
-                    closed.Error = $"Closed ({e.Reason})";
+                    // The core ended it on its own: the lease stays, and the
+                    // next channel list (or reconnect) opens it again.
+                    AppLog.Info($"tile {e.Tile} closed by the core ({e.Reason})");
+                    Leases.TileEnded(closed);
                 }
                 break;
             case "detection":
@@ -479,6 +1061,12 @@ internal sealed class Viewer
                 DetectionEvents++;
                 ApplyDetection(e);
                 break;
+            case "layouts_changed":
+                if (e.Revision != LayoutsRevision)
+                {
+                    ReloadLayouts();
+                }
+                return;
             case "timing":
                 if (e.What is { } what)
                 {
@@ -496,321 +1084,10 @@ internal sealed class Viewer
         Changed?.Invoke();
     }
 
-    private void ApplyDetection(CoreEvent e)
-    {
-        DeviceEntry? device = FindDevice(e.Device);
-        if (device is null || e.Channel < 0)
-        {
-            return;
-        }
-        string kind = e.Type == "motion" ? "motion" : e.Kind ?? e.Type;
-        var detection = new DetectionEvent(
-            device.Config.Key, e.Channel, kind, e.State == "start", e.Source ?? DetectionSource.Device, e.AtNs, e.Lens, e.Type == "alarm");
-        Detections.Apply(detection);
-        if (Alerts.Apply(detection, HeardAt(e.AtNs)))
-        {
-            AlertChanges++;
-            LogAlerts();
-        }
-        UpdateBoard();
-    }
-
-    /// <summary>When a detection was first heard, in local time (a sound's start arrives seconds after it).</summary>
-    private DateTime HeardAt(long atNs)
-    {
-        DateTime now = WallClock();
-        long ago = atNs > 0 ? CoreNowNs() - atNs : 0;
-        return ago > 0 && ago < 3_600_000_000_000 ? now - TimeSpan.FromTicks(ago / 100) : now;
-    }
-
-    private void LogAlerts()
-    {
-        for (; _alertsLogged < Alerts.Log.Count; _alertsLogged++)
-        {
-            AppLog.Info(Alerts.Log[_alertsLogged].Text);
-        }
-    }
-
-    private void UpdateBoard()
-    {
-        if (Board.Update(Detections, Clock.Now))
-        {
-            IndicatorsChanged?.Invoke();
-        }
-    }
-
-    /// <summary>The user dismissed a camera's alert: gone for every tile of that camera.</summary>
-    public void DismissAlert(CameraRef camera)
-    {
-        if (Alerts.Dismiss(camera, WallClock()) is not null)
-        {
-            AlertChanges++;
-            LogAlerts();
-            Changed?.Invoke();
-        }
-    }
-
-    /// <summary>
-    /// The slow tick (a few times a second, never per frame): ends held indicators, and reports
-    /// zoom changes to the tier planner (Auto switches to the main stream past 2x).
-    /// </summary>
-    public void Tick()
-    {
-        UpdateBoard();
-        foreach (StageTile t in _tiles)
-        {
-            if (t.Zoom != t.DemandZoom)
-            {
-                UpdateDemand(t);
-            }
-        }
-    }
-
-    private void OpenTilesFor(DeviceEntry device)
-    {
-        bool added = false;
-        foreach (ChannelInfo c in device.Channels.Values.OrderBy(c => c.Channel))
-        {
-            if (!c.Connected || _tiles.Any(t => t.Device == device && t.Channel == c.Channel && t.Lens == 0))
-            {
-                continue;
-            }
-            if (_tiles.Length >= MaxTiles)
-            {
-                AppLog.Limited("max-tiles", 60, $"more than {MaxTiles} channels; the rest are not shown");
-                break;
-            }
-            if (CreateTile(device, c.Channel, 0, c.Name) is not null)
-            {
-                added = true;
-            }
-        }
-        if (added)
-        {
-            Changed?.Invoke();
-        }
-    }
-
-    /// <summary>
-    /// Opens a tile for a camera on the tier it should show now (the low one in a grid: sub, or a
-    /// second lens's mobile; never the high one first) and adds it to the grid order. Null when
-    /// the core refuses. The caller raises <see cref="Changed"/> (or use <see cref="OpenCameraTile"/>).
-    /// </summary>
-    private StageTile? CreateTile(DeviceEntry device, byte channel, int lens, string? name)
-    {
-        var camera = new CameraRef(device.Config.Key, channel, lens);
-        StreamTier tier = Planner.WantedTier(camera);
-        try
-        {
-            (ulong id, VideoTile video) = _host.OpenTile(device.Id, channel, CoreHost.ToCore(tier));
-            var tile = new StageTile(id, device, channel, lens, video) { RequestedTier = tier, OpenedTier = tier, ShownTier = TierName(tier) };
-            if (name is { Length: > 0 } n)
-            {
-                tile.Name = lens > 0 ? $"{n} · lens {lens + 1}" : n;
-            }
-            _tilesById[id] = tile;
-            // Grid order: device by device (in the order added), channel by channel, lens by lens.
-            StageTile[] next = [.. _tiles, tile];
-            Array.Sort(next, CompareGridOrder);
-            Volatile.Write(ref _tiles, next);
-            UpdateDemand(tile);
-            return tile;
-        }
-        catch (NvException ex)
-        {
-            AppLog.Warn($"opening channel {channel} failed: {ex.Status}");
-            return null;
-        }
-    }
-
-    private int CompareGridOrder(StageTile a, StageTile b)
-    {
-        int da = _devices.IndexOf(a.Device), db = _devices.IndexOf(b.Device);
-        if (da != db)
-        {
-            return da.CompareTo(db);
-        }
-        return a.Channel != b.Channel ? a.Channel.CompareTo(b.Channel) : a.Lens.CompareTo(b.Lens);
-    }
-
-    /// <summary>Opens a tile for one lens of a channel (the second lens of a multi-lens camera is lens 1).</summary>
-    public StageTile? OpenCameraTile(DeviceEntry device, byte channel, int lens)
-    {
-        StageTile? tile = CreateTile(device, channel, lens, device.Channels.GetValueOrDefault(channel)?.Name);
-        if (tile is not null)
-        {
-            Changed?.Invoke();
-        }
-        return tile;
-    }
-
-    /// <summary>Closes a tile and opens its camera again on the tier it should use now, keeping its choices.</summary>
-    private void ReopenTile(StageTile old)
-    {
-        _host.CloseTile(old.Id);
-        _tilesById.Remove(old.Id);
-        Planner.ClearDemands(old);
-        StageTile[] without = [.. _tiles.Where(t => t != old)];
-        Volatile.Write(ref _tiles, without);
-        StageTile? neu = CreateTile(old.Device, old.Channel, old.Lens, null);
-        if (neu is null)
-        {
-            old.Error = "Could not reopen the stream";
-            Volatile.Write(ref _tiles, [.. without, old]);
-            Changed?.Invoke();
-            return;
-        }
-        neu.Name = old.Name;
-        neu.Quality = old.Quality;
-        neu.Focused = old.Focused;
-        neu.Zoom = old.Zoom;
-        neu.CenterX = old.CenterX;
-        neu.CenterY = old.CenterY;
-        UpdateDemand(neu);
-        if (old.Audible)
-        {
-            SetListening(neu, true);
-        }
-        Changed?.Invoke();
-    }
-
-    private static string TierName(StreamTier tier) => tier switch
-    {
-        StreamTier.Main => "main",
-        StreamTier.Mobile => "mobile",
-        StreamTier.Extern => "extern",
-        _ => "sub",
-    };
-
-    /// <summary>Closes one tile (a lens tile opened with <see cref="OpenCameraTile"/>).</summary>
-    public void CloseCameraTile(StageTile tile)
-    {
-        CloseTile(tile);
-        Changed?.Invoke();
-    }
-
-    private void CloseTile(StageTile tile)
-    {
-        Volatile.Write(ref _tiles, [.. _tiles.Where(t => t != tile)]);
-        _tilesById.Remove(tile.Id);
-        _host.CloseTile(tile.Id);
-        if (Planner.ClearDemands(tile) is { } camera)
-        {
-            ApplyTier(camera);
-        }
-    }
-
-    /// <summary>Makes a tile audible or silent; tiles start silent.</summary>
-    public void SetListening(StageTile tile, bool audible)
-    {
-        if (tile.Audible == audible)
-        {
-            return;
-        }
-        try
-        {
-            Core.SetTileAudio(tile.Id, audible, 1);
-            tile.Audible = audible;
-        }
-        catch (NvException e)
-        {
-            AppLog.Warn($"listening on tile {tile.Id} failed: {e.Status}");
-        }
-        Changed?.Invoke();
-    }
-
-    /// <summary>
-    /// Click on a speaker: listen to this tile alone, or also to it when
-    /// <paramref name="additive"/> (Ctrl); a second click mutes it.
-    /// </summary>
-    public void ToggleListening(StageTile tile, bool additive)
-    {
-        if (tile.Audible)
-        {
-            SetListening(tile, false);
-            return;
-        }
-        if (!additive)
-        {
-            foreach (StageTile other in _tiles)
-            {
-                if (other != tile && other.Audible)
-                {
-                    SetListening(other, false);
-                }
-            }
-        }
-        SetListening(tile, true);
-    }
-
-    /// <summary>
-    /// A tile's quality choice (Auto, Clear, Fluent, Balanced): the tile asks its camera for the
-    /// matching stream; the highest ask across every tile of the camera wins. A layout leaf keeps
-    /// the choice as its "quality" member (<see cref="TileQualities.ToMember"/>).
-    /// </summary>
-    public void SetQuality(StageTile tile, TileQuality quality)
-    {
-        if (tile.Quality == quality)
-        {
-            return;
-        }
-        tile.Quality = quality;
-        UpdateDemand(tile);
-        Changed?.Invoke();
-    }
-
-    /// <summary>A tile fills the stage (or stops): Auto asks for the main stream while it does.</summary>
-    public void SetFocused(StageTile tile, bool focused)
-    {
-        if (tile.Focused == focused)
-        {
-            return;
-        }
-        tile.Focused = focused;
-        UpdateDemand(tile);
-    }
-
-    /// <summary>States what the tile asks of its camera (quality, focus, zoom) and carries out any tier switch that follows.</summary>
-    public void UpdateDemand(StageTile tile)
-    {
-        tile.DemandZoom = tile.Zoom;
-        foreach (CameraRef camera in Planner.SetDemand(tile, tile.Camera, tile.Quality, tile.Focused, tile.Zoom))
-        {
-            ApplyTier(camera);
-        }
-    }
-
-    /// <summary>Switches every open tile of a camera to the tier it should show now (nothing when it already asks for it).</summary>
-    private void ApplyTier(CameraRef camera)
-    {
-        StreamTier wanted = Planner.WantedTier(camera);
-        foreach (StageTile tile in _tiles.Where(t => t.Camera == camera && t.RequestedTier != wanted))
-        {
-            try
-            {
-                Core.SetTier(tile.Id, CoreHost.ToCore(wanted));
-                tile.RequestedTier = wanted;
-            }
-            catch (NvException e)
-            {
-                AppLog.Warn($"tier switch on tile {tile.Id} failed: {e.Status}");
-            }
-        }
-    }
-
-    public StageTile? FindTile(ulong id) => _tilesById.GetValueOrDefault(id);
-
-    private DeviceEntry? FindDevice(ulong id) => id == 0 ? null : _devices.FirstOrDefault(d => d.Id == id);
-
     /// <summary>Closes every tile and removes every device (shutdown).</summary>
     public void CloseAll()
     {
-        foreach (StageTile t in _tiles)
-        {
-            _host.CloseTile(t.Id);
-        }
-        Volatile.Write(ref _tiles, []);
-        _tilesById.Clear();
+        Leases.CloseAll();
         foreach (DeviceEntry d in _devices)
         {
             if (d.Id != 0)

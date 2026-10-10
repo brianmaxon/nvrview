@@ -14,7 +14,8 @@ headless demo.
 | `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer (Windows only) |
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
 | `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping) and its tests on simulated time; builds and runs on Windows and Linux |
-| `NvrView.App/` | the app: a WinUI 3 window with the live tile grid, focus, listening, Settings, and a `--selftest` (Windows only) |
+| `NvrView.Shell/`, `NvrView.Shell.Tests/` | the shell's logic without a window: split-pane layouts and their JSON (the macOS app's documents, byte for byte), layout geometry, tile leases, the sidebar's edge reveal, camera groups, window restore; and its tests; builds and runs on Windows and Linux |
+| `NvrView.App/` | the app: WinUI 3 windows with split-pane layouts, the sidebar, focus, listening, Settings, and a `--selftest` (Windows only) |
 
 Every project targets .NET 10 (the current LTS). The bindings and the smoke
 test run on win-x64 and linux-x64 (and linux-arm64 in Docker on Apple
@@ -235,9 +236,9 @@ tiles) are in [docs/RENDERING.md](../../docs/RENDERING.md), "Windows".
 
 ## The app (NvrView.App)
 
-What [docs/UX.md](../../docs/UX.md) asks for, on Windows, for one window
-showing every connected channel of every configured device (layouts, the
-sidebar, several windows, and window restore come in the next milestone).
+What [docs/UX.md](../../docs/UX.md) asks for, on Windows: several windows,
+each with its own content (a stored layout, a group, or an unsaved
+arrangement), a sidebar, and the windows restored on the next launch.
 
 ### Running it
 
@@ -286,6 +287,41 @@ the mouse wheel (or a touchpad pinch) zooms around the pointer, dragging
 pans, 0 resets; Ctrl+L listens to the selected tile; Ctrl+D shows
 diagnostics (picture size, tier, GPU or CPU decoding, incoming frame rate);
 F1 lists the shortcuts; right-click has all of it in a menu.
+
+Layouts and windows:
+
+- **The sidebar** lists Layouts, Groups, and Devices with their cameras
+  (offline channels hidden unless the checkbox at its foot says otherwise; a
+  multi-lens camera expands into Lens 1 and Lens 2), each camera row with
+  its detection symbols. Clicking a layout or group shows it in the window;
+  clicking a camera puts it in the selected tile (or the only one, else the
+  first empty one, else alone); a camera dragged onto a tile shows there, and
+  onto a group joins it. Right-click a row for Open in new window, Rename,
+  Duplicate, Delete, Add to group, New group from this device. S hides and
+  shows it; its width (drag the edge) and state are remembered per window.
+- **Edge reveal.** With the sidebar hidden, resting the pointer at the
+  window's left edge for about 150 ms slides it in over the video (the stage
+  is not resized); it slides away half a second after the pointer leaves,
+  except while a drag, a menu, or a name being typed holds it; its pin docks
+  it again.
+- **The designer.** Ctrl+E (or right-click, Edit layout) shows the edit bar:
+  the name, Split side by side, Split stacked, Remove (Delete), presets
+  (Single, 2 × 2, 1 + 3, 3 × 3), Save as layout, Done. Dividers drag
+  (double-click evens them) and a tile dragged onto another swaps them, in
+  or out of Edit Layout; the right-click menu has the same entries for its
+  tile plus Clear tile, Show camera, and the tile's Quality.
+- **Several windows.** Ctrl+N or Open in new window. Each window leases the
+  cameras it shows, so a camera in several tiles and windows is one core
+  tile (one stream); each window has its own render thread and swap chain on
+  the shared GPU device. Edits to a stored layout are saved to the core's
+  store at once and followed by every window showing it (`layouts_changed`),
+  except during a drag there.
+- **Restore.** `%LOCALAPPDATA%\NvrView\windows.json` keeps each window's
+  content, frame, full screen, and sidebar state; `groups.json` the groups
+  (the macOS app's format); the layouts are in the core's `core\layouts.json`.
+  None of them holds a secret or a device address (layouts name devices by
+  the core's device key). Development modes keep groups and windows in
+  memory.
 
 ### The self-test
 
@@ -340,9 +376,21 @@ that is refused once, then streams):
     second-lens tile opens on mobile, and an injected `tile_error`
     `start_rejected` reopens it on extern for the run (the core ends a real
     refusal only after its 60 s wait);
-12. stopping the mock makes every tile say it is reconnecting;
-13. no callback threw, no tile reported an error or a failed tier switch;
-14. with `--credential-test`, a throwaway credential is written, read back,
+12. layouts and windows: the arrangement is saved as a layout (cameras named
+    by the core's device key); a split, a camera picked into the new tile, a
+    swap, and a tile's quality are each stored, and the stored JSON reads
+    back the same; changing the window's content while a tile is focused
+    ends only the focus (the render thread keeps its swap chain and
+    presents); the layout opened in a second window draws on its own render
+    thread with the same core tiles and follows an edit made in the first;
+    closing it gives its leases back; with the sidebar collapsed, the edge
+    reveal (on a manual clock) shows after 150 ms, not before, and leaves
+    half a second after the pointer, without resizing the stage's buffers;
+    the window's restore record says what it shows and that the sidebar is
+    collapsed;
+13. stopping the mock makes every tile say it is reconnecting;
+14. no callback threw, no tile reported an error or a failed tier switch;
+15. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
 
 It writes what it measured and `selftest: PASS` or `selftest: FAIL` to the
@@ -384,9 +432,10 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
 | Type | What |
 | --- | --- |
 | `CoreHost` | the core and the shared GPU device; actions go straight to each tile's `VideoTile` inside the read side of a device gate; events are parsed and handed to the UI thread |
-| `Viewer` | the UI thread's state: devices (state, retry time, channels), tiles (status, tier, quality, listening, zoom); opens a tile for every connected channel on the tier the planner picks, and for any lens on request (`OpenCameraTile`); owns the detection tracker, the indicator board, the alert center, and the quality demands; the render thread reads an immutable tile array |
-| `StageRenderer` | the render thread: the swap chain, layout, focus animation, zoom, drawing, presenting, device-loss recovery, readback for the self-test |
-| `StageView`, `TileChrome` | the XAML above the swap chain: hover header, speaker, level meter, status line, corner indicators, sound badges, alert strip and border, selection outline, diagnostics; input |
+| `Viewer` | the UI thread's state shared by every window: devices (state, retry time, channels, core device key), one `CameraTile` per leased camera (`TileLeases`; opened on the tier the planner picks), listening per camera, the layouts (the core's store), the groups, the detection tracker, indicator board, alert center, and the quality demands |
+| `ViewerWindow`, `SidebarView`, `EditBar` | one window: its content (`WindowState`), leases, sidebar and edge-reveal overlay, edit bar, keys, restore record |
+| `StageRenderer` | one window's render thread: its swap chain, picture fit into the layout's cells, focus animation, zoom, drawing, presenting, device-loss recovery, readback for the self-test |
+| `StageView`, `TileChrome` | one window's stage: one `StageTile` per layout leaf, the XAML above the swap chain (hover header, speaker, level meter, status line, corner indicators, sound badges, alert strip and border, selection outline, edit outlines, diagnostics); input, the designer, drops |
 | `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator corner (`view-settings.json`) |
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
@@ -415,7 +464,11 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
   settles, one more resize makes them exact. Measured: 9 resizes for 30
   window sizes in 1.3 s, presentation continuing at about 35 frames per
   second meanwhile (about 50 in steady state on that display).
-- **Layout and focus.** `nv_grid_layout` in panel pixels each frame. A
+- **Layout and focus.** The UI thread lays the window's split tree out in
+  DIPs (`NvrView.Shell.LayoutGeometry`) whenever it or the size changes and
+  hands the cells to the render thread, which fits each picture into its
+  cell (letterboxed) every frame, scaling the cells while a resize is on its
+  way; nothing is allocated per frame. A
   focused tile's rectangle is interpolated (0.25 s, smoothstep) between its
   grid cell and the whole stage and drawn last, over the others, which stop
   being drawn once it covers them; nothing is recreated. Once the animation
@@ -439,7 +492,11 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
   Decode `DecodeError`, so the core flushes and waits for one; a rebuild that
   fails answers the same way, and repeated failures make the core reset and
   reconfigure the tile. A new swap chain is attached to the panel on the UI
-  thread. The self-test simulates the loss (a real removal cannot be caused
+  thread. With several windows, the device is replaced once (the render
+  thread that saw the loss passes the device it lost; `CoreHost.FrameGate`
+  keeps every window's frame off a device being released) and the other
+  windows' render threads notice the new device and make new swap chains.
+  The self-test simulates the loss (a real removal cannot be caused
   without driver tools) and checks that every tile plays again.
 - **Audio.** WASAPI shared mode, event-driven, 32-bit float stereo at the
   default device's mix rate (`AUTOCONVERTPCM` lets the engine convert), on a

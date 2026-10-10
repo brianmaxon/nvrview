@@ -2,6 +2,7 @@
 // wrote (the strings below are that app's encoder output for the same trees).
 
 using System.Text.Json.Nodes;
+using NvrView.Tiles;
 
 namespace NvrView.Shell.Tests;
 

@@ -1,49 +1,74 @@
-// The window's content: the SwapChainPanel the render thread presents into,
-// the tile chrome above it, and the input that drives both (docs/UX.md):
+// A window's stage: the SwapChainPanel its render thread presents into, the
+// tile chrome above it, and the input that drives both (docs/UX.md):
 //
-// - hover shows a tile's header (speaker, name) and fades it out 3 s after
-//   the pointer stops or leaves; a click selects, a double-click (or Space,
-//   or Enter) focuses the tile with an animation of the same live tile and,
-//   once the animation ends, switches it to the main stream; the sub stream
-//   stays on screen until the core's aligned switch (docs/FFI.md);
-// - F full screen, arrow keys move the selection by position (in focus
-//   they switch the focused camera), 0 resets digital zoom, Ctrl+L listens,
-//   Ctrl+D diagnostics, Ctrl+, Settings, F1 the list of shortcuts;
+// - the window's split tree (WindowState.Tree) laid out into cells; one
+//   StageTile per leaf, pointing at its camera's shared core tile;
+// - hover shows a tile's header (speaker, name) and fades it 3 s after the
+//   pointer stops or leaves; a click selects; a double-click (or Space, or
+//   Enter) focuses the tile with an animation of the same live tile and,
+//   once it ends, has the leases switch its camera to the focus tier;
+// - the designer: drag a divider (double-click evens it), drag a tile onto
+//   another to swap them, split, remove, clear, show a camera, presets (the
+//   context menu, the edit bar, and Delete in Edit Layout mode); cameras
+//   dragged from the sidebar drop onto a tile;
 // - mouse wheel (or a touchpad pinch, which arrives as Ctrl+wheel) zooms
-//   around the pointer and dragging pans, by changing only the source
-//   rectangle the renderer samples;
+//   around the pointer and dragging pans a zoomed tile, by changing only the
+//   source rectangle the renderer samples;
 // - the tile features: the corner indicators and sound badges, the alert strip
-//   and its Dismiss (Enter), the Quality menu, M to listen, and, in full
-//   screen, the chrome and the pointer hiding 3 s after the last interaction
-//   (alert strips and indicators stay).
+//   and its Dismiss (Enter), the Quality menu (kept in the layout leaf), M to
+//   listen, and, in full screen, the chrome and the pointer hiding 3 s after
+//   the last interaction (alert strips and indicators stay).
+//
+// Keys reach it through the window (ViewerWindow.OnKey -> HandleKey).
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.UI;
-using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
 using NvrView.Interop;
+using NvrView.Shell;
 using NvrView.Tiles;
-using Windows.Foundation;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 using Windows.UI.Core;
+using Point = Windows.Foundation.Point;
+using Rect = NvrView.Shell.Rect;
 
 namespace NvrView.App;
 
+/// <summary>One window's arrangement and what the user is doing with it.</summary>
+internal sealed class WindowState(WindowContent content, string name, LayoutNode tree)
+{
+    public WindowContent Content { get; set; } = content;
+
+    public string Name { get; set; } = name;
+
+    public LayoutNode Tree { get; set; } = tree;
+
+    public NodePath? Selected { get; set; }
+
+    public bool Editing { get; set; }
+}
+
 internal sealed partial class StageView : UserControl
 {
-
     // ISwapChainPanelNative of WinUI 3 (microsoft.ui.xaml.media.dxinterop.h).
     private static readonly Guid SwapChainPanelNativeId = new("63aad0b8-7c24-40ff-85a8-640d944cc325");
+
+    private static readonly SolidColorBrush EditOutline = new(Windows.UI.Color.FromArgb(0x90, 0x9A, 0xA4, 0xB0));
+    private static readonly SolidColorBrush DropBrush = new(Windows.UI.Color.FromArgb(0x50, 0x3A, 0x96, 0xDD));
+    private static readonly SolidColorBrush DropOutline = new(Windows.UI.Color.FromArgb(0xF0, 0x3A, 0x96, 0xDD));
 
     private readonly Viewer _viewer;
     private readonly AppWindow _appWindow;
     private readonly SwapChainPanel _panel = new();
+    private readonly Canvas _editLayer = new() { IsHitTestVisible = false };
     private readonly Canvas _chromeLayer = new() { Background = new SolidColorBrush(Colors.Transparent) };
     private readonly StackPanel _empty = new()
     {
@@ -61,30 +86,49 @@ internal sealed partial class StageView : UserControl
     };
     private readonly Border _help;
     private readonly List<TileChrome> _chromes = [];
+    private readonly List<Rectangle> _outlines = [];
     private readonly DispatcherQueueTimerHolder _timer;
-    private StageTile[] _chromeTiles = [];
+    private StageTile[] _tiles = [];
+    private LayoutFrames _frames = LayoutFrames.None;
     private StageTile? _hovered;
     private readonly ChromeIdle _idle;
     private bool _cursorHidden;
     private bool _diagnostics;
-    private StageTile? _dragTile;
-    private Point _dragFrom;
-    private float _dragCenterX, _dragCenterY;
+    private NodePath? _dropTarget;
+    private StageTile? _focusDemand;
 
-    public StageView(Viewer viewer, AppWindow appWindow)
+    private enum GestureKind
+    {
+        None,
+        Divider,
+        TileDrag,
+        Pan,
+    }
+
+    private GestureKind _gesture;
+    private NodePath _gesturePath;
+    private Point _gestureFrom;
+    private bool _dragging;
+    private StageTile? _panTile;
+    private float _panCenterX, _panCenterY;
+
+    public StageView(Viewer viewer, AppWindow appWindow, WindowState state)
     {
         _viewer = viewer;
         _appWindow = appWindow;
         _idle = new ChromeIdle(viewer.Clock);
+        State = state;
         IsTabStop = true;
         UseSystemFocusVisuals = false;
+        AllowDrop = true;
         Background = new SolidColorBrush(Colors.Black);
         var root = new Grid();
         root.Children.Add(_panel);
+        root.Children.Add(_editLayer);
         root.Children.Add(_chromeLayer);
 
         var add = new Button { Content = "Add a device…", HorizontalAlignment = HorizontalAlignment.Center };
-        add.Click += (_, _) => OpenSettings();
+        add.Click += (_, _) => SettingsRequested?.Invoke();
         _empty.Children.Add(_emptyText);
         _empty.Children.Add(add);
         root.Children.Add(_empty);
@@ -106,11 +150,15 @@ internal sealed partial class StageView : UserControl
                     "Double-click, Space, Enter   focus the selected tile / back to the grid",
                     "Arrow keys                   select the neighboring tile (in focus: switch camera)",
                     "F                            full screen",
-                    "Esc                          leave focus, then full screen",
+                    "S                            show or hide the sidebar",
+                    "Esc                          leave focus, editing, then full screen",
                     "Mouse wheel, drag            digital zoom and pan; 0 resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
+                    "Ctrl+E                       edit the layout (drag dividers and tiles)",
+                    "Delete                       remove the selected tile while editing",
+                    "Ctrl+N                       new window",
                     "Ctrl+D                       diagnostics",
                     "Ctrl+,                       Settings (devices)",
                     "F1                           this list"),
@@ -120,20 +168,26 @@ internal sealed partial class StageView : UserControl
         Content = root;
 
         Renderer = null!;
-        _panel.SizeChanged += (_, _) => PushSize();
+        _panel.SizeChanged += (_, _) =>
+        {
+            PushSize();
+            Relayout();
+        };
         _panel.CompositionScaleChanged += (_, _) => PushSize();
         _viewer.Changed += RefreshAll;
+        _viewer.Leases.TileChanged += OnTileChanged;
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
         _timer = new DispatcherQueueTimerHolder(DispatcherQueue, TimeSpan.FromMilliseconds(250), Tick);
-        Loaded += (_, _) =>
-        {
-            Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += OnRendering;
-            _ = Focus(FocusState.Programmatic);
-        };
+        Loaded += (_, _) => Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += OnRendering;
         Unloaded += (_, _) => Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
-        RefreshAll();
+        DragOver += OnDragOver;
+        DragLeave += (_, _) => SetDropTarget(null);
+        Drop += OnDrop;
     }
+
+    /// <summary>The window's arrangement.</summary>
+    public WindowState State { get; }
 
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
@@ -141,32 +195,36 @@ internal sealed partial class StageView : UserControl
     /// <summary>The Settings dialog opener (set by the window).</summary>
     public Action? SettingsRequested { get; set; }
 
+    /// <summary>The tree changed by a finished gesture or command (the window stores it).</summary>
+    public event Action<LayoutNode>? Edited;
+
+    /// <summary>Selection, focus, or editing changed (the edit bar follows).</summary>
+    public event Action? StateChanged;
+
+    /// <summary>
+    /// Called while a tile's context menu is built, after the tile's own
+    /// entries (Listen, Focus, Reset zoom) and before the layout entries, so
+    /// other features can add theirs (a Quality submenu, for one).
+    /// </summary>
+    public static event Action<MenuFlyout, StageTile, StageView>? TileMenuOpening;
+
+    /// <summary>This window's tiles, one per leaf, in reading order.</summary>
+    public StageTile[] Tiles => _tiles;
+
     /// <summary>The selected tile (keyboard actions apply to it).</summary>
-    public StageTile? Selected { get; private set; }
+    public StageTile? Selected => State.Selected is { } p ? _tiles.FirstOrDefault(t => t.Path == p) : null;
 
     /// <summary>True while a tile is focused (or animating into focus).</summary>
     public bool IsFocused => Renderer.Focus is { Entering: true };
 
-    /// <summary>Puts an element in the stage's overlay for a moment (the self-test renders it to a bitmap); true adds, false removes.</summary>
-    public void HostTemporarily(FrameworkElement element, bool add)
-    {
-        if (add)
-        {
-            Canvas.SetLeft(element, 20);
-            Canvas.SetTop(element, 20);
-            _chromeLayer.Children.Add(element);
-        }
-        else
-        {
-            _chromeLayer.Children.Remove(element);
-        }
-    }
-
-    /// <summary>The chrome of a tile (for the self-test).</summary>
-    public TileChrome? ChromeFor(StageTile tile) => _chromes.FirstOrDefault(c => c.Tile == tile);
+    /// <summary>True while a divider or tile drag is in progress (the window does not follow stored changes then).</summary>
+    public bool IsInteracting => _gesture is GestureKind.Divider or GestureKind.TileDrag;
 
     /// <summary>Frames the UI thread updated the chrome (for the self-test).</summary>
     public long ChromeFrames { get; private set; }
+
+    /// <summary>The gap between tiles: wider while editing, so dividers are easy to grab.</summary>
+    public double Gap => State.Editing ? 6 : 2;
 
     public void PushSize() =>
         Renderer?.SetPanelSize(_panel.ActualWidth, _panel.ActualHeight, _panel.CompositionScaleX, _panel.CompositionScaleY);
@@ -196,13 +254,173 @@ internal sealed partial class StageView : UserControl
         }
     }
 
-    private void OpenSettings() => SettingsRequested?.Invoke();
+    // ---- tiles and layout ----
+
+    /// <summary>Rebuilds the tiles for the current tree (after the window's content or tree changed).</summary>
+    public void Reload()
+    {
+        IReadOnlyList<LeafInfo> leaves = State.Tree.Leaves;
+        var old = _tiles;
+        var next = new StageTile[leaves.Count];
+        for (int i = 0; i < leaves.Count; i++)
+        {
+            LeafInfo leaf = leaves[i];
+            TileQuality quality = QualityOf(State.Tree, leaf.Path);
+            StageTile? same = old.FirstOrDefault(t => t.Path == leaf.Path && t.CameraOrNone == leaf.Camera);
+            if (same is not null)
+            {
+                next[i] = same;
+                _viewer.SetQuality(same, quality);
+                continue;
+            }
+            var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality);
+            t.Shared = leaf.Camera is { } c ? _viewer.Leases.Tile(c) : null;
+            // The zoom follows the camera through layout changes (docs/UX.md "Digital zoom").
+            if (old.FirstOrDefault(o => o.CameraOrNone is not null && o.CameraOrNone == leaf.Camera) is { } before)
+            {
+                t.Zoom = before.Zoom;
+                t.CenterX = before.CenterX;
+                t.CenterY = before.CenterY;
+            }
+            next[i] = t;
+            _viewer.UpdateDemand(t);
+        }
+        foreach (StageTile gone in old.Where(o => Array.IndexOf(next, o) < 0))
+        {
+            _viewer.WithdrawDemand(gone);
+        }
+        _tiles = next;
+        if (State.Selected is { } s && State.Tree[s] is not LayoutLeaf)
+        {
+            State.Selected = null;
+        }
+        if (Renderer.Focus is { } f && Array.IndexOf(next, f.Tile) < 0)
+        {
+            CancelFocus();
+        }
+        Relayout();
+        SyncChromes();
+        RefreshAll();
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Lays the tree out for the panel's size and hands the cells to the renderer.</summary>
+    private void Relayout()
+    {
+        double w = _panel.ActualWidth, h = _panel.ActualHeight;
+        _frames = State.Tree.Frames(new Rect(0, 0, Math.Max(w, 0), Math.Max(h, 0)), Gap);
+        var cells = new Rect[_tiles.Length];
+        for (int i = 0; i < _tiles.Length; i++)
+        {
+            cells[i] = _frames.Leaf(_tiles[i].Path)?.Rect ?? default;
+        }
+        if (Renderer is not null)
+        {
+            Renderer.Layout = new StageLayout(_tiles, cells, w, h);
+        }
+        PlaceOutlines();
+    }
+
+    private void OnTileChanged(CameraRef camera, CameraTile? tile)
+    {
+        foreach (StageTile t in _tiles)
+        {
+            if (t.CameraOrNone == camera)
+            {
+                t.Shared = tile;
+            }
+        }
+    }
+
+    // ---- editing ----
+
+    /// <summary>Applies a change to the tree; null from the change means nothing to do.</summary>
+    public void Edit(Func<LayoutNode, LayoutNode?> change)
+    {
+        if (change(State.Tree) is not { } tree || ReferenceEquals(tree, State.Tree))
+        {
+            return;
+        }
+        State.Tree = tree;
+        Reload();
+        Edited?.Invoke(tree);
+    }
+
+    /// <summary>The selected tile, or the only one.</summary>
+    private NodePath? Target => State.Selected ?? (State.Tree.LeafCount == 1 ? NodePath.Root : null);
+
+    public bool CanSplit => Target is not null && State.Tree.LeafCount < LayoutNode.MaxLeaves;
+
+    public void Split(SplitAxis axis)
+    {
+        if (Target is { } path && State.Tree.Splitting(path, axis) is { } s)
+        {
+            State.Selected = s.NewLeaf;
+            Edit(_ => s.Tree);
+        }
+    }
+
+    public void RemoveSelected()
+    {
+        if (State.Selected is { } path && State.Tree.Removing(path) is { } r)
+        {
+            State.Selected = r.Tree[r.Survivor] is LayoutLeaf ? r.Survivor : null;
+            Edit(_ => r.Tree);
+        }
+    }
+
+    public void Assign(CameraRef? camera, NodePath path) => Edit(t => t.Assigning(camera, path));
+
+    public void Swap(NodePath from, NodePath to)
+    {
+        State.Selected = to;
+        Edit(t => t.Swapping(from, to));
+    }
+
+    public void ApplyPreset(LayoutPreset preset)
+    {
+        List<CameraRef> cameras = [.. State.Tree.CameraList.OfType<CameraRef>()];
+        State.Selected = null;
+        Edit(_ => preset.Tree(cameras));
+    }
+
+    /// <summary>Sets (or with null removes) an app member of the tile at <paramref name="path"/>, saved with the layout (a tile's quality, for one).</summary>
+    public void SetTileMember(NodePath path, string name, string? json) => Edit(t => t.SettingMember(path, name, json));
+
+    public void Select(NodePath? path)
+    {
+        State.Selected = path;
+        Interact();
+        UpdateHover();
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Enters or leaves Edit Layout mode.</summary>
+    public void SetEditing(bool editing)
+    {
+        if (State.Editing == editing)
+        {
+            return;
+        }
+        if (IsFocused)
+        {
+            Unfocus();
+        }
+        State.Editing = editing;
+        if (editing && State.Selected is null)
+        {
+            State.Selected = State.Tree.Leaves.FirstOrDefault().Path;
+        }
+        Relayout();
+        RefreshAll();
+        StateChanged?.Invoke();
+    }
 
     // ---- focus ----
 
     public void ToggleFocus(StageTile tile)
     {
-        if (Renderer.Focus is { Entering: true } f && f.Tile == tile.Id)
+        if (Renderer.Focus is { Entering: true } f && f.Tile == tile)
         {
             Unfocus();
         }
@@ -214,31 +432,35 @@ internal sealed partial class StageView : UserControl
 
     public void FocusOn(StageTile tile)
     {
-        long now = Stopwatch.GetTimestamp();
-        FocusAnimation? current = Renderer.Focus;
-        if (current is { Entering: true } && current.Tile != tile.Id && _viewer.FindTile(current.Tile) is { } previous)
+        if (State.Editing)
         {
-            // Switch the focused camera: no animation, tiers swap at once.
-            _viewer.SetFocused(previous, false);
-            Renderer.Focus = new FocusAnimation(tile.Id, now, true, 1);
-            _viewer.SetFocused(tile, true);
-            Selected = tile;
-            RefreshAll();
             return;
         }
-        float from = current is not null && current.Tile == tile.Id ? current.Progress(now) : 0;
-        var animation = new FocusAnimation(tile.Id, now, true, from);
+        long now = Stopwatch.GetTimestamp();
+        FocusAnimation? current = Renderer.Focus;
+        State.Selected = tile.Path;
+        if (current is { Entering: true } && current.Tile != tile)
+        {
+            // Switch the focused camera: no animation, tiers swap at once.
+            Renderer.Focus = new FocusAnimation(tile, now, true, 1);
+            SetFocusDemand(tile);
+            RefreshAll();
+            StateChanged?.Invoke();
+            return;
+        }
+        float from = current is not null && current.Tile == tile ? current.Progress(now) : 0;
+        var animation = new FocusAnimation(tile, now, true, from);
         Renderer.Focus = animation;
-        Selected = tile;
-        // The main stream once the animation is over (docs/UX.md).
+        // The focus tier once the animation is over (docs/UX.md).
         After((1 - from) * FocusAnimation.Seconds, () =>
         {
             if (ReferenceEquals(Renderer.Focus, animation))
             {
-                _viewer.SetFocused(tile, true);
+                SetFocusDemand(tile);
             }
         });
         RefreshAll();
+        StateChanged?.Invoke();
     }
 
     public void Unfocus()
@@ -251,11 +473,8 @@ internal sealed partial class StageView : UserControl
         float p = f.Progress(now);
         var animation = new FocusAnimation(f.Tile, now, false, p);
         Renderer.Focus = animation;
-        if (_viewer.FindTile(f.Tile) is { } tile)
-        {
-            // The sub stream is ready almost at once; the tile shrinks meanwhile.
-            _viewer.SetFocused(tile, false);
-        }
+        // The grid tier is ready almost at once; the tile shrinks meanwhile.
+        SetFocusDemand(null);
         After(p * FocusAnimation.Seconds + 0.05, () =>
         {
             if (ReferenceEquals(Renderer.Focus, animation))
@@ -264,6 +483,36 @@ internal sealed partial class StageView : UserControl
             }
         });
         RefreshAll();
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Ends focus at once, without animation (the window's content is being
+    /// replaced, or the focused tile went away). The stage keeps drawing:
+    /// nothing is torn down, only the focus ends.
+    /// </summary>
+    public void CancelFocus()
+    {
+        Renderer.Focus = null;
+        SetFocusDemand(null);
+    }
+
+    // The focused tile asks the tier planner for the focus tier (Auto: main).
+    private void SetFocusDemand(StageTile? tile)
+    {
+        if (ReferenceEquals(_focusDemand, tile))
+        {
+            return;
+        }
+        if (_focusDemand is { } old)
+        {
+            _viewer.SetFocused(old, false);
+        }
+        _focusDemand = tile;
+        if (tile is not null)
+        {
+            _viewer.SetFocused(tile, true);
+        }
     }
 
     // One-shot timers stay referenced until they fire: an unreferenced
@@ -293,11 +542,8 @@ internal sealed partial class StageView : UserControl
     /// <summary>Self-test: pretends the window is (or is not) full screen without changing the window.</summary>
     public bool? FullScreenOverride { get; set; }
 
-    public void ToggleFullScreen()
-    {
-        bool full = IsFullScreen;
-        _appWindow.SetPresenter(full ? AppWindowPresenterKind.Overlapped : AppWindowPresenterKind.FullScreen);
-    }
+    public void ToggleFullScreen() =>
+        _appWindow.SetPresenter(_appWindow.Presenter.Kind == AppWindowPresenterKind.FullScreen ? AppWindowPresenterKind.Overlapped : AppWindowPresenterKind.FullScreen);
 
     // ---- zoom ----
 
@@ -323,22 +569,23 @@ internal sealed partial class StageView : UserControl
         t.CenterY = 0.5f;
     }
 
-    // ---- input ----
+    // ---- pointer ----
 
+    /// <summary>The drawn tile under a point (the focused one on top).</summary>
     private StageTile? TileAt(Point p)
     {
-        StageTile[] tiles = _viewer.Tiles;
-        // The focused tile is on top.
-        if (Renderer.Focus is { } f && _viewer.FindTile(f.Tile) is { Visible: true } focused && Contains(focused, p))
+        if (Renderer.Focus is { } f && f.Tile.Visible && Contains(f.Tile, p))
         {
-            return focused;
+            return f.Tile;
         }
-        foreach (StageTile t in tiles)
+        if (Renderer.Focus is { Entering: true })
         {
-            if (t.Visible && Contains(t, p))
-            {
-                return t;
-            }
+            return null;
+        }
+        // By cell, so empty tiles and letterbox bars count.
+        if (_frames.LeafAt(p.X, p.Y) is { } leaf)
+        {
+            return _tiles.FirstOrDefault(t => t.Path == leaf.Path);
         }
         return null;
     }
@@ -346,21 +593,48 @@ internal sealed partial class StageView : UserControl
     private static bool Contains(StageTile t, Point p) =>
         p.X >= t.X && p.Y >= t.Y && p.X < t.X + t.Width && p.Y < t.Y + t.Height;
 
+    private bool CanEditLayout => Renderer.Focus is null;
+
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
-        Point p = e.GetCurrentPoint(this).Position;
+        PointerPoint pp = e.GetCurrentPoint(this);
+        Point p = pp.Position;
         Interact();
-        if (_dragTile is { } drag && e.GetCurrentPoint(this).Properties.IsLeftButtonPressed && drag.Width > 0)
+        switch (_gesture)
         {
-            double dx = (p.X - _dragFrom.X) / drag.Width / drag.Zoom, dy = (p.Y - _dragFrom.Y) / drag.Height / drag.Zoom;
-            double half = 0.5 / drag.Zoom;
-            drag.CenterX = (float)Math.Clamp(_dragCenterX - dx, half, 1 - half);
-            drag.CenterY = (float)Math.Clamp(_dragCenterY - dy, half, 1 - half);
+            case GestureKind.Divider when _frames.Dividers.FirstOrDefault(d => d.Path == _gesturePath) is { Region.Width: > 0 } d:
+                double ratio = LayoutGeometry.RatioDragging(d, p.X, p.Y, Gap);
+                if (State.Tree.SettingRatio(ratio, _gesturePath) is { } tree)
+                {
+                    State.Tree = tree;
+                    Relayout();
+                }
+                break;
+            case GestureKind.TileDrag:
+                if (!_dragging && Math.Abs(p.X - _gestureFrom.X) + Math.Abs(p.Y - _gestureFrom.Y) > 6)
+                {
+                    _dragging = true;
+                }
+                if (_dragging)
+                {
+                    NodePath? target = _frames.LeafAt(p.X, p.Y)?.Path;
+                    SetDropTarget(target == _gesturePath ? null : target);
+                }
+                break;
+            case GestureKind.Pan when _panTile is { Width: > 0 } drag:
+                double dx = (p.X - _gestureFrom.X) / drag.Width / drag.Zoom, dy = (p.Y - _gestureFrom.Y) / drag.Height / drag.Zoom;
+                double half = 0.5 / drag.Zoom;
+                drag.CenterX = (float)Math.Clamp(_panCenterX - dx, half, 1 - half);
+                drag.CenterY = (float)Math.Clamp(_panCenterY - dy, half, 1 - half);
+                break;
         }
-        StageTile? t = TileAt(p);
-        if (t != _hovered)
+        _hovered = TileAt(p);
+        if (_gesture == GestureKind.None)
         {
-            _hovered = t;
+            DividerFrame? over = CanEditLayout ? _frames.DividerAt(p.X, p.Y, 8) : null;
+            ProtectedCursor = over is { } dv
+                ? InputSystemCursor.Create(dv.Axis == SplitAxis.Row ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeNorthSouth)
+                : null;
         }
         UpdateHover();
     }
@@ -376,25 +650,77 @@ internal sealed partial class StageView : UserControl
         Interact();
         _ = Focus(FocusState.Pointer);
         PointerPoint pp = e.GetCurrentPoint(this);
-        if (pp.Properties.IsLeftButtonPressed && TileAt(pp.Position) is { } t)
+        if (!pp.Properties.IsLeftButtonPressed)
         {
-            Selected = t;
-            if (t.Zoom > 1)
-            {
-                _dragTile = t;
-                _dragFrom = pp.Position;
-                _dragCenterX = t.CenterX;
-                _dragCenterY = t.CenterY;
-                _ = CapturePointer(e.Pointer);
-            }
-            UpdateHover();
+            return;
         }
+        Point p = pp.Position;
+        _gestureFrom = p;
+        _dragging = false;
+        if (CanEditLayout && _frames.DividerAt(p.X, p.Y, 8) is { } d)
+        {
+            _gesture = GestureKind.Divider;
+            _gesturePath = d.Path;
+            _ = CapturePointer(e.Pointer);
+            return;
+        }
+        if (TileAt(p) is not { } t)
+        {
+            return;
+        }
+        Select(t.Path);
+        if (t.Zoom > 1 && !State.Editing)
+        {
+            _gesture = GestureKind.Pan;
+            _panTile = t;
+            _panCenterX = t.CenterX;
+            _panCenterY = t.CenterY;
+        }
+        else if (CanEditLayout)
+        {
+            _gesture = GestureKind.TileDrag;
+            _gesturePath = t.Path;
+        }
+        else
+        {
+            return;
+        }
+        _ = CapturePointer(e.Pointer);
     }
 
     protected override void OnPointerReleased(PointerRoutedEventArgs e)
     {
-        _dragTile = null;
+        Point p = e.GetCurrentPoint(this).Position;
+        GestureKind gesture = _gesture;
+        _gesture = GestureKind.None;
+        _panTile = null;
         ReleasePointerCapture(e.Pointer);
+        switch (gesture)
+        {
+            case GestureKind.Divider:
+                Edited?.Invoke(State.Tree);
+                break;
+            case GestureKind.TileDrag when _dragging:
+                SetDropTarget(null);
+                if (_frames.LeafAt(p.X, p.Y)?.Path is { } to && to != _gesturePath)
+                {
+                    Swap(_gesturePath, to);
+                }
+                break;
+        }
+        _dragging = false;
+    }
+
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
+    {
+        if (_gesture == GestureKind.Divider)
+        {
+            Edited?.Invoke(State.Tree);
+        }
+        _gesture = GestureKind.None;
+        _dragging = false;
+        _panTile = null;
+        SetDropTarget(null);
     }
 
     protected override void OnDoubleTapped(DoubleTappedRoutedEventArgs e)
@@ -403,7 +729,14 @@ internal sealed partial class StageView : UserControl
         {
             return;
         }
-        if (TileAt(e.GetPosition(this)) is { } t)
+        Point p = e.GetPosition(this);
+        if (CanEditLayout && _frames.DividerAt(p.X, p.Y, 8) is { } d)
+        {
+            Edit(t => t.SettingRatio(0.5, d.Path));
+            e.Handled = true;
+            return;
+        }
+        if (!State.Editing && TileAt(p) is { } t && (!t.IsEmpty || IsFocused))
         {
             ToggleFocus(t);
             e.Handled = true;
@@ -422,38 +755,167 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    // ---- drag and drop (cameras from the sidebar) ----
+
+    private void OnDragOver(object sender, DragEventArgs e)
+    {
+        Point p = e.GetPosition(this);
+        if (CanEditLayout && e.DataView.Contains(StandardDataFormats.Text) && _frames.LeafAt(p.X, p.Y) is { } leaf)
+        {
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            e.DragUIOverride.Caption = "Show here";
+            SetDropTarget(leaf.Path);
+        }
+        else
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            SetDropTarget(null);
+        }
+    }
+
+    private async void OnDrop(object sender, DragEventArgs e)
+    {
+        Point p = e.GetPosition(this);
+        SetDropTarget(null);
+        if (!CanEditLayout || !e.DataView.Contains(StandardDataFormats.Text) || _frames.LeafAt(p.X, p.Y) is not { } leaf)
+        {
+            return;
+        }
+        DragOperationDeferral deferral = e.GetDeferral();
+        try
+        {
+            if (CameraRefs.FromDragText(await e.DataView.GetTextAsync()) is { } camera)
+            {
+                Select(leaf.Path);
+                Assign(camera, leaf.Path);
+            }
+        }
+        finally
+        {
+            deferral.Complete();
+        }
+    }
+
+    private void SetDropTarget(NodePath? path)
+    {
+        if (_dropTarget != path)
+        {
+            _dropTarget = path;
+            PlaceOutlines();
+        }
+    }
+
+    /// <summary>The edit-mode outlines and the drop or swap target, over the cells.</summary>
+    private void PlaceOutlines()
+    {
+        IReadOnlyList<LeafFrame> leaves = _frames.Leaves;
+        while (_outlines.Count < leaves.Count)
+        {
+            var r = new Rectangle { StrokeThickness = 1, StrokeDashArray = [4, 3], IsHitTestVisible = false };
+            _outlines.Add(r);
+            _editLayer.Children.Add(r);
+        }
+        for (int i = 0; i < _outlines.Count; i++)
+        {
+            Rectangle r = _outlines[i];
+            if (i >= leaves.Count)
+            {
+                r.Visibility = Visibility.Collapsed;
+                continue;
+            }
+            LeafFrame f = leaves[i];
+            bool drop = _dropTarget == f.Path;
+            r.Visibility = State.Editing || drop ? Visibility.Visible : Visibility.Collapsed;
+            r.Stroke = drop ? DropOutline : EditOutline;
+            r.StrokeThickness = drop ? 2 : 1;
+            r.Fill = drop ? DropBrush : null;
+            r.Width = Math.Max(f.Rect.Width, 0);
+            r.Height = Math.Max(f.Rect.Height, 0);
+            Canvas.SetLeft(r, f.Rect.X);
+            Canvas.SetTop(r, f.Rect.Y);
+        }
+    }
+
+    // ---- context menu ----
+
     protected override void OnRightTapped(RightTappedRoutedEventArgs e)
     {
-        StageTile? t = TileAt(e.GetPosition(this));
+        Point at = e.GetPosition(this);
+        StageTile? t = TileAt(at);
         if (t is not null)
         {
-            Selected = t;
+            Select(t.Path);
         }
         var menu = new MenuFlyout();
-        void Item(string text, Action action, bool enabled = true)
+        MenuFlyoutItem Item(IList<MenuFlyoutItemBase> into, string text, Action action, bool enabled = true)
         {
             var item = new MenuFlyoutItem { Text = text, IsEnabled = enabled };
             item.Click += (_, _) => action();
-            menu.Items.Add(item);
+            into.Add(item);
+            return item;
+        }
+        if (t is { CameraOrNone: { } camera })
+        {
+            Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the grid" : "Focus", () => ToggleFocus(t), !State.Editing);
+            Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
+            Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
+            menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
+            if (_viewer.Alerts.IsActive(camera))
+            {
+                Item(menu.Items, "Dismiss alert", () => _viewer.DismissAlert(camera));
+            }
         }
         if (t is not null)
         {
-            Item(IsFocused && Renderer.Focus?.Tile == t.Id ? "Back to the grid" : "Focus", () => ToggleFocus(t));
-            Item(t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(t, false));
-            Item("Reset zoom", () => ResetZoom(t), t.Zoom > 1);
-            menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => _viewer.SetQuality(t, q)));
-            if (_viewer.Alerts.IsActive(t.Camera))
-            {
-                Item("Dismiss alert", () => _viewer.DismissAlert(t.Camera));
-            }
+            TileMenuOpening?.Invoke(menu, t, this);
             menu.Items.Add(new MenuFlyoutSeparator());
         }
+        if (t is not null && CanEditLayout)
+        {
+            Item(menu.Items, "Split side by side", () => Split(SplitAxis.Row), CanSplit);
+            Item(menu.Items, "Split stacked", () => Split(SplitAxis.Col), CanSplit);
+            Item(menu.Items, "Remove tile", RemoveSelected, State.Tree.LeafCount > 1 || !t.IsEmpty);
+            if (!t.IsEmpty)
+            {
+                Item(menu.Items, "Clear tile", () => Assign(null, t.Path));
+            }
+            var show = new MenuFlyoutSubItem { Text = "Show camera" };
+            foreach (DeviceEntry d in _viewer.Devices)
+            {
+                List<CameraRef> cameras = [.. _viewer.ListedChannels(d).SelectMany(c => Viewer.CamerasOf(d, c))];
+                if (cameras.Count == 0)
+                {
+                    continue;
+                }
+                if (show.Items.Count > 0)
+                {
+                    show.Items.Add(new MenuFlyoutSeparator());
+                }
+                show.Items.Add(new MenuFlyoutItem { Text = d.DisplayName, IsEnabled = false });
+                foreach (CameraRef c in cameras)
+                {
+                    var item = new ToggleMenuFlyoutItem { Text = _viewer.CameraName(c), IsChecked = t.CameraOrNone == c };
+                    item.Click += (_, _) => Assign(c, t.Path);
+                    show.Items.Add(item);
+                }
+            }
+            show.IsEnabled = show.Items.Count > 0;
+            menu.Items.Add(show);
+            var presets = new MenuFlyoutSubItem { Text = "Layout preset" };
+            foreach (LayoutPreset preset in LayoutPresets.All)
+            {
+                Item(presets.Items, preset.Title(), () => ApplyPreset(preset));
+            }
+            menu.Items.Add(presets);
+            menu.Items.Add(new MenuFlyoutSeparator());
+        }
+        WindowMenu?.Invoke(menu);
         menu.Items.Add(IndicatorCornerMenu());
-        Item("Full screen", ToggleFullScreen);
-        Item(_diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
-        Item("Keyboard shortcuts", ToggleHelp);
-        Item("Settings…", OpenSettings);
-        menu.ShowAt(this, e.GetPosition(this));
+        Item(menu.Items, IsFullScreen ? "Leave full screen" : "Full screen", ToggleFullScreen);
+        Item(menu.Items, _diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
+        Item(menu.Items, "Keyboard shortcuts", ToggleHelp);
+        Item(menu.Items, "Settings…", () => SettingsRequested?.Invoke());
+        menu.ShowAt(this, at);
         e.Handled = true;
     }
 
@@ -469,6 +931,122 @@ internal sealed partial class StageView : UserControl
             sub.Items.Add(item);
         }
         return sub;
+    }
+
+    /// <summary>A tile's quality (the Quality menu): kept in the layout leaf ("quality"; Auto is no member), asked of the tier planner.</summary>
+    public void SetQuality(StageTile tile, TileQuality quality)
+    {
+        string? member = quality.ToMember();
+        Edit(t => t.SettingMember(tile.Path, "quality", member is null ? null : System.Text.Json.Nodes.JsonValue.Create(member).ToJsonString()));
+        _viewer.SetQuality(tile, quality);
+    }
+
+    /// <summary>The quality a layout leaf keeps (missing, or a value this app does not know, reads as Auto).</summary>
+    public static TileQuality QualityOf(LayoutNode tree, NodePath path)
+    {
+        string? json = tree.Member(path, "quality");
+        if (json is null)
+        {
+            return TileQuality.Auto;
+        }
+        try
+        {
+            return TileQualities.FromMember(System.Text.Json.Nodes.JsonNode.Parse(json) is System.Text.Json.Nodes.JsonValue v && v.TryGetValue(out string? text) ? text : null);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return TileQuality.Auto;
+        }
+    }
+
+    /// <summary>The window's own entries for the context menu (Edit Layout, Save as Layout, sidebar, new window).</summary>
+    public Action<MenuFlyout>? WindowMenu { get; set; }
+
+    // ---- keys (from the window) ----
+
+    /// <summary>A key for the stage; true if it was used.</summary>
+    public bool HandleKey(VirtualKey key, bool ctrl, bool repeat)
+    {
+        Interact();
+        StageTile? s = Selected;
+        if (s is null && _tiles.Length > 0 && key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Space or VirtualKey.Enter or VirtualKey.M)
+        {
+            Select(_tiles[0].Path);
+            s = _tiles[0];
+        }
+        if (IsFocused && Renderer.Focus is { } focused)
+        {
+            s = focused.Tile;
+        }
+        if (s is { IsEmpty: false } && !repeat)
+        {
+            static bool Down(VirtualKey k) => InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(CoreVirtualKeyStates.Down);
+            TileAction action = TileKeyMap.Map(ToTileKey(key), ctrl, Down(VirtualKey.Menu), Down(VirtualKey.Shift), _viewer.Alerts.IsActive(s.Camera));
+            if (action != TileAction.None)
+            {
+                ApplyAction(action, s);
+                return true;
+            }
+        }
+        switch (key)
+        {
+            case VirtualKey.F when !ctrl && !repeat:
+                ToggleFullScreen();
+                return true;
+            case VirtualKey.Escape:
+                if (IsFocused)
+                {
+                    Unfocus();
+                }
+                else if (State.Editing)
+                {
+                    SetEditing(false);
+                }
+                else if (IsFullScreen)
+                {
+                    ToggleFullScreen();
+                }
+                return true;
+            case VirtualKey.Space or VirtualKey.Enter when s is not null && !repeat:
+                if (!s.IsEmpty || IsFocused)
+                {
+                    ToggleFocus(IsFocused && Renderer.Focus is { } f ? f.Tile : s);
+                }
+                return true;
+            case VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down when s is not null:
+                if (Neighbor(IsFocused && Renderer.Focus is { } focus ? focus.Tile : s, key) is { } next)
+                {
+                    if (IsFocused)
+                    {
+                        if (!next.IsEmpty)
+                        {
+                            FocusOn(next);
+                        }
+                    }
+                    else
+                    {
+                        Select(next.Path);
+                    }
+                }
+                return true;
+            case VirtualKey.Delete when State.Editing && !repeat:
+                RemoveSelected();
+                return true;
+            case VirtualKey.Number0 or VirtualKey.NumberPad0 when s is not null:
+                ResetZoom(s);
+                return true;
+            case VirtualKey.D when ctrl && !repeat:
+                ToggleDiagnostics();
+                return true;
+            case (VirtualKey)188 when ctrl: // the comma key
+                SettingsRequested?.Invoke();
+                return true;
+            case VirtualKey.F1 when !repeat:
+                ToggleHelp();
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static TileKey ToTileKey(VirtualKey key) => key switch
@@ -488,115 +1066,34 @@ internal sealed partial class StageView : UserControl
             case TileAction.Dismiss:
                 _viewer.DismissAlert(tile.Camera);
                 break;
-            case TileAction.ToggleFocus:
+            case TileAction.ToggleFocus when !State.Editing:
                 ToggleFocus(tile);
                 break;
-            case TileAction.ToggleListening:
-                _viewer.ToggleListening(tile, false);
-                Selected = tile;
+            case TileAction.ToggleListening when !tile.IsEmpty:
+                _viewer.ToggleListening(tile.Camera, false);
+                Select(tile.Path);
                 break;
         }
     }
 
-    protected override void OnKeyDown(KeyRoutedEventArgs e)
-    {
-        Interact();
-        bool KeyDown(VirtualKey k) => InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(CoreVirtualKeyStates.Down);
-        bool ctrl = KeyDown(VirtualKey.Control);
-        StageTile[] tiles = _viewer.Tiles;
-        Selected ??= tiles.FirstOrDefault();
-        StageTile? s = Selected;
-        e.Handled = true;
-        if (s is not null)
-        {
-            TileAction action = TileKeyMap.Map(ToTileKey(e.Key), ctrl, KeyDown(VirtualKey.Menu), KeyDown(VirtualKey.Shift), _viewer.Alerts.IsActive(s.Camera));
-            if (action != TileAction.None)
-            {
-                ApplyAction(action, s);
-                return;
-            }
-        }
-        switch (e.Key)
-        {
-            case VirtualKey.F when !ctrl:
-                ToggleFullScreen();
-                break;
-            case VirtualKey.Escape:
-                if (IsFocused)
-                {
-                    Unfocus();
-                }
-                else if (IsFullScreen)
-                {
-                    ToggleFullScreen();
-                }
-                break;
-            case VirtualKey.Space or VirtualKey.Enter when s is not null:
-                // Shift+Space and the like are not shortcuts of ours.
-                e.Handled = false;
-                break;
-            case VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down when s is not null:
-                if (Neighbor(s, e.Key) is { } next)
-                {
-                    if (IsFocused)
-                    {
-                        FocusOn(next);
-                    }
-                    Selected = next;
-                    Interact();
-                    UpdateHover();
-                }
-                break;
-            case VirtualKey.Number0 or VirtualKey.NumberPad0 when s is not null:
-                ResetZoom(s);
-                break;
-            case VirtualKey.D when ctrl:
-                ToggleDiagnostics();
-                break;
-            case (VirtualKey)188 when ctrl: // the comma key
-                OpenSettings();
-                break;
-            case VirtualKey.F1:
-                ToggleHelp();
-                break;
-            default:
-                e.Handled = false;
-                break;
-        }
-    }
-
-    /// <summary>The nearest tile whose center lies in that direction from <paramref name="from"/>'s.</summary>
+    /// <summary>The neighbor in that direction by position in the layout (docs/UX.md "Keyboard").</summary>
     public StageTile? Neighbor(StageTile from, VirtualKey key)
     {
-        double cx = from.X + from.Width / 2, cy = from.Y + from.Height / 2;
-        StageTile? best = null;
-        double bestScore = double.MaxValue;
-        foreach (StageTile t in _viewer.Tiles)
+        int index = Array.IndexOf(_tiles, from);
+        if (index < 0)
         {
-            if (t == from || t.Width <= 0)
-            {
-                continue;
-            }
-            double dx = t.X + t.Width / 2 - cx, dy = t.Y + t.Height / 2 - cy;
-            (double along, double across) = key switch
-            {
-                VirtualKey.Left => (-dx, dy),
-                VirtualKey.Right => (dx, dy),
-                VirtualKey.Up => (-dy, dx),
-                _ => (dy, dx),
-            };
-            if (along <= 1)
-            {
-                continue;
-            }
-            double score = along + 2 * Math.Abs(across);
-            if (score < bestScore)
-            {
-                bestScore = score;
-                best = t;
-            }
+            return null;
         }
-        return best;
+        Rect[] cells = [.. _tiles.Select(t => _frames.Leaf(t.Path)?.Rect ?? default)];
+        (int dx, int dy) = key switch
+        {
+            VirtualKey.Left => (-1, 0),
+            VirtualKey.Right => (1, 0),
+            VirtualKey.Up => (0, -1),
+            _ => (0, 1),
+        };
+        int n = LayoutGeometry.Neighbor(cells, index, dx, dy);
+        return n >= 0 ? _tiles[n] : null;
     }
 
     private void ToggleDiagnostics()
@@ -612,49 +1109,43 @@ internal sealed partial class StageView : UserControl
 
     private void SpeakerClicked(StageTile tile)
     {
+        if (tile.CameraOrNone is not { } camera)
+        {
+            return;
+        }
         bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
-        _viewer.ToggleListening(tile, ctrl);
-        Selected = tile;
+        _viewer.ToggleListening(camera, ctrl);
+        Select(tile.Path);
     }
 
     private void SyncChromes()
     {
-        StageTile[] tiles = _viewer.Tiles;
-        if (ReferenceEquals(tiles, _chromeTiles))
-        {
-            return;
-        }
-        _chromeTiles = tiles;
         _chromeLayer.Children.Clear();
-        var kept = _chromes.Where(c => tiles.Contains(c.Tile)).ToDictionary(c => c.Tile);
+        var kept = _chromes.Where(c => _tiles.Contains(c.Tile)).ToDictionary(c => c.Tile);
         _chromes.Clear();
-        foreach (StageTile t in tiles)
+        foreach (StageTile t in _tiles)
         {
             TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera) };
+            chrome.Speaker.Visibility = t.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
-        }
-        if (Selected is not null && !tiles.Contains(Selected))
-        {
-            Selected = null;
         }
     }
 
     /// <summary>Texts, badges, and the empty-stage message after a state change.</summary>
     public void RefreshAll()
     {
-        SyncChromes();
         foreach (TileChrome c in _chromes)
         {
             StageTile t = c.Tile;
             c.Refresh(TitleOf(t), StatusText(t), t.Audible, _diagnostics ? DiagnosticsText(t) : null);
         }
         SyncOverlays();
-        bool empty = _viewer.Tiles.Length == 0;
+        bool empty = _viewer.Devices.Count == 0 && State.Tree.Cameras.Count == 0;
         _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         if (empty)
         {
-            _emptyText.Text = EmptyText();
+            _emptyText.Text = "No devices yet. Add an NVR or camera to start watching (Ctrl+, or right-click).";
         }
         UpdateHover();
     }
@@ -674,7 +1165,13 @@ internal sealed partial class StageView : UserControl
         bool blink = AlertBorder.ModeFor(_viewer.AnimationsEnabled()) == AlertBorder.Mode.Blinking;
         foreach (TileChrome c in _chromes)
         {
-            CameraRef camera = c.Tile.Camera;
+            if (c.Tile.CameraOrNone is not { } camera)
+            {
+                c.SetAlert(null, blink);
+                c.SetIndicators([], corner);
+                c.SetSoundBadges([]);
+                continue;
+            }
             c.SetAlert(_viewer.Alerts.For(camera)?.Lines(now), blink);
             c.SetIndicators(_viewer.Board.Items(camera), corner);
             List<string> sound = [];
@@ -689,14 +1186,23 @@ internal sealed partial class StageView : UserControl
         }
     }
 
-    private string EmptyText()
+    /// <summary>Puts an element in the stage's overlay for a moment (the self-test renders it to a bitmap); true adds, false removes.</summary>
+    public void HostTemporarily(FrameworkElement element, bool add)
     {
-        if (_viewer.Devices.Count == 0)
+        if (add)
         {
-            return "No devices yet. Add an NVR or camera to start watching (Ctrl+, or right-click).";
+            Canvas.SetLeft(element, 20);
+            Canvas.SetTop(element, 20);
+            _chromeLayer.Children.Add(element);
         }
-        return string.Join("\n", _viewer.Devices.Select(d => $"{d.DisplayName}: {DeviceText(d) ?? "connected, no channels yet"}"));
+        else
+        {
+            _chromeLayer.Children.Remove(element);
+        }
     }
+
+    /// <summary>The chrome of a tile (for the self-test).</summary>
+    public TileChrome? ChromeFor(StageTile tile) => _chromes.FirstOrDefault(c => c.Tile == tile);
 
     /// <summary>The device's state in words, or null when connected.</summary>
     public static string? DeviceText(DeviceEntry d)
@@ -724,27 +1230,41 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>The tile's status line, or null while it plays normally.</summary>
-    public static string? StatusText(StageTile t)
+    public string? StatusText(StageTile t)
     {
-        if (DeviceText(t.Device) is { } device)
+        if (t.CameraOrNone is not { } camera)
         {
-            return device;
+            return State.Editing ? "Empty tile: drop a camera here, or pick one in the sidebar" : null;
         }
-        if (t.Error is { } error)
+        if (t.Device is not { } device)
+        {
+            return "This camera's device was removed.";
+        }
+        if (DeviceText(device) is { } text)
+        {
+            return text;
+        }
+        if (t.Shared is not { } shared)
+        {
+            return _viewer.ChannelOf(camera) is { Connected: false } || (device.Channels.Count > 0 && _viewer.ChannelOf(camera) is null)
+                ? "Camera offline"
+                : "Starting…";
+        }
+        if (shared.Error is { } error)
         {
             return error;
         }
-        if (t.Video.MissingDecoder == NvCodec.H265)
+        if (shared.Video.MissingDecoder == NvCodec.H265)
         {
             return "This camera sends H.265 video. Install the HEVC Video Extension from the Microsoft Store to watch it.";
         }
-        if (t.Waiting is { } waiting)
+        if (shared.Waiting is { } waiting)
         {
             return waiting + "…";
         }
-        return t.Video.Status switch
+        return shared.Video.Status switch
         {
-            NvTileStatus.Undecodable => "This stream cannot be decoded." + (t.Video.ConfigureError is { } why ? $"\n{why}" : ""),
+            NvTileStatus.Undecodable => "This stream cannot be decoded." + (shared.Video.ConfigureError is { } why ? $"\n{why}" : ""),
             NvTileStatus.Recovering => "Recovering…",
             NvTileStatus.Waiting when t.PictureWidth == 0 => "Starting…",
             _ => null,
@@ -753,30 +1273,30 @@ internal sealed partial class StageView : UserControl
 
     private static string DiagnosticsText(StageTile t)
     {
-        string kind = t.Video.DecoderKind switch
+        if (t.Shared is not { } s)
+        {
+            return "no stream";
+        }
+        string kind = s.Video.DecoderKind switch
         {
             NvrView.Video.DecoderKind.Hardware => "GPU",
             NvrView.Video.DecoderKind.Software or NvrView.Video.DecoderKind.SoftwareTexture => "CPU",
             _ => "?",
         };
-        return $"{t.PictureWidth}x{t.PictureHeight} {t.ShownTier} · {kind} decode · {t.ReceivedRate:0.0} fps in";
+        return $"{t.PictureWidth}x{t.PictureHeight} {s.ShownTier} · {kind} decode · {s.ReceivedRate:0.0} fps in";
     }
 
     private void UpdateHover()
     {
+        long now = Stopwatch.GetTimestamp();
         bool recent = _idle.ChromeShown;
+        NodePath? selected = State.Selected;
         foreach (TileChrome c in _chromes)
         {
             bool header = recent && c.Tile == _hovered;
-            bool selected = c.Tile == Selected && recent;
-            if (c.HeaderShown != header || selected)
-            {
-                c.SetHover(header, selected);
-            }
-            else if (!selected)
-            {
-                c.SetHover(header, false);
-            }
+            // The outline fades with the chrome, but stays while editing the layout.
+            bool isSelected = c.Tile.Path == selected && (recent || State.Editing);
+            c.SetHover(header, isSelected);
         }
     }
 
@@ -787,28 +1307,22 @@ internal sealed partial class StageView : UserControl
     public void Tick()
     {
         _viewer.Tick();
+        foreach (StageTile t in _tiles)
+        {
+            if (t.Zoom != t.DemandZoom)
+            {
+                _viewer.UpdateDemand(t);
+            }
+        }
         UpdateCursor();
-        // Countdowns and fades that depend on time alone.
+        // Countdowns and fades that depend on time alone; status lines that
+        // follow the video (starting, recovering).
         UpdateHover();
-        if (_viewer.Devices.Any(d => d.State == "backoff"))
+        foreach (TileChrome c in _chromes)
         {
-            RefreshAll();
+            c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null);
         }
-        else if (_diagnostics)
-        {
-            foreach (TileChrome c in _chromes)
-            {
-                c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, DiagnosticsText(c.Tile));
-            }
-        }
-        else
-        {
-            // Status lines that follow the video (starting, recovering).
-            foreach (TileChrome c in _chromes)
-            {
-                c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, null);
-            }
-        }
+        SyncOverlays();
     }
 
     // ---- interaction and the pointer ----
@@ -851,15 +1365,21 @@ internal sealed partial class StageView : UserControl
         foreach (TileChrome c in _chromes)
         {
             c.Place();
-            if (c.Tile.Audible || c.HeaderShown)
+            if ((c.Tile.Audible || c.HeaderShown) && c.Tile.Shared is { } shared)
             {
-                c.SetLevel(core.TileAudioLevel(c.Tile.Id).Peak);
+                c.SetLevel(core.TileAudioLevel(shared.Id).Peak);
             }
         }
     }
 
-    public void StopTimers()
+    /// <summary>The window is closing: ends focus and stops the timers.</summary>
+    public void TearDown()
     {
+        CancelFocus();
+        foreach (StageTile t in _tiles)
+        {
+            _viewer.WithdrawDemand(t);
+        }
         if (_cursorHidden)
         {
             _cursorHidden = false;
@@ -869,6 +1389,10 @@ internal sealed partial class StageView : UserControl
             }
         }
         _timer.Stop();
+        _viewer.Changed -= RefreshAll;
+        _viewer.IndicatorsChanged -= SyncOverlays;
+        _viewer.Settings.Changed -= SyncOverlays;
+        _viewer.Leases.TileChanged -= OnTileChanged;
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
     }
 }

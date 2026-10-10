@@ -353,3 +353,9 @@ with Windows conventions:
   and the full screen idle hiding of the chrome and the pointer follow the
   sections above; the red border is steady when Windows' "Show animations" is
   off, as Reduce Motion is on the Mac.
+- Layouts, groups, and windows follow the sections above. Edit Layout is
+  Ctrl+E or the right-click menu (the edit bar holds the name, split, remove,
+  presets, and Save as layout); Ctrl+N opens a new window. Layouts are the
+  same documents the macOS app stores. The edge reveal, its timing, and its
+  pin are as described under "Sidebar"; the sidebar's width is remembered
+  with the window.

@@ -14,6 +14,9 @@ public readonly record struct CameraRef(string Device, int Channel, int Lens = 0
 
     /// <summary>The channel's first lens: the camera whose microphone it is.</summary>
     public CameraRef ChannelKey => this with { Lens = 0 };
+
+    // Not the record's printout: it would print ChannelKey, a CameraRef, forever.
+    public override string ToString() => Lens == 0 ? $"{Device}/{Channel}" : $"{Device}/{Channel}/lens{Lens}";
 }
 
 /// <summary>Where a detection came from (the events' <c>source</c>).</summary>

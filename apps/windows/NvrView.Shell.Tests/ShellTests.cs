@@ -2,6 +2,7 @@
 // real time), groups, window restore, and drag text.
 
 using System.Text.Json.Nodes;
+using NvrView.Tiles;
 
 namespace NvrView.Shell.Tests;
 
@@ -192,7 +193,7 @@ internal static class RevealTests
     {
         T.Run("reveal: a pass over the edge does not count; resting does", () =>
         {
-            var clock = new ManualClock();
+            var clock = new ManualViewerClock(1000);
             var r = new SidebarReveal();
             r.Pointer(inEdge: true, inOverlay: false, clock.Now);
             T.Equal(clock.Now + 0.15, r.Deadline);
@@ -211,7 +212,7 @@ internal static class RevealTests
 
         T.Run("reveal: hides half a second after the pointer leaves", () =>
         {
-            var clock = new ManualClock();
+            var clock = new ManualViewerClock(1000);
             var r = Shown(clock);
             r.Pointer(false, true, clock.Now);
             T.Check(r.Deadline is null, "over the overlay");
@@ -229,7 +230,7 @@ internal static class RevealTests
 
         T.Run("reveal: drags, menus, and editing hold it", () =>
         {
-            var clock = new ManualClock();
+            var clock = new ManualViewerClock(1000);
             var r = Shown(clock);
             r.Pointer(false, false, clock.Now);
             clock.Advance(0.5);
@@ -244,7 +245,7 @@ internal static class RevealTests
 
         T.Run("reveal: docking hides at once and disables it", () =>
         {
-            var clock = new ManualClock();
+            var clock = new ManualViewerClock(1000);
             var r = Shown(clock);
             r.SetEnabled(false);
             T.Check(!r.IsShown && r.Deadline is null);
@@ -258,7 +259,7 @@ internal static class RevealTests
         });
     }
 
-    private static SidebarReveal Shown(ManualClock clock)
+    private static SidebarReveal Shown(ManualViewerClock clock)
     {
         var r = new SidebarReveal();
         r.Pointer(true, false, clock.Now);
@@ -385,12 +386,12 @@ internal static class StoreTests
         {
             foreach (CameraRef c in new[] { Fixtures.Cam(0), Fixtures.Cam(12, "d-00ff", 1) })
             {
-                T.Equal<CameraRef?>(c, CameraRef.FromDragText(c.DragText));
+                T.Equal<CameraRef?>(c, CameraRefs.FromDragText(c.DragText()));
             }
-            T.Equal("nvrview-camera:3.1@dev-a", Fixtures.Cam(3, lens: 1).DragText);
+            T.Equal("nvrview-camera:3.1@dev-a", Fixtures.Cam(3, lens: 1).DragText());
             foreach (string bad in new[] { "", "camera:1@x", "nvrview-camera:1@", "nvrview-camera:@x", "nvrview-camera:1.2@x", "nvrview-camera:a@x", "nvrview-camera:1.0.0@x" })
             {
-                T.Check(CameraRef.FromDragText(bad) is null, bad);
+                T.Check(CameraRefs.FromDragText(bad) is null, bad);
             }
             T.Equal("3 of 8", ChannelFilter.CountText(3, 8));
             T.Equal("8", ChannelFilter.CountText(8, 8));

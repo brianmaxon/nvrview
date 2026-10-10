@@ -4,31 +4,11 @@
 // after the pointer leaves it, unless a drag, an open menu, or text editing
 // holds it. Pure state with the time passed in: the window arms one timer for
 // Deadline and calls Tick when it fires, and tests drive it with a manual
-// clock (no real waiting).
+// clock (NvrView.Tiles.ManualViewerClock; no real waiting).
+
+using NvrView.Tiles;
 
 namespace NvrView.Shell;
-
-/// <summary>A time source in seconds (monotonic).</summary>
-public interface IClock
-{
-    double Now { get; }
-}
-
-/// <summary>The system's monotonic clock.</summary>
-public sealed class SystemClock : IClock
-{
-    public static readonly SystemClock Instance = new();
-
-    public double Now => System.Diagnostics.Stopwatch.GetTimestamp() / (double)System.Diagnostics.Stopwatch.Frequency;
-}
-
-/// <summary>A clock that moves only when told (tests, simulated runs).</summary>
-public sealed class ManualClock(double start = 1000) : IClock
-{
-    public double Now { get; private set; } = start;
-
-    public void Advance(double seconds) => Now += seconds;
-}
 
 /// <summary>Things that keep the overlay up although the pointer is outside it.</summary>
 [Flags]

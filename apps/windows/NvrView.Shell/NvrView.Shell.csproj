@@ -9,4 +9,8 @@
     <RootNamespace>NvrView.Shell</RootNamespace>
     <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- CameraRef and the clock come from the tile features' logic. -->
+    <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+  </ItemGroup>
 </Project>

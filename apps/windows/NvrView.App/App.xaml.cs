@@ -1,27 +1,26 @@
-// The application: starts the core, the GPU device, the window, the render
-// thread, and audio; connects the devices (from Settings, or the one given on
-// the command line for development); runs the self-test when asked; and
-// shuts everything down in order when the window closes.
+// The application: starts the core, the GPU device, audio, and the windows
+// (restored from the last run, or one showing every camera); connects the
+// devices (from Settings, or the one given on the command line for
+// development); runs the self-test when asked; remembers the open windows
+// (windows.json: content, frame, full screen, sidebar; no secrets); and shuts
+// everything down in order when the last window closes.
 
-using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using NvrView.Interop;
-using Windows.Graphics;
-using static TerraFX.Interop.Windows.Windows;
-using static TerraFX.Interop.Windows.SWP;
+using NvrView.Shell;
 
 namespace NvrView.App;
 
 public partial class App : Application
 {
-    private Window? _window;
-    private StageView? _stage;
-    private StageRenderer? _renderer;
+    private readonly List<ViewerWindow> _windows = [];
     private AudioOutput? _audio;
     private Viewer? _viewer;
     private CoreHost? _host;
     private MockNvr? _mock;
     private SelfTest? _selfTest;
+    private WindowStore _windowStore = new(null);
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _saveTimer;
     private bool _shutDown;
 
     public App()
@@ -45,13 +44,17 @@ public partial class App : Application
 
     internal Viewer? Viewer => _viewer;
 
-    internal StageView? Stage => _stage;
+    /// <summary>The open windows, the first opened first.</summary>
+    internal IReadOnlyList<ViewerWindow> Windows => _windows;
 
-    internal StageRenderer? Renderer => _renderer;
+    /// <summary>The first window's stage, renderer, and window (the self-test's main window).</summary>
+    internal StageView? Stage => _windows.FirstOrDefault()?.Stage;
+
+    internal StageRenderer? Renderer => _windows.FirstOrDefault()?.Renderer;
+
+    internal Window? MainWindow => _windows.FirstOrDefault()?.Window;
 
     internal AudioOutput? Audio => _audio;
-
-    internal Window? MainWindow => _window;
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -88,42 +91,19 @@ public partial class App : Application
             LogMaxTotalBytes = 16 << 20,
             DataDir = Path.Combine(dataDir, "core"),
         }, o.Gpu, !o.Software);
+        // Development modes (--host, --mock-nvr) keep nothing but the core's own store.
         bool memoryOnly = o.Development;
         _viewer = new Viewer(
             _host,
             memoryOnly ? new MemoryCredentials() : new WindowsCredentials(),
             new DeviceStore(memoryOnly ? null : Path.Combine(dataDir, "settings.json")),
-            new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")));
-
-        _window = new Window { Title = "nvrview" };
-        AppWindow appWindow = _window.AppWindow;
-        _stage = new StageView(_viewer, appWindow);
-        _window.Content = _stage;
-        _renderer = new StageRenderer(_host, _viewer, chain => ui.TryEnqueue(() => _stage.AttachSwapChain(chain)));
-        _stage.Renderer = _renderer;
-        _stage.SettingsRequested = () => _ = SettingsDialog.ShowAsync(_stage.XamlRoot, _viewer, memoryOnly);
-        _window.Closed += (_, _) => Shutdown();
-
-        if (o.SelfTest)
-        {
-            // Behind every other window, without activation: the person at the
-            // computer keeps working (the self-test never takes focus).
-            appWindow.MoveAndResize(new RectInt32(40, 40, 1024, 640));
-            appWindow.Show(false);
-            nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(_window);
-            unsafe
-            {
-                _ = SetWindowPos((TerraFX.Interop.Windows.HWND)hwnd, TerraFX.Interop.Windows.HWND.HWND_BOTTOM, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            }
-        }
-        else
-        {
-            appWindow.Resize(new SizeInt32(1280, 800));
-            _window.Activate();
-        }
-        _stage.PushSize();
-        _renderer.Start();
+            new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")),
+            new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
+        _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
+        _saveTimer = ui.CreateTimer();
+        _saveTimer.Interval = TimeSpan.FromSeconds(1);
+        _saveTimer.IsRepeating = false;
+        _saveTimer.Tick += (_, _) => SaveWindows();
 
         if (!o.NoAudio)
         {
@@ -174,10 +154,74 @@ public partial class App : Application
             _viewer.LoadSavedDevices();
         }
 
+
+        // The windows of the last run, or one showing every camera (it fills
+        // itself once the cameras are known).
+        List<SavedWindow> restore = _windowStore.Load();
+        foreach (SavedWindow w in restore)
+        {
+            OpenWindow(w.Content, w);
+        }
+        if (_windows.Count == 0)
+        {
+            OpenWindow(ViewerWindow.AllCameras(_viewer));
+        }
+
         if (o.SelfTest)
         {
             _selfTest = new SelfTest(this, o);
             _selfTest.Start();
+        }
+    }
+
+    /// <summary>Opens a window with its own content (behind the others and never activated in the self-test).</summary>
+    internal ViewerWindow OpenWindow(WindowContent content, SavedWindow? restore = null)
+    {
+        var w = new ViewerWindow(_viewer!, _host!, content, restore, background: Program.Options.SelfTest);
+        _windows.Add(w);
+        w.Changed += ScheduleSave;
+        w.Closed += WindowClosed;
+        ScheduleSave();
+        return w;
+    }
+
+    private void WindowClosed(ViewerWindow w)
+    {
+        if (_shutDown)
+        {
+            return;
+        }
+        if (_windows.Count == 1)
+        {
+            // The last window: remembered as it was, then everything stops.
+            SaveWindows();
+            _windows.Clear();
+            Shutdown();
+            Exit();
+            return;
+        }
+        _windows.Remove(w);
+        SaveWindows();
+    }
+
+    private void ScheduleSave()
+    {
+        if (_saveTimer is { } t && !_shutDown)
+        {
+            t.Stop();
+            t.Start();
+        }
+    }
+
+    private void SaveWindows()
+    {
+        try
+        {
+            _windowStore.Save(_windows.Select(w => w.ToSaved()));
+        }
+        catch (IOException e)
+        {
+            AppLog.Warn($"saving windows.json failed: {e.Message}");
         }
     }
 
@@ -189,9 +233,11 @@ public partial class App : Application
             return;
         }
         _shutDown = true;
-        _stage?.StopTimers();
-        _renderer?.Dispose();
-        _stage?.AttachSwapChain(0);
+        _saveTimer?.Stop();
+        foreach (ViewerWindow w in _windows.ToArray())
+        {
+            w.Close();
+        }
         _audio?.Dispose();
         _viewer?.CloseAll();
         _host?.Dispose();
@@ -210,7 +256,10 @@ public partial class App : Application
     {
         ExitCode = code;
         Shutdown();
-        _window?.Close();
+        foreach (ViewerWindow w in _windows.ToArray())
+        {
+            w.Window.Close();
+        }
         Exit();
     }
 }

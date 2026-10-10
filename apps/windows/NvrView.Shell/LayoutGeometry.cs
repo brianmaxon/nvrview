@@ -3,6 +3,8 @@
 // designer's hit testing and the renderer's rectangles are tested headless.
 // Rectangles are in any unit (DIPs in the app), origin top left.
 
+using NvrView.Tiles;
+
 namespace NvrView.Shell;
 
 /// <summary>A rectangle, origin top left.</summary>

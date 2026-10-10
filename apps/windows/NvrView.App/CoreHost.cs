@@ -45,6 +45,7 @@ internal sealed class CoreEvent
     public long Decoded;
     public long Dropped;
     public long Failures;
+    public long Revision;
     public List<ChannelInfo>? Channels;
 
     /// <summary>The raw JSON of audio_stats events (diagnostics only).</summary>
@@ -96,6 +97,7 @@ internal sealed class CoreEvent
                 case "decoded" when v.ValueKind == JsonValueKind.Number: e.Decoded = Long(v); break;
                 case "dropped" when v.ValueKind == JsonValueKind.Number: e.Dropped = Long(v); break;
                 case "failures" when v.ValueKind == JsonValueKind.Number: e.Failures = Long(v); break;
+                case "revision" when v.ValueKind == JsonValueKind.Number: e.Revision = Long(v); break;
                 case "channels" when v.ValueKind == JsonValueKind.Array:
                     e.Channels = [];
                     foreach (JsonElement c in v.EnumerateArray())
@@ -204,6 +206,13 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
     /// <summary>The current device (replaced after a loss); read it on the render thread or inside the gate.</summary>
     public GpuDevice Gpu { get; private set; }
 
+    /// <summary>
+    /// Held (read) by every window's render thread for a frame; replacing
+    /// the device takes it (write), so no frame draws on a device being
+    /// released.
+    /// </summary>
+    public ReaderWriterLockSlim FrameGate { get; } = new(LockRecursionPolicy.NoRecursion);
+
     /// <summary>GPU devices replaced after a loss.</summary>
     public int DeviceReplacements { get; private set; }
 
@@ -263,13 +272,21 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
     /// Replaces a lost GPU device (render thread): holds back every action,
     /// creates a new device, moves every tile to it, releases the old one.
     /// The renderer's own objects must be released before and recreated after.
+    /// With several windows, each render thread may see the loss: passing the
+    /// device it lost makes the replacement happen once.
     /// </summary>
-    public void ReplaceGpu()
+    public void ReplaceGpu(GpuDevice? lost = null)
     {
+        FrameGate.EnterWriteLock();
         _gate.EnterWriteLock();
         try
         {
             GpuDevice old = Gpu;
+            if (lost is not null && !ReferenceEquals(lost, old))
+            {
+                // Another window's render thread already replaced it.
+                return;
+            }
             GpuDevice fresh = GpuDevice.Create(_gpuChoice);
             lock (_tilesLock)
             {
@@ -286,6 +303,7 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         finally
         {
             _gate.ExitWriteLock();
+            FrameGate.ExitWriteLock();
         }
     }
 
@@ -342,5 +360,6 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         Core.Dispose();
         Gpu.Dispose();
         _gate.Dispose();
+        FrameGate.Dispose();
     }
 }

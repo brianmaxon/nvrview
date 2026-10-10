@@ -13,6 +13,8 @@
 // One thread (the UI thread in the app): opening and closing tiles must not
 // happen inside a core callback.
 
+using NvrView.Tiles;
+
 namespace NvrView.Shell;
 
 /// <summary>What the leases open, close, and tell about focus.</summary>

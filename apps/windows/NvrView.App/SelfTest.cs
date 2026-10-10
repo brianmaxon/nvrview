@@ -30,7 +30,17 @@
 //    the stream (main, extern, sub) and Auto follows zoom past 2x and back
 //    below 1.6x; a second-lens tile opens on mobile, and where the device
 //    refuses mobile it is reopened on extern for the run;
-// 11. with --credential-test, a throwaway credential is written, read back,
+// 11. layouts and windows: the arrangement saved as a layout (device keys),
+//    a split, a camera picked into the new tile, a swap, and a tile's
+//    quality are each stored; changing the content while a tile is focused
+//    ends only the focus (the renderer keeps its swap chain and presents);
+//    the layout opened in a second window draws with its own render thread
+//    on the same core tiles and follows an edit made in the first; closing it
+//    gives its leases back; collapsing the sidebar and revealing it at the
+//    edge (on a manual clock) does not resize the stage's buffers; the
+//    window's restore record says what it shows and that the sidebar is
+//    collapsed;
+// 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
 // Writes what it measured and PASS or FAIL to the --log file and exits 0 or 1.
@@ -38,6 +48,7 @@
 using System.Diagnostics;
 using System.Text;
 using Microsoft.UI.Windowing;
+using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
@@ -49,6 +60,9 @@ internal sealed class SelfTest(App app, AppOptions options)
     private readonly List<string> _problems = [];
     private readonly List<string> _lines = [];
     private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+    /// <summary>The first window's tiles that show a camera.</summary>
+    private StageTile[] Tiles => [.. app.Stage!.Tiles.Where(t => !t.IsEmpty)];
 
     public void Start()
     {
@@ -95,23 +109,34 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
         }
 
+        // The first window shows the mock's channels (first lenses) as an even grid.
+        bool listed = await Until(() => v.Devices.FirstOrDefault() is { State: "connected" } d && d.Channels.Count >= options.MockChannels, 30);
+        if (!listed)
+        {
+            _problems.Add("the mock's channels were not listed");
+            return;
+        }
+        DeviceEntry mockDevice = v.Devices[0];
+        app.Windows[0].Show(new WindowContent.Scratch("Self-test", LayoutNode.Balanced(
+            mockDevice.Channels.Keys.Order().Select(c => new CameraRef(mockDevice.Key, c)))));
+
         // 1. Tiles play.
-        bool playing = await Until(() => v.Tiles.Length >= options.MockChannels &&
-            v.Tiles.All(t => t.Video.Counters.Decoded > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
-        Say($"devices {v.Devices.Count} ({string.Join(", ", v.Devices.Select(d => d.State))}), tiles {v.Tiles.Length}, " +
+        bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
+            Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
+        Say($"devices {v.Devices.Count} ({string.Join(", ", v.Devices.Select(d => d.State))}), tiles {Tiles.Length}, " +
             $"first picture {Ms(v.Timings.GetValueOrDefault("first_picture"))}");
         if (!playing)
         {
-            _problems.Add($"tiles did not all play: {string.Join("; ", v.Tiles.Select(Describe))}");
+            _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
             return;
         }
         await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.SelfTestSeconds * 0.2)));
         long memoryBefore = PrivateBytes();
-        await CheckFrame("grid", v.Tiles);
+        await CheckFrame("grid", Tiles);
         if (options.MockChannels >= 2)
         {
-            StageTile last = v.Tiles[^1];
-            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {StageView.StatusText(last) ?? "playing"}");
+            StageTile last = Tiles[^1];
+            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {app.Stage!.StatusText(last) ?? "playing"}");
             if (!v.WaitedTiles.Contains(last.Id))
             {
                 _problems.Add("the third-party channel never reported waiting for the camera");
@@ -145,9 +170,9 @@ internal sealed class SelfTest(App app, AppOptions options)
             var saved = new DeviceConfig { Name = "second", Host = mock.Host, Port = mock.Port, User = "example-user" };
             v.SaveDevice(saved, Environment.GetEnvironmentVariable("NVRVIEW_TEST_PASSWORD") ?? "example-password");
             bool connected = await Until(() => v.Devices.Any(d => d.Config.Key == saved.Key && d.State == "connected"), 10);
-            int tilesWithSecond = v.Tiles.Length;
+            int tilesWithSecond = Tiles.Length;
             v.ForgetDevice(saved.Key);
-            Say($"settings save: second device connected {connected}, {tilesWithSecond} tiles; removed: {v.Devices.All(d => d.Config.Key != saved.Key)}, {v.Tiles.Length} tiles");
+            Say($"settings save: second device connected {connected}, {tilesWithSecond} tiles; removed: {v.Devices.All(d => d.Config.Key != saved.Key)}, {Tiles.Length} tiles");
             if (!connected || v.Devices.Any(d => d.Config.Key == saved.Key))
             {
                 _problems.Add("saving and removing a device did not connect and remove it");
@@ -170,11 +195,11 @@ internal sealed class SelfTest(App app, AppOptions options)
         await Resize(r);
 
         // 3. Spatial selection.
-        StageTile first = v.Tiles[0];
-        if (v.Tiles.Length >= 2)
+        StageTile first = Tiles[0];
+        if (Tiles.Length >= 2)
         {
             StageTile? right = stage.Neighbor(first, Windows.System.VirtualKey.Right);
-            Say($"right of tile 0: {(right is null ? "none" : $"tile {Array.IndexOf(v.Tiles, right)}")}");
+            Say($"right of tile 0: {(right is null ? "none" : $"tile {Array.IndexOf(Tiles, right)}")}");
             if (right is null)
             {
                 _problems.Add("arrow-key selection found no tile to the right of the first");
@@ -184,9 +209,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         // 4. Focus: animation, then the main stream after the aligned switch.
         int tierEventsBefore = v.TierEvents.Count;
         stage.FocusOn(first);
-        bool main = await Until(() => first.Video.ShownGeneration == 1 && first.ShownTier == "main", FocusAnimation.Seconds + 8);
+        bool main = await Until(() => first.Video?.ShownGeneration == 1 && first.ShownTier == "main", FocusAnimation.Seconds + 8);
         float stageW = (float)stage.ActualWidth, stageH = (float)stage.ActualHeight;
-        Say($"focused tile 0: showing generation {first.Video.ShownGeneration} ({first.ShownTier}), picture {first.PictureWidth}x{first.PictureHeight}, " +
+        Say($"focused tile 0: showing generation {first.Video?.ShownGeneration} ({first.ShownTier}), picture {first.PictureWidth}x{first.PictureHeight}, " +
             $"rect {first.X:0},{first.Y:0} {first.Width:0}x{first.Height:0} of {stageW:0}x{stageH:0}, " +
             $"tier switch {Ms(v.Timings.GetValueOrDefault("tier_switch"))}, delta {v.TierSwitchDeltaMs?.ToString() ?? "n/a"} ms, held {v.TierSwitchHeldMs?.ToString() ?? "n/a"} ms");
         if (!main)
@@ -208,7 +233,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("no audio level while muted");
         }
         long rendered = app.Audio?.FramesRendered ?? 0;
-        v.ToggleListening(first, additive: false);
+        v.ToggleListening(first.Camera, additive: false);
         var heard = Stopwatch.StartNew();
         float listening = 0;
         while (heard.Elapsed.TotalSeconds < 6 && listening <= 0)
@@ -242,13 +267,13 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add("the audio output rendered nothing");
         }
-        v.SetListening(first, false);
+        v.SetListening(first.Camera, false);
 
         // 6. Leave focus.
         tierEventsBefore = v.TierEvents.Count;
         stage.Unfocus();
-        bool sub = await Until(() => first.Video.ShownGeneration == 2 && first.ShownTier == "sub" && r.Focus is null, FocusAnimation.Seconds + 8);
-        Say($"after focus: showing generation {first.Video.ShownGeneration} ({first.ShownTier})");
+        bool sub = await Until(() => first.Video?.ShownGeneration == 2 && first.ShownTier == "sub" && r.Focus is null, FocusAnimation.Seconds + 8);
+        Say($"after focus: showing generation {first.Video?.ShownGeneration} ({first.ShownTier})");
         if (!sub)
         {
             _problems.Add("leaving focus did not return to the sub stream");
@@ -256,7 +281,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         CheckTierEvents(v, first.Id, tierEventsBefore, 2);
 
         // 7. Digital zoom.
-        StageTile zoomed = v.Tiles[^1];
+        StageTile zoomed = Tiles[^1];
         StageView.ZoomAround(zoomed, 0.25, 0.25, 2);
         await CheckFrame("zoomed", [zoomed]);
         Say($"zoom {zoomed.Zoom:0.0} around {zoomed.CenterX:0.00},{zoomed.CenterY:0.00}");
@@ -266,7 +291,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         StageView.ResetZoom(zoomed);
 
-        long failuresBefore = v.Tiles.Sum(t => t.Video.Counters.Failures + t.Video.Counters.ConfigureFailures);
+        long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
         Say($"decode failures before the device loss: {failuresBefore}");
         if (failuresBefore > 0)
         {
@@ -275,28 +300,29 @@ internal sealed class SelfTest(App app, AppOptions options)
         long memoryAfter = PrivateBytes();
 
         // 8. Device loss.
-        long[] decodedBefore = [.. v.Tiles.Select(t => t.Video.Counters.Decoded)];
+        long[] decodedBefore = [.. Tiles.Select(t => (t.Video?.Counters.Decoded ?? 0))];
         r.SimulateDeviceLoss();
         bool recovered = await Until(() => r.Recoveries >= 1, 10);
         bool playingAgain = recovered && await Until(() =>
-            v.Tiles.Select((t, i) => t.Video.Counters.Decoded > decodedBefore[i] + 10 && t.PictureWidth > 0).All(x => x), 15);
+            Tiles.Select((t, i) => (t.Video?.Counters.Decoded ?? 0) > decodedBefore[i] + 10 && t.PictureWidth > 0).All(x => x), 15);
         Say($"device loss: recoveries {r.Recoveries}, device replacements {v.Host.DeviceReplacements}, " +
-            $"decoders rebuilt {v.Tiles.Sum(t => t.Video.Rebuilds)}, failures answered {v.Tiles.Sum(t => t.Video.Counters.Failures) - failuresBefore}");
+            $"decoders rebuilt {Tiles.Sum(t => (t.Video?.Rebuilds ?? 0))}, failures answered {Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0)) - failuresBefore}");
         if (!recovered || !playingAgain)
         {
-            _problems.Add($"tiles did not play again after the device loss: {string.Join("; ", v.Tiles.Select(Describe))}");
+            _problems.Add($"tiles did not play again after the device loss: {string.Join("; ", Tiles.Select(Describe))}");
         }
         else
         {
             await Task.Delay(500);
-            await CheckFrame("after device loss", v.Tiles);
+            await CheckFrame("after device loss", Tiles);
         }
 
         await TileFeatures(v, stage);
+        await LayoutsAndWindows(v);
 
         // Detections from the mock (camera AI) reached the tiles.
         Say($"detection events: {v.DetectionEvents}, shown now: " +
-            string.Join(", ", v.Tiles.SelectMany(t => v.Board.Items(t.Camera).Select(i => i.Description)).Distinct()));
+            string.Join(", ", Tiles.SelectMany(t => v.Board.Items(t.Camera).Select(i => i.Description)).Distinct()));
         if (v.DetectionEvents == 0)
         {
             _problems.Add("no detection events arrived");
@@ -304,8 +330,8 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // The device goes away: tiles say they reconnect, with a countdown.
         app.StopMock();
-        bool reconnecting = await Until(() => v.Tiles.All(t => StageView.StatusText(t) is { } s && s.Contains("onnect", StringComparison.Ordinal)), 15);
-        Say($"mock-nvr stopped: {StageView.StatusText(v.Tiles[0]) ?? "playing"}");
+        bool reconnecting = await Until(() => Tiles.All(t => app.Stage!.StatusText(t) is { } s && s.Contains("onnect", StringComparison.Ordinal)), 15);
+        Say($"mock-nvr stopped: {app.Stage!.StatusText(Tiles[0]) ?? "playing"}");
         if (!reconnecting)
         {
             _problems.Add("tiles did not say they were reconnecting after the device went away");
@@ -317,7 +343,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add($"callbacks threw {v.Core.CallbackExceptionCount} times: {v.Core.FirstCallbackException}");
         }
         _problems.AddRange(v.Problems.Select(p => $"core: {p}"));
-        foreach (StageTile t in v.Tiles)
+        foreach (StageTile t in Tiles)
         {
             Say(Describe(t));
         }
@@ -333,7 +359,7 @@ internal sealed class SelfTest(App app, AppOptions options)
     private static CoreEvent Detect(StageTile tile, string kind, string source, bool start) => new()
     {
         Type = "detection",
-        Device = tile.Device.Id,
+        Device = tile.Device!.Id,
         Channel = tile.Channel,
         Kind = kind,
         Source = source,
@@ -352,8 +378,8 @@ internal sealed class SelfTest(App app, AppOptions options)
     private async Task TileFeatures(Viewer v, StageView stage)
     {
         // Camera AI detections from the mock reach the corner indicators.
-        bool shown = await Until(() => v.Tiles.Any(t => stage.ChromeFor(t) is { Indicators.Count: > 0 }), 15);
-        StageTile? withSymbols = v.Tiles.FirstOrDefault(t => stage.ChromeFor(t) is { Indicators.Count: > 0 });
+        bool shown = await Until(() => Tiles.Any(t => stage.ChromeFor(t) is { Indicators.Count: > 0 }), 15);
+        StageTile? withSymbols = Tiles.FirstOrDefault(t => stage.ChromeFor(t) is { Indicators.Count: > 0 });
         Say($"corner indicators: {(shown ? string.Join(", ", stage.ChromeFor(withSymbols!)!.Indicators.Select(i => i.Description)) : "none")}, " +
             $"corner {v.Settings.IndicatorCorner}");
         Expect(shown, "no tile showed a corner indicator from the mock's detections");
@@ -370,20 +396,20 @@ internal sealed class SelfTest(App app, AppOptions options)
         // Alerts, auto-hide, and the hold, on a clock that moves only when told to.
         var clock = new ManualViewerClock(1000);
         v.UseClock(clock);
-        StageTile lens0 = v.Tiles.First(t => t.Channel == 1 && t.Lens == 0);
-        DeviceEntry device = lens0.Device;
-        StageTile? lens1 = v.OpenCameraTile(device, 1, 1);
+        StageTile lens0 = Tiles.First(t => t.Channel == 1 && t.Lens == 0);
+        DeviceEntry? device = lens0.Device;
+        StageTile? lens1 = AddCamera(stage, new CameraRef(device!.Key, 1, 1));
         Expect(lens1 is not null, "the second-lens tile did not open");
         if (lens1 is null)
         {
             return;
         }
-        bool lensPlays = await Until(() => lens1.Video.Counters.Decoded > 5 && lens1.PictureWidth > 0, 15);
-        Say($"second lens: opened on {lens1.OpenedTier}, showing {lens1.ShownTier}, decoded {lens1.Video.Counters.Decoded}");
+        bool lensPlays = await Until(() => (lens1.Video?.Counters.Decoded ?? 0) > 5 && lens1.PictureWidth > 0, 15);
+        Say($"second lens: opened on {lens1.OpenedTier}, showing {lens1.ShownTier}, decoded {(lens1.Video?.Counters.Decoded ?? 0)}");
         Expect(lens1.OpenedTier == StreamTier.Mobile, "a second-lens tile did not open on mobile");
         Expect(lensPlays, "the second-lens tile did not play");
         TileChrome c0 = stage.ChromeFor(lens0)!, c1 = stage.ChromeFor(lens1)!;
-        StageTile other = v.Tiles.First(t => t.Channel == 0);
+        StageTile other = Tiles.First(t => t.Channel == 0);
         TileChrome cOther = stage.ChromeFor(other)!;
 
         v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
@@ -495,27 +521,180 @@ internal sealed class SelfTest(App app, AppOptions options)
         // A camera whose device refuses the second lens's mobile stream: reopened on extern. The core ends
         // a refused start with tile_error start_rejected only after its 60 s wait (docs/FFI.md), so the event is
         // injected, as a fake core would.
-        StageTile onCh2 = v.Tiles.First(t => t.Channel == 2 && t.Lens == 0);
-        StageTile? refused = v.OpenCameraTile(onCh2.Device, 2, 1);
-        CameraRef camera = new(onCh2.Device.Config.Key, 2, 1);
+        StageTile onCh2 = Tiles.First(t => t.Channel == 2 && t.Lens == 0);
+        CameraRef camera = new(onCh2.Device!.Key, 2, 1);
+        StageTile? refused = AddCamera(stage, camera);
         Expect(refused is { OpenedTier: StreamTier.Mobile }, "the refused second lens did not open on mobile first");
         ulong firstId = refused?.Id ?? 0;
         if (refused is not null)
         {
             v.Apply(new CoreEvent { Type = "tile_error", Tile = refused.Id, Reason = "start_rejected", Status = 400 });
         }
-        StageTile? now = v.Tiles.FirstOrDefault(t => t.Camera == camera);
+        StageTile? now = Tiles.FirstOrDefault(t => t.Camera == camera);
         bool reopened = now is { OpenedTier: StreamTier.Extern } && now.Id != firstId && v.Planner.NoMobile(camera);
         Say($"second lens refused on mobile: reopened on {now?.OpenedTier.ToString() ?? "n/a"} as a new tile {now is not null && now.Id != firstId} (no mobile for the run: {v.Planner.NoMobile(camera)}), " +
             $"a first lens is left alone: {!v.Planner.StartFailed(onCh2.Camera, StreamTier.Sub, "start_rejected")}");
         Expect(reopened, "a second lens whose mobile start was refused was not reopened on extern");
-        foreach (StageTile t in v.Tiles.Where(t => t.Lens > 0).ToArray())
+        while (Tiles.FirstOrDefault(t => t.Lens > 0) is { } t)
         {
             // The mock refuses extern too on this channel; that refusal is expected.
             v.Problems.RemoveAll(p => p.StartsWith($"tile_error tile {t.Id}:", StringComparison.Ordinal));
-            v.CloseCameraTile(t);
+            RemoveTile(stage, t);
         }
-        Expect(v.Tiles.All(t => t.Lens == 0), "a second-lens tile stayed open");
+        Expect(Tiles.All(t => t.Lens == 0), "a second-lens tile stayed open");
+    }
+
+    // 11. Layouts, windows, and the sidebar (docs/UX.md "Layouts", "Sidebar").
+    private async Task LayoutsAndWindows(Viewer v)
+    {
+        ViewerWindow w1 = app.Windows[0];
+        StageView stage = w1.Stage;
+        StageRenderer r = w1.Renderer;
+
+        // Save the arrangement as a stored layout; the window now shows it.
+        int leaves = stage.Tiles.Length;
+        string? id = w1.SaveAsLayout(v.UniqueLayoutName("Self-test layout"));
+        SavedLayout? stored = id is null ? null : v.Layout(id);
+        Say($"layout saved: {id ?? "refused"}, {stored?.Root.LeafCount ?? 0} tiles, window shows it: {w1.State.Content is WindowContent.Layout(string shown) && shown == id}");
+        Expect(stored is not null && stored.Root == w1.State.Tree, "Save as layout did not store the window's tree");
+        if (id is null || stored is null)
+        {
+            return;
+        }
+        Expect(v.Devices[0].Config.CoreKey is { } coreKey && stored.Root.Cameras.All(c => c.Device == coreKey),
+            "the layout does not name cameras by the core's device key");
+        try
+        {
+            // Split the first tile, put a camera in the new tile, swap two tiles: each edit is stored.
+            stage.SetEditing(true);
+            NodePath first = stage.Tiles[0].Path;
+            stage.Select(first);
+            stage.Split(SplitAxis.Row);
+            NodePath? added = w1.State.Selected;
+            Expect(v.Layout(id)?.Root.LeafCount == leaves + 1, "splitting a tile was not stored");
+            CameraRef extra = new(v.Devices[0].Key, 0);
+            w1.CameraPicked(extra);
+            Expect(added is { } p && v.Layout(id)?.Root[p]?.Camera == extra, "a camera picked in the sidebar did not fill the selected tile");
+            NodePath a = stage.Tiles[0].Path, b = stage.Tiles[^1].Path;
+            CameraRef? ca = stage.Tiles[0].CameraOrNone, cb = stage.Tiles[^1].CameraOrNone;
+            stage.Swap(a, b);
+            LayoutNode? after = v.Layout(id)?.Root;
+            Say($"designer: split to {after?.LeafCount} tiles, swapped {ca} and {cb}: stored {after?[a]?.Camera} and {after?[b]?.Camera}");
+            Expect(after?[a]?.Camera == cb && after?[b]?.Camera == ca, "swapping two tiles was not stored");
+            // A tile's quality is saved in its leaf ("quality"), and Auto removes it.
+            stage.SetQuality(stage.Tiles[0], TileQuality.Fluent);
+            string? member = v.Layout(id)?.Root.Member(stage.Tiles[0].Path, "quality");
+            stage.SetQuality(stage.Tiles[0], TileQuality.Auto);
+            Expect(member == "\"fluent\"" && v.Layout(id)?.Root.Member(stage.Tiles[0].Path, "quality") is null,
+                "a tile's quality was not kept in its layout leaf");
+            stage.SetEditing(false);
+            // The stored JSON reads back to the same layout.
+            Expect(SavedLayout.Parse(v.Layout(id)!.ToJson()) == v.Layout(id), "the stored layout does not round-trip");
+
+            bool playing = await Until(() => Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 3 && t.PictureWidth > 0), 15);
+            Expect(playing, $"tiles did not play after the edits: {string.Join("; ", Tiles.Select(Describe))}");
+
+            // Changing the content while a tile is focused ends the focus only: the renderer keeps presenting.
+            StageTile focusTile = Tiles[0];
+            stage.FocusOn(focusTile);
+            await Task.Delay(400);
+            int chains = r.SwapChains;
+            long frames = r.Frames;
+            w1.Show(new WindowContent.Layout(id));
+            await Task.Delay(500);
+            Say($"content changed while focused: focus {(r.Focus is null ? "ended" : "kept")}, swap chains {chains} -> {r.SwapChains}, frames +{r.Frames - frames}");
+            Expect(r.Focus is null && !focusTile.Focused, "changing the content did not end the focus");
+            Expect(r.SwapChains == chains && r.Frames - frames > 10, "changing the content while focused disturbed the renderer");
+            await CheckFrame("after a content change while focused", Tiles);
+
+            // The same layout in a second window: its own render thread, shared core tiles.
+            ViewerWindow w2 = app.OpenWindow(new WindowContent.Layout(id));
+            bool drawn = await Until(() => w2.Renderer.Frames > 30 && w2.Stage.Tiles.Where(t => !t.IsEmpty).All(t => t.PictureWidth > 0), 15);
+            StageTile[] t2 = [.. w2.Stage.Tiles.Where(t => !t.IsEmpty)];
+            bool shared = t2.All(t => Tiles.FirstOrDefault(o => o.CameraOrNone == t.CameraOrNone) is { } o && o.Id == t.Id && t.Id != 0);
+            CameraRef sample = t2[0].Camera;
+            Say($"second window: {w2.Renderer.Frames} frames, {t2.Length} tiles, same core tiles {shared}, leases of {sample} {v.Leases.LeaseCount(sample)}, core tiles {v.Tiles.Length}");
+            Expect(drawn, "the second window did not draw its tiles");
+            Expect(shared, "the second window did not share the first window's core tiles");
+            Expect(v.Tiles.Length == v.Leases.Cameras.Count, "a camera has more than one core tile");
+            if (drawn)
+            {
+                await CheckFrame("second window", t2, w2.Renderer);
+            }
+
+            // An edit in one window reaches the other (layouts_changed), not during a drag.
+            stage.Edit(t => t.SettingRatio(0.3, NodePath.Root));
+            bool followed = await Until(() => w2.State.Tree == w1.State.Tree, 5);
+            Say($"second window followed the edit: {followed}");
+            Expect(followed, "the second window did not follow the stored layout");
+
+            // Closing it gives its leases back; the first window keeps playing.
+            int before = v.Leases.LeaseCount(sample);
+            w2.Window.Close();
+            await Task.Delay(300);
+            Say($"second window closed: windows {app.Windows.Count}, leases of {sample} {before} -> {v.Leases.LeaseCount(sample)}");
+            Expect(app.Windows.Count == 1 && v.Leases.LeaseCount(sample) == before - t2.Count(t => t.Camera == sample), "closing a window did not give its leases back");
+
+            // The sidebar: collapse it (the stage grows), then reveal it at the
+            // edge on a manual clock: the overlay slides over the stage, whose
+            // buffers are not resized.
+            w1.SetSidebarDocked(false);
+            await Task.Delay(700);
+            (uint bw, uint bh) = r.BufferSize;
+            long resizes = r.TotalResizes;
+            var clock = new ManualViewerClock(1000);
+            w1.RevealClock = clock;
+            w1.PointerAt(inEdge: true, inOverlay: false);
+            clock.Advance(0.1);
+            w1.TickReveal();
+            bool early = w1.RevealShown;
+            clock.Advance(0.05);
+            w1.TickReveal();
+            bool shownNow = w1.RevealShown;
+            long frames2 = r.Frames;
+            await Task.Delay(600);
+            Say($"reveal: after 0.10 s {early}, after 0.15 s {shownNow}; buffers {bw}x{bh} -> {r.BufferSize.Width}x{r.BufferSize.Height}, resizes +{r.TotalResizes - resizes}, frames +{r.Frames - frames2}");
+            Expect(!early && shownNow, "the edge reveal did not wait about 150 ms and then show");
+            Expect(r.TotalResizes == resizes && r.BufferSize == (bw, bh) && !w1.SidebarDocked, "revealing the sidebar resized the stage");
+            w1.PointerAt(inEdge: false, inOverlay: true);
+            w1.PointerAt(inEdge: false, inOverlay: false);
+            clock.Advance(0.49);
+            w1.TickReveal();
+            bool stays = w1.RevealShown;
+            clock.Advance(0.02);
+            w1.TickReveal();
+            Expect(stays && !w1.RevealShown, "the overlay did not leave half a second after the pointer");
+            // The window remembers the collapsed sidebar (window restore).
+            List<SavedWindow> saved = WindowStore.FromJson(System.Text.Json.Nodes.JsonNode.Parse(WindowStore.ToJson(app.Windows.Select(w => w.ToSaved()))));
+            Say($"window restore: {saved.Count} window(s), content {saved.FirstOrDefault()?.Content}, sidebar collapsed {saved.FirstOrDefault()?.SidebarCollapsed}, frame {saved.FirstOrDefault()?.Frame}");
+            Expect(saved.Count == 1 && saved[0].Content == new WindowContent.Layout(id) && saved[0].SidebarCollapsed && saved[0].Frame.Width >= ViewerWindow.MinWidth,
+                "the window's restore record is wrong");
+            w1.RevealClock = SystemClockInstance;
+            w1.SetSidebarDocked(true);
+            await Task.Delay(300);
+        }
+        finally
+        {
+            // The store lives on in the self-test's data directory.
+            v.DeleteLayout(id);
+        }
+        Expect(v.Layout(id) is null && w1.State.Content is WindowContent.Scratch, "deleting the layout left the window showing it");
+    }
+
+    private static readonly NvrView.Tiles.IViewerClock SystemClockInstance = new SystemViewerClock();
+
+    // Shows a camera in a new tile of the window (a split of its last tile), as the sidebar or a drop would.
+    private static StageTile? AddCamera(StageView stage, CameraRef camera)
+    {
+        NodePath last = stage.Tiles[^1].Path;
+        stage.Edit(t => t.Splitting(last, SplitAxis.Row, camera)?.Tree);
+        return stage.Tiles.FirstOrDefault(t => t.CameraOrNone == camera);
+    }
+
+    private static void RemoveTile(StageView stage, StageTile tile)
+    {
+        stage.Select(tile.Path);
+        stage.RemoveSelected();
     }
 
     // Renders every indicator symbol once on a gray ground, checks that pixels were drawn, and saves the
@@ -585,12 +764,12 @@ internal sealed class SelfTest(App app, AppOptions options)
         return p.PrivateMemorySize64;
     }
 
-    private static string Describe(StageTile t)
+    private string Describe(StageTile t)
     {
-        TileCounters c = t.Video.Counters;
+        TileCounters c = t.Video?.Counters ?? default;
         return $"tile {t.Id} ch{t.Channel}: decoded {c.Decoded}, shown {t.Shown}, failures {c.Failures}, no picture {c.NoPictures}, " +
             $"generations {c.Generations}, resets {c.Resets}, picture {t.PictureWidth}x{t.PictureHeight}, " +
-            $"decoder {t.Video.DecoderKind} ({t.Video.DecoderName}), status {StageView.StatusText(t) ?? "playing"}";
+            $"decoder {t.Video?.DecoderKind} ({t.Video?.DecoderName}), status {app.Stage!.StatusText(t) ?? "playing"}";
     }
 
     private void CheckTierEvents(Viewer v, ulong tile, int from, long generation)
@@ -651,9 +830,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         await Task.Delay(400);
     }
 
-    private async Task CheckFrame(string what, IReadOnlyList<StageTile> tiles)
+    private async Task CheckFrame(string what, IReadOnlyList<StageTile> tiles, StageRenderer? renderer = null)
     {
-        StageRenderer r = app.Renderer!;
+        StageRenderer r = renderer ?? app.Renderer!;
         Task<StageCapture> task = r.CaptureAsync();
         if (await Task.WhenAny(task, Task.Delay(5000)) != task)
         {
@@ -664,7 +843,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         var parts = new List<string>();
         foreach (StageTile t in tiles)
         {
-            (ulong _, float x, float y, float w, float h) = c.Rects.FirstOrDefault(rect => rect.Tile == t.Id);
+            (StageTile _, float x, float y, float w, float h) = c.Rects.FirstOrDefault(rect => rect.Tile == t);
             double spread = Spread(c.Image, x, y, w, h);
             parts.Add($"tile {t.Id} {spread:0.0}");
             if (spread < 8)

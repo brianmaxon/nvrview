@@ -8,6 +8,7 @@
 
 using System.Collections.Immutable;
 using System.Text;
+using NvrView.Tiles;
 
 namespace NvrView.Shell;
 
