@@ -126,6 +126,10 @@ final class AppModel {
         self.deviceFile = deviceFile
         self.groupFile = groupFile
         target.model = self
+        leases.hasMiddleTier = { [weak self] camera in
+            guard let info = self?.channelInfo(camera) else { return false }
+            return info.tiers.contains("extern") && !info.isMultiLens
+        }
         leases.resolve = { [weak self] key in self?.devices.first { $0.key == key }?.deviceID }
         leases.onTileChange = { [weak self] camera, tile in
             guard let self, let tile else { return }

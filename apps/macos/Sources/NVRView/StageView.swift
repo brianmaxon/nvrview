@@ -98,6 +98,12 @@ final class StageView: NSView {
     private var focusAnimation: (from: Double, to: Double, start: CFTimeInterval)?
     /// The camera this stage told the leases it focuses.
     private var focusedCamera: CameraRef?
+    /// A tile of this stage as the leases know it (stream quality demands).
+    private struct DemandOwner: Hashable {
+        let stage: ObjectIdentifier
+        let path: NodePath
+    }
+    private var demandOwners: Set<DemandOwner> = []
 
     private enum Gesture {
         case divider(NodePath)
@@ -175,6 +181,7 @@ final class StageView: NSView {
         }
         layoutChrome()
         refreshChrome()
+        syncDemands()
         window?.invalidateCursorRects(for: overlay)
         lastKey = nil
     }
@@ -258,6 +265,8 @@ final class StageView: NSView {
                 detail.append(t.shown == .main ? "main stream" : "\(t.shown.name) stream")
             }
         }
+        let quality = model.leases.effectiveQuality(state.tree[leaf.path]?.quality ?? .auto, camera)
+        if quality != .auto { detail.insert(quality.title, at: 1) }
         detail.append(model.hasCameraAI(camera) ? "detection: camera AI" : "detection: this Mac")
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
@@ -395,9 +404,9 @@ final class StageView: NSView {
         guard state.focused != nil else { return }
         // The grid's stream is asked for at once; the main stream keeps
         // showing until it is there, while the tile shrinks back.
-        if let camera = focusedCamera {
-            model.leases.setFocused(camera, false)
+        if focusedCamera != nil {
             focusedCamera = nil
+            syncDemands()
         }
         animateFocus(to: 0)
         delegate?.stageDidChangeState(self)
@@ -417,8 +426,8 @@ final class StageView: NSView {
             if a.to == 1, let f = state.focused, let camera = state.tree[f]?.camera {
                 // After the animation: the sharper stream, swapped in by the
                 // core after its first keyframe.
-                model.leases.setFocused(camera, true)
                 focusedCamera = camera
+                syncDemands()
                 refreshChrome()
             } else if a.to == 0 {
                 state.focused = nil
@@ -429,7 +438,6 @@ final class StageView: NSView {
     }
 
     private func endFocusImmediately() {
-        if let camera = focusedCamera { model.leases.setFocused(camera, false) }
         focusedCamera = nil
         state.focused = nil
         focusAnimation = nil
@@ -440,15 +448,10 @@ final class StageView: NSView {
     /// on the main stream (the new camera's main stream is asked for before
     /// the old one is let go, so a camera in both keeps it).
     private func switchFocus(to path: NodePath) {
-        let old = focusedCamera
         state.focused = path
         state.selected = path
-        focusedCamera = nil
-        if let camera = state.tree[path]?.camera {
-            model.leases.setFocused(camera, true)
-            focusedCamera = camera
-        }
-        if let old { model.leases.setFocused(old, false) }
+        focusedCamera = state.tree[path]?.camera
+        syncDemands()
         layoutChrome()
         refreshChrome()
         delegate?.stageDidChangeState(self)
@@ -566,6 +569,7 @@ final class StageView: NSView {
         let was = state.zoom[camera]?.isZoomed == true
         state.zoom[camera] = z.isZoomed ? z : nil
         if was != z.isZoomed { refreshChrome() }
+        syncDemands()
     }
 
     /// The zoom a tile's camera has (1x if none).
@@ -634,7 +638,36 @@ final class StageView: NSView {
     /// Leaves focus without animating (the window closes, the tree changes).
     func tearDown() {
         endFocusImmediately()
+        syncDemands(clearAll: true)
         grid.prepare = nil
+    }
+
+    // MARK: Stream quality (docs/UX.md "Stream quality per tile")
+
+    /// Tells the leases what each tile asks of its camera: its quality, focus
+    /// (once the focus animation is done) and zoom. The leases keep each
+    /// camera on the highest stream any tile of any window asks for.
+    private func syncDemands(clearAll: Bool = false) {
+        var owners: Set<DemandOwner> = []
+        if !clearAll {
+            let id = ObjectIdentifier(self)
+            for leaf in state.tree.leaves {
+                guard let camera = leaf.camera else { continue }
+                let owner = DemandOwner(stage: id, path: leaf.path)
+                owners.insert(owner)
+                model.leases.setDemand(
+                    owner: owner, camera: camera, quality: state.tree[leaf.path]?.quality ?? .auto,
+                    focused: focusedCamera != nil && state.focused == leaf.path,
+                    zoomScale: state.zoom[camera]?.scale ?? 1)
+            }
+        }
+        for owner in demandOwners.subtracting(owners) { model.leases.clearDemands(owner: owner) }
+        demandOwners = owners
+    }
+
+    /// Sets the quality of the tile at `path`; saved with the layout.
+    func setQuality(_ quality: TileQuality, at path: NodePath) {
+        edit { $0.settingQuality(quality, at: path) }
     }
 
     // MARK: Editing
@@ -831,6 +864,30 @@ final class StageView: NSView {
         }
     }
 
+    /// Quality ▸ Auto, Clear, Fluent, and Balanced where the camera has it.
+    private func qualityMenuItem(camera: CameraRef, path: NodePath) -> NSMenuItem {
+        let current = model.leases.effectiveQuality(state.tree[path]?.quality ?? .auto, camera)
+        let sub = NSMenu()
+        for q in TileQuality.allCases where q != .balanced || model.leases.offersBalanced(camera) {
+            let i = ClosureMenuItem(title: q.title) { [weak self] in self?.setQuality(q, at: path) }
+            i.state = q == current ? .on : .off
+            switch q {
+            case .auto: i.toolTip = "The low stream in the grid; the main stream when focused or zoomed in"
+            case .clear: i.toolTip = "The main stream, also in the grid"
+            case .fluent: i.toolTip = "The low stream, also when focused"
+            case .balanced: i.toolTip = "The middle stream"
+            }
+            sub.addItem(i)
+        }
+        sub.addItem(.separator())
+        let note = NSMenuItem(title: "The main stream on many tiles is costly", action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        sub.addItem(note)
+        let item = NSMenuItem(title: "Quality", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
     fileprivate func menu(at p: CGPoint) -> NSMenu? {
         guard state.focused == nil, let leaf = frames.leaf(at: p) else { return nil }
         state.selected = leaf.path
@@ -844,6 +901,7 @@ final class StageView: NSView {
                 self?.model.toggleListening(camera, additive: false)
             }
             item("Focus") { [weak self] in self?.focus(leaf.path) }
+            menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
             menu.addItem(.separator())
         }
         item("Split Side by Side") { [weak self] in self?.split(.row) }

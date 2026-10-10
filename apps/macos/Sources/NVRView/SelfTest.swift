@@ -188,7 +188,28 @@ final class SelfTest {
             if let fake = model.fake {
                 problems += fake.violations.map { "core contract: \($0)" }
             }
-            sidebarStep()
+            qualityStep(camera)
+        }
+    }
+
+    /// Clear on a tile switches its camera to the main stream in the grid;
+    /// back to Auto returns it to the sub stream.
+    private func qualityStep(_ camera: CameraRef) {
+        guard let model = app.model, let window else { finish(problems) }
+        guard let leaf = window.state.tree.leaves.first(where: { $0.camera == camera }) else { return sidebarStep() }
+        window.stage.setQuality(.clear, at: leaf.path)
+        after(4) { [self] in
+            let tier = model.leases.tile(for: camera)?.tierState
+            print("quality Clear: showing \(tier?.shown.name ?? "nothing"), requested \(tier?.requested.name ?? "-")")
+            if model.fake != nil, tier?.shown != .main { problems.append("Clear did not switch to the main stream") }
+            window.stage.setQuality(.auto, at: leaf.path)
+            after(4) { [self] in
+                let back = model.leases.tile(for: camera)?.tierState
+                print("quality Auto: showing \(back?.shown.name ?? "nothing")")
+                if model.fake != nil, back?.shown != .sub { problems.append("Auto did not return to the sub stream") }
+                if window.state.tree[leaf.path]?.quality != .auto { problems.append("the quality did not reset") }
+                sidebarStep()
+            }
         }
     }
 
