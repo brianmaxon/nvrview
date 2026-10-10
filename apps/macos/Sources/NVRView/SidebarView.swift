@@ -55,11 +55,12 @@ struct SidebarView: View {
                     ForEach(model.layouts) { layout in
                         row(
                             layout.name, detail: "\(layout.root.leafCount)",
-                            selected: state.current == .layout(id: layout.id)
+                            selected: state.current == .layout(id: layout.id), icon: LayoutIcon.image(for: layout.root)
                         ) { window?.show(.layout(id: layout.id)) }
                         .contextMenu { layoutMenu(layout) }
                     }
                     addButton("New Layout…") { window?.newLayout(nil) }
+                    templateMenu
 
                     header("Groups")
                     ForEach(groupItems) { item in
@@ -151,11 +152,39 @@ struct SidebarView: View {
         .padding(.vertical, 3)
     }
 
+    /// "New Layout from Template": each template with its shape and tile
+    /// count, like a picker.
+    private var templateMenu: some View {
+        Menu {
+            ForEach(LayoutTemplate.ordered) { template in
+                Button {
+                    window?.newLayout(from: template)
+                } label: {
+                    Label {
+                        Text(template.title)
+                    } icon: {
+                        Image(nsImage: LayoutIcon.image(for: template.shape))
+                    }
+                }
+            }
+        } label: {
+            Label("New Layout from Template", systemImage: "plus").foregroundStyle(Color.accentColor)
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .padding(.horizontal, Self.rowInset)
+        .padding(.vertical, 3)
+    }
+
     // MARK: Rows
 
-    private func row(_ title: String, detail: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func row(
+        _ title: String, detail: String, selected: Bool, icon: NSImage? = nil, action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             HStack {
+                if let icon { LayoutIconView(image: icon) }
                 Text(title).lineLimit(1)
                 Spacer()
                 Text(detail).font(.caption).foregroundStyle(.secondary)
@@ -180,7 +209,10 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(collapsedGroups.contains(group.id) ? "Expand" : "Collapse")
-            row(group.name, detail: "\(group.cameras.count)", selected: state.current == .group(id: group.id)) {
+            row(
+                group.name, detail: "\(group.cameras.count)", selected: state.current == .group(id: group.id),
+                icon: LayoutIcon.image(gridOf: group.cameras.count)
+            ) {
                 window?.show(.group(id: group.id))
             }
         }

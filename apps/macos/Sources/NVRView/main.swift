@@ -277,6 +277,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             i.keyEquivalentModifierMask = mods
             return i
         }
+        /// File > New Layout from Template: each template with its shape.
+        func templateItem() -> NSMenuItem {
+            let parent = NSMenuItem(title: "New Layout from Template", action: nil, keyEquivalent: "")
+            let menu = NSMenu(title: parent.title)
+            for t in LayoutTemplate.ordered {
+                let i = item(t.title, #selector(ViewerWindowController.newLayoutFromTemplate(_:)))
+                i.keyEquivalent = ""
+                i.representedObject = t.rawValue
+                i.image = LayoutIcon.image(for: t.shape)
+                menu.addItem(i)
+            }
+            parent.submenu = menu
+            return parent
+        }
         submenu("NVRView", [
             item("Settings…", #selector(showSettings(_:)), ","),
             .separator(),
@@ -286,6 +300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         submenu("File", [
             item("New Window", #selector(newWindow(_:)), "n"),
             item("New Layout…", #selector(ViewerWindowController.newLayout(_:)), "n", [.command, .shift]),
+            templateItem(),
             item("Save as Layout…", #selector(ViewerWindowController.saveAsLayout(_:)), "s", [.command, .shift]),
             .separator(),
             item("Close", #selector(NSWindow.performClose(_:)), "w"),

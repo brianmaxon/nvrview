@@ -466,6 +466,23 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         }
     }
 
+    /// A new layout in a template's shape, filled with the online cameras in
+    /// All Cameras order (empty tiles when there are fewer), opened for editing.
+    func newLayout(from template: LayoutTemplate) {
+        askName("New Layout", initial: model.uniqueLayoutName("Layout")) { [weak self] name in
+            guard let self else { return }
+            let root = template.tree(cameras: model.onlineCameras)
+            guard let id = model.createLayout(name: name, root: root) else { return }
+            show(.layout(id: id))
+            if !state.editing { toggleEditing(nil) }
+        }
+    }
+
+    @objc func newLayoutFromTemplate(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let template = LayoutTemplate(rawValue: raw) else { return }
+        newLayout(from: template)
+    }
+
     func applyPreset(_ preset: LayoutNode.Preset) {
         let cameras = state.tree.cameraList.compactMap(\.self)
         state.selected = nil

@@ -469,6 +469,35 @@ internal sealed class ViewerWindow
         }
     }
 
+    /// <summary>
+    /// A new layout in a template's shape, filled with the online cameras in All Cameras order (empty tiles when
+    /// there are fewer), opened for editing.
+    /// </summary>
+    public async void NewLayoutFromTemplate(LayoutTemplate template)
+    {
+        if (await AskName("New layout", _viewer.UniqueLayoutName("Layout")) is not { } name)
+        {
+            return;
+        }
+        if (_viewer.CreateLayout(name, template.Tree(_viewer.OnlineCameras)) is { } id)
+        {
+            Show(new WindowContent.Layout(id));
+            Stage.SetEditing(true);
+        }
+    }
+
+    /// <summary>One item per template (shape icon, tile count, shape), smallest first.</summary>
+    public void AddTemplateItems(IList<MenuFlyoutItemBase> items)
+    {
+        foreach (LayoutTemplate t in LayoutTemplates.All)
+        {
+            LayoutTemplate template = t;
+            var item = new MenuFlyoutItem { Text = template.Title(), Icon = LayoutIcon.Create(template.Shape()) };
+            item.Click += (_, _) => NewLayoutFromTemplate(template);
+            items.Add(item);
+        }
+    }
+
     public async void SaveAsLayout()
     {
         if (await AskName("Save as layout", _viewer.UniqueLayoutName(State.Name)) is { } name)
@@ -563,6 +592,9 @@ internal sealed class ViewerWindow
             Item("Save as layout…", SaveAsLayout);
         }
         Item("New layout…", NewLayout);
+        var templates = new MenuFlyoutSubItem { Text = "New layout from template" };
+        AddTemplateItems(templates.Items);
+        menu.Items.Add(templates);
         Item(SidebarDocked ? "Hide sidebar" : "Show sidebar", ToggleSidebar);
         Item("New window", () => App.Instance.OpenWindow(ToSaved().Content));
         menu.Items.Add(new MenuFlyoutSeparator());

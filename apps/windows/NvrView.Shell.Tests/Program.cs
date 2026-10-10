@@ -90,6 +90,7 @@ internal static class Program
         RevealTests.Run();
         StoreTests.Run();
         AllCamerasTests.Run();
+        LayoutTemplateTests.Run();
         return T.Summary();
     }
 }
