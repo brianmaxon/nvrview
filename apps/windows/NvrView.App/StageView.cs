@@ -103,7 +103,13 @@ internal sealed partial class StageView : UserControl
         Divider,
         TileDrag,
         Pan,
+
+        /// <summary>A drag in a dewarped fisheye view turns (and in Virtual PTZ tilts) it.</summary>
+        Fisheye,
     }
+
+    private FisheyeAim _fisheyeFrom;
+    private readonly FisheyeZoomEasing<StageTile> _fisheyeZoom = new();
 
     private GestureKind _gesture;
     private NodePath _gesturePath;
@@ -270,13 +276,16 @@ internal sealed partial class StageView : UserControl
             LeafInfo leaf = leaves[i];
             TileQuality quality = QualityOf(State.Tree, leaf.Path);
             StageTile? same = old.FirstOrDefault(t => t.Path == leaf.Path && t.CameraOrNone == leaf.Camera);
+            FisheyeTileSetting fisheye = FisheyeTileSetting.FromJson(State.Tree.Member(leaf.Path, FisheyeTileSetting.Member));
             if (same is not null)
             {
                 next[i] = same;
                 _viewer.SetQuality(same, quality);
+                same.FisheyeSetting = fisheye;
+                PublishFisheye(same);
                 continue;
             }
-            var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality);
+            var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality) { FisheyeSetting = fisheye };
             t.Shared = leaf.Camera is { } c ? _viewer.Leases.Tile(c) : null;
             // The zoom follows the camera through layout changes (docs/UX.md "Digital zoom").
             if (old.FirstOrDefault(o => o.CameraOrNone is not null && o.CameraOrNone == leaf.Camera) is { } before)
@@ -285,6 +294,7 @@ internal sealed partial class StageView : UserControl
                 t.CenterX = before.CenterX;
                 t.CenterY = before.CenterY;
             }
+            PublishFisheye(t);
             next[i] = t;
             _viewer.UpdateDemand(t);
         }
@@ -624,6 +634,10 @@ internal sealed partial class StageView : UserControl
                     SetDropTarget(target == _gesturePath ? null : target);
                 }
                 break;
+            case GestureKind.Fisheye when _panTile is { Width: > 0, Height: > 0, Fisheye: { } fe } turn:
+                FisheyeAim aim = _fisheyeFrom.Dragged(p.X - _gestureFrom.X, p.Y - _gestureFrom.Y, turn.Width, turn.Height, fe.Mode, fe.Mount);
+                SetFisheyeAim(turn, aim, save: false);
+                break;
             case GestureKind.Pan when _panTile is { Width: > 0 } drag:
                 double dx = (p.X - _gestureFrom.X) / drag.Width / drag.Zoom, dy = (p.Y - _gestureFrom.Y) / drag.Height / drag.Zoom;
                 double half = 0.5 / drag.Zoom;
@@ -672,7 +686,14 @@ internal sealed partial class StageView : UserControl
             return;
         }
         Select(t.Path);
-        if (t.Zoom > 1 && !State.Editing)
+        if (!State.Editing && t.Fisheye is { } fe && fe.Mode.Dewarps())
+        {
+            _gesture = GestureKind.Fisheye;
+            _panTile = t;
+            _fisheyeFrom = fe.Aim;
+            _fisheyeZoom.Cancel(t);
+        }
+        else if (t.Zoom > 1 && !State.Editing)
         {
             _gesture = GestureKind.Pan;
             _panTile = t;
@@ -695,11 +716,15 @@ internal sealed partial class StageView : UserControl
     {
         Point p = e.GetCurrentPoint(this).Position;
         GestureKind gesture = _gesture;
+        StageTile? turned = _panTile;
         _gesture = GestureKind.None;
         _panTile = null;
         ReleasePointerCapture(e.Pointer);
         switch (gesture)
         {
+            case GestureKind.Fisheye when turned is not null:
+                SaveFisheye(turned);
+                break;
             case GestureKind.Divider:
                 Edited?.Invoke(State.Tree);
                 break;
@@ -719,6 +744,10 @@ internal sealed partial class StageView : UserControl
         if (_gesture == GestureKind.Divider)
         {
             Edited?.Invoke(State.Tree);
+        }
+        if (_gesture == GestureKind.Fisheye && _panTile is { } turned)
+        {
+            SaveFisheye(turned);
         }
         _gesture = GestureKind.None;
         _dragging = false;
@@ -749,6 +778,17 @@ internal sealed partial class StageView : UserControl
     protected override void OnPointerWheelChanged(PointerRoutedEventArgs e)
     {
         PointerPoint pp = e.GetCurrentPoint(this);
+        if (TileAt(pp.Position) is { Fisheye: { } fe } ft && fe.Mode.Dewarps())
+        {
+            // Virtual PTZ zooms (eased); the other dewarped views do nothing.
+            if (fe.Mode == FisheyeViewMode.Ptz)
+            {
+                ZoomFisheye(ft, Math.Pow(1.25, pp.Properties.MouseWheelDelta / 120.0));
+            }
+            e.Handled = true;
+            Interact();
+            return;
+        }
         if (TileAt(pp.Position) is { } t && t.Width > 0 && t.Height > 0 && t.PictureWidth > 0)
         {
             double fx = (pp.Position.X - t.X) / t.Width, fy = (pp.Position.Y - t.Y) / t.Height;
@@ -863,6 +903,11 @@ internal sealed partial class StageView : UserControl
             Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
             Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
             menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
+            if (_viewer.IsFisheye(camera))
+            {
+                menu.Items.Add(FisheyeViewMenu(t));
+                menu.Items.Add(FisheyeMountMenu(camera));
+            }
             if (_viewer.Alerts.IsActive(camera))
             {
                 Item(menu.Items, "Dismiss alert", () => _viewer.DismissAlert(camera));
@@ -921,6 +966,134 @@ internal sealed partial class StageView : UserControl
         menu.ShowAt(this, at);
         e.Handled = true;
     }
+
+    // ---- fisheye views (docs/UX.md "Fisheye cameras") ----
+
+    /// <summary>The "Fisheye view" submenu: Original, Panorama, Double Panorama, Quad, Virtual PTZ.</summary>
+    private MenuFlyoutSubItem FisheyeViewMenu(StageTile t)
+    {
+        var sub = new MenuFlyoutSubItem { Text = "Fisheye view" };
+        foreach (FisheyeViewMode mode in Enum.GetValues<FisheyeViewMode>())
+        {
+            var item = new RadioMenuFlyoutItem { Text = mode.Title(), GroupName = "fisheye-view", IsChecked = mode == t.FisheyeSetting.Mode };
+            FisheyeViewMode choice = mode;
+            item.Click += (_, _) => SetFisheyeMode(t, choice);
+            sub.Items.Add(item);
+        }
+        return sub;
+    }
+
+    /// <summary>The "Fisheye mount" submenu of a fisheye camera (a per-camera setting, saved).</summary>
+    private MenuFlyoutSubItem FisheyeMountMenu(CameraRef camera)
+    {
+        var sub = new MenuFlyoutSubItem { Text = "Fisheye mount" };
+        foreach (FisheyeMount mount in Enum.GetValues<FisheyeMount>())
+        {
+            var item = new RadioMenuFlyoutItem { Text = mount.Title(), GroupName = "fisheye-mount", IsChecked = mount == _viewer.Settings.Mount(camera) };
+            FisheyeMount choice = mount;
+            item.Click += (_, _) => SetFisheyeMount(camera, choice);
+            sub.Items.Add(item);
+        }
+        return sub;
+    }
+
+    /// <summary>A tile's fisheye view (the menu): saved in its layout leaf ("fisheye"); the view's aim is kept.</summary>
+    public void SetFisheyeMode(StageTile tile, FisheyeViewMode mode)
+    {
+        tile.FisheyeSetting = tile.FisheyeSetting with { Mode = mode };
+        PublishFisheye(tile);
+        SaveFisheye(tile);
+        RefreshAll();
+    }
+
+    /// <summary>A fisheye camera's mount (saved per camera); this window's tiles follow at once, others on their next tick.</summary>
+    public void SetFisheyeMount(CameraRef camera, FisheyeMount mount)
+    {
+        _viewer.Settings.SetMount(camera, mount);
+        foreach (StageTile t in _tiles)
+        {
+            PublishFisheye(t);
+        }
+    }
+
+    /// <summary>Hands the render thread what a tile dewarps with (null: draw it as it is).</summary>
+    public void PublishFisheye(StageTile t)
+    {
+        FisheyeChoice? next = null;
+        if (t.CameraOrNone is { } camera && t.FisheyeSetting.Mode.Dewarps() && _viewer.IsFisheye(camera))
+        {
+            FisheyeMount mount = _viewer.Settings.Mount(camera);
+            next = new FisheyeChoice(t.FisheyeSetting.Mode, t.FisheyeSetting.AimFor(mount), mount);
+        }
+        if (next != t.Fisheye)
+        {
+            t.Fisheye = next;
+        }
+    }
+
+    private void SetFisheyeAim(StageTile t, FisheyeAim aim, bool save)
+    {
+        t.FisheyeSetting = t.FisheyeSetting with { Aim = aim };
+        PublishFisheye(t);
+        if (save)
+        {
+            SaveFisheye(t);
+        }
+    }
+
+    /// <summary>Writes the tile's fisheye view to its layout leaf (at the end of a drag or zoom, not on every refresh).</summary>
+    private void SaveFisheye(StageTile t)
+    {
+        string? json = t.FisheyeSetting.ToJson();
+        if (State.Tree.Member(t.Path, FisheyeTileSetting.Member) != (json is null ? null : LayoutJson.Canonical(json)))
+        {
+            SetTileMember(t.Path, FisheyeTileSetting.Member, json);
+        }
+    }
+
+    /// <summary>0 on a dewarped tile: back to the mount's default direction and field of view.</summary>
+    private bool ResetFisheye(StageTile t)
+    {
+        if (t.Fisheye is not { } fe || !fe.Mode.Dewarps())
+        {
+            return false;
+        }
+        _fisheyeZoom.Cancel(t);
+        t.FisheyeSetting = t.FisheyeSetting with { Aim = null };
+        PublishFisheye(t);
+        SaveFisheye(t);
+        return true;
+    }
+
+    /// <summary>Zooms a Virtual PTZ tile by <paramref name="factor"/> (more than 1 zooms in), eased over the next refreshes.</summary>
+    public void ZoomFisheye(StageTile t, double factor)
+    {
+        if (t.Fisheye is not { Mode: FisheyeViewMode.Ptz } fe || !double.IsFinite(factor) || factor <= 0)
+        {
+            return;
+        }
+        double from = _fisheyeZoom.Target(t) ?? fe.Aim.Fov;
+        _fisheyeZoom.Set(t, from / factor, _viewer.Clock.Now);
+    }
+
+    /// <summary>One step of the Virtual PTZ zoom easing (every display refresh, on the viewer's clock); saved when it ends.</summary>
+    public void StepFisheyeZoom(double now)
+    {
+        if (!_fisheyeZoom.IsEasing)
+        {
+            return;
+        }
+        foreach ((StageTile t, double fov) in _fisheyeZoom.Tick(now, k => k.Fisheye?.Aim.Fov ?? k.FisheyeSetting.Aim?.Fov ?? 90))
+        {
+            if (t.Fisheye is { } fe)
+            {
+                SetFisheyeAim(t, (fe.Aim with { Fov = fov }).Clamped(fe.Mount), save: _fisheyeZoom.Target(t) is null);
+            }
+        }
+    }
+
+    /// <summary>Whether a Virtual PTZ zoom is still easing (self-test).</summary>
+    public bool IsEasingFisheyeZoom => _fisheyeZoom.IsEasing;
 
     /// <summary>The "Indicator corner" submenu: where the tiles' symbols sit (a setting, saved).</summary>
     private MenuFlyoutSubItem IndicatorCornerMenu()
@@ -1036,7 +1209,10 @@ internal sealed partial class StageView : UserControl
                 RemoveSelected();
                 return true;
             case VirtualKey.Number0 or VirtualKey.NumberPad0 when s is not null:
-                ResetZoom(s);
+                if (!ResetFisheye(s))
+                {
+                    ResetZoom(s);
+                }
                 return true;
             case VirtualKey.D when ctrl && !repeat:
                 ToggleDiagnostics();
@@ -1154,8 +1330,11 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>The header's title: the camera's name, and the quality when it is not Auto.</summary>
-    public static string TitleOf(StageTile t) =>
-        t.Quality.HeaderNote() is { } note ? $"{t.Name} · {note}" : t.Name;
+    public static string TitleOf(StageTile t)
+    {
+        string title = t.Quality.HeaderNote() is { } note ? $"{t.Name} · {note}" : t.Name;
+        return t.Fisheye is { } fe && fe.Mode.Dewarps() ? $"{title} · {fe.Mode.Title()}" : title;
+    }
 
     /// <summary>
     /// The corner indicators, the sound badges, and the alert strip of every tile, from the viewer's
@@ -1312,6 +1491,8 @@ internal sealed partial class StageView : UserControl
         _viewer.Tick();
         foreach (StageTile t in _tiles)
         {
+            // A camera is known to be fisheye only once its capabilities are read.
+            PublishFisheye(t);
             if (t.Zoom != t.DemandZoom)
             {
                 _viewer.UpdateDemand(t);
@@ -1364,6 +1545,7 @@ internal sealed partial class StageView : UserControl
     private void OnRendering(object? sender, object e)
     {
         ChromeFrames++;
+        StepFisheyeZoom(_viewer.Clock.Now);
         NvCore core = _viewer.Core;
         foreach (TileChrome c in _chromes)
         {

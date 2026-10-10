@@ -130,6 +130,12 @@ public partial class App : Application
                 // channel 2 refuses those tiers, as a camera without a second lens does.
                 mockArgs.AddRange(["--multi-lens", "1:7,7", "--extern", "2:refused"]);
             }
+            if (o.SelfTest && o.MockChannels >= 3)
+            {
+                // Channel 2 is also a fisheye camera streaming the synthetic circular picture
+                // (docs/UX.md "Fisheye cameras"); its first lens is all the dewarp step uses.
+                mockArgs.AddRange(["--fisheye", "2", "--fisheye-fixture", Path.Combine(root, "fixtures", "synthetic", "fisheye", "h264-fisheye.h264"), "--fisheye-size", "384"]);
+            }
             if (o.SelfTest && o.MockChannels >= 2)
             {
                 // The last channel behaves like a third-party camera behind an

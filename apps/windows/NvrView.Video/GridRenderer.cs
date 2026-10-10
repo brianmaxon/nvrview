@@ -7,9 +7,16 @@
 // pixels); Draw() takes rectangles the caller computed (the app's animated
 // focus and digital zoom) and any render target, such as a swap chain's
 // buffer (SwapChainTarget).
+//
+// A tile that carries fisheye dewarp constants (docs/RENDERING.md,
+// "Fisheye dewarping") is drawn with a second pixel shader that maps each
+// output pixel to a direction and samples the circular picture there; its
+// constants (22 rows, NvrView.Tiles.DewarpConstants) are a second constant
+// buffer, and a third holds where the visible picture sits in the textures.
 
 using System.Runtime.InteropServices;
 using NvrView.Interop;
+using NvrView.Tiles;
 using TerraFX.Interop.DirectX;
 using TerraFX.Interop.Windows;
 using static TerraFX.Interop.DirectX.DirectX;
@@ -56,6 +63,12 @@ public struct TileDraw
 
     /// <summary>The caller's own reference (which of its tiles this is); not used for drawing.</summary>
     public object? Tag;
+
+    /// <summary>Draw through the fisheye dewarp shader with <see cref="DewarpRows"/> (the source rectangle is then unused: the views cover the destination).</summary>
+    public bool Dewarp;
+
+    /// <summary>The dewarp constants when <see cref="Dewarp"/> is set.</summary>
+    public DewarpConstants DewarpRows;
 }
 
 /// <summary>The grid pass (see the file comment).</summary>
@@ -94,6 +107,67 @@ public sealed unsafe class GridRenderer : IDisposable
             float4 ycc = float4(luma.Sample(linearClamp, i.uv), chroma.Sample(linearClamp, i.uv), 1);
             return float4(saturate(float3(dot(r, ycc), dot(g, ycc), dot(b, ycc))), 1);
         }
+
+        // Fisheye dewarping (docs/RENDERING.md): i.uv is the point in the tile
+        // (0..1). Rows per view: rect, axis X (w: 0 rectilinear, 1 cylindrical),
+        // axis Y (w: tan(h/2) or psi0), axis Z (w: tan(v/2) or dpsi), extra
+        // (tau0, dtau).
+        cbuffer Dewarp : register(b1)
+        {
+            float4 lens;      // cx, cy, r, r*W/H (picture fractions)
+            float4 params;    // thetaMax, view count
+            float4 views[20];
+        };
+        cbuffer Picture : register(b2)
+        {
+            float4 visible;   // the visible picture in texture coordinates: origin xy, size zw
+        };
+
+        float4 psDewarp(Varyings i) : SV_Target
+        {
+            float2 p = i.uv;
+            int count = (int)params.y;
+            [unroll] for (int k = 0; k < 4; k++)
+            {
+                if (k >= count)
+                {
+                    break;
+                }
+                float4 rect = views[k * 5];
+                float4 ax = views[k * 5 + 1];
+                float4 ay = views[k * 5 + 2];
+                float4 az = views[k * 5 + 3];
+                float4 ex = views[k * 5 + 4];
+                if (p.x < rect.x || p.x > rect.z || p.y < rect.y || p.y > rect.w)
+                {
+                    continue;
+                }
+                float2 t = (p - rect.xy) / (rect.zw - rect.xy);
+                float3 dir;
+                if (ax.w < 0.5)
+                {
+                    dir = az.xyz + (2 * t.x - 1) * ay.w * ax.xyz + (2 * t.y - 1) * az.w * ay.xyz;
+                }
+                else
+                {
+                    float psi = ay.w + t.x * az.w;
+                    float tau = ex.x + t.y * ex.y;
+                    dir = cos(tau) * sin(psi) * ax.xyz + sin(tau) * ay.xyz + cos(tau) * cos(psi) * az.xyz;
+                }
+                dir = normalize(dir);
+                float theta = acos(clamp(dir.z, -1, 1));
+                if (theta > params.x)
+                {
+                    return float4(0, 0, 0, 1);
+                }
+                float sl = length(dir.xy);
+                float2 q = sl > 1e-6 ? dir.xy / sl : float2(0, 0);
+                float2 uv = visible.xy + (lens.xy + (theta / params.x) * lens.zw * q) * visible.zw;
+                float4 ycc = float4(luma.SampleLevel(linearClamp, uv, 0), chroma.SampleLevel(linearClamp, uv, 0), 1);
+                return float4(saturate(float3(dot(r, ycc), dot(g, ycc), dot(b, ycc))), 1);
+            }
+            return float4(0, 0, 0, 1);
+        }
         """;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -110,7 +184,10 @@ public sealed unsafe class GridRenderer : IDisposable
     private ID3D11Texture2D* _staging;
     private ID3D11VertexShader* _vs;
     private ID3D11PixelShader* _ps;
+    private ID3D11PixelShader* _psDewarp;
     private ID3D11Buffer* _constants;
+    private ID3D11Buffer* _dewarp;
+    private ID3D11Buffer* _picture;
     private ID3D11SamplerState* _sampler;
     private ID3D11RasterizerState* _rasterizer;
     private NvSize[] _sizes = new NvSize[16];
@@ -160,6 +237,9 @@ public sealed unsafe class GridRenderer : IDisposable
 
     /// <summary>Frames rendered.</summary>
     public long Frames { get; private set; }
+
+    /// <summary>Tiles drawn through the dewarp shader, over every frame (the self-test checks it grows).</summary>
+    public long DewarpDraws { get; private set; }
 
     /// <summary>The layout used by the last frame, one entry per tile.</summary>
     public ReadOnlySpan<NvTileLayout> Layout => _layout.AsSpan(0, _count);
@@ -253,7 +333,12 @@ public sealed unsafe class GridRenderer : IDisposable
         ctx->PSSetSamplers(0, 1, &sampler);
         ID3D11Buffer* cb = _constants;
         ctx->VSSetConstantBuffers(0, 1, &cb);
-        ctx->PSSetConstantBuffers(0, 1, &cb);
+        ID3D11Buffer** psBuffers = stackalloc ID3D11Buffer*[3];
+        psBuffers[0] = _constants;
+        psBuffers[1] = _dewarp;
+        psBuffers[2] = _picture;
+        ctx->PSSetConstantBuffers(0, 3, psBuffers);
+        bool dewarping = false;
 
         ID3D11ShaderResourceView** views = stackalloc ID3D11ShaderResourceView*[2];
         for (int i = 0; i < draws.Length; i++)
@@ -266,9 +351,14 @@ public sealed unsafe class GridRenderer : IDisposable
                 continue;
             }
             sequences[i] = p.Sequence;
-            if (d.DestWidth <= 0 || d.DestHeight <= 0 || d.SrcWidth <= 0 || d.SrcHeight <= 0)
+            if (d.DestWidth <= 0 || d.DestHeight <= 0 || (!d.Dewarp && (d.SrcWidth <= 0 || d.SrcHeight <= 0)))
             {
                 continue;
+            }
+            if (d.Dewarp != dewarping)
+            {
+                dewarping = d.Dewarp;
+                ctx->PSSetShader(dewarping ? _psDewarp : _ps, null, 0);
             }
             D3D11_MAPPED_SUBRESOURCE mapped;
             GpuDevice.Check(ctx->Map((ID3D11Resource*)cb, 0, D3D11_MAP.D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Map(constants)");
@@ -281,15 +371,40 @@ public sealed unsafe class GridRenderer : IDisposable
             // may hold the coded picture, with the visible one inside.
             float tw = p.TextureWidth, th = p.TextureHeight;
             NvRect v = p.Visible;
-            c->SrcLeft = (v.X + d.SrcX) / tw;
-            c->SrcRight = (v.X + d.SrcX + d.SrcWidth) / tw;
-            c->SrcTop = (v.Y + d.SrcY) / th;
-            c->SrcBottom = (v.Y + d.SrcY + d.SrcHeight) / th;
+            if (d.Dewarp)
+            {
+                // The shader works in the tile's own coordinates.
+                c->SrcLeft = 0;
+                c->SrcTop = 0;
+                c->SrcRight = 1;
+                c->SrcBottom = 1;
+            }
+            else
+            {
+                c->SrcLeft = (v.X + d.SrcX) / tw;
+                c->SrcRight = (v.X + d.SrcX + d.SrcWidth) / tw;
+                c->SrcTop = (v.Y + d.SrcY) / th;
+                c->SrcBottom = (v.Y + d.SrcY + d.SrcHeight) / th;
+            }
             for (int k = 0; k < 12; k++)
             {
                 c->Matrix[k] = p.Color.M[k];
             }
             ctx->Unmap((ID3D11Resource*)cb, 0);
+            if (d.Dewarp)
+            {
+                GpuDevice.Check(ctx->Map((ID3D11Resource*)_dewarp, 0, D3D11_MAP.D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Map(dewarp)");
+                *(DewarpConstants*)mapped.pData = d.DewarpRows;
+                ctx->Unmap((ID3D11Resource*)_dewarp, 0);
+                GpuDevice.Check(ctx->Map((ID3D11Resource*)_picture, 0, D3D11_MAP.D3D11_MAP_WRITE_DISCARD, 0, &mapped), "Map(picture)");
+                var vis = (float*)mapped.pData;
+                vis[0] = v.X / tw;
+                vis[1] = v.Y / th;
+                vis[2] = v.Width / tw;
+                vis[3] = v.Height / th;
+                ctx->Unmap((ID3D11Resource*)_picture, 0);
+                DewarpDraws++;
+            }
             views[0] = p.LumaView;
             views[1] = p.ChromaView;
             ctx->PSSetShaderResources(0, 2, views);
@@ -393,6 +508,12 @@ public sealed unsafe class GridRenderer : IDisposable
             GpuDevice.Check(device->CreatePixelShader(ps.Pointer, ps.Size, null, &shader), "CreatePixelShader");
             _ps = shader;
         }
+        using (ShaderBlob ps = Compile("psDewarp"u8, "ps_4_0"u8))
+        {
+            ID3D11PixelShader* shader = null;
+            GpuDevice.Check(device->CreatePixelShader(ps.Pointer, ps.Size, null, &shader), "CreatePixelShader(dewarp)");
+            _psDewarp = shader;
+        }
 
         D3D11_BUFFER_DESC cbDesc = new()
         {
@@ -404,6 +525,14 @@ public sealed unsafe class GridRenderer : IDisposable
         ID3D11Buffer* cb = null;
         GpuDevice.Check(device->CreateBuffer(&cbDesc, null, &cb), "CreateBuffer(constants)");
         _constants = cb;
+        cbDesc.ByteWidth = (uint)sizeof(DewarpConstants);
+        cb = null;
+        GpuDevice.Check(device->CreateBuffer(&cbDesc, null, &cb), "CreateBuffer(dewarp)");
+        _dewarp = cb;
+        cbDesc.ByteWidth = 16;
+        cb = null;
+        GpuDevice.Check(device->CreateBuffer(&cbDesc, null, &cb), "CreateBuffer(picture)");
+        _picture = cb;
 
         D3D11_SAMPLER_DESC sd = new()
         {
@@ -476,7 +605,10 @@ public sealed unsafe class GridRenderer : IDisposable
     {
         Release(ref _rasterizer);
         Release(ref _sampler);
+        Release(ref _picture);
+        Release(ref _dewarp);
         Release(ref _constants);
+        Release(ref _psDewarp);
         Release(ref _ps);
         Release(ref _vs);
         Release(ref _staging);

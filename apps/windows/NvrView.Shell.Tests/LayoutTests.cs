@@ -144,6 +144,24 @@ internal static class LayoutTreeTests
             T.Equal("\"clear\"", T.NotNull(q.Splitting(P("a"), SplitAxis.Row)).Tree.Member(P("aa"), "quality"));
         });
 
+        T.Run("tree: a tile's fisheye view is a member beside its quality", () =>
+        {
+            var ptz = new FisheyeTileSetting(FisheyeViewMode.Ptz, new FisheyeAim(12.5, 45, 70));
+            LayoutNode q = T.NotNull(contract.SettingMember(P("a"), "quality", "\"clear\""));
+            LayoutNode f = T.NotNull(q.SettingMember(P("a"), FisheyeTileSetting.Member, ptz.ToJson()));
+            T.Equal(ptz, FisheyeTileSetting.FromJson(f.Member(P("a"), FisheyeTileSetting.Member)));
+            T.Equal("\"clear\"", f.Member(P("a"), "quality"));
+            // Through the layout JSON, as the core stores it (and as the macOS app writes it).
+            var saved = new SavedLayout("l1", "Layout 1", f, 1);
+            LayoutNode read = SavedLayout.Parse(saved.ToJson()).Root;
+            T.Equal(ptz, FisheyeTileSetting.FromJson(read.Member(P("a"), FisheyeTileSetting.Member)));
+            const string mac = """{"id":"m","name":"Mac","root":{"camera":{"channel":5,"device":"d-0123456789abcdef"},"fisheye":{"view":"double_panorama"}},"version":1}""";
+            T.Equal(FisheyeViewMode.DoublePanorama, FisheyeTileSetting.FromJson(SavedLayout.Parse(mac).Root.Member(NodePath.Root, FisheyeTileSetting.Member)).Mode);
+            // Original removes the member.
+            LayoutNode back = T.NotNull(f.SettingMember(P("a"), FisheyeTileSetting.Member, FisheyeTileSetting.Original.ToJson()));
+            T.Check(back == q);
+        });
+
         T.Run("tree: random edits keep every invariant", () =>
         {
             var rng = new SplitMix(0x5eed);

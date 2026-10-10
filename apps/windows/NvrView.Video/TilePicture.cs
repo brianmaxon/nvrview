@@ -137,6 +137,67 @@ public sealed unsafe class TilePicture : IDisposable
         Published(ptsUs);
     }
 
+    /// <summary>
+    /// Copies the visible luma plane to memory (8-bit, rows of <paramref name="width"/> bytes),
+    /// or null without a picture. Waits for the GPU and allocates a staging texture and the
+    /// array each time: for the few tries of finding a fisheye camera's image circle
+    /// (docs/RENDERING.md), never per frame. Call under the device lock.
+    /// </summary>
+    public byte[]? ReadLuma(out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+        ID3D11Texture2D* source = _nv12 != null ? _nv12 : _luma;
+        if (!HasPicture || source == null)
+        {
+            return null;
+        }
+        D3D11_TEXTURE2D_DESC desc;
+        source->GetDesc(&desc);
+        desc.Usage = D3D11_USAGE.D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = (uint)D3D11_CPU_ACCESS_FLAG.D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ID3D11Texture2D* staging = null;
+        GpuDevice.Check(_gpu.Device->CreateTexture2D(&desc, null, &staging), "CreateTexture2D(luma readback)");
+        try
+        {
+            ID3D11DeviceContext* ctx = _gpu.Context;
+            ctx->CopyResource((ID3D11Resource*)staging, (ID3D11Resource*)source);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            GpuDevice.Check(ctx->Map((ID3D11Resource*)staging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(luma readback)");
+            try
+            {
+                NvRect v = Visible;
+                int x0 = (int)Math.Min(v.X, desc.Width), y0 = (int)Math.Min(v.Y, desc.Height);
+                width = (int)Math.Min(v.Width, desc.Width - (uint)x0);
+                height = (int)Math.Min(v.Height, desc.Height - (uint)y0);
+                if (width <= 0 || height <= 0)
+                {
+                    width = (int)desc.Width;
+                    height = (int)desc.Height;
+                    x0 = 0;
+                    y0 = 0;
+                }
+                byte[] pixels = new byte[width * height];
+                for (int y = 0; y < height; y++)
+                {
+                    new ReadOnlySpan<byte>((byte*)mapped.pData + (y0 + y) * mapped.RowPitch + x0, width)
+                        .CopyTo(pixels.AsSpan(y * width, width));
+                }
+                return pixels;
+            }
+            finally
+            {
+                ctx->Unmap((ID3D11Resource*)staging, 0);
+            }
+        }
+        finally
+        {
+            staging->Release();
+        }
+    }
+
     /// <summary>Drops the picture (the tile draws black); keeps the textures for reuse.</summary>
     public void Clear()
     {
