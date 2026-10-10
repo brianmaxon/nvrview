@@ -445,6 +445,32 @@ probe in "Second lenses", without per-lens kinds.
 | `dogCat`, `animal`, `pet` | the client's own JSON and UI names (`petCount` in 519) | reported (client); not wire names |
 | `other`, `buck`, `bear`, `boar`, `fox`, `female_deer`, `raccoon`, `turkey`, `wolf` | wildlife subtypes: `animalTypes` in the paged search 492, `animalType` in its results, `detectedAnimalTypes` in a recording file's `FileInfo` | reported (client) |
 
+## Fisheye cameras
+
+A fisheye (360°) camera sends its raw circular image; dewarping it into
+panoramas or virtual views is the client's job. Measured with `bc-cli query
+199`, `bc-cli query 146` and `bc-cli capture`/`analyze` (sub and main, 12 s)
+of a ceiling-mounted fisheye camera behind an NVR on newer firmware, and one
+decoded main picture. Nothing here sends anything beyond the read-only
+queries and a preview.
+
+| Fact | Provenance |
+| --- | --- |
+| `Support` (199) gives every channel `item` a `fishEye` (1 for the fisheye camera, 0 for every other channel) and a `channelType` string: `fisheye_ipc` for the fisheye camera, `ipc` for ordinary cameras, `Doorbell` for a doorbell. The fisheye item had no `subItem`. | observed |
+| The fisheye camera's item also had `ptzType` 0, `ptzControl` 64, `autoPt` 1, and `ipcAudioTalk` 1. What `ptzControl` 64 and `autoPt` mean for a camera without a motor is unknown; nvrview sends it no motion commands. | observed; meaning open |
+| Its streams are square: `StreamInfo` (146) listed main 2560×2560 (25 fps advertised) and sub 1024×1024 (10 fps advertised) in one entry, and main 2048×2048 with the same sub in another. The camera's channel list (145) named `mainStream,subStream` only. | observed |
+| Delivered: sub 1024×1024 at 10.46 fps with a keyframe every 40 pictures (3.84 s); main 2560×2560 H.264 at 12.50 fps (half the advertised 25) with a keyframe every 24 pictures (1.92 s). As elsewhere, take the rate from the timestamps. | observed |
+| The 146 entry with the 2560×2560 main stream had `videoEncType` 1, yet the delivered main stream was H.264 (High profile): one more reason to take the codec from the media records. | observed |
+| The picture is the lens's image circle on black. Fitted to the black-to-image boundary of three main pictures (and one scaled to the sub size), the circle's center sat at (0.501, 0.502) of the width and height and its radius at 0.471 of the width, the same in every picture to within 0.001; the corners outside it read luma 0. | observed |
+| The camera draws its text overlay (name and date/time) in the black corners outside the circle, not over the image. | observed |
+| Ceiling mount: the floor is in the middle of the circle and the walls around its rim. The lens's field of view is not reported by any query seen; nvrview assumes 180° (the rim is the horizon). | observed (mount); field of view assumed |
+
+How nvrview uses this: the core passes `fishEye` (or a `channelType` of
+`fisheye_ipc`) to the apps as `fisheye` in the `channels` event
+(docs/FFI.md). The apps find the circle in the decoded picture themselves
+(docs/RENDERING.md, "Fisheye dewarping"), since no query reports it, so a
+camera that frames its circle differently still works.
+
 ## Camera motion control
 
 Commands that move a camera, change its focus, or play sound through its
