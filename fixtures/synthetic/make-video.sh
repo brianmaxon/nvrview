@@ -18,6 +18,19 @@
 #                          that cannot be decoded; the first usable keyframe is
 #                          frame 20 (0-based index 19 of the file).
 #   h265-leading-p.h265    Same for H.265.
+#   h264-colors.h264       192x96, 10 frames (1 keyframe): six vertical bars,
+#                          32x64 px, of known RGB colors (see COLOR_BARS
+#                          below, left to right), above a 32 px strip of the
+#                          moving test pattern (so the picture changes over
+#                          time); converted with the BT.601
+#                          matrix to video range and flagged that way in the
+#                          VUI (matrix, primaries and transfer SMPTE 170M,
+#                          video_full_range_flag 0). Encoded at a very low CRF
+#                          so the decoded bar centers stay within a few codes
+#                          of the source.
+#   h265-colors.h265       Same bars, BT.709 matrix, full range
+#                          (video_full_range_flag 1), flagged that way in the
+#                          VUI.
 #
 # Usage: ./make-video.sh   (rewrites the files next to this script)
 set -euo pipefail
@@ -74,4 +87,35 @@ for n, pos in enumerate(starts):
         break
 PY
 done
+
+# Known-color bars. Keep in sync with apps/macos/Tests/VideoKitTests/ColorTests.swift.
+COLOR_BARS="B42828 28A03C 323CBE DCDCDC 808080 181818"
+
+colors() { # codec matrix range out
+  local codec=$1 matrix=$2 range=$3 out=$4
+  local lib fmt params graph="" labels="" n=0 c
+  if [ "$codec" = h264 ]; then
+    lib=libx264; fmt=h264
+    params="-x264-params keyint=20:min-keyint=20:scenecut=0:bframes=0:repeat-headers=1:aud=0"
+  else
+    lib=libx265; fmt=hevc
+    params="-x265-params keyint=20:min-keyint=20:scenecut=0:bframes=0:repeat-headers=1:aud=0:log-level=error"
+  fi
+  for c in $COLOR_BARS; do
+    graph="${graph}color=c=0x$c:s=32x64:r=20[c$n];"
+    labels="$labels[c$n]"
+    n=$((n + 1))
+  done
+  # The tags end up in the VUI colour description.
+  local tag=smpte170m
+  [ "$matrix" = bt709 ] && tag=bt709
+  ffmpeg -v error -y -filter_complex \
+    "${graph}${labels}hstack=inputs=$n[bars];testsrc2=size=192x32:rate=20[strip];[bars][strip]vstack,format=gbrp,scale=out_color_matrix=$matrix:out_range=$range,format=yuv420p,setparams=range=$range:color_primaries=$tag:color_trc=$tag:colorspace=$tag" \
+    -frames:v 10 -c:v $lib -preset medium -crf 4 \
+    -colorspace $tag -color_primaries $tag -color_trc $tag -color_range $range $params -f $fmt "$out"
+}
+
+colors h264 bt601 tv h264-colors.h264
+colors h265 bt709 pc h265-colors.h265
+
 /bin/ls -l *.h264 *.h265
