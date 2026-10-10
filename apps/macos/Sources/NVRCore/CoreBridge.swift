@@ -43,6 +43,10 @@ public final class CoreBridge: Sendable {
             tile.perform(action)
         }
 
+        func core(didReject failure: CoreDecodeFailure, tile id: UInt64) {
+            registry.withLock { $0.byID[id] }?.reject(failure)
+        }
+
         func core(didEmit json: UnsafeRawBufferPointer) {
             guard let event = CoreEvent.parse(Data(json)) else { return }
             if case .tileClosed(let id, _) = event {

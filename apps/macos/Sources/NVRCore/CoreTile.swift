@@ -66,6 +66,11 @@ public final class CoreTile: Sendable {
 
     func assign(id: UInt64) { link.id.store(id, ordering: .releasing) }
 
+    /// Answers an action this version could not carry out.
+    func reject(_ failure: CoreDecodeFailure) {
+        link.router.value?.reportFailed(link: link, tile: id, failure)
+    }
+
     /// No more results go to the core (the tile is closed or being closed).
     func markClosed() { link.closed.store(true, ordering: .releasing) }
 

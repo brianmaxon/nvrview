@@ -167,12 +167,14 @@ final class RecordingCore: CoreAPI {
         var odd = NvAction()
         odd.kind = NvActionKind(rawValue: 99)  // a kind from a newer core: ignored
         h.action(odd)
-        // A Configure with a codec this version does not know is ignored too.
+        // A Configure with a codec this version does not know is not carried
+        // out, but it is answered, so the core is not left waiting.
         var configure = NvAction()
         configure.kind = NV_ACTION_CONFIGURE
         configure.configure.codec = NvCodec(rawValue: 77)
         h.action(configure)
         #expect(h.tile.snapshot.configures == 0)
+        #expect(h.core.log.withLock { $0.failed } == [.invalidParameterSets])
 
         let json = #"{"type":"device_state","device":1,"state":"backoff","attempt":2,"retry_ms":4000,"new":true}"#
         var text = json

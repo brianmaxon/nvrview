@@ -105,7 +105,15 @@ public enum CCallbacks {
                 guard let context, let action else { return }
                 let sink = Unmanaged<CallbackContext>.fromOpaque(context).takeUnretainedValue().sink
                 // Borrowed pointers: handled synchronously, never kept.
-                guard let converted = CoreAction(action.pointee) else { return }
+                guard let converted = CoreAction(action.pointee) else {
+                    // Unknown kinds need no answer; a Configure or Decode does.
+                    switch action.pointee.kind {
+                    case NV_ACTION_CONFIGURE: sink.core(didReject: .invalidParameterSets, tile: tile)
+                    case NV_ACTION_DECODE: sink.core(didReject: .invalidAccessUnit, tile: tile)
+                    default: break
+                    }
+                    return
+                }
                 sink.core(didDeliver: converted, tile: tile)
             },
             on_event: { context, json, length in

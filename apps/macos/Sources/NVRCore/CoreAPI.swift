@@ -48,6 +48,14 @@ public protocol CoreSink: AnyObject, Sendable {
     func core(didDeliver action: CoreAction, tile: UInt64)
     /// `on_event`: serialized across the core. UTF-8 JSON, not terminated.
     func core(didEmit json: UnsafeRawBufferPointer)
+    /// An action that needs an answer but carries a value this version does
+    /// not know (docs/FFI.md): answer it with `failure` so the core is not
+    /// left waiting.
+    func core(didReject failure: CoreDecodeFailure, tile: UInt64)
+}
+
+extension CoreSink {
+    public func core(didReject failure: CoreDecodeFailure, tile: UInt64) {}
 }
 
 /// Creates a core that delivers to `sink`. `CCore.factory(...)` makes the
