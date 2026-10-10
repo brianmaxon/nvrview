@@ -212,3 +212,19 @@ public enum LevelMeterMode: Sendable, Equatable {
     /// screen, so hidden tiles cost nothing.
     public func polls(headerShown: Bool) -> Bool { visible(headerShown: headerShown) }
 }
+
+/// The sidebar's "Hide Offline Channels" filter: an NVR advertises every
+/// slot it has, most of them empty on a large unit. Only the sidebar list is
+/// filtered; layouts and groups refer to cameras by device and channel, so
+/// they keep working whatever is hidden.
+public enum ChannelFilter {
+    public static func visible(_ channels: [ChannelInfo], hideOffline: Bool) -> [ChannelInfo] {
+        hideOffline ? channels.filter(\.connected) : channels
+    }
+
+    /// "16" when all are listed, "4 of 16" when some are hidden, nil without channels.
+    public static func countText(shown: Int, total: Int) -> String? {
+        guard total > 0 else { return nil }
+        return shown == total ? "\(total)" : "\(shown) of \(total)"
+    }
+}

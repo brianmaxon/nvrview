@@ -86,6 +86,21 @@ final class AppModel {
         }
     }
     static let showFrameRatesKey = "showFrameRates"
+    /// The sidebar lists only channels that are connected (View menu;
+    /// remembered). On by default: an NVR advertises every slot it has, and
+    /// most of a large unit's can be empty. Unset in the defaults means on.
+    var hideOfflineChannels = UserDefaults.standard.object(forKey: AppModel.hideOfflineKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(hideOfflineChannels, forKey: Self.hideOfflineKey)
+            notify()
+        }
+    }
+    static let hideOfflineKey = "hideOfflineChannels"
+
+    /// The channels the sidebar lists for a device.
+    func listedChannels(_ device: DeviceRuntime) -> [ChannelInfo] {
+        ChannelFilter.visible(device.channels, hideOffline: hideOfflineChannels)
+    }
 
     /// Gives the core's event thread a way back to the model on the main queue.
     private final class Target: @unchecked Sendable {

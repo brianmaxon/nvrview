@@ -27,7 +27,7 @@ struct SidebarView: View {
 
     private var deviceItems: [Item] {
         model.devices.flatMap { d in
-            [Item.device(d.key)] + d.channels.flatMap { c -> [Item] in
+            [Item.device(d.key)] + model.listedChannels(d).flatMap { c -> [Item] in
                 let camera = CameraRef(device: d.key, channel: c.channel)
                 guard c.isMultiLens, expandedChannels.contains(camera) else { return [.camera(d.key, camera)] }
                 return [.camera(d.key, camera)] + model.cameras(device: d.key, channel: c).map { Item.lens($0) }
@@ -190,6 +190,10 @@ struct SidebarView: View {
     private func deviceRow(_ device: AppModel.DeviceRuntime) -> some View {
         HStack {
             Text(device.config.name).fontWeight(.semibold).lineLimit(1)
+            if let count = ChannelFilter.countText(shown: model.listedChannels(device).count, total: device.channels.count) {
+                Text(count).font(.caption).foregroundStyle(.secondary)
+                    .help(model.hideOfflineChannels ? "Channels listed (offline ones hidden: View > Hide Offline Channels)" : "Channels")
+            }
             Spacer()
             Text(Self.stateText(device)).font(.caption).foregroundStyle(Self.stateColor(device.link.state))
         }
@@ -198,14 +202,14 @@ struct SidebarView: View {
             Button("New Group from This Device") {
                 model.createGroup(
                     name: device.config.name,
-                    cameras: device.channels.flatMap { model.cameras(device: device.key, channel: $0) })
+                    cameras: model.listedChannels(device).flatMap { model.cameras(device: device.key, channel: $0) })
             }
             Button("Show All Cameras in New Window") {
                 model.openWindow(
                     .scratch(
                         name: device.config.name,
                         root: LayoutNode.balanced(
-                            Array(device.channels.flatMap { model.cameras(device: device.key, channel: $0) }
+                            Array(model.listedChannels(device).flatMap { model.cameras(device: device.key, channel: $0) }
                                 .prefix(LayoutNode.maxLeaves)))))
             }
         }
