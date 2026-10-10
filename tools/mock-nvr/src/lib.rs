@@ -12,17 +12,23 @@
 //!   per-channel version info (318), and a channel info push (145) after login;
 //! - preview start (3) and stop (4): a looping synthetic video fixture is sent
 //!   as BCMEDIA records at a fixed frame rate, starting at a keyframe, with the
-//!   first 1024 bytes of each frame-start message encrypted.
+//!   first 1024 bytes of each frame-start message encrypted;
+//! - optionally, audio interleaved with the video like a device's: one ADTS
+//!   frame per `05wb` record, placed after every picture captured before it
+//!   was sent, with a configurable audio clock skew and arrival jitter
+//!   ([`audio`]).
 //!
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
+pub mod audio;
 pub mod fixture;
 
+use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
 use bc_protocol::framer::{Decoder, RawMessage, encode_message_with_status};
 use bc_protocol::header::Class;
-use bc_protocol::media::{encode_info, encode_video};
+use bc_protocol::media::{encode_audio, encode_info, encode_video};
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml::{self, XML_DECLARATION};
 use fixture::Fixture;
@@ -65,6 +71,8 @@ pub struct Config {
     pub height: u32,
     /// The looping video source.
     pub fixture: Arc<Fixture>,
+    /// Interleaved audio, if any.
+    pub audio: Option<Arc<AudioConfig>>,
 }
 
 impl Config {
@@ -82,6 +90,7 @@ impl Config {
             width: 320,
             height: 240,
             fixture: Arc::new(fixture),
+            audio: None,
         }
     }
 }
@@ -544,8 +553,9 @@ fn media_message(key: &SessionKey, id: u32, record: &[u8], out: &mut Vec<u8>) ->
     Ok(())
 }
 
-/// Sends the info record and then the looping fixture at the configured
-/// rate until stopped or the connection fails.
+/// Sends the info record and then the looping fixtures (video, and audio if
+/// configured) on the schedule a device would use, until stopped or the
+/// connection fails.
 fn stream_media(
     shared: &Shared,
     writer: &Writer,
@@ -556,9 +566,13 @@ fn stream_media(
     let cfg = &shared.config;
     let fix = &cfg.fixture;
     let fps = cfg.fps.max(1);
-    let period = Duration::from_micros(1_000_000 / u64::from(fps));
+    let audio = cfg.audio.as_deref();
+    let schedule = Schedule::new(1_000_000 / u64::from(fps), audio);
+    let mut jitter = Jitter::new(
+        audio.map_or(1, |a| a.seed),
+        audio.map_or(0, |a| a.jitter_us),
+    );
     let mut index = fix.first_keyframe();
-    let mut pts_us = 0u64;
     let mut out = Vec::new();
     media_message(
         key,
@@ -567,8 +581,8 @@ fn stream_media(
         &mut out,
     )?;
     let start = Instant::now();
-    let mut n = 0u32;
-    loop {
+    let mut due = start;
+    for (item, send_us) in schedule {
         {
             let mut w = lock(writer);
             if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
@@ -577,13 +591,24 @@ fn stream_media(
             w.write_all(&out)?;
         }
         out.clear();
-        let frame = &fix.frames()[index];
-        let record = encode_video(0, frame.keyframe, fix.codec(), pts_us, &[], &frame.data);
+        let record = match item {
+            Item::Video { pts_us, .. } => {
+                let frame = &fix.frames()[index];
+                index = fix.next_index(index);
+                encode_video(0, frame.keyframe, fix.codec(), pts_us, &[], &frame.data)
+            }
+            Item::Audio { k } => {
+                let a = audio.expect("audio items only with audio");
+                let frames = a.fixture.frames();
+                encode_audio(a.stream_index, &frames[(k as usize) % frames.len()])
+            }
+        };
         media_message(key, id, &record, &mut out)?;
-        index = fix.next_index(index);
-        pts_us += period.as_micros() as u64;
-        n += 1;
-        let due = start + period * n;
+        // Send when the item exists, plus jitter; never before the previous
+        // message (one TCP stream keeps its order).
+        let at =
+            start + Duration::from_micros(send_us as u64) + Duration::from_micros(jitter.next_us());
+        due = due.max(at);
         while let Some(left) = due.checked_duration_since(Instant::now()) {
             if stop.load(Ordering::SeqCst) || shared.shutdown.load(Ordering::SeqCst) {
                 return Ok(());
@@ -591,4 +616,5 @@ fn stream_media(
             thread::sleep(left.min(POLL));
         }
     }
+    Ok(())
 }
