@@ -17,12 +17,12 @@
 
   Run from an elevated PowerShell (Run as administrator):
     Set-ExecutionPolicy -Scope Process Bypass
-    .\setup-windows.ps1 [-RepoDir C:\src\nvrview] [-SkipTests] [-Optional]
+    .\setup-windows.ps1 [-RepoDir <folder>] [-SkipTests] [-Optional]
                         [-EnableSsh [-SshSource winget|feature]
                          -AuthorizedKey "ssh-ed25519 AAAA... name"]
 
 .PARAMETER RepoDir
-  Where to clone the repository (default: $HOME\src\nvrview).
+  Where to clone the repository (default: $HOME\nvrview\repo).
 .PARAMETER SkipTests
   Do not run cargo test at the end.
 .PARAMETER Optional
@@ -43,7 +43,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$RepoDir = (Join-Path $HOME 'src\nvrview'),
+  [string]$RepoDir = (Join-Path $HOME 'nvrview\repo'),
   [switch]$SkipTests,
   [switch]$Optional,
   [switch]$EnableSsh,
