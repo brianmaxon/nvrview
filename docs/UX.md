@@ -54,6 +54,14 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
   is decoded, so the picture sharpens in place instead of blinking.
 - Leaving focus does the reverse: the sub-stream is already running for the
   grid, so the tile shrinks back without a gap.
+- Focus belongs to one tile of one window. Other windows (and other tiles)
+  showing the same camera keep their layout; because a camera is streamed
+  once, they share its tile and so show the main stream while any window
+  focuses it, scaled into their own rectangles, and return to the
+  sub-stream when the last focus ends.
+- The second lens of a multi-lens camera is a camera of its own (its own
+  tile), on the lens's own tiers: `mobile` in the grid, `extern` focused,
+  or `extern` throughout when the device does not serve `mobile`.
 
 ## Chrome
 
