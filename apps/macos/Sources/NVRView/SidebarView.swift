@@ -35,8 +35,15 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            List {
-                Section("Layouts") {
+            // A stack in a scroll view, not a `List`: the list's table view
+            // applies one batched update per change, and when rows appear in
+            // more than one place at once (two devices reporting their
+            // channels together) AppKit's row-height cache re-enters itself
+            // and logs a reentrancy warning it says will become an assert.
+            // The rows here are buttons, so the list added nothing else.
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    header("Layouts")
                     ForEach(model.layouts) { layout in
                         row(
                             layout.name, detail: "\(layout.root.leafCount)",
@@ -44,16 +51,9 @@ struct SidebarView: View {
                         ) { window?.show(.layout(id: layout.id)) }
                         .contextMenu { layoutMenu(layout) }
                     }
-                    Button {
-                        window?.newLayout(nil)
-                    } label: {
-                        Label("New Layout…", systemImage: "plus").foregroundStyle(Color.accentColor)
-                    }
-                    .buttonStyle(.plain)
-                }
-                Section("Groups") {
-                    // One flat list per section: rows whose number changes
-                    // inside nested lists upset the sidebar's table view.
+                    addButton("New Layout…") { window?.newLayout(nil) }
+
+                    header("Groups")
                     ForEach(groupItems) { item in
                         switch item {
                         case .group(let id):
@@ -67,16 +67,13 @@ struct SidebarView: View {
                             EmptyView()
                         }
                     }
-                    Button {
+                    addButton("New Group…") {
                         window?.askName("New Group", initial: "Group") { name in
                             model.createGroup(name: name, cameras: [])
                         }
-                    } label: {
-                        Label("New Group…", systemImage: "plus").foregroundStyle(Color.accentColor)
                     }
-                    .buttonStyle(.plain)
-                }
-                Section("Devices") {
+
+                    header("Devices")
                     ForEach(deviceItems) { item in
                         switch item {
                         case .device(let key):
@@ -92,10 +89,13 @@ struct SidebarView: View {
                             NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: nil)
                         }
                         .buttonStyle(.link)
+                        .padding(.horizontal, Self.rowInset)
+                        .padding(.vertical, 3)
                     }
                 }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 10)
             }
-            .listStyle(.sidebar)
             if let notice = model.notice {
                 HStack {
                     Text(notice).font(.caption).foregroundStyle(.secondary)
@@ -113,6 +113,30 @@ struct SidebarView: View {
         }
     }
 
+    /// The horizontal inset of a row's content inside its highlight.
+    static let rowInset: CGFloat = 8
+
+    private func header(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, Self.rowInset)
+            .padding(.top, 12)
+            .padding(.bottom, 3)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private func addButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: "plus").foregroundStyle(Color.accentColor)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Self.rowInset)
+        .padding(.vertical, 3)
+    }
+
     // MARK: Rows
 
     private func row(_ title: String, detail: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -122,12 +146,14 @@ struct SidebarView: View {
                 Spacer()
                 Text(detail).font(.caption).foregroundStyle(.secondary)
             }
+            .padding(.horizontal, Self.rowInset)
+            .padding(.vertical, 4)
             .contentShape(Rectangle())
-            .padding(.vertical, 2)
         }
         .buttonStyle(.plain)
         .fontWeight(selected ? .semibold : .regular)
-        .listRowBackground(selected ? Color.accentColor.opacity(0.25) : Color.clear)
+        .background(
+            RoundedRectangle(cornerRadius: 5).fill(selected ? Color.accentColor.opacity(0.25) : Color.clear))
     }
 
     private func groupRow(_ group: CameraGroup) -> some View {

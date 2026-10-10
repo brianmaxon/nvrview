@@ -13,7 +13,10 @@ import VideoKit
 ///    switch), still showing a picture;
 /// 3. listening makes the camera audible and its level meter reads a level;
 /// 4. leaving focus asks for the sub-stream again;
-/// 5. with `--fake`, the fake core saw no contract violation.
+/// 5. with `--fake`, the fake core saw no contract violation;
+/// 6. the sidebar took rows added and removed in several places in one
+///    update (a group and a layout at once), and AppKit logged none of the warnings
+///    in `forbiddenLog` during the whole run.
 ///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
@@ -22,6 +25,9 @@ final class SelfTest {
     private var problems: [String] = []
 
     init(app: AppDelegate) { self.app = app }
+
+    /// Lines AppKit must never log (it says the first will become an assert).
+    static let forbiddenLog = ["reentrant operation in its NSTableView delegate"]
 
     func start(seconds: Double) {
         after(seconds) { [self] in checkGrid() }
@@ -90,8 +96,37 @@ final class SelfTest {
             if let fake = model.fake {
                 problems += fake.violations.map { "core contract: \($0)" }
             }
-            finish(problems)
+            sidebarStep()
         }
+    }
+
+    /// Rows inserted and removed in two places of the sidebar in one update:
+    /// what made a table-backed sidebar re-enter its row-height cache.
+    private func sidebarStep() {
+        guard let model = app.model else { finish(problems) }
+        // Only with `--fake`: never touch the user's stored groups.
+        guard model.fake != nil else { return checkLog() }
+        let cameras = model.allCameras
+        let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
+        let layout = model.createLayout(name: "Self-Test", root: LayoutNode.balanced(Array(cameras.prefix(2))))
+        after(0.5) { [self] in
+            model.deleteGroup(group)
+            if let layout { model.deleteLayout(layout) }
+            after(0.5) { [self] in checkLog() }
+        }
+    }
+
+    private func checkLog() {
+        if let watch = app.logWatch {
+            for p in watch.patterns {
+                let n = watch.count(p)
+                print("AppKit warning \"\(p)\": \(n)")
+                if n > 0 { problems.append("AppKit logged \"\(p)\" \(n) times") }
+            }
+        } else {
+            problems.append("could not watch standard error")
+        }
+        finish(problems)
     }
 
     private func capture(_ what: String, then next: @escaping @MainActor () -> Void) {

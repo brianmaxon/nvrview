@@ -14,8 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private(set) var model: AppModel?
     private(set) var windows: [ViewerWindowController] = []
     private var settings: SettingsWindowController?
+    /// With `--selftest`: AppKit's warnings on standard error, counted.
+    let logWatch: LogWatch?
 
-    init(options: Options) { self.options = options }
+    init(options: Options) {
+        self.options = options
+        logWatch = options.selfTestSeconds == nil ? nil : LogWatch(patterns: SelfTest.forbiddenLog)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model: AppModel
