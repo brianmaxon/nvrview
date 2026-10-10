@@ -21,6 +21,11 @@
 #                         each at 0.4 (a configuration other than the
 #                         devices' 16 kHz mono).
 #   aac-stereo-48k.s16    FFmpeg's decode of aac-stereo-48k.aac.
+#   aac-smoke-t3.aac      16 kHz mono, 8 s (two cycles, so it loops in
+#                         rhythm): a smoke alarm's temporal-three pattern,
+#                         a 3.1 kHz tone at 0.3, on for 0.5 s and off for
+#                         0.5 s three times, then off for 1.5 s (each cycle
+#                         4 s), for the core's alarm detector.
 #
 # Usage: ./make-audio.sh   (rewrites the files next to this script)
 set -euo pipefail
@@ -46,5 +51,9 @@ enc "$click" 16000 1 4 32k aac-clicks.aac
 
 enc '0.4*sin(2*PI*440*t)|0.4*sin(2*PI*660*t)' 48000 2 0.5 96k aac-stereo-48k.aac
 ref aac-stereo-48k.aac 2 aac-stereo-48k.s16
+
+# On while mod(t,4) < 3 (three pulses) and mod(t,1) < 0.5 (each 0.5 s).
+t3='if(lt(mod(t\,4)\,3)*lt(mod(t\,1)\,0.5)\,0.3*sin(2*PI*3100*t)\,0)'
+enc "$t3" 16000 1 8 32k aac-smoke-t3.aac
 
 /bin/ls -l aac-*
