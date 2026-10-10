@@ -211,7 +211,7 @@ impl TileAudio {
         if stamp.reset {
             self.estimator.reset();
             self.estimator_settled = false;
-            self.delay.reset();
+            self.delay.restart();
         }
         let mut sent = None;
         if let Some(tl) = stamp.timeline {
@@ -219,7 +219,6 @@ impl TileAudio {
             // over once it has settled.
             if !self.estimator_settled && stamp.first_sample >= u64::from(format.sample_rate) * 2 {
                 self.estimator.reset();
-                self.delay.reset();
                 self.estimator_settled = true;
             }
             let s = tl.at((stamp.first_sample + frames as u64) as f64);
@@ -245,7 +244,12 @@ impl TileAudio {
                 format,
                 pcm,
                 timeline: stamp.timeline,
-                map,
+                // Playout starts once the map has settled (the first two
+                // seconds of an estimated one are rough): placing audio on
+                // the rough map and correcting it a second later cost two or
+                // three audible jumps after every (re)start in a replayed LAN
+                // recording; waiting costs two seconds of audio once.
+                map: map.filter(|_| self.explicit_map.is_some() || self.estimator_settled),
                 playout_delay_us: delay.us,
                 delay_rate: delay.rate,
                 now_us: arrived_us as f64,
@@ -264,6 +268,8 @@ impl TileAudio {
             t.reset();
         }
         self.estimator.reset();
+        self.estimator_settled = false;
+        self.delay.restart();
         if let Some(p) = self.playout.as_mut() {
             p.restart();
         }

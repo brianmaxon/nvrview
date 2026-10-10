@@ -40,10 +40,14 @@ use std::collections::VecDeque;
 /// or two every few minutes (under 1% of the window's seconds) stay above
 /// it.
 pub const DELAY_PERCENTILE: f64 = 0.99;
-/// Window of the lateness percentile, camera seconds (300 per-second
-/// maxima). Long enough that one stall in it stays above the percentile,
-/// short enough to follow a change in the network within minutes.
-pub const DELAY_WINDOW_S: f64 = 300.0;
+/// Window of the lateness percentile, seconds of arrivals (600 per-second
+/// maxima, so the percentile skips the window's six worst seconds). Long
+/// enough to remember a rough patch of a few seconds that recurs every ten
+/// minutes or so (a replayed LAN recording had one; a 300 s window forgot
+/// it between occurrences and underran there every pass), and that a stall
+/// every five minutes stays above the percentile; short enough to follow a
+/// change in the network within minutes.
+pub const DELAY_WINDOW_S: f64 = 600.0;
 /// How far ahead of the host time it is heard the renderer reads a frame:
 /// the output's latency plus up to one callback. Core Audio and WASAPI
 /// typically run 10 ms callbacks with a few ms of device latency.
@@ -68,10 +72,18 @@ pub const MAX_SLEW: f64 = 0.002;
 /// Near the target the delay approaches it with this time constant, so it
 /// settles without overshooting.
 const SETTLE_TAU_S: f64 = 10.0;
-/// The target is recomputed this often, camera seconds.
-const UPDATE_S: f64 = 1.0;
-/// Observations needed before the first target (about 10 s of records).
-const MIN_OBSERVATIONS: usize = 150;
+/// Extra delay right after a (re)start, while the presentation estimate
+/// (a median over its first minutes of deliveries) still moves: its early
+/// errors arrive as lateness the window has not seen. Measured on a replayed
+/// LAN recording: without it, most underruns fell in the first two minutes
+/// after each restart.
+pub const WARMUP_MARGIN_US: f64 = 50_000.0;
+/// The warm-up allowance falls to nothing over this many seconds of
+/// arrivals.
+pub const WARMUP_MARGIN_S: f64 = 120.0;
+/// Seconds of observations needed before the first target. (The target is
+/// recomputed once per second of arrivals.)
+const MIN_SECONDS: usize = 10;
 
 /// The delay a block is played with.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,10 +101,16 @@ pub(crate) struct DelayControl {
     fixed: Option<f64>,
     current: f64,
     target: Option<f64>,
-    /// (camera time sent, host time arrived), µs.
-    window: VecDeque<(f64, f64)>,
-    last_update: Option<f64>,
+    /// (host second, latest lateness in it), µs, over the last
+    /// [`DELAY_WINDOW_S`] seconds of arrivals. Lateness is measured against
+    /// the presentation map in use when the record arrived, and kept across
+    /// stream restarts: the network has not changed, and forgetting it
+    /// would make the first minutes after every reconnect underrun.
+    seconds: VecDeque<(i64, f64)>,
+    last_update: Option<i64>,
     scratch: Vec<f64>,
+    /// Host time of the first lateness measured since the last restart.
+    since_restart: Option<f64>,
 }
 
 impl DelayControl {
@@ -102,17 +120,25 @@ impl DelayControl {
             fixed,
             current: fixed.unwrap_or(INITIAL_DELAY_US),
             target: None,
-            window: VecDeque::new(),
+            seconds: VecDeque::new(),
             last_update: None,
             scratch: Vec::new(),
+            since_restart: None,
         }
     }
 
-    /// Forgets the observations (the stream restarted or its timeline was
-    /// rough), keeping the delay in use: the network is still the same.
-    pub fn reset(&mut self) {
-        self.window.clear();
-        self.last_update = None;
+    /// The stream (re)started: playout is placed afresh with the next block,
+    /// so the delay may step up at once by the warm-up allowance, which then
+    /// fades out.
+    pub fn restart(&mut self) {
+        if self.fixed.is_some() {
+            return;
+        }
+        self.since_restart = None;
+        let base = self.target.unwrap_or(self.current);
+        self.current = (base + WARMUP_MARGIN_US)
+            .max(self.current)
+            .clamp(MIN_DELAY_US, MAX_DELAY_US);
     }
 
     /// The delay in use, µs.
@@ -129,9 +155,10 @@ impl DelayControl {
     }
 
     /// A record whose last sample was sent at camera time `sent_us` arrived
-    /// at host time `arrived_us`; `record_us` is its length. Returns the
-    /// delay for the block it carries, `dt_s` (its length in seconds) after
-    /// the previous one.
+    /// at host time `arrived_us`; `record_us` is its length. `map` is the
+    /// presentation map, once it is settled enough to measure lateness
+    /// against (`None` records nothing). Returns the delay for the block the
+    /// record carries, `dt_s` (its length in seconds) after the previous one.
     pub fn observe(
         &mut self,
         sent_us: f64,
@@ -146,42 +173,43 @@ impl DelayControl {
                 rate: 0.0,
             };
         }
-        self.window.push_back((sent_us, arrived_us));
-        while self
-            .window
-            .front()
-            .is_some_and(|&(s, _)| s < sent_us - DELAY_WINDOW_S * 1e6)
-        {
-            self.window.pop_front();
-        }
-        if let Some(map) = map
-            && self.window.len() >= MIN_OBSERVATIONS
-            && self
-                .last_update
-                .is_none_or(|t| sent_us - t >= UPDATE_S * 1e6 || sent_us < t)
-        {
-            self.last_update = Some(sent_us);
-            // The latest arrival (against its target) of each second.
-            self.scratch.clear();
-            let mut second = None;
-            for &(s, a) in &self.window {
-                let late = a - map.host_at(s);
-                let sec = (s / 1e6).floor();
-                match self.scratch.last_mut() {
-                    Some(m) if second == Some(sec) => *m = m.max(late),
-                    _ => {
-                        self.scratch.push(late);
-                        second = Some(sec);
-                    }
-                }
+        if let Some(map) = map {
+            self.since_restart.get_or_insert(arrived_us);
+            let late = arrived_us - map.host_at(sent_us);
+            let sec = (arrived_us / 1e6).floor() as i64;
+            match self.seconds.back_mut() {
+                Some((s, m)) if *s == sec => *m = m.max(late),
+                _ => self.seconds.push_back((sec, late)),
             }
-            let k = ((self.scratch.len() - 1) as f64 * DELAY_PERCENTILE).round() as usize;
-            let (_, late, _) = self.scratch.select_nth_unstable_by(k, f64::total_cmp);
-            let want = *late + record_us.max(0.0) + OUTPUT_LEAD_US;
-            self.target = Some(want.clamp(MIN_DELAY_US, MAX_DELAY_US));
+            while self
+                .seconds
+                .front()
+                .is_some_and(|&(s, _)| s <= sec - DELAY_WINDOW_S as i64)
+            {
+                self.seconds.pop_front();
+            }
+            if self.seconds.len() >= MIN_SECONDS && self.last_update.is_none_or(|t| sec != t) {
+                self.last_update = Some(sec);
+                self.scratch.clear();
+                self.scratch.extend(self.seconds.iter().map(|&(_, m)| m));
+                let k = ((self.scratch.len() - 1) as f64 * DELAY_PERCENTILE).round() as usize;
+                let (_, late, _) = self.scratch.select_nth_unstable_by(k, f64::total_cmp);
+                let want = *late + record_us.max(0.0) + OUTPUT_LEAD_US;
+                self.target = Some(want.clamp(MIN_DELAY_US, MAX_DELAY_US));
+            }
         }
+        let warmup = match self.since_restart {
+            Some(t0) => {
+                WARMUP_MARGIN_US
+                    * (1.0 - (arrived_us - t0) / (WARMUP_MARGIN_S * 1e6)).clamp(0.0, 1.0)
+            }
+            None => WARMUP_MARGIN_US,
+        };
         let rate = match self.target {
-            Some(t) => ((t - self.current) / (SETTLE_TAU_S * 1e6)).clamp(-MAX_SLEW, MAX_SLEW),
+            Some(t) => {
+                let t = (t + warmup).clamp(MIN_DELAY_US, MAX_DELAY_US);
+                ((t - self.current) / (SETTLE_TAU_S * 1e6)).clamp(-MAX_SLEW, MAX_SLEW)
+            }
             None => 0.0,
         };
         let dt = dt_s.clamp(0.0, 1.0);
@@ -205,13 +233,16 @@ mod tests {
 
     /// Feeds `seconds` of 64 ms records whose lateness is `late(k)`,
     /// continuing from the last record fed.
-    fn feed(d: &mut DelayControl, seconds: f64, mut late: impl FnMut(u64) -> f64) -> Vec<Delay> {
+    fn feed(
+        d: &mut DelayControl,
+        next: &mut u64,
+        seconds: f64,
+        mut late: impl FnMut(u64) -> f64,
+    ) -> Vec<Delay> {
         let m = map();
         let n = (seconds / 0.064) as u64;
-        let first = d
-            .window
-            .back()
-            .map_or(0, |&(s, _)| (s / 64_000.0) as u64 + 1);
+        let first = *next;
+        *next += n;
         (first..first + n)
             .map(|k| {
                 let sent = k as f64 * 64_000.0;
@@ -223,8 +254,9 @@ mod tests {
     #[test]
     fn follows_the_lateness_percentile_slowly_and_within_bounds() {
         let mut d = DelayControl::new(None);
+        let mut k0 = 0;
         // Lateness uniform in 0..100 ms: p99 = 99 ms, target 64 + 99 + 20.
-        let out = feed(&mut d, 600.0, |k| (k * 37 % 100) as f64 * 1000.0);
+        let out = feed(&mut d, &mut k0, 600.0, |k| (k * 37 % 100) as f64 * 1000.0);
         let t = d.target().unwrap();
         assert!((t - 183_000.0).abs() < 2_000.0, "target {t}");
         assert!((d.current() - t).abs() < 1_000.0);
@@ -235,10 +267,10 @@ mod tests {
         }
         // A clean network shrinks it to the floor; a terrible one grows it
         // to the ceiling.
-        feed(&mut d, 900.0, |_| 0.0);
+        feed(&mut d, &mut k0, 900.0, |_| 0.0);
         assert_eq!(d.target(), Some(MIN_DELAY_US));
         assert!((d.current() - MIN_DELAY_US).abs() < 1_000.0);
-        feed(&mut d, 900.0, |_| 2e6);
+        feed(&mut d, &mut k0, 900.0, |_| 2e6);
         assert_eq!(d.target(), Some(MAX_DELAY_US));
         assert!((d.current() - MAX_DELAY_US).abs() < 1_000.0);
     }
@@ -246,9 +278,10 @@ mod tests {
     #[test]
     fn rare_stalls_do_not_move_the_target() {
         let mut d = DelayControl::new(None);
+        let mut k0 = 0;
         // 20 ms of lateness, plus a 1.5 s stall every 5 minutes (its 23
         // records arrive together at its end).
-        feed(&mut d, 1200.0, |k| {
+        feed(&mut d, &mut k0, 1200.0, |k| {
             let in_cycle = k % 4688;
             if in_cycle < 23 {
                 1.5e6 - in_cycle as f64 * 64_000.0
@@ -263,7 +296,8 @@ mod tests {
     #[test]
     fn fixed_never_moves() {
         let mut d = DelayControl::new(Some(280_000.0));
-        let out = feed(&mut d, 60.0, |_| 300_000.0);
+        let mut k0 = 0;
+        let out = feed(&mut d, &mut k0, 60.0, |_| 300_000.0);
         assert!(out.iter().all(|x| x.us == 280_000.0 && x.rate == 0.0));
         assert_eq!(d.target(), Some(280_000.0));
     }

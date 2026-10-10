@@ -109,23 +109,46 @@ the crate's `Renderer`.
   `delay.rs`). It must cover a record's length (64 ms: a record is sent only
   after its last sample), its lateness against the presentation reference,
   and the output's lead (the renderer reads about 20 ms ahead of the time
-  it is heard). The target is the 99th percentile, over the last 300 s, of
-  the *per-second maximum* lateness, plus those two, kept within
-  100–500 ms: every record arrives in time in all but about one second in
-  a hundred, and a stall (a second or two of late records) every few
-  minutes does not raise it. (A plain 99th percentile of records underran
-  every few seconds in the simulation: late records come singly, spread
-  over many seconds.) The floor is a record plus the lead plus slack; the
-  ceiling is where audio stops feeling like the picture's sound and a
-  network needing more is stalling, which resyncs handle. The delay starts
-  at 250 ms, moves toward the target at most 2 ms per second (approaching
-  it with a 10 s time constant), and playout feeds that rate forward into
-  its resampling ratio, so a change is a 0.2% tempo change (3.5 cents),
-  never a jump. In simulation: 100 ms on a clean network (0–10 ms jitter),
-  about 270 ms under the measured LAN jitter (188 underruns in 3 h), about
-  400 ms under jitter half again as large; every click stays within ±40 ms
-  of its moving target. A caller can still fix the delay
+  it is heard). The target is the 99th percentile, over the last 600 s of
+  arrivals, of the *per-second maximum* lateness, plus those two, kept
+  within 100–500 ms: every record arrives in time in all but about one
+  second in a hundred, a stall (a second or two of late records) every
+  few minutes does not raise it, and a rough patch that recurs every ten
+  minutes or so is remembered between occurrences. (A plain 99th
+  percentile of records underran every few seconds in the simulation: late
+  records come singly, spread over many seconds. A 300 s window forgot a
+  rough patch in a replayed LAN recording between its occurrences.)
+  Lateness is kept across stream restarts (the network has not changed).
+  The floor is a record plus the lead plus slack; the ceiling is where
+  audio stops feeling like the picture's sound and a network needing more
+  is stalling, which resyncs handle. The delay starts at 250 ms; after
+  every (re)start it steps up by a 50 ms warm-up allowance that fades over
+  two minutes, because the presentation reference is still a young median
+  then and its early errors arrive as lateness (without it, most underruns
+  in the replayed recording fell in the first two minutes after each
+  restart). It moves toward the target at most 2 ms per second
+  (approaching it with a 10 s time constant), and playout feeds that rate
+  forward into its resampling ratio, so a change is a 0.2% tempo change
+  (3.5 cents), never a jump. In simulation: 100 ms on a clean network
+  (0–10 ms jitter), about 280 ms under the measured LAN jitter, about
+  400 ms under jitter half again as large; every click stays within
+  ±40 ms of its moving target. A caller can still fix the delay
   (`TileConfig::playout_delay_us`).
+- **Start**: playout waits until the estimated presentation map has
+  settled (the first 2 s of a stream; an explicit map is used at once).
+  Placing audio on the rough early map and correcting it a second later
+  cost two or three audible jumps after every (re)start.
+- **Soak** (`tools/soak`, a real 10-minute LAN recording looped for 24 h of
+  simulated time, each loop a restart): with the fixed 280 ms delay, the
+  filtered A/V error after each start's first minute ranged −15.8 to
+  +35.1 ms (mean +0.4), up to 47.9 ms in the first minute, with 436 resyncs
+  (all in the first seconds after a restart) and 144 underruns (one per
+  loop seam). With the adaptive delay, the warm-up allowance, and playout
+  waiting for a settled map: −15.7 to +34.2 ms (mean +0.6), up to 40.4 ms
+  in the first minute, no resyncs, the same 144 seam underruns, and a
+  delay of 256 ms. The rate estimate at the end of every pass is
+  16,000.12 Hz; a run that ends seconds after a restart reports the young
+  estimate of the new epoch (16,009 Hz), which is not a bias.
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the
