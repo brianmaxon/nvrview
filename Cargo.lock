@@ -453,6 +453,7 @@ dependencies = [
  "bc-protocol",
  "bc-session",
  "mock-nvr",
+ "mp4-remux",
  "serde",
  "serde_json",
  "tempfile",

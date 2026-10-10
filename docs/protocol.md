@@ -61,6 +61,16 @@ usual, and the message ID is the play request's. A parser must therefore not
 decide the header length from bytes 18–19 alone: only classes `0x1465` and
 `0x1466` have a 20-byte header. (observed (client capture))
 
+Implementation rule (ours, derived from the above): a command-5 header is
+always 24 bytes, whatever bytes 18–19 hold. A `seq` close to a Unix time has
+a high half that can spell a known class (for example the bytes `14 64`
+when `seq` is between `0x64140000` and `0x6414ffff`, an 18-hour span of
+March 2023) or none at all, so reading it as a class would misframe the stream.
+The decoder returns the u32 in bytes 16–19 as the replay `seq` for every
+command-5 message; only the device's media messages mean it as `seq` (the
+client's request and the device's first reply have a status and class
+there, and the caller knows which message it holds).
+
 ## Login
 
 1. Client sends command 1, empty body, class `0x1465`, message ID 0, status

@@ -348,3 +348,23 @@ async fn a_disconnect_fails_the_download_and_the_session_recovers() {
     s.close().await;
     assert_eq!(nvr.active_logins(), 0);
 }
+
+#[tokio::test]
+async fn a_download_survives_a_reader_that_falls_behind() {
+    // Unpaced, as devices send downloads. Blocking this runtime's only
+    // thread stops the session reading, so the server's socket send buffer
+    // fills and its writes must wait rather than fail.
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |_| {});
+    let mut dl = s
+        .download(&request(1, d(8, 22, 0, 0), d(8, 22, 0, 59)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        dl.next().await.unwrap(),
+        Some(DownloadEvent::Estimate(_))
+    ));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(drain(&mut dl).await.unwrap().1, 600);
+    s.close().await;
+}

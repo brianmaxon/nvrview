@@ -7,6 +7,12 @@
 .env.*
 *.local.*
 
+# Editor leftovers (swap files record user, host, and path)
+.*.sw[a-p]
+*~
+.#*
+\#*\#
+
 # Rust
 /target/
 

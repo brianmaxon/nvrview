@@ -17,6 +17,8 @@ fn ten_simulated_minutes_at_60x() {
     assert_eq!(r.video.failures, 0);
     assert_eq!(r.resets_seen, 0);
     assert!(r.video.audio_frames > 100);
+    // Memory is sampled only where `soak::memory::current_bytes` supports it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(!r.memory.is_empty());
     if let Some(t) = &r.trend {
         assert!(t.stable, "{t:?}");

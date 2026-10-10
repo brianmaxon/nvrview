@@ -49,6 +49,13 @@ files need no C library on any platform.
   the file each belongs to.
 - **Cover images** (298): one keyframe per event or file, decoded to a small
   thumbnail and cached.
+  The core fetches the keyframe (`recordings::thumbs::cover_thumbnail`) and
+  keeps it in an on-disk cache bounded by entry count (default 4096) and total
+  bytes (default 64 MB), least recently used first. The core does not decode
+  pictures: the app decodes the keyframe, shrinks it, and may store the small
+  image in its place, which is how thousands of thumbnails fit. Entries are
+  keyed by device, channel, stream, and requested range; an empty answer (no
+  recording in the range) is not cached.
 
 The index fills in the background (recent days first, then older ones),
 refreshes the current day periodically, and is shared by every window. All of
@@ -116,6 +123,19 @@ Events from all cameras are grouped into incidents:
 - **Progress** per incident and per camera, pausable, survives app restarts.
 - **No re-encoding** for plain downloads: chunks are joined and remuxed into
   MP4 (H.264 or H.265 video, AAC audio) with correct timestamps.
+- **Joining** (`recordings::finalize`) is crash-safe in two steps. The chunks
+  are written to a fragmented MP4 (`joined.fmp4` in the camera's parts
+  folder, flushed and synced every fragment of up to 2 s), with the overlap
+  dropped by timestamp and each audio frame placed right after the video frame
+  it followed (audio has no timestamp; audio that followed a repeated
+  video frame is dropped with it). Then the fragmented file is remuxed into a
+  standard faststart MP4 under a temporary name, renamed into place, and
+  deleted. A killed process leaves either the fragmented file (it plays up to
+  its last complete fragment; `recover_fragmented` finishes it) or a finished
+  MP4, never a partial output name, and the raw chunks stay until the job is
+  forgotten, so an interrupted join is simply redone. A change of codec or
+  parameter sets in the middle of an incident fails the join (a file has one
+  `moov`); handling it by splitting the output is not done yet.
 
 ## Output
 
