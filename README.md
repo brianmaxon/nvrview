@@ -90,12 +90,12 @@ NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh
 `scripts/check.sh` runs, in order and stopping at the first failure:
 sanitization and a full-history secret scan, `cargo fmt`, `clippy`, the Rust
 tests, the C header check, the C smoke test (plain and with AddressSanitizer),
-a Windows compile check, the Linux tests and the C# smoke test in Docker, the
-macOS app tests, and the macOS GUI self-tests (their windows open behind other
-windows). Environment variables skip the slow or optional steps:
-`NVRVIEW_LINUX_TESTS=0`, `NVRVIEW_CSHARP_TESTS=0`, `NVRVIEW_GUI_TESTS=0`,
-`NVRVIEW_SECRET_SCAN=0`; `NVRVIEW_BROWSER_TESTS=1` adds the browser playback
-check. `scripts/clean-docker.sh` removes what the Docker steps leave behind.
+Windows and Linux compile checks, the C# smoke test in Docker, the macOS app
+tests, and the macOS GUI self-tests (their windows open behind other windows).
+Environment variables skip the slow or optional steps:
+`NVRVIEW_CSHARP_TESTS=0`, `NVRVIEW_GUI_TESTS=0`, `NVRVIEW_SECRET_SCAN=0`.
+`NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
+every push) and `NVRVIEW_BROWSER_TESTS=1` the browser playback check. `scripts/clean-docker.sh` removes what the Docker steps leave behind.
 
 ## Contributing
 

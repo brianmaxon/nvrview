@@ -65,10 +65,18 @@ fi
 step "Windows compile check"
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 
-# Linux tests in Docker, when the Docker daemon is running.
-# NVRVIEW_LINUX_TESTS=0 skips them.
-if [ "${NVRVIEW_LINUX_TESTS:-1}" = "0" ]; then
-  step "Linux tests skipped (NVRVIEW_LINUX_TESTS=0)"
+step "Linux compile check"
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
+  cargo check --workspace --all-targets --target x86_64-unknown-linux-gnu
+else
+  echo "Linux target not installed (rustup target add x86_64-unknown-linux-gnu); skipped"
+fi
+
+# The full Linux tests in Docker repeat the Rust tests in a slower VM, and CI
+# runs them on every push, so they are opt-in: NVRVIEW_LINUX_TESTS=1 runs them
+# when the Docker daemon is running.
+if [ "${NVRVIEW_LINUX_TESTS:-0}" != "1" ]; then
+  step "Linux tests skipped (NVRVIEW_LINUX_TESTS=1 runs them)"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   step "Linux tests (Docker)"
   scripts/linux-check.sh
