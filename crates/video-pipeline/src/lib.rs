@@ -8,6 +8,7 @@
 //!
 //! No I/O, no threads, no clocks, no platform APIs: callers pass time in.
 //!
+//! - [`pipeline`]: [`TilePipeline`], the per-tile decoder state machine.
 //! - [`nal`]: Annex-B splitting and access unit classification by NAL type.
 //! - [`h264`], [`h265`]: parameter set parsing (written from the syntax tables
 //!   of ITU-T H.264 and H.265) for picture size, cropping, and VUI color.
@@ -23,6 +24,7 @@ pub mod h264;
 pub mod h265;
 pub mod layout;
 pub mod nal;
+pub mod pipeline;
 mod vui;
 
 pub use bits::ParseError;
@@ -32,4 +34,8 @@ pub use geometry::{Rect, Size};
 pub use layout::{FitMode, TileLayout, grid_dimensions, grid_layout, grid_layout_into};
 pub use nal::{
     AccessUnitInfo, Codec, NalUnits, ParameterSetKind, RandomAccess, analyze, nal_units,
+};
+pub use pipeline::{
+    AccessUnit, Action, ActionKind, DecodeFailure, PipelineConfig, TilePipeline, TileStats,
+    TileStatus,
 };
