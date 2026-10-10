@@ -17,7 +17,9 @@
 //
 // Common options: --lib PATH (nvrview.dll), --gpu auto|hardware|warp,
 // --software (decode on the CPU even with a GPU), --size WxH (render target),
-// --expect hardware|software (fail unless every tile decoded that way).
+// --expect hardware|software (fail unless every tile decoded that way),
+// --decoder-samples N and --limit-coded-size (decoder memory; see
+// DecoderSettings in NvrView.Video).
 // The password comes from NVRVIEW_TEST_PASSWORD (default example-password).
 
 using System.Globalization;
@@ -40,7 +42,8 @@ internal sealed class Options
         "usage: NvrView.Demo --mock-nvr EXE [options] --selftest SECONDS FILE...\n" +
         "       NvrView.Demo --mock-nvr EXE [options] --live SECONDS [--channels N] [--fixture FILE] [--fps N] [--tier sub|main]\n" +
         "       NvrView.Demo [options] --bench FILE [--frames N] [--coded WxH]\n" +
-        "options: --lib PATH  --gpu auto|hardware|warp  --software  --size WxH  --expect hardware|software";
+        "options: --lib PATH  --gpu auto|hardware|warp  --software  --size WxH  --expect hardware|software\n" +
+        "         --decoder-samples N  --limit-coded-size";
 
     public Mode Mode { get; private set; }
 
@@ -115,6 +118,8 @@ internal sealed class Options
                     };
                     break;
                 case "--software": o.Software = true; break;
+                case "--decoder-samples": DecoderSettings.OutputSamples = Count(); break;
+                case "--limit-coded-size": DecoderSettings.LimitCodedSize = true; break;
                 case "--size":
                     string[] wh = Value().Split('x');
                     if (wh.Length != 2 || !uint.TryParse(wh[0], out uint w) || !uint.TryParse(wh[1], out uint h) ||

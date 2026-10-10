@@ -43,7 +43,18 @@ git ls-files -z --cached --others --exclude-standard |
   ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
 
 echo "running the Windows checks on $host"
-# $gitbash is meant to expand here, on this side.
-# shellcheck disable=SC2086,SC2029
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
-ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && scripts/windows-worker.sh\""
+# The worker's options travel as variables set in that script.
+vars=""
+for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY; do
+  eval "val=\${$v:-}"
+  case "$val" in
+    *[!A-Za-z0-9_.-]*) echo "$v: letters, digits, '.', '-' and '_' only" >&2; exit 2 ;;
+  esac
+  if [ -n "$val" ]; then
+    vars="$vars $v=$val"
+  fi
+done
+# $gitbash and $vars are meant to expand here, on this side.
+# shellcheck disable=SC2086,SC2029
+ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""

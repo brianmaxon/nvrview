@@ -320,3 +320,19 @@ A doorbell press opens the doorbell's inset as a call:
   leaves it; clicking or dragging cameras from it works as usual. S, or a pin
   control in the overlay, docks it again (which resizes the stage as before).
   The same works in full screen.
+
+## Windows notes
+
+The Windows app (`apps/windows/NvrView.App`) follows these requirements
+with Windows conventions:
+
+- Ctrl takes the place of ⌘ (Ctrl+L listens, Ctrl+, opens Settings), and
+  Ctrl+click on a speaker listens to several tiles.
+- Shortcuts are listed in a help overlay (F1) and in the right-click menu,
+  which also carries Settings, full screen, and diagnostics (Ctrl+D).
+- Full screen is the window's own full-screen presenter (F, and Esc after
+  leaving focus).
+- A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel;
+  touch-screen pinch is not handled yet.
+- Until the corner indicators exist on Windows, detections show as small
+  always-visible badges at the bottom of the tile, with their source.

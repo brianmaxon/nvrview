@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Windows viewer: a WinUI 3 window whose tile grid is drawn by
+       NvrView.Video into a swap chain (see apps/windows/README.md).
+       Unpackaged and self-contained: the Windows App SDK and the .NET
+       runtime are copied next to the executable, nothing is installed. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>NvrView.App</RootNamespace>
+    <!-- Not "NvrView": NvrView.dll would collide with the core's nvrview.dll
+         next to it (file names are case-insensitive). -->
+    <AssemblyName>NvrView.App</AssemblyName>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Program.cs has its own Main (it parses the command line first). -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <ServerGarbageCollector>false</ServerGarbageCollector>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+    <ProjectReference Include="../NvrView.Video/NvrView.Video.csproj" />
+    <!-- Microsoft Software License Terms (redistributable; see
+         apps/windows/README.md, "Windows App SDK"). Pinned: the 1.8
+         metapackage pins each component package exactly. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
+  </ItemGroup>
+</Project>

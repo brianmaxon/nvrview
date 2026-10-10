@@ -1,0 +1,318 @@
+// The core and the GPU device the tiles decode on, and the callbacks that
+// connect them (docs/FFI.md):
+//
+// - Actions run on the core's thread for each tile and go straight to that
+//   tile's VideoTile, inside the read side of the device gate. Replacing a
+//   lost GPU device takes the write side, so no action runs while decoders
+//   and pictures move to the new device.
+// - Events are parsed on the core's event thread and handed to the UI
+//   thread (Viewer.Apply), which owns every piece of viewer state.
+
+using System.Text.Json;
+using Microsoft.UI.Dispatching;
+using NvrView.Interop;
+using NvrView.Video;
+
+namespace NvrView.App;
+
+/// <summary>One parsed core event (the fields the viewer uses; the rest are ignored).</summary>
+internal sealed class CoreEvent
+{
+    public string Type = "";
+    public ulong Device;
+    public ulong Tile;
+    public string? State;
+    public string? Reason;
+    public string? Kind;
+    public string? Source;
+    public string? Tier;
+    public string? Name;
+    public string? Model;
+    public string? Key;
+    public string? What;
+    public int Channel = -1;
+    public int Lens;
+    public int Status;
+    public int Attempt;
+    public long RetryMs;
+    public long Generation = -1;
+    public long Ns;
+    public double? DeltaMs;
+    public double? HeldMs;
+    public long Received;
+    public long Decoded;
+    public long Dropped;
+    public long Failures;
+    public List<ChannelInfo>? Channels;
+
+    /// <summary>The raw JSON of audio_stats events (diagnostics only).</summary>
+    public string? Raw;
+
+    // Numbers the core may write as integers or with a fraction.
+    private static long Long(JsonElement v) => v.TryGetInt64(out long l) ? l : (long)v.GetDouble();
+
+    public static CoreEvent? Parse(ReadOnlySpan<byte> json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json.ToArray());
+        JsonElement r = doc.RootElement;
+        if (r.ValueKind != JsonValueKind.Object || !r.TryGetProperty("type", out JsonElement t))
+        {
+            return null;
+        }
+        var e = new CoreEvent { Type = t.GetString() ?? "" };
+        if (e.Type == "audio_stats")
+        {
+            e.Raw = System.Text.Encoding.UTF8.GetString(json);
+        }
+        foreach (JsonProperty p in r.EnumerateObject())
+        {
+            JsonElement v = p.Value;
+            switch (p.Name)
+            {
+                case "device" when v.ValueKind == JsonValueKind.Number: e.Device = v.GetUInt64(); break;
+                case "tile" when v.ValueKind == JsonValueKind.Number: e.Tile = v.GetUInt64(); break;
+                case "state": e.State = v.GetString(); break;
+                case "reason": e.Reason = v.GetString(); break;
+                case "kind": e.Kind = v.GetString(); break;
+                case "source": e.Source = v.GetString(); break;
+                case "tier": e.Tier = v.GetString(); break;
+                case "name": e.Name = v.GetString(); break;
+                case "model": e.Model = v.GetString(); break;
+                case "key": e.Key = v.GetString(); break;
+                case "what": e.What = v.GetString(); break;
+                case "channel" when v.ValueKind == JsonValueKind.Number: e.Channel = (int)Long(v); break;
+                case "lens" when v.ValueKind == JsonValueKind.Number: e.Lens = (int)Long(v); break;
+                case "status" when v.ValueKind == JsonValueKind.Number: e.Status = (int)Long(v); break;
+                case "attempt" when v.ValueKind == JsonValueKind.Number: e.Attempt = (int)Long(v); break;
+                case "retry_ms" when v.ValueKind == JsonValueKind.Number: e.RetryMs = Long(v); break;
+                case "generation" when v.ValueKind == JsonValueKind.Number: e.Generation = Long(v); break;
+                case "ns" when v.ValueKind == JsonValueKind.Number: e.Ns = Long(v); break;
+                case "delta_ms" when v.ValueKind == JsonValueKind.Number: e.DeltaMs = v.GetDouble(); break;
+                case "held_ms" when v.ValueKind == JsonValueKind.Number: e.HeldMs = v.GetDouble(); break;
+                case "received" when v.ValueKind == JsonValueKind.Number: e.Received = Long(v); break;
+                case "decoded" when v.ValueKind == JsonValueKind.Number: e.Decoded = Long(v); break;
+                case "dropped" when v.ValueKind == JsonValueKind.Number: e.Dropped = Long(v); break;
+                case "failures" when v.ValueKind == JsonValueKind.Number: e.Failures = Long(v); break;
+                case "channels" when v.ValueKind == JsonValueKind.Array:
+                    e.Channels = [];
+                    foreach (JsonElement c in v.EnumerateArray())
+                    {
+                        if (ChannelInfo.From(c) is { } info)
+                        {
+                            e.Channels.Add(info);
+                        }
+                    }
+                    break;
+            }
+        }
+        return e;
+    }
+}
+
+/// <summary>One channel of a device, from a channels event.</summary>
+internal sealed class ChannelInfo
+{
+    public byte Channel;
+    public bool Connected;
+    public string? Name;
+    public string[] Tiers = [];
+    public string[]? Detects;
+    public int Lenses;
+
+    public static ChannelInfo? From(JsonElement c)
+    {
+        if (!c.TryGetProperty("channel", out JsonElement ch) || !ch.TryGetByte(out byte channel))
+        {
+            return null;
+        }
+        var info = new ChannelInfo { Channel = channel };
+        if (c.TryGetProperty("connected", out JsonElement conn) && conn.ValueKind is JsonValueKind.True)
+        {
+            info.Connected = true;
+        }
+        if (c.TryGetProperty("name", out JsonElement n) && n.ValueKind == JsonValueKind.String)
+        {
+            info.Name = n.GetString();
+        }
+        if (c.TryGetProperty("tiers", out JsonElement tiers) && tiers.ValueKind == JsonValueKind.Array)
+        {
+            info.Tiers = [.. tiers.EnumerateArray().Select(x => x.GetString() ?? "")];
+        }
+        if (c.TryGetProperty("detects", out JsonElement d) && d.ValueKind == JsonValueKind.Array)
+        {
+            info.Detects = [.. d.EnumerateArray().Select(x => x.GetString() ?? "")];
+        }
+        if (c.TryGetProperty("lenses", out JsonElement l) && l.TryGetInt32(out int lenses))
+        {
+            info.Lenses = lenses;
+        }
+        return info;
+    }
+}
+
+/// <summary>The core, the GPU device, and the action path (see the file comment).</summary>
+internal sealed class CoreHost : NvCoreCallbacks, IDisposable
+{
+    private readonly ReaderWriterLockSlim _gate = new(LockRecursionPolicy.NoRecursion);
+    private readonly Lock _tilesLock = new();
+    private readonly Dictionary<ulong, VideoTile> _byId = [];
+    private readonly DispatcherQueue _ui;
+    private readonly GpuChoice _gpuChoice;
+    private readonly bool _allowHardware;
+    private Action<CoreEvent>? _sink;
+
+    public CoreHost(DispatcherQueue ui, NvCoreOptions options, GpuChoice gpu, bool allowHardware)
+    {
+        _ui = ui;
+        _gpuChoice = gpu;
+        _allowHardware = allowHardware;
+        Gpu = GpuDevice.Create(gpu);
+        AppLog.Info($"GPU: {Gpu.Describe()}");
+        Core = NvCore.Create(options, this);
+    }
+
+    public NvCore Core { get; }
+
+    /// <summary>The current device (replaced after a loss); read it on the render thread or inside the gate.</summary>
+    public GpuDevice Gpu { get; private set; }
+
+    /// <summary>GPU devices replaced after a loss.</summary>
+    public int DeviceReplacements { get; private set; }
+
+    /// <summary>Events go here, on the UI thread.</summary>
+    public void SetSink(Action<CoreEvent> sink) => _sink = sink;
+
+    /// <summary>Opens a tile and its VideoTile before any action can look for it.</summary>
+    public (ulong Id, VideoTile Video) OpenTile(ulong device, byte channel, NvStreamTier tier)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_tilesLock)
+            {
+                ulong id = Core.OpenTile(device, channel, tier);
+                var video = new VideoTile(Gpu, Core, id, _allowHardware);
+                _byId[id] = video;
+                return (id, video);
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    /// <summary>Closes a tile (no action for it runs after this) and releases its decoders.</summary>
+    public void CloseTile(ulong id)
+    {
+        try
+        {
+            Core.CloseTile(id);
+        }
+        catch (NvException e) when (e.Status is NvStatus.UnknownId or NvStatus.Closed)
+        {
+        }
+        VideoTile? video;
+        lock (_tilesLock)
+        {
+            _byId.Remove(id, out video);
+        }
+        if (video is not null)
+        {
+            _gate.EnterReadLock();
+            try
+            {
+                video.Dispose();
+            }
+            finally
+            {
+                _gate.ExitReadLock();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Replaces a lost GPU device (render thread): holds back every action,
+    /// creates a new device, moves every tile to it, releases the old one.
+    /// The renderer's own objects must be released before and recreated after.
+    /// </summary>
+    public void ReplaceGpu()
+    {
+        _gate.EnterWriteLock();
+        try
+        {
+            GpuDevice old = Gpu;
+            GpuDevice fresh = GpuDevice.Create(_gpuChoice);
+            lock (_tilesLock)
+            {
+                foreach (VideoTile video in _byId.Values)
+                {
+                    video.ReplaceDevice(fresh);
+                }
+            }
+            Gpu = fresh;
+            DeviceReplacements++;
+            old.Dispose();
+            AppLog.Warn($"GPU device replaced: {fresh.Describe()}");
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
+    public override void OnAction(NvCore core, ulong tile, in NvAction action)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            VideoTile? video;
+            lock (_tilesLock)
+            {
+                video = _byId.GetValueOrDefault(tile);
+            }
+            if (video is not null)
+            {
+                video.OnAction(in action);
+            }
+            else if (action.Kind == NvActionKind.Decode)
+            {
+                core.DecodeFailed(tile, action.Generation, NvDecodeFailure.NotConfigured);
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    public override void OnEvent(NvCore core, ReadOnlySpan<byte> json)
+    {
+        CoreEvent? e = CoreEvent.Parse(json);
+        if (e is null || _sink is not { } sink)
+        {
+            return;
+        }
+        _ = _ui.TryEnqueue(() => sink(e));
+    }
+
+    public override void OnCallbackException(Exception exception) =>
+        AppLog.Limited("callback", 10, $"a core callback threw: {exception.GetType().Name}: {exception.Message}");
+
+    /// <summary>Closes every tile, frees the core, releases the device. Stop audio and rendering first.</summary>
+    public void Dispose()
+    {
+        ulong[] ids;
+        lock (_tilesLock)
+        {
+            ids = [.. _byId.Keys];
+        }
+        foreach (ulong id in ids)
+        {
+            CloseTile(id);
+        }
+        Core.Dispose();
+        Gpu.Dispose();
+        _gate.Dispose();
+    }
+}

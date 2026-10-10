@@ -169,6 +169,14 @@ integrated GPU allocates from system memory (not broken down further). The longe
 action in a run (decoder start-up included) was 160 to 220 ms; on average
 a Decode action took 0.6 to 3.4 ms on the core's thread for that tile.
 
+The app (`NvrView.App`) draws the same pass into a flip-model composition
+swap chain hosted by a WinUI `SwapChainPanel`, paced by the swap chain's
+frame latency waitable (one frame of latency), with buffer resizes
+coalesced to one per 100 ms and the old buffers scaled in between; design
+and measurements (no per-frame allocations, presentation during resizes,
+device-loss recovery, decoder memory settings that did not help) are in
+[apps/windows/README.md](../apps/windows/README.md), "The app".
+
 ## Where this crosses the C interface (M2)
 
 The core runs the pipeline on its per-channel delivery thread and invokes the

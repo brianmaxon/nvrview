@@ -69,6 +69,27 @@ public struct DecoderCounters
     public long InputAllocations;
 }
 
+/// <summary>
+/// Process-wide decoder settings that trade memory for robustness; set them
+/// before the first Configure. Measured in docs/RENDERING.md, "Windows".
+/// </summary>
+public static class DecoderSettings
+{
+    /// <summary>
+    /// When positive, asks GPU decoders for this many output samples beyond
+    /// what decoding needs (MF_SA_MINIMUM_OUTPUT_SAMPLE_COUNT on the output
+    /// stream); 0 leaves the decoder's default.
+    /// </summary>
+    public static int OutputSamples { get; set; }
+
+    /// <summary>
+    /// When true, tells decoders the largest coded size to expect (the
+    /// Configure's coded size, CODECAPI_AVDecVideoMaxCodedWidth/Height), so
+    /// they need not size their surfaces for the largest the profile allows.
+    /// </summary>
+    public static bool LimitCodedSize { get; set; }
+}
+
 /// <summary>A Media Foundation decoder for one tile generation (see the file comment).</summary>
 public sealed unsafe class MfDecoder : IDisposable
 {
@@ -134,6 +155,12 @@ public sealed unsafe class MfDecoder : IDisposable
     /// <summary>Why the last Configure failed, for logs and reports.</summary>
     public string? ConfigureError { get; private set; }
 
+    /// <summary>
+    /// True when the last Configure failed because the system has no decoder
+    /// for the codec at all (for H.265: the HEVC Video Extension is missing).
+    /// </summary>
+    public bool NoDecoderInstalled { get; private set; }
+
     /// <summary>The decoder's output size (may be the coded size, larger than the visible picture).</summary>
     public NvSize OutputSize => new(_outWidth, _outHeight);
 
@@ -153,6 +180,7 @@ public sealed unsafe class MfDecoder : IDisposable
     {
         ReleaseTransform();
         ConfigureError = null;
+        NoDecoderInstalled = false;
         if (codec != NvCodec.H264 && codec != NvCodec.H265)
         {
             ConfigureError = $"unknown codec {(int)codec}";
@@ -187,6 +215,7 @@ public sealed unsafe class MfDecoder : IDisposable
                 MFT_MESSAGE_TYPE.MFT_MESSAGE_SET_D3D_MANAGER, (nuint)_gpu.Manager) >= 0;
         }
 
+        ApplySettings(codedSize);
         HRESULT hr = SetInputType(codec, codedSize);
         if ((int)hr < 0 && _d3d)
         {
@@ -289,6 +318,19 @@ public sealed unsafe class MfDecoder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Answers every picture still in flight with <paramref name="kind"/>
+    /// (before the decoder is thrown away outside the core's actions, as on
+    /// GPU device loss, so no Decode is left without its answer).
+    /// </summary>
+    public void AbandonHeld(IDecodeResults results, NvDecodeFailure kind)
+    {
+        while (_heldCount > 0)
+        {
+            DropOldest(results, kind);
+        }
+    }
+
     /// <summary>Drops everything in flight (no answers for it) and keeps the decoder.</summary>
     public void Flush()
     {
@@ -325,6 +367,7 @@ public sealed unsafe class MfDecoder : IDisposable
         if ((int)hr < 0 || count == 0)
         {
             ConfigureError = $"no {(codec == NvCodec.H264 ? "H.264" : "H.265")} decoder (0x{(int)hr:X8}, {count} found)";
+            NoDecoderInstalled = (int)hr >= 0 && count == 0;
             if (activates != null)
             {
                 CoTaskMemFree(activates);
@@ -367,6 +410,35 @@ public sealed unsafe class MfDecoder : IDisposable
         string s = new(name, 0, (int)length);
         CoTaskMemFree(name);
         return s;
+    }
+
+    // DecoderSettings, applied before the input type is set (the decoder
+    // sizes its surfaces from them when streaming begins).
+    private void ApplySettings(NvSize codedSize)
+    {
+        if (_d3d && DecoderSettings.OutputSamples > 0)
+        {
+            IMFAttributes* output = null;
+            if ((int)_mft->GetOutputStreamAttributes(0, &output) >= 0 && output != null)
+            {
+                _ = output->SetUINT32(Ref(in MF_SA_MINIMUM_OUTPUT_SAMPLE_COUNT), (uint)DecoderSettings.OutputSamples);
+                output->Release();
+            }
+        }
+        if (DecoderSettings.LimitCodedSize && codedSize.Width > 0 && codedSize.Height > 0)
+        {
+            ICodecAPI* api = null;
+            if ((int)_mft->QueryInterface(__uuidof<ICodecAPI>(), (void**)&api) >= 0 && api != null)
+            {
+                VARIANT v = default;
+                v.vt = (ushort)VARENUM.VT_UI4;
+                v.ulVal = codedSize.Width;
+                _ = api->SetValue(__uuidof<CODECAPI_AVDecVideoMaxCodedWidth>(), &v);
+                v.ulVal = codedSize.Height;
+                _ = api->SetValue(__uuidof<CODECAPI_AVDecVideoMaxCodedHeight>(), &v);
+                api->Release();
+            }
+        }
     }
 
     private HRESULT SetInputType(NvCodec codec, NvSize codedSize)

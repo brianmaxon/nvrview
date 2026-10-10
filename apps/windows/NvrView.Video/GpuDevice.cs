@@ -212,6 +212,16 @@ public sealed unsafe class GpuDevice : IDisposable
     /// </summary>
     public DeviceLock Lock() => new(_multithread);
 
+    /// <summary>
+    /// The device-removed reason: S_OK while the device works, otherwise
+    /// why it was lost (driver update or crash, GPU reset, adapter removed).
+    /// Cheap; any thread.
+    /// </summary>
+    public int RemovedReason => _device == null ? E_FAIL : (int)_device->GetDeviceRemovedReason();
+
+    /// <summary>True once the device is lost and must be recreated.</summary>
+    public bool IsRemoved => RemovedReason != S_OK;
+
     /// <summary>Waits until the GPU has finished everything submitted so far.</summary>
     public void WaitForIdle()
     {
