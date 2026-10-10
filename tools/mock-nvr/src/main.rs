@@ -17,7 +17,8 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
     \x20               [--multi-lens CH:BITS,BITS] [--extern CH:MODE,CH:MODE]\n\
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
-    \x20               [--talk CH,CH]\n\
+    \x20               [--talk CH,CH] [--fisheye CH,CH] [--fisheye-fixture FILE]\n\
+    \x20               [--fisheye-size N]\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
     --extern sets how channel CH lists and answers externStream/mobileStream: listed\n\
     (default), hidden (not listed, served: a second lens), info-only (not listed, one\n\
@@ -26,6 +27,9 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
     later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
     --talk gives channels a speaker (doorbell talk-back: ipcAudioTalk, ability, talk).\n\
+    --fisheye makes channels fisheye cameras (fishEye 1, channelType fisheye_ipc) that\n\
+    stream --fisheye-fixture (default fixtures/synthetic/fisheye/h264-fisheye.h264), advertised\n\
+    as --fisheye-size squared (default 384, the synthetic fixture's size).\n\
     password: environment variable MOCK_NVR_PASSWORD (default example-password)";
 
 fn run() -> Result<(), String> {
@@ -47,6 +51,9 @@ fn run() -> Result<(), String> {
     let mut third_party: Vec<u8> = Vec::new();
     let (mut third_party_refusals, mut third_party_delay_ms) = (2u32, 200u64);
     let mut talk: Vec<u8> = Vec::new();
+    let mut fisheye: Vec<u8> = Vec::new();
+    let mut fisheye_fixture = PathBuf::from("fixtures/synthetic/fisheye/h264-fisheye.h264");
+    let mut fisheye_size = 384u32;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--help" || a == "-h" {
@@ -126,6 +133,16 @@ fn run() -> Result<(), String> {
                     .split(',')
                     .map(|c| c.parse().map_err(|_| format!("bad value for {a}: {v}")))
                     .collect::<Result<_, _>>()?
+            }
+            "--fisheye" => {
+                fisheye = v
+                    .split(',')
+                    .map(|c| c.parse().map_err(|_| format!("bad value for {a}: {v}")))
+                    .collect::<Result<_, _>>()?
+            }
+            "--fisheye-fixture" => fisheye_fixture = PathBuf::from(v),
+            "--fisheye-size" => {
+                fisheye_size = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--detections" => {
                 detections = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
@@ -214,6 +231,13 @@ fn run() -> Result<(), String> {
         return Err(format!("--talk channel {ch} is not below --channels"));
     }
     cfg.talk_channels = talk;
+    if !fisheye.is_empty() {
+        if let Some(ch) = fisheye.iter().find(|c| **c >= channels) {
+            return Err(format!("--fisheye channel {ch} is not below --channels"));
+        }
+        let fix = Fixture::load(&fisheye_fixture).map_err(|e| e.to_string())?;
+        cfg.fisheye = Some(mock_nvr::FisheyeConfig::new(fisheye, fix, fisheye_size));
+    }
     if let Ok(p) = std::env::var("MOCK_NVR_PASSWORD") {
         cfg.password = p;
     }

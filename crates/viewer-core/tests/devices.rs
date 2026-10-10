@@ -221,3 +221,32 @@ fn a_multi_lens_camera_reports_its_lenses_and_what_each_detects() {
     assert_eq!(c[0]["detects"], serde_json::json!(["people", "vehicle"]));
     sim.run_free(|| core.shutdown());
 }
+
+#[test]
+fn a_fisheye_camera_is_marked_in_the_channel_list() {
+    let sim = SimRuntime::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic");
+    let load = |name: &str| mock_nvr::fixture::Fixture::load(&dir.join(name)).unwrap();
+    let mut cfg = mock_nvr::Config::new(load("h264-basic.h264"));
+    cfg.channels = 3;
+    cfg.fisheye = Some(mock_nvr::FisheyeConfig::new(
+        vec![1],
+        load("fisheye/h264-fisheye.h264"),
+        384,
+    ));
+    let nvr = sim_spawn(&sim, cfg);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let dev = add(&core, &nvr);
+    sim_until(&sim, &core, "fisheye", 10, || {
+        of_device(&rec, "channels", dev)
+            .iter()
+            .any(|e| e["channels"][1].get("fisheye").is_some())
+    });
+    let e = of_device(&rec, "channels", dev).pop().unwrap();
+    let c = &e["channels"];
+    assert_eq!(c[1]["fisheye"], true, "{e}");
+    for other in [0, 2] {
+        assert!(c[other].get("fisheye").is_none(), "{e}");
+    }
+    sim.run_free(|| core.shutdown());
+}

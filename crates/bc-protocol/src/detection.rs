@@ -85,6 +85,10 @@ pub struct ChannelAi {
     /// with its own `chnID` and `aitype`), by lens number; empty when the
     /// item has none (a single-lens camera, or older firmware).
     pub lenses: Vec<LensAi>,
+    /// A fisheye (360°) camera that sends its raw circular image: the
+    /// item's `fishEye` is 1 or its `channelType` is `fisheye_ipc`
+    /// (docs/protocol.md, "Fisheye cameras").
+    pub fisheye: bool,
 }
 
 /// One lens of a multi-lens camera in the capabilities reply (199).
@@ -174,10 +178,13 @@ fn channel_ai(item: &[(String, String)], subs: &[Fields]) -> Option<ChannelAi> {
         .collect();
     lenses.sort_by_key(|l| l.lens);
     lenses.dedup_by_key(|l| l.lens);
+    let fisheye = field(item, "fishEye").is_some_and(|v| v == "1")
+        || field(item, "channelType").is_some_and(|v| v.eq_ignore_ascii_case("fisheye_ipc"));
     Some(ChannelAi {
         channel: field(item, "chnID")?.parse().ok()?,
         aitype: field(item, "aitype")?.parse().ok()?,
         lenses,
+        fisheye,
     })
 }
 
@@ -263,17 +270,20 @@ mod tests {
                 ChannelAi {
                     channel: 0,
                     aitype: 0,
-                    lenses: vec![]
+                    lenses: vec![],
+                    fisheye: false,
                 },
                 ChannelAi {
                     channel: 1,
                     aitype: 7,
-                    lenses: vec![]
+                    lenses: vec![],
+                    fisheye: false,
                 },
                 ChannelAi {
                     channel: 2,
                     aitype: 23,
-                    lenses: vec![LensAi { lens: 0, aitype: 7 }, LensAi { lens: 1, aitype: 1 }]
+                    lenses: vec![LensAi { lens: 0, aitype: 7 }, LensAi { lens: 1, aitype: 1 }],
+                    fisheye: false,
                 },
             ]
         );
@@ -303,6 +313,33 @@ mod tests {
         assert_eq!(
             ai_kinds(1 | (1 << 17) | (1 << 22) | (1 << 3) | (1 << 7)),
             vec!["face", "package", "cry"]
+        );
+    }
+
+    #[test]
+    fn channel_ai_fisheye() {
+        // As a newer NVR reports it: `fishEye` and `channelType` per item.
+        let xml = "<body><Support><channelNum>3</channelNum>\
+            <item><chnID>0</chnID><aitype>0</aitype><channelType>ipc</channelType><fishEye>0</fishEye></item>\
+            <item><chnID>1</chnID><aitype>7</aitype><channelType>fisheye_ipc</channelType>\
+            <ptzType>0</ptzType><fishEye>1</fishEye></item>\
+            <item><chnID>2</chnID><aitype>0</aitype><channelType>Doorbell</channelType><fishEye>0</fishEye></item>\
+            </Support></body>";
+        let ai = parse_channel_ai(xml).unwrap();
+        assert_eq!(
+            ai.iter()
+                .map(|c| (c.channel, c.fisheye))
+                .collect::<Vec<_>>(),
+            vec![(0, false), (1, true), (2, false)]
+        );
+        // Either field alone is enough; neither (older firmware) is not.
+        let xml = "<Support><item><chnID>0</chnID><aitype>0</aitype><fishEye>1</fishEye></item>\
+            <item><chnID>1</chnID><aitype>0</aitype><channelType>FISHEYE_IPC</channelType></item>\
+            <item><chnID>2</chnID><aitype>0</aitype></item></Support>";
+        let ai = parse_channel_ai(xml).unwrap();
+        assert_eq!(
+            ai.iter().map(|c| c.fisheye).collect::<Vec<_>>(),
+            vec![true, true, false]
         );
     }
 }
