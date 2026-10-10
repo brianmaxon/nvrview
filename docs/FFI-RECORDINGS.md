@@ -939,60 +939,64 @@ NV_ERR_NOT_CONFIGURED = -8,    /* nv_recordings_configure not called, or no down
 `NV_PENDING` is the first positive status: apps that test `== NV_OK` treat
 it as "not yet", and only `nv_thumbnail_get` returns it.
 
-## Open questions for the user
+## Decisions (2026-10-10)
 
-1. **ABI 4 or additive to 3?** This proposal bumps to 4 because apps check
-   for an exact match and there is no minor version. Alternative: add
-   `nv_abi_minor()` now, so later additive changes (motion control, the
-   local API) do not each force a major bump.
-2. **Plays per device and live view on the same session.** The official
-   client stops a channel's live view before playing it, and session and
-   stream limits are not measured (protocol.md, "Open questions"). This
-   proposal keeps live view running and caps plays at 4 per device. Should
-   playback instead pause live tiles of the same device when a limit is
-   hit, or refuse the play (`limit`) as proposed? Needs a measurement on
-   hardware first.
-3. **Replay pacing.** Whether the device paces a play after its initial
-   burst or relies on TCP decides whether the buffer-full stop/restart
-   happens rarely or constantly, and whether rates above 1 can be served
-   without keyframe-only playback (command 150, not traced). Is 0.25 to 4
-   the right first range, with faster scrubbing by seeks?
-4. **Synchronization accuracy.** Recorded times anchor on whole seconds at
-   keyframes, so two cameras may be up to about a second apart before the
-   user nudges `offset_ms`. Is that acceptable for the first version, or
-   should the core refine it (for example from where the seconds count
-   changes between keyframes, or from audio)? Should offsets the user sets
-   be remembered per camera?
-5. **How a play ends at a file boundary** is unknown (protocol.md). The
-   core will start the next file itself at its start; a short stall at
-   each boundary (files run 30 to 60 minutes) may be visible. Acceptable?
-6. **Device time zone.** The core needs the device's "today" for indexing;
-   this proposal has the app pass `utc_offset_s` (default: the computer's
-   offset). Should the core read the device's own time settings instead?
-   That needs a read-only query observed and added to protocol.md first.
-7. **Clean up `NvStreamTier`?** ABI 4 could replace `NV_TIER_MOBILE` and
-   `NV_TIER_EXTERN` with a lens argument on `nv_tile_open` (protocol
-   neutrality), at the cost of one change to the macOS app.
-8. **Indexing by default.** This proposal indexes nothing until
-   `nv_recordings_enable`. Should an app enable every connected channel by
-   default (more device searches at first start), or ask the user?
-9. **Deleting downloads.** `nv_download_forget` removes only `.parts`;
-   finished files are left to the app (move to Trash or Recycle Bin).
-   Should the core offer deleting a whole incident folder?
-10. **Animal kinds.** Until the device's animal type names are observed,
-    `dog_cat` is the only animal kind. Should the follow cut and filters
-    treat `dog_cat`, and later on-device `animal` detections, as one
-    "animal" filter in the core, or leave grouping of kinds to the apps?
-11. **Edits beyond follow cut and grids** (picture-in-picture, a chosen
-    camera order per incident, labels with event kinds): in scope for the
-    first `nv_edit_compute`, or later?
-12. **Watching sound on cameras that are not on screen.** Keeping every
-    camera's sub-stream open for sound uses one stream per camera on the
-    device. Should the app watch all cameras with audio by default, only
-    the ones the user picks, or none until sound features are turned on?
-13. **Background analysis of older recordings.** Off by default as
-    proposed (it fetches audio from the device), on when the user asks for
-    a day or camera, or a slow default pass over the last few days?
-14. **The sound kind set.** The proposed ten kinds plus the classifier's
-    own label: enough for the first version? Should "cry" from the device
-    and `baby_cry` from the computer be one filter?
+The open questions of this proposal, as the user answered them, and what
+changes in the contract above. Where a decision needs a measurement first,
+it says so; nothing below depends on an unmeasured fact.
+
+1. **Versioning: add a minor version.** `nv_abi_minor()` joins
+   `nv_abi_version()`: the major number changes only for incompatible
+   changes, the minor for additions (recordings, talk-back, later motion
+   control and the local API), so changes are classified and apps can check
+   for a feature. Recordings arrive as an addition, not ABI 4.
+2. **Live view keeps running during playback.** Plays and live tiles share
+   the device's one session; how many plays a device allows next to live
+   view is measured before the limit is set (protocol.md, "Open questions").
+3. **Rates up to 16x,** as the official client offers. How it serves fast
+   rates (keyframe-only playback, command 150, or the device's own pacing)
+   is captured from the official client at 4x, 8x, and 16x before the core
+   implements rates above 2x; until then 0.25x to 2x by seeks and pacing.
+4. **Synchronization to tens of milliseconds, not a second.** Every recorded
+   video frame carries a microsecond timestamp, as in live view; only the
+   anchor to wall-clock time comes from whole seconds at keyframes. Each
+   keyframe bounds the anchor to a one-second window, and intersecting the
+   windows of many keyframes narrows it (live view: about 15 ms from two
+   minutes of a main stream's keyframes, protocol.md "Sub and main of one
+   camera"). The shared clock uses that refined anchor per camera and file;
+   the user can still nudge `offset_ms`, remembered per camera. To confirm on
+   a real recording: the same refinement on recorded streams, and how far
+   two cameras' clocks differ.
+5. **A short stall at file boundaries is acceptable** unless a way to avoid
+   it is found (for example asking for the next file before the current one
+   ends; measured when playback is built).
+6. **Time zone: the NVR's.** Index and incident times are the device's own
+   wall-clock time, which is what the cameras burn into their picture. The
+   core reads the NVR's time settings through a read-only query once that
+   query is observed and recorded in protocol.md; until then the app passes
+   `utc_offset_s`.
+7. **Protocol neutrality:** ABI additions take a `lens` argument instead of
+   new uses of `NV_TIER_MOBILE`/`NV_TIER_EXTERN`; the Baichuan tier names stay
+   for compatibility, marked as such (docs/ARCHITECTURE.md "Other
+   protocols").
+8. **No background indexing.** The NVR keeps the real index; the core's index
+   is a cache of what has been searched, so the timeline, calendar, search,
+   and incident grouping across cameras answer at once without repeating
+   device searches, and the computer's own labels (sound events) have a
+   place. It fills on demand: a day or camera the user opens is searched and
+   kept, and today is refreshed while it is shown. `nv_recordings_enable`
+   remains, but no default pass runs.
+9. **Deleting moves to the Trash** (macOS Trash, Windows Recycle Bin), never
+   a permanent delete: the core offers it for whole incident folders, the
+   app performs it through the system.
+10. **Animal kinds stay open-ended:** `dog_cat` and any finer kinds devices
+    report later pass through as their own kinds; an "animal" filter in the
+    apps groups every animal kind, so new kinds need no contract change.
+11. **Edits beyond the follow cut and grids** come later.
+12. **Sound watching:** only cameras that are on screen, plus cameras the
+    user adds to an "always listen for sound" list, keep their audio decoded
+    for sound events (`nv_sound_watch` for the list).
+13. **Older recordings are analyzed for sound only on request,** for the day
+    or camera the user picks; no background pass.
+14. **The ten sound kinds plus the classifier's own label** are enough for
+    the first version.
