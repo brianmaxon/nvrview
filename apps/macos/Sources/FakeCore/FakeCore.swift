@@ -50,12 +50,17 @@ public struct FakeDeviceSpec: Sendable {
     /// Channels whose camera supports talk-back (a doorbell: `ipcAudioTalk`
     /// 1); a talk on any other channel is refused with `not_supported`.
     public var talkChannels: Set<Int>
+    /// Fisheye cameras (`fisheye` in `channels`): they play
+    /// `FakeCore.Options.fisheyeClip` when one is set.
+    public var fisheyeChannels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
         detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
-        multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = []
+        multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = [],
+        fisheyeChannels: Set<Int> = []
     ) {
+        self.fisheyeChannels = fisheyeChannels
         self.talkChannels = talkChannels
         self.multiLensChannels = multiLensChannels
         self.channelsWithoutAudio = channelsWithoutAudio
@@ -122,6 +127,9 @@ public final class FakeCore: CoreAPI {
         /// example sharper ones for `main`); by default the tier switch
         /// plays the same clips.
         public var tierClips: [StreamTier: [FakeClip]] = [:]
+        /// What fisheye channels (`FakeDeviceSpec.fisheyeChannels`) play on
+        /// every tier; nil: the ordinary clips.
+        public var fisheyeClip: FakeClip?
         public var pacing = Pacing.manual
         /// Wrap around at the end of the clip (timestamps keep growing).
         public var loop = true
@@ -296,7 +304,8 @@ public final class FakeCore: CoreAPI {
                 // Like the devices observed: a multi-lens camera advertises
                 // only main and sub, and says how many lenses it has.
                 let lenses = spec.multiLensChannels.contains(c) ? #","lenses":2"# : ""
-                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)}"#
+                let fisheye = spec.fisheyeChannels.contains(c) ? #","fisheye":true"# : ""
+                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
         }
@@ -330,7 +339,8 @@ public final class FakeCore: CoreAPI {
             let tile = FakeTile(
                 id: id, device: device, channel: channel, tier: tier, detects: d.spec.detectingChannels.contains(Int(channel))
                     ? d.spec.detects : [], silent: d.failed,
-                hasAudio: !d.failed && !d.spec.channelsWithoutAudio.contains(Int(channel)), owner: self)
+                hasAudio: !d.failed && !d.spec.channelsWithoutAudio.contains(Int(channel)),
+                fisheye: d.spec.fisheyeChannels.contains(Int(channel)), owner: self)
             d.tiles.append(id)
             w.devices[device] = d
             w.tiles[id] = tile
@@ -421,7 +431,8 @@ public final class FakeCore: CoreAPI {
     }
 
     /// The clip a channel plays at a tier.
-    fileprivate func clip(channel: UInt8, tier: StreamTier, opened: StreamTier) -> FakeClip {
+    fileprivate func clip(channel: UInt8, tier: StreamTier, opened: StreamTier, fisheye: Bool = false) -> FakeClip {
+        if fisheye, let clip = options.fisheyeClip { return clip }
         let list = tier == opened ? options.clips : (options.tierClips[tier] ?? options.clips)
         return list[Int(channel) % list.count]
     }
@@ -852,6 +863,8 @@ private final class FakeTile: Sendable {
     let silent: Bool
     /// The camera sends audio.
     let hasAudio: Bool
+    /// A fisheye camera's tile (plays `Options.fisheyeClip`).
+    let fisheye: Bool
     private unowned let owner: FakeCore
 
     /// One pipeline: the tile has one, and two while a tier switch runs.
@@ -913,9 +926,10 @@ private final class FakeTile: Sendable {
 
     init(
         id: UInt64, device: UInt64, channel: UInt8, tier: StreamTier, detects: [String], silent: Bool,
-        hasAudio: Bool, owner: FakeCore
+        hasAudio: Bool, fisheye: Bool = false, owner: FakeCore
     ) {
         self.hasAudio = hasAudio
+        self.fisheye = fisheye
         self.id = id
         self.device = device
         self.channel = channel
@@ -923,7 +937,7 @@ private final class FakeTile: Sendable {
         self.detects = detects
         self.silent = silent
         self.owner = owner
-        let clip = owner.clip(channel: channel, tier: tier, opened: tier)
+        let clip = owner.clip(channel: channel, tier: tier, opened: tier, fisheye: fisheye)
         state = Mutex(State(lanes: [Lane(generation: 0, tier: tier, clip: clip, cursor: 0, now: owner.options.tierClock())]))
     }
 
@@ -1171,7 +1185,7 @@ private final class FakeTile: Sendable {
                     #"{"type":"tile_tier","tile":\#(id),"tier":"\#(tier.name)","state":"failed","generation":\#(generation),"reason":"start_rejected"}"#)
                 return events
             }
-            let clip = owner.clip(channel: channel, tier: tier, opened: openedTier)
+            let clip = owner.clip(channel: channel, tier: tier, opened: openedTier, fisheye: fisheye)
             var lane = Lane(generation: generation, tier: tier, clip: clip, cursor: shownLane.cursor, now: now)
             if owner.options.newTierStartsAtKeyframe, !clip.units.isEmpty {
                 let at = shownLane.cursor % clip.units.count

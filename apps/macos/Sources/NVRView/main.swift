@@ -66,13 +66,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func makeModel() throws -> AppModel {
         if options.fake {
-            let clips = try options.files.map { try FakeClip.load($0) }
+            // A file named like the fisheye fixture plays as a fisheye camera
+            // (the second NVR's channel 4) rather than in the ordinary rotation.
+            let isFisheye = { (u: URL) in u.lastPathComponent.contains("fisheye") }
+            let clips = try options.files.filter { !isFisheye($0) }.map { try FakeClip.load($0) }
             var o = FakeCore.Options(clips: clips)
+            o.fisheyeClip = try options.files.first(where: isFisheye).map { try FakeClip.load($0) }
             o.pacing = .realtime(fps: 20)
             o.devices = [
                 // Channel 4 is a made-up doorbell (talk-back capable).
                 "192.0.2.10": FakeDeviceSpec(name: "NVR", channelCount: 6, multiLensChannels: [5], talkChannels: [3]),
-                "192.0.2.11": FakeDeviceSpec(name: "NVR", channelCount: 4),
+                "192.0.2.11": FakeDeviceSpec(
+                    name: "NVR", channelCount: 4, fisheyeChannels: o.fisheyeClip == nil ? [] : [3]),
             ]
             // The self-test sends its own detections and alarms, at known times.
             o.detectionDemo = options.selfTestSeconds == nil ? 12 : nil

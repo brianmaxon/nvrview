@@ -300,6 +300,13 @@ private func degrees(_ r: Double) -> Double { r * 180 / .pi }
         #expect(tree.settingFisheye(ptz, at: [.a]) == nil)
     }
 
+    @Test func channelInfoCarriesTheFisheyeFlag() throws {
+        let with = try JSONDecoder().decode(
+            ChannelInfo.self, from: Data(#"{"channel":5,"connected":true,"tiers":["main","sub"],"fisheye":true}"#.utf8))
+        let without = try JSONDecoder().decode(ChannelInfo.self, from: Data(#"{"channel":4,"connected":true}"#.utf8))
+        #expect(with.fisheye && !without.fisheye)
+    }
+
     @Test func aimDefaultsFollowTheMount() {
         let s = FisheyeTileSetting(mode: .ptz)
         #expect(s.aim(for: .ceiling) == FisheyeAim(pan: 0, tilt: 45, fov: 90))

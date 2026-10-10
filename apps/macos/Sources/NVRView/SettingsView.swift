@@ -189,6 +189,14 @@ struct CameraSettingsView: View {
             Toggle(
                 "Doorbell: allow talk-back",
                 isOn: Binding(get: { o.allowTalk }, set: { model.setAllowTalk(camera, $0) }))
+            if model.isFisheye(camera) {
+                Picker(
+                    "Fisheye mount",
+                    selection: Binding(get: { o.fisheyeMount }, set: { model.setFisheyeMount(camera, $0) })
+                ) {
+                    ForEach(FisheyeMount.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            }
         }
         .padding(.vertical, 2)
     }

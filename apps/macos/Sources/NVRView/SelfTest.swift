@@ -44,7 +44,13 @@ import VideoKit
 ///    dismissed, and dismissing it dismisses its alert. The microphone,
 ///    speech recognition and text-to-speech are fakes: no permission
 ///    prompt, ever;
-/// 13. AppKit logged none of the warnings in `forbiddenLog` during the run.
+/// 13. with `--fake` and the fisheye fixture among the files, a fisheye
+///    camera put in a tile finds its image circle (within 1% of the
+///    fixture's), each fisheye view draws through the dewarp pipeline with
+///    its pixels matching the fixture's colors where the reference mapping
+///    says, and a drag, a wheel step (eased) and 0 move and reset the
+///    virtual camera;
+/// 14. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
 /// animations, easing and the idle delay finish when the test advances it,
@@ -666,7 +672,122 @@ final class SelfTest {
             if model.alerts.isActive(hall) { problems.append("dismissing the smoke inset did not dismiss its alert") }
             stage.unfocus()
             advance(StageView.focusDuration)
+            fisheyeStep()
+        }
+    }
+
+    // MARK: Fisheye (docs/UX.md "Fisheye cameras")
+
+    /// The synthetic fisheye fixture's colors by azimuth quadrant, ceiling
+    /// mount (fixtures/synthetic/make-fisheye.sh): 0-90° red, 90-180° green,
+    /// 180-270° blue, 270-360° yellow; 15° checker cells, a white dot at
+    /// tilt 20°. Nil when a pixel is none of them clearly.
+    private static func fixtureSector(_ c: SIMD3<Int>) -> Int? {
+        let (r, g, b) = (c.x, c.y, c.z)
+        if r > g + 40 && r > b + 40 { return 0 }
+        if g > r + 30 && g > b + 30 { return 1 }
+        if b > r + 40 && b > g + 40 { return 2 }
+        if r > b + 50 && g > b + 50 { return 3 }
+        return nil
+    }
+
+    /// With `--fake` and the fisheye fixture: a fisheye camera put in a tile
+    /// finds its circle, and every view draws through the dewarp pipeline
+    /// with pixels matching the fixture's colors where the reference mapping
+    /// says they should; a drag and a wheel step move the virtual camera
+    /// (eased on the clock), saved with the layout; 0 resets it.
+    private func fisheyeStep() {
+        guard let model = app.model, let window else { finish(problems) }
+        guard let camera = model.allCameras.first(where: { model.isFisheye($0) }) else {
+            problems.append("no fisheye camera (run with fixtures/synthetic/fisheye/h264-fisheye.h264 among the files)")
+            return checkLog()
+        }
+        let stage = window.stage
+        guard let path = window.state.tree.frames(in: stage.bounds).leaves.first?.path else {
+            problems.append("no tile for the fisheye camera")
+            return checkLog()
+        }
+        stage.assign(camera, at: path)
+        when({ model.leases.tile(for: camera)?.latestPicture() != nil }, timeout: 3) { [self] in
+            let grid = stage.grid
+            // The circle is measured from the first pictures, on the clock.
+            stage.setFisheyeMode(.panorama, at: path)
+            for _ in 0..<FisheyeCircleTracker.maxTries where stage.fisheyeDewarp(of: path) == nil {
+                grid.prepare?(grid.renderer, grid.drawableSize)
+                advance(FisheyeCircleTracker.interval)
+            }
+            guard let lens = stage.fisheyeDewarp(of: path)?.lens else {
+                problems.append("the fisheye tile is not dewarped")
+                return checkLog()
+            }
+            let c = lens.circle
+            print(String(format: "fisheye circle: center %.4f, %.4f radius %.4f (fixture 0.49, 0.505, 0.46)", c.cx, c.cy, c.r))
+            if abs(c.cx - 0.49) > 0.01 || abs(c.cy - 0.505) > 0.01 || abs(c.r - 0.46) > 0.01 {
+                problems.append("the fisheye circle is more than 1% off the fixture's")
+            }
+            for mode in FisheyeViewMode.allCases where mode.dewarps {
+                stage.setFisheyeMode(mode, at: path)
+                checkFisheyePixels(path, mode)
+            }
+            // Virtual PTZ: a drag turns it, a wheel step zooms it (eased).
+            let size = window.state.tree.frames(in: stage.bounds).leaf(path)?.rect.size ?? .zero
+            stage.turnFisheye(path, by: CGVector(dx: size.width / 4, dy: 0), size: size)
+            stage.zoomFisheye(path, by: 2, eased: true)
+            advance(0.03)
+            let midway = window.state.tree[path]?.fisheye.aim?.fov ?? 0
+            advance(1)
+            let aim = window.state.tree[path]?.fisheye.aim
+            print(String(format: "virtual PTZ: pan %.1f, field of view %.1f after a second (%.1f midway)",
+                aim?.pan ?? .nan, aim?.fov ?? .nan, midway))
+            if aim.map({ abs($0.pan + 22.5) < 0.01 }) != true { problems.append("a drag did not turn the virtual camera") }
+            if aim?.fov != 45 || stage.isEasingFisheye || !(midway > 45 && midway < 90) {
+                problems.append("the virtual camera did not ease its zoom to 45°")
+            }
+            checkFisheyePixels(path, .ptz)
+            stage.resetZoom(at: path)
+            if window.state.tree[path]?.fisheye.aim != nil { problems.append("0 did not reset the virtual camera") }
+            stage.setFisheyeMode(.original, at: path)
+            grid.prepare?(grid.renderer, grid.drawableSize)
+            if stage.fisheyeDewarp(of: path) != nil { problems.append("Original still dewarps") }
             checkLog()
+        }
+    }
+
+    /// Draws the window offscreen and compares the fisheye tile's pixels
+    /// with the fixture's color at the direction each one looks along.
+    private func checkFisheyePixels(_ path: NodePath, _ mode: FisheyeViewMode) {
+        guard let window else { return }
+        let stage = window.stage
+        let grid = stage.grid
+        grid.prepare?(grid.renderer, grid.drawableSize)
+        guard let dewarp = stage.fisheyeDewarp(of: path), let rect = stage.renderedDestination(of: path),
+            let image = grid.renderer.renderOffscreen(width: Int(grid.drawableSize.width), height: Int(grid.drawableSize.height))
+        else {
+            problems.append("\(mode.title): not drawn through the dewarp pipeline")
+            return
+        }
+        let drawn = grid.renderer.dewarpedTilesDrawn
+        var checked = 0, matched = 0
+        let step = max(rect.width, rect.height) / 40
+        for y in stride(from: rect.minY + 1, to: rect.maxY - 1, by: step) {
+            for x in stride(from: rect.minX + 1, to: rect.maxX - 1, by: step) {
+                let t = CGPoint(x: (x + 0.5 - rect.minX) / rect.width, y: (y + 0.5 - rect.minY) / rect.height)
+                guard let d = dewarp.direction(atTile: t), dewarp.picturePoint(atTile: t) != nil else { continue }
+                let (pan, tilt) = panTilt(of: d)
+                let psi = (pan + 360).truncatingRemainder(dividingBy: 360)
+                func clear(_ a: Double) -> Bool {
+                    let m = a.truncatingRemainder(dividingBy: 15)
+                    return m > 3 && m < 12
+                }
+                guard tilt > 5, tilt < 80, abs(tilt - 20) > 7, clear(psi), clear(tilt) else { continue }
+                checked += 1
+                if Self.fixtureSector(image.rgb(x: Int(x), y: Int(y))) == Int(psi / 90) % 4 { matched += 1 }
+            }
+        }
+        print("fisheye \(mode.title): dewarped tiles drawn \(drawn), pixels matching the fixture \(matched) of \(checked)")
+        if drawn < 1 { problems.append("\(mode.title): the dewarp pipeline drew nothing") }
+        if checked < 20 || Double(matched) < 0.9 * Double(checked) {
+            problems.append("\(mode.title): \(matched) of \(checked) pixels match the fixture")
         }
     }
 

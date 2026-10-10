@@ -93,6 +93,11 @@ final class StageView: NSView {
     /// Mouse-wheel zoom easing toward a target scale, per camera, around a
     /// point of the shown picture.
     private var zoomEasing = ZoomEasing<CameraRef>()
+    /// Virtual PTZ zoom easing toward a field of view, per tile.
+    private var fisheyeEasing = FisheyeZoomEasing<NodePath>()
+    /// When a fisheye view moved by scrolling or easing is saved with the
+    /// layout (once it rests), on the stage's clock.
+    private var fisheyeSaveDue: Double?
     /// The picture's layout size per camera, from the last refresh.
     var pictureSizes: [CameraRef: CGSize] = [:]
 
@@ -128,6 +133,8 @@ final class StageView: NSView {
         case tile(from: NodePath, start: CGPoint, dragging: Bool)
         /// A drag in a zoomed tile pans its picture.
         case pan(CameraRef, last: CGPoint)
+        /// A drag in a dewarped fisheye tile turns its view.
+        case aim(NodePath, last: CGPoint)
     }
     private var gesture: Gesture?
     private var dropTarget: NodePath?
@@ -248,7 +255,7 @@ final class StageView: NSView {
         for (path, inset) in insets where !shown.contains(path) { inset.setShown(false) }
         for leaf in leaves {
             guard let inset = insets[leaf.path] else { continue }
-            guard let camera = leaf.camera, let z = state.zoom[camera], z.isZoomed,
+            guard let camera = leaf.camera, let z = state.zoom[camera], z.isZoomed, fisheyeMode(leaf.path) == nil,
                 let picture = pictureSizes[camera], picture.width > 0, picture.height > 0
             else {
                 inset.setShown(false)
@@ -268,7 +275,12 @@ final class StageView: NSView {
         for leaf in frames.leaves {
             guard let view = chromes[leaf.path] else { continue }
             view.apply(content(for: leaf))
-            view.setZoomed(leaf.camera.flatMap { state.zoom[$0] }?.isZoomed == true)
+            if fisheyeMode(leaf.path) != nil {
+                // The reset control returns a moved view to its default.
+                view.setZoomed(state.tree[leaf.path]?.fisheye.aim != nil)
+            } else {
+                view.setZoomed(leaf.camera.flatMap { state.zoom[$0] }?.isZoomed == true)
+            }
             view.setHeaderPinned(leaf.camera.map(alertActive) == true)
             view.setOutlineShown(chromeVisible)
         }
@@ -297,6 +309,7 @@ final class StageView: NSView {
         }
         let quality = model.leases.effectiveQuality(state.tree[leaf.path]?.quality ?? .auto, camera)
         if quality != .auto { detail.insert(quality.title, at: 1) }
+        if let mode = fisheyeMode(leaf.path) { detail.insert(mode.title, at: 1) }
         detail.append(model.hasCameraAI(camera) ? "detection: camera AI" : "detection: this Mac")
         if let a = active.first { detail[detail.count - 1] = "\(DetectionTracker.label(a.kind)) by \(DetectionTracker.sourceLabel(a.source))" }
         return TileChromeContent(
@@ -347,6 +360,7 @@ final class StageView: NSView {
         var versions: [UInt64]
         var sizes: [CGSize]
         var zooms: [TileZoom]
+        var dewarps: [DewarpConstants?]
     }
 
     /// Called by the Metal view on every refresh with the drawable size in
@@ -359,12 +373,12 @@ final class StageView: NSView {
         // Per axis: during a resize the drawable may lag the view (it is
         // stretched to the bounds until its size catches up).
         let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
-        var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [], zooms: [])
+        var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [], zooms: [], dewarps: [])
         var tiles: [GridTile] = []
         var paths: [NodePath] = []
         /// One tile drawn into `rect` (points): the layout's, the swapped-in
         /// camera's over the whole stage, or an inset's on top.
-        func draw(_ tile: CoreTile, camera: CameraRef, rect: CGRect, zoom: TileZoom, fill: Bool) {
+        func draw(_ tile: CoreTile, camera: CameraRef, rect: CGRect, zoom: TileZoom, fill: Bool, path: NodePath? = nil) {
             let cell = rect.pixels(scaleX: scaleX, scaleY: scaleY)
             let snapshot = tile.snapshot
             let picture = tile.latestPicture()
@@ -378,7 +392,15 @@ final class StageView: NSView {
             let placed = TilePlacement.place(
                 rect: rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
                 offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: fill, zoom: zoom)
-            tiles.append(GridTile(picture: tile, color: matrix, destination: placed.destination, source: placed.source))
+            // A dewarped fisheye tile fills its whole cell through the dewarp
+            // pipeline (docs/RENDERING.md "Fisheye dewarping").
+            let dewarp = path.flatMap { fisheyeDewarp(camera: camera, path: $0, picture: picture, tileSize: cell.size) }
+            if let dewarp {
+                tiles.append(GridTile(picture: tile, color: matrix, destination: cell, dewarp: dewarp.constants))
+            } else {
+                tiles.append(GridTile(picture: tile, color: matrix, destination: placed.destination, source: placed.source))
+            }
+            key.dewarps.append(tiles.last?.dewarp)
             key.tiles.append(ObjectIdentifier(tile))
             key.rects.append(cell)
             key.versions.append(snapshot.version)
@@ -395,7 +417,9 @@ final class StageView: NSView {
             for leaf in currentLeaves {
                 guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
                 paths.append(leaf.path)
-                draw(tile, camera: camera, rect: leaf.rect, zoom: state.zoom[camera] ?? .none, fill: state.fill)
+                draw(
+                    tile, camera: camera, rect: leaf.rect, zoom: state.zoom[camera] ?? .none, fill: state.fill,
+                    path: leaf.path)
                 // Read only for meters on screen (audible, or hovered).
                 if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
                     chrome.setLevel(level.peak)
@@ -446,6 +470,7 @@ final class StageView: NSView {
     func tick(now: Double) {
         stepFocus(now: now)
         stepZoom(now: now)
+        stepFisheye(now: now)
         tickInsets(now: now)
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }
@@ -661,6 +686,10 @@ final class StageView: NSView {
     /// Zooms the tile at `p` by `factor` around `p`: at once (pinch), or
     /// eased over the next refreshes (a mouse-wheel notch).
     func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
+        if let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
+            zoomFisheye(leaf.path, by: factor, eased: eased)
+            return
+        }
         guard let t = zoomTarget(at: p) else { return }
         noteInteraction()
         if eased {
@@ -675,6 +704,12 @@ final class StageView: NSView {
 
     /// Pans the tile at `p` by `delta` points (the picture follows).
     func pan(at p: CGPoint, by delta: CGVector) {
+        if let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
+            noteInteraction()
+            turnFisheye(leaf.path, by: delta, size: leaf.rect.size)
+            fisheyeSaveDue = clock.now + 0.5
+            return
+        }
         guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.shown.width > 0, t.shown.height > 0 else {
             return
         }
@@ -685,12 +720,21 @@ final class StageView: NSView {
 
     /// Back to 1x, eased, for the tile at `path` (its reset control).
     func resetZoom(at path: NodePath) {
+        if fisheyeMode(path) != nil {
+            resetFisheye(path)
+            return
+        }
         guard let leaf = frames.leaf(path), let camera = leaf.camera else { return }
         resetZoom(camera)
     }
 
-    /// 0: back to 1x on the selected (or focused) tile.
+    /// 0: back to 1x on the selected (or focused) tile; a dewarped fisheye
+    /// tile back to its default view.
     func resetSelectedZoom() {
+        if let path = state.focused ?? state.selected, fisheyeMode(path) != nil {
+            resetFisheye(path)
+            return
+        }
         guard let camera = selectedCamera else { return }
         resetZoom(camera)
     }
@@ -759,6 +803,158 @@ final class StageView: NSView {
         edit { $0.settingQuality(quality, at: path) }
     }
 
+    // MARK: Fisheye views (docs/UX.md "Fisheye cameras")
+
+    /// The dewarped view of the tile at `path`, or nil when it shows its
+    /// picture as is (not a fisheye camera, or Original).
+    func fisheyeMode(_ path: NodePath) -> FisheyeViewMode? {
+        guard let camera = state.tree[path]?.camera, model.isFisheye(camera) else { return nil }
+        let mode = state.tree[path]?.fisheye.mode ?? .original
+        return mode.dewarps ? mode : nil
+    }
+
+    /// The dewarp of the tile at `path` drawn `tileSize` pixels big, or nil
+    /// when it draws its picture as is (also until the circle is known).
+    func fisheyeDewarp(camera: CameraRef, path: NodePath, picture: DecodedPicture?, tileSize: CGSize) -> FisheyeDewarp? {
+        guard let mode = fisheyeMode(path), let lens = model.fisheyeLens(camera, picture: picture) else { return nil }
+        let mount = model.cameraOptions(camera).fisheyeMount
+        let setting = state.tree[path]?.fisheye ?? .original
+        return FisheyeDewarp(lens: lens, mount: mount, mode: mode, aim: setting.aim(for: mount), tileSize: tileSize)
+    }
+
+    /// The dewarp a tile drew last, at its size then (self-test).
+    func fisheyeDewarp(of path: NodePath) -> FisheyeDewarp? {
+        guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count,
+            grid.renderer.tiles[i].dewarp != nil,
+            let camera = state.tree[path]?.camera, let tile = model.leases.tile(for: camera)
+        else { return nil }
+        return fisheyeDewarp(
+            camera: camera, path: path, picture: tile.latestPicture(), tileSize: grid.renderer.tiles[i].destination.size)
+    }
+
+    /// Where a tile is drawn in the drawable's pixels (self-test).
+    func renderedDestination(of path: NodePath) -> CGRect? {
+        guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count else { return nil }
+        return grid.renderer.tiles[i].destination
+    }
+
+    private func mount(_ path: NodePath) -> FisheyeMount {
+        state.tree[path]?.camera.map { model.cameraOptions($0).fisheyeMount } ?? .ceiling
+    }
+
+    /// Sets the view of the tile at `path`; saved with the layout.
+    func setFisheyeMode(_ mode: FisheyeViewMode, at path: NodePath) {
+        fisheyeEasing.cancel(path)
+        let aim = state.tree[path]?.fisheye.aim
+        edit { $0.settingFisheye(FisheyeTileSetting(mode: mode, aim: aim), at: path) }
+    }
+
+    /// Moves a tile's view in memory (saved by `saveFisheye`).
+    private func setAim(_ aim: FisheyeAim?, at path: NodePath) {
+        guard let mode = state.tree[path]?.fisheye.mode,
+            let tree = state.tree.settingFisheye(FisheyeTileSetting(mode: mode, aim: aim), at: path)
+        else { return }
+        let hadAim = state.tree[path]?.fisheye.aim != nil
+        state.tree = tree
+        if hadAim != (aim != nil) { refreshChrome() }
+    }
+
+    /// Saves the tree with the moved views (a drag ended, scrolling or
+    /// easing came to rest).
+    private func saveFisheye() {
+        fisheyeSaveDue = nil
+        delegate?.stage(self, didEdit: state.tree)
+    }
+
+    /// A drag (or two-finger scroll) of `delta` points in a tile `size`
+    /// points big turns its view; the picture follows the pointer.
+    func turnFisheye(_ path: NodePath, by delta: CGVector, size: CGSize) {
+        guard let mode = fisheyeMode(path) else { return }
+        let m = mount(path)
+        let aim = (state.tree[path]?.fisheye ?? .original).aim(for: m)
+        setAim(aim.dragged(by: delta, viewSize: size, mode: mode, mount: m), at: path)
+    }
+
+    /// The wheel or a pinch: Virtual PTZ zooms (eased for a wheel notch).
+    func zoomFisheye(_ path: NodePath, by factor: Double, eased: Bool) {
+        guard fisheyeMode(path) == .ptz else { return }
+        noteInteraction()
+        let m = mount(path)
+        let aim = (state.tree[path]?.fisheye ?? .original).aim(for: m)
+        if eased {
+            let from = fisheyeEasing.target(for: path) ?? aim.fov
+            fisheyeEasing.set(fov: from / factor, for: path, now: clock.now)
+        } else {
+            fisheyeEasing.cancel(path)
+            setAim(aim.zoomed(by: factor, mount: m), at: path)
+            fisheyeSaveDue = clock.now + 0.5
+        }
+    }
+
+    private func resetFisheye(_ path: NodePath) {
+        fisheyeEasing.cancel(path)
+        setAim(nil, at: path)
+        saveFisheye()
+    }
+
+    /// One step of the PTZ zoom easing and the deferred save (from `tick`).
+    private func stepFisheye(now: Double) {
+        if fisheyeEasing.isEasing {
+            let steps = fisheyeEasing.tick(now: now) { path in
+                (state.tree[path]?.fisheye ?? .original).aim(for: mount(path)).fov
+            }
+            for step in steps {
+                var aim = (state.tree[step.key]?.fisheye ?? .original).aim(for: mount(step.key))
+                aim.fov = step.fov
+                setAim(aim, at: step.key)
+            }
+            if !fisheyeEasing.isEasing { fisheyeSaveDue = now }
+        }
+        if let due = fisheyeSaveDue, now >= due, gesture == nil { saveFisheye() }
+    }
+
+    /// Whether a fisheye zoom is still easing (self-test).
+    var isEasingFisheye: Bool { fisheyeEasing.isEasing }
+
+    /// Fisheye View ▸ Original, Panorama, Double Panorama, Quad, Virtual PTZ.
+    private func fisheyeMenuItem(path: NodePath) -> NSMenuItem {
+        let current = state.tree[path]?.fisheye.mode ?? .original
+        let sub = NSMenu()
+        for mode in FisheyeViewMode.allCases {
+            let i = ClosureMenuItem(title: mode.title) { [weak self] in self?.setFisheyeMode(mode, at: path) }
+            i.state = mode == current ? .on : .off
+            switch mode {
+            case .original: i.toolTip = "The circle as the camera sends it, with digital zoom"
+            case .panorama: i.toolTip = "Everything around the camera in one strip"
+            case .doublePanorama: i.toolTip = "Two half-circle strips stacked"
+            case .quad: i.toolTip = "Four virtual cameras looking four ways"
+            case .ptz: i.toolTip = "One virtual camera: drag to aim, scroll or pinch to zoom (nothing is sent to the camera)"
+            }
+            sub.addItem(i)
+        }
+        let item = NSMenuItem(title: "Fisheye View", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    /// Fisheye Mount ▸ Ceiling, Wall, Desk (per camera).
+    private func mountMenuItem(camera: CameraRef) -> NSMenuItem {
+        let current = model.cameraOptions(camera).fisheyeMount
+        let sub = NSMenu()
+        for m in FisheyeMount.allCases {
+            let i = ClosureMenuItem(title: m.title) { [weak self] in
+                self?.model.setFisheyeMount(camera, m)
+                self?.lastKey = nil
+                self?.refreshChrome()
+            }
+            i.state = m == current ? .on : .off
+            sub.addItem(i)
+        }
+        let item = NSMenuItem(title: "Fisheye Mount", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
     // MARK: Editing
 
     func edit(_ change: (LayoutNode) -> LayoutNode?) {
@@ -804,6 +1000,9 @@ final class StageView: NSView {
     /// while editing the layout, it drags the tile to swap (docs/UX.md
     /// "Digital zoom").
     private func panGesture(at p: CGPoint) -> Gesture? {
+        if !state.editing, let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
+            return .aim(leaf.path, last: p)
+        }
         guard !state.editing, let leaf = drawnLeaf(at: p), let camera = leaf.camera, zoom(of: camera).isZoomed else {
             return nil
         }
@@ -856,6 +1055,10 @@ final class StageView: NSView {
             // Measured in the tile where the drag began, wherever it goes.
             guard let leaf = currentLeaves.last(where: { $0.camera == camera && $0.rect.contains(last) }) else { return }
             pan(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: CGVector(dx: p.x - last.x, dy: p.y - last.y))
+        case .aim(let path, let last)?:
+            gesture = .aim(path, last: p)
+            guard let leaf = currentLeaves.last(where: { $0.path == path }) else { return }
+            turnFisheye(path, by: CGVector(dx: p.x - last.x, dy: p.y - last.y), size: leaf.rect.size)
         case nil:
             break
         }
@@ -875,6 +1078,8 @@ final class StageView: NSView {
             guard let to = frames.leaf(at: p)?.path, to != from else { return }
             state.selected = to
             edit { $0.swapping(from, to) }
+        case .aim?:
+            saveFisheye()
         default:
             break
         }
@@ -992,6 +1197,10 @@ final class StageView: NSView {
             }
             item("Focus") { [weak self] in self?.focus(leaf.path) }
             menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
+            if model.isFisheye(camera) {
+                menu.addItem(fisheyeMenuItem(path: leaf.path))
+                menu.addItem(mountMenuItem(camera: camera))
+            }
             let entrance = model.cameraOptions(camera).entrance
             let e = ClosureMenuItem(title: "Entrance") { [weak self] in self?.model.setEntrance(camera, !entrance) }
             e.state = entrance ? .on : .off
