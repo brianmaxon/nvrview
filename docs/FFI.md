@@ -461,6 +461,74 @@ the machine (and later the web viewer) shares them.
   returns `NV_ERR_BUFFER_TOO_SMALL` and the app calls again with a buffer of
   `*len + 1` bytes.
 
+## Device discovery (proposal)
+
+Not in the header yet. A proposal for the minor-version addition that
+[FFI-RECORDINGS.md](FFI-RECORDINGS.md) "Decisions" introduces (`nv_abi_minor`;
+every existing declaration unchanged). The core side exists as the
+`discovery` crate (native search and probe, docs/protocol.md "LAN
+discovery"; ONVIF WS-Discovery), and `bc-cli discover` runs it from a
+terminal.
+
+```c
+/* Starts a search for devices on the local network: a few rounds of UDP
+ * broadcasts (and the WS-Discovery multicast) on each IPv4 interface that is
+ * up, or on the interfaces named in json, then listening until the time is
+ * up. Answers arrive as `discovered` events, then one `discovery_done`.
+ * json (may be NULL for defaults):
+ *   {"seconds":3, "interfaces":["192.0.2.5"], "onvif":true}
+ * Returns at once; NV_ERR_INVALID_ARGUMENT for invalid JSON or values. A
+ * second start while a search runs restarts it (one search per core). */
+NvStatus nv_discover_start(NvCore *core, const char *json);
+
+/* Stops the running search, if any, and closes its sockets; a
+ * `discovery_done` event with "stopped":true follows. */
+NvStatus nv_discover_stop(NvCore *core);
+```
+
+Events (same rules as every event: ignore unknown types and fields):
+
+```json
+{"type":"discovered","search":1,"key":"d1","kind":"nvr","name":"NVR 1","address":"192.0.2.10","channels":16,"services":[{"kind":"native","port":9000}]}
+{"type":"discovered","search":1,"key":"d2","kind":"camera","name":"Camera 1","model":"EXAMPLE-CAM","address":"192.0.2.20","services":[{"kind":"onvif","port":8000,"url":"http://192.0.2.20:8000/onvif/device_service"}]}
+{"type":"discovered","search":1,"key":"d3","kind":"unknown","address":"192.0.2.30","battery_percent":80,"services":[{"kind":"native"}]}
+{"type":"discovery_done","search":1,"count":3,"stopped":false,"errors":["en1: native search on 192.0.2.5:3000: address in use"]}
+```
+
+- **Protocol-neutral fields.** `kind` is `nvr`, `camera` or `unknown`;
+  `services` lists how to connect, each with `kind` (`native` for the
+  port-9000 protocol, `onvif`, more later), `port` and `url` when known.
+  Absent fields are unknown. The app picks a backend from `services` and
+  passes `address` and `port` to `nv_device_add`; nothing in the event is
+  specific to one wire protocol beyond the service names.
+- **Updates.** A device that answers again with more (another backend, a
+  battery reading) is sent again with the same `key` and the merged fields;
+  the app replaces its row. `key` is opaque and lives only for one search.
+- **IDs stay in the core.** Device UIDs and ONVIF endpoint IDs are used to
+  merge answers and to tell the app, later, that a found device is one it
+  already added (a planned `"known":true` field matched against device keys),
+  but never appear in events, logs, or the UI. MAC addresses are also left
+  out of events; addresses are logged at debug level only (see "Logging").
+- **Only on request.** The core never searches on its own: the app calls
+  `nv_discover_start` when the user opens its "find devices" screen and
+  `nv_discover_stop` when it closes. Nothing leaves the local network:
+  broadcasts and the WS-Discovery multicast go out with a TTL of 1.
+- **Bounded.** One search per core; at most 1024 devices per search;
+  `seconds` from 0.5 to 30 (default 3); answers that are malformed or answer
+  someone else's probe are counted and dropped.
+- **Port 3000.** The native search's answers come to UDP port 3000. The core
+  binds it on each interface's own address, which works next to the official
+  desktop client holding it on the wildcard address (observed on macOS);
+  when it cannot, `discovery_done` lists the error and the other backends
+  still run.
+- **macOS local network privacy (most likely; not confirmed).** A newly built command-line binary's
+  broadcasts and the answers to them were silently dropped on macOS 26
+  (sends reported success, nothing arrived), while an already approved
+  interpreter making the same calls worked. The app bundle needs an
+  `NSLocalNetworkUsageDescription` and the user's approval the first time
+  it searches; if a search finds nothing, the app should point at System
+  Settings, Privacy & Security, Local Network.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
