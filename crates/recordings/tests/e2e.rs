@@ -412,7 +412,12 @@ async fn three_camera_download_survives_a_stall_and_a_disconnect() {
     assert_eq!(json["start"], "2026-10-10 07:42:05");
 
     let (frames, worst) = live_task.await.unwrap();
-    assert!(frames >= 50, "live frames during the downloads: {frames}");
+    // The mock sends 25 fps, so about 75 frames in the 3 s window. A debug
+    // build sharing a small machine with the file's other end-to-end tests
+    // delivered 46 (this test alone: all of them), so the count only proves
+    // the stream kept flowing; the worst gap is the guarantee that downloads
+    // never stall live view.
+    assert!(frames >= 30, "live frames during the downloads: {frames}");
     assert!(
         worst < Duration::from_millis(400),
         "worst live gap {worst:?}"
