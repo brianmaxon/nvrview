@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Installs (with winget) Git, the Rust toolchain (rustup, MSVC target), the
-  Visual Studio C++ build tools, the .NET SDK, Python, and optionally ffmpeg
+  Visual Studio C++ build tools, the .NET 10 SDK, LLVM (clang), Python, and optionally ffmpeg
   and gitleaks; installs cbindgen; clones the repository; and runs the Rust
   tests to prove the setup works. Every step checks what is already there,
   so running it again is safe.
@@ -110,8 +110,11 @@ rustup default stable-x86_64-pc-windows-msvc
 rustup component add rustfmt clippy
 rustc --version
 
-Step '.NET SDK (C# bindings and smoke test in apps\windows)'
-Install-WingetPackage 'Microsoft.DotNet.SDK.8'
+Step '.NET SDK 10 (C# bindings and smoke test in apps\windows)'
+Install-WingetPackage 'Microsoft.DotNet.SDK.10'
+
+Step 'LLVM (clang builds the C layout check against the MSVC ABI, as CI does)'
+Install-WingetPackage 'LLVM.LLVM'
 
 Step 'Python (scripts\check-sanitized.py)'
 Install-WingetPackage 'Python.Python.3.12'
