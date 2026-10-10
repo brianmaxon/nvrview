@@ -3,7 +3,7 @@
 # Docker container, so Linux-only breaks show up before a push.
 #
 # By default the build output and the cargo registry live in Docker volumes
-# (nvrview-linux-target, nvrview-linux-cargo), so the Mac's target/ is never
+# (nvrview-linux-target-<checkout>, nvrview-linux-cargo), so the Mac's target/ is never
 # touched and later runs are incremental. The build volume is emptied after a
 # run once it grows past NVRVIEW_LINUX_TARGET_MAX_MB (default 6000), so it
 # cannot grow without bound. NVRVIEW_LINUX_CACHE=0 keeps nothing: the run uses
@@ -12,6 +12,10 @@
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 
+# One build volume per checkout (worktrees mount different trees at the same
+# /src path, and Cargo would take another tree's newer artifacts as fresh);
+# the cargo registry is content-addressed and shared.
+checkout=$(printf '%s' "$PWD" | shasum | cut -c1-8)
 image="${NVRVIEW_LINUX_IMAGE:-rust:1-bookworm}"
 max_mb="${NVRVIEW_LINUX_TARGET_MAX_MB:-6000}"
 
@@ -20,7 +24,7 @@ if [ "${NVRVIEW_LINUX_CACHE:-1}" = "0" ]; then
   target_vol=/src/target
   cargo_vol=/usr/local/cargo/registry
 else
-  target_vol=nvrview-linux-target:/src/target
+  target_vol="nvrview-linux-target-$checkout:/src/target"
   cargo_vol=nvrview-linux-cargo:/usr/local/cargo/registry
 fi
 

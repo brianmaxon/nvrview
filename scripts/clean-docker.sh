@@ -33,13 +33,14 @@ run() {
 
 # Containers from the check are started with --rm; remove any left by an
 # interrupted run that still hold the volumes.
-for c in $(docker ps -aq --filter volume=nvrview-linux-target --filter volume=nvrview-linux-cargo \
-  --filter volume=nvrview-csharp-build --filter volume=nvrview-csharp-nuget); do
-  run docker rm -f "$c"
+volumes="$(docker volume ls -q --filter name='^nvrview-linux-') $(docker volume ls -q --filter name='^nvrview-csharp-')"
+for v in $volumes; do
+  for c in $(docker ps -aq --filter volume="$v"); do
+    run docker rm -f "$c"
+  done
 done
 
-for v in $(docker volume ls -q --filter name='^nvrview-linux-') \
-  $(docker volume ls -q --filter name='^nvrview-csharp-'); do
+for v in $volumes; do
   run docker volume rm "$v"
 done
 
