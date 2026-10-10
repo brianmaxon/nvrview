@@ -108,10 +108,12 @@ public struct FramePipeline: Sendable {
                 changed = true
             }
         }
-        guard let sample = SampleBuilder.makeSample(
-            nals: vcl, from: frame.annexB, format: format,
-            ptsMicros: frame.ptsMicros, isKeyframe: hasKey)
-        else { return .dropped(.buildFailed) }
+        let built = frame.annexB.withUnsafeBytes { bytes in
+            SampleBuilder.makeSample(
+                nals: vcl, from: bytes, format: format,
+                ptsMicros: frame.ptsMicros, isKeyframe: hasKey)
+        }
+        guard let sample = built else { return .dropped(.buildFailed) }
 
         gateOpen = true
         activeFormat = format
@@ -119,11 +121,15 @@ public struct FramePipeline: Sendable {
     }
 }
 
+/// Builds a `CMSampleBuffer` from selected NAL units of an Annex-B buffer,
+/// each rewritten with a 4-byte big-endian length prefix. The bytes are copied,
+/// so `data` only needs to stay valid for the call.
 enum SampleBuilder {
     static func makeSample(
-        nals: [NALUnit], from data: Data, format: CMVideoFormatDescription,
+        nals: [NALUnit], from data: UnsafeRawBufferPointer, format: CMVideoFormatDescription,
         ptsMicros: Int64, isKeyframe: Bool
     ) -> CMSampleBuffer? {
+        guard !nals.isEmpty, let src = data.baseAddress else { return nil }
         let payload = nals.reduce(0) { $0 + 4 + $1.range.count }
         var block: CMBlockBuffer?
         guard CMBlockBufferCreateWithMemoryBlock(
@@ -142,15 +148,12 @@ enum SampleBuilder {
         else { return nil }
         let out = UnsafeMutableRawPointer(dest)
         var offset = 0
-        data.withUnsafeBytes { src in
-            for nal in nals {
-                let length = UInt32(nal.range.count).bigEndian
-                out.storeBytes(of: length, toByteOffset: offset, as: UInt32.self)
-                offset += 4
-                (out + offset).copyMemory(
-                    from: src.baseAddress! + nal.range.lowerBound, byteCount: nal.range.count)
-                offset += nal.range.count
-            }
+        for nal in nals {
+            let length = UInt32(nal.range.count).bigEndian
+            out.storeBytes(of: length, toByteOffset: offset, as: UInt32.self)
+            offset += 4
+            (out + offset).copyMemory(from: src + nal.range.lowerBound, byteCount: nal.range.count)
+            offset += nal.range.count
         }
 
         var timing = CMSampleTimingInfo(
