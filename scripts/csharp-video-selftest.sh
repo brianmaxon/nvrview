@@ -16,11 +16,17 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 export NVRVIEW_TEST_PASSWORD="${NVRVIEW_TEST_PASSWORD:-example-password}"
 
-cargo build --release -p mock-nvr
+# The Windows worker sets NVRVIEW_RELEASE_PACKAGES to build the library and
+# the mock together: separate invocations unify features differently and
+# compile shared dependencies twice.
+# shellcheck disable=SC2086 # a list of cargo arguments
+cargo build --release ${NVRVIEW_RELEASE_PACKAGES:--p mock-nvr}
 # Relative paths (build/ is git-ignored) keep Windows drive-letter paths out
 # of bash.
 out=build/csharp
 dotnet build apps/windows/NvrView.Demo -c Release --artifacts-path "$out/artifacts"
+# NVRVIEW_BUILD_ONLY=1 stops here (scripts/windows-worker.sh builds ahead).
+if [ -n "${NVRVIEW_BUILD_ONLY:-}" ]; then exit 0; fi
 demo=(dotnet "$out/artifacts/bin/NvrView.Demo/release/NvrView.Demo.dll"
   --mock-nvr target/release/mock-nvr.exe --lib target/release/nvrview.dll)
 f=fixtures/synthetic

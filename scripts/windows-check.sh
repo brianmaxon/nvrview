@@ -7,6 +7,13 @@
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> [NVRVIEW_WINDOWS_WORKER=<name>] \
 #     scripts/windows-check.sh
 #
+# A finished worker's folder (about 5 GB of build output) is deleted with
+#
+#   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
+#
+# Each run prints the Windows computer's free disk space first and warns
+# under 10 GB, then the time of every phase and step.
+#
 # Everything lives under %USERPROFILE%\nvrview on the Windows side (the
 # setup script's clone is %USERPROFILE%\nvrview\repo). Each worker name (default
 # "main"; give parallel agents their own) gets %USERPROFILE%\nvrview\worker\<name>:
@@ -19,6 +26,14 @@ set -eu
 cd "$(git rev-parse --show-toplevel)"
 
 host="${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
+clean=0
+if [ "${1:-}" = "--clean" ]; then
+  clean=1
+  NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
+elif [ $# -gt 0 ]; then
+  echo "usage: $0 [--clean <worker name>]" >&2
+  exit 2
+fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
 case "$worker" in
   *[!A-Za-z0-9_-]* | '') echo "NVRVIEW_WINDOWS_WORKER: letters, digits, - and _ only" >&2; exit 2 ;;
@@ -28,6 +43,31 @@ gitbash='"C:\Program Files\Git\bin\bash.exe"'
 
 # shellcheck disable=SC2086 # ssh_opts is a list of options
 ssh $ssh_opts "$host" "echo connected" >/dev/null
+
+# Free space on the drive holding %USERPROFILE%, in whole GB.
+free_gb() {
+  # shellcheck disable=SC2086
+  ssh $ssh_opts "$host" 'powershell -NoProfile -Command "[math]::Floor((Get-PSDrive ($env:USERPROFILE.Substring(0,1))).Free / 1GB)"' |
+    tr -d '\r' | grep -E '^[0-9]+$' | tail -n 1
+}
+
+if [ "$clean" = 1 ]; then
+  echo "deleting worker $worker on $host"
+  # The junction goes first, with a plain rmdir, so deleting src never
+  # reaches into target through it; then the folder with everything in it.
+  # shellcheck disable=SC2086,SC2029
+  ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if exist nvrview\\worker\\$worker\\src\\target rmdir nvrview\\worker\\$worker\\src\\target) && (if exist nvrview\\worker\\$worker rmdir /s /q nvrview\\worker\\$worker) && echo deleted"
+  echo "free disk space on $host: $(free_gb || echo unknown) GB"
+  exit 0
+fi
+
+check_start=$(date +%s)
+free=$(free_gb || true)
+echo "free disk space on $host: ${free:-unknown} GB"
+if [ -n "$free" ] && [ "$free" -lt 10 ]; then
+  echo "WARNING: under 10 GB free; each worker keeps about 5 GB of build output." >&2
+  echo "         Delete finished workers with: $0 --clean <name>" >&2
+fi
 
 echo "sending the working tree to $host (worker $worker)"
 # cmd.exe on the far side: recreate src, keep target (a directory junction
@@ -41,6 +81,9 @@ echo "sending the working tree to $host (worker $worker)"
 git ls-files -z --cached --others --exclude-standard |
   COPYFILE_DISABLE=1 tar --no-mac-metadata --null -T - -cf - |
   ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
+
+sent=$(date +%s)
+printf '   (sync: %ss)\n' "$((sent - check_start))"
 
 echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
@@ -58,3 +101,5 @@ done
 # $gitbash and $vars are meant to expand here, on this side.
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""
+now=$(date +%s)
+printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"
