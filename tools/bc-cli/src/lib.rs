@@ -5,6 +5,7 @@
 //! and the session is closed (previews stopped, socket shut) on every path.
 
 use bc_protocol::media::{Codec, Record};
+use bc_protocol::recording;
 use bc_protocol::session::Command;
 use bc_protocol::stream::StreamTier;
 use bc_protocol::xml;
@@ -188,6 +189,20 @@ pub struct RecordStats {
     pub skipped_codec_change: u64,
     /// Timestamp span of the frames written, in microseconds.
     pub duration_us: u64,
+    /// Audio frames received (written when an audio output is given).
+    pub audio_frames: u64,
+    /// Records written to the raw recording, if any.
+    pub raw_records: u64,
+}
+
+/// Optional outputs besides the video file.
+#[derive(Default)]
+pub struct ExtraOutputs<'a> {
+    /// Audio payloads as received (ADTS AAC frames: a playable `.aac` file).
+    pub audio: Option<&'a mut dyn Write>,
+    /// Every record with its arrival time ([`recording`] format), for
+    /// replaying the stream later.
+    pub raw: Option<recording::Writer<&'a mut dyn Write>>,
 }
 
 /// When to stop recording, besides `stop` resolving.
@@ -199,13 +214,14 @@ pub struct RecordLimits {
 
 /// Records one channel's video as a raw Annex-B elementary stream until
 /// `stop` resolves, a limit is reached, or the session ends. The first frame
-/// written is a keyframe (the session gates until one arrives). Audio is not
-/// written.
+/// written is a keyframe (the session gates until one arrives). Audio and a
+/// raw recording of every record go to `extra` when given.
 pub async fn record<W: Write>(
     session: &DeviceSession,
     channel: u8,
     tier: StreamTier,
     out: &mut W,
+    mut extra: ExtraOutputs<'_>,
     limits: RecordLimits,
     stop: impl Future<Output = ()>,
 ) -> Result<RecordStats, CliError> {
@@ -215,12 +231,24 @@ pub async fn record<W: Write>(
         .map_err(|_| CliError::SessionEnded)?;
     let mut stats = RecordStats::default();
     let mut first_pts = None;
+    let started = std::time::Instant::now();
+    let arrival = || started.elapsed().as_micros() as u64;
     tokio::pin!(stop);
     loop {
         let item = tokio::select! {
             item = sub.recv() => item,
             () = &mut stop => break,
         };
+        if let Some(raw) = extra.raw.as_mut() {
+            match &item {
+                Some(Item::Media(r)) => {
+                    raw.record(arrival(), r)?;
+                    stats.raw_records += 1;
+                }
+                Some(Item::Discontinuity) => raw.discontinuity(arrival())?,
+                _ => {}
+            }
+        }
         match item {
             Some(Item::Media(Record::Video {
                 codec,
@@ -243,7 +271,13 @@ pub async fn record<W: Write>(
                     break;
                 }
             }
-            Some(Item::Media(_)) => {}
+            Some(Item::Media(Record::Audio { data, .. })) => {
+                stats.audio_frames += 1;
+                if let Some(a) = extra.audio.as_mut() {
+                    a.write_all(&data)?;
+                }
+            }
+            Some(Item::Media(Record::Info { .. })) => {}
             Some(Item::Discontinuity) => stats.discontinuities += 1,
             Some(Item::StartRejected { status }) => return Err(CliError::StreamRefused(status)),
             None => {
@@ -261,6 +295,12 @@ pub async fn record<W: Write>(
         }
     }
     out.flush()?;
+    if let Some(a) = extra.audio.as_mut() {
+        a.flush()?;
+    }
+    if let Some(raw) = extra.raw.take() {
+        raw.finish()?;
+    }
     stats.dropped = sub.dropped();
     Ok(stats)
 }

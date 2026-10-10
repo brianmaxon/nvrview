@@ -67,6 +67,7 @@ async fn records_fixture(name: &str) {
         1,
         StreamTier::Sub,
         &mut out,
+        Default::default(),
         RecordLimits {
             frames: Some(frames),
         },
@@ -110,6 +111,7 @@ async fn stops_when_asked() {
         0,
         StreamTier::Main,
         &mut out,
+        Default::default(),
         RecordLimits::default(),
         tokio::time::sleep(Duration::from_millis(500)),
     )

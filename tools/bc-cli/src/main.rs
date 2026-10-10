@@ -5,7 +5,8 @@
 //! shell history and process listings): it comes from the environment
 //! variable `NVRVIEW_PASSWORD` or, on macOS, from a Keychain item.
 
-use bc_cli::{CliError, RecordLimits, list_channels, record, wait_logged_in};
+use bc_cli::{CliError, ExtraOutputs, RecordLimits, list_channels, record, wait_logged_in};
+use bc_protocol::recording;
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, SessionConfig, TcpConnector};
 use std::fs::File;
@@ -20,13 +21,15 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] channels
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] record
          --channel N [--tier main|sub|extern|mobile] --out FILE
-         [--seconds S] [--frames N]
+         [--audio FILE.aac] [--raw FILE.nvrrec] [--seconds S] [--frames N]
 
 The port defaults to 9000. The user name may also come from NVRVIEW_USER.
 The password comes from NVRVIEW_PASSWORD or, on macOS, from the Keychain
 item named with --keychain; never from the command line.
-record writes video only (Annex-B), starting at a keyframe, until Ctrl-C,
---seconds, or --frames.";
+record writes video (Annex-B), starting at a keyframe, until Ctrl-C,
+--seconds, or --frames. --audio also writes the audio as received (ADTS AAC).
+--raw also writes every record with its arrival time, for replaying the
+stream later; keep real recordings in the git-ignored captures/ directory.";
 
 /// How long to wait for the login before giving up.
 const LOGIN_LIMIT: Duration = Duration::from_secs(20);
@@ -37,6 +40,8 @@ enum Action {
         channel: u8,
         tier: StreamTier,
         out: PathBuf,
+        audio: Option<PathBuf>,
+        raw: Option<PathBuf>,
         seconds: Option<u64>,
         frames: Option<u64>,
     },
@@ -56,6 +61,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut command = None;
     let (mut channel, mut tier, mut out, mut seconds, mut frames) =
         (None, StreamTier::Sub, None, None, None);
+    let (mut audio, mut raw) = (None, None);
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -77,6 +83,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
             }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
+            "--audio" => audio = Some(PathBuf::from(value("--audio")?)),
+            "--raw" => raw = Some(PathBuf::from(value("--raw")?)),
             "--seconds" => {
                 seconds = Some(value("--seconds")?.parse().map_err(|_| "bad --seconds")?);
             }
@@ -94,6 +102,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Args, String> {
             channel: channel.ok_or("record needs --channel")?,
             tier,
             out: out.ok_or("record needs --out")?,
+            audio,
+            raw,
             seconds,
             frames,
         },
@@ -215,6 +225,8 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             channel,
             tier,
             out,
+            audio,
+            raw,
             seconds,
             frames,
         } => {
@@ -228,11 +240,29 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
                 tier.name(),
                 out.display()
             );
+            let mut audio_file = audio
+                .as_ref()
+                .map(File::create)
+                .transpose()?
+                .map(BufWriter::new);
+            let mut raw_file = raw
+                .as_ref()
+                .map(File::create)
+                .transpose()?
+                .map(BufWriter::new);
+            let extra = ExtraOutputs {
+                audio: audio_file.as_mut().map(|f| f as &mut dyn std::io::Write),
+                raw: match raw_file.as_mut() {
+                    Some(f) => Some(recording::Writer::new(f as &mut dyn std::io::Write)?),
+                    None => None,
+                },
+            };
             let stats = record(
                 session,
                 channel,
                 tier,
                 &mut file,
+                extra,
                 RecordLimits { frames },
                 ctrl_c_or(seconds),
             )
@@ -253,6 +283,12 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
                 stats.discontinuities,
                 stats.dropped
             );
+            if audio.is_some() || stats.audio_frames > 0 {
+                eprintln!("{} audio frames", stats.audio_frames);
+            }
+            if raw.is_some() {
+                eprintln!("{} records in the raw recording", stats.raw_records);
+            }
             if stats.skipped_codec_change > 0 {
                 eprintln!(
                     "skipped {} frames after a codec change",
