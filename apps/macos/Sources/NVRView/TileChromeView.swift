@@ -38,6 +38,8 @@ final class TileChromeView: NSView {
     static let fadeOutAfterExit: TimeInterval = 0.8
 
     var onSpeaker: (_ additive: Bool) -> Void = { _ in }
+    /// The header's reset-zoom control (shown while the tile is zoomed).
+    var onResetZoom: () -> Void = {}
 
     private let header = NSView()
     private let headerGradient = CAGradientLayer()
@@ -45,6 +47,7 @@ final class TileChromeView: NSView {
     private let subtitle = NSTextField(labelWithString: "")
     private let rates = NSTextField(labelWithString: "")
     private let speaker = NSButton()
+    private let resetZoom = NSButton()
     private let badges = NSStackView()
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
@@ -62,6 +65,10 @@ final class TileChromeView: NSView {
     private var tracking: NSTrackingArea?
     private var content: TileChromeContent?
     private var level: Float = 0
+    /// The header stays shown (an active alert; docs/UX.md "Alerts").
+    private var headerPinned = false
+    /// The selection outline is shown (it fades with the chrome).
+    private var outlineShown = true
 
     override var isFlipped: Bool { true }
 
@@ -106,6 +113,19 @@ final class TileChromeView: NSView {
         speaker.toolTip = "Listen (Option-click to listen to several)"
         speaker.setAccessibilityLabel("Listen")
         header.addSubview(speaker)
+
+        resetZoom.isBordered = false
+        resetZoom.bezelStyle = .shadowlessSquare
+        resetZoom.imagePosition = .imageOnly
+        resetZoom.contentTintColor = .white
+        resetZoom.image = NSImage(systemSymbolName: "1.magnifyingglass", accessibilityDescription: "Reset Zoom")
+            ?? NSImage(systemSymbolName: "minus.magnifyingglass", accessibilityDescription: "Reset Zoom")
+        resetZoom.target = self
+        resetZoom.action = #selector(resetZoomClicked(_:))
+        resetZoom.toolTip = "Reset Zoom (0)"
+        resetZoom.setAccessibilityLabel("Reset zoom")
+        resetZoom.isHidden = true
+        header.addSubview(resetZoom)
 
         badges.orientation = .horizontal
         badges.spacing = 4
@@ -157,12 +177,14 @@ final class TileChromeView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    // Clicks reach the stage, except on the speaker button.
+    // Clicks reach the stage, except on the header's buttons.
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard header.alphaValue > 0.05, !header.isHidden else { return nil }
         let p = convert(point, from: superview)
-        let inSpeaker = speaker.convert(speaker.bounds, to: self).contains(p)
-        return inSpeaker ? speaker : nil
+        for button in [speaker, resetZoom] where !button.isHidden {
+            if button.convert(button.bounds, to: self).contains(p) { return button }
+        }
+        return nil
     }
 
     // MARK: Content
@@ -198,8 +220,9 @@ final class TileChromeView: NSView {
         drop.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.28).cgColor
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        outline.borderWidth = c.selected ? 2 : (c.editing ? 1 : 0)
+        outline.borderWidth = c.selected ? (c.editing ? 2 : 1.5) : (c.editing ? 1 : 0)
         outline.borderColor = (c.selected ? NSColor.controlAccentColor : NSColor.white.withAlphaComponent(0.12)).cgColor
+        outline.opacity = outlineShown || c.editing ? 1 : 0
         let mode = LevelMeterMode(hasCamera: c.hasCamera, audible: c.audible)
         meterTrack.isHidden = mode != .audible
         meter.isHidden = mode != .audible
@@ -283,8 +306,10 @@ final class TileChromeView: NSView {
         CATransaction.commit()
         let button: CGFloat = 26
         speaker.frame = CGRect(x: w - button - 6, y: 4, width: button, height: 22)
+        let buttonsLeft = speaker.isHidden ? w - 4 : speaker.frame.minX
+        resetZoom.frame = CGRect(x: buttonsLeft - button - 2, y: 4, width: button, height: 22)
         let badgeSize = badges.fittingSize
-        let badgeRight = speaker.isHidden ? w - 8 : speaker.frame.minX - 4
+        let badgeRight = (resetZoom.isHidden ? buttonsLeft : resetZoom.frame.minX) - 4
         badges.frame = CGRect(x: max(badgeRight - badgeSize.width, 8), y: 7, width: badgeSize.width, height: badgeSize.height)
         let titleRight = (badges.arrangedSubviews.isEmpty ? badgeRight : badges.frame.minX) - 6
         title.frame = CGRect(x: 10, y: 7, width: max(titleRight - 10, 0), height: 16)
@@ -331,10 +356,55 @@ final class TileChromeView: NSView {
 
     func fadeOut() {
         fadeTimer?.invalidate()
+        guard !headerPinned else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.35
             header.animator().alphaValue = 0
         }
+    }
+
+    // MARK: Stage-driven state (zoom, alerts, auto-hide)
+
+    /// Shows the reset-zoom control while the tile is zoomed.
+    func setZoomed(_ zoomed: Bool) {
+        guard resetZoom.isHidden == zoomed else { return }
+        resetZoom.isHidden = !zoomed
+        needsLayout = true
+    }
+
+    /// Keeps the header shown whatever the hover and auto-hide say (a tile
+    /// with an active alert); releasing it lets it fade as usual.
+    func setHeaderPinned(_ pinned: Bool) {
+        guard pinned != headerPinned else { return }
+        headerPinned = pinned
+        if pinned {
+            fadeTimer?.invalidate()
+            header.alphaValue = 1
+        } else {
+            scheduleFade(after: Self.fadeOutAfterExit)
+        }
+    }
+
+    var isHeaderPinned: Bool { headerPinned }
+
+    /// Whether the header is on screen now (for the self-test).
+    var isHeaderShown: Bool { header.alphaValue > 0.01 }
+
+    /// Fades the selection outline with the rest of the chrome (it stays
+    /// while editing the layout).
+    func setOutlineShown(_ shown: Bool) {
+        guard shown != outlineShown else { return }
+        outlineShown = shown
+        let editing = content?.editing == true
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.duration = shown ? 0.12 : 0.35
+        outline.add(animation, forKey: "opacity")
+        outline.opacity = shown || editing ? 1 : 0
+    }
+
+    @objc private func resetZoomClicked(_ sender: NSButton) {
+        onResetZoom()
+        showChrome()
     }
 
     @objc private func speakerClicked(_ sender: NSButton) {

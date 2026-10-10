@@ -15,6 +15,11 @@ final class WindowState {
     var editing = false
     /// Crop pictures to fill their tiles instead of letterboxing.
     var fill = false
+    /// Digital zoom per camera, in picture coordinates (docs/UX.md "Digital
+    /// zoom"). Keyed by camera so it follows the picture through layout
+    /// changes, swaps, focus and the switch to the main stream; tiles of
+    /// the same camera in one window share it.
+    var zoom: [CameraRef: TileZoom] = [:]
 
     init(content: WindowContent, name: String, tree: LayoutNode) {
         self.content = content
@@ -57,6 +62,38 @@ final class StageView: NSView {
     private var frames = LayoutFrames(leaves: [], dividers: [])
     private var lastKey: RenderKey?
 
+    /// Wired by the alert work (docs/UX.md "Alerts"): whether a camera has
+    /// an active alert (its tile's header then stays shown, also in full
+    /// screen while the other chrome hides), and how to dismiss it (Return
+    /// on the selected tile).
+    var alertActive: (CameraRef) -> Bool = { _ in false }
+    var dismissAlert: (CameraRef) -> Void = { _ in }
+
+    /// Whether the window is in full screen: there the chrome, including
+    /// the pointer, hides after a few idle seconds (docs/UX.md "Full screen
+    /// chrome"). Set by the window controller.
+    var fullScreen = false {
+        didSet {
+            guard fullScreen != oldValue else { return }
+            noteInteraction()
+            if !fullScreen, hidesPointer { NSCursor.setHiddenUntilMouseMoves(false) }
+        }
+    }
+    /// Whether hiding the chrome in full screen also hides the pointer (the
+    /// self-test turns it off: it never touches the user's pointer).
+    var hidesPointer = true
+    /// When the chrome hides; seconds of no interaction.
+    private(set) var idle = ChromeIdle(now: CACurrentMediaTime())
+    /// The overlay chrome is shown (not hidden for idleness).
+    var chromeVisible: Bool { idle.visible }
+    private var insets: [NodePath: ZoomInsetView] = [:]
+    /// Mouse-wheel zoom easing toward a target scale, per camera, around a
+    /// point of the shown picture.
+    private var zoomTargets: [CameraRef: (scale: Double, unit: CGPoint, frame: CGRect)] = [:]
+    private var lastPrepare: CFTimeInterval?
+    /// The picture's layout size per camera, from the last refresh.
+    private var pictureSizes: [CameraRef: CGSize] = [:]
+
     private var focusProgress: Double = 0
     private var focusAnimation: (from: Double, to: Double, start: CFTimeInterval)?
     /// The camera this stage told the leases it focuses.
@@ -65,6 +102,8 @@ final class StageView: NSView {
     private enum Gesture {
         case divider(NodePath)
         case tile(from: NodePath, start: CGPoint, dragging: Bool)
+        /// A drag in a zoomed tile pans its picture.
+        case pan(CameraRef, last: CGPoint)
     }
     private var gesture: Gesture?
     private var dropTarget: NodePath?
@@ -119,12 +158,20 @@ final class StageView: NSView {
             view.removeFromSuperview()
             chromes[path] = nil
         }
+        for (path, view) in insets where !paths.contains(path) {
+            view.removeFromSuperview()
+            insets[path] = nil
+        }
         for leaf in frames.leaves where chromes[leaf.path] == nil {
             let view = TileChromeView()
             let path = leaf.path
             view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
+            view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
             chromes[leaf.path] = view
+            let inset = ZoomInsetView()
+            overlay.addSubview(inset)
+            insets[leaf.path] = inset
         }
         layoutChrome()
         refreshChrome()
@@ -147,9 +194,32 @@ final class StageView: NSView {
             guard let view = chromes[leaf.path] else { continue }
             if view.frame != leaf.rect { view.frame = leaf.rect }
         }
+        layoutInsets(leaves)
         // The focused tile's chrome rides on top while it grows.
-        if let f = state.focused, let view = chromes[f], overlay.subviews.last !== view {
+        if let f = state.focused, let view = chromes[f], overlay.subviews.last !== (insets[f] ?? view) {
             overlay.addSubview(view, positioned: .above, relativeTo: nil)
+            if let inset = insets[f] { overlay.addSubview(inset, positioned: .above, relativeTo: nil) }
+        }
+    }
+
+    /// Places and updates the zoom maps: shown while the tile is zoomed and
+    /// the chrome is up.
+    private func layoutInsets(_ leaves: [LeafFrame]) {
+        let shown = Set(leaves.map(\.path))
+        for (path, inset) in insets where !shown.contains(path) { inset.setShown(false) }
+        for leaf in leaves {
+            guard let inset = insets[leaf.path] else { continue }
+            guard let camera = leaf.camera, let z = state.zoom[camera], z.isZoomed,
+                let picture = pictureSizes[camera], picture.width > 0, picture.height > 0
+            else {
+                inset.setShown(false)
+                continue
+            }
+            let pictureRect = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill)
+            let frame = ZoomInsetView.frame(inPicture: pictureRect, aspect: picture.width / picture.height)
+            if inset.frame != frame { inset.frame = frame }
+            inset.update(region: z.visible(in: zoomFrame(leaf.rect, picture)))
+            inset.setShown(chromeVisible)
         }
     }
 
@@ -158,6 +228,9 @@ final class StageView: NSView {
         for leaf in frames.leaves {
             guard let view = chromes[leaf.path] else { continue }
             view.apply(content(for: leaf))
+            view.setZoomed(leaf.camera.flatMap { state.zoom[$0] }?.isZoomed == true)
+            view.setHeaderPinned(leaf.camera.map(alertActive) == true)
+            view.setOutlineShown(chromeVisible)
         }
     }
 
@@ -230,6 +303,7 @@ final class StageView: NSView {
         var rects: [CGRect]
         var versions: [UInt64]
         var sizes: [CGSize]
+        var zooms: [TileZoom]
     }
 
     /// Called by the Metal view on every refresh with the drawable size in
@@ -242,7 +316,8 @@ final class StageView: NSView {
         // Per axis: during a resize the drawable may lag the view (it is
         // stretched to the bounds until its size catches up).
         let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
-        var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [])
+        stepZoom()
+        var key = RenderKey(tiles: [], rects: [], versions: [], sizes: [], zooms: [])
         var tiles: [GridTile] = []
         var paths: [NodePath] = []
         for leaf in currentLeaves {
@@ -256,45 +331,46 @@ final class StageView: NSView {
             let pictureSize = CGSize(width: Int(mapping.layoutSize.width), height: Int(mapping.layoutSize.height))
             let matrix = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
                 ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
-            let gridTile: GridTile
-            if mapping.layoutSize == .zero {
-                gridTile = GridTile(picture: tile, color: matrix, destination: cell, source: nil)
-            } else {
-                // Fitted where the picture appears (even scale), then mapped
-                // into the possibly stretched drawable, so the picture keeps
-                // its shape while the drawable catches up with a resize.
-                let stretch = scaleY / scaleX
-                let shown = abs(stretch - 1) < 0.001 ? cell : leaf.rect.pixels(scale: scaleX)
-                let fit = PictureFit.fit(picture: pictureSize, in: shown, fill: state.fill)
-                let destination = shown == cell
-                    ? fit.destination
-                    : CGRect(
-                        x: fit.destination.minX, y: fit.destination.minY * stretch,
-                        width: fit.destination.width, height: fit.destination.height * stretch)
-                gridTile = GridTile(
-                    picture: tile, color: matrix, destination: destination,
-                    source: fit.source.offsetBy(dx: CGFloat(mapping.offset.x), dy: CGFloat(mapping.offset.y)))
-            }
-            tiles.append(gridTile)
+            // Zoom changes only the source rectangle sampled (TilePlacement).
+            let zoom = state.zoom[camera] ?? .none
+            if pictureSize != .zero, pictureSizes[camera] != pictureSize { pictureSizes[camera] = pictureSize }
+            let placed = TilePlacement.place(
+                rect: leaf.rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
+                offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: state.fill,
+                zoom: zoom)
+            tiles.append(GridTile(picture: tile, color: matrix, destination: placed.destination, source: placed.source))
             key.tiles.append(ObjectIdentifier(tile))
             key.rects.append(cell)
             key.versions.append(snapshot.version)
             key.sizes.append(pictureSize)
+            key.zooms.append(zoom)
             // Read only for meters on screen (audible, or hovered).
             if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
                 chrome.setLevel(level.peak)
             }
         }
         if key != lastKey || renderer.tiles.count != tiles.count {
+            if key.zooms != lastKey?.zooms { layoutInsets(currentLeaves) }
             lastKey = key
             renderer.tiles = tiles
             renderedPaths = paths
         }
     }
 
+    /// The source rectangles the renderer samples now, by leaf (tests and
+    /// the self-test check them against the zoom).
+    func renderedSource(of path: NodePath) -> CGRect? {
+        guard let i = renderedPaths.firstIndex(of: path), i < grid.renderer.tiles.count else { return nil }
+        return grid.renderer.tiles[i].source
+    }
+
     // MARK: Focus
 
     var isFocused: Bool { state.focused != nil }
+    /// A focus animation is running (self-test).
+    var isAnimatingFocus: Bool { focusAnimation != nil }
+    /// A mouse-wheel zoom is still easing (self-test).
+    var isEasingZoom: Bool { !zoomTargets.isEmpty }
 
     func toggleFocus(_ path: NodePath? = nil) {
         if state.focused != nil {
@@ -360,6 +436,201 @@ final class StageView: NSView {
         focusProgress = 0
     }
 
+    /// In focus, an arrow key: the focused tile becomes `path`'s, at once,
+    /// on the main stream (the new camera's main stream is asked for before
+    /// the old one is let go, so a camera in both keeps it).
+    private func switchFocus(to path: NodePath) {
+        let old = focusedCamera
+        state.focused = path
+        state.selected = path
+        focusedCamera = nil
+        if let camera = state.tree[path]?.camera {
+            model.leases.setFocused(camera, true)
+            focusedCamera = camera
+        }
+        if let old { model.leases.setFocused(old, false) }
+        layoutChrome()
+        refreshChrome()
+        delegate?.stageDidChangeState(self)
+    }
+
+    // MARK: Keyboard shortcuts (docs/UX.md "Keyboard")
+
+    /// Moves the selection to the tile in `direction` by position; in focus,
+    /// focuses that tile instead.
+    func moveSelection(_ direction: MoveDirection) {
+        if let f = state.focused {
+            guard focusAnimation == nil, let n = frames.neighbor(of: f, direction) else { return }
+            switchFocus(to: n)
+            return
+        }
+        if let s = state.selected, frames.leaf(s) != nil {
+            guard let n = frames.neighbor(of: s, direction) else { return }
+            state.selected = n
+        } else {
+            state.selected = frames.leaves.first?.path
+        }
+        noteInteraction()
+        refreshChrome()
+        delegate?.stageDidChangeState(self)
+    }
+
+    /// Return: dismisses the selected tile's alert if it has one, else
+    /// toggles focus.
+    func confirm() {
+        if let camera = selectedCamera, alertActive(camera) {
+            dismissAlert(camera)
+            refreshChrome()
+        } else {
+            toggleFocus()
+        }
+    }
+
+    // MARK: Chrome auto-hide (docs/UX.md "Full screen chrome")
+
+    /// A pointer move, click, key or scroll in the window.
+    func noteInteraction() {
+        guard idle.interact(now: CACurrentMediaTime()) else { return }
+        // Back: the outline and maps fade in; in full screen, the header of
+        // the tile under the pointer too (moving the pointer also does that).
+        refreshChrome()
+        layoutInsets(currentLeaves)
+        if fullScreen, let p = pointerInOverlay, let leaf = currentLeaves.last(where: { $0.rect.contains(p) }) {
+            chromes[leaf.path]?.showChrome()
+        }
+    }
+
+    /// Called now and then by the window: hides the chrome once idle. Out
+    /// of full screen the headers keep their own hover timing; the outline
+    /// and zoom map fade either way.
+    func tickChrome() {
+        guard idle.tick(now: CACurrentMediaTime()) else { return }
+        hideChrome()
+    }
+
+    /// The seconds of idleness before the chrome hides (the self-test
+    /// shortens it).
+    var chromeHideDelay: Double {
+        get { idle.delay }
+        set { idle.delay = newValue }
+    }
+
+    private func hideChrome() {
+        for view in chromes.values {
+            view.setOutlineShown(false)
+            // Headers of tiles with an active alert are pinned and stay.
+            if fullScreen { view.fadeOut() }
+        }
+        for inset in insets.values { inset.setShown(false) }
+        if fullScreen, hidesPointer { NSCursor.setHiddenUntilMouseMoves(true) }
+    }
+
+    /// Shows a tile's header as hovering does (self-test).
+    func showHeader(_ path: NodePath) { chromes[path]?.showChrome() }
+
+    /// Whether a tile's header is shown (self-test).
+    func headerShown(_ path: NodePath) -> Bool? { chromes[path]?.isHeaderShown }
+
+    /// Whether a tile's zoom map is shown (self-test).
+    func zoomMapShown(_ path: NodePath) -> Bool? { insets[path]?.isShown }
+
+    private var pointerInOverlay: CGPoint? {
+        guard let window else { return nil }
+        let p = overlay.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return overlay.bounds.contains(p) ? p : nil
+    }
+
+    // MARK: Digital zoom (docs/UX.md "Digital zoom")
+
+    /// The part of the picture a tile shows at 1x, as a fraction of it.
+    private func zoomFrame(_ rect: CGRect, _ picture: CGSize) -> CGRect {
+        TileZoom.normalized(PictureFit.fit(picture: picture, in: rect, fill: state.fill).source, picture: picture)
+    }
+
+    /// The tile under the pointer as drawn now (the focused one in focus).
+    private func drawnLeaf(at p: CGPoint) -> LeafFrame? {
+        currentLeaves.last { $0.rect.contains(p) }
+    }
+
+    /// For the tile at `p`: its camera, the unit point of `p` in its shown
+    /// picture, the shown picture's size in points, and its 1x frame.
+    private func zoomTarget(at p: CGPoint) -> (camera: CameraRef, unit: CGPoint, shown: CGSize, frame: CGRect)? {
+        guard let leaf = drawnLeaf(at: p), let camera = leaf.camera, let picture = pictureSizes[camera] else {
+            return nil
+        }
+        let shown = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill)
+        return (camera, TilePlacement.unit(p, in: shown), shown.size, zoomFrame(leaf.rect, picture))
+    }
+
+    private func setZoom(_ z: TileZoom, for camera: CameraRef) {
+        let was = state.zoom[camera]?.isZoomed == true
+        state.zoom[camera] = z.isZoomed ? z : nil
+        if was != z.isZoomed { refreshChrome() }
+    }
+
+    /// The zoom a tile's camera has (1x if none).
+    func zoom(of camera: CameraRef) -> TileZoom { state.zoom[camera] ?? .none }
+
+    /// Zooms the tile at `p` by `factor` around `p`: at once (pinch), or
+    /// eased over the next refreshes (a mouse-wheel notch).
+    func zoom(at p: CGPoint, by factor: Double, eased: Bool) {
+        guard let t = zoomTarget(at: p) else { return }
+        noteInteraction()
+        if eased {
+            let from = zoomTargets[t.camera]?.scale ?? zoom(of: t.camera).scale
+            let target = min(max(from * factor, 1), TileZoom.maxScale)
+            zoomTargets[t.camera] = (target, t.unit, t.frame)
+        } else {
+            zoomTargets[t.camera] = nil
+            setZoom(zoom(of: t.camera).zoomed(by: factor, atUnit: t.unit, in: t.frame), for: t.camera)
+        }
+    }
+
+    /// Pans the tile at `p` by `delta` points (the picture follows).
+    func pan(at p: CGPoint, by delta: CGVector) {
+        guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.shown.width > 0, t.shown.height > 0 else {
+            return
+        }
+        zoomTargets[t.camera] = nil
+        let unit = CGVector(dx: delta.dx / t.shown.width, dy: delta.dy / t.shown.height)
+        setZoom(zoom(of: t.camera).panned(byUnit: unit, in: t.frame), for: t.camera)
+    }
+
+    /// Back to 1x, eased, for the tile at `path` (its reset control).
+    func resetZoom(at path: NodePath) {
+        guard let leaf = frames.leaf(path), let camera = leaf.camera else { return }
+        resetZoom(camera)
+    }
+
+    /// 0: back to 1x on the selected (or focused) tile.
+    func resetSelectedZoom() {
+        guard let camera = selectedCamera else { return }
+        resetZoom(camera)
+    }
+
+    private func resetZoom(_ camera: CameraRef) {
+        guard zoom(of: camera).isZoomed else { return }
+        let frame = pictureSizes[camera].flatMap { size in
+            frames.leaves.first { $0.camera == camera }.map { zoomFrame($0.rect, size) }
+        } ?? TileZoom.wholeFrame
+        zoomTargets[camera] = (1, CGPoint(x: 0.5, y: 0.5), frame)
+    }
+
+    /// One display refresh of the mouse-wheel easing.
+    private func stepZoom() {
+        let now = CACurrentMediaTime()
+        let dt = lastPrepare.map { min(now - $0, 0.1) } ?? 1.0 / 60
+        lastPrepare = now
+        guard !zoomTargets.isEmpty else { return }
+        for (camera, t) in zoomTargets {
+            let current = zoom(of: camera)
+            let scale = TileZoom.eased(from: current.scale, to: t.scale, dt: dt)
+            let q = current.picturePoint(atUnit: t.unit, in: t.frame)
+            setZoom(current.zoomed(to: scale, keeping: q, atUnit: t.unit, in: t.frame), for: camera)
+            if scale == t.scale { zoomTargets[camera] = nil }
+        }
+    }
+
     /// Leaves focus without animating (the window closes, the tree changes).
     func tearDown() {
         endFocusImmediately()
@@ -407,10 +678,20 @@ final class StageView: NSView {
 
     // MARK: Pointer (from the overlay)
 
+    /// A plain drag in a tile zoomed past 1x pans its picture; at 1x, or
+    /// while editing the layout, it drags the tile to swap (docs/UX.md
+    /// "Digital zoom").
+    private func panGesture(at p: CGPoint) -> Gesture? {
+        guard !state.editing, let leaf = drawnLeaf(at: p), let camera = leaf.camera, zoom(of: camera).isZoomed else {
+            return nil
+        }
+        return .pan(camera, last: p)
+    }
+
     fileprivate func mouseDown(at p: CGPoint, clickCount: Int) {
         window?.makeFirstResponder(self)
         if state.focused != nil {
-            if clickCount == 2 { unfocus() }
+            if clickCount == 2 { unfocus() } else { gesture = panGesture(at: p) }
             return
         }
         if let d = frames.divider(at: p, minimum: 8) {
@@ -427,7 +708,7 @@ final class StageView: NSView {
             return
         }
         state.selected = leaf.path
-        gesture = .tile(from: leaf.path, start: p, dragging: false)
+        gesture = panGesture(at: p) ?? .tile(from: leaf.path, start: p, dragging: false)
         refreshChrome()
         delegate?.stageDidChangeState(self)
     }
@@ -448,6 +729,11 @@ final class StageView: NSView {
             NSCursor.closedHand.set()
             let target = frames.leaf(at: p)?.path
             setDropTarget(target == from ? nil : target)
+        case .pan(let camera, let last)?:
+            gesture = .pan(camera, last: p)
+            // Measured in the tile where the drag began, wherever it goes.
+            guard let leaf = currentLeaves.last(where: { $0.camera == camera && $0.rect.contains(last) }) else { return }
+            pan(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: CGVector(dx: p.x - last.x, dy: p.y - last.y))
         case nil:
             break
         }
@@ -528,9 +814,9 @@ final class StageView: NSView {
     // MARK: Keyboard and menus
 
     override func keyDown(with event: NSEvent) {
+        // Space, Return and the arrows arrive as window shortcuts
+        // (ViewerWindow); what is left here is the stage's own.
         switch event.keyCode {
-        case 36, 76, 49:  // Return, Enter, Space
-            toggleFocus()
         case 53:  // Escape
             if state.focused != nil {
                 unfocus()
@@ -600,6 +886,27 @@ private final class StageOverlay: NSView {
     override func mouseDragged(with event: NSEvent) { stage?.mouseDragged(to: point(event)) }
     override func mouseUp(with event: NSEvent) { stage?.mouseUp(at: point(event)) }
     override func menu(for event: NSEvent) -> NSMenu? { stage?.menu(at: point(event)) }
+
+    // A mouse wheel zooms around the pointer; a trackpad's (or Magic
+    // Mouse's) two-finger scroll pans a zoomed tile, and zooms with Option
+    // held; a pinch zooms.
+    override func scrollWheel(with event: NSEvent) {
+        guard let stage else { return }
+        let p = point(event)
+        if event.hasPreciseScrollingDeltas {
+            if event.modifierFlags.contains(.option) {
+                stage.zoom(at: p, by: exp(Double(event.scrollingDeltaY) * 0.01), eased: false)
+            } else {
+                stage.pan(at: p, by: CGVector(dx: event.scrollingDeltaX, dy: event.scrollingDeltaY))
+            }
+        } else if event.scrollingDeltaY != 0 {
+            stage.zoom(at: p, by: pow(1.25, Double(event.scrollingDeltaY)), eased: true)
+        }
+    }
+
+    override func magnify(with event: NSEvent) {
+        stage?.zoom(at: point(event), by: 1 + Double(event.magnification), eased: false)
+    }
 
     override func resetCursorRects() {
         for (rect, cursor) in stage?.cursorRects() ?? [] { addCursorRect(rect, cursor: cursor) }
