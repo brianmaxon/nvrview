@@ -8,12 +8,21 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+audio-pipeline = { path = "../audio-pipeline" }
 bc-protocol = { path = "../bc-protocol" }
 bc-session = { path = "../bc-session" }
+crossbeam-queue = "0.3.8"
 video-pipeline = { path = "../video-pipeline" }
 viewer-log = { path = "../viewer-log" }
 tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "rt-multi-thread", "macros"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+# The host clock (src/clock.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Performance"] }
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }

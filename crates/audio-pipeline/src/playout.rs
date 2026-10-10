@@ -58,6 +58,8 @@ pub(crate) struct Block<'a> {
     pub timeline: Option<Timeline>,
     pub map: Option<PresentationMap>,
     pub playout_delay_us: f64,
+    /// Rate of change of the playout delay (µs per µs).
+    pub delay_rate: f64,
     pub now_us: f64,
 }
 
@@ -267,11 +269,16 @@ impl Playout {
         }
         let nominal = f64::from(b.format.sample_rate) / self.out_rate;
         let feed_forward = tl.rate() / map.host_per_camera / self.out_rate;
-        let step = (feed_forward * (1.0 + correction)).clamp(
+        // A growing playout delay means each sample is heard that much
+        // later than the last: play slower by its rate (and faster while it
+        // shrinks), so the change needs no jump and no correction.
+        let step = (feed_forward * (1.0 + correction - b.delay_rate)).clamp(
             nominal * (1.0 - MAX_CORRECTION),
             nominal * (1.0 + MAX_CORRECTION),
         );
-        self.stats.correction = step / nominal - 1.0;
+        // Clock skew and controller only; the delay's own rate is reported
+        // with the delay.
+        self.stats.correction = step / nominal - 1.0 + b.delay_rate;
         self.stats.av_offset_us = self.err_f.map(|f| f * 1e6);
 
         self.scratch.clear();

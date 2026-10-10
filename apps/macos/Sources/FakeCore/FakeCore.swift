@@ -98,6 +98,11 @@ public final class FakeCore: CoreAPI {
     private let problems = Mutex<[String]>([])
     private let late = Atomic<Int>(0)
     private let afterFree = Atomic<Int>(0)
+    /// The fake's audio renderer (see `FakeAudio`).
+    public let audio = FakeAudio()
+    private let audioTiles = Mutex<[UInt64: FakeTileAudio]>([:])
+    private let tapLock = NSLock()
+    private let output = Mutex<(sampleRate: UInt32, channels: UInt32)?>(nil)
 
     public init(options: Options, sink: any CoreSink) {
         self.options = options
@@ -247,6 +252,81 @@ public final class FakeCore: CoreAPI {
         for t in tiles { t.stop() }
     }
 
+    // MARK: Audio
+
+    public func audioSetOutput(sampleRate: UInt32, channels: UInt32) throws(CoreStatus) {
+        requireOutsideCallback("nv_audio_set_output")
+        guard (8_000...384_000).contains(sampleRate), (1...2).contains(channels) else { throw .invalidArgument }
+        output.withLock { $0 = (sampleRate, channels) }
+        audio.channels.store(channels, ordering: .releasing)
+        audio.sampleRate.store(sampleRate, ordering: .releasing)
+    }
+
+    public func tileAudioSet(_ tile: UInt64, audible: Bool, volume: Float) throws(CoreStatus) {
+        requireOutsideCallback("nv_tile_audio_set")
+        guard volume.isFinite, volume >= 0 else { throw .invalidArgument }
+        guard world.withLock({ $0.tiles[tile] }) != nil else { throw .unknownID }
+        let gain = audioTiles.withLock { t -> Float in
+            t[tile, default: FakeTileAudio()].audible = audible
+            t[tile, default: FakeTileAudio()].volume = volume
+            return t.values.filter(\.audible).map(\.volume).max() ?? 0
+        }
+        audio.gainBits.store(gain.bitPattern, ordering: .relaxed)
+    }
+
+    public func tileAudioTap(_ tile: UInt64, enabled: Bool) throws(CoreStatus) {
+        requireOutsideCallback("nv_tile_audio_tap")
+        guard world.withLock({ $0.tiles[tile] }) != nil else { throw .unknownID }
+        // Like the real core: no block for the tile after this returns.
+        tapLock.withLock {
+            audioTiles.withLock { $0[tile, default: FakeTileAudio()].tapped = enabled }
+        }
+    }
+
+    public var audioRenderHook: AudioRenderHook { audio.hook }
+
+    /// The format the app last set with `audioSetOutput`.
+    public var audioOutput: (sampleRate: UInt32, channels: UInt32)? { output.withLock { $0 } }
+
+    /// Emits `count` tap blocks (1024 samples of a 16 kHz tone, camera time
+    /// following the sample count) to a tapped tile, on the calling thread.
+    /// Returns how many were emitted (0 when the tile is not tapped).
+    @discardableResult
+    public func pumpAudio(tile: UInt64, count: Int = 1) -> Int {
+        var emitted = 0
+        var samples = [Float](repeating: 0, count: 1024)
+        for _ in 0..<count {
+            let sent = tapLock.withLock { () -> Bool in
+                guard let first = audioTiles.withLock({ t -> UInt64? in
+                    guard t[tile]?.tapped == true else { return nil }
+                    defer { t[tile]!.blocks += 1 }
+                    return t[tile]!.blocks * 1024
+                }) else { return false }
+                for i in 0..<samples.count {
+                    samples[i] = 0.25 * Float(sin(Double(first + UInt64(i)) * 2 * Double.pi * 440 / 16_000))
+                }
+                let wall = Int64(Date().timeIntervalSince1970 * 1e6)
+                samples.withUnsafeBufferPointer { buf in
+                    let block = CoreAudioBlock(
+                        samples: buf, epoch: 0, firstSample: first, cameraTimeMicros: Int64(first) * 1_000_000 / 16_000,
+                        wallClockMicros: wall, discontinuity: first == 0)
+                    insideCallback { sink.core(didTap: block, tile: tile) }
+                }
+                return true
+            }
+            if !sent { break }
+            emitted += 1
+        }
+        return emitted
+    }
+
+    /// The `audio_stats` event a real core would send for this tile, if it
+    /// has audio settings.
+    fileprivate func audioStatsJSON(tile: UInt64) -> String? {
+        guard let a = audioTiles.withLock({ $0[tile] }) else { return nil }
+        return #"{"type":"audio_stats","tile":\#(tile),"records":\#(a.blocks),"decoded":\#(a.blocks),"audible":\#(a.audible),"volume":\#(a.volume),"tapped":\#(a.tapped),"codec":"aac","playout_delay_ms":100,"future_field":1}"#
+    }
+
     // MARK: Test hooks
 
     /// Pushes up to `count` access units of the tile's clip through the
@@ -292,7 +372,11 @@ public final class FakeCore: CoreAPI {
     // MARK: Internals
 
     private func detach(_ id: UInt64) -> FakeTile? {
-        world.withLock { w in
+        tapLock.withLock { _ = audioTiles.withLock { $0.removeValue(forKey: id) } }
+        audio.gainBits.store(
+            audioTiles.withLock { $0.values.filter(\.audible).map(\.volume).max() ?? 0 }.bitPattern,
+            ordering: .relaxed)
+        return world.withLock { w in
             for (device, var d) in w.devices where d.tiles.contains(id) {
                 d.tiles.removeAll { $0 == id }
                 w.devices[device] = d
@@ -392,14 +476,23 @@ private final class FakeTile: Sendable {
             let period = 1.0 / fps
             var next = ContinuousClock.now
             var lastStats = ContinuousClock.now
+            let audioStart = ContinuousClock.now
+            var audioBlocks = 0
             while !cancel.load(ordering: .acquiring) {
                 _ = pump(count: 1)
+                // Tap blocks at the device's rate: one per 64 ms.
+                let due = Int((ContinuousClock.now - audioStart) / .milliseconds(64))
+                if due > audioBlocks {
+                    owner.pumpAudio(tile: id, count: due - audioBlocks)
+                    audioBlocks = due
+                }
                 next += .seconds(period)
                 if ContinuousClock.now - lastStats > .seconds(1) {
                     lastStats = ContinuousClock.now
                     let a = answerLog
                     owner.event(
                         #"{"type":"tile_stats","tile":\#(id),"received":\#(state.withLock { $0.cursor }),"decoded":\#(a.decodedPTS.count),"gated":\#(gated),"dropped":0,"failures":\#(a.failures.count),"resets":0}"#)
+                    if let json = owner.audioStatsJSON(tile: id) { owner.event(json) }
                 }
                 let wait = next - ContinuousClock.now
                 if wait > .zero {

@@ -17,6 +17,9 @@ import VideoKit
 /// sent to a freed core.
 public final class CoreBridge: Sendable {
     public typealias EventHandler = @Sendable (CoreEvent) -> Void
+    /// Receives tapped audio on the core's tap thread; the block is borrowed
+    /// for the duration of the call.
+    public typealias AudioTapHandler = @Sendable (_ block: CoreAudioBlock, _ tile: UInt64) -> Void
 
     final class Router: CoreSink {
         struct Tiles {
@@ -35,8 +38,16 @@ public final class CoreBridge: Sendable {
         /// core out through it before freeing.
         let gate = Mutex(Gate())
         let onEvent: EventHandler
+        let onAudioTap: AudioTapHandler?
 
-        init(onEvent: @escaping EventHandler) { self.onEvent = onEvent }
+        init(onEvent: @escaping EventHandler, onAudioTap: AudioTapHandler?) {
+            self.onEvent = onEvent
+            self.onAudioTap = onAudioTap
+        }
+
+        func core(didTap block: CoreAudioBlock, tile id: UInt64) {
+            onAudioTap?(block, id)
+        }
 
         func core(didDeliver action: CoreAction, tile id: UInt64) {
             guard let tile = registry.withLock({ $0.byID[id] }) else { return }
@@ -76,11 +87,15 @@ public final class CoreBridge: Sendable {
     private let router: Router
     /// The core, for calls from outside callbacks. Nil after `shutdown`.
     private let core = Mutex<(any CoreAPI)?>(nil)
+    /// Players rendering from the core; stopped before it is freed.
+    private let players = Mutex<[Weak<AudioPlayer>]>([])
 
     /// Creates the core through `factory` (`CCore.factory(...)` or
     /// `FakeCore.factory(...)`).
-    public init(factory: CoreFactory, onEvent: @escaping EventHandler = { _ in }) throws(CoreStatus) {
-        router = Router(onEvent: onEvent)
+    public init(
+        factory: CoreFactory, onEvent: @escaping EventHandler = { _ in }, onAudioTap: AudioTapHandler? = nil
+    ) throws(CoreStatus) {
+        router = Router(onEvent: onEvent, onAudioTap: onAudioTap)
         let created = try factory(router)
         router.gate.withLock { $0.core = created }
         core.withLock { $0 = created }
@@ -151,12 +166,51 @@ public final class CoreBridge: Sendable {
         return (try? c.gridLayout(viewport: viewport, gap: gap, pictureSizes: pictureSizes, fill: fill)) ?? []
     }
 
+    // MARK: Audio
+
+    /// A player that renders this core's audio (`AudioPlayer`); it is stopped
+    /// by `shutdown` before the core is freed. Start it yourself.
+    public func makeAudioPlayer(mode: AudioPlayer.Mode = .device) throws(CoreStatus) -> AudioPlayer {
+        let c = try live()
+        let player = AudioPlayer(hook: c.audioRenderHook, mode: mode) { [weak self] rate, channels in
+            guard let self else { return .closed }
+            do throws(CoreStatus) {
+                try self.live().audioSetOutput(sampleRate: rate, channels: channels)
+                return .ok
+            } catch {
+                return error
+            }
+        }
+        players.withLock { list in
+            list.removeAll { $0.value == nil }
+            list.append(Weak(player))
+        }
+        return player
+    }
+
+    /// `nv_tile_audio_set`: makes the tile audible (or silent) at `volume`.
+    public func setTileAudio(_ tile: CoreTile, audible: Bool, volume: Float = 1) throws(CoreStatus) {
+        try live().tileAudioSet(tile.id, audible: audible, volume: volume)
+    }
+
+    /// `nv_tile_audio_tap`: blocks go to the `onAudioTap` handler.
+    public func setTileAudioTap(_ tile: CoreTile, enabled: Bool) throws(CoreStatus) {
+        try live().tileAudioTap(tile.id, enabled: enabled)
+    }
+
+    /// `nv_clock_now_ns`.
+    public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
+
     // MARK: Shutdown
 
     /// Closes everything: stops reporting, frees the core (no callback runs
     /// after that), then releases every decoder. Idempotent. Call from outside
     /// any callback, on every exit path.
     public func shutdown() {
+        // Audio renders straight into the core: stop every player first.
+        for player in players.withLock({ list in defer { list.removeAll() }; return list.compactMap(\.value) }) {
+            player.stop()
+        }
         // Stops decoder threads from calling into the core, and waits for any
         // call in progress (they never block, so this is brief).
         let taken = router.gate.withLock { g -> (any CoreAPI)? in
@@ -176,3 +230,4 @@ public final class CoreBridge: Sendable {
         }
     }
 }
+

@@ -18,10 +18,11 @@
 //! Measurement: the source has a single-sample impulse every `click_every`
 //! samples. The renderer's output is scanned for peaks; for each, the
 //! latency is the host time it is heard minus the host time at which its
-//! sample was captured. Playout aims at a constant latency: the delivery
-//! delay reference (the base delay plus the low percentile of the jitter
-//! that the presentation estimator uses) plus the playout delay.
-//! [`SimResult::errors`] gives each click's deviation from that.
+//! sample was captured. Playout aims at the delivery delay reference (the
+//! base delay plus the percentile of the jitter that the presentation
+//! estimator uses) plus the playout delay in effect for that click (adaptive
+//! unless the config fixes it). [`SimResult::errors`] gives each click's
+//! deviation from that.
 
 #![allow(dead_code)]
 
@@ -165,8 +166,12 @@ pub struct SimResult {
     pub clicks_sent: u64,
     pub tile: TileAudio,
     pub output: AudioOutput,
-    /// The latency playout aims at, µs.
+    /// The latency playout aims at at the end, µs.
     pub expected_latency_us: f64,
+    /// The delivery delay reference, µs: the latency without playout delay.
+    pub reference_us: f64,
+    /// (camera second, playout delay in µs) after every record.
+    pub delays: Vec<(f64, f64)>,
     /// Jitter deviations generated (for reporting).
     pub jitter_sd_us: f64,
     pub jitter_range_us: (f64, f64),
@@ -175,9 +180,21 @@ pub struct SimResult {
 impl SimResult {
     /// (camera second, deviation from the expected latency in µs) per click.
     pub fn errors(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
-        self.heard
-            .iter()
-            .map(|h| (h.camera_s, h.latency_us - self.expected_latency_us))
+        self.heard.iter().map(|h| {
+            (
+                h.camera_s,
+                h.latency_us - self.reference_us - self.delay_at(h.camera_s),
+            )
+        })
+    }
+
+    /// The playout delay used for the record holding camera second `t`.
+    pub fn delay_at(&self, t: f64) -> f64 {
+        let i = self.delays.partition_point(|&(s, _)| s < t);
+        self.delays
+            .get(i)
+            .or(self.delays.last())
+            .map_or(0.0, |&(_, d)| d)
     }
 
     /// Largest absolute deviation after `settle_s` and the number of clicks.
@@ -213,13 +230,9 @@ pub fn run_with(
         },
         OutputConfig::default(),
     );
-    let tile_cfg = match cfg.playout_delay_us {
-        Some(l) => TileConfig {
-            playout_delay_us: l,
-        },
-        None => TileConfig::default(),
+    let tile_cfg = TileConfig {
+        playout_delay_us: cfg.playout_delay_us,
     };
-    let playout_delay_us = tile_cfg.playout_delay_us;
     let mut tile = TileAudio::new(tile_cfg);
     tile.set_output(Some(out.clone()));
     tile.set_audible(true);
@@ -251,6 +264,7 @@ pub fn run_with(
     let mut detector = Detector::default();
     let mut clicks_sent = 0u64;
     let mut devs = Vec::new();
+    let mut delays = Vec::new();
 
     let cb_start = HOST0_US + 50_000.0;
     loop {
@@ -307,6 +321,8 @@ pub fn run_with(
                     clicks_sent += 1;
                 }
             }
+            // The delay this record is played with (before the push moves it).
+            delays.push((t_audio - rec_s, tile.stats().playout_delay_us));
             tile.push_pcm(fmt, &pcm, last_pts, arrival as u64, None);
             observe(t_audio, &tile);
         }
@@ -317,12 +333,20 @@ pub fn run_with(
     let p_low = sorted[((sorted.len() - 1) as f64 * DELAY_PERCENTILE) as usize];
     let mean = devs.iter().sum::<f64>() / devs.len() as f64;
     let sd = (devs.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / devs.len() as f64).sqrt();
-    let expected = cfg.base_delay_us + p_low + playout_delay_us;
+    let reference = cfg.base_delay_us + p_low;
+    let delay_at = |t: f64| {
+        let i = delays.partition_point(|&(s, _)| s < t);
+        delays.get(i).or(delays.last()).map_or(0.0, |&(_, d)| d)
+    };
 
-    // Attribute each heard peak to the nearest click.
+    // Attribute each heard peak to the nearest click. The delay changes by
+    // at most a few ms per second, so the one at the time heard is close
+    // enough to pick the click.
     let heard = heard
         .into_iter()
         .map(|host_us| {
+            let rough_s = (host_us - HOST0_US) / 1e6 / cfg.camera_skew;
+            let expected = reference + delay_at(rough_s);
             let cam_s = (host_us - expected - HOST0_US) / 1e6 / cfg.camera_skew;
             let k = (cam_s * cfg.audio_rate / cfg.click_every as f64)
                 .round()
@@ -335,12 +359,15 @@ pub fn run_with(
             }
         })
         .collect();
+    let expected = reference + delays.last().map_or(0.0, |&(_, d)| d);
     SimResult {
         heard,
         clicks_sent,
         tile,
         output: out,
         expected_latency_us: expected,
+        reference_us: reference,
+        delays,
         jitter_sd_us: sd,
         jitter_range_us: (sorted[0], sorted[sorted.len() - 1]),
     }

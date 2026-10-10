@@ -44,6 +44,10 @@ final class LiveSession {
     var onChange: () -> Void = {}
     private var device: UInt64?
     private var closed = false
+    /// Plays the core's audio on the default output device.
+    private var player: AudioPlayer?
+    /// Whether the shown tile is audible (the Listen menu item).
+    private(set) var listening = false
 
     /// The real core, if this build has one.
     static func realFactory() -> CoreFactory? {
@@ -80,6 +84,7 @@ final class LiveSession {
         let id = try bridge.addDevice(host: s.host, port: s.port, user: s.user, password: password)
         device = id
         tile = try bridge.openTile(device: id, channel: s.channel, tier: s.tier)
+        applyListening()
         onChange()
     }
 
@@ -92,10 +97,40 @@ final class LiveSession {
         tile = nil
     }
 
+    /// Starts audio output on the default device. `muted` silences the
+    /// device side (self-tests never make a sound).
+    func startAudio(muted: Bool) {
+        guard player == nil, !closed else { return }
+        do {
+            let p = try bridge.makeAudioPlayer()
+            if muted { p.outputVolume = 0 }
+            try p.start()
+            player = p
+        } catch {
+            FileHandle.standardError.write(Data("audio output unavailable: \(error)\n".utf8))
+        }
+    }
+
+    /// The Listen toggle: makes the shown tile audible or silent.
+    func setListening(_ on: Bool) {
+        listening = on
+        applyListening()
+        onChange()
+    }
+
+    private func applyListening() {
+        guard let tile else { return }
+        try? bridge.setTileAudio(tile, audible: listening)
+    }
+
     /// Closes the core: every session, every tile. Call on every exit path.
     func shutdown() {
         guard !closed else { return }
         closed = true
+        // Audio renders straight from the core: stop it first (the bridge
+        // would too).
+        player?.stop()
+        player = nil
         bridge.shutdown()
         tile = nil
         device = nil
@@ -120,6 +155,8 @@ final class LiveSession {
             if let tile, t != tile.id { return }
         case .tileStats:
             return
+        case .audioStats(let t, _):
+            if let tile, t != tile.id { return }
         }
         status.apply(event)
         onChange()

@@ -102,16 +102,54 @@ the crate's `Renderer`.
   every later frame still plays at its time. Latency never grows by the
   length of an underrun; this is the opposite of a player that resumes where
   it stopped, whose latency ratchets up with every stall.
-- **Playout delay**: 280 ms after the median delivery by default. It must
-  cover one record (64 ms: a record is sent only after its last sample) plus
-  the late tail of the jitter (177 ms above median measured). Note that with
-  pictures shown on arrival the video itself jitters by the same ±67 ms, and
-  audio lags the typical picture by the playout delay, more than lip-sync
-  tolerances (tens of ms). **Decision: video is never delayed** (live view,
-  above all full screen, shows the newest picture), so audio trails the
-  picture by its playout delay. The delay therefore adapts to the measured
-  jitter of each stream (a high percentile of recent delivery delay, bounded)
-  instead of a fixed 280 ms, so it is as short as the network allows.
+- **Playout delay**: how long after its picture each sample is heard. Video
+  is never delayed (live view, above all full screen, shows the newest
+  picture), so audio trails the picture by this delay, and it adapts to
+  each stream to be as short as its network allows (`crates/audio-pipeline`
+  `delay.rs`). It must cover a record's length (64 ms: a record is sent only
+  after its last sample), its lateness against the presentation reference,
+  and the output's lead (the renderer reads about 20 ms ahead of the time
+  it is heard). The target is the 99th percentile, over the last 600 s of
+  arrivals, of the *per-second maximum* lateness, plus those two, kept
+  within 100–500 ms: every record arrives in time in all but about one
+  second in a hundred, a stall (a second or two of late records) every
+  few minutes does not raise it, and a rough patch that recurs every ten
+  minutes or so is remembered between occurrences. (A plain 99th
+  percentile of records underran every few seconds in the simulation: late
+  records come singly, spread over many seconds. A 300 s window forgot a
+  rough patch in a replayed LAN recording between its occurrences.)
+  Lateness is kept across stream restarts (the network has not changed).
+  The floor is a record plus the lead plus slack; the ceiling is where
+  audio stops feeling like the picture's sound and a network needing more
+  is stalling, which resyncs handle. The delay starts at 250 ms; after
+  every (re)start it steps up by a 50 ms warm-up allowance that fades over
+  two minutes, because the presentation reference is still a young median
+  then and its early errors arrive as lateness (without it, most underruns
+  in the replayed recording fell in the first two minutes after each
+  restart). It moves toward the target at most 2 ms per second
+  (approaching it with a 10 s time constant), and playout feeds that rate
+  forward into its resampling ratio, so a change is a 0.2% tempo change
+  (3.5 cents), never a jump. In simulation: 100 ms on a clean network
+  (0–10 ms jitter), about 280 ms under the measured LAN jitter, about
+  400 ms under jitter half again as large; every click stays within
+  ±40 ms of its moving target. A caller can still fix the delay
+  (`TileConfig::playout_delay_us`).
+- **Start**: playout waits until the estimated presentation map has
+  settled and has a second of deliveries for its median (the first 3 s of
+  a stream; an explicit map is used at once).
+  Placing audio on the rough early map and correcting it a second later
+  cost two or three audible jumps after every (re)start.
+- **Soak** (`tools/soak`, a real 10-minute LAN recording looped for 24 h of
+  simulated time, each loop a restart): with the fixed 280 ms delay, the
+  filtered A/V error after each start's first minute ranged −15.8 to
+  +35.1 ms (mean +0.4), up to 47.9 ms in the first minute, with 436 resyncs
+  (all in the first seconds after a restart) and 144 underruns (one per
+  loop seam). With the adaptive delay, the warm-up allowance, and playout
+  waiting for a settled map: −15.1 to +34.9 ms (mean +1.1), up to 27.2 ms
+  in the first minute, no resyncs, the same 144 seam underruns, and a
+  delay of 256 ms. The rate estimate at the end of every pass is
+  16,000.12 Hz; a run that ends seconds after a restart reports the young
+  estimate of the new epoch (16,009 Hz), which is not a bias.
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the
@@ -135,22 +173,36 @@ Core ML on macOS, ONNX Runtime/DirectML on Windows). Results come back as
 timestamped text that the UI can align with video. A Rust-side engine can
 replace this later without changing the tap. Nothing leaves the machine.
 
-## C interface (planned, ABI 2)
+## C interface (ABI 2)
 
-Sketch, to be finalized when implemented:
+Specified in [FFI.md](FFI.md#audio) and [nvrview.h](nvrview.h):
 
 - `nv_audio_set_output(core, sample_rate, channels)`
-- `nv_tile_audio_enable(core, tile, enabled, volume)`
-- `nv_audio_render(core, float *out, frames, host_time_ns)`: called from the
-  app's real-time audio callback; mixes audible tiles; never blocks, locks,
-  or allocates. `host_time_ns` is when `out[0]` will be heard, on the same
-  clock as the core's arrival times (the core must define that clock for the
-  app, or convert).
-- `nv_tile_audio_tap(core, tile, enabled)` plus an `on_audio_tap` callback
-  delivering borrowed 16 kHz mono blocks with timestamps.
-- `audio_stats` events: buffer level, rate estimate, A/V offset, ratio
-  deviation, resyncs, underruns, overflow, records decoded, concealed, and
-  rejected, tap drops.
+- `nv_audio_render(core, out, frames, channels, host_time_ns)`: called from
+  the app's real-time callback; mixes audible tiles; never blocks, locks,
+  allocates, or frees. It takes the channel count the buffer was sized for
+  (unlike the first sketch), so a callback still running in the old format
+  after `nv_audio_set_output` gets silence instead of an overrun.
+- `host_time_ns` is on the core's clock, which is the platform host clock
+  (`nv_clock_now_ns`; on macOS `mach_absolute_time` in nanoseconds, the
+  unit of `AudioTimeStamp.mHostTime`), so arrival times and render times
+  need no conversion between clocks.
+- `nv_tile_audio_set(core, tile, audible, volume)` (audible and volume in
+  one call; volume 0 is the mute that keeps the slot).
+- `nv_tile_audio_tap(core, tile, enabled)` plus the `on_audio_tap` callback
+  delivering borrowed 16 kHz mono `NvAudioBlock`s with camera time, arrival
+  wall-clock time, epoch, and a discontinuity flag.
+- `audio_stats` events: buffer level, rate estimate, A/V error, playout
+  delay and its target, ratio deviation, resyncs, underruns, overflow,
+  records decoded, concealed, rejected, and talk-back records ignored, tap
+  blocks and drops.
+
+In viewer-core each tile thread owns its `TileAudio`; the core owns the
+`AudioOutput`, and the `Renderer` changes hands between the control thread
+(which replaces it on a format change) and the real-time thread through two
+lock-free single-slot queues, so a replaced renderer is always freed off the
+real-time thread. Records with stream index 1 (`01wb`, the client's
+talk-back form, reported) are counted and never played.
 
 ## Tests
 
@@ -168,6 +220,13 @@ In `crates/audio-pipeline` unless noted.
   ±40 ms of its target after the first minute, and the 10-minute mean offset
   shows no trend. Also: resync after a 3 s audio gap and a 6 s stall, and a
   check that the ratio correction stays small under jitter.
+- viewer-core, end to end against mock-nvr (AAC clicks, 30 ms jitter): the
+  core's renderer, driven like a device on the host clock, plays each click
+  within a few ms of its picture's arrival plus the reported playout delay;
+  taps, talk-back, and argument checks. viewer-ffi: `nv_audio_render` from
+  its own thread under a counting allocator while the app changes format,
+  volume, audibility, and taps: no allocation. The C smoke test renders
+  from a pthread.
 - Decoder accuracy against FFmpeg; fuzzed records through the decoder and a
   whole tile never panic; taps drop oldest and never disturb playout; the
   render path, under a counting allocator, never allocates or frees, through

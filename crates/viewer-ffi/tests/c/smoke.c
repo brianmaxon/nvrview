@@ -1,7 +1,8 @@
 /*
  * A C client of the nvrview core: opens one tile on a (mock) device, plays
  * it with a fake decoder that answers every Decode from inside the
- * callback, and checks the shutdown guarantees. Built and run by
+ * callback, renders its audio from a separate (audio-device-like) thread
+ * with a tap attached, and checks the shutdown guarantees. Built and run by
  * scripts/test-c-ffi.sh against a spawned mock-nvr.
  *
  * usage: smoke HOST PORT   (password from NVRVIEW_TEST_PASSWORD)
@@ -11,6 +12,8 @@
 
 #include "nvrview.h"
 
+#include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +23,8 @@
 static NvCore *_Atomic g_core;
 static atomic_ulong g_configures, g_decodes, g_answered, g_events, g_callbacks;
 static atomic_ulong g_problems, g_tile_closed;
+static atomic_ulong g_taps, g_renders, g_loud;
+static atomic_bool g_stop_render;
 /* nv_tile_open writes the ID here, and only then lets actions run, so the
  * callback may read it without further synchronization. */
 static uint64_t g_tile;
@@ -101,6 +106,43 @@ static void on_event(void *context, const char *json, size_t len) {
     }
 }
 
+static void on_audio_tap(void *context, uint64_t tile, const NvAudioBlock *block) {
+    (void)context;
+    atomic_fetch_add(&g_callbacks, 1);
+    atomic_fetch_add(&g_taps, 1);
+    if (tile != g_tile || block->sample_rate != 16000 || block->samples == NULL ||
+        block->sample_count == 0) {
+        problem("bad tap block");
+    }
+}
+
+/* An audio device's real-time thread: 10 ms of 48 kHz stereo every 10 ms,
+ * each callback 10 ms ahead of when it is heard. */
+static void *render_thread(void *arg) {
+    NvCore *core = arg;
+    static float buf[480 * 2];
+    while (!atomic_load(&g_stop_render)) {
+        uint64_t host = nv_clock_now_ns() + 10000000u;
+        if (nv_audio_render(core, buf, 480, 2, host) != NV_OK) {
+            problem("nv_audio_render failed");
+        }
+        int loud = 0;
+        for (size_t i = 0; i < sizeof buf / sizeof buf[0]; i++) {
+            if (!isfinite(buf[i]) || buf[i] > 1.0f || buf[i] < -1.0f) {
+                problem("rendered sample out of range");
+                break;
+            }
+            loud |= fabsf(buf[i]) > 0.1f;
+        }
+        atomic_fetch_add(&g_renders, 1);
+        if (loud) {
+            atomic_fetch_add(&g_loud, 1);
+        }
+        sleep_ms(10);
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: smoke HOST PORT\n");
@@ -115,7 +157,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    NvCallbacks cb = {NULL, on_action, on_event};
+    NvCallbacks cb = {NULL, on_action, on_event, on_audio_tap};
     NvCore *core = NULL;
     if (nv_core_new(NULL, cb, &core) != NV_OK || core == NULL) {
         fprintf(stderr, "smoke: nv_core_new failed\n");
@@ -134,6 +176,23 @@ int main(int argc, char **argv) {
         return 1;
     }
     tile = g_tile;
+
+    pthread_t renderer;
+    if (nv_audio_set_output(core, 48000, 2) != NV_OK ||
+        nv_tile_audio_set(core, tile, true, 1.0f) != NV_OK ||
+        nv_tile_audio_tap(core, tile, true) != NV_OK) {
+        problem("audio setup failed");
+    }
+    {
+        float mono[16];
+        if (nv_audio_render(core, mono, 16, 1, nv_clock_now_ns()) != NV_ERR_INVALID_ARGUMENT) {
+            problem("a channel count other than the output's was accepted");
+        }
+    }
+    if (pthread_create(&renderer, NULL, render_thread, core) != 0) {
+        fprintf(stderr, "smoke: cannot start the render thread\n");
+        return 1;
+    }
 
     for (int i = 0; i < 1000 && atomic_load(&g_answered) < 50; i++) {
         sleep_ms(10);
@@ -157,6 +216,9 @@ int main(int argc, char **argv) {
     if (nv_device_remove(core, device) != NV_OK) {
         problem("nv_device_remove failed");
     }
+    /* Rendering stops before the core is freed. */
+    atomic_store(&g_stop_render, true);
+    pthread_join(renderer, NULL);
 
     NvTileLayout layout[2];
     NvSize sizes[2] = {{1920, 1080}, {0, 0}};
@@ -173,9 +235,14 @@ int main(int argc, char **argv) {
     }
     nv_core_free(NULL);
 
-    printf("smoke: configures=%lu decodes=%lu answered=%lu events=%lu tile_closed=%lu\n",
+    printf("smoke: configures=%lu decodes=%lu answered=%lu events=%lu tile_closed=%lu "
+           "renders=%lu audible_renders=%lu tap_blocks=%lu\n",
            atomic_load(&g_configures), atomic_load(&g_decodes), decoded,
-           atomic_load(&g_events), atomic_load(&g_tile_closed));
+           atomic_load(&g_events), atomic_load(&g_tile_closed), atomic_load(&g_renders),
+           atomic_load(&g_loud), atomic_load(&g_taps));
+    if (atomic_load(&g_renders) < 20) {
+        problem("the render thread barely ran");
+    }
     if (decoded < 50) {
         problem("fewer than 50 decodes in 10 s");
     }

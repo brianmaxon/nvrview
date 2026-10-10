@@ -14,6 +14,7 @@
 pub mod adpcm;
 pub mod adts;
 pub mod decode;
+pub mod delay;
 mod fit;
 pub mod output;
 mod playout;
