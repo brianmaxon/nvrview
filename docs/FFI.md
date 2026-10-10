@@ -13,11 +13,11 @@ app **actions**, not raw frames.
 | --- | --- | --- | --- |
 | core | `nv_core_new` | `nv_core_free` | owns the async runtime, every session, every tile, the log |
 | device | `nv_device_add` | `nv_device_remove`, or `nv_core_free` | one session (one login) per device, however many tiles |
-| tile | `nv_tile_open` | `nv_tile_close`, its device's removal, or `nv_core_free` | one channel and tier, one pipeline, one platform decoder |
+| tile | `nv_tile_open` | `nv_tile_close`, its device's removal, or `nv_core_free` | one channel; one tier at a time (`nv_tile_set_tier`), each tier a *generation* with its own pipeline and platform decoder |
 
 IDs are nonzero `uint64_t`, never reused within a core. Two tiles may show the
 same channel and tier; each has its own pipeline, and the device carries the
-stream once per tile (sharing one stream is a later optimization).
+stream once (the session shares one preview between every tile showing it).
 
 ## Threads
 
@@ -27,8 +27,8 @@ stream once per tile (sharing one stream is a later optimization).
   keyframe when the app falls behind.
 - `on_action` is serialized per tile; `on_event` is serialized across the
   core; `on_audio_tap` is serialized across the core on its own thread.
-- From inside any callback an app may call only `nv_tile_decoded` and
-  `nv_tile_decode_failed`. Everything else (`nv_tile_close`,
+- From inside any callback an app may call only `nv_tile_decoded`,
+  `nv_tile_decode_failed`, and `nv_tile_audio_level`. Everything else (`nv_tile_close`,
   `nv_device_remove`, `nv_core_free`, ...) must be called from outside, or it
   could wait on the thread it runs on.
 - `nv_tile_decoded` and `nv_tile_decode_failed` may be called from any thread
@@ -61,7 +61,8 @@ stream once per tile (sharing one stream is a later optimization).
 
 ## Actions
 
-Exactly the pipeline's actions (RENDERING.md), in order, per tile:
+Exactly the pipeline's actions (RENDERING.md), in order, per tile and
+generation (below):
 `CONFIGURE`, `DECODE`, `FLUSH`, `RESET`, `CLEAR`, and `STATUS`. Answering
 rules, also from RENDERING.md: every `DECODE` not discarded by a later
 `FLUSH`, `RESET`, or `CONFIGURE` gets exactly one `nv_tile_decoded` or
@@ -82,6 +83,44 @@ decoder that outputs the coded size must add `visible_rect`'s origin.
 The core also drives each pipeline's clock (`tick`) and tells it about
 reconnects (`discontinuity`); the app does not.
 
+## Switching a tile's stream tier
+
+`nv_tile_set_tier(core, tile, tier)` asks a tile to show another tier (main
+on focus or full screen, sub back in the grid) without recreating it and
+without a gap:
+
+- Every action carries `NvAction.generation`: 0 for the stream the tile was
+  opened with, one more for each switch the core starts. Each generation is
+  its own pipeline and needs its own platform decoder; the answering rules
+  above hold per generation, and `nv_tile_decoded` and
+  `nv_tile_decode_failed` take the generation of the action they answer.
+  Answers for a generation that has ended are ignored.
+- The core starts the new tier's stream first (shared with any tile already
+  showing it) and runs the new generation beside the old one, whose actions
+  keep flowing. When the new generation's first `DECODE` has been answered
+  with `nv_tile_decoded`, the old generation gets one final
+  `NV_ACTION_RESET` (destroy that decoder; nothing of it follows), and its
+  stream stops unless another tile shows it. That Reset, on the action path
+  in order with the new generation's actions, is the moment to show the new
+  generation's pictures; the `tile_tier` `active` event says the same on the
+  event path.
+- Asking for the tier already requested changes nothing (with no switch in
+  progress it reports `active` again). A newer request replaces one still
+  starting. A generation that never shows (its stream refused or ended, it
+  became undecodable, or nothing decoded within 15 s) ends with a final
+  `NV_ACTION_RESET` of that generation and `tile_tier` `failed`; the old
+  generation keeps playing.
+- Audio follows the shown generation (it restarts with the new stream).
+
+```json
+{"type":"tile_tier","tile":7,"tier":"main","state":"starting","generation":1}
+{"type":"tile_tier","tile":7,"tier":"main","state":"active","generation":1}
+{"type":"tile_tier","tile":7,"tier":"sub","state":"failed","generation":2,"reason":"timeout"}
+```
+
+`reason` (with `failed` only): `superseded`, `timeout`, `start_rejected`,
+`stream_ended`, `undecodable`, `session_closed`.
+
 ## Events
 
 `on_event` delivers small JSON objects, one per call. Unknown `type` values
@@ -96,7 +135,15 @@ change.
 {"type":"device_state","device":1,"state":"closed"}
 {"type":"device_info","device":1,"name":"NVR","model":"EXAMPLE-MODEL"}
 {"type":"channels","device":1,"channels":[{"channel":0,"connected":true,"tiers":["main","sub"],"name":"Channel 1","model":"EXAMPLE-CAM"}]}
-{"type":"tile_stats","tile":7,"received":120,"decoded":118,"gated":0,"dropped":2,"failures":0,"resets":0}
+{"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
+{"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
+{"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
+{"type":"motion","device":1,"channel":5,"state":"start","at_ns":789}
+{"type":"alarm","device":1,"channel":2,"kind":"visitor","state":"start","at_ns":790}
+{"type":"layouts_changed","revision":4}
+{"type":"timing","what":"first_picture","tile":7,"ns":123456789}
+{"type":"timing","what":"tier_switch","tile":7,"ns":2345678}
+{"type":"tile_stats","tile":7,"tier":"sub","generation":0,"received":120,"decoded":118,"gated":0,"dropped":2,"failures":0,"resets":0}
 {"type":"tile_closed","tile":7,"reason":"device_removed"}
 {"type":"audio_stats","tile":7,"records":386,"bytes":26722,"decoded":386,"concealed":0,"rejected":0,"talkback_ignored":0,"epoch":0,"audible":true,"volume":1,"tapped":true,"no_free_slot":false,"playout_delay_ms":223.76,"outliers":0,"timestamp_resets":0,"codec":"aac","sample_rate":16000,"channels":1,"rate_estimate":15999.93,"playout_delay_target_ms":100,"av_offset_ms":0.092,"buffered_ms":199.104,"correction_ppm":1.819,"resyncs":0,"starts":1,"underruns":0,"underrun_frames":0,"overflow_frames":0,"blocks_not_played":0,"tap_blocks":386,"tap_dropped":0}
 ```
@@ -112,7 +159,30 @@ change.
   For `nv_tile_close` it may arrive after the call returns (`reason`:
   `closed`, `device_removed`, `login_failed`, `core_shutdown`).
 - `tile_stats` arrives about once a second per tile while it is open, for
-  diagnostics overlays; apps may ignore it.
+  diagnostics overlays; apps may ignore it. It describes the shown
+  generation.
+- `device_info` also carries the device's `key` (see "Layouts").
+- **Detections.** Every device session subscribes to the device's
+  detection pushes right after login (command 192; docs/protocol.md
+  "Detection events") and the core turns each state snapshot into `start`
+  and `stop` events per channel: `detection` for the device's AI types
+  (`kind` in the device's names, lowercase: `people`, `vehicle`,
+  `dog_cat`, `face`, `package`, `cry`, ...; unknown kinds are passed
+  through), `motion` for motion, and `alarm` for other states the device
+  reports (`kind` as the device names it, such as `visitor` for a doorbell
+  press). `lens` is present (1) for the second lens of a multi-lens camera.
+  `source` is `device`; on-device models will report through the same
+  event with `source` `local`. `at_ns` is the core's clock
+  (`nv_clock_now_ns`) at arrival: the pushes carry no usable time. When the
+  session drops or the device is removed, everything active gets its
+  `stop` first.
+- `detects` in `channels` lists the detection kinds a channel's camera
+  advertises (199 `aitype` bits), once known; `[]` for a camera without
+  AI. It may arrive in a later `channels` event than the slot list.
+- `timing`: `first_picture` is the time from `nv_core_new` to the first
+  `nv_tile_decoded` of any tile (sent once; the app adds its own
+  launch-to-`nv_core_new` time); `tier_switch` is the time from
+  `nv_tile_set_tier` to the switch.
 - `audio_stats` arrives about once a second for each tile whose stream has
   carried audio. Fields that are not known yet are left out: `codec`,
   `sample_rate`, `channels` and `rate_estimate` until a record decodes,
@@ -161,6 +231,57 @@ if the two clocks counted sleep differently.
 sends its own talk-back in) are never played: they are counted as
 `talkback_ignored` in `audio_stats`.
 
+## Audio level
+
+`nv_tile_audio_level(core, tile, &peak, &rms)` reads a tile's level for a
+meter at display rate, from any thread, lock-free. `nv_audio_render`
+measures it on the samples it mixes, before the tile's volume (a muted
+tile still shows that sound arrives): peak with a 0.3 s release, RMS over
+about 0.1 s, both 0..1. A tile that is not audible (or not known) reads 0;
+the values freeze while nothing renders.
+
+## Layouts
+
+Layouts are split trees ([UX.md](UX.md)) the core stores, so every app on
+the machine (and later the web viewer) shares them.
+
+```json
+{"id":"entrances","name":"Entrances","version":1,
+ "root":{"split":"row","ratio":0.62,
+   "a":{"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3}},
+   "b":{"split":"col","ratio":0.34,"a":{"camera":null},"b":{"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":9}}}}}
+```
+
+- A node is a leaf `{"camera": null}` (an empty tile) or
+  `{"camera": {"device": key, "channel": 0..255}}`, or a split
+  `{"split": "row"|"col", "ratio": 0.02..0.98, "a": node, "b": node}`
+  (`row`: `a` left of `b`; `col`: `a` above `b`). At most 16 splits deep
+  and 64 tiles; `id` (non-empty), `name` and device keys up to 256 bytes;
+  a layout up to 64 KiB of JSON; up to 500 layouts. Members the core does
+  not know (anywhere in the layout) are kept as given, so apps may store
+  their own settings, such as a tile's tier or fill mode.
+- `nv_layout_put` inserts or replaces by `id`; the core sets `version` (1,
+  then one more on each replacement; a `version` the app passes is
+  ignored). `nv_layout_delete` removes one. `nv_layouts_get` returns
+  `{"revision": N, "layouts": [...]}` in the order layouts were first
+  stored; `revision` grows with every change. Each change sends
+  `{"type":"layouts_changed","revision":N}`, so several windows stay in
+  step.
+- **Device keys** name devices in layouts. The core assigns one per device
+  address (host, case-insensitive, and port) the first time it is added,
+  and keeps it across runs: `nv_device_key`, and `key` in `device_info`.
+  The per-run device IDs are not stable and never go into a layout. A
+  device whose address changes gets a new key (rekeying by device identity
+  is future work).
+- Storage: `layouts.json` and `devices.json` in `NvConfig.data_dir`, each
+  rewritten whole and atomically (temporary file, flush, rename). An
+  unreadable file is renamed to `*.unreadable` and the store starts empty.
+  With no `data_dir` both live in memory for the run.
+- Strings come back through `out`/`cap`/`len`: `*len` always receives the
+  length without the NUL; when `out` is NULL or `cap` <= `*len` the call
+  returns `NV_ERR_BUFFER_TOO_SMALL` and the app calls again with a buffer of
+  `*len + 1` bytes.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
@@ -172,7 +293,13 @@ addresses redacted. Apps keep their own logs; nothing is printed to stdout.
 `NV_ABI_VERSION` changes on any incompatible change to the header. ABI 2
 added audio: `on_audio_tap` at the end of `NvCallbacks`, `NvAudioBlock`,
 `nv_clock_now_ns`, `nv_audio_set_output`, `nv_audio_render`,
-`nv_tile_audio_set`, and `nv_tile_audio_tap`. Apps check
+`nv_tile_audio_set`, and `nv_tile_audio_tap`. ABI 3 (M3, planned in
+[FFI-ABI3.md](FFI-ABI3.md)) added tier switching (`nv_tile_set_tier`,
+`NvAction.generation`, and a `generation` argument to `nv_tile_decoded` and
+`nv_tile_decode_failed`), `nv_tile_audio_level`, the layouts store
+(`nv_layouts_get`, `nv_layout_put`, `nv_layout_delete`, `nv_device_key`,
+`NvConfig.data_dir`), `NV_ERR_BUFFER_TOO_SMALL`, and the detection,
+`tile_tier`, `layouts_changed`, and `timing` events. Apps check
 `nv_abi_version()` at startup and refuse to run on a mismatch.
 
 ## Builds

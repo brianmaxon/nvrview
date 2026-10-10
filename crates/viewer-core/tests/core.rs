@@ -93,7 +93,7 @@ fn tiles_share_one_login_and_play() {
         core.open_tile(dev, 0, StreamTier::Sub),
         Err(CoreError::Closed)
     );
-    assert_eq!(core.decoded(tiles[0], 0), Err(CoreError::Closed));
+    assert_eq!(core.decoded(tiles[0], 0, 0), Err(CoreError::Closed));
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn closing_a_tile_stops_its_preview_and_its_callbacks() {
     assert_eq!(rec.seen(a).len(), seen_at_close, "no on_action after close");
     assert!(rec.decodes(b) > b_at_close, "the other tile keeps playing");
     assert_eq!(core.close_tile(a), Err(CoreError::UnknownId));
-    assert_eq!(core.decoded(a, 0), Err(CoreError::UnknownId));
+    assert_eq!(core.decoded(a, 0, 0), Err(CoreError::UnknownId));
     wait_until("tile_closed", 5, || {
         rec.events_of("tile_closed")
             .iter()
@@ -483,7 +483,7 @@ fn arguments_and_limits() {
         core.open_tile(dev, 1, StreamTier::Sub),
         Err(CoreError::Limit)
     );
-    assert_eq!(core.decoded(t + 100, 0), Err(CoreError::UnknownId));
+    assert_eq!(core.decoded(t + 100, 0, 0), Err(CoreError::UnknownId));
     core.close_tile(t).unwrap();
     core.remove_device(dev).unwrap();
     core.shutdown();

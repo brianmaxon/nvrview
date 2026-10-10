@@ -79,6 +79,8 @@ pub struct Behavior {
 #[derive(Default)]
 struct TileRec {
     seen: Vec<Seen>,
+    /// The generation of each entry in `seen`.
+    gens: Vec<u32>,
     configures: usize,
     decodes: usize,
     answered: usize,
@@ -122,6 +124,25 @@ impl Recorder {
             .get(&tile)
             .map(|t| t.seen.clone())
             .unwrap_or_default()
+    }
+
+    /// Every action with its generation.
+    pub fn seen_gen(&self, tile: u64) -> Vec<(u32, Seen)> {
+        self.tiles
+            .lock()
+            .unwrap()
+            .get(&tile)
+            .map(|t| t.gens.iter().copied().zip(t.seen.iter().cloned()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The actions of one generation.
+    pub fn seen_of(&self, tile: u64, generation: u32) -> Vec<Seen> {
+        self.seen_gen(tile)
+            .into_iter()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, s)| s)
+            .collect()
     }
 
     pub fn decodes(&self, tile: u64) -> usize {
@@ -190,12 +211,12 @@ impl Recorder {
         self.core.get().and_then(Weak::upgrade)
     }
 
-    fn answer(&self, tile: u64, r: Answer, from_thread: Option<Duration>) {
+    fn answer(&self, tile: u64, generation: u32, r: Answer, from_thread: Option<Duration>) {
         let Some(core) = self.core() else { return };
         let send = move |core: &Core| {
             let res = match r {
-                Answer::Decoded(pts) => core.decoded(tile, pts),
-                Answer::Failed(kind) => core.decode_failed(tile, kind),
+                Answer::Decoded(pts) => core.decoded(tile, generation, pts),
+                Answer::Failed(kind) => core.decode_failed(tile, generation, kind),
             };
             // A tile closed meanwhile is the only expected failure.
             if let Err(e) = res {
@@ -221,7 +242,7 @@ enum Answer {
 }
 
 impl Callbacks for Recorder {
-    fn on_action(&self, tile: u64, action: &Action<'_>) {
+    fn on_action(&self, tile: u64, generation: u32, action: &Action<'_>) {
         self.actions.fetch_add(1, Ordering::SeqCst);
         let busy = self.busy.lock().unwrap().entry(tile).or_default().clone();
         if busy.swap(true, Ordering::SeqCst) {
@@ -280,6 +301,7 @@ impl Callbacks for Recorder {
                 Action::Status(s) => Seen::Status(s),
             };
             rec.seen.push(seen);
+            rec.gens.push(generation);
             if answer.is_some() {
                 rec.answered += 1;
             }
@@ -288,7 +310,7 @@ impl Callbacks for Recorder {
             std::thread::sleep(d);
         }
         if let (Some(a), false) = (answer, b.silent) {
-            self.answer(tile, a, b.answer_from_thread);
+            self.answer(tile, generation, a, b.answer_from_thread);
         }
         if self.try_reentry.load(Ordering::SeqCst)
             && let Some(core) = self.core()

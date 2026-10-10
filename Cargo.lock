@@ -789,6 +789,7 @@ name = "viewer-ffi"
 version = "0.1.0"
 dependencies = [
  "mock-nvr",
+ "tempfile",
  "viewer-core",
 ]
 

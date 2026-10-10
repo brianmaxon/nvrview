@@ -25,12 +25,20 @@ struct Ctx {
     bad: AtomicBool,
     last_configure: Mutex<Option<ConfigureSeen>>,
     json: Mutex<Vec<String>>,
+    /// Decodes answered per generation (0 and 1).
+    gen_decodes: [AtomicU64; 2],
+    /// Resets per generation.
+    gen_resets: [AtomicU64; 2],
 }
 
 unsafe extern "C" fn on_action(context: *mut c_void, tile: u64, action: *const NvAction) {
     // SAFETY: the test passes a pointer to a Ctx that outlives the core, and
     // the core passes a valid action for the duration of the call.
     let (ctx, a) = unsafe { (&*(context as *const Ctx), &*action) };
+    let g = (a.generation as usize).min(1);
+    if a.kind == NvActionKind::NV_ACTION_RESET {
+        ctx.gen_resets[g].fetch_add(1, Ordering::SeqCst);
+    }
     match a.kind {
         NvActionKind::NV_ACTION_CONFIGURE => {
             ctx.configures.fetch_add(1, Ordering::SeqCst);
@@ -65,8 +73,9 @@ unsafe extern "C" fn on_action(context: *mut c_void, tile: u64, action: *const N
             // Answer from inside the callback, as allowed.
             let core = ctx.core.load(Ordering::SeqCst);
             // SAFETY: the core is live while it calls us.
-            if unsafe { nv_tile_decoded(core, tile, d.pts_us) } == NvStatus::NV_OK {
+            if unsafe { nv_tile_decoded(core, tile, a.generation, d.pts_us) } == NvStatus::NV_OK {
                 ctx.answered_ok.fetch_add(1, Ordering::SeqCst);
+                ctx.gen_decodes[g].fetch_add(1, Ordering::SeqCst);
             }
         }
         _ => {}
@@ -118,7 +127,7 @@ fn mock() -> mock_nvr::MockNvr {
 #[test]
 fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
-    assert_eq!(NV_ABI_VERSION, 2);
+    assert_eq!(NV_ABI_VERSION, 3);
 }
 
 #[test]
@@ -177,11 +186,56 @@ fn a_tile_plays_through_the_c_interface() {
             .any(|j| j.contains("\"type\":\"channels\"") && j.contains("Channel 1"))
     });
 
+    // Focus: the main stream as generation 1, then generation 0 ends.
+    // SAFETY: live core.
+    unsafe {
+        assert_eq!(
+            nv_tile_set_tier(core, tile, NvStreamTier::NV_TIER_MAIN as u32),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_tile_set_tier(core, tile, 3),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_tile_set_tier(core, tile + 100, NvStreamTier::NV_TIER_MAIN as u32),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+    }
+    wait_until("main-stream pictures", || {
+        ctx.gen_decodes[1].load(Ordering::SeqCst) >= 5
+    });
+    assert_eq!(ctx.gen_resets[0].load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.configures.load(Ordering::SeqCst), 2);
+    wait_until("tile_tier active", || {
+        ctx.json.lock().unwrap().iter().any(|j| {
+            j.contains("\"type\":\"tile_tier\"")
+                && j.contains("\"state\":\"active\"")
+                && j.contains("\"generation\":1")
+        })
+    });
+    let (mut peak, mut rms) = (1.0f32, 1.0f32);
+    // SAFETY: live core, valid out pointers.
+    unsafe {
+        assert_eq!(
+            nv_tile_audio_level(core, tile, &mut peak, &mut rms),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_tile_audio_level(core, tile, ptr::null_mut(), &mut rms),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+    }
+    assert_eq!((peak, rms), (0.0, 0.0), "silent tile");
+
     // SAFETY: live core.
     unsafe {
         assert_eq!(nv_tile_close(core, tile), NvStatus::NV_OK);
         assert_eq!(nv_tile_close(core, tile), NvStatus::NV_ERR_UNKNOWN_ID);
-        assert_eq!(nv_tile_decoded(core, tile, 0), NvStatus::NV_ERR_UNKNOWN_ID);
+        assert_eq!(
+            nv_tile_decoded(core, tile, 0, 0),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
         assert_eq!(nv_device_remove(core, dev), NvStatus::NV_OK);
         assert_eq!(nv_device_remove(core, dev), NvStatus::NV_ERR_UNKNOWN_ID);
     }
@@ -223,6 +277,7 @@ fn invalid_arguments_are_refused() {
             log_dir: bad_utf8.as_ptr().cast(),
             log_max_files: 0,
             log_max_total_bytes: 0,
+            data_dir: ptr::null(),
         };
         assert_eq!(
             nv_core_new(&config, callbacks(&ctx), &mut core),
@@ -304,11 +359,11 @@ fn invalid_arguments_are_refused() {
         );
         assert_eq!(nv_tile_open(core, id, 0, 1, &mut tile), NvStatus::NV_OK);
         assert_eq!(
-            nv_tile_decode_failed(core, tile, 7),
+            nv_tile_decode_failed(core, tile, 0, 7),
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
         assert_eq!(
-            nv_tile_decode_failed(core, tile, NvDecodeFailure::NV_FAIL_NO_PICTURE as u32),
+            nv_tile_decode_failed(core, tile, 0, NvDecodeFailure::NV_FAIL_NO_PICTURE as u32),
             NvStatus::NV_OK
         );
         assert_eq!(
@@ -429,4 +484,105 @@ fn grid_layout_matches_the_pipeline() {
         );
         assert!(out[0].cell.width > 0);
     }
+}
+
+#[test]
+fn layouts_and_device_keys_through_the_c_interface() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = CString::new(dir.path().to_str().unwrap()).unwrap();
+    let config = NvConfig {
+        log_dir: ptr::null(),
+        log_max_files: 0,
+        log_max_total_bytes: 0,
+        data_dir: data_dir.as_ptr(),
+    };
+    let ctx = Box::new(Ctx::default());
+    let mut core: *mut NvCore = ptr::null_mut();
+    // Nothing listens there: the device never connects, which is fine here.
+    let host = CString::new("127.0.0.1").unwrap();
+    let user = CString::new("example-user").unwrap();
+    let password = CString::new("example-password").unwrap();
+    // SAFETY: valid config, callbacks, out pointers and strings throughout;
+    // the core is live until freed once at the end.
+    unsafe {
+        assert_eq!(
+            nv_core_new(&config, callbacks(&ctx), &mut core),
+            NvStatus::NV_OK
+        );
+        let mut dev = 0u64;
+        assert_eq!(
+            nv_device_add(
+                core,
+                host.as_ptr(),
+                1,
+                user.as_ptr(),
+                password.as_ptr(),
+                &mut dev
+            ),
+            NvStatus::NV_OK
+        );
+        let mut len = 0usize;
+        assert_eq!(
+            nv_device_key(core, dev, ptr::null_mut(), 0, &mut len),
+            NvStatus::NV_ERR_BUFFER_TOO_SMALL
+        );
+        let mut buf = vec![0 as c_char; len + 1];
+        assert_eq!(
+            nv_device_key(core, dev, buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_OK
+        );
+        let key = std::ffi::CStr::from_ptr(buf.as_ptr())
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(key.len(), len);
+        assert_eq!(
+            nv_device_key(core, dev + 100, buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+
+        let layout = CString::new(format!(
+            r#"{{"id":"one","name":"One","root":{{"camera":{{"device":"{key}","channel":0}}}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(nv_layout_put(core, layout.as_ptr()), NvStatus::NV_OK);
+        let bad = CString::new(r#"{"id":"x"}"#).unwrap();
+        assert_eq!(
+            nv_layout_put(core, bad.as_ptr()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        let mut small = [0 as c_char; 4];
+        assert_eq!(
+            nv_layouts_get(core, small.as_mut_ptr(), small.len(), &mut len),
+            NvStatus::NV_ERR_BUFFER_TOO_SMALL
+        );
+        let mut buf = vec![0 as c_char; len + 1];
+        assert_eq!(
+            nv_layouts_get(core, buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_OK
+        );
+        let text = std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
+        assert!(
+            text.contains("\"version\":1") && text.contains(&key),
+            "{text}"
+        );
+        let id = CString::new("one").unwrap();
+        assert_eq!(nv_layout_delete(core, id.as_ptr()), NvStatus::NV_OK);
+        assert_eq!(
+            nv_layout_delete(core, id.as_ptr()),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(nv_device_remove(core, dev), NvStatus::NV_OK);
+        nv_core_free(core);
+    }
+    assert!(dir.path().join("layouts.json").exists());
+    assert!(dir.path().join("devices.json").exists());
+    let events = ctx.json.lock().unwrap().clone();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|j| j.contains("layouts_changed"))
+            .count(),
+        2
+    );
 }

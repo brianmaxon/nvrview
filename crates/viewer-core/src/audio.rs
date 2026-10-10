@@ -133,6 +133,9 @@ impl TileAudioControl {
 /// install drains `retired` first and only a render that overlapped an
 /// install retires).
 pub(crate) struct RenderHandoff {
+    /// Each playout slot's level after the last render, for
+    /// [`crate::Core::tile_audio_level`]; written only by the render side.
+    levels: Box<[LevelCell]>,
     current: ArrayQueue<Renderer>,
     retired: ArrayQueue<Renderer>,
     leaked: AtomicU64,
@@ -143,6 +146,9 @@ pub(crate) struct RenderHandoff {
 impl RenderHandoff {
     fn new() -> RenderHandoff {
         RenderHandoff {
+            levels: (0..OutputConfig::default().max_tiles)
+                .map(|_| LevelCell::default())
+                .collect(),
             current: ArrayQueue::new(1),
             retired: ArrayQueue::new(4),
             leaked: AtomicU64::new(0),
@@ -154,6 +160,9 @@ impl RenderHandoff {
     /// Control side: installs `r` (or removes the renderer with `None`).
     fn install(&self, r: Option<Renderer>) {
         while self.retired.pop().is_some() {}
+        for c in self.levels.iter() {
+            c.clear();
+        }
         self.installed.store(r.is_some(), Ordering::Release);
         drop(self.current.pop());
         if let Some(r) = r {
@@ -178,6 +187,9 @@ impl RenderHandoff {
         };
         let ok = if r.format().channels == channels {
             r.render(out, host_time_ns);
+            for (cell, l) in self.levels.iter().zip(r.levels()) {
+                cell.set(l.owner, l.peak, l.rms);
+            }
             Ok(())
         } else {
             out.fill(0.0);
@@ -190,6 +202,26 @@ impl RenderHandoff {
             std::mem::forget(r);
         }
         ok
+    }
+}
+
+/// One slot's level, readable from any thread without a lock.
+#[derive(Default)]
+struct LevelCell {
+    owner: AtomicU64,
+    peak: AtomicU32,
+    rms: AtomicU32,
+}
+
+impl LevelCell {
+    fn set(&self, owner: u64, peak: f32, rms: f32) {
+        self.peak.store(peak.to_bits(), Ordering::Relaxed);
+        self.rms.store(rms.to_bits(), Ordering::Relaxed);
+        self.owner.store(owner, Ordering::Release);
+    }
+
+    fn clear(&self) {
+        self.set(0, 0.0, 0.0);
     }
 }
 
@@ -253,6 +285,20 @@ impl AudioHub {
         host_time_ns: u64,
     ) -> Result<(), CoreError> {
         self.handoff.render(out, channels, host_time_ns)
+    }
+
+    /// A tile's latest level (peak, RMS) as the last render measured it;
+    /// zero for a tile that is not playing. Lock-free.
+    pub(crate) fn level(&self, tile: u64) -> (f32, f32) {
+        for c in self.handoff.levels.iter() {
+            if c.owner.load(Ordering::Acquire) == tile {
+                return (
+                    f32::from_bits(c.peak.load(Ordering::Relaxed)),
+                    f32::from_bits(c.rms.load(Ordering::Relaxed)),
+                );
+            }
+        }
+        (0.0, 0.0)
     }
 
     /// The control of a new tile.

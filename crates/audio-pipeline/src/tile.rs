@@ -101,6 +101,7 @@ pub struct TileAudio {
     tap: Option<TapState>,
     pcm: Vec<f32>,
     stats: AudioStats,
+    owner: u64,
 }
 
 impl std::fmt::Debug for TileAudio {
@@ -131,7 +132,14 @@ impl TileAudio {
             tap: None,
             pcm: Vec::new(),
             stats: AudioStats::default(),
+            owner: 0,
         }
+    }
+
+    /// Tags the playout slots this tile claims from now on, so the
+    /// renderer's levels ([`crate::Renderer::levels`]) name it.
+    pub fn set_owner(&mut self, owner: u64) {
+        self.owner = owner;
     }
 
     /// One audio record, in stream order.
@@ -366,7 +374,7 @@ impl TileAudio {
         match (&self.output, self.audible) {
             (Some(o), true) => {
                 if self.playout.is_none() {
-                    self.playout = Playout::new(o);
+                    self.playout = Playout::new(o, self.owner);
                     if let Some(p) = &self.playout {
                         p.set_playing(true);
                     }

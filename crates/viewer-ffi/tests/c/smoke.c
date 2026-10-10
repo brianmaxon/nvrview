@@ -1,8 +1,9 @@
 /*
  * A C client of the nvrview core: opens one tile on a (mock) device, plays
  * it with a fake decoder that answers every Decode from inside the
- * callback, renders its audio from a separate (audio-device-like) thread
- * with a tap attached, and checks the shutdown guarantees. Built and run by
+ * callback, switches it to the main stream (a second generation), renders
+ * its audio from a separate (audio-device-like) thread with a tap attached
+ * and reads its level, stores a layout, and checks the shutdown guarantees. Built and run by
  * scripts/test-c-ffi.sh against a spawned mock-nvr.
  *
  * usage: smoke HOST PORT   (password from NVRVIEW_TEST_PASSWORD)
@@ -24,6 +25,8 @@ static NvCore *_Atomic g_core;
 static atomic_ulong g_configures, g_decodes, g_answered, g_events, g_callbacks;
 static atomic_ulong g_problems, g_tile_closed;
 static atomic_ulong g_taps, g_renders, g_loud;
+/* Answered decodes and resets of generations 0 and 1. */
+static atomic_ulong g_gen_answered[2], g_gen_resets[2];
 static atomic_bool g_stop_render;
 /* nv_tile_open writes the ID here, and only then lets actions run, so the
  * callback may read it without further synchronization. */
@@ -44,6 +47,13 @@ static void on_action(void *context, uint64_t tile, const NvAction *action) {
     atomic_fetch_add(&g_callbacks, 1);
     if (tile != g_tile) {
         problem("action for a tile whose ID nv_tile_open had not returned");
+    }
+    if (action->generation > 1) {
+        problem("unexpected generation");
+    }
+    unsigned gen = action->generation > 1 ? 1 : action->generation;
+    if (action->kind == NV_ACTION_RESET) {
+        atomic_fetch_add(&g_gen_resets[gen], 1);
     }
     switch (action->kind) {
     case NV_ACTION_CONFIGURE: {
@@ -74,8 +84,9 @@ static void on_action(void *context, uint64_t tile, const NvAction *action) {
             }
         }
         free(copy);
-        if (nv_tile_decoded(atomic_load(&g_core), tile, d->pts_us) == NV_OK) {
+        if (nv_tile_decoded(atomic_load(&g_core), tile, action->generation, d->pts_us) == NV_OK) {
             atomic_fetch_add(&g_answered, 1);
+            atomic_fetch_add(&g_gen_answered[gen], 1);
         }
         break;
     }
@@ -199,6 +210,51 @@ int main(int argc, char **argv) {
     }
     unsigned long decoded = atomic_load(&g_answered);
 
+    /* Focus: the main stream starts as generation 1; generation 0 ends with
+     * a Reset once generation 1 has shown a picture. */
+    if (nv_tile_set_tier(core, tile, NV_TIER_MAIN) != NV_OK) {
+        problem("nv_tile_set_tier failed");
+    }
+    for (int i = 0; i < 1000 && atomic_load(&g_gen_answered[1]) < 20; i++) {
+        sleep_ms(10);
+    }
+    if (atomic_load(&g_gen_answered[1]) < 20 || atomic_load(&g_gen_resets[0]) != 1) {
+        problem("the tier switch did not complete");
+    }
+    {
+        float peak = -1, rms = -1;
+        if (nv_tile_audio_level(core, tile, &peak, &rms) != NV_OK || peak < 0 || peak > 1 ||
+            rms < 0 || rms > peak + 1e-6f) {
+            problem("nv_tile_audio_level");
+        }
+    }
+    {
+        char key[64], json[512], *all = NULL;
+        size_t len = 0;
+        if (nv_device_key(core, device, key, sizeof key, &len) != NV_OK || len == 0 ||
+            strlen(key) != len) {
+            problem("nv_device_key");
+        }
+        snprintf(json, sizeof json,
+                 "{\"id\":\"smoke\",\"name\":\"Smoke\",\"root\":{\"split\":\"row\","
+                 "\"ratio\":0.5,\"a\":{\"camera\":{\"device\":\"%s\",\"channel\":0}},"
+                 "\"b\":{\"camera\":null}}}",
+                 key);
+        if (nv_layout_put(core, json) != NV_OK) {
+            problem("nv_layout_put");
+        }
+        if (nv_layouts_get(core, NULL, 0, &len) != NV_ERR_BUFFER_TOO_SMALL || len == 0 ||
+            (all = malloc(len + 1)) == NULL || nv_layouts_get(core, all, len + 1, &len) != NV_OK ||
+            strstr(all, "\"smoke\"") == NULL) {
+            problem("nv_layouts_get");
+        }
+        free(all);
+        if (nv_layout_delete(core, "smoke") != NV_OK ||
+            nv_layout_delete(core, "smoke") != NV_ERR_UNKNOWN_ID) {
+            problem("nv_layout_delete");
+        }
+    }
+
     if (nv_tile_close(core, tile) != NV_OK) {
         problem("nv_tile_close failed");
     }
@@ -246,8 +302,8 @@ int main(int argc, char **argv) {
     if (decoded < 50) {
         problem("fewer than 50 decodes in 10 s");
     }
-    if (atomic_load(&g_configures) != 1) {
-        problem("expected exactly one Configure");
+    if (atomic_load(&g_configures) != 2) {
+        problem("expected exactly one Configure per generation");
     }
     if (atomic_load(&g_tile_closed) != 1) {
         problem("expected exactly one tile_closed");

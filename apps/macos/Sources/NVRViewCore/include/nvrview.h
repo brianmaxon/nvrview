@@ -1,7 +1,7 @@
 /*
  * nvrview core C interface. Contract: docs/FFI.md.
  *
- * This is the reference for M2. cbindgen generates the real header,
+ * This is the reference for ABI 3 (M3). cbindgen generates the real header,
  * crates/viewer-ffi/include/nvrview.h, from the Rust source; it must keep
  * these names, values, layouts, and the comments' meaning.
  */
@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 /* Bumped on any incompatible change; apps compare it with nv_abi_version(). */
-#define NV_ABI_VERSION 2
+#define NV_ABI_VERSION 3
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -25,8 +25,9 @@ typedef enum NvStatus {
     NV_ERR_INVALID_ARGUMENT = -1, /* null pointer, bad UTF-8, out-of-range value */
     NV_ERR_UNKNOWN_ID = -2,       /* device or tile already removed, or never existed */
     NV_ERR_CLOSED = -3,           /* the core is shutting down */
-    NV_ERR_LIMIT = -4,            /* too many devices or tiles */
+    NV_ERR_LIMIT = -4,            /* too many devices, tiles, layouts, or queued requests */
     NV_ERR_INTERNAL = -5,
+    NV_ERR_BUFFER_TOO_SMALL = -6, /* the output buffer is too small; *len holds the size needed */
 } NvStatus;
 
 typedef enum NvCodec {
@@ -122,6 +123,10 @@ typedef struct NvAction {
     NvConfigure configure;
     NvDecode decode;
     NvTileStatus status;
+    /* The tile's stream this action belongs to: 0 when opened, one more for
+     * each tier switch (nv_tile_set_tier). Each generation has its own
+     * platform decoder; answer with the action's generation. */
+    uint32_t generation;
 } NvAction;
 
 /* One block of a tile's tapped audio: 16 kHz mono, borrowed for the duration
@@ -169,6 +174,9 @@ typedef struct NvConfig {
     const char *log_dir;
     uint32_t log_max_files;      /* 0 = default */
     uint64_t log_max_total_bytes; /* 0 = default */
+    /* The app's data directory (UTF-8, NUL-terminated), where the core keeps
+     * layouts and device keys; NULL = in memory only. */
+    const char *data_dir;
 } NvConfig;
 
 typedef struct NvCore NvCore;
@@ -201,12 +209,23 @@ NvStatus nv_tile_open(NvCore *core, uint64_t device, uint8_t channel, NvStreamTi
  * from a callback. */
 NvStatus nv_tile_close(NvCore *core, uint64_t tile);
 
-/* Decoder results. Every Decode not discarded by a later Flush, Reset, or
- * Configure gets exactly one of these; a failed Configure gets one
- * nv_tile_decode_failed. Callable from any thread, including inside
- * on_action; they never block. */
-NvStatus nv_tile_decoded(NvCore *core, uint64_t tile, int64_t pts_us);
-NvStatus nv_tile_decode_failed(NvCore *core, uint64_t tile, NvDecodeFailure kind);
+/* Asks the tile to show `tier` (for example main on focus, sub back in the
+ * grid). The tile keeps presenting its current stream until the new one's
+ * first picture has been decoded, then switches in one step: no gap, no
+ * black frame. The new stream's actions carry the next generation; the
+ * switch is the old generation's final NV_ACTION_RESET (and a tile_tier
+ * event). Returns at once; progress arrives as events. Asking for the tier
+ * already requested changes nothing. */
+NvStatus nv_tile_set_tier(NvCore *core, uint64_t tile, NvStreamTier tier);
+
+/* Decoder results, for the generation of the action they answer. Every
+ * Decode not discarded by a later Flush, Reset, or Configure gets exactly
+ * one of these; a failed Configure gets one nv_tile_decode_failed.
+ * Results for a generation that has ended are ignored. Callable from any
+ * thread, including inside on_action; they never block. */
+NvStatus nv_tile_decoded(NvCore *core, uint64_t tile, uint32_t generation, int64_t pts_us);
+NvStatus nv_tile_decode_failed(NvCore *core, uint64_t tile, uint32_t generation,
+                               NvDecodeFailure kind);
 
 /* Audio (docs/AUDIO.md). */
 
@@ -244,6 +263,36 @@ NvStatus nv_tile_audio_set(NvCore *core, uint64_t tile, bool audible, float volu
  * arrives after a call that stops it returns. NV_ERR_INVALID_ARGUMENT if
  * on_audio_tap was NULL. */
 NvStatus nv_tile_audio_tap(NvCore *core, uint64_t tile, bool enabled);
+
+/* Latest peak and RMS level of a tile's audio, 0..1, as nv_audio_render
+ * last measured it, before the tile's volume (peak with a 0.3 s release,
+ * RMS over about 0.1 s). Both read 0 for a tile that is not audible or not
+ * known, and before rendering starts. Lock-free and allocation-free;
+ * callable from any thread, including callbacks, at display rate. */
+NvStatus nv_tile_audio_level(NvCore *core, uint64_t tile, float *peak, float *rms);
+
+/* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back
+ * UTF-8 and NUL-terminated in `out`; *len receives the length without the
+ * NUL. When `cap` <= *len (or out is NULL) the call returns
+ * NV_ERR_BUFFER_TOO_SMALL with *len set: call again with a larger buffer. */
+
+/* The device's stable key: the same address (host and port) gets the same
+ * key in every run while the data directory is kept. */
+NvStatus nv_device_key(NvCore *core, uint64_t device, char *out, size_t cap, size_t *len);
+
+/* Every stored layout: {"revision":N,"layouts":[...]}. */
+NvStatus nv_layouts_get(NvCore *core, char *out, size_t cap, size_t *len);
+
+/* Inserts or replaces (by "id") one layout given as JSON. The core
+ * validates it (NV_ERR_INVALID_ARGUMENT if not a valid split tree), sets
+ * its "version", stores it atomically, and sends layouts_changed.
+ * NV_ERR_LIMIT when the store is full, NV_ERR_INTERNAL when it cannot be
+ * written (nothing changes). */
+NvStatus nv_layout_put(NvCore *core, const char *json);
+
+/* Deletes a layout by id and sends layouts_changed. NV_ERR_UNKNOWN_ID if
+ * there is none. */
+NvStatus nv_layout_delete(NvCore *core, const char *id);
 
 /* Grid layout (pure; no core needed). Fills `out` (tile_count entries) with
  * the destination rectangle in the viewport and the source rectangle in the
