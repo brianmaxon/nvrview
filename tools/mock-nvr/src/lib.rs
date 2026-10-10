@@ -53,6 +53,13 @@
 //!   talk (201, audio 202, close 11) whose received records are logged
 //!   ([`MockNvr::talk_log`]) so tests can decode and time them.
 //!
+//! - optionally, fisheye cameras ([`FisheyeConfig`]): `fishEye` 1 and
+//!   `channelType` `fisheye_ipc` in their 199 items (every other item says
+//!   0 and `ipc`), a square stream-info entry, and their own looping
+//!   fixture, such as the synthetic circular picture
+//!   `fixtures/synthetic/fisheye/h264-fisheye.h264` (docs/protocol.md, "Fisheye
+//!   cameras").
+//!
 //! It never touches real hardware and answers every other command with
 //! status 400.
 
@@ -158,6 +165,37 @@ pub struct Config {
     /// Channels with a speaker (`ipcAudioTalk` 1): they answer the talk
     /// ability (10) and accept talk-back ([`talk`]). Others answer 400.
     pub talk_channels: Vec<u8>,
+    /// If set, these channels are fisheye cameras.
+    pub fisheye: Option<FisheyeConfig>,
+}
+
+/// Fisheye camera channels (docs/protocol.md, "Fisheye cameras"): flagged in
+/// the 199 reply and streaming their own fixture at their own size (both
+/// tiers alike) instead of [`Config::fixture`]. Replays and recordings are
+/// unaffected.
+#[derive(Clone, Debug)]
+pub struct FisheyeConfig {
+    /// The fisheye channels.
+    pub channels: Vec<u8>,
+    /// Their looping video source.
+    pub fixture: Arc<Fixture>,
+    /// Width advertised in their info record and stream info.
+    pub width: u32,
+    /// Height advertised in their info record and stream info.
+    pub height: u32,
+}
+
+impl FisheyeConfig {
+    /// `channels` streaming `fixture`, advertised as `size` x `size` (fisheye
+    /// streams are square).
+    pub fn new(channels: Vec<u8>, fixture: Fixture, size: u32) -> FisheyeConfig {
+        FisheyeConfig {
+            channels,
+            fixture: Arc::new(fixture),
+            width: size,
+            height: size,
+        }
+    }
 }
 
 /// How a channel's camera treats the second-lens tiers (`externStream` and
@@ -235,7 +273,15 @@ impl Config {
             extern_modes: Vec::new(),
             uids: Vec::new(),
             talk_channels: Vec::new(),
+            fisheye: None,
         }
+    }
+
+    /// The fisheye settings when `channel` is a fisheye camera.
+    pub fn fisheye_of(&self, channel: u8) -> Option<&FisheyeConfig> {
+        self.fisheye
+            .as_ref()
+            .filter(|f| f.channels.contains(&channel))
     }
 
     /// How `channel` treats its second-lens tiers ([`Config::extern_modes`]).
@@ -1089,7 +1135,8 @@ impl Conn {
     }
 
     /// Capabilities (199): the channel count and one `item` per channel
-    /// with its `aitype`, and one `subItem` per lens of a multi-lens camera.
+    /// with its `aitype`, `channelType` and `fishEye`, and one `subItem`
+    /// per lens of a multi-lens camera.
     fn support(&self) -> String {
         let cfg = &self.shared.config;
         let mut s = format!(
@@ -1099,9 +1146,15 @@ impl Conn {
         for c in 0..cfg.channels {
             let ai = cfg.aitypes.get(usize::from(c)).copied().unwrap_or(0);
             let talk = u8::from(cfg.talk_channels.contains(&c));
+            let (kind, fisheye) = if cfg.fisheye_of(c).is_some() {
+                ("fisheye_ipc", 1)
+            } else {
+                ("ipc", 0)
+            };
             s.push_str(&format!(
                 "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n\
-                 <ipcAudioTalk>{talk}</ipcAudioTalk>\n"
+                 <ipcAudioTalk>{talk}</ipcAudioTalk>\n<channelType>{kind}</channelType>\n\
+                 <fishEye>{fisheye}</fishEye>\n"
             ));
             let lenses = cfg.lens_aitypes.get(usize::from(c));
             for (lens, ai) in lenses.into_iter().flatten().enumerate() {
@@ -1145,9 +1198,11 @@ impl Conn {
             bc_protocol::media::Codec::H264 => 0,
             bc_protocol::media::Codec::H265 => 1,
         };
-        // Every channel shares one configuration, so one entry covers all of
-        // them through the channel bitmask.
-        let bits: u64 = (0..cfg.channels.min(64)).fold(0, |b, c| b | 1 << c);
+        // Every channel but the fisheye cameras shares one configuration, so
+        // one entry covers all of them through the channel bitmask.
+        let bits: u64 = (0..cfg.channels.min(64))
+            .filter(|c| cfg.fisheye_of(*c).is_none())
+            .fold(0, |b, c| b | 1 << c);
         let mut s = String::from("<StreamInfoList version=\"1.1\">\n<StreamInfo>\n");
         s.push_str(&format!("<channelBits>{bits}</channelBits>\n"));
         for t in [StreamTier::Main, StreamTier::Sub] {
@@ -1175,6 +1230,29 @@ impl Conn {
             ));
         }
         s.push_str("</StreamInfo>\n");
+        if let Some(f) = &cfg.fisheye {
+            let bits: u64 = f
+                .channels
+                .iter()
+                .filter(|c| **c < cfg.channels.min(64))
+                .fold(0, |b, c| b | 1 << c);
+            s.push_str(&format!(
+                "<StreamInfo>\n<channelBits>{bits}</channelBits>\n"
+            ));
+            for t in [StreamTier::Main, StreamTier::Sub] {
+                s.push_str(&format!(
+                    "<encodeTable>\n<type>{}</type>\n<resolution>\n<width>{}</width>\n<height>{}</height>\n\
+                     </resolution>\n<videoEncType>{}</videoEncType>\n\
+                     <defaultFramerate>{}</defaultFramerate>\n</encodeTable>\n",
+                    t.name(),
+                    f.width,
+                    f.height,
+                    enc_type(f.fixture.codec()),
+                    cfg.fps,
+                ));
+            }
+            s.push_str("</StreamInfo>\n");
+        }
         s.push_str("</StreamInfoList>\n");
         s
     }
@@ -1325,7 +1403,9 @@ async fn stream_media(
     } else {
         0
     };
-    let fix = &cfg.fixture;
+    let fisheye = cfg.fisheye_of(channel);
+    let fix = fisheye.map_or(&cfg.fixture, |f| &f.fixture);
+    let (width, height) = fisheye.map_or((cfg.width, cfg.height), |f| (f.width, f.height));
     let fps = cfg.fps.max(1);
     let audio = cfg.audio.as_deref();
     let schedule = Schedule::new(1_000_000 / u64::from(fps), audio);
@@ -1338,7 +1418,7 @@ async fn stream_media(
     media_message(
         key,
         id,
-        &encode_info(cfg.width, cfg.height, fps.min(255) as u8),
+        &encode_info(width, height, fps.min(255) as u8),
         &mut out,
     )?;
     let start = Instant::now();

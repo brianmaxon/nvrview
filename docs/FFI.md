@@ -152,6 +152,7 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":0,"connected":true,"tiers":["main","sub"],"name":"Channel 1","model":"EXAMPLE-CAM"}]}
 {"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
 {"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
+{"type":"channels","device":1,"channels":[{"channel":5,"connected":true,"tiers":["main","sub"],"detects":["people"],"fisheye":true}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
 {"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"local_audio","at_ns":457}
@@ -262,6 +263,13 @@ change.
   The `tiers` a channel advertises do not tell a second lens apart
   (single-lens cameras can advertise `extern` too; channels that do are
   never probed).
+- `fisheye` is `true` for a fisheye (360°) camera, which sends its raw
+  circular image for the app to dewarp (199 `fishEye` 1 or `channelType`
+  `fisheye_ipc`; docs/protocol.md "Fisheye cameras"), and absent for every
+  other channel. Like `detects` it arrives once the capabilities are read.
+  It is an added event field: no header change and no ABI number (apps
+  ignore fields they do not know). The core does nothing else for such a
+  camera; dewarping is drawing (docs/RENDERING.md, "Fisheye dewarping").
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from

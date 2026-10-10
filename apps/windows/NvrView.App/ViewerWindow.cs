@@ -74,6 +74,7 @@ internal sealed class ViewerWindow
         Microsoft.UI.Dispatching.DispatcherQueue ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
         Renderer = new StageRenderer(host, chain => ui.TryEnqueue(() => Stage.AttachSwapChain(chain)));
         Stage.Renderer = Renderer;
+        Renderer.Circles = viewer.Circles;
         Stage.SettingsRequested = OpenSettings;
         Stage.Edited += OnEdited;
         Stage.StateChanged += () => _editBar!.Update();

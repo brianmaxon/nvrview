@@ -175,6 +175,121 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     // Render thread: distinct pictures drawn.
     public long Shown;
     public ulong LastSequence;
+
+    /// <summary>The tile's saved fisheye view (UI thread; the layout leaf's "fisheye" member, or the view being dragged).</summary>
+    public FisheyeTileSetting FisheyeSetting { get; set; } = FisheyeTileSetting.Original;
+
+    private FisheyeChoice? _fisheye;
+
+    /// <summary>What the render thread dewarps with: null draws the picture as it is (Original, or not a fisheye camera).</summary>
+    public FisheyeChoice? Fisheye
+    {
+        get => Volatile.Read(ref _fisheye);
+        set => Volatile.Write(ref _fisheye, value);
+    }
+
+    // Render thread: the dewarp constants and what they were computed for.
+    public object? DewarpKey;
+    public DewarpConstants DewarpRows;
+}
+
+/// <summary>A dewarped tile's view, mount and aim (immutable; replaced when any changes).</summary>
+internal sealed record FisheyeChoice(FisheyeViewMode Mode, FisheyeAim Aim, FisheyeMount Mount);
+
+/// <summary>
+/// Each fisheye camera's image circle, found from its first decoded pictures
+/// (docs/RENDERING.md "Finding the circle") and kept for the run; shared by
+/// every window. The render threads ask for tries and hand the luma over;
+/// detection runs on the thread pool. Thread-safe.
+/// </summary>
+internal sealed class FisheyeCircles
+{
+    private readonly Lock _lock = new();
+    private readonly Dictionary<CameraRef, FisheyeCircleTracker> _trackers = [];
+    private readonly HashSet<CameraRef> _busy = [];
+
+    /// <summary>The camera's circle once found (or fallen back to the inscribed one).</summary>
+    public FisheyeCircle? Circle(CameraRef camera)
+    {
+        lock (_lock)
+        {
+            return _trackers.TryGetValue(camera, out FisheyeCircleTracker? t) ? t.Circle : null;
+        }
+    }
+
+    /// <summary>Whether the camera's circle came from the fallback (no clear rim found).</summary>
+    public bool FellBack(CameraRef camera)
+    {
+        lock (_lock)
+        {
+            return _trackers.TryGetValue(camera, out FisheyeCircleTracker? t) && t.FellBack;
+        }
+    }
+
+    /// <summary>Claims a try at <paramref name="now"/> (seconds) if one is due and none is running.</summary>
+    public bool TryBegin(CameraRef camera, double now)
+    {
+        lock (_lock)
+        {
+            if (_busy.Contains(camera))
+            {
+                return false;
+            }
+            if (!_trackers.TryGetValue(camera, out FisheyeCircleTracker? t))
+            {
+                t = new FisheyeCircleTracker();
+                _trackers[camera] = t;
+            }
+            if (!t.WantsTry(now))
+            {
+                return false;
+            }
+            _busy.Add(camera);
+            return true;
+        }
+    }
+
+    /// <summary>Measures a luma plane on the thread pool and records the outcome of the try claimed with <see cref="TryBegin"/>.</summary>
+    public void Measure(CameraRef camera, byte[]? luma, int width, int height, double now)
+    {
+        if (luma is null || width <= 0 || height <= 0)
+        {
+            Finish(camera, null, now, Math.Max(width, 1), Math.Max(height, 1));
+            return;
+        }
+        _ = Task.Run(() =>
+        {
+            FisheyeCircle? found = null;
+            try
+            {
+                found = FisheyeCircleDetector.Detect(width, height, (x, y) => luma[y * width + x]);
+            }
+            catch (Exception e)
+            {
+                AppLog.Limited("fisheye", 3, $"fisheye circle detection failed: {e.Message}");
+            }
+            Finish(camera, found, now, width, height);
+        });
+    }
+
+    private void Finish(CameraRef camera, FisheyeCircle? found, double now, int width, int height)
+    {
+        lock (_lock)
+        {
+            _busy.Remove(camera);
+            if (_trackers.TryGetValue(camera, out FisheyeCircleTracker? t))
+            {
+                bool had = t.Circle is not null;
+                t.Record(found, now, width, height);
+                if (!had && t.Circle is { } c)
+                {
+                    AppLog.Info(t.FellBack
+                        ? $"fisheye: no clear image circle after {t.Tries} tries; using the inscribed circle"
+                        : $"fisheye: image circle at ({c.Cx:F3}, {c.Cy:F3}), radius {c.R:F3} of the width");
+                }
+            }
+        }
+    }
 }
 
 /// <summary>A clock that reads another one, which can be replaced.</summary>
@@ -513,6 +628,14 @@ internal sealed class Viewer : ITileBackend<CameraTile>
 
     /// <summary>A device by camera key or configuration key.</summary>
     public DeviceEntry? FindDevice(string key) => _devices.FirstOrDefault(d => d.Key == key || d.Config.Key == key);
+
+    /// <summary>Every fisheye camera's image circle (shared by the windows' render threads).</summary>
+    public FisheyeCircles Circles { get; } = new();
+
+    /// <summary>Whether a camera is a fisheye camera (the core's "fisheye"; a first lens only).</summary>
+    public bool IsFisheye(CameraRef camera) =>
+        camera.Lens == 0 && camera.Channel is >= 0 and <= 255 && FindDevice(camera.Device) is { } d
+        && d.Channels.TryGetValue((byte)camera.Channel, out ChannelInfo? c) && c.Fisheye;
 
     private DeviceEntry? FindDevice(ulong id) => id == 0 ? null : _devices.FirstOrDefault(d => d.Id == id);
 
@@ -974,6 +1097,11 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                     {
                         if (dev.Channels.TryGetValue(c.Channel, out ChannelInfo? before))
                         {
+                            // "fisheye" comes with the capabilities, as "detects" does.
+                            if (c.Detects is null)
+                            {
+                                c.Fisheye |= before.Fisheye;
+                            }
                             // Names, detection kinds, and lenses may come in a later list than the slots.
                             c.Name ??= before.Name;
                             c.Detects ??= before.Detects;

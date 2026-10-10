@@ -28,13 +28,17 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
     /// How many lenses the camera has (`lenses`; absent means 1). A second
     /// lens is served on the same channel as its own tiers.
     public var lenses: Int
+    /// A fisheye (360°) camera sending its raw circle (`fisheye`; absent
+    /// means false): the app can dewarp it (docs/RENDERING.md).
+    public var fisheye: Bool
 
-    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects, lenses }
+    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects, lenses, fisheye }
 
     public init(
         channel: Int, connected: Bool = false, tiers: [String] = [], name: String? = nil,
-        model: String? = nil, detects: [String] = [], lenses: Int = 1
+        model: String? = nil, detects: [String] = [], lenses: Int = 1, fisheye: Bool = false
     ) {
+        self.fisheye = fisheye
         self.lenses = lenses
         self.channel = channel
         self.connected = connected
@@ -53,6 +57,7 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
         model = try c.decodeIfPresent(String.self, forKey: .model)
         detects = (try? c.decodeIfPresent([String].self, forKey: .detects)) ?? []
         lenses = max((try? c.decodeIfPresent(Int.self, forKey: .lenses)) ?? 1, 1)
+        fisheye = (try? c.decodeIfPresent(Bool.self, forKey: .fisheye)) ?? false
     }
 
     /// Whether the camera has a second lens the app can show.

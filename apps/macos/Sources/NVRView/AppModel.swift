@@ -72,6 +72,8 @@ final class AppModel {
     private(set) var groups: [CameraGroup] = []
     /// Per-camera options (entrance, doorbell talk-back and ring), saved.
     private(set) var cameraSettings: [CameraOptions] = []
+    /// Each fisheye camera's image circle, found from its first pictures.
+    @ObservationIgnored private var fisheyeCircles: [CameraRef: FisheyeCircleTracker] = [:]
     private(set) var detections = DetectionTracker()
     /// What the sidebar rows show for the detections (held briefly after a
     /// stop, like the tiles' corner indicators).
@@ -314,6 +316,46 @@ final class AppModel {
 
     /// Marks a camera as an entrance: a person on it opens an alert inset.
     func setEntrance(_ camera: CameraRef, _ on: Bool) { updateOptions(camera) { $0.entrance = on } }
+
+    /// How a fisheye camera is mounted (its panorama and virtual views follow).
+    func setFisheyeMount(_ camera: CameraRef, _ mount: FisheyeMount) {
+        updateOptions(camera.firstLens) { $0.fisheyeMount = mount }
+    }
+
+    /// Whether the camera is a fisheye camera the app can dewarp.
+    func isFisheye(_ camera: CameraRef) -> Bool { camera.lens == 0 && channelInfo(camera)?.fisheye == true }
+
+    /// The lens of a fisheye camera for its newest picture: the image circle
+    /// found in its first pictures (FisheyeCircleTracker; a few tries on the
+    /// CPU, then never again), kept per camera for the run.
+    func fisheyeLens(_ camera: CameraRef, picture: DecodedPicture?) -> FisheyeLens? {
+        let camera = camera.firstLens
+        var tracker = fisheyeCircles[camera] ?? FisheyeCircleTracker()
+        if let picture, tracker.wantsTry(now: clock.now) {
+            let pb = picture.pixelBuffer
+            let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            var found: FisheyeCircle?
+            if let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) {
+                let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+                let bytes = base.assumingMemoryBound(to: UInt8.self)
+                found = FisheyeCircleDetector.detect(width: w, height: h) { x, y in bytes[y * stride + x] }
+            }
+            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            tracker.record(found, now: clock.now, width: w, height: h)
+            fisheyeCircles[camera] = tracker
+            if let c = tracker.circle {
+                NSLog(
+                    "fisheye circle for channel %d: center %.3f, %.3f radius %.3f%@", camera.channel + 1, c.cx, c.cy,
+                    c.r, tracker.fellBack ? " (not found; inscribed circle)" : "")
+            }
+        }
+        guard let circle = tracker.circle else { return nil }
+        let aspect = picture.map {
+            Double(CVPixelBufferGetWidth($0.pixelBuffer)) / Double(max(CVPixelBufferGetHeight($0.pixelBuffer), 1))
+        } ?? 1
+        return FisheyeLens(circle: circle, aspect: aspect)
+    }
 
     /// A doorbell plays when it rings even if nothing was playing.
     func setUnmuteOnRing(_ camera: CameraRef, _ on: Bool) { updateOptions(camera.firstLens) { $0.unmuteOnRing = on } }
@@ -829,15 +871,21 @@ struct CameraOptions: Codable, Equatable, Sendable {
     var unmuteOnRing = false
     /// A doorbell: talk-back allowed (camera motion control; off by default).
     var allowTalk = false
+    /// A fisheye camera: how it is mounted (docs/UX.md "Fisheye cameras").
+    var fisheyeMount = FisheyeMount.ceiling
 
-    init(camera: CameraRef, entrance: Bool = false, unmuteOnRing: Bool = false, allowTalk: Bool = false) {
+    init(
+        camera: CameraRef, entrance: Bool = false, unmuteOnRing: Bool = false, allowTalk: Bool = false,
+        fisheyeMount: FisheyeMount = .ceiling
+    ) {
         self.camera = camera
         self.entrance = entrance
         self.unmuteOnRing = unmuteOnRing
         self.allowTalk = allowTalk
+        self.fisheyeMount = fisheyeMount
     }
 
-    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk }
+    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -845,7 +893,8 @@ struct CameraOptions: Codable, Equatable, Sendable {
         entrance = try c.decodeIfPresent(Bool.self, forKey: .entrance) ?? false
         unmuteOnRing = try c.decodeIfPresent(Bool.self, forKey: .unmuteOnRing) ?? false
         allowTalk = try c.decodeIfPresent(Bool.self, forKey: .allowTalk) ?? false
+        fisheyeMount = (try? c.decodeIfPresent(FisheyeMount.self, forKey: .fisheyeMount)) ?? .ceiling
     }
 
-    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk }
+    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling }
 }

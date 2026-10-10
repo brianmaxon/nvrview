@@ -205,6 +205,8 @@ struct ChannelDetects {
     /// Per lens, for a camera with two or more lenses (`subItem`s); empty
     /// for a single-lens camera.
     lenses: Vec<Vec<&'static str>>,
+    /// A fisheye camera (raw circular image; the apps dewarp it).
+    fisheye: bool,
 }
 
 impl ChannelDetects {
@@ -220,6 +222,7 @@ impl ChannelDetects {
             } else {
                 Vec::new()
             },
+            fisheye: c.fisheye,
         }
     }
 }
@@ -251,7 +254,7 @@ fn channels_event(
             ),
             None => o,
         };
-        match (cd, probed.get(&c.channel)) {
+        let o = match (cd, probed.get(&c.channel)) {
             (Some(x), _) if x.lenses.len() >= 2 => o
                 .u64("lenses", x.lenses.len() as u64)
                 .str_arrays("lens_detects", x.lenses.iter().map(|l| l.iter().copied())),
@@ -259,6 +262,12 @@ fn channels_event(
             // `lens_detects` is left out.
             (_, Some(n)) if *n >= 2 => o.u64("lenses", u64::from(*n)),
             _ => o,
+        };
+        // Present only for a fisheye camera (docs/FFI.md).
+        if cd.is_some_and(|x| x.fisheye) {
+            o.bool("fisheye", true)
+        } else {
+            o
         }
     });
     Object::event("channels")
@@ -799,6 +808,7 @@ mod tests {
             ChannelDetects {
                 kinds: vec!["people", "vehicle"],
                 lenses: Vec::new(),
+                fisheye: false,
             },
         );
         let v: serde_json::Value = serde_json::from_str(&channels_event(
@@ -828,6 +838,7 @@ mod tests {
                     aitype: 1 | 16,
                 },
             ],
+            fisheye: false,
         };
         detects.insert(1, ChannelDetects::from_ai(&ai));
         let v: serde_json::Value = serde_json::from_str(&channels_event(
@@ -854,6 +865,27 @@ mod tests {
             ..ai.clone()
         };
         assert!(ChannelDetects::from_ai(&one).lenses.is_empty());
+        assert!(c[0].get("fisheye").is_none() && c[1].get("fisheye").is_none());
+
+        // A fisheye camera: `fisheye` true, absent everywhere else.
+        let fisheye = detection::ChannelAi {
+            channel: 0,
+            aitype: 0,
+            lenses: Vec::new(),
+            fisheye: true,
+        };
+        detects.insert(0, ChannelDetects::from_ai(&fisheye));
+        let v: serde_json::Value = serde_json::from_str(&channels_event(
+            1,
+            &slots,
+            &names,
+            Some(&detects),
+            &HashMap::new(),
+        ))
+        .unwrap();
+        let c = &v["channels"];
+        assert_eq!(c[0]["fisheye"], true);
+        assert!(c[1].get("fisheye").is_none());
     }
 
     fn push(connection: u64, states: Vec<(u8, u8, &str, &str)>) -> AlarmPush {

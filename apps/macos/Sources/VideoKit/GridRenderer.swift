@@ -50,6 +50,8 @@ public final class GridRenderer {
 
     private let queue: any MTLCommandQueue
     private let pipeline: any MTLRenderPipelineState
+    /// Fisheye tiles (`GridTile.dewarp`): the same vertices, `dewarp_fragment`.
+    private let dewarpPipeline: any MTLRenderPipelineState
     private let textureCache: CVMetalTextureCache
     private let passDescriptor = MTLRenderPassDescriptor()
 
@@ -91,6 +93,9 @@ public final class GridRenderer {
         descriptor.colorAttachments[0].pixelFormat = Self.pixelFormat
         do {
             pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+            descriptor.label = "grid dewarp tile"
+            descriptor.fragmentFunction = library.makeFunction(name: "dewarp_fragment")
+            dewarpPipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
             throw .setupFailed("pipeline: \(error)")
         }
@@ -126,6 +131,9 @@ public final class GridRenderer {
         guard shown.indices.contains(index) else { return nil }
         return shown[index].rate(now: hostMicros())
     }
+
+    /// Tiles drawn with the dewarp pipeline in the last frame (self-test).
+    public private(set) var dewarpedTilesDrawn = 0
 
     /// The size of the picture a tile is drawing now, or nil when it draws black.
     public func pictureSize(ofTile index: Int) -> CGSize? {
@@ -269,7 +277,8 @@ public final class GridRenderer {
         passDescriptor.colorAttachments[0].texture = target
         defer { passDescriptor.colorAttachments[0].texture = nil }
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
-        encoder.setRenderPipelineState(pipeline)
+        var current: (any MTLRenderPipelineState)?
+        var dewarped = 0
         let width = Float(target.width)
         let height = Float(target.height)
         for (i, tile) in tiles.enumerated() {
@@ -278,20 +287,33 @@ public final class GridRenderer {
             let s = tile.source ?? CGRect(x: 0, y: 0, width: t.width, height: t.height)
             let pw = Float(t.width)
             let ph = Float(t.height)
+            let wanted = tile.dewarp == nil ? pipeline : dewarpPipeline
+            if current !== wanted {
+                encoder.setRenderPipelineState(wanted)
+                current = wanted
+            }
             var uniforms = TileUniforms(
                 destination: SIMD4(
                     Float(d.minX) / width * 2 - 1, 1 - Float(d.minY) / height * 2,
                     Float(d.maxX) / width * 2 - 1, 1 - Float(d.maxY) / height * 2),
-                source: SIMD4(Float(s.minX) / pw, Float(s.minY) / ph, Float(s.maxX) / pw, Float(s.maxY) / ph),
+                // A dewarped tile's shader works in tile coordinates.
+                source: tile.dewarp == nil
+                    ? SIMD4(Float(s.minX) / pw, Float(s.minY) / ph, Float(s.maxX) / pw, Float(s.maxY) / ph)
+                    : SIMD4(0, 0, 1, 1),
                 r: tile.color.r, g: tile.color.g, b: tile.color.b)
             let size = MemoryLayout<TileUniforms>.stride
             encoder.setVertexBytes(&uniforms, length: size, index: 0)
             encoder.setFragmentBytes(&uniforms, length: size, index: 0)
+            if var constants = tile.dewarp {
+                encoder.setFragmentBytes(&constants, length: MemoryLayout<DewarpConstants>.stride, index: 1)
+                dewarped += 1
+            }
             encoder.setFragmentTexture(t.lumaTexture, index: 0)
             encoder.setFragmentTexture(t.chromaTexture, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
+        dewarpedTilesDrawn = dewarped
     }
 
     // MARK: Offscreen

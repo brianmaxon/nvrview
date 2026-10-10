@@ -39,12 +39,19 @@ public struct GridTile: Sendable {
     public var color: YCbCrToRGB
     public var destination: CGRect
     public var source: CGRect?
+    /// A dewarped fisheye tile: drawn by the dewarp pipeline with these
+    /// constants over the whole `destination` (`source` is not used).
+    public var dewarp: DewarpConstants?
 
-    public init(picture: any TilePictureSource, color: YCbCrToRGB, destination: CGRect, source: CGRect? = nil) {
+    public init(
+        picture: any TilePictureSource, color: YCbCrToRGB, destination: CGRect, source: CGRect? = nil,
+        dewarp: DewarpConstants? = nil
+    ) {
         self.picture = picture
         self.color = color
         self.destination = destination
         self.source = source
+        self.dewarp = dewarp
     }
 }
 

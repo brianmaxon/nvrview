@@ -124,6 +124,9 @@ internal sealed class ChannelInfo
     public string[]? Detects;
     public int Lenses;
 
+    /// <summary>A fisheye camera (the core's "fisheye"; docs/FFI.md): the app dewarps its circular picture.</summary>
+    public bool Fisheye;
+
     public static ChannelInfo? From(JsonElement c)
     {
         if (!c.TryGetProperty("channel", out JsonElement ch) || !ch.TryGetByte(out byte channel))
@@ -146,6 +149,10 @@ internal sealed class ChannelInfo
         if (c.TryGetProperty("detects", out JsonElement d) && d.ValueKind == JsonValueKind.Array)
         {
             info.Detects = [.. d.EnumerateArray().Select(x => x.GetString() ?? "")];
+        }
+        if (c.TryGetProperty("fisheye", out JsonElement fe) && fe.ValueKind is JsonValueKind.True)
+        {
+            info.Fisheye = true;
         }
         if (c.TryGetProperty("lenses", out JsonElement l) && l.TryGetInt32(out int lenses))
         {

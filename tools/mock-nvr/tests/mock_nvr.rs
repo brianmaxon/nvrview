@@ -330,6 +330,7 @@ fn bundled_fixtures_split_into_expected_pictures() {
         ("h265-basic.h265", Codec::H265, 60, 3, 0),
         ("h264-leading-p.h264", Codec::H264, 59, 2, 19),
         ("h265-leading-p.h265", Codec::H265, 59, 2, 19),
+        ("fisheye/h264-fisheye.h264", Codec::H264, 20, 1, 0),
     ] {
         let f = Fixture::load(&fixture_path(name)).unwrap();
         assert_eq!(f.codec(), codec, "{name}");
@@ -571,4 +572,74 @@ fn doorbell_talk_back_round_trip() {
         nvr.sleep(Duration::from_millis(10));
     }
     assert_eq!(nvr.talk_log()[1].end, TalkEnd::Disconnected);
+}
+
+#[test]
+fn fisheye_channel_is_flagged_and_streams_its_own_square_fixture() {
+    let fisheye = Fixture::load(&fixture_path("fisheye/h264-fisheye.h264")).unwrap();
+    let first = fisheye.frames()[0].data.clone();
+    let nvr = start(|c| {
+        c.fps = 100;
+        c.fisheye = Some(mock_nvr::FisheyeConfig::new(vec![2], fisheye, 384));
+    });
+    let mut c = Client::connect(&nvr, USER, PASSWORD);
+    assert_eq!(c.login(), Event::LoginOk);
+
+    let (_, q) = c.session.query_info(Command::Support, None).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    let xml = match c.control() {
+        Event::Control {
+            command: 199, xml, ..
+        } => xml,
+        e => panic!("{e:?}"),
+    };
+    let ai = bc_protocol::detection::parse_channel_ai(&xml).unwrap();
+    assert_eq!(
+        ai.iter()
+            .map(|a| (a.channel, a.fisheye))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (1, false), (2, true)]
+    );
+    assert_eq!(
+        xml.matches("<channelType>fisheye_ipc</channelType>")
+            .count(),
+        1
+    );
+
+    let (_, q) = c.session.query_info(Command::StreamInfoList, None).unwrap();
+    c.tcp.write_all(&q).unwrap();
+    match c.control() {
+        Event::Control {
+            command: 146, xml, ..
+        } => {
+            // The ordinary channels in one entry, the fisheye camera in its own.
+            assert!(xml.contains("<channelBits>3</channelBits>"), "{xml}");
+            assert!(xml.contains("<channelBits>4</channelBits>"), "{xml}");
+            assert!(
+                xml.contains("<width>384</width>\n<height>384</height>"),
+                "{xml}"
+            );
+        }
+        e => panic!("{e:?}"),
+    }
+
+    let (id, bytes) = c.session.start_preview(2, StreamTier::Main).unwrap();
+    c.tcp.write_all(&bytes).unwrap();
+    let mut demux = Demuxer::new();
+    let recs = read_until_video(&mut c, id, &mut demux, 1);
+    assert!(matches!(
+        recs[0],
+        Record::Info {
+            width: 384,
+            height: 384,
+            ..
+        }
+    ));
+    let video = recs.iter().find_map(|r| match r {
+        Record::Video { data, .. } => Some(data.clone()),
+        _ => None,
+    });
+    assert_eq!(video.as_deref(), Some(&first[..]));
+    drop(c);
+    nvr.shutdown();
 }
