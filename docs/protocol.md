@@ -265,15 +265,324 @@ Reply details:
 
 Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 192, 299, 511, 527–551, 574 (configuration and capability queries), and 14–16,
-142, 272–274 (recording search and playback).
+142, 272–274 (recording search; see "Recordings: search and download").
+
+## Camera motion control
+
+Commands that move a camera, change its focus, or play sound through its
+speaker. Each is marked with its tier (docs/ARCHITECTURE.md, "Device
+commands"): **viewing** (read-only, always allowed), **motion** (camera
+motion control, only where the user enabled it), or **configuration**
+(changes settings; never sent). Unless marked observed, everything here is
+reported (client); none of the motion commands has been seen on the wire yet.
+
+**Request shapes.** Read-only queries in this area have no body: the request
+is only an extension, `<Extension version="1.1"><channelId>N</channelId></Extension>`
+(the client adds `chnType`, and `subChannel` for a second lens), and the
+client waits up to 8 s for the reply. Commands that act send an XML body as
+well. (reported (client); the extension-only query form is observed for
+command 10 and the channel queries 527–551)
+
+### Capabilities
+
+| Fact | Provenance |
+| --- | --- |
+| `Support` (199) has a device-level `ptzMode` (`none`, `af`, `ptz`, `pt`, `p`) and per-channel `item` entries with `chnID`, `ptzType`, `ptzControl`, `ptzPreset`, `ptzPatrol`, `ptzTattern`, `autoPt`, `ipcAudioTalk`, `channelType`. | observed (field names); meanings reported (client) |
+| `ipcAudioTalk` 1 marks a channel that supports talk-back: on two NVRs the client asked for the talk ability (command 10) of exactly the channels with `ipcAudioTalk` 1, and of no others. | observed |
+| `ptzType` took the values 0, 1 and 3, and `ptzControl` several bitmasks, on different channels; their meaning is not established. The client reads `ptzPreset` bit 0 as "has presets", `ptzControl` bit 7 as "can report its position", bit 4 as digital zoom, bit 14 as manual focus, and a per-channel `autoFocus` of 1 as autofocus support; it shows a zoom and focus slider when the device's `ptzMode` is `af` or `ptz`. | values observed; meanings reported (client), medium confidence |
+| `AbilityInfo` (151) lists, per module and channel, what the logged-in user may do, as `abilityValue` strings like `download_rw, fileFind_rw`. PTZ entries are `control`, `preset`, `cruise`, `track`, `decoder`, `ptzInfo`; audio has `talk`; replay has `replay`, `seek`; record has `download`, `fileFind`. | observed (form); PTZ entries reported (client) |
+
+### Reading position and state (viewing)
+
+| Command | Reply | Provenance |
+| --- | --- | --- |
+| 433 | `ptzCurPos` with integers `pPos`, `tPos`, `zPos` (pan, tilt, zoom; units and ranges unknown) | reported (client) |
+| 294 | `zoom` and `focus`, each with `minPos`, `maxPos`, `curPos`; the client polls it about every 6 s while its PTZ panel is open | reported (client) |
+| 190 | `PtzPreset` with `channelId`, `separateCfg`, `maxPresetNum`, and `presetList/preset` entries (`id`, `name`, `imageName`, `xpos`, `ypos`, `height`, `width`, `mode`) | reported (client) |
+| 224 | `AutoFocus` with `channelId`, `disable` (whether continuous autofocus is off) | reported (client) |
+| 742 | PTZ information: `pt`, `separateCfg` | reported (client) |
+| 332, 35, 64 | guard (home position) settings, PTZ serial settings, patrol settings | reported (client) |
+| 10 | `TalkAbility`: `duplexList/duplex` (`FDX` seen), `audioStreamModeList/audioStreamMode` (`followVideoStream`, `mixAudioStream` seen), and `audioConfigList/audioConfig` with `priority`, `audioType` (`adpcm` seen; the client also knows `g711`), `sampleRate` (16000 seen), `samplePrecision` (16), `lengthPerEncoder` (1024), `soundTrack` (`mono`) | observed |
+| 542, 657, 693 | pushed by the device: PTZ state, PTZ status, talk status | reported (client) |
+
+### Moving (motion)
+
+**Command 18, PTZ control**, a body with no reply data:
+
+```xml
+<PtzControl version="1.1">
+  <channelId>N</channelId>
+  <speed>20</speed>
+  <command>left</command>
+</PtzControl>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| `command` is one of `left`, `right`, `up`, `down`, `leftUp`, `leftDown`, `rightUp`, `rightDown`, `zoomInc`, `zoomDec`, `focusInc`, `focusDec`, `irisInc`, `irisDec`, or `stop`. | reported (client) |
+| Moves are continuous: the client sends the direction when a control is pressed and `stop` (with speed 1) when it is released. Its default speed is 20; its speed slider runs 1–64. A client must therefore always follow a move with `stop`, including on error and disconnect paths. | reported (client) |
+| `auto` (continuous scan) and `startPatrol`/`stopPatrol` (with `patrolId`) are also motion; `clearPatrol` changes settings (configuration). | reported (client) |
+| `focusInc`/`focusDec` are the only one-shot focus actions found; no "autofocus now" command exists in the client. | reported (client) |
+
+**Command 19, presets.** One command number for recall, save, and delete;
+only the body's `command` tells them apart:
+
+```xml
+<PtzPreset version="1.1">
+  <channelId>N</channelId>
+  <presetList>
+    <preset>
+      <id>1</id>
+      <command>toPos</command>
+    </preset>
+  </presetList>
+</PtzPreset>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| `toPos` recalls a preset: **motion**. `setPos` saves the current position as a preset and `delPos` deletes one: **configuration**. The allowlist cannot judge 19 by its number; nvrview must build recall bodies itself and never forward any other `command`. | reported (client) |
+| The client always writes `xpos`, `ypos`, `height`, `width` (floats) into each `preset`, `name` and `imageName` when set, and optionally `mode` (`global`, `center`, `area`). Whether a recall needs more than `id` and `command` is not known. | reported (client) |
+
+**Other motion commands.**
+
+| Command | Body | Tier | Provenance |
+| --- | --- | --- | --- |
+| 295 | `StartZoomFocus` with `channelId`, `command` (`zoomPos` or `focusPos`), `movePos`: move zoom or focus to an absolute position in the range from 294 (the client's slider) | motion | reported (client) |
+| 468 | `ptzCurPos` with `pPos`, `tPos`, `zPos`: go to absolute coordinates | motion, but nvrview never chooses raw coordinates (it recalls presets instead) | reported (client) |
+| 445 | `Ptz3DLocation` with `topLeftX`, `topLeftY`, `width`, `height` (floats), `speed`, `streamType`: aim at a rectangle drawn on the picture | motion | reported (client) |
+| 545 | `pPos`, `tPos`, `zPos` and a rectangle: move to a tracking area | motion | reported (client) |
+| 709 | manual focus with `xpos`, `ypos`, `height`, `width` (a focus region); no caller in the client's UI was found, so its effect is unknown | motion (unconfirmed) | reported (client) |
+| 331 | guard (home position): `toGrd` goes there, `setGrd` saves it. The client writes `benable` and `timeout` into every 331 body, so even `toGrd` can rewrite settings | configuration (never sent, even to go home) | reported (client) |
+
+**Configuration in this area (never sent):** 19 with `setPos` or `delPos`,
+20 (set patrol), 331, 225 (turn continuous autofocus on or off), 708
+(autofocus mode), 34 (PTZ serial settings).
+
+### Talk-back (motion)
+
+Sending sound to a camera's or doorbell's speaker. All reported (client)
+unless marked.
+
+1. Command 10 reads the talk ability (viewing; observed above).
+2. Command **201** opens talk:
+
+   ```xml
+   <TalkConfig version="1.1">
+     <channelId>N</channelId>
+     <duplex>FDX</duplex>
+     <audioStreamMode>followVideoStream</audioStreamMode>
+     <audioConfig>
+       <audioType>adpcm</audioType>
+       <sampleRate>16000</sampleRate>
+       <samplePrecision>16</samplePrecision>
+       <lengthPerEncoder>1024</lengthPerEncoder>
+       <soundTrack>mono</soundTrack>
+     </audioConfig>
+   </TalkConfig>
+   ```
+
+   The client fills it from the ability reply (`duplex` `FDX` or `HDX`;
+   `audioStreamMode` `followVideoStream`, `onlyAudioStream` or
+   `mixAudioStream`).
+3. Audio goes out as command **202** messages, class `0x1464`, status 0, with
+   the extension `<Extension version="1.1"><binaryData>1</binaryData><channelId>N</channelId></Extension>`
+   and a payload of `01wb` records: both size fields hold the ADPCM length
+   plus 8, then a 4-byte prefix `00 01 <n/2+2> 00` and an IMA ADPCM block
+   (predictor, step index, samples).
+4. Command **11** closes talk: no body, channel extension only.
+
+| Fact | Provenance |
+| --- | --- |
+| Commands 12 and 203–205 (other talk stream variants) are not used by this client. | reported (client) |
+| Not known: whether 202 payloads are encrypted, which message ID they carry, how they are paced, and whether the device answers them. The ability advertised 16 kHz ADPCM, while the client's ADPCM decoder outputs 8 kHz; which rate the talk records use is unconfirmed. | open |
+
+## Recordings: search and download
+
+Everything in this section is read-only: it lists or copies recordings and
+changes nothing on the device. All of it belongs to the viewing tier.
+
+**Times.** Every time in these bodies is a block of six elements,
+`<year>`, `<month>` (1–12), `<day>`, `<hour>`, `<minute>`, `<second>`, in the
+device's local wall-clock time with no zone or offset. (observed)
+
+### What the official client sent when its playback tab opened
+
+Observed in a capture of the official desktop client and an NVR,
+on the session that was already carrying live view. The client stopped the
+live stream of the selected channel (command 4), then ran three searches over
+that same session, interleaved, each with its own message ID. The whole
+exchange took about 3.5 s. No playback or download was started in that
+capture. (observed)
+
+**1. Which days have recordings: command 142.** One request per month:
+
+```xml
+<DayRecords version="1.1">
+  <startTime><year>2026</year><month>1</month><day>1</day><hour>0</hour><minute>0</minute><second>0</second></startTime>
+  <endTime><year>2026</year><month>1</month><day>31</day><hour>23</hour><minute>59</minute><second>59</second></endTime>
+  <DayRecordList>
+    <DayRecord><index>0</index><channelId>N</channelId><uid>UID-EXAMPLE</uid></DayRecord>
+  </DayRecordList>
+</DayRecords>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| The reply repeats `startTime`/`endTime` and, per `DayRecord` (`index`, `channelId`), a `dayTypeList` of `dayType` entries, each with an `index` and a `type` (`normal` was the only value seen; the client also knows `none` and `alarm`). | observed; other types reported (client) |
+| Nine entries, indexes 0–8, came back on the tenth day of a month for a channel that had recorded continuously, which fits "one entry per day with recordings, index = day of month − 1"; not confirmed. Other `type` values (probably event recordings) were not seen. | observed (meaning inferred) |
+| `uid` is the camera's device ID from `ChannelInfo` (command 145). The client sent the same request three times in a row. | observed |
+
+**2. Recording files of one day: commands 14, 15, 16** (open, fetch, close).
+All three use the same message ID.
+
+Command 14 opens a search:
+
+```xml
+<FileInfoList version="1.1">
+  <FileInfo>
+    <uid>UID-EXAMPLE</uid>
+    <searchAITrack>1</searchAITrack>
+    <channelId>N</channelId>
+    <logicChnBitmap>255</logicChnBitmap>
+    <streamType>mainStream</streamType>
+    <recordType>manual, sched, io, md, people, face, vehicle, …</recordType>
+    <fileRecordType><i>manual</i><i>sched</i><i>md</i>…</fileRecordType>
+    <startTime>… 00:00:00 of the day …</startTime>
+    <endTime>… 23:59:59 of the same day …</endTime>
+  </FileInfo>
+</FileInfoList>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| `recordType` is a comma-separated list of recording causes; `fileRecordType` lists the same causes as `<i>` items plus a few more (`answer`, `nonmotorveh`, `IPCInputOutput`). The client asked for every cause it knows. | observed |
+| `streamType` takes the live-view stream names (`externStream` was seen); the client searched the stream the tile was showing. | observed |
+| The 14 reply is a single summary `FileInfo`: `channelId`, `handle` (0 here), empty `name`, `containsAudio`, `recordType` (the causes present that day, e.g. `manual ,io ,md ,sched`), `supportSub`, `sizeL`/`sizeH` 0, and the requested times. | observed |
+| Command 15 sends `FileInfo` with `channelId`, `uid`, `searchAITrack`, and the `handle` from the 14 reply. Its reply lists the day's files, one `FileInfo` each: `channelId`, `handle`, `name`, `Id`, `streamType`, `containsAudio`, `recordType`, `sizeL` and `sizeH` (low and high 32 bits of the file size in bytes), `supportSub`, `encrypt`, `startTime`, `endTime`. | observed |
+| A single 15 returned every file of a day of continuous recording (a few dozen files, about 19 KB of XML); whether a busier day needs repeated 15 requests until an empty reply is not known. | observed |
+| Recording files run about 30 to 60 minutes; the first one of a day can start on the previous day. | observed |
+| In the client, 14, 15 and 16 are named search *open*, *next* and *close*, so 15 is presumably repeated for further pages. The reply `FileInfo` can also carry `uid`, `fileType` (`h264`, `mp4`, `flv`, `jpg`), `playSpeed`, `fileSize` and `typeExtension`, and 14 can carry `fileType` `jpg` to search snapshots. | reported (client) |
+| Command 16 with the same body closes the search; the reply is empty with status 200. The next search was handed the same `handle` 0 again. | observed |
+| `name` and `Id` are opaque file identifiers; treat them as strings. (In the capture `Id` looked like `<tier>-<channel>-0-<packed start time>-<suffix>`, with the start time in UTC and a 0-based month, and `name` like a channel number plus the local start time; neither is needed to download by time.) | observed |
+
+**3. Motion and detection events of one day: commands 272, 273, 274** (open,
+fetch pages, close). All three use the same message ID. Unlike the other
+searches, the request body travels as the *payload* of the message: the
+header's payload offset is non-zero, the extension is
+`<Extension version="1.1"><channelId>N</channelId></Extension>`, and the
+payload is the XML body below, encrypted like any other body. Replies carry an
+ordinary (encrypted) body with no extension. (observed)
+
+```xml
+<findAlarmVideo version="1.1">
+  <channelId>N</channelId>
+  <uid>UID-EXAMPLE</uid>
+  <logicChnBitmap>255</logicChnBitmap>
+  <streamType>2</streamType>
+  <notSearchVideo>0</notSearchVideo>
+  <startTime>… 00:00:00 of the day …</startTime>
+  <endTime>… 23:59:59 of the same day …</endTime>
+  <alarmType>md, pir, other, package, io, people, face, vehicle, …</alarmType>
+  <eventAlarmType><i>md</i><i>pir</i>…</eventAlarmType>
+</findAlarmVideo>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| The 272 reply is `findAlarmVideo` with `channelId` and a `fileHandle` (a small number that increased by one with each new search). | observed |
+| `streamType` here is a number, not a name: 2 was sent while the 14 search of the same moment named `externStream`. The mapping of the numbers is not known. | observed |
+| Command 273 sends `findAlarmVideo` with `channelId` and `fileHandle` and returns one page: `alarmVideoInfo` with `channelId`, `fileHandle`, `bFinished`, and an `alarmVideoList` of up to 50 `alarmVideo` entries. The client repeats 273 until `bFinished` is 1; every page but the last was full. | observed |
+| Each `alarmVideo` has `fileName`, `bHasRecFile`, `bEncrypted`, `alarmType` (`md`, `vehicle`, `people` seen), `fileId` (the `Id` of the recording file from command 15 that contains the event), `startTime`, `endTime`. Events were about 10 to 25 s long. | observed |
+| Command 274 with `channelId` and `fileHandle` closes the search; empty reply, status 200. | observed |
+| The client also knows `destination` in the 272 request and `bDeleted` and `score` in `alarmVideo`. | reported (client) |
+
+These three searches give a playback UI what it needs: a calendar (142), a timeline of
+continuous recording (14–16), and event markers (272–274).
+
+### Playback commands in the client (not yet observed)
+
+All reported (client); none of these appeared in a capture yet.
+
+| Command | Use | Body |
+| --- | --- | --- |
+| 5 / 7 | play a recording file / stop | `FileInfo` with `channelId`, `Id` or `name`, `uid`, `supportSub`, `playSpeed`, `streamType`, optional `startTime` |
+| 123 | seek during playback | `ReplaySeek` with `channelId`, `seq`, `seekTime` |
+| 150 | keyframe-only playback | not traced |
+| 381 / 382 / 383 | play by time range / stop / seek (newer form) | `ReplayByTimeV2` with `startTime`, `endTime`, `playSpeed`, `streamType`, `logicChnBitmap`, offsets, `durationList` |
+| 8 / 9 | download a whole file by name / stop | `FileInfo` with `uid`, `Id`, `name`, `channelId`, `supportSub`, `streamType` |
+| 143 / 144 | download a time range / stop | below |
+| 476; 492–494 | paged download; paged search open, next, close | not traced |
+| 303 | **delete recording files** | configuration tier: never sent |
+
+### Download by time range: command 143
+
+Named "download cut" in the client, with 144 as its stop. Observed on an NVR (firmware build family 2025) by a small read-only
+client that sent only login and this command, and verified by decoding the
+result. The official client was not captured downloading; that it uses 143
+too is unconfirmed.
+
+Request, class `0x1464`, payload offset 0, body encrypted like any other:
+
+```xml
+<FileInfoList version="1.1">
+  <FileInfo>
+    <uid>UID-EXAMPLE</uid>
+    <logicChnBitmap>255</logicChnBitmap>
+    <channelId>N</channelId>
+    <supportSub>0</supportSub>
+    <streamType>mainStream</streamType>
+    <startTime>…</startTime>
+    <endTime>…</endTime>
+  </FileInfo>
+</FileInfoList>
+```
+
+| Fact | Provenance |
+| --- | --- |
+| Every reply is a command-143 message carrying the request's message ID. | observed |
+| First comes a control reply (payload offset 0) whose encrypted body is a `FileInfoList` with `sizeL`: the device's estimate of the window's size in bytes. | observed |
+| Then media messages: an extension (payload offset non-zero) and a payload of BCMEDIA records, exactly as in live view. `encryptLen` was 0 on every media message, so the payload is plain. | observed |
+| The download ends with a command-143 message with an empty body. | observed |
+| Other messages (alarm and status pushes) arrive on the same session during a download and must be skipped by command number and message ID. | observed |
+| `streamType` alone selects the lens and tier: `mainStream`, `subStream`, and on a multi-lens camera `externStream` (second lens, high) and `mobileStream` (second lens, low). Changing `channelId` or `logicChnBitmap`, or adding logical-channel elements, never selected the second lens. `uid` is optional for the first lens; it was sent with the camera's ID for the second lens, as the official client does in its searches. | observed |
+| The cut is aligned to the recording's keyframes: a 5 s window came back as 6–8 s of video (one whole GOP of 6 s on a main stream, 8 s on a sub-stream). Video timestamps (µs) are the frame times; the advertised frame rate is not. | observed |
+| Audio records can precede the window's first picture by whole fragments (up to about 12 s was seen), and audio has no timestamp, so a downloader must align audio to video itself (for example, drop audio ahead of the first keyframe). | observed |
+| A window with no recording ends normally (empty 143) without a single video record. | observed |
+| Second-lens streams carry audio as `15wb`; any `..wb` record is audio. | observed |
+| Cost, for a 5 s window: about 1.5 MB read for a high-resolution H.265 main stream and 0.42 MB for its H.264 sub-stream, about 2 s per fetch including login. One session served several such downloads one after another. | observed |
+| A download can be stopped early with command 144 (empty body). | reported (client) |
+| Other projects report command 13 for downloads and 14–16 as a download path; in the client, 14–16 are the file search above and 13 is not sent. | reported |
+
+**Why not the HTTP API.** The same NVR's HTTP API was measured as a
+download path and rejected: its file download always streams a whole
+recording file from the first byte (no `Range`, and the `start`/`seek`
+parameters other clients send were accepted and ignored), at about 800 kB/s,
+with files packed in 60-minute units; its server-side cut returned a name
+that no request could retrieve; its search answers a window longer than a
+day with a per-day bitmap instead of files, and a two-hour window took
+minutes. Its token logins also count against the device's session limit:
+six logins without a logout made the device refuse new connections. RTSP
+serves live view only, and ONVIF offered no replay service. (observed)
 
 ## Open questions
 
 - Camera motion control (needed before any code sends it): the commands and
-  bodies for reading the PTZ position, recalling a preset, moving, focus and
-  autofocus, and a doorbell's talk-back audio; which models support each. To
-  be observed from the official app's PTZ and focus controls, and checked
-  against static analysis of the client.
+  bodies are now reported (client); none is observed. Read-only checks first:
+  199, 151, 433, 294, 190 and 224 on a PTZ or zoom camera, to map `ptzType`
+  and the `ptzControl` bits and learn the units of `pPos`/`tPos`/`zPos` and
+  `movePos`. Then a capture of the official app using move and stop, preset
+  recall, the zoom and focus sliders, and talk-back, to confirm 18, 19
+  (`toPos`), 295, and the 201 → 202 → 11 sequence (message IDs, encryption,
+  pacing, sample rate). What 709 does is unknown.
+- Recordings: whether 15 must be repeated for days with many files; the
+  meaning of `dayType` `index` and of the numeric `streamType` in 272; whether
+  the official client downloads with 143 (a capture of its download); the
+  playback commands 5/7, 123 and 381–383, none yet observed; how a 143 error
+  (bad stream name, no disk) is reported.
+- How many sessions an NVR accepts. Its HTTP API refused new connections
+  after six logins without logout (observed); the limit for port 9000
+  sessions is not measured.
 - Idle timeout on the device side. The client's side is now reported
   (command 93 after 6 s of silence; dead after 10 s on a direct connection);
   confirm on hardware, including whether a device answers 93 while streaming
