@@ -81,6 +81,10 @@ public struct InsetItem: Sendable, Equatable, Identifiable {
     /// The view the stage showed before a swap (its camera in the inset),
     /// rather than an event.
     public var isReturn = false
+    /// The call is shown in its own window (docs/UX.md "Doorbell calls"):
+    /// the item is kept for the call's whole life but not drawn, counted,
+    /// leased, swapped or closed by the clock here.
+    public var detached = false
 
     public var id: CameraRef { camera }
 
@@ -129,11 +133,17 @@ public struct InsetBoard: Sendable, Equatable {
 
     public init() {}
 
+    /// The items drawn in this window (all but the detached ones).
+    public var attached: [InsetItem] { items.filter { !$0.detached } }
     /// The insets drawn, top of the stack first.
-    public var shown: [InsetItem] { Array(items.prefix(Self.maxShown)) }
+    public var shown: [InsetItem] { Array(attached.prefix(Self.maxShown)) }
     /// How many more there are than are drawn.
-    public var more: Int { max(items.count - Self.maxShown, 0) }
-    public var isEmpty: Bool { items.isEmpty && swap == nil }
+    public var more: Int { max(attached.count - Self.maxShown, 0) }
+    /// Nothing on screen: no inset drawn and no swap (detached items do not
+    /// count).
+    public var isEmpty: Bool { attached.isEmpty && swap == nil }
+    /// The calls shown in their own windows.
+    public var detachedCameras: [CameraRef] { items.filter(\.detached).map(\.camera) }
 
     public func item(for camera: CameraRef) -> InsetItem? {
         if swap?.shown == camera { return swap?.item }
@@ -142,11 +152,14 @@ public struct InsetBoard: Sendable, Equatable {
 
     /// An event started. `visible`: the window shows the camera already (it
     /// gets its tile alert instead). A repeat on a camera that has an inset
-    /// updates it and brings it to the top. Returns whether anything changed.
+    /// updates it and brings it to the top. `detached`: a call that opens in
+    /// its own window; its item is recorded whether or not the camera is
+    /// visible, and a repeat keeps an item's presentation. Returns whether
+    /// anything changed.
     @discardableResult
-    public mutating func started(_ kind: InsetKind, camera: CameraRef, visible: Bool, now: Double, at date: Date)
-        -> Bool
-    {
+    public mutating func started(
+        _ kind: InsetKind, camera: CameraRef, visible: Bool, now: Double, at date: Date, detached: Bool = false
+    ) -> Bool {
         if var s = swap, s.shown == camera {
             s.item.count += 1
             s.item.lastAt = date
@@ -169,12 +182,31 @@ public struct InsetBoard: Sendable, Equatable {
             items.insert(item, at: 0)
             return true
         }
-        guard !visible else { return false }
+        guard !visible || detached else { return false }
         items.insert(
             InsetItem(
                 camera: camera, kind: kind, firstAt: date, lastAt: date, count: 1, active: true, startedAt: now,
-                endedAt: nil, usedAt: now),
+                endedAt: nil, usedAt: now, detached: detached),
             at: 0)
+        return true
+    }
+
+    /// Pop Out (`true`) or Pop In (`false`) a call's item. Popping out the
+    /// swapped-in camera ends the swap first (the stage shows its own view
+    /// again). Popping in puts the inset back on top with a fresh minute.
+    /// Returns whether anything changed.
+    @discardableResult
+    public mutating func setDetached(_ camera: CameraRef, _ detached: Bool, now: Double) -> Bool {
+        if detached, let s = swap, s.shown == camera {
+            swapBack(now: now)
+        }
+        guard let i = items.firstIndex(where: { $0.camera == camera && !$0.isReturn }), items[i].detached != detached
+        else { return false }
+        var item = items.remove(at: i)
+        item.detached = detached
+        item.hovered = false
+        item.usedAt = max(item.usedAt, now)
+        items.insert(item, at: 0)
         return true
     }
 
@@ -198,7 +230,7 @@ public struct InsetBoard: Sendable, Equatable {
     /// When an inset that closes by itself closes, on the viewer clock (nil
     /// while hovered or for sound alarms).
     public static func closesAt(_ item: InsetItem) -> Double? {
-        guard item.kind.closesByItself, !item.isReturn, !item.hovered else { return nil }
+        guard item.kind.closesByItself, !item.isReturn, !item.hovered, !item.detached else { return nil }
         let ended = item.endedAt ?? (item.startedAt + lostStopAfter)
         return max(ended, item.usedAt) + autoCloseDelay
     }
@@ -241,7 +273,7 @@ public struct InsetBoard: Sendable, Equatable {
     @discardableResult
     public mutating func dismissTop() -> InsetItem? {
         if let s = swap { return dismiss(s.shown) }
-        guard let top = items.first else { return nil }
+        guard let top = attached.first else { return nil }
         if top.isReturn {
             swapBack(now: nil)
             return nil
@@ -259,7 +291,7 @@ public struct InsetBoard: Sendable, Equatable {
             swapBack(now: now)
             return
         }
-        guard let i = items.firstIndex(where: { $0.camera == camera && !$0.isReturn }) else { return }
+        guard let i = items.firstIndex(where: { $0.camera == camera && !$0.isReturn && !$0.detached }) else { return }
         var item = items.remove(at: i)
         item.usedAt = now
         item.hovered = false
@@ -285,7 +317,7 @@ public struct InsetBoard: Sendable, Equatable {
     public mutating func swapTop(displaced: CameraRef?, now: Double) {
         if swap != nil {
             swapBack(now: now)
-        } else if let top = items.first {
+        } else if let top = attached.first {
             swap(top.camera, displaced: displaced, now: now)
         }
     }
@@ -369,7 +401,8 @@ extension ChromeCorner {
 }
 
 /// The insets' geometry on a stage (top-left origin): about 30% of the
-/// stage's width, stacked from the corner, newest nearest it.
+/// stage's width, in one column placed by an `InsetAnchor` (a corner by
+/// default), newest nearest the column's nearer horizontal edge.
 public enum InsetGeometry {
     public static let widthFraction = 0.3
     public static let minWidth = 220.0
@@ -378,21 +411,42 @@ public enum InsetGeometry {
     public static let headerHeight = 22.0
 
     /// The frames of `heights.count` insets of the given heights (header,
-    /// video and any call controls) in a stage of `size`. Insets that do not
-    /// fit are left out (the caller counts them in "+N more").
+    /// video and any call controls) in a stage of `size`, stacked from
+    /// `corner`. Insets that do not fit are left out (the caller counts them
+    /// in "+N more").
     public static func frames(
         count: Int, width: Double, heights: [Double], corner: ChromeCorner, stage: (width: Double, height: Double)
     ) -> [(x: Double, y: Double, width: Double, height: Double)] {
-        var out: [(x: Double, y: Double, width: Double, height: Double)] = []
-        let left = corner == .topLeft || corner == .bottomLeft
-        let top = corner == .topLeft || corner == .topRight
-        let x = left ? margin : stage.width - margin - width
+        frames(count: count, width: width, heights: heights, anchor: InsetAnchor(corner: corner), stage: stage)
+    }
+
+    /// The same for a column placed anywhere: `anchor` is the column's
+    /// position as a fraction of the free space inside the margins. Below
+    /// the middle (`y > 0.5`) the newest inset is at the column's bottom and
+    /// the others stack upward; otherwise the newest is at its top. Insets
+    /// that do not fit the stage's height (inside the margins) are left out;
+    /// the newest is always drawn, even when it alone is taller.
+    public static func frames(
+        count: Int, width: Double, heights: [Double], anchor: InsetAnchor, stage: (width: Double, height: Double)
+    ) -> [(x: Double, y: Double, width: Double, height: Double)] {
+        var fitting: [Double] = []
         var used = margin
         for h in heights.prefix(count) {
-            guard used + h + margin <= stage.height || out.isEmpty else { break }
-            let y = top ? used : stage.height - used - h
-            out.append((x, y, width, h))
+            guard used + h + margin <= stage.height || fitting.isEmpty else { break }
+            fitting.append(h)
             used += h + gap
+        }
+        guard !fitting.isEmpty else { return [] }
+        let column = fitting.reduce(0, +) + gap * Double(fitting.count - 1)
+        let x = margin + anchor.x * (stage.width - 2 * margin - width)
+        let top = margin + anchor.y * (stage.height - 2 * margin - column)
+        let upward = anchor.growsUpward
+        var out: [(x: Double, y: Double, width: Double, height: Double)] = []
+        var offset = 0.0
+        for h in fitting {
+            let y = upward ? top + column - offset - h : top + offset
+            out.append((x, y, width, h))
+            offset += h + gap
         }
         return out
     }
@@ -400,5 +454,89 @@ public enum InsetGeometry {
     /// The inset width for a stage width.
     public static func width(stage: Double) -> Double {
         min(max(stage * widthFraction, minWidth), max(stage - 2 * margin, 0))
+    }
+}
+
+/// Where a window's inset column sits (docs/UX.md "Alert insets"): its
+/// position as a fraction of the free space inside the stage's margins,
+/// `x = (left - margin) / (stageWidth - 2 margin - columnWidth)` and the same
+/// for `y` with heights, each in 0...1. (0, 0) is the top left corner and
+/// (1, 1) the bottom right. Resizing the window or going full screen keeps
+/// the fractions, so a column in a corner stays in it.
+public struct InsetAnchor: Sendable, Equatable, Hashable, Codable {
+    public let x: Double
+    public let y: Double
+
+    /// Clamped to 0...1 (anything not finite counts as 0).
+    public init(x: Double, y: Double) {
+        self.x = x.isFinite ? min(max(x, 0), 1) : 0
+        self.y = y.isFinite ? min(max(y, 0), 1) : 0
+    }
+
+    /// A corner's anchor (the default placement).
+    public init(corner: ChromeCorner) {
+        switch corner {
+        case .topLeft: self.init(x: 0, y: 0)
+        case .topRight: self.init(x: 1, y: 0)
+        case .bottomLeft: self.init(x: 0, y: 1)
+        case .bottomRight: self.init(x: 1, y: 1)
+        }
+    }
+
+    /// The column grows upward from its bottom edge (it sits nearer the
+    /// bottom); at the exact middle it grows downward.
+    public var growsUpward: Bool { y > 0.5 }
+
+    private enum CodingKeys: String, CodingKey { case x, y }
+
+    /// A saved value goes through the clamping initializer.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(x: try c.decode(Double.self, forKey: .x), y: try c.decode(Double.self, forKey: .y))
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(x, forKey: .x)
+        try c.encode(y, forKey: .y)
+    }
+}
+
+/// Dragging the inset column (docs/UX.md "Alert insets"): where it lands as
+/// an anchor, each axis snapping to its edge within `snapDistance`.
+public enum InsetPlacement {
+    /// Points from an edge (inside the margins) within which an axis snaps
+    /// to that edge.
+    public static let snapDistance = 24.0
+
+    /// The anchor for a column whose top left corner was dragged to
+    /// `origin` in a stage of `stage` (top-left origin, points).
+    public static func anchor(
+        origin: (x: Double, y: Double), column: (width: Double, height: Double), stage: (width: Double, height: Double)
+    ) -> InsetAnchor {
+        InsetAnchor(
+            x: fraction(origin.x, size: column.width, stage: stage.width),
+            y: fraction(origin.y, size: column.height, stage: stage.height))
+    }
+
+    /// One axis: the offset from the near margin over the free space; 0 or 1
+    /// within the snap distance of either end (the nearer end when both
+    /// are, the start on a tie); 0 when there is no free space.
+    public static func fraction(_ position: Double, size: Double, stage: Double) -> Double {
+        let free = stage - 2 * InsetGeometry.margin - size
+        guard free > 0 else { return 0 }
+        let fromStart = position - InsetGeometry.margin
+        let fromEnd = free - fromStart
+        if min(fromStart, fromEnd) <= snapDistance { return fromStart <= fromEnd ? 0 : 1 }
+        return fromStart / free
+    }
+
+    /// The column's top left corner for an anchor (the inverse of `anchor`
+    /// away from the edges).
+    public static func origin(
+        anchor: InsetAnchor, column: (width: Double, height: Double), stage: (width: Double, height: Double)
+    ) -> (x: Double, y: Double) {
+        let m = InsetGeometry.margin
+        return (m + anchor.x * (stage.width - 2 * m - column.width), m + anchor.y * (stage.height - 2 * m - column.height))
     }
 }
