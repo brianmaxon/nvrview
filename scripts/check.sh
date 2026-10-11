@@ -36,8 +36,26 @@ elif command -v gitleaks >/dev/null 2>&1; then
   gitleaks detect --source=. --redact --no-banner
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   step "secret scan (full history, Docker)"
-  docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.18.4 \
-    detect --source=/repo --redact --no-banner
+  # Mounted at the same paths as on the host, with the repository's common
+  # git directory too: in a git worktree .git is a file pointing there, and
+  # without it git fails and gitleaks scans nothing yet exits 0. A scan that
+  # reports no commits is therefore a failure.
+  common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+  scan_log="$(mktemp)"
+  if docker run --rm -v "$PWD:$PWD" -v "$common:$common" -w "$PWD" \
+    zricethezav/gitleaks:v8.18.4 detect --source="$PWD" --redact --no-banner \
+    >"$scan_log" 2>&1; then scan_rc=0; else scan_rc=$?; fi
+  cat "$scan_log"
+  if [ "$scan_rc" -ne 0 ]; then
+    rm -f "$scan_log"
+    exit "$scan_rc"
+  fi
+  if ! grep -Eq '[1-9][0-9]* commits scanned' "$scan_log"; then
+    rm -f "$scan_log"
+    echo "secret scan: no commits were scanned" >&2
+    exit 1
+  fi
+  rm -f "$scan_log"
 else
   step "secret scan skipped (no gitleaks or Docker)"
 fi
