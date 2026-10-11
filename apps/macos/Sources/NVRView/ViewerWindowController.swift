@@ -109,6 +109,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             MainActor.assumeIsolated { self?.sidebarCollapsedChanged() }
         }
         stage.delegate = self
+        stage.onInsetAnchorChange = { [weak self] in self?.onChange() }
         editBar.controller = self
         token = model.subscribe { [weak self] in self?.modelChanged() }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -558,8 +559,11 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         let fullScreen = window.styleMask.contains(.fullScreen)
         return SavedWindow(
             content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen,
-            sidebarCollapsed: sidebarCollapsedPreference)
+            sidebarCollapsed: sidebarCollapsedPreference, insetAnchor: stage.insetAnchor)
     }
+
+    /// Puts the alert insets where the user left them (a restored window).
+    func restoreInsetAnchor(_ anchor: InsetAnchor?) { stage.insetAnchor = anchor }
 
     func windowDidMove(_ notification: Notification) { onChange() }
     func windowDidEndLiveResize(_ notification: Notification) { onChange() }

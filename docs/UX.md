@@ -473,6 +473,16 @@ Details settled while building it (macOS):
 - The insets stack from their corner, newest nearest it; those that do not
   fit the stage's height count in "+N more". The corner is a setting
   (Settings > Alerts), opposite the corner indicators by default.
+- Moving the column: a press on the header (its labels included) becomes a
+  drag after 2 pt, one on the picture after the 6 pt click threshold;
+  releasing after a drag never swaps. The column follows the pointer with
+  the snap applied as it moves, and the position is stored when the button
+  is released, in the window's record in `windows.json` (`insetAnchor`, left
+  out while the column is in its default corner). "Reset Position" is in
+  the menu of every inset over the stage. Moving the column counts as using
+  its insets (their minute starts again). The 12 pt margin keeps the column
+  clear of the sidebar's 6 pt edge-reveal strip and of the top edge that
+  reveals the toolbar in full screen.
 - Swapping with a layout that is not focused puts the selected (or first)
   tile's camera into the return inset ("Back to the view"); clicking it, its
   close control, or Tab swaps back. Clicking another inset while swapped puts

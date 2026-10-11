@@ -19,16 +19,24 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     /// The user's choice for the sidebar (not the transient full-screen
     /// state). Files written before this field existed decode as open.
     public var sidebarCollapsed: Bool
+    /// Where the user moved the window's alert insets (docs/UX.md "Alert
+    /// insets"); nil: the default corner. Left out of the file while nil;
+    /// files without it (or with a value that cannot be read) load as nil.
+    public var insetAnchor: InsetAnchor?
 
-    public init(content: Content, frame: CGRect, fullScreen: Bool = false, sidebarCollapsed: Bool = false) {
+    public init(
+        content: Content, frame: CGRect, fullScreen: Bool = false, sidebarCollapsed: Bool = false,
+        insetAnchor: InsetAnchor? = nil
+    ) {
         self.content = content
         self.frame = frame
         self.fullScreen = fullScreen
         self.sidebarCollapsed = sidebarCollapsed
+        self.insetAnchor = insetAnchor
     }
 
     private enum CodingKeys: String, CodingKey {
-        case content, frame, fullScreen, sidebarCollapsed
+        case content, frame, fullScreen, sidebarCollapsed, insetAnchor
     }
 
     public init(from decoder: any Decoder) throws {
@@ -37,6 +45,7 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         frame = try c.decode(CGRect.self, forKey: .frame)
         fullScreen = try c.decode(Bool.self, forKey: .fullScreen)
         sidebarCollapsed = try c.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed) ?? false
+        insetAnchor = (try? c.decodeIfPresent(InsetAnchor.self, forKey: .insetAnchor)) ?? nil
     }
 
     /// Where to put a restored window: its saved frame if enough of it is on

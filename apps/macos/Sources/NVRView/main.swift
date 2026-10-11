@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// devices are made up).
     private let windowFile: JSONFileStore<SavedWindow>
     private var saveScheduled = false
+    /// How often a viewer window asked to be saved (self-test).
+    private(set) var windowSaveRequests = 0
     private var terminating = false
 
     init(options: Options) {
@@ -247,7 +249,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // quits as before.
             if windows.isEmpty, !terminating { model.calls.endAll() }
         }
-        controller.onChange = { [weak self] in self?.scheduleSaveWindows() }
+        controller.onChange = { [weak self] in
+            self?.windowSaveRequests += 1
+            self?.scheduleSaveWindows()
+        }
         windows.append(controller)
         defer { scheduleSaveWindows() }
         guard let window = controller.window else { return controller }
@@ -290,6 +295,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let controller = openWindow(content, frame: frame) else { continue }
             reopened = true
             controller.restoreSidebar(collapsed: w.sidebarCollapsed)
+            controller.restoreInsetAnchor(w.insetAnchor)
             if w.fullScreen, options.selfTestSeconds == nil { controller.window?.toggleFullScreen(nil) }
         }
         return reopened

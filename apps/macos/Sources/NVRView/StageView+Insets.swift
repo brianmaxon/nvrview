@@ -370,6 +370,8 @@ extension StageView {
             }
             view.callDelegate = CallTarget(stage: self, camera: camera)
             view.onPopOut = { [weak self] in self?.model.popOutCall(camera) }
+            view.onDrag = { [weak self] phase, point in self?.dragInsets(phase, at: point) }
+            view.onResetPosition = { [weak self] in self?.resetInsetPosition() }
             insetLayer.addSubview(view)
             alertInsetViews[camera] = view
         }
@@ -422,8 +424,69 @@ extension StageView {
         stageCall.onPopOut = stageFillingCamera.map { camera in { [weak self] in self?.model.popOutCall(camera.firstLens) } }
     }
 
-    /// Places the insets in their corner, newest nearest it, and notes where
-    /// each picture goes for the renderer.
+    // MARK: Moving the column (docs/UX.md "Alert insets", "Moving them")
+
+    /// Where the column sits now: being dragged, where the user left it, or
+    /// the default corner (the Settings corner, else opposite the
+    /// indicators). The 12 pt margin keeps it off the sidebar's 6 pt
+    /// edge-reveal strip and the full-screen toolbar's reveal edge at the top.
+    var effectiveInsetAnchor: InsetAnchor { insetDragAnchor ?? insetAnchor ?? InsetAnchor(corner: model.insetCorner) }
+
+    /// A drag on an inset moves the whole column; each axis snaps to its
+    /// edge within 24 pt. The column keeps its position as a fraction of the
+    /// free space (InsetPlacement), so resizing keeps it in place.
+    func dragInsets(_ phase: InsetView.DragPhase, at point: CGPoint) {
+        switch phase {
+        case .began:
+            guard let column = insetColumn else { return }
+            insetDragStart = (point, column)
+            insetsUsedByDrag()
+        case .moved, .ended:
+            guard let start = insetDragStart else { return }
+            let b = insetLayer.bounds
+            let origin = (
+                x: Double(start.column.minX + point.x - start.pointer.x),
+                y: Double(start.column.minY + point.y - start.pointer.y))
+            let anchor = InsetPlacement.anchor(
+                origin: origin, column: (Double(start.column.width), Double(start.column.height)),
+                stage: (Double(b.width), Double(b.height)))
+            if phase == .moved {
+                insetDragAnchor = anchor
+                layoutInsetViews()
+                return
+            }
+            insetDragStart = nil
+            insetDragAnchor = nil
+            insetsUsedByDrag()
+            if insetAnchor == anchor {
+                layoutInsetViews()
+            } else {
+                insetAnchor = anchor
+            }
+            onInsetAnchorChange()
+        }
+    }
+
+    /// Moving the column is using its insets (their minute starts again).
+    private func insetsUsedByDrag() {
+        let now = clock.now
+        for item in insetBoard.shown {
+            insetBoard.use(item.camera, now: now)
+            model.calls.use(item.camera)
+        }
+    }
+
+    /// "Reset Position": back to the default corner.
+    func resetInsetPosition() {
+        insetDragStart = nil
+        insetDragAnchor = nil
+        insetAnchor = nil
+        onInsetAnchorChange()
+    }
+
+    /// Places the insets in their column (where the user moved it, else the
+    /// default corner), newest nearest its nearer horizontal edge, and notes
+    /// where each picture goes for the renderer.
     func layoutInsetViews() {
         let b = insetLayer.bounds
         guard b.width > 0, b.height > 0 else { return }
@@ -434,8 +497,9 @@ extension StageView {
             let call = alertInsetViews[item.camera]?.callPanel.isHidden == false ? Double(InsetView.callHeight) : 0
             return InsetGeometry.headerHeight + width * min(max(aspect, 0.3), 1.2) + call
         }
+        let anchor = effectiveInsetAnchor
         let frames = InsetGeometry.frames(
-            count: shown.count, width: width, heights: heights, corner: model.insetCorner,
+            count: shown.count, width: width, heights: heights, anchor: anchor,
             stage: (Double(b.width), Double(b.height)))
         var rects: [CameraRef: CGRect] = [:]
         for (i, item) in shown.enumerated() {
@@ -453,13 +517,13 @@ extension StageView {
         }
         insetVideoRects = rects
         let column = frames.map { CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height) }.reduce(CGRect.null) { $0.union($1) }
-        stageCall.avoid = column.isNull ? nil : column
+        insetColumn = column.isNull ? nil : column
+        stageCall.avoid = insetColumn
         let more = insetBoard.more + max(shown.count - frames.count, 0)
         moreChip.isHidden = more == 0
         if more > 0, let last = frames.last {
             moreChip.stringValue = "+\(more) more"
-            let top = model.insetCorner == .topLeft || model.insetCorner == .topRight
-            let y = top ? last.y + last.height + 6 : last.y - 6 - 20
+            let y = anchor.growsUpward ? last.y - 6 - 20 : last.y + last.height + 6
             moreChip.frame = CGRect(x: last.x, y: y, width: 90, height: 20)
         }
         // Keep the insets above the stage's call controls.

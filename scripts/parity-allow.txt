@@ -69,6 +69,10 @@ call-popout-open            macos    gap: Windows has no call window yet to pop 
 call-popout-talk            macos    gap: Windows has no call window yet; talk, latch and draft across a pop are unchecked
 call-window-frame           macos    gap: Windows has no call window yet, so no remembered frame or top-right fallback
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
+inset-drag-multi            macos    gap: Windows call cards cannot be moved yet (docs/UX.md "Alert insets", "Moving them")
+inset-drag-resize           macos    gap: Windows call cards cannot be moved yet, so no position kept across a resize
+inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window
+inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
