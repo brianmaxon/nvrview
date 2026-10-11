@@ -596,20 +596,36 @@ final class SelfTest {
         guard let model = app.model, let fake = model.fake, let tile = model.leases.tile(for: doorbell) else {
             return checkLog()
         }
-        // parity: call-talk-refused
-        // Without the permission: refused, nothing sent.
+        // parity: call-talk-permission-prompt
+        // Without the permission Talk asks first; Cancel sends nothing, the
+        // call stays open, and the camera's option stays off.
+        guard let prompter = model.calls.fakePrompter else { return checkLog() }
+        prompter.answers = [false]
         model.calls.startTalking(doorbell)
-        let refused = model.calls.call(for: doorbell)?.talk.phase
-        print("talk without permission: \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
-        if refused != .refused(reason: "not_permitted", retryMilliseconds: nil) {
-            problems.append("talk-back without the permission was not refused (\(String(describing: refused)))")
+        let name = model.name(of: doorbell)
+        print("talk without permission: asked \(prompter.asked.map(\.title)), \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
+        if prompter.asked.map(\.title) != ["Allow talk-back for \(name)?"] {
+            problems.append("Talk without the permission did not ask to allow talk-back for the camera")
         }
-        if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
+        if model.calls.call(for: doorbell)?.talk.phase != .idle { problems.append("a canceled prompt left talk-back started") }
+        if fake.talkStarts != startsBefore { problems.append("talk-back reached the device before the user allowed it") }
+        if model.cameraOptions(doorbell).allowTalk { problems.append("Cancel turned talk-back on") }
+        if model.calls.call(for: doorbell) == nil { problems.append("Cancel ended the call") }
         model.calls.stopTalking(doorbell)
+        // A typed reply asks too; Cancel keeps the text (accepted false) and sends nothing.
+        prompter.answers = [false]
+        var accepted: Bool?
+        model.calls.sendReply("Not yet", to: doorbell) { accepted = $0 }
+        if accepted != false || prompter.asked.count != 2 { problems.append("a typed reply without the permission did not ask and keep its text") }
+        if fake.talkStarts != startsBefore || model.calls.fakeSpeech?.rendered.isEmpty == false {
+            problems.append("a canceled typed reply was rendered or sent")
+        }
         // parity: call-talk-allowed
-        // With it: the microphone's audio goes out while Talk is held.
-        model.setAllowTalk(doorbell, true)
+        // Allow persists the option and starts the talk without pressing
+        // again; the microphone's audio goes out while Talk is held.
+        prompter.answers = [true]
         model.calls.startTalking(doorbell)
+        if !model.cameraOptions(doorbell).allowTalk { problems.append("Allow did not turn talk-back on for the camera") }
         when({ model.calls.call(for: doorbell)?.talk.isActive == true }, timeout: 2) { [self] in
             model.calls.fakeMicrophone?.speak(count: 16_000)
             let sent = fake.talkPushedMilliseconds(tile: tile.id)
@@ -631,10 +647,30 @@ final class SelfTest {
                         problems.append("the typed reply was not rendered")
                     }
                     if phase != .stopped(reason: "finished") { problems.append("the typed reply's talk did not drain") }
-                    model.setAllowTalk(doorbell, false)
-                    swapStep(doorbell, otherCamera)
+                    coreRefusalStep(doorbell, otherCamera, startsBefore: fake.talkStarts)
                 }
             }
+        }
+    }
+
+    /// The core still refuses (its permission was revoked behind the app's
+    /// back): the same prompt appears; Cancel leaves it refused.
+    private func coreRefusalStep(_ doorbell: CameraRef, _ otherCamera: CameraRef, startsBefore: Int) {
+        guard let model = app.model, let fake = model.fake, let prompter = model.calls.fakePrompter,
+            let id = model.runtime(doorbell.device)?.deviceID
+        else { return checkLog() }
+        // parity: call-talk-refused
+        try? model.bridge.setTalkPermission(device: id, channel: UInt8(doorbell.channel), allowed: false)
+        let asked = prompter.asked.count
+        prompter.answers = [false]
+        model.calls.startTalking(doorbell)
+        when({ prompter.asked.count == asked + 1 }, timeout: 2) { [self] in
+            print("core refusal: asked again \(prompter.asked.count == asked + 1), \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
+            if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
+            if model.calls.call(for: doorbell)?.talk.isTalking == true { problems.append("Cancel after a core refusal left talk-back running") }
+            model.calls.stopTalking(doorbell)
+            model.setAllowTalk(doorbell, false)
+            swapStep(doorbell, otherCamera)
         }
     }
 
@@ -711,9 +747,10 @@ final class SelfTest {
         if !model.audible.contains(doorbell) { problems.append("a conversation did not make the camera audible") }
         if fake.talkStarts != startsBefore { problems.append("a conversation sent talk-back by itself") }
         model.calls.startTalking(doorbell)
-        if case .refused = model.calls.call(for: doorbell)?.talk.phase {} else {
-            problems.append("Talk in a conversation was not refused without the permission")
+        if model.calls.fakePrompter?.asked.count != 5 || model.calls.call(for: doorbell)?.talk.phase != .idle {
+            problems.append("Talk in a conversation did not ask first (and send nothing on Cancel)")
         }
+        if fake.talkStarts != startsBefore { problems.append("a canceled Talk in a conversation reached the device") }
         model.calls.stopTalking(doorbell)
         // parity: call-conversation-end
         stage.endConversation(doorbell)

@@ -78,7 +78,7 @@ import Testing
         #expect(asked)
         talk.startFailed(.notPermitted)
         #expect(talk.phase == .refused(reason: "not_permitted", retryMilliseconds: nil))
-        #expect(talk.text.contains("not enabled for this doorbell"))
+        #expect(talk.text.contains("not enabled for this camera"))
         // The event that comes with it says the same.
         talk.apply(TalkEvent(tile: 7, state: .refused, reason: "not_permitted"))
         #expect(!talk.isTalking)
@@ -95,6 +95,41 @@ import Testing
         talk.apply(TalkEvent(tile: 7, state: .stopped, reason: "idle"))
         #expect(talk.text == "Talk ended: no audio for a while")
         #expect(TalkState.words("device_refused") == "the device refused")
+    }
+
+    // MARK: Talk-back permission prompt
+
+    @Test func asksOnlyWhenTheCameraDoesNotAllowTalkBack() {
+        #expect(TalkPermission.gate(allowed: false) == .ask)
+        #expect(TalkPermission.gate(allowed: true) == .proceed)
+    }
+
+    @Test func allowPersistsAndContinuesCancelDoesNeither() {
+        let mic = TalkPermission.outcome(allow: true, action: .microphone)
+        #expect(mic == .init(allowTalkBack: true, continueAction: true, keepTypedText: false))
+        let reply = TalkPermission.outcome(allow: true, action: .reply)
+        #expect(reply == .init(allowTalkBack: true, continueAction: true, keepTypedText: false))
+        let cancelMic = TalkPermission.outcome(allow: false, action: .microphone)
+        #expect(cancelMic == .init(allowTalkBack: false, continueAction: false, keepTypedText: false))
+        // A typed reply that is canceled stays in the field.
+        let cancelReply = TalkPermission.outcome(allow: false, action: .reply)
+        #expect(cancelReply == .init(allowTalkBack: false, continueAction: false, keepTypedText: true))
+    }
+
+    @Test func thePromptNamesTheCamera() {
+        let p = TalkPermission.prompt(cameraName: "Front Door")
+        #expect(p.title == "Allow talk-back for Front Door?")
+        #expect(p.message == "Talk-back sends sound through this camera's speaker. You can turn it off in Settings.")
+        #expect(p.allow == "Allow" && p.cancel == "Cancel")
+    }
+
+    @Test func refusalsNameTheCamera() {
+        #expect(
+            TalkPermission.refusal(cameraName: "Front Door", reason: "busy")
+                == "Talk-back refused: Front Door, another client is talking")
+        #expect(
+            TalkPermission.refusal(cameraName: "Front Door", reason: "rate_limited", retryMilliseconds: 2_000)
+                == "Talk-back refused: Front Door, too many attempts (try again in 2 s)")
     }
 
     @Test func lettingGoBeforeAnyEventReturnsToIdle() {
