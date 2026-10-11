@@ -152,6 +152,13 @@ pub struct SessionConfig {
     /// stall the clock restarts from now instead of bursting. Default
     /// 200 ms.
     pub talk_catch_up: Duration,
+    /// After the last audio of a talk that ends by [`crate::Talk::finish`],
+    /// how long to keep it open sending silence before the close: the
+    /// device plays about a second behind and drops what it has not played
+    /// when the talk closes (docs/protocol.md, "Talk-back (motion)"). Audio
+    /// pushed meanwhile continues the same talk. Zero closes right after
+    /// the audio. Default 1.5 s.
+    pub talk_tail: Duration,
 }
 
 impl SessionConfig {
@@ -188,6 +195,7 @@ impl SessionConfig {
             talk_idle_timeout: Duration::from_secs(10),
             talk_max_duration: Duration::from_secs(300),
             talk_catch_up: Duration::from_millis(200),
+            talk_tail: Duration::from_millis(1500),
         }
     }
 }

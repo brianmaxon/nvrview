@@ -303,8 +303,11 @@ final class DoorbellCalls {
         s.you?.finish()
         s.you = nil
         s.call.activity(now: model.clock.now)
+        // Drains: what the microphone pushed goes out, then the core's
+        // silent tail, so the doorbell plays the last words before the talk
+        // closes (talking again meanwhile continues the same talk).
         if s.pendingReply == nil, let tile = model.leases.tile(for: s.call.camera) {
-            try? model.bridge.stopTalk(tile, drain: false)
+            try? model.bridge.stopTalk(tile, drain: true)
         }
         s.call.talk.stopRequested()
         model.changed()

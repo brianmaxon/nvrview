@@ -543,7 +543,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: call-typed-reply
         // 4. A typed reply: rendered by the voice (never played here), pushed in one go, ended by a draining stop.
         await v.Calls.SendReplyAsync("Hello, one moment please", camera);
-        bool replied = await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
+        // Letting go of Talk above also drained ("finished"), so the reply must start a talk of its own first.
+        bool replyStarted = call.Talk.IsTalking;
+        bool replied = replyStarted && await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
         Say($"calls: typed reply: voice rendered {string.Join("|", voice.Rendered)}, talk ended \"{call.Talk.Reason}\", {call.Talk.SentMs} ms sent");
         Expect(voice.Rendered.SequenceEqual(["Hello, one moment please"]), "the voice did not render exactly the typed text");
         Expect(replied && call.Talk.SentMs >= 300, "the typed reply was not sent and finished");

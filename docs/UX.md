@@ -581,7 +581,12 @@ Details settled while building it (macOS):
   when Talk is first pressed; a typed reply needs no microphone.
 - A typed reply is rendered by the system voice into buffers (never played
   locally), converted to 16 kHz mono, held until talk-back is active, pushed
-  in one go, and ended with a draining stop unless Talk is held.
+  in one go, and ended with a draining stop unless Talk is held. Letting go
+  of Talk is a draining stop too. After a draining stop the core keeps the
+  talk open for 1.5 s of silence before closing it, because the doorbell
+  plays about a second behind and drops what it has not played at the close
+  (AUDIO.md, "Talk-back (sending)"); talking or sending again meanwhile
+  continues the same talk. Both apps do this.
 - The visitor's transcript comes from the doorbell tile's audio tap (16 kHz
   mono), enabled for the call; the user's from the microphone while talking,
   not while the doorbell's audio is audible and carrying sound (and 0.4 s

@@ -101,10 +101,26 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
     assert_eq!(log.channel, BELL);
     assert!(log.continuous());
     // 1 s at 48 kHz is 16000 samples at 16 kHz: 15 or 16 records,
-    // depending on the resampler's delay.
-    let n = log.records.len();
+    // depending on the resampler's delay; then the silent tail (1.5 s:
+    // 24 records), so the device plays the end before the close.
+    let tail = last["tail_ms"].as_u64().unwrap() as usize / 64;
+    assert_eq!(tail, 24);
+    let n = log.records.len() - tail;
     assert!((15..=16).contains(&n), "{n} records");
     assert_eq!(last["sent_ms"], (n * 64) as u64);
+    let closed = log.ended.unwrap().duration_since(log.records[n - 1].at);
+    assert!(
+        closed >= std::time::Duration::from_millis(1500),
+        "closed {closed:?} after the last audio"
+    );
+    assert!(
+        log.records[n..].iter().skip(1).all(|r| r
+            .decode()
+            .unwrap()
+            .samples
+            .iter()
+            .all(|x| x.abs() < 64))
+    );
     // What arrived is the 500 Hz tone: check its frequency by counting
     // zero crossings in the middle of the decoded audio.
     let pcm = log.samples().unwrap();

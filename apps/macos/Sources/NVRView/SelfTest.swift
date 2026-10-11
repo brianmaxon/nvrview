@@ -694,7 +694,10 @@ final class SelfTest {
                 model.calls.setDraft(doorbell, "Hello, one moment please")
                 model.calls.sendReply("Hello, one moment please", to: doorbell)
                 if model.calls.call(for: doorbell)?.draft.isEmpty != true { problems.append("a sent reply stayed in the call's draft") }
+                // (Letting go of Talk above also drained, so "finished"
+                // alone does not show that the reply went out.)
                 when({
+                    guard model.calls.fakeSpeech?.rendered.isEmpty == false else { return false }
                     if case .stopped(let r)? = model.calls.call(for: doorbell)?.talk.phase { return r == "finished" }
                     return false
                 }, timeout: 3) { [self] in

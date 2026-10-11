@@ -180,6 +180,19 @@ and sends one record per 64 ms of its own clock, with a bounded buffer
 that drops rather than queues when the app pushes faster than real time.
 Received talk-back records (`01wb`) are still never played.
 
+**The tail.** The device plays talk audio about a second behind and drops
+whatever it has not played when the talk closes (observed; docs/protocol.md,
+"Talk-back (motion)"): closing right after the last record cut the last
+second or so of every reply. So a talk that ends normally (a draining stop:
+a typed reply sent in full, or the user letting go of Talk) stays open
+after its last audio and sends silence, encoded and paced like any other
+record, for `SessionConfig::talk_tail` (default 1.5 s: 24 records), then
+closes. Audio pushed during the tail continues the same talk without a new
+start (and without counting against the start limit). Aborts close at
+once: withdrawing the permission, closing the tile or call, shutdown, a
+device error, the idle and length limits. The `talk` event's `tail_ms`
+reports the silence sent; `sent_ms` counts audio only.
+
 ## Speech recognition (later)
 
 The core provides the tap; recognition runs outside it at first, in the app

@@ -206,8 +206,12 @@ impl TalkHub {
         };
         let mut g = lock(&slot.inner);
         let inner = &mut *g;
-        if inner.ending.is_some() {
-            return true;
+        match inner.ending {
+            Some(Ending::Stop) => return true,
+            // More audio takes back a draining stop asked for while the
+            // talk was starting (as it does on a running talk).
+            Some(Ending::Drain) if !samples.is_empty() => inner.ending = None,
+            _ => {}
         }
         if inner.resampler.as_ref().is_none_or(|(r, _, _)| *r != rate) {
             inner.resampler = (rate != TALK_RATE).then(|| {
@@ -243,8 +247,9 @@ impl TalkHub {
         true
     }
 
-    /// Ends `tile`'s talk: at once, or after the audio already pushed
-    /// (`drain`). Returns false when it has none.
+    /// Ends `tile`'s talk: at once, or after the audio already pushed and
+    /// the session's silent tail (`drain`; a later push continues it).
+    /// Returns false when it has none.
     pub(crate) fn stop(&self, tile: u64, drain: bool) -> bool {
         let Some(slot) = lock(&self.slots).get(&tile).cloned() else {
             return false;
@@ -275,7 +280,8 @@ impl TalkHub {
                 &slot,
                 slot.event("stopped")
                     .str("reason", "tile_closed")
-                    .u64("sent_ms", stats.records_sent * 64)
+                    .u64("sent_ms", (stats.records_sent - stats.tail_records) * 64)
+                    .u64("tail_ms", stats.tail_records * 64)
                     .u64("dropped_ms", (inner.dropped + stats.samples_dropped) / 16),
             );
         } else {
@@ -358,11 +364,15 @@ impl HubRef {
                 break None;
             }
         };
-        let (sent, dropped) = {
+        let (sent, tail, dropped) = {
             let mut inner = lock(&slot.inner);
             let t = inner.talk.take();
             let stats = t.as_ref().map(Talk::stats).unwrap_or_default();
-            (stats.records_sent, inner.dropped + stats.samples_dropped)
+            (
+                stats.records_sent - stats.tail_records,
+                stats.tail_records,
+                inner.dropped + stats.samples_dropped,
+            )
         };
         let mut obj = slot
             .event("stopped")
@@ -372,6 +382,7 @@ impl HubRef {
         }
         obj = obj
             .u64("sent_ms", sent * 64)
+            .u64("tail_ms", tail * 64)
             .u64("dropped_ms", dropped / 16);
         if !slot.reported.swap(true, Ordering::AcqRel) {
             self.events.send(obj.finish(), Priority::State);

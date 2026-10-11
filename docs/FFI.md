@@ -429,7 +429,12 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
    allocate, so not from the real-time audio callback.
 4. **Stop.** `nv_talk_stop(core, tile, false)` stops at once;
    `nv_talk_stop(core, tile, true)` stops after the audio already pushed has
-   been sent (for a text-to-speech reply pushed in one go). Closing the
+   been sent and then 1.5 s of silence (the tail: the device plays about a
+   second behind and drops what it has not played at the close; AUDIO.md,
+   "Talk-back (sending)"). Use it for a text-to-speech reply pushed in one
+   go and when the user lets go of Talk. Pushing again before the close
+   continues the same talk (no new start, no `talk` event); stop it again
+   the same way. Closing the
    tile, removing its device, freeing the core, the session dropping, a
    device error, 10 s without pushed audio, and 5 minutes of talk also
    stop it. Every stop sends the device's close (command 11) unless the
@@ -438,7 +443,7 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
 ```json
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"starting"}
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"active"}
-{"type":"talk","tile":7,"device":1,"channel":3,"state":"stopped","reason":"stopped","sent_ms":4096,"dropped_ms":0}
+{"type":"talk","tile":7,"device":1,"channel":3,"state":"stopped","reason":"finished","sent_ms":4096,"tail_ms":1536,"dropped_ms":0}
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"not_permitted"}
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"rate_limited","retry_ms":41000}
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"refused","reason":"device_refused","status":400}
@@ -453,7 +458,8 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
 - `stopped` reasons: `stopped` (`nv_talk_stop`), `finished` (a draining
   stop), `tile_closed`, `permission_revoked`, `idle`, `max_duration`,
   `device_error` (with `status`), `session_closed`, `connection_lost`,
-  `dropped`. `sent_ms` is the audio sent, `dropped_ms` the audio dropped.
+  `dropped`. `sent_ms` is the audio sent, `tail_ms` the silent tail sent
+  after it (0 unless the talk drained), `dropped_ms` the audio dropped.
 - The core logs every start, stop and refusal with its reason (refusals
   at most one line every few seconds).
 

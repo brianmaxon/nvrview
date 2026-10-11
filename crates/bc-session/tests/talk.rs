@@ -90,7 +90,7 @@ async fn a_channel_without_a_speaker_is_refused_before_any_talk_command() {
 #[tokio::test(start_paused = true)]
 async fn audio_arrives_decodable_and_in_real_time_then_finishes_with_a_close() {
     let nvr = spawn_mock();
-    let s = session(&nvr, |_| {});
+    let s = session(&nvr, |c| c.talk_tail = Duration::ZERO);
     s.set_motion_allowed(BELL, true);
     let mut talk = s.talk(BELL).await.unwrap();
     assert_eq!(talk.state(), TalkState::Active);
@@ -310,7 +310,7 @@ async fn a_lost_connection_ends_the_talk() {
 #[tokio::test(start_paused = true)]
 async fn microphone_style_pushes_go_out_as_they_fill_records() {
     let nvr = spawn_mock();
-    let s = session(&nvr, |_| {});
+    let s = session(&nvr, |c| c.talk_tail = Duration::ZERO);
     s.set_motion_allowed(BELL, true);
     let mut talk = s.talk(BELL).await.unwrap();
     // 20 ms chunks every 20 ms for 1.28 s: 20 records' worth.
@@ -338,5 +338,128 @@ async fn microphone_style_pushes_go_out_as_they_fill_records() {
         span > Duration::from_millis(1100) && span < Duration::from_millis(1600),
         "{span:?}"
     );
+    s.close().await;
+}
+
+/// Records of `log` that decode to silence from where they start.
+fn silent_records(log: &TalkLog) -> usize {
+    log.records
+        .iter()
+        .rev()
+        .take_while(|r| r.decode().unwrap().samples.iter().all(|&x| x.abs() < 64))
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_finished_talk_sends_a_silent_tail_before_the_close() {
+    // The device plays about a second behind and drops what it has not
+    // played at the close: the default tail keeps the talk open 1.5 s
+    // after the last audio, sending silence at the same pace.
+    let nvr = spawn_mock();
+    let s = session(&nvr, |_| {});
+    s.set_motion_allowed(BELL, true);
+    let mut talk = s.talk(BELL).await.unwrap();
+    // A reply rendered to 3.5 s, pushed in one go.
+    let src = tone(56_000);
+    assert_eq!(talk.push(&src), src.len());
+    talk.finish();
+    assert_eq!(
+        ended(&mut talk).await,
+        TalkState::Stopped(StopReason::Finished)
+    );
+    wait_log(&nvr, "talk closed", |l| {
+        l.len() == 1 && l[0].end == TalkEnd::Closed
+    })
+    .await;
+    let log = &nvr.talk_log()[0];
+    let audio = src.len().div_ceil(SAMPLES_PER_RECORD);
+    // ceil(1500 / 64) silent records follow the audio.
+    let tail = 24;
+    assert_eq!(log.records.len(), audio + tail);
+    assert_eq!(talk.stats().tail_records, tail as u64);
+    assert_eq!(talk.stats().records_sent, (audio + tail) as u64);
+    assert!(log.continuous());
+    // The audio as pushed, then silence in the same codec.
+    let mut with_tail = src.clone();
+    with_tail.resize((audio + tail) * SAMPLES_PER_RECORD, 0);
+    assert_eq!(log.samples().unwrap(), expected(&with_tail));
+    assert!(silent_records(log) >= tail, "{}", silent_records(log));
+    // Paced like the audio, and the close comes after the whole tail.
+    let rec = Duration::from_micros(RECORD_DURATION_US);
+    let last_audio = log.records[audio - 1].at;
+    let last = log.records[audio + tail - 1].at;
+    let span = last.duration_since(last_audio);
+    assert!(
+        span + Duration::from_millis(15) >= rec * tail as u32
+            && span < rec * tail as u32 + Duration::from_millis(200),
+        "{span:?}"
+    );
+    let closed = log.ended.unwrap();
+    assert!(closed >= last);
+    assert!(
+        closed.duration_since(last_audio) >= Duration::from_millis(1500),
+        "{:?}",
+        closed.duration_since(last_audio)
+    );
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_push_during_the_tail_continues_the_same_talk() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |_| {});
+    s.set_motion_allowed(BELL, true);
+    let mut talk = s.talk(BELL).await.unwrap();
+    let first = tone(SAMPLES_PER_RECORD * 4);
+    talk.push(&first);
+    talk.finish();
+    // Wait until a few silent records went out.
+    wait_log(&nvr, "tail started", |l| l[0].records.len() >= 8).await;
+    assert_eq!(talk.state(), TalkState::Active);
+    let second = tone(SAMPLES_PER_RECORD * 3);
+    assert_eq!(talk.push(&second), second.len());
+    talk.finish();
+    assert_eq!(
+        ended(&mut talk).await,
+        TalkState::Stopped(StopReason::Finished)
+    );
+    wait_log(&nvr, "talk closed", |l| {
+        l.len() == 1 && l[0].end == TalkEnd::Closed
+    })
+    .await;
+    // One talk: one open, one close.
+    assert_eq!(nvr.command_count(201), 1);
+    assert_eq!(nvr.command_count(11), 1);
+    let log = &nvr.talk_log()[0];
+    assert!(log.continuous());
+    // The second reply went out after some silence, then a full tail.
+    let n = log.records.len();
+    let tail = talk.stats().tail_records as usize;
+    assert!(tail >= 4 + 24, "{tail}");
+    assert_eq!(n, 4 + 3 + tail);
+    assert_eq!(talk.stats().records_sent as usize, n);
+    assert!(silent_records(log) >= 20, "{}", silent_records(log));
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn stopping_closes_at_once_without_a_tail() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |_| {});
+    s.set_motion_allowed(BELL, true);
+    let mut talk = s.talk(BELL).await.unwrap();
+    talk.push(&tone(16_000));
+    wait_log(&nvr, "audio flowing", |l| l[0].records.len() >= 3).await;
+    let at = Instant::now();
+    talk.stop();
+    assert_eq!(
+        ended(&mut talk).await,
+        TalkState::Stopped(StopReason::Stopped)
+    );
+    wait_log(&nvr, "closed", |l| l[0].end == TalkEnd::Closed).await;
+    let log = &nvr.talk_log()[0];
+    assert!(log.ended.unwrap().duration_since(at) < Duration::from_millis(100));
+    assert_eq!(talk.stats().tail_records, 0);
+    assert_eq!(silent_records(log), 0);
     s.close().await;
 }

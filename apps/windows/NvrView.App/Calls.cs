@@ -381,9 +381,11 @@ internal sealed class ViewerCalls
         Retire(s.You);
         s.You = null;
         s.Call.Activity(Now);
+        // Drains: what the microphone pushed goes out, then the core's silent tail, so the doorbell
+        // plays the last words before the talk closes (talking again meanwhile continues the talk).
         if (s.PendingReply is null && _viewer.Leases.Tile(s.Call.Camera) is { } tile)
         {
-            StopTalkQuietly(tile, drain: false);
+            StopTalkQuietly(tile, drain: true);
         }
         s.Call.Talk.StopRequested();
         _viewer.RaiseCallsChanged();

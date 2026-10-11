@@ -694,8 +694,16 @@ fn talk_back_through_the_c_interface() {
             .first()
             .is_some_and(|t| t.end == mock_nvr::talk::TalkEnd::Closed)
     });
-    // 16000 samples at 16 kHz: 15 full records and one padded.
-    assert_eq!(nvr.talk_log()[0].records.len(), 16);
+    // 16000 samples at 16 kHz: 15 full records and one padded, then the
+    // 1.5 s silent tail (24 records) before the close.
+    assert_eq!(nvr.talk_log()[0].records.len(), 16 + 24);
+    assert!(
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| j.contains("\"sent_ms\":1024") && j.contains("\"tail_ms\":1536"))
+    );
     assert!(!ctx.bad.load(Ordering::SeqCst));
     // SAFETY: live core, freed once.
     unsafe { nv_core_free(core) };
