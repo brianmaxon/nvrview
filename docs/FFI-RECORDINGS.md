@@ -720,7 +720,7 @@ NvStatus nv_playback_pause(NvCore *core, uint64_t playback);
 /* Moves the shared clock. Returns at once; a newer seek replaces one still
  * starting. Clamped to the playback's range. */
 NvStatus nv_playback_seek(NvCore *core, uint64_t playback, int64_t position_ms, NvSeekMode mode);
-/* Forward rate, 0.25 to 4. Audio plays at 1 only. */
+/* Forward rate: 0.25, 0.5, 1, 2, 4, 8, or 16 (Decision 3). Audio plays at 1 only. */
 NvStatus nv_playback_set_rate(NvCore *core, uint64_t playback, double rate);
 /* While paused: +1 shows the next picture of every camera; -1 is an exact
  * seek one picture back (slower: decodes from the previous keyframe). */
@@ -822,7 +822,9 @@ with camera time.
   scrubber). `state` as `NvPlaybackState`.
 - `playback_camera` `state`: `buffering`, `playing`, `late`,
   `no_recording`, `ended`, `failed` (`reason`: `start_rejected`,
-  `stream_ended`, `undecodable`, `session_closed`, `limit`).
+  `stream_ended`, `undecodable`, `session_closed`, `limit`,
+  `device_in_use`: a newer playback took the device, see the C10
+  clarifications).
 - `playback_seek` `state`: `starting`, `active`, `failed`, with the seek's
   generation (the same for every tile of the playback).
 - `playback_closed` `reason`: `closed`, `device_removed` (the playback had
@@ -1701,3 +1703,101 @@ where section 3, "Locked incidents", was silent.
 12. **Incidents are regrouped at the end of every fill**, because a lane
     prunes its index then (days past the age or size limit, which locks
     now exempt), and incidents in dropped days disappear.
+
+## Clarifications from the implementation (C10, 2026-10-11)
+
+What building the playback engine (MILESTONE-P.md, C10;
+`viewer_core::playback`) settled where section 6 was silent or could be
+read two ways. The Rust calls are `Core::playback_open` (and
+`playback_open_deferred` with `PlaybackPending::publish` for the C
+function's out parameters), `playback_add_camera`, `playback_remove_camera`,
+`playback_play`, `playback_pause`, `playback_seek`, `playback_set_rate`,
+`playback_set_offset`, `playback_position`, `playback_status`, and
+`playback_close`; the C functions are F2.
+
+1. **Plays per device, as the device needs them.** A device keeps one seek
+   position per session (protocol.md, "Live view and plays on one
+   session"), so the plays of one device are started as a group at one seek
+   time: running ones stopped (7), every camera seeked to the same time
+   (123), about 0.5 s later all played (5). A seek, a rate change, a tier
+   switch, an offset change, and adding or removing a camera restart the
+   device's group that way. Two cases start a group of one camera while the
+   others run: a camera whose recording resumes after a gap (at the start
+   of its next file) and a play stopped because its buffer was full (at the
+   newest second it holds). One start is in flight per device; newer
+   requests coalesce, and starts of different playbacks on one device are
+   serialized.
+2. **One playback per device.** Two playbacks cannot share a device's seek
+   position. The playback that most recently started plays on a device owns
+   it: the older playback's cameras of that device stop and report
+   `failed` with the new reason `device_in_use` (their tiles are cleared),
+   until that playback seeks again and takes the device back. Its cameras
+   on other devices go on.
+3. **Which file.** Each camera plays the file that holds the seek time. The
+   recordings index holds main-stream files, so a main-stream play takes
+   its file from the index; a sub-stream play's file `Id` differs, so the
+   camera's sub-stream files of that day are searched (14 to 16) once per
+   playback. A camera with no indexed file at the time is not started and
+   shows `no_recording` (also when its day is not in the index: a playback
+   needs the days asked for with `nv_recordings_want`).
+4. **Time.** Keyframe seconds are UTC; the position is device local. The
+   device's offset is the `utc_offset_s` of `nv_recordings_enable` (the
+   cameras' devices must be enabled for recordings; `NV_ERR_INVALID_ARGUMENT`
+   otherwise). Each camera's anchor is refined over its last 64 keyframes
+   (slice C7) and taken at the middle of its window.
+5. **Rates** are exactly 0.25, 0.5, 1, 2, 4, 8, and 16 (others:
+   `NV_ERR_INVALID_ARGUMENT`). The device gets `playSpeed` 1 below 1x
+   (paced slower by the core) and the rate itself from 1x up. A
+   main-stream play arrives as keyframes only from 2x (observed); from 8x
+   the core also decodes only the keyframes of a stream that carries every
+   frame (a sub-stream keeps every frame at 4x, observed), which bounds four
+   cameras' decoding. A rate change starts a new generation of every tile
+   but sends no `playback_seek`; `playback_state` reports the new rate.
+6. **Generations.** A seek or rate change gives every tile of the playback
+   the same new generation number; a restart of one device's group (tier,
+   offset, camera added or removed) gives that device's tiles the next
+   number of the playback's counter, so numbers on one tile can skip. Every
+   such generation is shown once its picture at the position was decoded;
+   with `NV_SEEK_KEYFRAME` that is the keyframe at or before the position,
+   and the pictures from there to the position are decoded right after (the
+   picture moves on to the position quickly). A camera with nothing at the
+   position gets a generation that is shown at once with
+   `NV_ACTION_CLEAR`.
+7. **Waiting.** With `wait` the clock holds for a camera that has nothing
+   at the position: up to 6 s after its play started (the first-media
+   limit), up to 2 s while playing (then `late`). A play that delivers
+   nothing within the first-media limit is stopped and its camera shows
+   `no_recording`; it is not started again before its next file or a seek.
+   With `free` the clock never holds. A camera without recording at the
+   position never holds the clock.
+8. **How a play ends.** The device sends no end message (observed), so a
+   camera ends after the end of its last indexed file in the range, and the
+   playback ends at the earlier of `end_ms` and the last camera's end
+   (offsets included); the position stays there. An incident's range runs
+   from its start less the margin to the end of its last second plus the
+   margin.
+9. **Buffers.** Each camera holds at most 20 s of media ahead (times the
+   rate above 1x) or 16 MB; then its play is stopped, and started again from
+   the newest second held once half has been played; pictures already held
+   are skipped, so the generation goes on without a gap or a repeat.
+10. **Offsets** are nudges of a few seconds at most: a device's group is
+    seeked to the earliest time any of its cameras needs (position plus
+    offset), and cameras with larger offsets drop what comes before theirs.
+11. **Playback tiles** do no live sound analysis (no alarms or loudness
+    from recorded audio), never clear their picture for lack of new ones
+    (a paused playback keeps its pictures), send no `tile_tier` events (the
+    playback reports seeks), and refuse `nv_tile_close`
+    (`NV_ERR_INVALID_ARGUMENT`). `nv_tile_set_tier` on one restarts its
+    device's group at the position in the new tier.
+12. **`nv_playback_position`** reports the position and state as of the
+    engine's last step (every 10 ms), under one brief lock.
+13. **Limits.** At most 8 playbacks, 4 cameras per playback, a range of 24
+    hours, and the core's tile limit counting live and playback tiles
+    (`NV_ERR_LIMIT`); a camera twice in one playback is
+    `NV_ERR_INVALID_ARGUMENT`.
+14. **Not done in C10.** `nv_playback_step`; stills from a playback (C14's
+    `ShownPicture`); a `DayAudioSource` fed by playback; and `playback_closed`
+    with `login_failed`: a refused login shows the device's cameras
+    `failed` (`session_closed`), and the app closes the playback. A camera of
+    a device that is enabled but not added when the playback opens is
+    `failed` (`session_closed`) until the playback is opened again.
