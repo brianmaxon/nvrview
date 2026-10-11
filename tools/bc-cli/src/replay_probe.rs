@@ -66,8 +66,10 @@ pub struct ProbeConfig {
     pub gap: Duration,
     /// Live view alone after the last stage.
     pub tail: Duration,
-    /// The device's current time; `None` takes it from the first live
-    /// keyframe's wall clock.
+    /// The device's current local time, the clock of its recording times.
+    /// `None` takes the first live keyframe's wall clock, which an NVR was
+    /// observed to keep in UTC (docs/protocol.md): only right on a device
+    /// whose local time is UTC.
     pub now: Option<DateTime>,
     /// Waiting for the login.
     pub login_limit: Duration,

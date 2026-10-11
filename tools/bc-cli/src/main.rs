@@ -41,8 +41,8 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] talk
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
-         --channel N --allow-replay-probe [--tier main|sub] [--max-plays 1-4]
-         [--now YYYY-MM-DDTHH:MM:SS]
+         --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
+         [--tier main|sub] [--max-plays 1-4]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -77,8 +77,9 @@ The talk is closed at the end, on Ctrl-C, and on every error.
 replay-probe measures whether one session carries live view and recorded
 plays at once (docs/MILESTONE-P.md, B5): only with --allow-replay-probe. On
 one session it starts live view of --channel, finds a recording of that
-channel at least 60 s long that ended at least 2 minutes before the device's
-time (the first live keyframe's wall clock, or --now), then runs stages of
+channel at least 60 s long that ended at least 2 minutes before --now (the
+device's local time, which its recording times use; a keyframe's wall clock
+can be UTC), then runs stages of
 1, 2, ... up to --max-plays (default and at most 4) simultaneous plays of it
 at normal speed, each for at most 10 s, counting live and play frames per
 second. It stops at the first refusal, error, stall, or live disruption;
@@ -316,7 +317,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             let mut cfg = ProbeConfig::new(channel.ok_or("replay-probe needs --channel")?);
             cfg.tier = tier;
             cfg.max_plays = max_plays;
-            cfg.now = now;
+            cfg.now = Some(now.ok_or("replay-probe needs --now (the device's local time)")?);
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
         }
@@ -831,7 +832,18 @@ mod tests {
         };
         let e = with(&["replay-probe", "--channel", "1"]).err().unwrap();
         assert!(e.contains("--allow-replay-probe"), "{e}");
-        let ok = with(&["replay-probe", "--channel", "1", "--allow-replay-probe"]);
+        let e = with(&["replay-probe", "--channel", "1", "--allow-replay-probe"])
+            .err()
+            .unwrap();
+        assert!(e.contains("--now"), "{e}");
+        let ok = with(&[
+            "replay-probe",
+            "--channel",
+            "1",
+            "--allow-replay-probe",
+            "--now",
+            "2026-10-08T09:30:00",
+        ]);
         let Ok(Parsed::Device(Args {
             action: Action::ReplayProbe(cfg),
             ..
@@ -840,7 +852,7 @@ mod tests {
             panic!("not parsed");
         };
         assert_eq!((cfg.channel, cfg.max_plays), (1, MAX_PLAYS));
-        assert!(cfg.now.is_none());
+        assert!(cfg.now.is_some());
         for bad in ["0", "5"] {
             let r = with(&[
                 "replay-probe",
