@@ -12,8 +12,8 @@
 //   context menu, the edit bar, and Delete in Edit Layout mode); cameras
 //   dragged from the sidebar drop onto a tile;
 // - mouse wheel (or a touchpad pinch, which arrives as Ctrl+wheel) zooms
-//   around the pointer and dragging pans a zoomed tile, by changing only the
-//   source rectangle the renderer samples;
+//   around the pointer and dragging pans a zoomed tile: the picture grows
+//   over the tile's bars until it fills the tile, then crops (TileZoom);
 // - the tile features: the corner indicators and sound badges, the alert strip
 //   and its Dismiss (Enter), the Quality menu (kept in the layout leaf), M to
 //   listen, and, in full screen, the chrome and the pointer hiding 3 s after
@@ -117,7 +117,7 @@ internal sealed partial class StageView : UserControl
     private Point _gestureFrom;
     private bool _dragging;
     private StageTile? _panTile;
-    private float _panCenterX, _panCenterY;
+    private TileZoom _panFrom;
 
     public StageView(Viewer viewer, AppWindow appWindow, WindowState state)
     {
@@ -587,20 +587,13 @@ internal sealed partial class StageView : UserControl
 
     // ---- zoom ----
 
-    public static void ZoomAround(StageTile t, double fx, double fy, double factor)
-    {
-        float z = t.Zoom;
-        float z2 = (float)Math.Clamp(z * factor, 1, 8);
-        // The picture point under the pointer stays under it.
-        double w = 1 / z, x = Math.Clamp(t.CenterX - w / 2, 0, 1 - w);
-        double h = 1 / z, y = Math.Clamp(t.CenterY - h / 2, 0, 1 - h);
-        double px = x + fx * w, py = y + fy * h;
-        double w2 = 1 / z2, h2 = 1 / z2;
-        double x2 = Math.Clamp(px - fx * w2, 0, 1 - w2), y2 = Math.Clamp(py - fy * h2, 0, 1 - h2);
-        t.CenterX = (float)(x2 + w2 / 2);
-        t.CenterY = (float)(y2 + h2 / 2);
-        t.Zoom = z2;
-    }
+    /// <summary>
+    /// Zooms by <paramref name="factor"/> around (fx, fy), a point of the tile's area (0..1): the
+    /// picture point there stays under it, and the picture grows over the bars until it fills the
+    /// tile (NvrView.Tiles TileZoom).
+    /// </summary>
+    public static void ZoomAround(StageTile t, double fx, double fy, double factor) =>
+        t.DigitalZoom = t.DigitalZoom.ZoomedBy(factor, fx, fy, t.ZoomBase);
 
     public static void ResetZoom(StageTile t)
     {
@@ -630,8 +623,9 @@ internal sealed partial class StageView : UserControl
         return null;
     }
 
+    // The tile's whole area, bars included (a zoomed picture grows over them).
     private static bool Contains(StageTile t, Point p) =>
-        p.X >= t.X && p.Y >= t.Y && p.X < t.X + t.Width && p.Y < t.Y + t.Height;
+        p.X >= t.ViewX && p.Y >= t.ViewY && p.X < t.ViewX + t.ViewWidth && p.Y < t.ViewY + t.ViewHeight;
 
     private bool CanEditLayout => Renderer.Focus is null;
 
@@ -665,11 +659,10 @@ internal sealed partial class StageView : UserControl
                 FisheyeAim aim = _fisheyeFrom.Dragged(p.X - _gestureFrom.X, p.Y - _gestureFrom.Y, turn.Width, turn.Height, fe.Mode, fe.Mount);
                 SetFisheyeAim(turn, aim, save: false);
                 break;
-            case GestureKind.Pan when _panTile is { Width: > 0 } drag:
-                double dx = (p.X - _gestureFrom.X) / drag.Width / drag.Zoom, dy = (p.Y - _gestureFrom.Y) / drag.Height / drag.Zoom;
-                double half = 0.5 / drag.Zoom;
-                drag.CenterX = (float)Math.Clamp(_panCenterX - dx, half, 1 - half);
-                drag.CenterY = (float)Math.Clamp(_panCenterY - dy, half, 1 - half);
+            case GestureKind.Pan when _panTile is { ViewWidth: > 0, ViewHeight: > 0 } drag:
+                // The picture follows the pointer, in units of the tile's area.
+                double dx = (p.X - _gestureFrom.X) / drag.ViewWidth, dy = (p.Y - _gestureFrom.Y) / drag.ViewHeight;
+                drag.DigitalZoom = _panFrom.Panned(dx, dy, drag.ZoomBase);
                 break;
         }
         _hovered = TileAt(p);
@@ -724,8 +717,7 @@ internal sealed partial class StageView : UserControl
         {
             _gesture = GestureKind.Pan;
             _panTile = t;
-            _panCenterX = t.CenterX;
-            _panCenterY = t.CenterY;
+            _panFrom = t.DigitalZoom;
         }
         else if (CanEditLayout)
         {
@@ -819,9 +811,10 @@ internal sealed partial class StageView : UserControl
             Interact();
             return;
         }
-        if (TileAt(pp.Position) is { } t && t.Width > 0 && t.Height > 0 && t.PictureWidth > 0)
+        if (TileAt(pp.Position) is { } t && t.ViewWidth > 0 && t.ViewHeight > 0 && t.PictureWidth > 0)
         {
-            double fx = (pp.Position.X - t.X) / t.Width, fy = (pp.Position.Y - t.Y) / t.Height;
+            // Around the pointer's place in the tile's area (bars included).
+            double fx = Math.Clamp((pp.Position.X - t.ViewX) / t.ViewWidth, 0, 1), fy = Math.Clamp((pp.Position.Y - t.ViewY) / t.ViewHeight, 0, 1);
             ZoomAround(t, fx, fy, Math.Pow(1.0015, pp.Properties.MouseWheelDelta));
             e.Handled = true;
             Interact();

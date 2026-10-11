@@ -339,6 +339,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("zoom was not applied");
         }
         StageView.ResetZoom(zoomed);
+        await CheckZoomFillsTile();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -654,6 +655,82 @@ internal sealed class SelfTest(App app, AppOptions options)
     }
 
     private static bool Near(double a, double b) => Math.Abs(a - b) < 1.5;
+
+    // parity: zoom-fills-tile
+    // A letterboxed tile zoomed past the point where its picture fills the
+    // tile: the former bar shows picture; back at 1x it is black again.
+    private async Task CheckZoomFillsTile()
+    {
+        StageRenderer r = app.Renderer!;
+        StageTile? boxed = Tiles.FirstOrDefault(t => !(t.Fisheye is { } f && f.Mode.Dewarps()) && ZoomBar(t) is not null);
+        if (boxed is null || ZoomBar(boxed) is not { } bar)
+        {
+            _problems.Add("no letterboxed tile to check the zoom on");
+            return;
+        }
+        double? before = await BarLit(r, bar);
+        ZoomBase b = boxed.ZoomBase;
+        // Past the scale where the picture fills the tile's short side.
+        double past = Math.Min(1.25 / Math.Min(b.Width, b.Height), TileZoom.MaxScale);
+        StageView.ZoomAround(boxed, 0.5, 0.5, past);
+        double? zoomed = await BarLit(r, bar);
+        StageView.ResetZoom(boxed);
+        double? after = await BarLit(r, bar);
+        Say($"zoom fills the tile: tile {boxed.Id} at {past:0.00}x, bar lit {before:0.00} at 1x, {zoomed:0.00} zoomed, {after:0.00} back at 1x");
+        Expect(before is < 0.02, "the letterbox bar was not black at 1x");
+        Expect(zoomed is >= 0.5, "zoomed past filling the tile, the letterbox bar still shows no picture");
+        Expect(after is < 0.02, "back at 1x, the letterbox bar is not black");
+    }
+
+    // One of a tile's bars at 1x (DIPs, a unit in from its edges), or null if the picture fills it.
+    private static Rect? ZoomBar(StageTile t)
+    {
+        if (t.PictureWidth <= 0 || t.ViewWidth <= 0 || t.ViewHeight <= 0)
+        {
+            return null;
+        }
+        if (t.Y - t.ViewY >= 4)
+        {
+            return new Rect(t.ViewX + 2, t.ViewY + 1, t.ViewWidth - 4, t.Y - t.ViewY - 2);
+        }
+        if (t.X - t.ViewX >= 4)
+        {
+            return new Rect(t.ViewX + 1, t.ViewY + 2, t.X - t.ViewX - 2, t.ViewHeight - 4);
+        }
+        return null;
+    }
+
+    // The share of a rectangle's pixels (DIPs; sampled) that are not black in the next frame drawn.
+    private async Task<double?> BarLit(StageRenderer r, Rect bar)
+    {
+        Task<StageCapture> task = r.CaptureAsync();
+        if (await Task.WhenAny(task, Task.Delay(5000)) != task)
+        {
+            _problems.Add("no frame was drawn for the zoom check");
+            return null;
+        }
+        StageCapture c = await task;
+        int lit = 0, n = 0;
+        double step = Math.Max(Math.Min(bar.Width, bar.Height) / 8, 1);
+        for (double y = bar.Y; y < bar.Y + bar.Height; y += step)
+        {
+            for (double x = bar.X; x < bar.X + bar.Width; x += step)
+            {
+                int px = (int)(x * c.ScaleX), py = (int)(y * c.ScaleY);
+                if (px < 0 || py < 0 || px >= c.Image.Width || py >= c.Image.Height)
+                {
+                    continue;
+                }
+                n++;
+                (int cr, int cg, int cb) = c.Image.Rgb(px, py);
+                if (cr + cg + cb > 24)
+                {
+                    lit++;
+                }
+            }
+        }
+        return n > 0 ? lit / (double)n : null;
+    }
 
     // A frame read back: the card's picture is the last tile drawn and is not flat.
     private async Task CheckCardFrame(string what, CallCard card, StageRenderer r)

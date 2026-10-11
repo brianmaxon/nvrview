@@ -282,11 +282,27 @@ look at a detail.
 - Double-click keeps its meaning (focus); 0 or a small reset control in the
   hover header returns to 1x; zoom never changes what is recorded or
   streamed.
+- Zooming in uses the whole tile: the picture grows over the letterbox or
+  pillarbox bars, and as soon as it is larger than the tile on an axis it
+  fills that axis (cropping), so the bars shrink and then disappear. The
+  same holds for the focused tile and in full screen. At 1x the tile looks
+  exactly as unzoomed (fitted, or filled with Fill Tiles).
+- Panning stops at the picture's edges (nothing beyond the picture is ever
+  shown; with Fill Tiles it can reach the parts the 1x crop hides). The
+  picture point under the pointer or pinch stays put while zooming; on an
+  axis the picture does not fill yet, it stays centered, so there the point
+  moves until the picture fills that axis.
 - A small inset map of the whole picture, with the visible region outlined,
   shows while zoomed and fades with the chrome.
-- How: zoom only changes the source rectangle the renderer samples from the
-  decoded picture (no extra decoding or copies), so it costs nothing per
-  frame beyond the drawing that already happens.
+- How: zoom only changes the rectangles the renderer draws and samples from
+  the decoded picture (no extra decoding or copies), so it costs nothing per
+  frame beyond the drawing that already happens. The rule, per axis, with
+  `b` the picture's 1x size as a fraction of the tile, `s` the scale and
+  `c` the picture point at the tile's center: the picture is `L = s * b`
+  tiles long and starts at `u0 = (1 - L) / 2` while `L <= 1`, else at
+  `0.5 - c * L` clamped to `1 - L ... 0`; it is drawn over its span
+  intersected with the tile, sampling the matching part of the picture.
+  The same pure geometry on both apps (`TileZoom`).
 
 Details settled while building it (macOS):
 
@@ -301,7 +317,7 @@ Details settled while building it (macOS):
   same camera in one window share it.
 - The inset map is an outline of the whole picture with the visible region
   marked, drawn as overlay layers (no second picture, so no extra drawing or
-  texture work), in the shown picture's bottom left corner.
+  texture work), in the bottom left corner of the picture as drawn.
 
 ## Fisheye cameras
 

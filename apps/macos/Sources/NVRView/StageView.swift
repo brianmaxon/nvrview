@@ -282,10 +282,11 @@ final class StageView: NSView {
                 inset.setShown(false)
                 continue
             }
-            let pictureRect = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill)
+            // In the picture as drawn zoomed (it grows over the bars).
+            let pictureRect = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill, zoom: z)
             let frame = ZoomInsetView.frame(inPicture: pictureRect, aspect: picture.width / picture.height)
             if inset.frame != frame { inset.frame = frame }
-            inset.update(region: z.visible(in: zoomFrame(leaf.rect, picture)))
+            inset.update(region: z.visible(in: zoomBase(leaf.rect, picture)))
             inset.setShown(chromeVisible)
         }
     }
@@ -409,7 +410,7 @@ final class StageView: NSView {
             let matrix = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
                 ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
             if pictureSize != .zero, pictureSizes[camera] != pictureSize { pictureSizes[camera] = pictureSize }
-            // Zoom changes only the source rectangle sampled (TilePlacement).
+            // Zoomed, the picture grows over the bars, then crops (TilePlacement).
             let placed = TilePlacement.place(
                 rect: rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
                 offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: fill, zoom: zoom)
@@ -663,9 +664,9 @@ final class StageView: NSView {
 
     // MARK: Digital zoom (docs/UX.md "Digital zoom")
 
-    /// The part of the picture a tile shows at 1x, as a fraction of it.
-    private func zoomFrame(_ rect: CGRect, _ picture: CGSize) -> CGRect {
-        TileZoom.normalized(PictureFit.fit(picture: picture, in: rect, fill: state.fill).source, picture: picture)
+    /// How the picture sits in the tile `rect` at 1x (fitted or filled).
+    private func zoomBase(_ rect: CGRect, _ picture: CGSize) -> ZoomBase {
+        ZoomBase(picture: picture, tile: rect.size, fill: state.fill)
     }
 
     /// The tile under the pointer as drawn now (the focused one in focus).
@@ -673,31 +674,28 @@ final class StageView: NSView {
         currentLeaves.last { $0.rect.contains(p) }
     }
 
-    /// For the tile at `p`: its camera, the unit point of `p` in its shown
-    /// picture, the shown picture's size in points, and its 1x frame.
+    /// For the tile at `p`: its camera, the unit point of `p` in the tile,
+    /// the tile's size in points, and how its picture sits in it at 1x.
     private func zoomTarget(at p: CGPoint)
-        -> (camera: CameraRef, path: NodePath, unit: CGPoint, shown: CGSize, frame: CGRect)?
+        -> (camera: CameraRef, path: NodePath, unit: CGPoint, size: CGSize, base: ZoomBase)?
     {
         guard let leaf = drawnLeaf(at: p), let camera = leaf.camera, let picture = pictureSizes[camera] else {
             return nil
         }
-        let shown = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill)
-        return (camera, leaf.path, TilePlacement.unit(p, in: shown), shown.size, zoomFrame(leaf.rect, picture))
+        return (camera, leaf.path, TilePlacement.unit(p, in: leaf.rect), leaf.rect.size, zoomBase(leaf.rect, picture))
     }
 
-    /// The 1x frame of `camera`'s picture now, in the tile `path` if it
+    /// How `camera`'s picture sits at 1x now, in the tile `path` if it
     /// still shows the camera, else its first tile: from the picture's size
     /// at this refresh, so a picture that changed size or shape since the
     /// easing began (the main stream replacing the sub-stream) is followed.
-    private func currentZoomFrame(_ camera: CameraRef, tile path: NodePath?) -> CGRect {
-        guard let picture = pictureSizes[camera], picture.width > 0, picture.height > 0 else {
-            return TileZoom.wholeFrame
-        }
+    private func currentZoomBase(_ camera: CameraRef, tile path: NodePath?) -> ZoomBase {
+        guard let picture = pictureSizes[camera], picture.width > 0, picture.height > 0 else { return .whole }
         let leaves = currentLeaves
         guard let leaf = leaves.first(where: { $0.path == path && $0.camera == camera })
             ?? leaves.first(where: { $0.camera == camera })
-        else { return TileZoom.wholeFrame }
-        return zoomFrame(leaf.rect, picture)
+        else { return .whole }
+        return zoomBase(leaf.rect, picture)
     }
 
     private func setZoom(_ z: TileZoom, for camera: CameraRef) {
@@ -725,7 +723,7 @@ final class StageView: NSView {
             zoomEasing.set(.init(scale: target, unit: t.unit, tile: t.path), for: t.camera, now: clock.now)
         } else {
             zoomEasing.cancel(t.camera)
-            setZoom(zoom(of: t.camera).zoomed(by: factor, atUnit: t.unit, in: t.frame), for: t.camera)
+            setZoom(zoom(of: t.camera).zoomed(by: factor, atUnit: t.unit, in: t.base), for: t.camera)
         }
     }
 
@@ -737,12 +735,12 @@ final class StageView: NSView {
             fisheyeSaveDue = clock.now + 0.5
             return
         }
-        guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.shown.width > 0, t.shown.height > 0 else {
+        guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.size.width > 0, t.size.height > 0 else {
             return
         }
         zoomEasing.cancel(t.camera)
-        let unit = CGVector(dx: delta.dx / t.shown.width, dy: delta.dy / t.shown.height)
-        setZoom(zoom(of: t.camera).panned(byUnit: unit, in: t.frame), for: t.camera)
+        let unit = CGVector(dx: delta.dx / t.size.width, dy: delta.dy / t.size.height)
+        setZoom(zoom(of: t.camera).panned(byUnit: unit, in: t.base), for: t.camera)
     }
 
     /// Back to 1x, eased, for the tile at `path` (its reset control).
@@ -778,7 +776,7 @@ final class StageView: NSView {
         guard zoomEasing.isEasing else { return }
         let steps = zoomEasing.tick(
             now: now, current: { zoom(of: $0) },
-            frame: { camera, target in currentZoomFrame(camera, tile: target.tile) })
+            base: { camera, target in currentZoomBase(camera, tile: target.tile) })
         for step in steps { setZoom(step.zoom, for: step.key) }
     }
 
