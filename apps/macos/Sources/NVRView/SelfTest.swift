@@ -659,7 +659,9 @@ final class SelfTest {
         guard let model = app.model, let fake = model.fake, let prompter = model.calls.fakePrompter,
             let id = model.runtime(doorbell.device)?.deviceID
         else { return checkLog() }
-        // parity: call-talk-refused
+        // macOS only: the core's own refusal (its permission revoked behind
+        // the app's back) shows the same prompt. Windows re-sends the setting
+        // before every start, so it cannot be out of sync there.
         try? model.bridge.setTalkPermission(device: id, channel: UInt8(doorbell.channel), allowed: false)
         let asked = prompter.asked.count
         prompter.answers = [false]

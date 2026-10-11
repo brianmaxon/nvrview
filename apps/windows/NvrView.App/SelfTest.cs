@@ -458,12 +458,13 @@ internal sealed class SelfTest(App app, AppOptions options)
         var mic = new FakeMicrophone();
         var voice = new FakeSpeech { Rate = 22_050 };
         var engines = new List<FakeTranscriber>();
+        var prompter = new FakeTalkPrompter();
         v.Calls.Services = new CallServices(mic, voice, () =>
         {
             var engine = new FakeTranscriber();
             engines.Add(engine);
             return engine;
-        });
+        }, prompter);
         var clock = new ManualViewerClock(3000);
         v.UseClock(clock);
         v.SetAudible([]);
@@ -499,18 +500,26 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.AddConversationItems(menu, camera);
         Expect(menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().First().Text == "End conversation", "the tile menu does not offer End conversation during a call");
 
-        // parity: call-talk-refused
-        // 2. Talk is refused until talk-back is allowed for the camera.
-        v.Calls.StartTalking(camera);
-        bool refused = await Until(() => call!.Talk is { Current: TalkState.Phase.Refused, Outstanding: 0 }, 5);
-        Say($"calls: talk without permission: {call!.Talk.Text}");
-        Expect(refused && call.Talk.Reason == "not_permitted" && mic.Starts == 0, "Talk without the permission was not refused (or the microphone opened)");
+        // parity: call-talk-permission-prompt
+        // 2. Without the permission Talk asks first; Cancel sends nothing, the call stays open, and the setting stays off.
+        string cameraName = v.CameraName(camera);
+        prompter.Answers.Enqueue(false);
+        await v.Calls.StartTalkingAsync(camera);
+        Say($"calls: talk without permission: asked \"{prompter.Asked.FirstOrDefault()?.Title}\", {call!.Talk.Text}");
+        Expect(prompter.Asked.Count == 1 && prompter.Asked[0].Title == $"Allow talk-back for {cameraName}?", "Talk without the permission did not ask to allow talk-back for the camera");
+        Expect(call.Talk.Current == TalkState.Phase.Idle && call.Talk.Outstanding == 0 && mic.Starts == 0, "a canceled prompt started talk-back (or opened the microphone)");
+        Expect(!v.Settings.TalkAllowed(camera) && v.Calls.CallFor(camera) is not null, "Cancel turned talk-back on or ended the call");
+        // A typed reply asks too; Cancel keeps the text (not accepted) and sends nothing.
+        prompter.Answers.Enqueue(false);
+        bool replyAccepted = await v.Calls.SendReplyAsync("Not yet", camera);
+        Expect(!replyAccepted && prompter.Asked.Count == 2, "a typed reply without the permission did not ask and keep its text");
+        Expect(voice.Rendered.Count == 0 && call.Talk.Outstanding == 0, "a canceled typed reply was rendered or sent");
 
         // parity: call-talk-allowed
-        // 3. Allowed, Talk really talks: the core reports the audio it sent.
-        v.SetTalkAllowed(camera, true);
-        Expect(v.Settings.TalkAllowed(camera), "the permission was not kept");
+        // 3. Allow saves the setting and starts the talk without pressing again; the core reports the audio it sent.
+        prompter.Answers.Enqueue(true);
         v.Calls.StartTalking(camera);
+        Expect(v.Settings.TalkAllowed(camera), "Allow did not keep the permission");
         bool active = await Until(() => call.Talk.IsActive, 10);
         Expect(active && mic.Running, "Talk did not become active with the microphone running");
         for (int i = 0; i < 10; i++)

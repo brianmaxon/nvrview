@@ -80,6 +80,14 @@ internal sealed class CallSession(Call call)
 
     /// <summary>A status note for the call (microphone refused, ...).</summary>
     public string? Note { get; set; }
+
+    /// <summary>The confirmation to allow talk-back is on screen.</summary>
+    public bool Asking { get; set; }
+
+    /// <summary>What the user last started, and the typed reply's audio, so a refusal from the core can be answered by the same prompt.</summary>
+    public TalkAction? LastAction { get; set; }
+
+    public List<float>? LastReply { get; set; }
 }
 
 internal sealed class ViewerCalls
@@ -290,17 +298,65 @@ internal sealed class ViewerCalls
     // ---- talk-back ----
 
     /// <summary>
-    /// Talk pressed (held, or the toggle on): starts talk-back with the microphone. Nothing is sent
-    /// without the camera's permission: the core refuses with <c>not_permitted</c>.
+    /// Asks "Allow talk-back for the camera?" and applies the answer: Allow saves the setting as the
+    /// tile menu does (which also tells the core). True when the user allowed it and the call is
+    /// still open. One question at a time.
     /// </summary>
-    public void StartTalking(CameraRef camera)
+    private async Task<bool> AskToAllowAsync(CallSession s, TalkAction action)
     {
-        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) || s.MicTalk)
+        if (s.Asking)
+        {
+            return false;
+        }
+        s.Asking = true;
+        try
+        {
+            CameraRef camera = s.Call.Camera;
+            bool allow = await Services.Prompter.AskAsync(TalkPermission.Prompt(_viewer.CameraName(camera)));
+            TalkOutcome outcome = TalkPermission.Outcome(allow, action);
+            if (outcome.AllowTalkBack)
+            {
+                _viewer.SetTalkAllowed(camera, true);
+            }
+            _viewer.RaiseCallsChanged();
+            return outcome.ContinueAction && _sessions.GetValueOrDefault(camera.ChannelKey) == s;
+        }
+        finally
+        {
+            s.Asking = false;
+        }
+    }
+
+    /// <summary>
+    /// Talk pressed (held, or the toggle on): starts talk-back with the microphone. When the
+    /// camera's talk-back is off the user is asked first (nothing is sent before the answer); a
+    /// <c>not_permitted</c> refusal from the core asks the same way.
+    /// </summary>
+    public void StartTalking(CameraRef camera) => _ = StartTalkingAsync(camera);
+
+    /// <summary>As <see cref="StartTalking"/>, finishing once the prompt (if any) is answered.</summary>
+    public async Task StartTalkingAsync(CameraRef camera)
+    {
+        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) || s.MicTalk || s.Asking)
+        {
+            return;
+        }
+        s.Call.Activity(Now);
+        s.LastAction = TalkAction.Microphone;
+        if (TalkPermission.Gate(_viewer.Settings.TalkAllowed(s.Call.Camera)) == TalkGate.Ask && !await AskToAllowAsync(s, TalkAction.Microphone))
+        {
+            return;
+        }
+        BeginMicrophoneTalk(s);
+    }
+
+    private void BeginMicrophoneTalk(CallSession s)
+    {
+        if (s.MicTalk)
         {
             return;
         }
         s.MicTalk = true;
-        s.Call.Activity(Now);
         s.Note = null;
         if (!BeginTalk(s))
         {
@@ -351,13 +407,13 @@ internal sealed class ViewerCalls
         {
             _viewer.Core.TalkStart(tile.Id);
             s.Call.Talk.StartSent();
-            AppLog.Info($"Talk-back started: channel {s.Call.Camera.Channel + 1}");
+            AppLog.Info($"Talk-back started: {_viewer.CameraName(s.Call.Camera)}");
             return true;
         }
         catch (NvException e)
         {
             s.Call.Talk.StartFailed(e.Status == NvStatus.NotPermitted);
-            AppLog.Info($"Talk-back refused: channel {s.Call.Camera.Channel + 1}, {TalkState.Words(e.Status == NvStatus.NotPermitted ? "not_permitted" : "error")}");
+            AppLog.Info(TalkPermission.Refusal(_viewer.CameraName(s.Call.Camera), e.Status == NvStatus.NotPermitted ? "not_permitted" : "error"));
             return false;
         }
     }
@@ -402,20 +458,28 @@ internal sealed class ViewerCalls
     /// Send: speaks <paramref name="text"/> (what the user typed in the call, nothing else) through
     /// the camera with the system voice, under the same permission and limits as Talk.
     /// </summary>
-    public async Task SendReplyAsync(string text, CameraRef camera)
+    public async Task<bool> SendReplyAsync(string text, CameraRef camera, Action? accepted = null)
     {
         string typed = text.Trim();
-        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) || typed.Length == 0)
+        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) || typed.Length == 0 || s.Asking)
         {
-            return;
+            return false;
         }
         s.Call.Activity(Now);
-        AppLog.Info($"Typed reply sent: channel {s.Call.Camera.Channel + 1}, {typed.Length} characters");
+        s.LastAction = TalkAction.Reply;
+        // Asked before anything is rendered or sent. Cancel drops nothing: the caller keeps the text.
+        if (TalkPermission.Gate(_viewer.Settings.TalkAllowed(s.Call.Camera)) == TalkGate.Ask && !await AskToAllowAsync(s, TalkAction.Reply))
+        {
+            return false;
+        }
+        accepted?.Invoke();
+        AppLog.Info($"Typed reply sent: {_viewer.CameraName(s.Call.Camera)}, {typed.Length} characters");
         (float[] samples, uint rate) = await Services.Speech.RenderAsync(typed);
         if (!_sessions.TryGetValue(camera.ChannelKey, out s) || samples.Length == 0)
         {
-            return;
+            return true;
         }
+        s.LastReply = [.. samples];
         s.PendingReply ??= [];
         s.PendingReply.AddRange(samples);
         s.PendingRate = rate;
@@ -426,6 +490,34 @@ internal sealed class ViewerCalls
         else if (!BeginTalk(s))
         {
             s.PendingReply = null;
+        }
+        _viewer.RaiseCallsChanged();
+        return true;
+    }
+
+    /// <summary>
+    /// The core refused for lack of permission although the setting is on (out of sync) or was off:
+    /// the same prompt; Allow tells the core again and repeats what the user asked.
+    /// </summary>
+    private async Task CoreRefusedPermissionAsync(CallSession s, bool wasMic, List<float>? reply, uint rate)
+    {
+        TalkAction action = wasMic ? TalkAction.Microphone : s.LastAction ?? TalkAction.Microphone;
+        if (!await AskToAllowAsync(s, action))
+        {
+            return;
+        }
+        if (action == TalkAction.Reply && reply is not null)
+        {
+            s.PendingReply = [.. reply];
+            s.PendingRate = rate;
+            if (!BeginTalk(s))
+            {
+                s.PendingReply = null;
+            }
+        }
+        else
+        {
+            BeginMicrophoneTalk(s);
         }
         _viewer.RaiseCallsChanged();
     }
@@ -477,7 +569,7 @@ internal sealed class ViewerCalls
             return;
         }
         s.Call.Activity(Now);
-        int channel = s.Call.Camera.Channel + 1;
+        string name = _viewer.CameraName(s.Call.Camera);
         switch (e.State)
         {
             case "active":
@@ -485,6 +577,8 @@ internal sealed class ViewerCalls
                 break;
             case "refused":
             case "stopped":
+                List<float>? lastReply = s.LastReply;
+                bool wasMic = s.MicTalk;
                 s.PendingReply = null;
                 if (s.MicTalk)
                 {
@@ -494,8 +588,12 @@ internal sealed class ViewerCalls
                     s.You = null;
                 }
                 AppLog.Info(e.State == "refused"
-                    ? $"Talk-back refused: channel {channel}, {TalkState.Words(e.Reason ?? "refused", e.RetryMs)}"
-                    : $"Talk-back stopped: channel {channel}, {e.Reason ?? "stopped"}, {e.SentMs} ms sent");
+                    ? TalkPermission.Refusal(name, e.Reason ?? "refused", e.RetryMs)
+                    : $"Talk-back stopped: {name}, {e.Reason ?? "stopped"}, {e.SentMs} ms sent");
+                if (e.State == "refused" && e.Reason == "not_permitted")
+                {
+                    _ = CoreRefusedPermissionAsync(s, wasMic, lastReply, s.PendingRate);
+                }
                 break;
         }
         _viewer.RaiseCallsChanged();
