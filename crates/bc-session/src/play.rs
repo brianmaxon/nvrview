@@ -215,8 +215,10 @@ impl DeviceSession {
     /// Starts several plays together, as the official client did
     /// (docs/protocol.md, "Four plays at once"): all seeks (123) back to
     /// back with consecutive `seq` numbers and the one `seekTime` `at`
-    /// (each start's own [`PlayStart::at`] is ignored), then their replies,
-    /// then a pause of [`crate::SessionConfig::play_group_delay`] (about
+    /// (`Some`: the official client's recipe; with `None` each start's own
+    /// [`PlayStart::at`] is sent instead, an experiment: the device keeps
+    /// one seek position per session, so the last seek is likely the one
+    /// every play starts from), then their replies, then a pause of [`crate::SessionConfig::play_group_delay`] (about
     /// 0.5 s), then all plays (5) back to back, each with a message ID of
     /// its own. The returned plays are in the order of `starts`. The call
     /// stops nothing itself: stop running plays first.
@@ -230,7 +232,7 @@ impl DeviceSession {
     pub async fn play_group(
         &self,
         starts: &[PlayStart],
-        at: DateTime,
+        at: Option<DateTime>,
     ) -> Result<Vec<Play>, SearchError> {
         if self.shared.is_closing() {
             return Err(SearchError::Query(QueryError::Closed));
@@ -252,6 +254,7 @@ impl DeviceSession {
         let seeks: Vec<Boxed<'_, Result<Reply, QueryError>>> = (0..n)
             .map(|i| {
                 let seq = base.wrapping_add(i);
+                let at = at.unwrap_or(starts[i as usize].at);
                 Box::pin(self.call(Box::new(move |s| s.replay_seek(seq, at)), None))
                     as Boxed<'_, Result<Reply, QueryError>>
             })
