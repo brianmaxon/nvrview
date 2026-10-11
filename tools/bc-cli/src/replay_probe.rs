@@ -106,6 +106,9 @@ pub struct ProbeConfig {
     /// observed to keep in UTC (docs/protocol.md): only right on a device
     /// whose local time is UTC.
     pub now: Option<DateTime>,
+    /// No live preview at all: no baseline or tail, no live checks, and
+    /// `now` is required. Measures the plays alone.
+    pub no_live: bool,
     /// Waiting for the login.
     pub login_limit: Duration,
     /// The whole run, login included (at most [`RUN_LIMIT`]).
@@ -126,6 +129,7 @@ impl ProbeConfig {
             gap: Duration::from_secs(1),
             tail: Duration::from_secs(3),
             now: None,
+            no_live: false,
             login_limit: Duration::from_secs(20),
             run_limit: RUN_LIMIT,
         }
@@ -367,18 +371,23 @@ impl<W: Write> Run<'_, W> {
                 .map(|r| r.state.counter.frames.swap(0, Ordering::Relaxed))
                 .collect();
             let cols: Vec<String> = p.iter().map(|n| format!("{n:>4}")).collect();
-            self.line(&format!("{label:<9} live {l:>4}  plays {}", cols.join(" ")));
+            if self.cfg.no_live {
+                self.line(&format!("{label:<9} plays {}", cols.join(" ")));
+            } else {
+                self.line(&format!("{label:<9} live {l:>4}  plays {}", cols.join(" ")));
+            }
             if !matches!(*state.borrow_and_update(), ConnState::Connected) {
                 return Err(Outcome::LiveDisrupted {
                     stage,
                     what: "the connection was lost".into(),
                 });
             }
-            if let Some(why) = live.trouble.lock().unwrap().clone() {
+            let trouble = live.trouble.lock().unwrap().clone();
+            if let (false, Some(why)) = (self.cfg.no_live, trouble) {
                 return Err(Outcome::LiveDisrupted { stage, what: why });
             }
             if full {
-                if l == 0 {
+                if l == 0 && !self.cfg.no_live {
                     return Err(Outcome::LiveDisrupted {
                         stage,
                         what: "a second without live video".into(),
@@ -624,60 +633,71 @@ async fn probe<W: Write>(
         .await?;
 
     let live_state = Arc::new(LiveState::default());
-    let sub = run
-        .bounded(session.subscribe(ch, cfg.tier))
-        .await?
-        .map_err(|_| Outcome::Error {
+    let now;
+    let _live;
+    if cfg.no_live {
+        _live = None;
+        now = cfg.now.ok_or_else(|| Outcome::Error {
             stage: 0,
-            what: "the session closed".into(),
+            what: "without live view the run needs the device's time (--now)".into(),
         })?;
-    let _live = LiveTask(spawn_live(sub, Arc::clone(&live_state)));
-    // The first live keyframe.
-    let first = run
-        .bounded(async {
-            let limit = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < limit {
-                if live_state.first_wall.lock().unwrap().is_some() {
-                    return true;
+        run.line("no live view; the plays run alone");
+    } else {
+        let sub = run
+            .bounded(session.subscribe(ch, cfg.tier))
+            .await?
+            .map_err(|_| Outcome::Error {
+                stage: 0,
+                what: "the session closed".into(),
+            })?;
+        _live = Some(LiveTask(spawn_live(sub, Arc::clone(&live_state))));
+        // The first live keyframe.
+        let first = run
+            .bounded(async {
+                let limit = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < limit {
+                    if live_state.first_wall.lock().unwrap().is_some() {
+                        return true;
+                    }
+                    if live_state.trouble.lock().unwrap().is_some() {
+                        return false;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
-                if live_state.trouble.lock().unwrap().is_some() {
-                    return false;
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            false
-        })
-        .await?;
-    if !first {
-        let what = live_state
-            .trouble
+                false
+            })
+            .await?;
+        if !first {
+            let what = live_state
+                .trouble
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "no live keyframe within 10 s".into());
+            return Err(Outcome::LiveDisrupted { stage: 0, what });
+        }
+        let live_wall = live_state
+            .first_wall
             .lock()
             .unwrap()
-            .clone()
-            .unwrap_or_else(|| "no live keyframe within 10 s".into());
-        return Err(Outcome::LiveDisrupted { stage: 0, what });
-    }
-    let live_wall = live_state
-        .first_wall
-        .lock()
-        .unwrap()
-        .flatten()
-        .and_then(|w| DateTime::from_naive_secs(i64::from(w)));
-    let now = cfg.now.or(live_wall).ok_or_else(|| Outcome::Error {
-        stage: 0,
-        what: "the live keyframe has no wall clock; pass --now".into(),
-    })?;
-    run.line(&format!(
-        "live view of channel {ch} ({}) running; the first keyframe's wall clock reads {}",
-        cfg.tier.name(),
-        live_wall
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "nothing".into())
-    ));
+            .flatten()
+            .and_then(|w| DateTime::from_naive_secs(i64::from(w)));
+        now = cfg.now.or(live_wall).ok_or_else(|| Outcome::Error {
+            stage: 0,
+            what: "the live keyframe has no wall clock; pass --now".into(),
+        })?;
+        run.line(&format!(
+            "live view of channel {ch} ({}) running; the first keyframe's wall clock reads {}",
+            cfg.tier.name(),
+            live_wall
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "nothing".into())
+        ));
 
-    let until = Instant::now() + cfg.baseline;
-    let (base, _) = run.measure("baseline", 0, &live_state, &[], until).await?;
-    report.baseline_live_fps = mean(&base);
+        let until = Instant::now() + cfg.baseline;
+        let (base, _) = run.measure("baseline", 0, &live_state, &[], until).await?;
+        report.baseline_live_fps = mean(&base);
+    }
 
     // Each play's recording: today's files of its channel, or yesterday's
     // when today has none that fits (the live wall clock may be on another
@@ -743,7 +763,11 @@ async fn probe<W: Write>(
     }
 
     for stage in 1..=max_plays {
-        run.line(&format!("stage {stage}: {stage} play(s) beside live view"));
+        if cfg.no_live {
+            run.line(&format!("stage {stage}: {stage} play(s), no live view"));
+        } else {
+            run.line(&format!("stage {stage}: {stage} play(s) beside live view"));
+        }
         let mut st = Stage {
             plays: stage,
             ..Stage::default()
@@ -902,11 +926,17 @@ async fn probe<W: Write>(
             .zip(&st.elapsed_secs)
             .map(|(v, e)| format!("{v:.1} s in {e:.1} s"))
             .collect();
+        let live = if cfg.no_live {
+            "no live view".to_string()
+        } else {
+            format!(
+                "live {:.1} fps (baseline {:.1})",
+                st.live_fps, report.baseline_live_fps
+            )
+        };
         run.line(&format!(
-            "stage {stage} summary: live {:.1} fps (baseline {:.1}); plays fps [{}]; bytes {:?}; \
+            "stage {stage} summary: {live}; plays fps [{}]; bytes {:?}; \
              first frame [{}]; first keyframe vs seek [{}]; video delivered [{}]",
-            st.live_fps,
-            report.baseline_live_fps,
             fps.join(", "),
             st.play_bytes,
             first.join(", "),
@@ -917,6 +947,9 @@ async fn probe<W: Write>(
         result?;
         report.max_ok = stage;
         run.bounded(tokio::time::sleep(cfg.gap)).await?;
+    }
+    if cfg.no_live {
+        return Ok(());
     }
     let until = Instant::now() + cfg.tail;
     let (tail, _) = run

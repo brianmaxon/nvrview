@@ -223,3 +223,49 @@ async fn a_refused_login_is_not_retried() {
     assert_eq!(nvr.command_count(5), 0);
     s.close().await;
 }
+
+/// Without live view: no live subscription, no baseline or tail, four
+/// stages of plays alone, every play stopped.
+#[tokio::test(start_paused = true)]
+async fn four_stages_with_no_live_view() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr);
+    let (_tx, rx) = watch::channel(false);
+    let mut out = Vec::new();
+    let mut cfg = probe_cfg();
+    cfg.no_live = true;
+    let r = replay_probe(&s, &cfg, &mut out, rx).await.unwrap();
+    let text = String::from_utf8_lossy(&out).to_string();
+    assert_eq!(r.outcome, Outcome::Completed, "{text}");
+    assert_eq!(r.max_ok, 4);
+    assert_eq!(r.plays_started, 1 + 2 + 3 + 4);
+    assert!(r.tail_live_fps.is_none());
+    assert!(!text.contains("baseline"), "{text}");
+    assert!(!text.contains("live  "), "{text}");
+    assert!(!text.contains("fps (baseline"), "{text}");
+    assert_eq!(nvr.command_count(3), 0, "a live preview was started");
+    for (i, st) in r.stages.iter().enumerate() {
+        assert_eq!(st.delivered, i + 1);
+        assert!(st.play_fps.iter().all(|f| *f > 0.0), "{st:?}");
+    }
+    assert!(r.stops_sent >= 10, "{}", r.stops_sent);
+    closed_cleanly(&nvr, s).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_live_view_needs_the_device_time() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr);
+    let (_tx, rx) = watch::channel(false);
+    let mut cfg = probe_cfg();
+    cfg.no_live = true;
+    cfg.now = None;
+    let r = replay_probe(&s, &cfg, &mut Vec::new(), rx).await.unwrap();
+    assert!(
+        matches!(r.outcome, Outcome::Error { .. }),
+        "{:?}",
+        r.outcome
+    );
+    assert_eq!(r.plays_started, 0);
+    closed_cleanly(&nvr, s).await;
+}

@@ -42,7 +42,7 @@ usage:
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
-         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10]
+         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10] [--no-live]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -88,7 +88,9 @@ apart), each for at most 10 s, with --gap seconds (default 1, at most 10)
 of live view alone between stages, counting live and play frames per
 second. It stops at the first refusal, error, stall, or live disruption;
 every play is stopped (7) and the session closed on every path, Ctrl-C
-included; the whole run is capped at 90 s. Only the file search, live
+included; the whole run is capped at 90 s. --no-live leaves out the live
+preview and every live measurement and check (the plays alone; --now is then
+the only source of the device's time). Only the file search, live
 preview, seek (123), play (5) and stop (7) are sent. Keep its output in the
 ignored captures/ directory.
 analyze prints a Markdown timing report of a recording (aggregates only).";
@@ -174,6 +176,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut number = None;
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
     let (mut allow_probe, mut max_plays, mut now) = (false, None, None);
+    let mut no_live = false;
     let mut plays = None;
     let mut gap = None;
     let mut it = args;
@@ -245,6 +248,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                         .ok_or("bad --now (YYYY-MM-DDTHH:MM:SS)")?,
                 );
             }
+            "--no-live" => no_live = true,
             "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
             "--tone" => {
                 tone = value("--tone")?
@@ -347,6 +351,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             cfg.plays = plays.unwrap_or_default();
             cfg.gap = gap.unwrap_or(cfg.gap);
             cfg.now = Some(now.ok_or("replay-probe needs --now (the device's local time)")?);
+            cfg.no_live = no_live;
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
         }
@@ -702,17 +707,24 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             ctrl_c.abort();
             let report = r?;
             println!("result: {}", report.outcome);
-            println!(
-                "highest number of simultaneous plays that all delivered beside live view: {}",
-                report.max_ok
-            );
-            println!(
-                "live fps: baseline {:.1}, after the plays {}",
-                report.baseline_live_fps,
-                report
-                    .tail_live_fps
-                    .map_or("not measured".into(), |f| format!("{f:.1}"))
-            );
+            if cfg.no_live {
+                println!(
+                    "highest number of simultaneous plays that all delivered with no live view: {}",
+                    report.max_ok
+                );
+            } else {
+                println!(
+                    "highest number of simultaneous plays that all delivered beside live view: {}",
+                    report.max_ok
+                );
+                println!(
+                    "live fps: baseline {:.1}, after the plays {}",
+                    report.baseline_live_fps,
+                    report
+                        .tail_live_fps
+                        .map_or("not measured".into(), |f| format!("{f:.1}"))
+                );
+            }
             println!(
                 "plays requested {}, stops sent {}; the session is closed next",
                 report.plays_started, report.stops_sent
@@ -926,6 +938,35 @@ mod tests {
         let mut v = base.to_vec();
         v.extend_from_slice(&["--plays", "1~9"]);
         assert!(with(&v).is_err());
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&base)
+        else {
+            panic!("base not parsed");
+        };
+        assert!(!cfg.no_live);
+        let mut v = base.to_vec();
+        v.push("--no-live");
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&v)
+        else {
+            panic!("--no-live not parsed");
+        };
+        assert!(cfg.no_live && cfg.now.is_some());
+        // --now stays required without live view.
+        let e = with(&[
+            "replay-probe",
+            "--channel",
+            "1",
+            "--allow-replay-probe",
+            "--no-live",
+        ])
+        .err()
+        .unwrap();
+        assert!(e.contains("--now"), "{e}");
         let mut v = base.to_vec();
         v.extend_from_slice(&["--gap", "5"]);
         let Ok(Parsed::Device(Args {
