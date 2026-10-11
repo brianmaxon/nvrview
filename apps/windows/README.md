@@ -13,7 +13,7 @@ headless demo.
 | `layout/nvlayout.c` | prints struct sizes, field offsets, and constants as the C compiler sees `nvrview.h` |
 | `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer (Windows only) |
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
-| `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping, the rules of calls) and its tests on simulated time; builds and runs on Windows and Linux |
+| `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping, the rules of calls, where call cards go) and its tests on simulated time; builds and runs on Windows and Linux |
 | `NvrView.Shell/`, `NvrView.Shell.Tests/` | the shell's logic without a window: split-pane layouts and their JSON (the macOS app's documents, byte for byte), layout geometry, tile leases, the sidebar's edge reveal, camera groups, window restore; and its tests; builds and runs on Windows and Linux |
 | `NvrView.App/` | the app: WinUI 3 windows with split-pane layouts, the sidebar, focus, listening, Settings, a `--selftest`, and a `--startup-test` (Windows only) |
 
@@ -427,14 +427,21 @@ that is refused once, then streams):
     microphone, voice and recognizer, never real hardware: Start
     conversation (the tile menu offers it, with Allow talk-back) opens a
     call with no press, audible, a card over the stage, the camera's tapped
-    audio reaching the recognizer, and nothing sent by itself; Talk is
+    audio reaching the recognizer, and nothing sent by itself; the call and
+    the card each hold a lease, and the card's picture is the camera's shared
+    tile drawn last by the window's renderer (pictures counted, the readback
+    not flat), again after a simulated device loss; the card goes to the
+    Settings corner and, with none chosen, opposite the indicators; focusing
+    the camera moves the controls over the stage (the card's lease and
+    picture go) and leaving focus brings the card back; Talk is
     asks "Allow talk-back for the camera?" until talk-back is allowed (Cancel
     sends nothing; Allow saves the setting and talks) and then really talks (the core's
     `sent_ms` is checked); a typed reply is rendered by the voice at its own
     rate, pushed in one go and ended with a draining stop (`finished`);
     captions reach the card; a press (an injected `alarm`) joins the call
     or opens a silent one with Unmute; a call ends a minute after its last
-    activity on a manual clock and gives the audio and the lease back. Then
+    activity on a manual clock and gives the audio and both leases back (and
+    its picture is no longer drawn). Then
     on the real computer: the system voice renders a sentence, the desktop
     recognizer hears it ("moment" must be in the text where Windows has a
     recognizer), and with `--mic-test` the microphone opens for 0.7 s (the
@@ -555,9 +562,25 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   invariant globalization, `PredefinedCulturesOnly` is off in the project file
   (System.Speech names its recognizers by culture, and without this it
   finds none).
-- **Where it shows.** A card per call in the stage's bottom right corner of
-  every window (`CallPanel.cs`). Windows has no alert insets yet, so a press
-  opens the card but does not show the doorbell's video unless a tile does.
+- **Where it shows.** A card per call in every window (`CallPanel.cs`),
+  stacked from the inset corner (Settings > "Doorbell call cards", else
+  opposite the corner indicators; `InsetGeometry` in `NvrView.Tiles/Insets.cs`,
+  the macOS rules and test vectors), newest nearest it. A card is a header,
+  the camera's live picture, and the controls. When the camera fills the
+  stage (its tile is focused, or is the only one) the controls show along
+  the bottom of the stage instead, with no picture of their own. Calls are
+  the only insets on Windows: no smoke, CO or entrance insets, no swap.
+- **The card's picture.** The card's middle is a transparent hole. Once per
+  UI frame `CallStack.Publish` hands the window's `StageRenderer` the hole's
+  rectangle (DIPs, relative to the swap chain panel) with the card's own
+  `StageTile`, which points at the camera's shared `CameraTile`; the render
+  thread draws these overlays after the grid, so they sit on top even of a
+  focused tile, with the same pictures and keyframe gating (no second
+  decoder) and the window's own composition scale. A device loss rebuilds
+  the renderer and the overlays come back with the grid. Each card with a
+  picture holds its own lease on the camera besides the call's (acquired
+  before any is released when the cards change, released when the card
+  goes, moves over the stage, or the window closes).
 - **Not yet on Windows:** saving transcripts into the event log (the call is
   logged without them), a per-doorbell "unmute on ring" setting.
 
@@ -568,9 +591,9 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
 | `CoreHost` | the core and the shared GPU device; actions go straight to each tile's `VideoTile` inside the read side of a device gate; events are parsed and handed to the UI thread |
 | `Viewer` | the UI thread's state shared by every window: devices (state, retry time, channels, core device key), one `CameraTile` per leased camera (`TileLeases`; opened on the tier the planner picks), listening per camera, the layouts (the core's store), the groups, the detection tracker, indicator board, alert center, and the quality demands |
 | `ViewerWindow`, `SidebarView`, `EditBar` | one window: its content (`WindowState`), leases, sidebar and edge-reveal overlay, edit bar, keys, restore record |
-| `StageRenderer` | one window's render thread: its swap chain, picture fit into the layout's cells, focus animation, zoom, drawing, presenting, device-loss recovery, readback for the self-test |
+| `StageRenderer` | one window's render thread: its swap chain, picture fit into the layout's cells, focus animation, zoom, the call cards' pictures drawn last, drawing, presenting, device-loss recovery, readback for the self-test |
 | `StageView`, `TileChrome` | one window's stage: one `StageTile` per layout leaf, the XAML above the swap chain (hover header, speaker, level meter, status line, corner indicators, sound badges, alert strip and border, selection outline, edit outlines, diagnostics); input, the designer, drops |
-| `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator corner (`view-settings.json`) |
+| `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator and call card corners (`view-settings.json`) |
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |

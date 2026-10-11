@@ -81,14 +81,17 @@ less than that. Nothing here was run on a Windows machine.
 | Tile alert: red border (steady with reduced motion), header with reason, count, times, Dismiss | yes | yes | |
 | Alert survives the stop; Enter or Dismiss clears it on every lens | yes | yes | |
 | Session event log of alerts | yes | yes | Not verified where each app shows it. |
-| Alert insets for cameras not on screen (doorbell, smoke, entrance people) | yes | no | Windows has no alert insets (UX.md, apps/windows/README.md "Calls"). |
-| Inset corner setting, Entrance option per camera | yes | no | Depends on alert insets. |
+| Alert insets for cameras not on screen (doorbell, smoke, entrance people) | yes | partial (calls only: a call card with the doorbell's live picture) | Windows has no smoke or entrance insets (UX.md, apps/windows/README.md "Calls"). |
+| Inset picture drawn by the window's own renderer, last, from the shared tile | yes | yes | Self-test step `alert-inset-in-grid`; Windows also checks it after a device loss (`call-inset-device-loss`). |
+| Inset corner setting (Settings, else opposite the indicators) | yes | yes | macOS: Settings > Alerts; Windows: Settings ("Doorbell call cards"). Windows step `call-inset-corner`. |
+| Entrance option per camera | yes | no | Depends on alert insets for detections. |
 
 ### Calls, talk-back, and captions
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Doorbell press opens a call | yes | partial (a card opens; the doorbell's video appears only if a tile shows it) | Needs alert insets. |
+| Doorbell press opens a call with the doorbell's live video | yes | yes | Windows: a call card with the picture, in the inset corner. |
+| Call controls over the stage when the doorbell fills it (focused or only tile) | yes | yes | Windows step `call-stage-controls`. |
 | Start Conversation / End Conversation without a press | yes | yes | Tile menu on both. |
 | Unmute control for a silent call | yes | yes | |
 | Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. |
@@ -110,7 +113,7 @@ less than that. Nothing here was run on a Windows machine.
 | Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
 | Settings: Devices | yes | yes | |
 | Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
-| Settings: Alerts (inset corner, save transcripts) | yes | no | Depends on alert insets and transcript saving. |
+| Settings: Alerts (inset corner, save transcripts) | yes | partial (the call cards' corner, in Settings; no transcript saving) | |
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
@@ -122,9 +125,8 @@ less than that. Nothing here was run on a Windows machine.
 
 What the table shows that is not just a platform difference:
 
-- Windows has no alert insets, which also leaves the press-opens-video call
-  flow, the inset corner, the Entrance option, and the Alerts settings
-  missing.
+- Windows insets are call cards only: no smoke, CO or entrance insets, no
+  swap with the stage, and no Entrance option.
 - Windows lacks "unmute on ring" and saving call transcripts.
 - Windows has no zoom map, no header reset-zoom control, no Fill Tiles, and
   digital zoom does not follow a touch screen's pinch.
