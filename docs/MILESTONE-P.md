@@ -40,14 +40,16 @@ recordings owner and the C interface has no recordings functions.
 | Playback at 1×: 123 `ReplaySeek`, 5 `FileInfo` by `Id` with `playSpeed` 1, 7 stop; media on the play's message ID with the 123 `seq`; burst then roughly real-time pace; play starts at the keyframe at or before `seekTime` | observed (client capture) | C9 |
 | A play continues across a file boundary with no wire event | observed (timing and bytes only) | C9, C10 |
 | Several plays on one session, demultiplexed by message ID | observed (client capture), up to four | C9, C10 |
-| Rate change is stop, seek, play with `playSpeed` | observed (timing and bytes only) | C9 seam |
-| Keyframes carry wall-clock seconds in extra-header bytes 0–3 | observed (live view); matched `seekTime` at replay start in the client capture, but read UTC against a local `seekTime` on an NVR measured with `bc-cli replay-probe` (observed) | C7, C10 |
-| `playSpeed` values above 1, which frames a fast rate keeps, frames per second per rate | **blocked**: encrypted in the capture | B1 |
-| How a play ends at the end of the last file; how 5, 123 and 143 report errors | **unknown**: never seen | C9 seam |
-| Live media and replay media on one session at once | **observed** for one play beside one live preview (`bc-cli replay-probe`): accepted, live rate unchanged. A second play of the same file on the same camera was refused (status 52092); plays of different cameras beside live view, and downloads beside live view, not yet measured | B5 |
-| Reply fields of 104, 106, 38 (device time zone, DST, NTP) | **blocked**: encrypted | B2 |
-| Event-search (273) type names for animals | **blocked**: encrypted; live push says `dog_cat` | B3 |
-| Event log and AI search 516–519, 759, 653 | **reported (client)** only, never on the wire | B4 |
+| Rate change is stop, seek, play with `playSpeed` 1, 2, 4, 8, 16 | observed (client capture, decrypted) | C9 seam |
+| Keyframes carry wall-clock seconds in extra-header bytes 0–3, in **UTC** (Unix epoch) in live view and replay; `seekTime` and all search times are device local; the first keyframe is at the seek time converted to UTC, or up to 1 s after it | observed (client capture, decrypted, and `bc-cli replay-probe`); the first capture's "equal to `seekTime`" reading is not reproduced | C7, C10 |
+| A recording file `Id` embeds UTC (zero-based month); file `name` and search times are local | observed (client capture) | C1, C10 |
+| `playSpeed` 2, 4, 8, 16: keyframes only, no audio; every keyframe up to 4×, every 2nd at 8×, every 4th at 16×; at most about two keyframes per second delivered, so the media clock runs at the requested rate; a burst, then pacing (at 1× about 4 to 5 s ahead of real time) | observed (client capture, decrypted) | B1 (done), C9 seam |
+| How a play ends at the end of the recorded data; how 143 reports errors | **unknown**: the client always stopped its plays itself (7) when its loaded file list ran out; no device end message seen | B6, C9 seam |
+| 5, 123, 7 report errors | no non-200 status was ever seen on them (all 200); a time with no recording is read from search results | C9 seam |
+| Live media and replay media on one session at once | **observed** (`bc-cli replay-probe`): one play, and two simultaneous plays (one of them another camera), beside one live preview, all delivered; live rate unchanged; nothing refused. The earlier "status 52092 refusal" was our misreading of a replay header, not a device status. Live view beside more than two plays, and beside downloads, not measured | B5 |
+| 104 reply (`timeZone` in seconds west of UTC for standard time, `isDst`, local date and time); 106 (DST rule) and 38 (NTP) | 104 **observed**; 106 and 38 **unseen** (the newer client's Date & Time screen read only 104) | B2 |
+| Event-search (273) animal type name | **observed**: `dog_cat` | B3 |
+| Event log and AI search 516–518, 653 (plain `textOfPicture` text matched on the NVR, `similarity`, hit fields, covers ending with a status-201 message, opening a hit = 14–16, 272–274, 123, 5); 519 and 759 | 516–518 and 653 **observed (client capture)**; 519 and 759 **reported (client)** only; status 442 on a 517 page unexplained | B4 |
 
 ## Slices
 
@@ -95,13 +97,13 @@ next minor.
 
 | ID | Blocked item | Seam until then |
 | --- | --- | --- |
-| B1 | Rates above 2×: `playSpeed` values, which frames are kept, frames per second | rates 0.25× to 2× by pacing 1× plays (decision 3); `playSpeed` other than 1 is never sent |
-| B2 | The device's own time zone (104, 106, 38 replies) | the app passes `utc_offset_s` |
-| B3 | Animal names in event-search replies | kinds pass through unchanged; the apps' "animal" filter covers `dog_cat` and any later animal kind (decision 10) |
-| B4 | Event log and AI search (516–519, 759, 653) | not on the allowlist; nothing built |
-| B5 | ~~Live and replay media on one session at once~~ (observed: one play beside one live preview was accepted and live view kept its rate; docs/protocol.md, "Live view and plays on one session"). A second run found a second play of the same file on the same camera refused with status 52092 (the first play and live view unaffected). Still open: whether that is a per-file, per-camera or total limit (the earlier client capture had four synchronized plays of different cameras accepted), and live view beside a download | the design keeps live running (decision 2); plays limited by `max_plays_per_device` (default 4) and a refusal (any non-200 answer to 5) ends only that play and is shown as unavailable; downloads already share the session today and the end-to-end test checks live view keeps flowing in the mock. Next: a probe stage that plays different cameras, with the user's permission |
-| B6 | How a play ends at the end of the last file; error replies of 5, 123, 143 | C9 reports `ended` when the core's clock passes the last indexed recording, and `refused` for any non-200 status |
-| B7 | Whether the wall-clock seconds in keyframe extra headers are the device's local time or UTC. Observed UTC (live and replay) on one NVR whose local time is not UTC, with `seekTime` and search times local; the client capture's reading (seconds equal to `seekTime`) disagrees, so whether this differs by device or firmware is open | recorded times stay on the keyframes' own clock (`recordings::recorded_time`); conversion to the index's local time waits |
+| B1 | ~~Rates above 2×~~ (observed: `playSpeed` 1, 2, 4, 8, 16; keyframes only and no audio from 2×; see docs/protocol.md, "Rates, keyframes, and how a play ends") | rates 0.25× to 2× by pacing 1× plays (decision 3); `playSpeed` other than 1 is still never sent, so fast rates are unblocked for a later slice, not built |
+| B2 | The device's own time zone: 104 is now known (`timeZone`, `isDst`, local time; current UTC offset is `-timeZone + 3600` when `isDst` is 1, matched on one device). Open: the layouts of 106 (DST rule) and 38 (NTP), which the newer client never read | the app passes `utc_offset_s`; a later slice may compute it from 104 |
+| B3 | ~~Animal names in event-search replies~~ (observed: `dog_cat`) | kinds pass through unchanged; the apps' "animal" filter covers `dog_cat` and any later animal kind (decision 10) |
+| B4 | ~~Event log and AI search~~ 516–518 and 653 observed (docs/protocol.md, "What the AI search sent on the wire"). Open: 519 and 759 (never sent by that client), status 442 on a 517 page, `pts` and `offset` semantics | not on the allowlist; nothing built; adding 516–518 and 653 needs the allowlist reason recorded in protocol.md |
+| B5 | ~~Live and replay media on one session at once~~ (observed: one play, and two simultaneous plays with one of them another camera, beside one live preview were all accepted and delivered, and live view kept its rate; docs/protocol.md, "Live view and plays on one session"). The earlier "second play refused with status 52092" was our probe misreading a replay header (the play that "failed" was the restart of a file stopped moments earlier); the device refused nothing. Still open: live view beside more than two plays, live view beside a download, any real per-camera or total limit, and what the misread message was | the design keeps live running (decision 2); plays limited by `max_plays_per_device` (default 4) and a refusal (any non-200 answer to 5) ends only that play and is shown as unavailable; downloads already share the session today and the end-to-end test checks live view keeps flowing in the mock. Next: fix the probe's status reading, then a stage with three or four plays and one with a download, with the user's permission |
+| B6 | How a play ends at the true end of the recorded data (the official client always stopped first with 7 when its loaded file list ran out, and no device end message was seen); error replies of 143 (5, 123 and 7 were always 200) | C9 reports `ended` when the core's clock passes the last indexed recording, and `refused` for any non-200 status |
+| B7 | ~~Whether keyframe seconds are local or UTC~~ (observed UTC, live and replay, in the official client's decrypted capture and nvrview's probe; `seekTime`, file `name` and search times are local; the file `Id` is UTC). The first capture's "equal to `seekTime`" reading is unexplained; UTC is confirmed only on the devices measured | recorded times stay on the keyframes' own clock (`recordings::recorded_time`); conversion to the index's local time (with `utc_offset_s` or 104) is now unblocked |
 
 ## Order and parallel agents
 
@@ -135,30 +137,37 @@ C12 (after C11) ─────────── F3
 
 ## The re-capture
 
-What the next packet capture of the official client must contain so B1–B3,
-B6, and B7 can proceed. Start the capture **before** launching the client (quit
-it first), so the logins are in it and the bodies can be decrypted locally;
-the capture stays in the git-ignored `captures/` directory.
+Done. The capture of the official client with the login included was made
+and decrypted; its facts are in docs/protocol.md (marked observed (client
+capture)) and in the tables above. What each planned step settled:
 
-1. Open the playback tab on one camera; play at 1× for 20 s, then 2×, 4×,
-   8×, 16× for at least 20 s each (B1: `playSpeed` values, frames and
-   keyframes per rate).
-2. Play the most recent recording at 1× until it reaches the present, and
-   let it run 30 s more (B6: how a play ends).
-3. Seek to a time with no recording, and pick a day with none (B6).
-4. Pick a day with an animal event and filter by animal (B3: the type name
-   in 273 replies).
-5. Open the device's Date & Time screen and close it without saving (B2:
-   104, 106, 38 replies). With step 1's plays, this also settles B7: the
-   keyframes' seconds against the play's `seekTime` and the device's zone.
-6. If the client allows it, keep a live view of another camera open in a
-   second window during the playback and a download (B5).
-7. If the NVR has it, the AI search screen: a type search, a danger-level
-   search, a track, opening one hit and its cover (B4).
+1. Plays at 1×, 2×, 4×, 8×, 16× (B1): settled, see B1.
+2. Play the most recent recording until it reaches the present (B6): the
+   client stopped each play itself when its loaded file list ran out, so the
+   true end of data was not reached. Still open.
+3. Seek to a time with no recording, and a day with none (B6): the client
+   searched the empty day (a normal reply with an empty file list) and sent no
+   play, so no error reply was provoked. The client never sends a seek to a
+   time without recording; still open.
+4. A day with an animal event (B3): settled (`dog_cat`).
+5. The Date & Time screen (B2, B7): that client version read only 104, so
+   104 is settled and 106 and 38 are still open; B7 is settled by the plays.
+6. A live view beside a playback and a download (B5): not in the capture (the
+   client stops live view when the playback tab opens). B5 was measured with
+   nvrview's own probe instead, see below.
+7. AI search (B4): a typed-phrase search, its covers and opening a hit were
+   captured; type, danger-level and track searches were not.
 
 B5 is measured with nvrview's own read-only client instead, with the
 user's permission to use real hardware: `bc-cli replay-probe` (one session,
 one live preview, then 1 to 4 simultaneous plays at 1×, each at most 10 s,
 the run capped at 90 s; it stops at the first refusal, error, stall, or
-live disruption). Its first run settled live plus one play; the play limit
-beside live view needs another run.
+live disruption). Its runs settled live plus one play and live plus two
+plays (one of them another camera). Its reported "refusal" was a misread
+of a replay header, so its status reading needs fixing before another run
+(three or four plays; a download beside live view).
+
+What a further capture would still need: a play left running past the end
+of the last recording (B6), a 143 failure, 106 and 38 (a client version or
+screen that reads them), 519 and 759, and a repeat of a phrase search that
+returns status 442 on a 517 page.

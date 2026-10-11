@@ -144,23 +144,20 @@ AI search: commands 516–519, 759, 653"), read from the official client but
    it fails open: no hit in time never suppresses a notification. Searches
    run at most a few times a minute per NVR, one at a time, never while the
    device is busy serving playback, within the session limits.
-4. **Text search needs a text encoder.** The NVR compares a feature vector,
-   not text; the official client makes it with a downloaded encoder model or
-   the vendor's server. Using the vendor's server is out (it can record the
-   search). nvrview never bundles, downloads, or redistributes the vendor's
-   model. The one possible route: when the official app is already
-   installed on the same computer, an opt-in setting lets nvrview use the
-   model that installation already has, found in place, and text search is
-   offered only then. Before building it: read the official app's license
-   terms on use of its files by other software (the user decides); inspect
-   an installed copy to learn the model's format (if it is encrypted or needs
-   a proprietary runtime, the route ends there); record only facts in
-   protocol.md (file format, input tokenization, output vector size and
-   version, confirmed by test), writing the loading code from our own notes
-   under the clean-room rules; and follow the NVR's feature-version answer
-   by using whichever installed model version matches, saying so when none
-   does. An open encoder would almost certainly not produce vectors in the
-   same space. Type, danger, and track searches do not depend on any of this.
+4. **Text search is matched by the NVR.** The official client's AI search
+   screen was observed sending the typed phrase itself to the NVR (a plain
+   text field with a similarity cut-off, docs/protocol.md "What the AI search
+   sent on the wire"); no encoder model ran on the computer and no feature
+   vector was sent, and the NVR returned ranked hits. nvrview can therefore
+   send the same text with no model of its own, and needs no vendor server
+   (a vendor server could record the search texts, so it stays out). Older
+   firmware, or other client versions, may use a feature vector instead
+   (reported from the client's code); if an NVR does not return hits for
+   plain text, text search is simply not offered for it, and nvrview never
+   bundles, downloads, or redistributes the vendor's model. Results are a
+   similarity ranking over all detected objects with a low cut-off, not a
+   class filter, so the UI should show the score and let the user raise the
+   cut-off. Type, danger, and track searches do not depend on any of this.
 5. **Fast thumbnails.** The official client fetches one cover per hit, one
    at a time, which makes its search slow. Ours fetches covers only for hits
    on screen, in parallel up to the device's measured limit, and caches them.
@@ -314,31 +311,30 @@ compositor and encoder.
 
 ## Open questions
 
-- Device AI search (above): the wire format, how soon a hit appears after
-  an event, the device's cost and limits for repeated searches, and whether
-  text search can work without the vendor's encoder.
-- Animal event type names from the device (needs a capture with an animal
-  event). The live state push already reports `dog_cat`; the event-search
-  reply names were not decryptable in the latest capture.
+- Device AI search (above): the wire format is now observed (516 to 518,
+  plain-text search matched by the NVR). Still open: how soon a hit appears
+  after an event, the device's cost and limits for repeated searches, and why
+  a 517 page is sometimes answered with status 442.
+- (Settled.) The animal event type name is `dog_cat` in the live push and in
+  event-search replies.
 - Whether live view and 143 downloads can share a session, the device's
   limits on concurrent downloads, and how many plays it allows beside live
   view. A capture showed four synchronized replay plays on one session with
   no refusal (with live view stopped by the client), and nvrview's own probe
-  showed one play beside live view on one session, accepted with the live
-  frame rate unchanged (B5 in docs/MILESTONE-P.md); several plays beside live
-  view and live-plus-download are still unconfirmed.
+  showed two simultaneous plays (one of them another camera) beside live view
+  on one session, accepted with the live frame rate unchanged (B5 in
+  docs/MILESTONE-P.md); more than two plays beside live view and
+  live-plus-download are still unconfirmed.
 - How 143 reports errors, and how a play ends at the end of a file. A play is
   now observed to continue across a file boundary with no wire event; the end
   of the last file was not reached, and no seek or play ever returned an error
   status (a time with no recording is read from the search results, not from a
   play error).
-- How fast rates (2×–16×) are served at the frame level. The latest capture
-  showed the client switches rate with stop/seek/play (`playSpeed` in the play
-  request, no dedicated speed or keyframe-only command) and that higher rates
-  deliver only about three times the 1× byte rate, not N× — so the device
-  appears to thin the stream toward keyframes — but the records were encrypted,
-  so the frames-per-second and keyframe ratio per rate still need a
-  decryptable capture.
+- (Settled.) Fast rates (2×–16×) are served as keyframes only with no audio,
+  switched by stop/seek/play with `playSpeed` 2, 4, 8, 16: every keyframe up
+  to 4×, then every 2nd (8×) and 4th (16×), at most about two keyframes per
+  second, so the media clock runs at the requested rate (docs/protocol.md,
+  "Rates, keyframes, and how a play ends").
 - Clock agreement between cameras behind one NVR (recorded times come from
   the NVR; offsets between cameras with their own clocks need measuring).
 - Which cameras to keep watching for sound when they are not on screen
