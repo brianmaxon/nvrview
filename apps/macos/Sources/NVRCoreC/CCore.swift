@@ -180,6 +180,30 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    public func updateCheck(json: String) throws(CoreStatus) {
+        let status = CoreStatus(nv_update_check(try core(), json))
+        if !status.isOK { throw status }
+    }
+
+    public func updateDownload(json: String) throws(CoreStatus) {
+        let status = CoreStatus(nv_update_download(try core(), json))
+        if !status.isOK { throw status }
+    }
+
+    public func updateCancel() throws(CoreStatus) {
+        let status = CoreStatus(nv_update_cancel(try core()))
+        if !status.isOK { throw status }
+    }
+
+    public func updateParseKey(_ text: String) -> String? {
+        text.withCString { t in try? Self.string { nv_update_parse_key(t, $0, $1, $2) } }
+    }
+
+    public func updateParseSource(_ text: String) -> String {
+        text.withCString { t in try? Self.string { nv_update_parse_source(t, $0, $1, $2) } }
+            ?? #"{"ok":false,"reason":"source_invalid","message":"invalid text"}"#
+    }
+
     public func discoverStop() throws(CoreStatus) {
         let status = CoreStatus(nv_discover_stop(try core()))
         if !status.isOK { throw status }

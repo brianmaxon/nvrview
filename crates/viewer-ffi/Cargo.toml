@@ -20,6 +20,8 @@ viewer-core = { path = "../viewer-core" }
 mock-nvr = { path = "../../tools/mock-nvr" }
 simtime = { path = "../../tools/simtime" }
 tempfile = "3"
+# Signed update folders for the update functions' tests.
+updates = { path = "../updates" }
 
 [lints]
 workspace = true

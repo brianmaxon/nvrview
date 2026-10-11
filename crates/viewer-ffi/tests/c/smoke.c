@@ -299,6 +299,26 @@ int main(int argc, char **argv) {
         problem("discovery start/stop");
     }
 
+    /* Updates (minor 2): the pure helpers, refused requests, and a check
+     * with no trusted key (it starts and reports the failure as an event;
+     * nothing is fetched), then cancel. */
+    {
+        char out[256];
+        size_t out_len = 0;
+        if (nv_update_parse_key("not a key", out, sizeof out, &out_len) != NV_ERR_INVALID_ARGUMENT ||
+            nv_update_parse_source("http://updates.example.com/", out, sizeof out, &out_len) != NV_OK ||
+            strstr(out, "insecure_source") == NULL ||
+            nv_update_parse_source("https://updates.example.com/u", NULL, 0, &out_len) !=
+                NV_ERR_BUFFER_TOO_SMALL ||
+            out_len == 0 || nv_update_check(core, "{") != NV_ERR_INVALID_ARGUMENT ||
+            nv_update_cancel(core) != NV_OK ||
+            nv_update_check(core, "{\"source\":\"https://updates.example.com/u\",\"keys\":[],"
+                                  "\"current\":\"0.3.0\"}") != NV_OK ||
+            nv_update_cancel(core) != NV_OK) {
+            problem("update helpers and check");
+        }
+    }
+
     nv_core_free(core);
     unsigned long after_free = atomic_load(&g_callbacks);
     sleep_ms(200);

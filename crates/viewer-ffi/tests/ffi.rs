@@ -129,7 +129,7 @@ fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
     assert_eq!(NV_ABI_VERSION, 3);
     assert_eq!(nv_abi_minor(), NV_ABI_MINOR);
-    assert_eq!(NV_ABI_MINOR, 1);
+    assert_eq!(NV_ABI_MINOR, 2);
 }
 
 #[test]
@@ -746,5 +746,162 @@ fn discovery_through_the_c_interface() {
         nv_core_free(core);
     }
     assert_eq!(done_events(&ctx).len(), 2);
+    assert!(!ctx.bad.load(Ordering::SeqCst));
+}
+
+/// An update request; with `staging`, a download of 0.4.0.
+fn update_request(source: &str, key: &str, staging: Option<&str>) -> CString {
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut r = format!(
+        r#"{{"source":"{}","keys":["{}"],"current":"0.3.0","platform":"test-os""#,
+        esc(source),
+        esc(key)
+    );
+    if let Some(s) = staging {
+        r.push_str(&format!(r#","version":"0.4.0","staging_dir":"{}""#, esc(s)));
+    }
+    r.push('}');
+    CString::new(r).unwrap()
+}
+
+/// The text a successful out-buffer call wrote.
+///
+/// # Safety
+/// `buf` holds a NUL-terminated string.
+unsafe fn out_text(buf: &[c_char]) -> String {
+    // SAFETY: per the caller.
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn updates_through_the_c_interface() {
+    // A folder source with version 0.4.0 for platform "test-os", signed by
+    // a key made here.
+    let key = updates::SecretKey::from_seed([5; 32]);
+    let src = tempfile::tempdir().unwrap();
+    let file = "App-0.4.0-test-os.zip";
+    let package = updates::zip::write_stored(&[("App/hello.txt", b"hello")]);
+    std::fs::write(src.path().join(file), &package).unwrap();
+    let (size, sha) = updates::hash_file(&src.path().join(file)).unwrap();
+    let manifest = format!(
+        r#"{{"format":1,"version":"0.4.0","notes":"","packages":{{"test-os":{{"file":"{file}","size":{size},"sha256":"{}"}}}}}}"#,
+        updates::keys::encode_hex(&sha)
+    );
+    std::fs::write(src.path().join("updates.json"), &manifest).unwrap();
+    std::fs::write(
+        src.path().join("updates.json.sig"),
+        key.sign_line(manifest.as_bytes()),
+    )
+    .unwrap();
+    let public = key.public().to_text();
+    let source = src.path().to_str().unwrap();
+
+    let ctx = Box::new(Ctx::default());
+    let mut core: *mut NvCore = ptr::null_mut();
+    let cstr = |s: &str| CString::new(s).unwrap();
+    let finals = |ctx: &Ctx| -> Vec<String> {
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.contains("\"type\":\"update\"")
+                    && !e.contains("\"started\"")
+                    && !e.contains("\"downloading\"")
+            })
+            .cloned()
+            .collect()
+    };
+    let mut buf = vec![0 as c_char; 256];
+    let mut len = 0usize;
+    // SAFETY: valid strings, buffers, and out pointers throughout; the core
+    // is live until freed once at the end.
+    unsafe {
+        // The pure helpers need no core.
+        let k = cstr(&public);
+        assert_eq!(
+            nv_update_parse_key(k.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_OK
+        );
+        let info = out_text(&buf);
+        assert!(
+            info.contains(&key.public().id()) && info.contains(&public),
+            "{info}"
+        );
+        assert_eq!(
+            nv_update_parse_key(k.as_ptr(), buf.as_mut_ptr(), 4, &mut len),
+            NvStatus::NV_ERR_BUFFER_TOO_SMALL
+        );
+        assert_eq!(len, info.len());
+        assert_eq!(
+            nv_update_parse_key(
+                cstr("not a key").as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len
+            ),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        let insecure = cstr("http://updates.example.com/");
+        assert_eq!(
+            nv_update_parse_source(insecure.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_OK
+        );
+        let s = out_text(&buf);
+        assert!(
+            s.contains("\"ok\":false") && s.contains("insecure_source"),
+            "{s}"
+        );
+        assert_eq!(
+            nv_update_parse_source(ptr::null(), buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+
+        assert_eq!(
+            nv_core_new(ptr::null(), callbacks(&ctx), &mut core),
+            NvStatus::NV_OK
+        );
+        // Nothing running: cancel is fine.
+        assert_eq!(nv_update_cancel(core), NvStatus::NV_OK);
+        assert_eq!(
+            nv_update_cancel(ptr::null_mut()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_update_check(core, ptr::null()),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        for bad in ["{", r#"{"source":"/s","keys":["x"],"current":"0.3.0"}"#] {
+            assert_eq!(
+                nv_update_check(core, cstr(bad).as_ptr()),
+                NvStatus::NV_ERR_INVALID_ARGUMENT,
+                "{bad}"
+            );
+        }
+        let check = update_request(source, &public, None);
+        assert_eq!(nv_update_check(core, check.as_ptr()), NvStatus::NV_OK);
+        wait_until("the check", || !finals(&ctx).is_empty());
+        let f = finals(&ctx);
+        assert!(
+            f[0].contains("\"available\"") && f[0].contains("\"version\":\"0.4.0\""),
+            "{f:?}"
+        );
+
+        let work = tempfile::tempdir().unwrap();
+        let staging = work.path().join("staging");
+        let download = update_request(source, &public, Some(staging.to_str().unwrap()));
+        assert_eq!(nv_update_download(core, download.as_ptr()), NvStatus::NV_OK);
+        wait_until("the download", || finals(&ctx).len() == 2);
+        let f = finals(&ctx);
+        assert!(f[1].contains("\"ready\""), "{f:?}");
+        assert_eq!(
+            std::fs::read(staging.join("content/App/hello.txt")).unwrap(),
+            b"hello"
+        );
+        nv_core_free(core);
+    }
     assert!(!ctx.bad.load(Ordering::SeqCst));
 }

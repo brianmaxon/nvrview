@@ -41,6 +41,18 @@ extension CoreAPI {
     public func discoverStop() throws(CoreStatus) {}
 }
 
+// Updates (minor 2). A core without them checks nothing, and the app's
+// update settings say so.
+extension CoreAPI {
+    public func updateCheck(json: String) throws(CoreStatus) { throw .invalidArgument }
+    public func updateDownload(json: String) throws(CoreStatus) { throw .invalidArgument }
+    public func updateCancel() throws(CoreStatus) {}
+    public func updateParseKey(_ text: String) -> String? { nil }
+    public func updateParseSource(_ text: String) -> String {
+        #"{"ok":false,"reason":"source_invalid","message":"this build cannot update itself"}"#
+    }
+}
+
 // Talk-back (docs/FFI.md "Talk-back"): camera motion control, off for every
 // camera until the app passes the user's per-camera permission. A core
 // without it refuses everything, so nothing is ever sent.

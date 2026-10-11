@@ -52,6 +52,7 @@ pub mod sound;
 pub mod store;
 pub mod talk;
 mod tile;
+pub mod update;
 
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector};
@@ -326,6 +327,8 @@ pub struct Core {
     talk: talk::TalkHub,
     /// The one LAN device search ([`discover`]).
     discover: discover::DiscoverHub,
+    /// The one update check or download ([`update`]).
+    update: update::UpdateHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -399,6 +402,7 @@ impl Core {
         };
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
         let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
+        let update = update::UpdateHub::new(event_sink.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -420,6 +424,7 @@ impl Core {
             lens,
             talk,
             discover,
+            update,
         })
     }
 
@@ -672,6 +677,32 @@ impl Core {
     pub fn discover_stop(&self) -> Result<(), CoreError> {
         self.check_api()?;
         self.discover.stop();
+        Ok(())
+    }
+
+    /// Starts an update check, or a download when the request has one
+    /// ([`update`], docs/FFI.md, "Updates"). Returns the operation's ID at
+    /// once; progress and the outcome arrive as `update` events. Build the
+    /// request with [`update::parse_request`] from the app's JSON.
+    ///
+    /// # Errors
+    /// [`CoreError::Limit`] while another update operation runs,
+    /// [`CoreError::Closed`], [`CoreError::InvalidArgument`] from inside a
+    /// callback.
+    pub fn update_start(&self, request: update::Request) -> Result<u64, CoreError> {
+        self.check_api()?;
+        self.update.start(request)
+    }
+
+    /// Cancels the running update operation, if any, waiting briefly for
+    /// it to end. Nothing running is not an error.
+    ///
+    /// # Errors
+    /// [`CoreError::Closed`], [`CoreError::InvalidArgument`] from inside a
+    /// callback.
+    pub fn update_cancel(&self) -> Result<(), CoreError> {
+        self.check_api()?;
+        self.update.cancel();
         Ok(())
     }
 
@@ -1173,6 +1204,9 @@ impl Core {
         self.talk.shutdown();
         // A running search ends with its `discovery_done` (stopped).
         self.discover.stop();
+        // A running update check or download is canceled (its folder
+        // removed); its `canceled` event comes first if it ends in time.
+        self.update.cancel();
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()

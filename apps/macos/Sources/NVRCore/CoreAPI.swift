@@ -77,6 +77,27 @@ public protocol CoreAPI: Sendable {
     /// Minor 1 `nv_discover_stop`: ends the running search, if any.
     func discoverStop() throws(CoreStatus)
 
+    /// Minor 2 `nv_update_check` (docs/FFI.md "Updates"): checks the update
+    /// source; the outcome arrives as `update` events. `NV_ERR_LIMIT` while
+    /// another update operation runs.
+    func updateCheck(json: String) throws(CoreStatus)
+
+    /// Minor 2 `nv_update_download`: downloads, verifies, and unpacks the
+    /// accepted version into the request's `staging_dir`.
+    func updateDownload(json: String) throws(CoreStatus)
+
+    /// Minor 2 `nv_update_cancel`: the running operation's final event is
+    /// queued before it returns.
+    func updateCancel() throws(CoreStatus)
+
+    /// Minor 2 `nv_update_parse_key` (pure): `{"key":...,"id":...}`, or nil
+    /// when the text is not one update public key.
+    func updateParseKey(_ text: String) -> String?
+
+    /// Minor 2 `nv_update_parse_source` (pure): `{"ok":true,"kind":...,
+    /// "display":...}` or `{"ok":false,"reason":...,"message":...}`.
+    func updateParseSource(_ text: String) -> String
+
     /// `nv_audio_set_output`: the format the real-time callback renders
     /// (1 or 2 interleaved channels). Call again after a device change.
     func audioSetOutput(sampleRate: UInt32, channels: UInt32) throws(CoreStatus)

@@ -334,7 +334,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 1;
+    public const uint AbiMinor = 2;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -480,6 +480,31 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_discover_stop(nint core);
+
+    /// <summary>Starts an update check (minor 2; docs/FFI.md, "Updates").</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_update_check(nint core, string json);
+
+    /// <summary>Downloads, verifies, and unpacks the accepted update (minor 2).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_update_download(nint core, string json);
+
+    /// <summary>Cancels the running update operation, if any (minor 2).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_update_cancel(nint core);
+
+    /// <summary>Parses an update public key (pure; minor 2).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_update_parse_key(byte* text, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Checks an update source as typed (pure; minor 2).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_update_parse_source(byte* text, byte* output, nuint cap, nuint* len);
 
     /// <summary>Grid layout (pure; no core needed).</summary>
     [LibraryImport(Library)]

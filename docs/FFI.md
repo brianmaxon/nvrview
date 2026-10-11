@@ -584,6 +584,74 @@ Events (same rules as every event: ignore unknown types and fields):
   the search's end by several seconds. An app that gets `count` 0 with such
   errors points at System Settings, Privacy & Security, Local Network.
 
+## Updates
+
+Minor 2 of ABI 3. The core side is the `updates` crate wrapped in
+`viewer-core`'s `update` module; [UPDATES.md](UPDATES.md) is the design
+(sources, manifest, signatures, staging, and what the apps do to apply).
+The core checks, downloads, verifies, and unpacks; it never applies an
+update and never checks on its own.
+
+```c
+NvStatus nv_update_check(NvCore *core, const char *json);
+NvStatus nv_update_download(NvCore *core, const char *json);
+NvStatus nv_update_cancel(NvCore *core);
+NvStatus nv_update_parse_key(const char *text, char *out, size_t cap, size_t *len);
+NvStatus nv_update_parse_source(const char *text, char *out, size_t cap, size_t *len);
+```
+
+- **Request.** `{"source":"https://updates.example.com/nvrview/",
+  "keys":["nvrview-ed25519-pub <hex>"],"current":"0.3.0",
+  "platform":"macos-arm64"}`; a download adds `"version":"0.4.0"` (the
+  version the user accepted) and `"staging_dir":"/abs/path"` (must not
+  exist; on the same volume as the installed app). `platform` is optional
+  (the core's own: `macos-arm64`, `win-x64`, ...). Unknown members are
+  ignored. Invalid JSON, a key that does not parse, more than 16 keys, or a
+  version that is not semantic is `NV_ERR_INVALID_ARGUMENT`; an unacceptable
+  source is reported by the operation's `failed` event, so the app shows one
+  kind of message for every failure.
+- **One at a time.** A start while a check or download runs is
+  `NV_ERR_LIMIT`. `nv_update_cancel` waits up to about half a second for the
+  operation to end by itself; either way its final event is queued before
+  the call returns and nothing more of it follows. A worker still blocked
+  in a network read (a server that stopped answering) ends at its next
+  chunk or timeout, removing what it created; its outcome is dropped.
+  `nv_core_free` cancels the same way.
+- **Calls.** Like the other calls, refused from inside a callback and after
+  `nv_core_free` began. The two parse functions need no core and follow the
+  out-buffer rules of "Layouts".
+
+Events (ignore unknown types and fields, as always):
+
+```json
+{"type":"update","op":1,"action":"check","state":"started"}
+{"type":"update","op":1,"action":"check","state":"available","current":"0.3.0","version":"0.4.0","notes":"Fixes.","size":31457280,"key_id":"0011223344556677"}
+{"type":"update","op":2,"action":"check","state":"up_to_date","current":"0.4.0","latest":"0.4.0"}
+{"type":"update","op":3,"action":"check","state":"up_to_date","current":"0.3.0","latest":"0.4.0","no_package":true}
+{"type":"update","op":4,"action":"download","state":"downloading","received":1048576,"total":31457280}
+{"type":"update","op":4,"action":"download","state":"ready","version":"0.4.0","path":"/Applications/.NVRView-update/staging-0.4.0/content"}
+{"type":"update","op":5,"action":"check","state":"failed","reason":"bad_signature","message":"the manifest's signature does not verify with any trusted key"}
+{"type":"update","op":6,"action":"download","state":"canceled"}
+```
+
+- Every operation sends `started` first, then at most one final event:
+  `available` or `up_to_date` (check), `ready` (download), `failed`, or
+  `canceled`. `downloading` comes at most once per percent, first with
+  `received` 0.
+- `reason` (with `failed`): `source_invalid`, `insecure_source`,
+  `no_trusted_keys`, `unreachable`, `not_found`, `too_large`,
+  `redirect_refused`, `bad_signature`, `bad_manifest`, `unsupported_format`,
+  `version_changed`, `not_newer`, `bad_package`, `unsafe_archive`,
+  `staging`, `unsupported_cpu` (UPDATES.md says when each happens).
+  `message` is a sentence for people; it can name the source's host or
+  folder, so apps show it but log only the reason.
+- `available` only for a version strictly newer than `current` with a
+  package for the platform; `no_package` marks a newer version without one.
+- `ready`'s `path` is the unpacked package (`<staging_dir>/content`): on
+  macOS it holds `NVRView.app`, on Windows the app folder's files.
+- The core logs one line per outcome with its reason; sources and messages
+  only at debug level.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
@@ -618,6 +686,7 @@ symbol at all, so a bound app checks first):
 | minor | added |
 | --- | --- |
 | 1 | `nv_abi_minor`, device discovery (`nv_discover_start`, `nv_discover_stop`, the `discovered` and `discovery_done` events) |
+| 2 | updates (`nv_update_check`, `nv_update_download`, `nv_update_cancel`, `nv_update_parse_key`, `nv_update_parse_source`, the `update` event) |
 
 ## Builds
 

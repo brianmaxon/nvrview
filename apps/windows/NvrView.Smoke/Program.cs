@@ -747,6 +747,7 @@ internal sealed class Smoke(Options options)
 
         string key = CheckLayouts(core, device, dataDir);
         CheckDiscovery(core);
+        CheckUpdates(core);
         CheckGrid();
 
         // Close: nothing for the tile after nv_tile_close returns, and one
@@ -891,6 +892,37 @@ internal sealed class Smoke(Options options)
 
     // Discovery (minor 1): a bad request is refused, and a search on loopback
     // only (nothing answers there) starts, stops, and reports its end.
+    // Updates (minor 2): the pure helpers, a refused request, and a check
+    // with no trusted key (it starts and reports the failure as an event;
+    // nothing is fetched), then cancel.
+    private void CheckUpdates(NvCore core)
+    {
+        if (NvCore.UpdateParseKey("not a key") is not null)
+        {
+            Problem("nv_update_parse_key accepted text that is not a key");
+        }
+        string? parsed = NvCore.UpdateParseKey("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c");
+        if (parsed is null || !parsed.Contains("\"id\":", StringComparison.Ordinal))
+        {
+            Problem($"nv_update_parse_key: {parsed}");
+        }
+        if (!NvCore.UpdateParseSource("http://updates.example.com/").Contains("insecure_source", StringComparison.Ordinal))
+        {
+            Problem("nv_update_parse_source accepted http:// to a public host");
+        }
+        try
+        {
+            core.UpdateCheck("{");
+            Problem("nv_update_check accepted invalid JSON");
+        }
+        catch (NvException e) when (e.Status == NvStatus.InvalidArgument)
+        {
+        }
+        core.UpdateCancel();
+        core.UpdateCheck("{\"source\":\"https://updates.example.com/u\",\"keys\":[],\"current\":\"0.3.0\"}");
+        core.UpdateCancel();
+    }
+
     private void CheckDiscovery(NvCore core)
     {
         if (NvCore.AbiMinor() != NvNative.AbiMinor)

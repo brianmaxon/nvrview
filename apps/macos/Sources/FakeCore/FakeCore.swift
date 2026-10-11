@@ -186,6 +186,8 @@ public final class FakeCore: CoreAPI {
         /// A search ends by itself after this much real time; nil: only
         /// `discoverStop` or `finishDiscovery` end it (the self-test).
         public var discoveryDuration: Duration?
+        /// What update checks find (`FakeUpdates.swift`); nil: up to date.
+        public var updateOffer: FakeUpdateOffer?
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -218,6 +220,7 @@ public final class FakeCore: CoreAPI {
 
     let options: Options
     let discovery = FakeDiscoveryState()
+    let updates = FakeUpdateState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()

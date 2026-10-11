@@ -565,6 +565,93 @@ public sealed unsafe class NvCore : IDisposable
     }
 
     /// <summary>
+    /// Starts an update check (docs/FFI.md, "Updates"); the outcome arrives as
+    /// <c>update</c> events. Throws <see cref="NvStatus.Limit"/> while another
+    /// update operation runs.
+    /// </summary>
+    public void UpdateCheck(string json)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_update_check(core, json), nameof(NvNative.nv_update_check));
+        }
+    }
+
+    /// <summary>Downloads, verifies, and unpacks the accepted version into the request's <c>staging_dir</c>.</summary>
+    public void UpdateDownload(string json)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_update_download(core, json), nameof(NvNative.nv_update_download));
+        }
+    }
+
+    /// <summary>Cancels the running update operation; its final event is queued before this returns.</summary>
+    public void UpdateCancel()
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_update_cancel(core), nameof(NvNative.nv_update_cancel));
+        }
+    }
+
+    /// <summary>
+    /// Parses an update public key (pure): <c>{"key":...,"id":...}</c>, or null
+    /// when the text is not one key.
+    /// </summary>
+    public static string? UpdateParseKey(string text)
+    {
+        try
+        {
+            return PureString(text, (t, b, c, l) => NvNative.nv_update_parse_key(t, b, c, l), nameof(NvNative.nv_update_parse_key));
+        }
+        catch (NvException e) when (e.Status == NvStatus.InvalidArgument)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Checks an update source as typed (pure): <c>{"ok":true,"kind":...,"display":...}</c>
+    /// or <c>{"ok":false,"reason":...,"message":...}</c>.
+    /// </summary>
+    public static string UpdateParseSource(string text) =>
+        PureString(text, (t, b, c, l) => NvNative.nv_update_parse_source(t, b, c, l), nameof(NvNative.nv_update_parse_source));
+
+    private delegate NvStatus PureStringCall(byte* text, byte* output, nuint cap, nuint* len);
+
+    // The out/cap/len convention for functions that need no core.
+    private static string PureString(string text, PureStringCall call, string function)
+    {
+        byte[] input = Encoding.UTF8.GetBytes(text + "\0");
+        int cap = 512;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            byte[] buffer = new byte[cap];
+            nuint len = 0;
+            NvStatus s;
+            fixed (byte* t = input)
+            fixed (byte* p = buffer)
+            {
+                s = call(t, p, (nuint)cap, &len);
+            }
+            if (s == NvStatus.Ok)
+            {
+                return Encoding.UTF8.GetString(buffer, 0, checked((int)len));
+            }
+            if (s != NvStatus.BufferTooSmall)
+            {
+                throw new NvException(s, function);
+            }
+            cap = checked((int)len + 1);
+        }
+        throw new NvException(NvStatus.BufferTooSmall, function);
+    }
+
+    /// <summary>
     /// Grid layout (pure). <paramref name="pictureSizes"/> may hold zero sizes
     /// for tiles with no picture yet; <paramref name="output"/> receives one
     /// entry per picture size.

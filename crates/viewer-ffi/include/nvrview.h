@@ -21,9 +21,9 @@
 /**
  * Bumped for each addition that leaves every existing declaration
  * unchanged (new functions, events, status codes); resets to 0 with a new
- * NV_ABI_VERSION. Minor 1: device discovery.
+ * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates.
  */
-#define NV_ABI_MINOR 1
+#define NV_ABI_MINOR 2
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -612,6 +612,80 @@ enum NvStatus nv_discover_start(struct NvCore *core, const char *json);
  * `core` is a live handle.
  */
 enum NvStatus nv_discover_stop(struct NvCore *core);
+
+/**
+ * Starts an update check (minor 2; docs/FFI.md, "Updates";
+ * docs/UPDATES.md): fetch the source's manifest and signature, verify it
+ * with the trusted keys, and compare versions. Returns at once; the outcome
+ * arrives as "update" events ("started", then one of "up_to_date",
+ * "available", "failed", "canceled"). json:
+ * {"source":"https://... | /folder","keys":["nvrview-ed25519-pub ..."],
+ *  "current":"0.3.0","platform":"macos-arm64"}
+ * (platform optional: the core's own by default). NV_ERR_INVALID_ARGUMENT
+ * for invalid JSON, a key that is not an update public key, or a version
+ * that is not semantic; a bad source is reported by the event.
+ * NV_ERR_LIMIT while another update operation runs (one at a time). The
+ * core never checks on its own.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_update_check(struct NvCore *core, const char *json);
+
+/**
+ * Downloads, verifies, and unpacks the version the user accepted
+ * (minor 2): the manifest is fetched and verified again and must still
+ * offer it; the package's size and SHA-256 must match before anything is
+ * unpacked into staging_dir (which must not exist; it is created). Events:
+ * "started", "downloading" (received, total), then one of "ready" (path of
+ * the unpacked package), "failed", "canceled". json: the check's members
+ * plus "version" (the accepted version) and "staging_dir" (an absolute
+ * path on the same volume as the installed app). On failure the core
+ * removes everything it created. Errors as nv_update_check.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_update_download(struct NvCore *core, const char *json);
+
+/**
+ * Cancels the running update check or download, if any (minor 2). Its
+ * final event ("canceled", or the outcome it reached first) is queued
+ * before this returns, within about half a second; nothing more of that
+ * operation follows. NV_OK when nothing runs.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_update_cancel(struct NvCore *core);
+
+/**
+ * Parses an update public key as a user pastes it or as a key file holds
+ * it (pure; no core needed; minor 2). On success `out` receives
+ * {"key":"nvrview-ed25519-pub <hex>","id":"<16 hex digits>"}: the
+ * canonical text to store and the ID to show. NV_ERR_INVALID_ARGUMENT
+ * when the text is not one valid key. NUL-terminated, `*len` bytes
+ * without the NUL; NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap`
+ * <= `*len`.
+ *
+ * # Safety
+ * `text` is a NUL-terminated string; `out` is null or valid for writing
+ * `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_update_parse_key(const char *text, char *out, size_t cap, size_t *len);
+
+/**
+ * Checks an update source as the user typed it (pure; no core needed;
+ * minor 2). `out` receives {"ok":true,"kind":"folder|https|http",
+ * "display":"..."} or {"ok":false,"reason":"source_invalid|
+ * insecure_source","message":"..."} (NV_OK either way). Out-buffer rules
+ * as nv_update_parse_key.
+ *
+ * # Safety
+ * `text` is a NUL-terminated string; `out` is null or valid for writing
+ * `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_update_parse_source(const char *text, char *out, size_t cap, size_t *len);
 
 /**
  * Grid layout (pure; no core needed). Fills `out` (tile_count entries) with
