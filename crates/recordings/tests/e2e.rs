@@ -523,8 +523,10 @@ async fn three_camera_download(clock: Timing) {
     assert_eq!(again.resume_all().unwrap(), 0);
     assert!(again.progress().borrow().is_empty());
     let id = p[0].id.clone();
-    assert!(sched.forget(&id));
+    assert!(sched.forget(&id, false).unwrap());
+    assert!(!sched.forget(&id, false).unwrap());
     assert!(sched.progress().borrow().is_empty());
+    assert!(folder.join(PARTS_DIR).is_dir());
 
     sched.shutdown().await;
     drop(sched);

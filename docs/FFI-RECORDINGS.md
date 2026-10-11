@@ -497,7 +497,8 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 - `reason` (with `failed`): `stalled`, `session_closed`, `refused` (the
   device answered with an error), `no_recording` (the range held no
   video), `write_failed` (disk full or not writable), `join_failed` (for
-  example a codec change inside the range), `login_failed`. `detail` is
+  example a codec change inside the range), `login_failed`, `other`
+  (anything else, and failures recorded by older versions). `detail` is
   English for logs and diagnostics, not for parsing.
 - `bytes_estimate` is the device's own size estimate for the running
   chunk added to the bytes done, when known.
