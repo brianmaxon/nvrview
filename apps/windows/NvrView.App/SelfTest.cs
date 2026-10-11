@@ -752,16 +752,22 @@ internal sealed class SelfTest(App app, AppOptions options)
         return null;
     }
 
-    // The share of a rectangle's pixels (DIPs; sampled) that are not black in the next frame drawn.
+    // The share of a rectangle's pixels (DIPs; sampled) that are not black in a frame begun after
+    // the caller's change: the next frame may already be in flight with the old zoom (the render
+    // thread reads it at the start of a frame), so that one is skipped and the one after is read.
     private async Task<double?> BarLit(StageRenderer r, Rect bar)
     {
-        Task<StageCapture> task = r.CaptureAsync();
-        if (await Task.WhenAny(task, Task.Delay(5000)) != task)
+        StageCapture c = null!;
+        for (int i = 0; i < 2; i++)
         {
-            _problems.Add("no frame was drawn for the zoom check");
-            return null;
+            Task<StageCapture> task = r.CaptureAsync();
+            if (await Task.WhenAny(task, Task.Delay(5000)) != task)
+            {
+                _problems.Add("no frame was drawn for the zoom check");
+                return null;
+            }
+            c = await task;
         }
-        StageCapture c = await task;
         int lit = 0, n = 0;
         double step = Math.Max(Math.Min(bar.Width, bar.Height) / 8, 1);
         for (double y = bar.Y; y < bar.Y + bar.Height; y += step)
