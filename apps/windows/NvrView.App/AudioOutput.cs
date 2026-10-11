@@ -15,6 +15,9 @@
 //   first. So host_ns = qpc * 100 + (written - position) / rate.
 // - A device that goes away (AUDCLNT_E_DEVICE_INVALIDATED, unplugged or
 //   changed) restarts the stream on the new default device after a second.
+// - The device's endpoint ID is the reference of the microphone's echo
+//   canceller during talk-back (WasapiMicrophone, docs/AUDIO.md "Echo
+//   cancellation").
 
 using System.Runtime.InteropServices;
 using NvrView.Interop;
@@ -50,6 +53,11 @@ internal sealed unsafe partial class AudioOutput : IDisposable
     public long FramesRendered => Interlocked.Read(ref _framesRendered);
 
     private long _framesRendered;
+
+    /// <summary>The endpoint ID of the device that plays (the echo canceller's reference for talk-back); null without one.</summary>
+    public string? DeviceId => _deviceId;
+
+    private volatile string? _deviceId;
 
     /// <summary>Why there is no output, if there is none (no device, refused format).</summary>
     public string? Problem { get; private set; }
@@ -114,6 +122,12 @@ internal sealed unsafe partial class AudioOutput : IDisposable
             if (hr.FAILED)
             {
                 return $"no output device (0x{hr.Value:X8})";
+            }
+            char* id;
+            if (device->GetId(&id).SUCCEEDED)
+            {
+                _deviceId = new string(id);
+                CoTaskMemFree(id);
             }
             hr = device->Activate(__uuidof<IAudioClient>(), (uint)CLSCTX_ALL, null, (void**)&client);
             if (hr.FAILED)
@@ -198,6 +212,7 @@ internal sealed unsafe partial class AudioOutput : IDisposable
         finally
         {
             SampleRate = 0;
+            _deviceId = null;
             if (mix != null)
             {
                 CoTaskMemFree(mix);

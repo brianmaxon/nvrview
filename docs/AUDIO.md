@@ -201,6 +201,101 @@ which already comes after the 1.5 s tail, and while talk-back runs, a visitor
 caption that closely matches what we said or typed is dropped. This is a text
 filter for the captions only; the audio itself is unchanged.
 
+## Echo cancellation
+
+While the user talks back, the camera's audio may be playing through the
+computer's speakers, and the microphone hears it. Sent back, the visitor
+hears themselves a second or more later; captioned, the visitor's words show
+up again as the user's. Both apps use the operating system's voice
+processing (acoustic echo cancellation and noise suppression) on the
+microphone while Talk is on, so the user can talk while the visitor is heard
+(full duplex). This is app code (Apple and Windows APIs); the core is not
+involved, and the microphone's audio reaches the core already processed.
+
+**Rules (shared, `EchoCancellation` in NVRCore and NvrView.Tiles, same test
+vectors).** Echo cancellation counts as active only when the platform
+confirms all of it: the voice-processing stream was set up, the system
+reports its echo canceller present and on, and the canceller's reference is
+the output that plays the camera. Anything not confirmed (an older system
+that cannot report, a microphone without a canceller, a canceller turned
+off, a reference on another output device) is the fallback. Each outcome is
+logged once per run ("Talk-back microphone: echo cancellation on", or
+"... unavailable (why); captions of the microphone pause while the camera
+plays"), and the call's status says "Echo cancellation on" or "No echo
+cancellation" while the microphone is on.
+
+**The caption gate (`MicrophoneEchoGate`).** Talk-back itself is never
+gated: what the microphone hears always goes to the camera. Only the
+microphone's captions are:
+
+- Without echo cancellation (the fallback, and how both apps worked before):
+  the half-duplex gate. While the camera is audible and its level peaks over
+  0.03, and 0.4 s after, the microphone is not captioned. The visitor still
+  hears their own voice back from the computer's speakers, as before.
+- With echo cancellation: no half-duplex gate, only a short safety duck when
+  the camera is very loud (a peak over 0.5, and 0.15 s after). A canceller is
+  weakest exactly then (speakers distort, so the echo is no longer a linear
+  copy of the reference) and a residue would be captioned as the user's
+  words. Ordinary speech from the camera is captioned on both sides at once.
+
+**macOS.** Voice processing (`AVAudioInputNode.setVoiceProcessingEnabled`)
+must see what the speakers play, so the microphone runs on the same
+`AVAudioEngine` as playback: while Talk is on, playback moves to an engine
+with voice processing enabled on its input (which enables it on the output
+too) and the microphone is tapped there (`AudioPlayer.startVoiceProcessing`).
+Other apps' audio is ducked as little as the system allows
+(`voiceProcessingOtherAudioDuckingConfiguration`, minimum level, no advanced
+ducking); automatic gain control is left on. Measured on one Mac (macOS 26;
+`VoiceProcessingTapTests`, opt-in with `NVRVIEW_AUDIO_DEVICE_TESTS=1`):
+
+- Enabling voice processing takes about 1 s and pauses the engine that is
+  playing for 0.3 to 0.5 s. An engine that had it cannot turn it off again
+  (its output then reports 0 channels and does not start), so each mode is
+  an engine of its own, and the main mixer must exist before voice
+  processing is enabled (otherwise the output unit fails to initialize, error
+  -10875).
+- Switching from a prepared plain engine to a prepared voice-processing one
+  pauses playback for 0.07 to 0.11 s; switching back for 0.85 to 1 s.
+- A built engine that was not started does not run the input device (no
+  microphone in use).
+- The voice-processing input has 9 channels, all carrying the same
+  processed signal; the first is converted to 16 kHz.
+
+So the switches happen where they hurt least: the voice-processing engine is
+built (not started) when a call opens, if the microphone is already allowed;
+Talk only switches to it; after Talk it lingers for 2 minutes with nothing
+taken from the microphone (the system shows the microphone in use), so
+pressing Talk again is instant; playback goes back to a plain engine when
+the call ends or the linger runs out. The slow work runs on a queue of its
+own, never on the main thread, and never two render blocks on the core at
+once. A device change while voice processing runs rebuilds it (at most 5
+times in 30 s); when that fails the player goes back to plain playback, the
+microphone to an engine of its own, and the call to the fallback. If voice
+processing cannot start at all, the microphone runs on its own engine as
+before.
+
+**Windows** (11 22H2 and later; earlier versions capture as before and get
+the fallback). The WASAPI capture stream asks for the communications
+category (`IAudioClient2::SetClientProperties`,
+`AudioCategory_Communications`), which is what makes Windows apply voice
+processing (the microphone driver's, or the one Windows provides on recent
+versions). After `Initialize`,
+`IAcousticEchoCancellationControl::SetEchoCancellationRenderEndpoint` points
+the canceller at the endpoint the app plays the camera on (the `AudioOutput`
+device); a canceller without that control listens to the default
+communications output, which counts only if it is the same device.
+`IAudioEffectsManager::GetAudioEffects` says whether
+`AUDIO_EFFECT_TYPE_ACOUSTIC_ECHO_CANCELLATION` is there and on; where it
+cannot be asked, echo cancellation counts as unknown, so the fallback. The
+render stream is unchanged.
+
+**What is not verified by a test.** The self-tests (step
+`call-echo-cancellation`) check the configuration: what the microphone
+reported, what the call shows and logs, and which caption rule runs (on
+macOS also the captions themselves with a fake doorbell level). Whether the
+echo is actually removed needs a person, a doorbell, and speakers: real echo
+cannot be produced or judged in a self-test.
+
 ## Speech recognition (later)
 
 The core provides the tap; recognition runs outside it at first, in the app

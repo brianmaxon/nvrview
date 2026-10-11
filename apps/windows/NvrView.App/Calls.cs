@@ -36,11 +36,12 @@ internal sealed class TapRouter
     }
 }
 
-/// <summary>The echo gate of one call, used on the microphone's thread; whether the camera is audible is set from the UI thread.</summary>
+/// <summary>The echo gate of one call, used on the microphone's thread; whether the camera is audible, and whether the system cancels its echo, are set from the UI thread.</summary>
 internal sealed class EchoBox
 {
-    private readonly EchoGate _gate = new();
+    private readonly MicrophoneEchoGate _gate = new();
     private volatile bool _audible;
+    private volatile bool _cancelled;
 
     public bool CameraAudible
     {
@@ -48,12 +49,19 @@ internal sealed class EchoBox
         set => _audible = value;
     }
 
+    public bool EchoCancelled
+    {
+        get => _cancelled;
+        set => _cancelled = value;
+    }
+
     public bool Allows(double now, float peak)
     {
         bool audible = _audible;
+        bool cancelled = _cancelled;
         lock (_gate)
         {
-            return _gate.AllowsMicrophone(now, audible, peak);
+            return _gate.AllowsMicrophone(now, audible, peak, cancelled);
         }
     }
 }
@@ -75,6 +83,9 @@ internal sealed class CallSession(Call call)
     public uint PendingRate { get; set; }
 
     public EchoBox Echo { get; } = new();
+
+    /// <summary>Whether the system cancels the camera's echo while the microphone is on (null while it is off).</summary>
+    public EchoCancellation? EchoState { get; set; }
 
     public CameraTile? Tapped { get; set; }
 
@@ -116,7 +127,18 @@ internal sealed class ViewerCalls
     /// <summary>The call for a camera (any lens of its channel), if one is open.</summary>
     public Call? CallFor(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.Call;
 
-    public string? NoteFor(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.Note;
+    /// <summary>The call's status note: a problem (microphone refused, ...), else whether echo cancellation is on while the microphone is.</summary>
+    public string? NoteFor(CameraRef camera) =>
+        _sessions.GetValueOrDefault(camera.ChannelKey) is { } s ? s.Note ?? (s.MicTalk ? s.EchoState?.Note : null) : null;
+
+    /// <summary>Whether the system cancels the camera's echo in the microphone (null while the microphone is off).</summary>
+    public EchoCancellation? EchoFor(CameraRef camera) =>
+        _sessions.GetValueOrDefault(camera.ChannelKey) is { MicTalk: true } s ? s.EchoState : null;
+
+    /// <summary>Whether the caption gate runs in its echo-cancelled mode (self-test).</summary>
+    public bool? EchoGateCancelled(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.Echo.EchoCancelled;
+
+    private readonly EchoCancellationLog _echoLog = new();
 
     public bool IsTalkingWithMicrophone(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.MicTalk == true;
 
@@ -419,6 +441,7 @@ internal sealed class ViewerCalls
         }
         s.MicTalk = false;
         Services.Microphone.Stop();
+        s.EchoState = null;
         Retire(s.You);
         s.You = null;
         s.Call.Activity(Now);
@@ -482,8 +505,9 @@ internal sealed class ViewerCalls
         {
             try
             {
+                // Always sent (echo-cancelled when the system can).
                 core.TalkPush(tile.Id, samples, 16_000);
-                // Not while the camera plays through the speakers (echo).
+                // Captioned unless the camera's echo may be in it (MicrophoneEchoGate).
                 float peak = core.TileAudioLevel(tile.Id).Peak;
                 if (echo.Allows(Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency, peak))
                 {
@@ -499,6 +523,15 @@ internal sealed class ViewerCalls
         {
             s.Note = $"Talk-back: {problem}";
             StopTalking(s.Call.Camera);
+            return;
+        }
+        // Known once the microphone opened; it does not change while it runs.
+        EchoCancellation state = Services.Microphone.Echo ?? EchoCancellation.Gated("the microphone did not say");
+        s.EchoState = state;
+        echo.EchoCancelled = state.Active;
+        if (_echoLog.Line(state) is { } line)
+        {
+            AppLog.Info(line);
         }
     }
 
@@ -634,6 +667,7 @@ internal sealed class ViewerCalls
                 {
                     s.MicTalk = false;
                     Services.Microphone.Stop();
+                    s.EchoState = null;
                     Retire(s.You);
                     s.You = null;
                 }

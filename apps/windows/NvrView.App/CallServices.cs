@@ -2,7 +2,8 @@
 // self-test and tests can fake each of them:
 //
 // - the microphone: WASAPI shared-mode capture, 16 kHz mono float (the engine converts whatever
-//   the device's own format), on a thread of its own;
+//   the device's own format), on a thread of its own, in communications mode with the system's
+//   echo canceller where Windows confirms one;
 // - the system voice that renders a typed reply: Windows.Media.SpeechSynthesis into a WAV in
 //   memory (never played here; the camera's speaker plays it), read as mono float at the voice's
 //   own rate (the core resamples what talk-back sends);
@@ -14,6 +15,7 @@
 
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Speech.AudioFormat;
 using System.Speech.Recognition;
 using NvrView.Tiles;
@@ -30,6 +32,9 @@ internal interface IMicrophone
 {
     /// <summary>Starts capturing; <paramref name="onBlock"/> gets 16 kHz mono blocks on a capture thread. Null when started, else why not.</summary>
     string? Start(Action<float[]> onBlock);
+
+    /// <summary>Whether the system cancels the speakers' echo in what the last <see cref="Start"/> captures (null before one started).</summary>
+    EchoCancellation? Echo { get; }
 
     /// <summary>Stops capturing (nothing arrives after it returns).</summary>
     void Stop();
@@ -92,7 +97,8 @@ internal sealed class CallServices(IMicrophone microphone, ISpeechRenderer speec
     public ITranscriptionEngine MakeTranscriber() => transcriber();
 
     /// <summary>The real ones: WASAPI, the system voice, the desktop recognizer.</summary>
-    public static CallServices Real() => new(new WasapiMicrophone(), new WindowsSpeech(), () => new SapiTranscriber());
+    public static CallServices Real() =>
+        new(new WasapiMicrophone(() => App.Instance.Audio?.DeviceId), new WindowsSpeech(), () => new SapiTranscriber());
 }
 
 // ---- speech synthesis ----
@@ -133,11 +139,25 @@ internal sealed class WindowsSpeech : ISpeechRenderer
 
 // ---- microphone ----
 
-/// <summary>WASAPI shared-mode capture at 16 kHz mono float (see the file comment).</summary>
-internal sealed unsafe class WasapiMicrophone : IMicrophone
+/// <summary>
+/// WASAPI shared-mode capture at 16 kHz mono float (see the file comment), in communications mode
+/// with the system's echo canceller (docs/AUDIO.md "Echo cancellation"): the stream's category is
+/// <c>AudioCategory_Communications</c>, which asks Windows for its voice processing (echo
+/// cancellation and noise suppression, where the microphone's driver or Windows offers them); the
+/// canceller's reference is set to the device that plays the camera
+/// (<c>IAcousticEchoCancellationControl</c>), and the stream's effects list
+/// (<c>IAudioEffectsManager</c>) says whether the canceller is there and on. All of it needs
+/// Windows 11 22H2 or later; before that the capture is plain. Anything not
+/// confirmed counts as no echo cancellation (<see cref="EchoCancellation.Decide"/>), and the
+/// call falls back to the caption gate; capture itself goes on either way.
+/// </summary>
+internal sealed unsafe class WasapiMicrophone(Func<string?>? playbackDevice = null) : IMicrophone
 {
     // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT.
     private static readonly Guid IeeeFloat = new("00000003-0000-0010-8000-00aa00389b71");
+
+    // AUDIO_EFFECT_TYPE_ACOUSTIC_ECHO_CANCELLATION (ksmedia.h).
+    private static readonly Guid AecEffect = new("6f64adbe-8211-11e2-8c70-2c27d7f001fa");
 
     // AUDCLNT_BUFFERFLAGS_SILENT.
     private const uint SilentFlag = 0x2;
@@ -145,8 +165,11 @@ internal sealed unsafe class WasapiMicrophone : IMicrophone
     private Thread? _thread;
     private volatile bool _stop;
     private string? _problem;
+    private string? _render;
     private Action<float[]>? _sink;
     private readonly ManualResetEventSlim _opened = new();
+
+    public EchoCancellation? Echo { get; private set; }
 
     public string? Start(Action<float[]> onBlock)
     {
@@ -154,6 +177,8 @@ internal sealed unsafe class WasapiMicrophone : IMicrophone
         _sink = onBlock;
         _problem = null;
         _stop = false;
+        Echo = null;
+        _render = playbackDevice?.Invoke();
         _opened.Reset();
         _thread = new Thread(Run) { Name = "microphone", IsBackground = true };
         _thread.Start();
@@ -206,6 +231,11 @@ internal sealed unsafe class WasapiMicrophone : IMicrophone
                     : $"the microphone refused (0x{hr.Value:X8})");
                 return;
             }
+            // Communications mode, before Initialize; without it the capture is plain (and gated).
+            // The calls that set it up and confirm the canceller are Windows 11 22H2's.
+            string? communications = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621)
+                ? Communications(client)
+                : "echo cancellation needs Windows 11 22H2 or later";
             WAVEFORMATEXTENSIBLE format = default;
             format.Format.wFormatTag = 0xFFFE; // WAVE_FORMAT_EXTENSIBLE
             format.Format.nChannels = 1;
@@ -225,6 +255,14 @@ internal sealed unsafe class WasapiMicrophone : IMicrophone
             {
                 Opened($"mono 16 kHz capture refused (0x{hr.Value:X8})");
                 return;
+            }
+            if (communications is not null)
+            {
+                Echo = EchoCancellation.Decide(EchoProbe.Failed(communications));
+            }
+            else if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22621))
+            {
+                Echo = EchoCancellation.Decide(Probe(enumerator, client));
             }
             _ = client->SetEventHandle(ready);
             hr = client->GetService(__uuidof<IAudioCaptureClient>(), (void**)&capture);
@@ -278,6 +316,96 @@ internal sealed unsafe class WasapiMicrophone : IMicrophone
             // A failure before Opened (an exception) must not leave Start waiting.
             _opened.Set();
         }
+    }
+
+    // Asks for the communications category. Null when set, else why not.
+    [SupportedOSPlatform("windows10.0.22621.0")]
+    private static string? Communications(IAudioClient* client)
+    {
+        IAudioClient2* client2 = null;
+        HRESULT hr = client->QueryInterface(__uuidof<IAudioClient2>(), (void**)&client2);
+        if (hr.FAILED)
+        {
+            return $"no communications mode on this system (0x{hr.Value:X8})";
+        }
+        AudioClientProperties properties = default;
+        properties.cbSize = (uint)sizeof(AudioClientProperties);
+        properties.bIsOffload = BOOL.FALSE;
+        properties.eCategory = AUDIO_STREAM_CATEGORY.AudioCategory_Communications;
+        properties.Options = AUDCLNT_STREAMOPTIONS.AUDCLNT_STREAMOPTIONS_NONE;
+        hr = client2->SetClientProperties(&properties);
+        client2->Release();
+        return hr.SUCCEEDED ? null : $"the microphone refused communications mode (0x{hr.Value:X8})";
+    }
+
+    // After Initialize in communications mode: the canceller's reference and whether it is on.
+    [SupportedOSPlatform("windows10.0.22621.0")]
+    private EchoProbe Probe(IMMDeviceEnumerator* enumerator, IAudioClient* client)
+    {
+        string? render = _render ?? DefaultRender(enumerator, ERole.eConsole);
+        bool reference = false;
+        IAcousticEchoCancellationControl* aec = null;
+        if (render is not null && client->GetService(__uuidof<IAcousticEchoCancellationControl>(), (void**)&aec).SUCCEEDED)
+        {
+            fixed (char* id = render)
+            {
+                reference = aec->SetEchoCancellationRenderEndpoint(id).SUCCEEDED;
+            }
+            aec->Release();
+        }
+        else if (render is not null)
+        {
+            // No control (a canceller that does not take one): it listens to the default
+            // communications device, which may be another one.
+            reference = DefaultRender(enumerator, ERole.eCommunications) == render;
+        }
+        return new EchoProbe(true, Effect: Effect(client), ReferenceIsPlayback: reference);
+    }
+
+    // The stream's echo canceller as the system lists it, else unknown.
+    [SupportedOSPlatform("windows10.0.22621.0")]
+    private static EchoEffect Effect(IAudioClient* client)
+    {
+        IAudioEffectsManager* manager = null;
+        if (client->GetService(__uuidof<IAudioEffectsManager>(), (void**)&manager).FAILED)
+        {
+            return EchoEffect.Unknown;
+        }
+        AUDIO_EFFECT* effects = null;
+        uint count = 0;
+        EchoEffect found = EchoEffect.Unknown;
+        if (manager->GetAudioEffects(&effects, &count).SUCCEEDED)
+        {
+            found = EchoEffect.Absent;
+            for (uint i = 0; i < count; i++)
+            {
+                if (effects[i].id == AecEffect)
+                {
+                    found = effects[i].state == AUDIO_EFFECT_STATE.AUDIO_EFFECT_STATE_ON ? EchoEffect.On : EchoEffect.Off;
+                }
+            }
+            CoTaskMemFree(effects);
+        }
+        manager->Release();
+        return found;
+    }
+
+    private static string? DefaultRender(IMMDeviceEnumerator* enumerator, ERole role)
+    {
+        IMMDevice* device = null;
+        if (enumerator->GetDefaultAudioEndpoint(EDataFlow.eRender, role, &device).FAILED)
+        {
+            return null;
+        }
+        string? result = null;
+        char* id;
+        if (device->GetId(&id).SUCCEEDED)
+        {
+            result = new string(id);
+            CoTaskMemFree(id);
+        }
+        device->Release();
+        return result;
     }
 
     private void Opened(string? problem)
@@ -557,6 +685,9 @@ internal sealed class FakeMicrophone : IMicrophone
     public int Starts { get; private set; }
 
     public bool Running => _sink is not null;
+
+    /// <summary>What every start reports (the self-test sets the fallback too).</summary>
+    public EchoCancellation? Echo { get; set; } = EchoCancellation.System;
 
     public string? Start(Action<float[]> onBlock)
     {

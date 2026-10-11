@@ -28,6 +28,9 @@ final class DoorbellCalls {
         /// The echo gate, run on the microphone's thread with the doorbell's
         /// level for each block (the level is lock-free to read).
         let echo = EchoBox()
+        /// Whether the system cancels the doorbell's echo while the
+        /// microphone is on (nil while it is off).
+        var echoCancellation: EchoCancellation?
         var tapped: CoreTile?
         /// A status note for the call (microphone refused, ...).
         var note: String?
@@ -48,6 +51,7 @@ final class DoorbellCalls {
     private let services: CallServices
     private var sessions: [CameraRef: Session] = [:]
     private let taps: TapRouter
+    private var echoLog = EchoCancellationLog()
 
     init(model: AppModel, services: CallServices, taps: TapRouter) {
         self.model = model
@@ -59,7 +63,26 @@ final class DoorbellCalls {
     func call(for camera: CameraRef) -> DoorbellCall? { sessions[camera.firstLens]?.call }
     var cameras: [CameraRef] { Array(sessions.keys) }
     var isEmpty: Bool { sessions.isEmpty }
-    func note(for camera: CameraRef) -> String? { sessions[camera.firstLens]?.note }
+    /// The call's status note: a problem (microphone refused, ...), else
+    /// whether echo cancellation is on while the microphone is. The Mac's
+    /// call views show the note instead of the talk state, so it is joined
+    /// to it here.
+    func note(for camera: CameraRef) -> String? {
+        guard let s = sessions[camera.firstLens] else { return nil }
+        if let note = s.note { return note }
+        guard s.micTalk, let echo = s.echoCancellation else { return nil }
+        return s.call.talk.text + " · " + echo.note
+    }
+
+    /// Whether the system cancels the doorbell's echo in the microphone
+    /// (nil while the microphone is off).
+    func echoCancellation(for camera: CameraRef) -> EchoCancellation? {
+        guard let s = sessions[camera.firstLens], s.micTalk else { return nil }
+        return s.echoCancellation
+    }
+
+    /// Whether the caption gate runs in its echo-cancelled mode (self-test).
+    func echoGateCancelled(_ camera: CameraRef) -> Bool? { sessions[camera.firstLens]?.echo.echoCancelled }
 
     /// The fake microphone, when the services are fakes (self-test).
     var fakeMicrophone: FakeMicrophone? { services.microphone as? FakeMicrophone }
@@ -153,6 +176,8 @@ final class DoorbellCalls {
                 camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin,
                 presentation: model.callPresentation(for: camera)))
         sessions[camera] = s
+        // Echo cancellation's slow setup, ahead of Talk (no microphone yet).
+        services.microphone.prepare(true)
         model.leases.acquire(camera)
         if case .audible = audio {
             // Audible at once: the cameras that were playing are muted for the call.
@@ -332,6 +357,7 @@ final class DoorbellCalls {
         guard s.micTalk else { return }
         s.micTalk = false
         services.microphone.stop()
+        s.echoCancellation = nil
         s.you?.finish()
         s.you = nil
         s.call.activity(now: model.clock.now)
@@ -381,17 +407,36 @@ final class DoorbellCalls {
         let bridge = model.bridge
         let echo = s.echo
         echo.doorbellAudible = model.audible.contains(s.call.camera)
+        let camera = s.call.camera
         do {
-            try services.microphone.start { samples in
-                try? bridge.pushTalk(tile, samples: samples, sampleRate: 16_000)
-                // Not while the doorbell plays through the speakers (echo).
-                let peak = bridge.audioLevel(tile)?.peak ?? 0
-                if echo.allows(now: ProcessInfo.processInfo.systemUptime, peak: peak) { you.feed(pcm16k: samples) }
-            }
+            try services.microphone.start(
+                { samples in
+                    // Always sent (echo-cancelled when the system can).
+                    try? bridge.pushTalk(tile, samples: samples, sampleRate: 16_000)
+                    // Captioned unless the doorbell's echo may be in it
+                    // (MicrophoneEchoGate).
+                    let peak = bridge.audioLevel(tile)?.peak ?? 0
+                    if echo.allows(now: ProcessInfo.processInfo.systemUptime, peak: peak) { you.feed(pcm16k: samples) }
+                },
+                onEcho: { [weak self] state in
+                    echo.echoCancelled = state.isActive
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated { self?.echoChanged(camera, state) }
+                    }
+                })
         } catch {
             s.note = "Talk-back: the microphone could not start"
             stopTalking(s.call.camera)
         }
+    }
+
+    /// The microphone said whether the system cancels the doorbell's echo:
+    /// shown in the call, and logged once per outcome.
+    private func echoChanged(_ camera: CameraRef, _ state: EchoCancellation) {
+        guard let s = sessions[camera.firstLens], s.micTalk else { return }
+        s.echoCancellation = state
+        if let line = echoLog.line(for: state) { model.logEvent(line) }
+        model.changed()
     }
 
     /// Send: speaks `text` (what the user typed in the call, nothing else)
@@ -468,6 +513,7 @@ final class DoorbellCalls {
             if s.micTalk {
                 s.micTalk = false
                 services.microphone.stop()
+                s.echoCancellation = nil
                 s.you?.finish()
                 s.you = nil
             }
@@ -535,6 +581,7 @@ final class DoorbellCalls {
             model.setAudible(s.call.mutedForCall)
         }
         model.leases.release(s.call.camera)
+        if sessions.isEmpty { services.microphone.prepare(false) }
         let endedAt = Date()
         let text = s.call.logText(endedAt: endedAt, saveTranscript: model.saveCallTranscripts)
         model.logEvent(text + " (\(reason))", transcriptFollows: model.saveCallTranscripts && !s.call.transcript.finals.isEmpty)
@@ -573,18 +620,28 @@ final class TapRouter: Sendable {
 }
 
 /// The echo gate for one call, used on the microphone's thread; whether the
-/// doorbell is audible is set from the main thread.
+/// doorbell is audible is set from the main thread, whether the system
+/// cancels its echo from the microphone's.
 final class EchoBox: Sendable {
-    private let gate = Mutex(EchoGate())
+    private let gate = Mutex(MicrophoneEchoGate())
     private let audible = Atomic<Bool>(false)
+    private let cancelled = Atomic<Bool>(false)
 
     var doorbellAudible: Bool {
         get { audible.load(ordering: .relaxed) }
         set { audible.store(newValue, ordering: .relaxed) }
     }
 
+    var echoCancelled: Bool {
+        get { cancelled.load(ordering: .relaxed) }
+        set { cancelled.store(newValue, ordering: .relaxed) }
+    }
+
     func allows(now: Double, peak: Float) -> Bool {
         let playing = doorbellAudible
-        return gate.withLock { $0.allowsMicrophone(now: now, doorbellAudible: playing, doorbellPeak: peak) }
+        let cancelled = echoCancelled
+        return gate.withLock {
+            $0.allowsMicrophone(now: now, doorbellAudible: playing, doorbellPeak: peak, echoCancelled: cancelled)
+        }
     }
 }

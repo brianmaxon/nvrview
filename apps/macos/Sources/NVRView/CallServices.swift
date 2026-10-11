@@ -18,9 +18,18 @@ protocol MicrophoneInput: AnyObject {
     /// refused or unavailable, with a reason for the call's status line.
     func requestAccess(_ done: @escaping @MainActor (_ granted: Bool, _ reason: String?) -> Void)
     /// Starts capturing; `onSamples` runs on an audio thread (not the
-    /// real-time one) with 16 kHz mono samples.
-    func start(_ onSamples: @escaping @Sendable ([Float]) -> Void) throws
+    /// real-time one) with 16 kHz mono samples. `onEcho` (any thread) says
+    /// whether the system cancels the speakers' echo: once it is known
+    /// (possibly before this returns), and again if that changes while
+    /// capturing. Throws when no microphone could start at once.
+    func start(
+        _ onSamples: @escaping @Sendable ([Float]) -> Void, onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) throws
     func stop()
+    /// A call opened (`true`) or the last one ended (`false`): the slow part
+    /// of echo cancellation is prepared ahead of Talk, without opening the
+    /// microphone, and only when its use is already allowed.
+    func prepare(_ calls: Bool)
 }
 
 /// Text-to-speech for a typed reply, as 16 kHz mono float samples.
@@ -44,10 +53,12 @@ struct CallServices {
     var speech: any SpeechRenderer
     var prompter: any TalkPrompter = AlertTalkPrompter()
 
-    /// The real ones.
-    static func system() -> CallServices {
+    /// The real ones. `player` is the app's audio output, whose engine the
+    /// microphone joins for echo cancellation.
+    static func system(player: @escaping @MainActor () -> AudioPlayer?) -> CallServices {
         CallServices(
-            makeTranscriber: { _ in AppleTranscriber() }, microphone: AppleMicrophone(), speech: AppleSpeechRenderer())
+            makeTranscriber: { _ in AppleTranscriber() }, microphone: AppleMicrophone(player: player),
+            speech: AppleSpeechRenderer())
     }
 
     /// Fakes for the self-test and development: no permission prompt, no
@@ -68,9 +79,23 @@ func hasUsageString(_ key: String) -> Bool {
 // MARK: Microphone
 
 /// The input device through `AVAudioEngine`, converted to 16 kHz mono.
+///
+/// With echo cancellation (docs/AUDIO.md "Echo cancellation"): the
+/// microphone runs on the app's audio output engine with the system's voice
+/// processing (`AudioPlayer.startVoiceProcessing`), so the doorbell playing
+/// through the speakers is removed from what is sent back. When that cannot
+/// start, or stops working during the call, the microphone runs on an
+/// engine of its own as before, and the call falls back to the caption gate.
 @MainActor
 final class AppleMicrophone: MicrophoneInput {
+    private let player: @MainActor () -> AudioPlayer?
     private var engine: AVAudioEngine?
+    private var voice: AudioPlayer?
+    /// Bumped by every start and stop, so a late "voice processing lost"
+    /// from an earlier capture changes nothing.
+    private var generation = 0
+
+    init(player: @escaping @MainActor () -> AudioPlayer?) { self.player = player }
 
     func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) {
         guard hasUsageString("NSMicrophoneUsageDescription") else {
@@ -92,8 +117,90 @@ final class AppleMicrophone: MicrophoneInput {
         }
     }
 
-    func start(_ onSamples: @escaping @Sendable ([Float]) -> Void) throws {
+    func start(
+        _ onSamples: @escaping @Sendable ([Float]) -> Void, onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) throws {
         stop()
+        generation += 1
+        guard let player = player() else {
+            try startOwnEngine(onSamples)
+            onEcho(.decide(.failed("no audio output")))
+            return
+        }
+        voice = player
+        player.startVoiceProcessing(
+            onSamples: onSamples, onLost: Self.lostHandler(self, generation: generation, onSamples, onEcho),
+            done: Self.startedHandler(self, generation: generation, onSamples, onEcho))
+    }
+
+    func prepare(_ calls: Bool) {
+        guard let player = player() else { return }
+        // Building the engine for voice processing reads the input device's
+        // format; not before the user allowed the microphone (no prompt).
+        if calls, hasUsageString("NSMicrophoneUsageDescription"),
+            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        {
+            player.prepareVoiceProcessing()
+        } else if !calls {
+            player.discardVoiceProcessing()
+        }
+    }
+
+    /// Voice processing started or not (built outside main-actor code: the
+    /// player calls it on its own queue).
+    private nonisolated static func startedHandler(
+        _ mic: AppleMicrophone, generation: Int, _ onSamples: @escaping @Sendable ([Float]) -> Void,
+        _ onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) -> @Sendable (VoiceProcessingError?) -> Void {
+        { [weak mic] error in
+            guard let error else {
+                // Voice processing is echo cancellation by definition, with
+                // the doorbell's output as its reference (the same engine).
+                onEcho(.decide(EchoProbe(processing: true, effect: .on, referenceIsPlayback: true)))
+                return
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let mic, mic.generation == generation else { return }
+                    mic.fallBack(error.description, onSamples, onEcho)
+                }
+            }
+        }
+    }
+
+    /// Voice processing stopped during the capture (built outside main-actor
+    /// code: it is called on whatever thread saw the device change).
+    private nonisolated static func lostHandler(
+        _ mic: AppleMicrophone, generation: Int, _ onSamples: @escaping @Sendable ([Float]) -> Void,
+        _ onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) -> @Sendable (String) -> Void {
+        { [weak mic] why in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let mic, mic.generation == generation else { return }
+                    mic.fallBack(why, onSamples, onEcho)
+                }
+            }
+        }
+    }
+
+    /// Without voice processing: the microphone on an engine of its own, and
+    /// the caption gate (logged by the call).
+    private func fallBack(
+        _ why: String, _ onSamples: @escaping @Sendable ([Float]) -> Void,
+        _ onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) {
+        voice = nil
+        do {
+            try startOwnEngine(onSamples)
+            onEcho(.decide(.failed(why)))
+        } catch {
+            onEcho(.decide(.failed(why + "; the microphone could not start either")))
+        }
+    }
+
+    /// The microphone on an engine of its own (no echo cancellation).
+    private func startOwnEngine(_ onSamples: @escaping @Sendable ([Float]) -> Void) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -110,6 +217,9 @@ final class AppleMicrophone: MicrophoneInput {
     }
 
     func stop() {
+        generation += 1
+        voice?.stopVoiceProcessing()
+        voice = nil
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
@@ -337,10 +447,20 @@ final class FakeMicrophone: MicrophoneInput {
 
     func requestAccess(_ done: @escaping @MainActor (Bool, String?) -> Void) { done(true, nil) }
 
-    func start(_ onSamples: @escaping @Sendable ([Float]) -> Void) throws {
+    /// What the next start reports (the self-test sets the fallback too).
+    var echo = EchoCancellation.system
+
+    func start(
+        _ onSamples: @escaping @Sendable ([Float]) -> Void, onEcho: @escaping @Sendable (EchoCancellation) -> Void
+    ) throws {
         running = true
         self.onSamples = onSamples
+        onEcho(echo)
     }
+
+    /// Whether a call asked for echo cancellation to be prepared.
+    private(set) var prepared = false
+    func prepare(_ calls: Bool) { prepared = calls }
 
     func stop() {
         running = false

@@ -130,14 +130,33 @@ extension TalkAudioConverter {
     /// an audio thread, so the block is built here, outside any actor: a
     /// block made inside main-actor code would be main-actor isolated, and
     /// Swift 6 stops the app when it runs on another thread.
+    ///
+    /// `firstChannelOnly`: only the first channel is converted (the input
+    /// of voice processing reports several; see `AudioPlayer`).
     public nonisolated static func tapBlock(
-        _ onSamples: @escaping @Sendable ([Float]) -> Void
+        _ onSamples: @escaping @Sendable ([Float]) -> Void, firstChannelOnly: Bool = false
     ) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
         let converter = LockedTalkConverter()
         return { buffer, _ in
-            let samples = converter.convert(buffer)
+            let input = firstChannelOnly ? (firstChannel(of: buffer) ?? buffer) : buffer
+            let samples = converter.convert(input)
             if !samples.isEmpty { onSamples(samples) }
         }
+    }
+
+    /// The first channel of a deinterleaved float buffer with several, as a
+    /// mono buffer; nil for any other buffer (used as it is).
+    public nonisolated static func firstChannel(of buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        let f = buffer.format
+        guard f.channelCount > 1, f.commonFormat == .pcmFormatFloat32, !f.isInterleaved,
+            let data = buffer.floatChannelData,
+            let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: f.sampleRate, channels: 1, interleaved: false),
+            let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: max(buffer.frameLength, 1)),
+            let dest = out.floatChannelData
+        else { return nil }
+        out.frameLength = buffer.frameLength
+        dest[0].update(from: data[0], count: Int(buffer.frameLength))
+        return out
     }
 }
 
