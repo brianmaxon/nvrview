@@ -49,6 +49,7 @@ fn start(ch: u8, at: DateTime) -> PlayStart {
             stream: StreamTier::Sub,
             file_id: format!("mock-file-{ch}-{}", hour.to_naive_secs()),
             file_name: format!("file-{ch}"),
+            speed: 1,
         },
         at,
     }
@@ -95,7 +96,10 @@ async fn a_play_seeks_bursts_paces_and_crosses_files() {
     // the keyframe at or before the seek.
     let at = d(8, 7, 41, 41);
     let t0 = Instant::now();
-    let mut p = s.play(&start(1, at)).await.unwrap();
+    let mut q = start(1, at);
+    // One-minute files: name the one that holds the seek.
+    q.request.file_id = format!("mock-file-1-{}", d(8, 7, 41, 0).to_naive_secs());
+    let mut p = s.play(&q).await.unwrap();
     let (wall, first, _) = read_video(&mut p, 3).await;
     assert_eq!(wall, Some(at.to_naive_secs() as u32 - 1));
     // The burst (3 s in the mock) arrives at once...
@@ -307,5 +311,90 @@ async fn a_group_without_a_shared_time_sends_each_starts_own_seek() {
     assert_eq!((log[0].at, log[1].at), (b, b));
     assert_eq!(plays[1].seq(), plays[0].seq() + 1);
     drop(plays);
+    s.close().await;
+}
+
+/// Reads a play for `secs` of wall time: (video frames, keyframes, audio
+/// records, media seconds from the first to the last picture).
+async fn tally(p: &mut Play, secs: u64) -> (usize, usize, usize, f64) {
+    let (mut video, mut keys, mut audio, mut first, mut last) = (0, 0, 0, None, 0);
+    let until = Instant::now() + Duration::from_secs(secs);
+    while let Ok(r) = tokio::time::timeout_at(until, p.next()).await {
+        match r.unwrap() {
+            Some(Record::Video {
+                pts_us, keyframe, ..
+            }) => {
+                video += 1;
+                keys += usize::from(keyframe);
+                first.get_or_insert(pts_us);
+                last = pts_us;
+            }
+            Some(Record::Audio { .. }) => audio += 1,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    let media = (last - first.unwrap_or(last)) as f64 / 1e6;
+    (video, keys, audio, media)
+}
+
+#[tokio::test(start_paused = true)]
+async fn play_speed_is_sent_and_main_streams_thin_to_keyframes() {
+    let aac =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/aac-tone.aac");
+    let aac = std::sync::Arc::new(mock_nvr::audio::AudioFixture::load(&aac).unwrap());
+    let nvr = spawn_mock(|a| {
+        a.play_burst_secs = 0;
+        a.audio = Some(aac);
+    });
+    let s = session(&nvr, |_| {});
+    let at = d(8, 7, 10, 0);
+    // A main-stream play at 4x: keyframes only, no audio, the media clock
+    // at 4 s a second (the mock models the observed main-stream play).
+    let mut q = start(1, at);
+    q.request.stream = StreamTier::Main;
+    q.request.speed = 4;
+    let mut p = s.play(&q).await.unwrap();
+    let (video, keys, audio, media) = tally(&mut p, 10).await;
+    assert_eq!(video, keys, "keyframes only");
+    assert_eq!(audio, 0);
+    assert!((34.0..=42.0).contains(&media), "{media}");
+    drop(p);
+    // A sub-stream play at 4x keeps every frame and its audio.
+    let mut q = start(2, at);
+    q.request.speed = 4;
+    let mut p = s.play(&q).await.unwrap();
+    let (video, keys, audio, media) = tally(&mut p, 5).await;
+    assert!(video > keys * 10, "{video} {keys}");
+    assert!(audio > 0);
+    assert!((16.0..=22.0).contains(&media), "{media}");
+    drop(p);
+    // At 16x a main stream keeps every fourth keyframe: 8 s apart with the
+    // mock's 2 s GOP, so about 16 media seconds a second.
+    let mut q = start(0, at);
+    q.request.stream = StreamTier::Main;
+    q.request.speed = 16;
+    let mut p = s.play(&q).await.unwrap();
+    let (video, keys, _, media) = tally(&mut p, 4).await;
+    assert_eq!(video, keys);
+    assert!((56.0..=72.0).contains(&media), "{media}");
+    assert!(video <= 10, "{video}");
+    drop(p);
+    let speeds: Vec<Option<u32>> = nvr.play_log().iter().map(|l| l.speed).collect();
+    assert_eq!(speeds, vec![Some(4), Some(4), Some(16)]);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_play_whose_file_does_not_hold_the_seek_gets_nothing() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |c| c.play_stall_timeout = Duration::from_secs(2));
+    // The 10:00 file named, the seek at 09:30: as observed, no media.
+    let mut q = start(1, d(8, 10, 0, 5));
+    q.at = d(8, 9, 30, 0);
+    let mut p = s.play(&q).await.unwrap();
+    assert!(p.next().await.is_err());
+    assert!(!nvr.play_log()[0].served);
+    drop(p);
     s.close().await;
 }

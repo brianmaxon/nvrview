@@ -3,11 +3,11 @@
 //! recording file, its media routed by message ID; a stop (7) on every exit
 //! path.
 //!
-//! Only normal speed is played: the `playSpeed` values of other rates were
-//! seen only encrypted (docs/MILESTONE-P.md, B1). A play continues across
-//! recording files by itself (observed); how it ends at the end of the
-//! last file is not known (B6): a message with an empty body is taken as
-//! the end.
+//! The rate is the request's `playSpeed` (1, 2, 4, 8, or 16, as observed).
+//! A play continues across recording files by itself (observed); the device
+//! was never seen ending a play (docs/protocol.md, "Rates, keyframes, and
+//! how a play ends"), so a message with an empty body is taken as the end
+//! only in case one comes; callers end plays themselves.
 //!
 //! The device sends a burst (a few MB) and then roughly real time; the
 //! session never waits for a consumer, so a play's unread data is bounded
@@ -142,7 +142,7 @@ impl fmt::Debug for Play {
 }
 
 /// A boxed future, for a list of requests to drive together.
-type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Drives the futures together and returns their outputs in order. Each
 /// round polls them in order, so requests that are ready to go out leave
@@ -170,7 +170,7 @@ async fn join_in_order<T>(mut futs: Vec<Boxed<'_, T>>) -> Vec<T> {
 }
 
 impl DeviceSession {
-    /// Starts a play: seeks (123), then plays (5) at normal speed. Refused
+    /// Starts a play: seeks (123), then plays (5) at the request's speed. Refused
     /// at once with [`QueryError::Busy`] when
     /// [`crate::SessionConfig::max_plays`] plays already run; the seek's
     /// refusal is [`SearchError::Refused`].
