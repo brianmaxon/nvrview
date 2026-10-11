@@ -22,7 +22,7 @@ use crate::header::Class;
 use crate::stream::StreamTier;
 use crate::talk::{self, TalkConfig};
 use crate::xml::{self, PreviewPolicy, XmlError};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 /// Commands this crate can send (plus 145, which devices push). Anything
@@ -339,6 +339,10 @@ struct Transfer {
     seq: Option<u32>,
 }
 
+/// How many recent seek `seq` numbers a session remembers for routing play
+/// media.
+const SEEK_MEMORY: usize = 32;
+
 /// One session with one device.
 pub struct Session {
     user: String,
@@ -349,6 +353,10 @@ pub struct Session {
     next_id: u32,
     previews: HashMap<u32, Preview>,
     transfers: HashMap<u32, Transfer>,
+    /// The `seq` of the latest seeks (at most [`SEEK_MEMORY`]): a device
+    /// was observed to tag a running play's media with the `seq` of a later
+    /// seek (protocol.md, "Live view and plays on one session").
+    seeks: VecDeque<u32>,
     /// Channels the caller enabled motion-tier commands for.
     motion: HashSet<u8>,
     /// Channels with a talk opened (201 sent) and not yet closed.
@@ -385,6 +393,7 @@ impl Session {
             next_id: 1,
             previews: HashMap::new(),
             transfers: HashMap::new(),
+            seeks: VecDeque::new(),
             motion: HashSet::new(),
             talks: HashSet::new(),
         }
@@ -723,6 +732,10 @@ impl Session {
         let id = self.alloc_id()?;
         let body = archive::replay_seek_body(seq, at);
         let bytes = self.send(Command::ReplaySeek, id, &[], body.as_bytes())?;
+        if self.seeks.len() == SEEK_MEMORY {
+            self.seeks.pop_front();
+        }
+        self.seeks.push_back(seq);
         Ok((id, bytes))
     }
 
@@ -1015,10 +1028,13 @@ impl Session {
         }
     }
 
-    /// A message of a play (5). Media headers carry the play's `seq` where
-    /// other messages have a status and class (protocol.md, "Replay media
-    /// headers"), so a message is media when its `seq` matches; the first
-    /// reply (status 200, a stream-info record) is media too.
+    /// A message of a play (5). Media headers carry a `seq` where other
+    /// messages have a status and class (protocol.md, "Replay media
+    /// headers"). The device tags a running play's media with the `seq` of
+    /// the latest seek on the session, not always the play's own, so a
+    /// message on the play's ID is media when its `seq` is the play's or
+    /// that of any recent seek; the first reply (status 200, a stream-info
+    /// record) is media too.
     ///
     /// How a device ends a play, or refuses one, has not been observed
     /// (docs/MILESTONE-P.md, B6). Here: an empty body ends the play (status
@@ -1032,7 +1048,9 @@ impl Session {
                 message_id: h.message_id,
             });
         };
-        let media_header = t.seq.is_some() && h.replay_seq == t.seq;
+        let media_header = t.seq.is_some()
+            && h.replay_seq
+                .is_some_and(|s| Some(s) == t.seq || self.seeks.contains(&s));
         let foreign = (!media_header).then(|| ForeignEnd {
             bytes_16_19: h.replay_seq.unwrap_or(u32::from(h.status)),
             expected_seq: t.seq,
@@ -1911,6 +1929,16 @@ mod tests {
             Event::TransferEnd { foreign: Some(f), .. }
                 if f.bytes_16_19 == seq + 9 && f.expected_seq == Some(seq + 3)
         ));
+        // Media tagged with a later seek's seq stays this play's media: a
+        // device was seen tagging a running play with the latest seek's seq.
+        let (pid, _) = s.start_play(&q, seq + 4).unwrap();
+        let (_, _) = s.replay_seek(seq + 5, t(7, 50, 0)).unwrap();
+        let retagged = crate::framer::encode_replay_media(pid, seq + 5, &e, &video).unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&retagged)).unwrap(),
+            Event::Media { message_id, .. } if message_id == pid
+        ));
+        s.stop_play(pid, &q).unwrap();
         let (pid, _) = s.start_play(&q, seq + 2).unwrap();
         let stop = decode_one(&s.stop_play(pid, &q).unwrap());
         assert_eq!(stop.header.command, 7);
