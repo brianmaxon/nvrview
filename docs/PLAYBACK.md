@@ -3,7 +3,8 @@
 Milestone P: finding recorded events and getting them off the NVR, done the
 way people actually use recordings. Protocol facts are in
 [protocol.md](protocol.md) ("Recordings: search and download", "Playback",
-"Cover images"); this is the design.
+"Cover images"); this is the design. The work breakdown (slices, order,
+what is blocked on a capture) is [MILESTONE-P.md](MILESTONE-P.md).
 
 ## What goes wrong today (official desktop app)
 
