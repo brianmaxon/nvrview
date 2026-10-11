@@ -26,6 +26,8 @@
 //! - [`naming`]: the output folder and file names and `incident.json`.
 //! - [`edl`]: edit decision lists (follow cut, 2-up, 4-up): pure planners
 //!   over an incident and its finished files.
+//! - [`export`]: export planners (trim, range download, stills, and the
+//!   destination and share-safe rules they share).
 //! - [`sync_samples`]: the keyframe times of a finished MP4, for the planners.
 //! - [`recorded_time`]: when a recorded picture was taken, from the
 //!   wall-clock seconds keyframes carry.
@@ -40,6 +42,7 @@
 pub mod chunk;
 pub mod edits;
 pub mod edl;
+pub mod export;
 pub mod finalize;
 pub mod groups;
 pub mod incident;

@@ -62,7 +62,7 @@ pub fn sanitize(name: &str) -> String {
     if out.is_empty() { "_".into() } else { out }
 }
 
-fn minute_stamp(t: Secs) -> String {
+pub(crate) fn minute_stamp(t: Secs) -> String {
     let d = date_time(t);
     format!(
         "{:04}-{:02}-{:02} {:02}.{:02}",
@@ -70,7 +70,7 @@ fn minute_stamp(t: Secs) -> String {
     )
 }
 
-fn second_stamp(t: Secs) -> String {
+pub(crate) fn second_stamp(t: Secs) -> String {
     let d = date_time(t);
     format!(
         "{:04}-{:02}-{:02} {:02}.{:02}.{:02}",
@@ -101,6 +101,70 @@ pub fn folder_name(inc: &Incident, camera_names: &[String], pattern: &NamePatter
 pub fn camera_file_name(start: Secs, camera_name: &str, pattern: &NamePattern) -> String {
     let base = sanitize(&format!("{} {camera_name}", second_stamp(start)));
     format!("{base}.{}", pattern.extension)
+}
+
+/// A time in milliseconds as a file name stamp, `2026-10-10 07.42.11.250`
+/// (device-local; used for still images, which can differ by less than a
+/// second).
+pub fn millis_stamp(ms: i64) -> String {
+    format!(
+        "{}.{:03}",
+        second_stamp(ms.div_euclid(1000)),
+        ms.rem_euclid(1000)
+    )
+}
+
+/// The neutral name of the camera at `index` for share-safe output:
+/// `Camera A`, `Camera B`, ... `Camera Z`, `Camera AA`, ... It stands in for
+/// the user's name for the camera, in the order the request lists cameras.
+pub fn neutral_camera_name(index: usize) -> String {
+    let mut letters = Vec::new();
+    let mut n = index;
+    loop {
+        letters.push(b'A' + (n % 26) as u8);
+        if n < 26 {
+            break;
+        }
+        n = n / 26 - 1;
+    }
+    letters.reverse();
+    format!("Camera {}", String::from_utf8_lossy(&letters))
+}
+
+/// The folder name of a range download (docs/FFI-RECORDINGS.md, section
+/// 7a): `2026-10-10 07.42\u{2013}07.52 range \u{2014} Front, Side`, or
+/// `2026-10-10 07.42\u{2013}07.52 <name>` when the user named it. A range
+/// that ends on another day writes that day's date before its end time. The
+/// end is the minute that contains `end`.
+pub fn range_folder_name(
+    start: Secs,
+    end: Secs,
+    name: Option<&str>,
+    camera_names: &[String],
+    pattern: &NamePattern,
+) -> String {
+    let (s, e) = (date_time(start), date_time(end));
+    let mut out = minute_stamp(start);
+    out.push('\u{2013}');
+    if (s.year, s.month, s.day) == (e.year, e.month, e.day) {
+        out.push_str(&format!("{:02}.{:02}", e.hour, e.minute));
+    } else {
+        out.push_str(&minute_stamp(end));
+    }
+    match name {
+        Some(n) => {
+            out.push(' ');
+            out.push_str(n);
+        }
+        None => {
+            out.push_str(" range");
+            if !camera_names.is_empty() {
+                out.push_str(&pattern.separator);
+                out.push_str(&camera_names.join(", "));
+            }
+        }
+    }
+    sanitize(&out)
 }
 
 /// A time as `incident.json` writes it: device-local, no zone.
@@ -255,6 +319,55 @@ mod tests {
         assert_eq!(
             folder_name(&renamed, &[], &p),
             "2026-10-10 07.42 Delivery- van-truck-"
+        );
+    }
+
+    #[test]
+    fn neutral_names_count_like_spreadsheet_columns() {
+        assert_eq!(neutral_camera_name(0), "Camera A");
+        assert_eq!(neutral_camera_name(1), "Camera B");
+        assert_eq!(neutral_camera_name(25), "Camera Z");
+        assert_eq!(neutral_camera_name(26), "Camera AA");
+        assert_eq!(neutral_camera_name(27), "Camera AB");
+        assert_eq!(neutral_camera_name(51), "Camera AZ");
+        assert_eq!(neutral_camera_name(52), "Camera BA");
+        assert_eq!(neutral_camera_name(701), "Camera ZZ");
+        assert_eq!(neutral_camera_name(702), "Camera AAA");
+    }
+
+    #[test]
+    fn millisecond_stamps_pad_and_handle_negatives() {
+        let t = secs(DateTime::new(2026, 10, 10, 7, 42, 11).unwrap());
+        assert_eq!(millis_stamp(t * 1000 + 250), "2026-10-10 07.42.11.250");
+        assert_eq!(millis_stamp(t * 1000 + 5), "2026-10-10 07.42.11.005");
+        assert_eq!(millis_stamp(t * 1000 - 1), "2026-10-10 07.42.10.999");
+    }
+
+    #[test]
+    fn range_folders() {
+        let p = NamePattern::default();
+        let s = secs(DateTime::new(2026, 10, 10, 7, 42, 5).unwrap());
+        let names = vec!["Front".to_string(), "Side/Gate".into()];
+        assert_eq!(
+            range_folder_name(s, s + 600, None, &names, &p),
+            "2026-10-10 07.42\u{2013}07.52 range \u{2014} Front, Side-Gate"
+        );
+        assert_eq!(
+            range_folder_name(s, s + 600, Some("Parcel: late?"), &names, &p),
+            "2026-10-10 07.42\u{2013}07.52 Parcel- late-"
+        );
+        // Across midnight the end carries its date.
+        assert_eq!(
+            range_folder_name(s, s + 86_400, None, &[], &p),
+            "2026-10-10 07.42\u{2013}2026-10-11 07.42 range"
+        );
+        // Long names are capped like incident folders.
+        let long = vec!["x".repeat(300)];
+        assert_eq!(
+            range_folder_name(s, s + 60, None, &long, &p)
+                .chars()
+                .count(),
+            MAX_NAME_CHARS
         );
     }
 
