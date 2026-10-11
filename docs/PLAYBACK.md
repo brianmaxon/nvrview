@@ -247,10 +247,12 @@ section 2a.
 - **Scheduling**: jobs from a whole incident are queued together. Devices
   work in parallel; per device, downloads share one session with a small
   concurrency limit (one download and one search at a time by default) so
-  live view keeps its stream. Whether a device carries live and download
-  traffic on one session at once is to be measured: the official client
-  stops live view during playback, though it ran searches and cover
-  requests beside its download.
+  live view keeps its stream. One NVR carried live view and a play on one
+  session at once with no drop in the live frame rate (observed with
+  `bc-cli replay-probe`, docs/protocol.md); live view beside a download is
+  still to be measured (the official client stops live view during
+  playback, though it ran searches and cover requests beside its
+  download).
 - **Progress** per incident and per camera, pausable, survives app restarts.
 - **No re-encoding** for plain downloads: chunks are joined and remuxed into
   MP4 (H.264 or H.265 video, AAC audio) with correct timestamps.
@@ -318,11 +320,13 @@ compositor and encoder.
 - Animal event type names from the device (needs a capture with an animal
   event). The live state push already reports `dog_cat`; the event-search
   reply names were not decryptable in the latest capture.
-- Whether live view and 143 downloads can share a session, and the
-  device's limits on concurrent downloads. A capture showed four synchronized
-  replay plays on one session with no refusal, but the client stops live view
-  when the playback tab opens, so live-plus-replay (and live-plus-download) on
-  one session is still unconfirmed.
+- Whether live view and 143 downloads can share a session, the device's
+  limits on concurrent downloads, and how many plays it allows beside live
+  view. A capture showed four synchronized replay plays on one session with
+  no refusal (with live view stopped by the client), and nvrview's own probe
+  showed one play beside live view on one session, accepted with the live
+  frame rate unchanged (B5 in docs/MILESTONE-P.md); several plays beside live
+  view and live-plus-download are still unconfirmed.
 - How 143 reports errors, and how a play ends at the end of a file. A play is
   now observed to continue across a file boundary with no wire event; the end
   of the last file was not reached, and no seek or play ever returned an error
