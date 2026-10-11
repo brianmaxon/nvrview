@@ -3,12 +3,15 @@
 A lightweight, native live viewer for **Reolink** NVRs and cameras. It speaks
 the devices' own protocol (Baichuan, TCP 9000) directly, with hardware video
 decoding and no browser engine: a low-power alternative to the official
-Reolink desktop client. macOS (Apple Silicon) first; Windows planned.
+Reolink desktop client. It runs on macOS (Apple Silicon) and Windows 11, from
+one shared Rust core.
 
-Status: in development. The macOS app plays live video from real NVRs and
-cameras (grid and split layouts, focus with the main stream, listening,
-detections, digital zoom); recordings and playback are designed but not built
-yet; the Windows app is in progress. See
+Status: in development. Both apps play live video from real NVRs and cameras
+(split-pane layouts and groups, several windows, focus with the main stream,
+listening, detections, digital zoom, fisheye dewarping, finding devices on
+the network); the macOS app also has doorbell calls with talk-back. Recordings
+and playback are designed but not built yet, and the Windows app does not
+have the doorbell call screens yet. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
 
 nvrview is an independent project. It is not affiliated with, endorsed by, or
@@ -21,7 +24,7 @@ only to describe compatibility.
 | --- | --- |
 | `crates/` | The shared Rust core: protocol, sessions, live and recorded media, audio, the C interface (`viewer-ffi`) |
 | `apps/macos/` | The macOS app (Swift, AppKit/SwiftUI, Metal, VideoToolbox) |
-| `apps/windows/` | The Windows app in progress (C#, Media Foundation, Direct3D 11, WinUI 3) |
+| `apps/windows/` | The Windows app (C#, Media Foundation, Direct3D 11, WinUI 3) |
 | `tools/` | `mock-nvr` (a fake device for tests and development), `bc-cli` (command-line client), `soak` |
 | `fixtures/synthetic/` | Generated test media (never real recordings) |
 | `docs/` | Design and contracts: architecture, protocol notes, C interface, rendering, audio, playback, interface |
@@ -78,9 +81,24 @@ NVRVIEW_REAL_CORE=1 swift test              # against the real core (after copyi
 
 ## Building on Windows
 
-The Windows app is in progress (see [apps/windows/README.md](apps/windows/README.md)).
-`scripts/setup-windows.ps1` prepares a Windows 11 computer (Rust, Visual Studio
-build tools, .NET 10, LLVM, Python; optionally key-only SSH), and
+Requirements: Windows 11 (x64) and the toolchain that
+`scripts/setup-windows.ps1` installs (Rust, Visual Studio build tools, .NET 10,
+LLVM, Python, Git Bash; optionally key-only SSH). In Git Bash, from the
+repository root:
+
+```sh
+scripts/windows-app.sh build
+target/dotnet/bin/NvrView.App/release_win-x64/NvrView.App.exe
+```
+
+The result is a self-contained folder (the .NET runtime and the Windows App
+SDK are inside); nothing is installed, and it runs from wherever it is copied.
+Add devices in **Settings** as on the Mac; passwords are kept in Windows
+Credential Manager, and layouts and settings in `%LOCALAPPDATA%\NvrView`, so
+replacing the app folder with a newer one keeps them. The details, options,
+and the Windows App SDK license terms are in
+[apps/windows/README.md](apps/windows/README.md).
+
 `scripts/windows-check.sh` runs the Windows checks on such a computer over SSH
 from a Mac, including uncommitted work:
 
@@ -90,7 +108,7 @@ NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh
 
 Each run prints the computer's free disk space (and warns under 10 GB), then
 the seconds every step took. Parallel sessions give themselves a worker folder
-with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 2 GB of
+with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 5 GB of
 build output, so delete a finished one with
 `NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh --clean <name>`.
 The worker builds without debug information (`NVRVIEW_WORKER_DEBUGINFO=1`
