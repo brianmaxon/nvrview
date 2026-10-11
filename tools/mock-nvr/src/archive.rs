@@ -98,6 +98,10 @@ pub struct ArchiveConfig {
     /// Seconds of video a play (command 5) sends at once before pacing to
     /// real time (observed: 2 to 4.4 s within the first quarter second).
     pub play_burst_secs: u32,
+    /// Plays a connection may run at once; one more is answered status 400
+    /// (the mock's choice: how a device refuses a play is not known). `None`:
+    /// no limit.
+    pub max_plays: Option<usize>,
 }
 
 /// One play (command 5) the fake served, for test assertions.
@@ -134,6 +138,7 @@ impl ArchiveConfig {
             audio: None,
             download_rate: None,
             play_burst_secs: 3,
+            max_plays: None,
         }
     }
 

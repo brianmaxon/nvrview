@@ -8,6 +8,7 @@
 //! variable `NVRVIEW_PASSWORD` or, on macOS, from a Keychain item.
 
 use bc_cli::analyze::Analysis;
+use bc_cli::replay_probe::{self, MAX_PLAYS, ProbeConfig};
 use bc_cli::{
     CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, info_command,
     info_query, list_channels, record, wait_logged_in,
@@ -39,6 +40,9 @@ usage:
          [--channel N] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] talk
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
+         --channel N --allow-replay-probe [--tier main|sub] [--max-plays 1-4]
+         [--now YYYY-MM-DDTHH:MM:SS]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -70,6 +74,18 @@ motion control, docs/protocol.md \"Talk-back (motion)\"): only with
 `ffmpeg -i IN -ar 16000 -ac 1 -f s16le OUT`) or a quiet tone (--tone, default
 440 Hz) for --seconds (default 2), pushed in real time like a microphone.
 The talk is closed at the end, on Ctrl-C, and on every error.
+replay-probe measures whether one session carries live view and recorded
+plays at once (docs/MILESTONE-P.md, B5): only with --allow-replay-probe. On
+one session it starts live view of --channel, finds a recording of that
+channel at least 60 s long that ended at least 2 minutes before the device's
+time (the first live keyframe's wall clock, or --now), then runs stages of
+1, 2, ... up to --max-plays (default and at most 4) simultaneous plays of it
+at normal speed, each for at most 10 s, counting live and play frames per
+second. It stops at the first refusal, error, stall, or live disruption;
+every play is stopped (7) and the session closed on every path, Ctrl-C
+included; the whole run is capped at 90 s. Only the file search, live
+preview, seek (123), play (5) and stop (7) are sent. Keep its output in the
+ignored captures/ directory.
 analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
@@ -105,6 +121,7 @@ enum Action {
         tone: f64,
         seconds: u64,
     },
+    ReplayProbe(ProbeConfig),
 }
 
 enum Parsed {
@@ -151,6 +168,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut file = None;
     let mut number = None;
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
+    let (mut allow_probe, mut max_plays, mut now) = (false, MAX_PLAYS, None);
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -188,6 +206,20 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 frames = Some(value("--frames")?.parse().map_err(|_| "bad --frames")?);
             }
             "--allow-talk" => allow_talk = true,
+            "--allow-replay-probe" => allow_probe = true,
+            "--max-plays" => {
+                max_plays = value("--max-plays")?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=MAX_PLAYS).contains(n))
+                    .ok_or("bad --max-plays (1 to 4)")?;
+            }
+            "--now" => {
+                now = Some(
+                    replay_probe::parse_time(&value("--now")?)
+                        .ok_or("bad --now (YYYY-MM-DDTHH:MM:SS)")?,
+                );
+            }
             "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
             "--tone" => {
                 tone = value("--tone")?
@@ -198,6 +230,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             "-h" | "--help" => return Err(String::new()),
             "channels" | "record" | "capture" | "analyze" | "query" | "lenses" | "talk"
+            | "replay-probe"
                 if command.is_none() =>
             {
                 command = Some(a);
@@ -269,6 +302,23 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 tone,
                 seconds: seconds.unwrap_or(2),
             }
+        }
+        Some("replay-probe") => {
+            if !allow_probe {
+                return Err(
+                    "replay-probe plays recordings on a real device; pass --allow-replay-probe"
+                        .into(),
+                );
+            }
+            if !matches!(tier, StreamTier::Sub | StreamTier::Main) {
+                return Err("replay-probe plays the main or sub stream only".into());
+            }
+            let mut cfg = ProbeConfig::new(channel.ok_or("replay-probe needs --channel")?);
+            cfg.tier = tier;
+            cfg.max_plays = max_plays;
+            cfg.now = now;
+            cfg.login_limit = LOGIN_LIMIT;
+            Action::ReplayProbe(cfg)
         }
         Some("lenses") => Action::Lenses {
             channel,
@@ -366,10 +416,13 @@ async fn ctrl_c_or(seconds: Option<u64>) {
 async fn run(args: Args) -> Result<(), String> {
     let password = password(args.keychain.as_deref())?;
     let addr = resolve(&args.host).await?;
-    let session = DeviceSession::spawn(
-        TcpConnector::new(addr),
-        SessionConfig::new(args.user, password),
-    );
+    let mut cfg = SessionConfig::new(args.user, password);
+    if matches!(args.action, Action::ReplayProbe(_)) {
+        cfg.max_plays = MAX_PLAYS;
+        cfg.play_stall_timeout = Duration::from_secs(4);
+        cfg.query_timeout = Duration::from_secs(10);
+    }
+    let session = DeviceSession::spawn(TcpConnector::new(addr), cfg);
     let result = run_action(&session, args.action).await;
     // Stops previews and closes the socket before the process exits.
     session.close().await;
@@ -608,6 +661,35 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             );
             Ok(())
         }
+        Action::ReplayProbe(cfg) => {
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let ctrl_c = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    let _ = stop_tx.send(true);
+                }
+            });
+            let mut out = std::io::stdout();
+            let r = replay_probe::replay_probe(session, &cfg, &mut out, stop_rx).await;
+            ctrl_c.abort();
+            let report = r?;
+            println!("result: {}", report.outcome);
+            println!(
+                "highest number of simultaneous plays that all delivered beside live view: {}",
+                report.max_ok
+            );
+            println!(
+                "live fps: baseline {:.1}, after the plays {}",
+                report.baseline_live_fps,
+                report
+                    .tail_live_fps
+                    .map_or("not measured".into(), |f| format!("{f:.1}"))
+            );
+            println!(
+                "plays requested {}, stops sent {}; the session is closed next",
+                report.plays_started, report.stops_sent
+            );
+            Ok(())
+        }
         Action::Query { cmd, channel } => {
             let reply = tokio::select! {
                 r = info_query(session, cmd, channel, LOGIN_LIMIT) => r?,
@@ -729,4 +811,58 @@ fn init_logging() {
                 .unwrap_or_else(|_| "warn".into()),
         )
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Parsed, String> {
+        parse_args(args.iter().map(|s| (*s).to_owned()))
+    }
+
+    const BASE: [&str; 4] = ["--host", "192.0.2.10", "--user", "example-user"];
+
+    #[test]
+    fn replay_probe_needs_its_flag_and_bounds_plays() {
+        let with = |extra: &[&str]| {
+            let mut v = BASE.to_vec();
+            v.extend_from_slice(extra);
+            parse(&v)
+        };
+        let e = with(&["replay-probe", "--channel", "1"]).err().unwrap();
+        assert!(e.contains("--allow-replay-probe"), "{e}");
+        let ok = with(&["replay-probe", "--channel", "1", "--allow-replay-probe"]);
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = ok
+        else {
+            panic!("not parsed");
+        };
+        assert_eq!((cfg.channel, cfg.max_plays), (1, MAX_PLAYS));
+        assert!(cfg.now.is_none());
+        for bad in ["0", "5"] {
+            let r = with(&[
+                "replay-probe",
+                "--channel",
+                "1",
+                "--allow-replay-probe",
+                "--max-plays",
+                bad,
+            ]);
+            assert!(r.is_err(), "--max-plays {bad}");
+        }
+        let r = with(&[
+            "replay-probe",
+            "--channel",
+            "1",
+            "--allow-replay-probe",
+            "--tier",
+            "extern",
+        ]);
+        assert!(r.is_err());
+        assert!(with(&["replay-probe", "--allow-replay-probe"]).is_err());
+        assert!(with(&["--password", "x", "replay-probe"]).is_err());
+    }
 }

@@ -1814,6 +1814,10 @@ impl Conn {
         if !file_id.starts_with(&format!("mock-file-{ch}-")) || self.plays.contains_key(&id) {
             return self.reply_xml(5, id, 400, "").await;
         }
+        self.plays.retain(|_, (_, s)| !s.is_finished());
+        if cfg.max_plays.is_some_and(|n| self.plays.len() >= n) {
+            return self.reply_xml(5, id, 400, "").await;
+        }
         {
             let mut log = lock(&self.shared.play_log);
             if log.len() >= DOWNLOAD_LOG_LEN {
