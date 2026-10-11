@@ -23,6 +23,9 @@ step() {
 step "sanitization"
 python3 -I scripts/check-sanitized.py --all
 
+step "self-test parity"
+python3 -I scripts/check-parity.py
+
 # The same full-history secret scan as CI, when Docker or gitleaks is
 # available. NVRVIEW_SECRET_SCAN=0 skips it. False positives go in
 # .gitleaksignore (synthetic examples only).
