@@ -543,8 +543,13 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   (`Viewer.ApplyDetection`).
 - **Microphone.** `WasapiMicrophone`: WASAPI shared mode, event driven, asked
   for 16 kHz mono float with `AUTOCONVERTPCM` (the engine converts from the
-  device's format). The same blocks go to `TalkPush` and, unless the camera's
-  audio is playing through the speakers (the echo gate), to the recognizer.
+  device's format), in communications mode with Windows' echo canceller
+  pointed at the `AudioOutput` device (`IAcousticEchoCancellationControl`,
+  confirmed through `IAudioEffectsManager`; docs/AUDIO.md "Echo
+  cancellation"). The same blocks go to `TalkPush` and to the recognizer,
+  which `MicrophoneEchoGate` holds back while the camera's audio plays
+  through the speakers when there is no echo cancellation, and only briefly
+  after a very loud moment when there is.
   Windows has no permission prompt for desktop apps: where the "Let desktop
   apps access your microphone" setting is off, the call says so.
 - **Typed reply.** `WindowsSpeech`: `Windows.Media.SpeechSynthesis` renders
