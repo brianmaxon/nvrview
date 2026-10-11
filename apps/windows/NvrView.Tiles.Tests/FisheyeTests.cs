@@ -20,6 +20,8 @@ internal static class FisheyeTests
         ("fisheye: quad looks four ways", Quad),
         ("fisheye: virtual PTZ is a rectilinear camera", Ptz),
         ("fisheye: aims are kept in range", AimRange),
+        ("fisheye: pinch scale maps to the field of view", PinchMapping),
+        ("fisheye: pinch steps are bounded and repeatable", PinchLimits),
         ("fisheye: dragging follows the pointer", Dragging),
         ("fisheye: zoom easing on the clock ends on the target", ZoomEasing),
         ("fisheye: constants describe the reference mapping", ConstantsMatch),
@@ -187,6 +189,41 @@ internal static class FisheyeTests
         Check.Equal(new FisheyeAim(10, 0, 90), new FisheyeAim(10, 10, 90).Clamped(FisheyeMount.Desk), "desk");
         Check.Equal(new FisheyeAim(90, -80, 90), new FisheyeAim(150, -85, 90).Clamped(FisheyeMount.Wall), "wall");
         Check.Equal(new FisheyeAim(0, 0, 90), new FisheyeAim(double.NaN, double.PositiveInfinity, double.NaN).Clamped(FisheyeMount.Wall), "not finite");
+    }
+
+    private static void PinchMapping()
+    {
+        FisheyeAim aim = FisheyeAim.Default(FisheyeMount.Wall);
+        Check.Equal(45.0, FisheyePinch.Apply(aim, 2, FisheyeMount.Wall).Fov, "spread zooms in");
+        Check.Equal(120.0, FisheyePinch.Apply(aim, 0.5, FisheyeMount.Wall).Fov, "squeeze zooms out, to the limit");
+        Check.Equal(aim, FisheyePinch.Apply(aim, 1, FisheyeMount.Wall), "no change");
+        Check.True(Close(FisheyePinch.Apply(aim, 1.5, FisheyeMount.Wall).Fov, 60), "1.5x");
+        Check.Equal(aim.Pan, FisheyePinch.Apply(aim, 1.5, FisheyeMount.Wall).Pan, "the direction is kept");
+        Check.True(Close(FisheyePinch.WheelFactor(120), 1.25), "one notch in");
+        Check.True(Close(FisheyePinch.WheelFactor(-120), 0.8), "one notch out");
+        Check.Equal(1.0, FisheyePinch.WheelFactor(0), "no wheel");
+    }
+
+    private static void PinchLimits()
+    {
+        FisheyeAim aim = FisheyeAim.Default(FisheyeMount.Ceiling);
+        Check.Equal(2.0, FisheyePinch.Factor(50), "a huge step is bounded");
+        Check.Equal(0.5, FisheyePinch.Factor(0.001), "a tiny step is bounded");
+        Check.Equal(1.0, FisheyePinch.Factor(double.NaN), "NaN");
+        Check.Equal(1.0, FisheyePinch.Factor(0), "zero");
+        Check.Equal(1.0, FisheyePinch.Factor(-3), "negative");
+        Check.Equal(1.0, FisheyePinch.Factor(double.PositiveInfinity), "infinite");
+        FisheyeAim many = aim;
+        for (int i = 0; i < 40; i++)
+        {
+            many = FisheyePinch.Apply(many, 1.2, FisheyeMount.Ceiling);
+        }
+        Check.Equal(FisheyeAim.MinFov, many.Fov, "repeated spreads stop at the narrowest view");
+        for (int i = 0; i < 40; i++)
+        {
+            many = FisheyePinch.Apply(many, 1 / 1.2, FisheyeMount.Ceiling);
+        }
+        Check.Equal(FisheyeAim.MaxFov, many.Fov, "repeated squeezes stop at the widest view");
     }
 
     private static void Dragging()

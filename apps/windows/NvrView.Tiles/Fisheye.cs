@@ -302,6 +302,32 @@ public readonly record struct FisheyeAim(double Pan, double Tilt, double Fov)
         !double.IsFinite(factor) || factor <= 0 ? this : (this with { Fov = Fov / factor }).Clamped(mount);
 }
 
+/// <summary>
+/// How a pinch zooms a Virtual PTZ tile (docs/UX.md "Fisheye cameras"): the
+/// field of view is divided by the pinch's scale, applied at once as the
+/// macOS pinch is, and kept within 20..120 degrees by <see cref="FisheyeAim"/>.
+/// A precision touchpad's pinch arrives as Ctrl+mouse wheel; a touch screen's
+/// as a manipulation scale. Both reduce to a factor here.
+/// </summary>
+public static class FisheyePinch
+{
+    /// <summary>The most one input event may zoom (a stray large value must not jump the view).</summary>
+    public const double MaxStep = 2;
+
+    /// <summary>One mouse-wheel notch (120 units) zooms by this much, as on the macOS wheel.</summary>
+    public const double NotchFactor = 1.25;
+
+    /// <summary>A zoom factor (more than 1 zooms in) from a pinch scale step, kept finite and within 1/MaxStep..MaxStep; 1 when unusable.</summary>
+    public static double Factor(double scale) =>
+        double.IsFinite(scale) && scale > 0 ? Math.Clamp(scale, 1 / MaxStep, MaxStep) : 1;
+
+    /// <summary>A zoom factor from wheel units (120 per notch; a positive delta zooms in), as a precision touchpad's pinch reports it.</summary>
+    public static double WheelFactor(int wheelDelta) => Factor(Math.Pow(NotchFactor, wheelDelta / 120.0));
+
+    /// <summary>The aim after a pinch step on a Virtual PTZ view (other views have no zoom).</summary>
+    public static FisheyeAim Apply(FisheyeAim aim, double scale, FisheyeMount mount) => aim.Zoomed(Factor(scale), mount);
+}
+
 /// <summary>How directions map onto one view.</summary>
 public abstract record FisheyeProjection
 {

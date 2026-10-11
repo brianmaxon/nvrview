@@ -934,6 +934,46 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
         Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera");
 
+        // Settings > fisheye mount (the picker, not the menu), then a synthetic pinch on the Virtual PTZ view.
+        var mountHooks = new SettingsDialogHooks();
+        var mountDialog = SettingsDialog.Create(stage.XamlRoot, v, development: true, mountHooks);
+        _ = mountDialog.ShowAsync();
+        await Task.Delay(300);
+        var pickers = mountHooks.Mounts();
+        Expect(pickers.Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Ceiling), "Settings does not list the fisheye camera with the default ceiling mount");
+        Expect(pickers.All(m => v.IsFisheye(m.Camera)), "Settings lists a camera that is not a fisheye camera");
+        mountHooks.ChooseMount(f.Camera.ChannelKey, FisheyeMount.Wall);
+        Expect(v.Settings.Mount(f.Camera) == FisheyeMount.Wall, "choosing Wall in Settings did not set the mount");
+        Expect(f.Fisheye is { Mount: FisheyeMount.Wall } onWall && onWall.Aim == FisheyeAim.Default(FisheyeMount.Wall), "the tile did not follow the mount chosen in Settings");
+        Expect(mountHooks.Mounts().Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Wall), "the picker does not show the saved mount");
+        var pinchClock = new ManualViewerClock(3000);
+        v.UseClock(pinchClock);
+        double pinchFrom = f.Fisheye?.Aim.Fov ?? 0;
+        stage.PinchFisheye(f, 1.5);
+        pinchClock.Advance(2);
+        stage.StepFisheyeZoom(pinchClock.Now);
+        double pinched = f.Fisheye?.Aim.Fov ?? 0;
+        stage.PinchFisheye(f, 2);
+        stage.PinchFisheye(f, 2);
+        pinchClock.Advance(2);
+        stage.StepFisheyeZoom(pinchClock.Now);
+        double limit = f.Fisheye?.Aim.Fov ?? 0;
+        stage.PinchFisheye(f, double.NaN);
+        pinchClock.Advance(2);
+        stage.StepFisheyeZoom(pinchClock.Now);
+        v.UseClock(new SystemViewerClock());
+        FisheyeTileSetting pinchSaved = FisheyeTileSetting.FromJson(stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member));
+        Say($"fisheye pinch (wall mount): {pinchFrom:0.#}° → {pinched:0.#}° (x1.5) → {limit:0.#}° (two x2), saved {pinchSaved.Aim?.Fov:0.#}°");
+        Expect(Math.Abs(pinched - pinchFrom / 1.5) < 1e-9, "a pinch of 1.5 did not divide the field of view by 1.5");
+        Expect(Math.Abs(limit - FisheyeAim.MinFov) < 1e-9 && (f.Fisheye?.Aim.Fov ?? 0) == limit, "pinching in did not stop at the narrowest view, or an unusable scale moved it");
+        Expect(pinchSaved.Aim is { } pa && Math.Abs(pa.Fov - FisheyeAim.MinFov) < 1e-9, "the pinched view was not saved with the layout");
+        mountHooks.ChooseMount(f.Camera.ChannelKey, FisheyeMount.Ceiling);
+        Expect(v.Settings.Mount(f.Camera) == FisheyeMount.Ceiling, "choosing Ceiling in Settings did not restore the default mount");
+        mountDialog.Hide();
+        stage.Select(f.Path);
+        stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
+        Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera after the pinch");
+
         // Back to the camera's own picture.
         stage.SetFisheyeMode(f, FisheyeViewMode.Original);
         Expect(f.Fisheye is null && stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member) is null, "Original did not remove the leaf member");

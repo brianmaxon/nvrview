@@ -32,6 +32,12 @@ internal sealed class SettingsDialogHooks
     /// <summary>The found-devices list as shown: (title, detail, enabled) per row, and whether the panel is visible.</summary>
     public Func<(bool Visible, List<(string Title, string Detail, bool Enabled)> Rows, string Status)> Panel =
         () => (false, [], "");
+
+    /// <summary>The fisheye cameras' mount pickers as shown: (camera, label, mount shown) per row.</summary>
+    public Func<List<(CameraRef Camera, string Label, FisheyeMount Mount)>> Mounts = () => [];
+
+    /// <summary>Chooses a mount in a camera's picker, as a click on its item does.</summary>
+    public Action<CameraRef, FisheyeMount> ChooseMount = (_, _) => { };
 }
 
 internal static class SettingsDialog
@@ -293,10 +299,69 @@ internal static class SettingsDialog
             }
         };
 
+        // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
+        // like the menu's choice; shown only when a connected camera reports a fisheye lens.
+        var mounts = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
+        var mountRows = new List<(CameraRef Camera, string Label, ComboBox Picker)>();
+        bool buildingMounts = false;
+
+        void RefreshMounts()
+        {
+            var fisheye = new List<(CameraRef Camera, string Label)>();
+            foreach (DeviceEntry d in viewer.Devices)
+            {
+                foreach (ChannelInfo ch in d.Channels.Values.Where(x => x.Fisheye).OrderBy(x => x.Channel))
+                {
+                    var camera = new CameraRef(d.Key, ch.Channel);
+                    fisheye.Add((camera, viewer.Devices.Count > 1 ? $"{d.DisplayName} \u00B7 {viewer.ChannelName(camera)}" : viewer.ChannelName(camera)));
+                }
+            }
+            if (mountRows.Count == fisheye.Count && mountRows.Select(r => (r.Camera, r.Label)).SequenceEqual(fisheye))
+            {
+                buildingMounts = true;
+                foreach (var r in mountRows)
+                {
+                    r.Picker.SelectedIndex = (int)viewer.Settings.Mount(r.Camera);
+                }
+                buildingMounts = false;
+                return;
+            }
+            buildingMounts = true;
+            mountRows.Clear();
+            mounts.Children.Clear();
+            mounts.Children.Add(new TextBlock { Text = "Fisheye cameras", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+            foreach ((CameraRef camera, string label) in fisheye)
+            {
+                var picker = new ComboBox { Header = $"{label}: mount", MinWidth = 200 };
+                foreach (FisheyeMount m in Enum.GetValues<FisheyeMount>())
+                {
+                    picker.Items.Add(new ComboBoxItem { Content = m.Title(), Tag = m });
+                }
+                picker.SelectedIndex = (int)viewer.Settings.Mount(camera);
+                CameraRef cam = camera;
+                picker.SelectionChanged += (_, _) =>
+                {
+                    if (!buildingMounts && picker.SelectedItem is ComboBoxItem { Tag: FisheyeMount chosen })
+                    {
+                        viewer.Settings.SetMount(cam, chosen);
+                    }
+                };
+                mountRows.Add((camera, label, picker));
+                mounts.Children.Add(picker);
+            }
+            mounts.Visibility = fisheye.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            buildingMounts = false;
+        }
+
+        RefreshMounts();
+        Action refreshMounts = RefreshMounts;
+        viewer.Changed += refreshMounts;
+
         var layout = new Grid { ColumnSpacing = 16, RowSpacing = 12 };
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition());
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.Children.Add(left);
@@ -305,14 +370,17 @@ internal static class SettingsDialog
         Grid.SetRow(corner, 1);
         Grid.SetColumnSpan(corner, 2);
         layout.Children.Add(corner);
-        Grid.SetRow(note, 2);
+        Grid.SetRow(mounts, 2);
+        Grid.SetColumnSpan(mounts, 2);
+        layout.Children.Add(mounts);
+        Grid.SetRow(note, 3);
         Grid.SetColumnSpan(note, 2);
         layout.Children.Add(note);
         if (App.Instance.Updater is { } updater)
         {
             layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             FrameworkElement updates = UpdateSettingsPanel.Build(updater);
-            Grid.SetRow(updates, 3);
+            Grid.SetRow(updates, 4);
             Grid.SetColumnSpan(updates, 2);
             layout.Children.Add(updates);
         }
@@ -341,6 +409,7 @@ internal static class SettingsDialog
         {
             opened = false;
             viewer.Changed -= refresh;
+            viewer.Changed -= refreshMounts;
             StopFinding();
         };
         if (hooks is not null)
@@ -348,6 +417,13 @@ internal static class SettingsDialog
             hooks.NewDevice = NewDevice;
             hooks.Choose = Choose;
             hooks.SearchAgain = StartFinding;
+            hooks.Mounts = () => [.. mountRows.Select(r => (r.Camera, r.Label, (FisheyeMount)r.Picker.SelectedIndex))];
+            hooks.ChooseMount = (camera, mount) =>
+            {
+                // The same path as a click on the picker's item.
+                ComboBox picker = mountRows.First(r => r.Camera == camera).Picker;
+                picker.SelectedIndex = (int)mount;
+            };
             hooks.Form = () => (name.Text, host.Text, port.Value);
             hooks.Panel = () => (
                 finder.Visibility == Visibility.Visible,

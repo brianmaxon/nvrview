@@ -630,8 +630,15 @@ with Windows conventions:
   which also carries Settings, full screen, and diagnostics (Ctrl+D).
 - Full screen is the window's own full-screen presenter (F, and Esc after
   leaving focus).
-- A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel;
-  touch-screen pinch is not handled yet.
+- A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel
+  (digital zoom, or the field of view of a Virtual PTZ tile). A touch
+  screen's two-finger pinch zooms a Virtual PTZ tile by the pinch's scale
+  (the field of view is divided by it, 120° to 20°, each step bounded); it
+  does not zoom a tile's digital zoom yet.
+- Settings lists each fisheye camera with a Mount picker (Ceiling, Wall,
+  Desk; default Ceiling), kept with the other view settings like the
+  right-click menu's Fisheye mount, and tiles in every window follow it at
+  once.
 - Corner indicators use Segoe Fluent Icons (a vector paw for animals); the
   corner is chosen in Settings or the right-click menu. A sound alarm also
   shows as a slate badge at the bottom left. Alerts, the Quality submenu, M,
