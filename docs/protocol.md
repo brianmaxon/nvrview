@@ -955,10 +955,11 @@ Measured with nvrview's own read-only client (`bc-cli replay-probe`) on one
 NVR with recent firmware: one session, one live preview of a camera's
 sub-stream, then one play at `playSpeed` 1 of a finished sub-stream recording
 of the same camera, beside it. Only the file search (14–16), preview (3, 4),
-seek (123), play (5) and stop (7) were sent. The run stopped after its first
-stage (one play, about 5 s) because the probe's stall threshold was then too
-strict for the burst below, so more than one play beside live view was not
-tried. All observed.
+seek (123), play (5) and stop (7) were sent. A first run stopped after one
+play because the probe's stall threshold was too strict for the burst below
+(since fixed); a second run on the same NVR completed the stages: one play,
+then a second play of the same file on the same camera, all beside the live
+preview. All observed.
 
 | Fact | Provenance |
 | --- | --- |
@@ -966,7 +967,9 @@ tried. All observed.
 | **Live view kept its rate.** The live sub-stream ran at 9.8 frames per second alone and 10.0 while the play ran; one second during the play's burst carried half the usual frames and the next made up for it (5 then 15), with no gap of a whole second. | observed |
 | **The burst can be long.** The play's first picture came 0.37 s after the request, and within the first second the device sent 8 s of video (80 frames at 10 frames per second, about 235 KB of sub-stream). Then nothing came for the 4 s the probe waited, consistent with the play running 8 s ahead of real time; whether it resumed at real time was not observed. The client capture's 1× bursts held 2 to 4.4 s of video. | observed |
 | **Keyframe wall clock in UTC, recording times local.** The live keyframes' wall-clock seconds matched the host's UTC clock within a second, and the play's first keyframe read `seekTime` (device local, like every search time) plus the device's UTC offset, less 1 s: the play started at the keyframe at or before `seekTime` on the local timeline, and the seconds in the extra header are UTC on this device. | observed |
-| **What a refusal looks like** was not seen: no seek, play, or search was refused. | observed (nothing to report) |
+| **A second simultaneous play of the same file on the same camera was refused.** The first play ran normally (live 10.1 frames per second against 10.0 alone; 11.9 s of video in 7.7 s; first picture 289 ms after the request). With it still running, the second 5 (play) was answered with status **52092** instead of 200, and the second play delivered no media; the seek before it was accepted. The refusal did not disturb live view or the first play, and the connection stayed up. | observed |
+| **Which limit this is was not determined.** Both plays used the same camera and the same recording file, and the earlier client capture had four synchronized plays accepted on one session (different cameras). So the limit may be per file, per camera, or a total of one while live view runs; plays of different cameras beside live view were not measured, and neither were downloads beside live view. | open |
+| **The first keyframe of each play read the device's UTC offset after `seekTime`** (about +14400 s on a device four hours behind UTC), as in the row above. | observed |
 
 ### Cover images: command 298
 
