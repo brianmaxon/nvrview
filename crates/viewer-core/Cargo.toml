@@ -12,6 +12,8 @@ audio-pipeline = { path = "../audio-pipeline" }
 bc-protocol = { path = "../bc-protocol" }
 bc-session = { path = "../bc-session" }
 discovery = { path = "../discovery" }
+# Recorded video: index, incidents, thumbnails, downloads (src/recordings_owner).
+recordings = { path = "../recordings" }
 # Update checks and downloads (src/update.rs).
 updates = { path = "../updates" }
 crossbeam-queue = "0.3.8"
