@@ -407,8 +407,9 @@ public sealed class Call
 {
     public const double IdleTimeout = 60.0;
 
-    public Call(CameraRef camera, DateTime startedAt, double now, CallAudioDecision audio, CallOrigin origin = CallOrigin.Press)
+    public Call(CameraRef camera, DateTime startedAt, double now, CallAudioDecision audio, CallOrigin origin = CallOrigin.Press, CallPresentation presentation = CallPresentation.Inset)
     {
+        Presentation = presentation;
         Camera = camera;
         StartedAt = startedAt;
         LastActivity = now;
@@ -444,6 +445,44 @@ public sealed class Call
     public Transcript Transcript { get; } = new();
 
     public TranscriptionStatus Transcription { get; set; } = TranscriptionStatus.Preparing;
+
+    /// <summary>
+    /// In the viewer windows' insets or in its own window; one state for the whole app, kept when
+    /// another press joins the call.
+    /// </summary>
+    public CallPresentation Presentation { get; set; }
+
+    /// <summary>"Keep talking" is on: Talk stays on without holding the button. Kept with the call, so a view built again (a pop-out) shows it.</summary>
+    public bool Latched { get; private set; }
+
+    /// <summary>The typed reply not sent yet, kept with the call for the same reason.</summary>
+    public string Draft { get; private set; } = "";
+
+    /// <summary>"Keep talking" turned on or off by the user (activity).</summary>
+    public void SetLatched(bool on, double now)
+    {
+        Latched = on;
+        Activity(now);
+    }
+
+    /// <summary>The microphone stopped on its own (refused, the talk ended, no microphone, the user answered Cancel): "Keep talking" turns off.</summary>
+    public void MicrophoneStopped() => Latched = false;
+
+    /// <summary>The user typed in the reply field (activity).</summary>
+    public void Edited(string draft, double now)
+    {
+        Draft = draft;
+        Activity(now);
+    }
+
+    /// <summary>A reply was sent: the field empties unless the user typed something else meanwhile.</summary>
+    public void Sent(string text)
+    {
+        if (Draft == text)
+        {
+            Draft = "";
+        }
+    }
 
     /// <summary>Activity keeps the call open.</summary>
     public void Activity(double now) => LastActivity = Math.Max(LastActivity, now);
