@@ -361,8 +361,24 @@ page's reads (102 HDD, 511 users, 76 local link, 80 version, 26 color, 115
 Wi-Fi, 574 sleep) and **no write command at all**: opening and closing the
 screen without saving changed nothing on the device. The bodies of the replies
 could not be decrypted in that capture (it had no login handshake), so the
-field layout — time-zone format, DST rule, NTP server and offset — is not yet
-recorded; the commands and their read-only use are. (observed (client capture))
+field layout was not recorded then; the commands and their read-only use were.
+(observed (client capture))
+
+A later capture, which included the login and could be decrypted, showed the
+Date & Time screen of a newer client version sending **only 104** (with the
+usual 58, 102, 511, 76 and 80 reads): no 106 and no 38. So the DST rule and
+the NTP fields are still unseen, but the 104 reply (status 200, about 516
+bytes, also sent twice at login) is now known. It holds `SystemGeneral` with
+`timeZone`, `osdFormat`, `year`, `month`, `day`, `hour`, `minute`, `second`,
+`deviceId`, `timeFormat`, `language`, `deviceName`, `loginLock`, `lockTime`,
+`allowedTimes` and `isDst`, followed by a `Norm` element (`norm`, e.g. `NTSC`).
+`year` to `second` are the device's local time. `timeZone` is in seconds
+**west** of UTC for standard time (a positive value is behind UTC), and
+`isDst` 1 means daylight saving is in effect, adding one hour. On the one
+device checked, `-timeZone + 3600` (with `isDst` 1) equalled the offset seen
+in keyframe seconds (see "Rates, keyframes, and how a play ends"), so the
+current UTC offset can be computed from 104 alone. (observed (client
+capture); the offset formula is inferred and matched one device)
 
 Commands seen but not needed for live view: 10, 44, 58, 76, 102, 104, 114, 151,
 299, 511, 527–551, 574 (configuration and capability queries), 192 (event
@@ -457,7 +473,7 @@ probe in "Second lenses", without per-lens kinds.
 
 | Name | Where | Provenance |
 | --- | --- | --- |
-| `dog_cat` | 33 `AItype`, 299 `detectType`, and the 272 search request | observed |
+| `dog_cat` | 33 `AItype`, 299 `detectType`, the 272 search request, and `alarmType` in 273 replies | observed |
 | `dog_cat`, also `dog`, `cat` | recognized in recording-file `recordType` and event-search types | reported (client) |
 | `dogCat`, `animal`, `pet` | the client's own JSON and UI names (`petCount` in 519) | reported (client); not wire names |
 | `other`, `buck`, `bear`, `boar`, `fox`, `female_deer`, `raccoon`, `turkey`, `wolf` | wildlife subtypes: `animalTypes` in the paged search 492, `animalType` in its results, `detectedAnimalTypes` in a recording file's `FileInfo` | reported (client) |
@@ -719,7 +735,8 @@ changes nothing on the device. All of it belongs to the viewing tier.
 
 **Times.** Every time in these bodies is a block of six elements,
 `<year>`, `<month>` (1–12), `<day>`, `<hour>`, `<minute>`, `<second>`, in the
-device's local wall-clock time with no zone or offset. (observed)
+device's local wall-clock time with no zone or offset. (observed) The one
+exception is the recording file `Id`, which embeds UTC (see command 15 below).
 
 ### What the official client sent when its playback tab opened
 
@@ -781,7 +798,9 @@ Command 14 opens a search:
 | Recording files run about 30 to 60 minutes; the first one of a day can start on the previous day. | observed |
 | In the client, 14, 15 and 16 are named search *open*, *next* and *close*, so 15 is presumably repeated for further pages. The reply `FileInfo` can also carry `uid`, `fileType` (`h264`, `mp4`, `flv`, `jpg`), `playSpeed`, `fileSize` and `typeExtension`, and 14 can carry `fileType` `jpg` to search snapshots. | reported (client) |
 | Command 16 with the same body closes the search; the reply is empty with status 200. The next search was handed the same `handle` 0 again. | observed |
-| `name` and `Id` are opaque file identifiers; treat them as strings. (In the capture `Id` looked like `<tier>-<channel>-0-<packed start time>-<suffix>`, with the start time in UTC and a 0-based month, and `name` like a channel number plus the local start time; neither is needed to download by time.) | observed |
+| `name` and `Id` are opaque file identifiers; treat them as strings. (In the capture `Id` looked like `<tier>-<channel>-0-<packed start time>-<suffix>`, with the start time in UTC and a 0-based month, and `name` like a channel number plus the local start time; neither is needed to download by time.) A later capture confirmed this: the `Id` embeds UTC with a zero-based month (`<tier>-<channel>-0-<yy><month-1><dd><hhmmss>-<suffix>`), while the file `name` and every search time are device local; 7 names the file by its local `name`, 5 by the UTC `Id`. | observed (client capture) |
+| A file still being written was listed with `recordType` `sched` and an `Id` suffix other than `00000`; after it closed it was listed with suffix `00000` and `recordType` `none`. Playing it by the `00000` form worked. The meaning of the suffix is inferred, not known. | observed (client capture) |
+| Selecting the current day again simply repeats 14, 272, 15, 273 pages, 16 and 274 for that day; there is no separate "extend" command. The reply to 15 lists every file of the day, and the last file's `endTime` equals the time of the search (a file still being written ends "now"), so the list grows only when searched again. A day without recordings is answered with a normal 14 reply, a 15 reply that is an empty `FileInfoList` element, and an empty 16; the client sent that search and no play. | observed (client capture) |
 
 **3. Motion and detection events of one day: commands 272, 273, 274** (open,
 fetch pages, close). All three use the same message ID. Unlike the other
@@ -809,11 +828,12 @@ ordinary (encrypted) body with no extension. (observed)
 | --- | --- |
 | The 272 reply is `findAlarmVideo` with `channelId` and a `fileHandle` (a small number that increased by one with each new search). | observed |
 | `streamType` here is a number, not a name: 2 was sent while the 14 search of the same moment named `externStream`, and 0 while it named `mainStream`. The full mapping is not known. | observed |
-| Command 273 sends `findAlarmVideo` with `channelId` and `fileHandle` and returns one page: `alarmVideoInfo` with `channelId`, `fileHandle`, `bFinished`, and an `alarmVideoList` of up to 50 `alarmVideo` entries. The client repeats 273 until `bFinished` is 1; every page but the last was full. | observed |
+| Command 273 sends `findAlarmVideo` with `channelId` and `fileHandle` and returns one page: `alarmVideoInfo` with `channelId`, `fileHandle`, `bFinished`, and an `alarmVideoList` of up to 50 `alarmVideo` entries. The client repeats 273 until `bFinished` is 1; every page but the last was full. A later capture on newer firmware saw pages of about 100 entries, requests sent back to back about every 0.15 s, and up to 14 pages for one busy day; the client then sent 274. | observed (client capture) |
 | Each `alarmVideo` has `fileName`, `bHasRecFile`, `bEncrypted`, `alarmType` (`md`, `vehicle`, `people` seen), `fileId` (the `Id` of the recording file from command 15 that contains the event), `startTime`, `endTime`. Events were about 10 to 25 s long. | observed |
 | Command 274 with `channelId` and `fileHandle` closes the search; empty reply, status 200. | observed |
 | The client also knows `destination` in the 272 request and `bDeleted` and `score` in `alarmVideo`. | reported (client) |
-| The full `alarmType` list the client sent was `md, pir, other, package, io, people, face, vehicle, dog_cat, visitor, cry, crossline, intrude, loitering, legacy, loss, answer`, and `eventAlarmType` added `nonmotorveh`, `tamper`, `lmsg` (and dropped `package`). Results seen: `md`, `people`, `vehicle`. | observed |
+| The full `alarmType` list the client sent was `md, pir, other, package, io, people, face, vehicle, dog_cat, visitor, cry, crossline, intrude, loitering, legacy, loss, answer`, and `eventAlarmType` added `nonmotorveh`, `tamper`, `lmsg` (and dropped `package`). Results seen: `md`, `people`, `vehicle`. A later capture sent the same two lists in full (272 request fields: `channelId`, `uid`, `logicChnBitmap`, `streamType`, `notSearchVideo`, `startTime`, `endTime`, `alarmType`, `eventAlarmType`) and saw `dog_cat` in replies, so the animal type name in 273 is `dog_cat` (no species-specific name). | observed (client capture) |
+| The client opened an event by 123 with `seekTime` equal to the event's `startTime` (no pre-roll), then 5 with the `fileId` from the 273 hit as the file `Id` (the 5 body carries the real `channelId`; 123's stays 0). | observed (client capture) |
 | A 272 search covers one channel (one lens, chosen by `streamType`) and one day; the playback tab runs one per channel it shows. There is no cross-channel form. | observed (requests); reported (client) |
 
 These three searches give a playback UI what it needs: a calendar (142), a timeline of
@@ -824,8 +844,11 @@ continuous recording (14–16), and event markers (272–274).
 The client's NVR "event log" window and its "AI video search" (search by
 type, or by a typed phrase) do not use 272–274. They use the event-log
 commands, which search **all chosen channels in one search**. None of them
-appeared in either capture; everything here is reported (client) and read
-from the client's request builders and reply parsers. All are viewing tier.
+appeared in the first two captures, so the tables below are reported (client),
+read from the client's request builders and reply parsers. A later capture of
+the AI search screen on an NVR with recent firmware confirmed part of it; those
+facts are in "What the AI search sent on the wire" after this section's
+tables, marked observed (client capture). All are viewing tier.
 
 | Command | Use | Body (request → reply) |
 | --- | --- | --- |
@@ -866,10 +889,34 @@ boxes in a hit; the closest are `structInfo` entries of the 759 detail.
 | Support is advertised per NVR as a set of bits (event log as a whole, and per type: motion, people, vehicle, animal, package, visitor, cry, crossline, nonmotorized vehicle, tamper, …), most likely the 199 `eventLogVersion`, which only newer NVR firmware sent. The mapping from that element to the bits was not traced. | reported (client); `eventLogVersion` observed |
 | The desktop event-log window opens one search for every channel with the selected types ORed into one set, `notSearchVideo` 1 and `desc` 0, then calls 517 until `bFinished`, dropping duplicate hits (same camera, channel, start and end). | reported (client) |
 | The client allows **120 s for each 517 page** (25 s for open, close and 519; 30 s in the newer search screen; the desktop values are timeout arguments, presumably seconds), which suggests the device can take long to answer. | reported (client) |
-| Text search: the typed phrase is turned into a feature vector on the computer by a downloaded text-encoder model, or, when a vendor feature flag is on, by the vendor's server (which can also record search texts). The vector, not the text, goes to the NVR in 516, with a `similarity` threshold. If the NVR reports a feature-version conflict (`version`, `text`), the client re-encodes with the other model version. | reported (client) |
+| Text search, as read from the client's code: the typed phrase is turned into a feature vector on the computer by a downloaded text-encoder model, or, when a vendor feature flag is on, by the vendor's server (which can also record search texts), and the vector goes to the NVR in 516 with a `similarity` threshold; on a feature-version conflict (`version`, `text`) the client re-encodes with the other model version. **Superseded on the wire:** the client version captured later sent the typed text itself (`textOfPicture`) with `similarity`, `encoderVersion` 0 and no `textFeature` or `filterList`, and the NVR returned hits, so on that NVR and client the NVR matches the text and no encoder runs on the computer. The vector path may still exist for other firmware or client versions. | reported (client); superseded by observed (client capture) |
 | Thumbnails: the newer search screen (the client's "AI video search") fetches one 653 cover per hit with a recording, through a queue that runs **one request at a time**, and its summary card loads the first 12 hits. The older desktop window instead asks 298 (cover preview, sub-stream, one frame over the hit's time range, 16 s timeout) per row. Per-hit, one-at-a-time image fetches are the clearest reason the client's AI search feels slow. | reported (client) |
 | The paged search 492–494 (`paginationSearch`: `channel`, `order`, `fileType`, `photoReplay`, `alarmInTypes`, `animalTypes`, `startTime`, `endTime`; items with `recordType`, `animalType`, `thumb`, `Id`, `fileSize`) carries thumbnails and wildlife subtypes; it appears to serve snapshot-based cameras and was not traced further. | reported (client) |
 | Nearby commands that are not viewing tier and are never sent: 300 (write `AiCfg`), 343 (write AI detection settings), 765 (set user-defined object labels). The client's "set text feature" step during a text search was not traced to a wire command; it stays off the allowlist until it is. | reported (client) |
+
+#### What the AI search sent on the wire
+
+Observed (client capture), decrypted, from the AI search screen of the
+official desktop client on an NVR with recent firmware, one session, one
+search typed at a time. Viewing tier.
+
+| Step | Wire |
+| --- | --- |
+| open | 516 `findEventLog`; the reply is `findEventLog` with a `handle` and `maxEventCount` 50 |
+| page | 517 `findEventLog` with `handle` and `maxEventCount` 50; the reply is `eventLogInfo` (`handle`, `bFinished`, `eventLogList`). The client kept one or two page requests in flight and sent the next as soon as a page arrived: page 1 came 0.1 to 1.3 s after the 516, later pages 0.2 to 1.8 s apart |
+| end | `bFinished` 1 with an empty `eventLogList`, then 518 with the `handle` (empty reply, status 200) |
+| cover | 653 `exportCoverPic` (`channelId`, `pts`, `startTime`, `endTime` of the hit): status 200 with `fileSize`, then media messages (extension `binaryData`, 38,000 bytes of JPEG each), then an empty message with status **201** as the terminator. 12 covers per search, strictly one at a time (the next request about 30 ms after the 201); each was a JPEG of 1920 by 720 and 127 to 214 KB |
+| open a hit | not a special command: 14, 15, 16 for the hit's channel and day (the file `Id` comes from 15), 272 to 274 for that range, 123 with `seekTime` = the hit's `startTime`, 5 with that `Id` (the hit's recording had a sub-stream, `supportSub` 1, and that stream was played), 7 at the end. No 759, 519 or 298 |
+
+| Fact | Provenance |
+| --- | --- |
+| 516 request fields written: `logTypeBits` 1, `notSearchVideo` 1, `onlySearchCluster` 0, `desc` 0, `chnbits` (all channels set), `mode` 2, `encoderVersion` 0, `textOfPicture` (the typed text), `similarity` 43, `category` (empty), `startTime` (seven days back, 00:00:00), `endTime` (today, 23:59:59), and an empty `devices` element. | observed (client capture) |
+| The text goes to the NVR as plain text and the NVR does the matching: no `textFeature` vector and no `filterList` were sent, and nothing ran on the computer. A different phrase is only a different `textOfPicture`; the UI's "animal" type was not a request field. | observed (client capture) |
+| Each `eventLog` hit had exactly `channelID`, `bHasRecFile`, `bEncrypted`, `yoloWorldType`, `score`, `pts`, `offset`, `startTime`, `endTime`: no `uid`, `fileName`, `alarmType` or bounding box. `yoloWorldType` values seen: `animal`, `person`, `motor vehicle` (a different vocabulary from the 272 `alarmType` names). `score` ran from the request's `similarity` (43) upward to about 60, so `similarity` acts as the cut-off. | observed (client capture) |
+| One phrase returned hundreds of hits over 14 pages (plus an empty finishing page), sorted by time, mostly of types other than the one the phrase named: the search is a similarity ranking over all detected objects with a low threshold, not a class filter. | observed (client capture) |
+| `pts` is in the recording's frame-timestamp clock (microseconds); for the hit that was opened, `pts` lay a few seconds after the first keyframe of its play, and `offset` was 19 s. That `pts` and `offset` locate the best-matching frame inside the hit is an inference. | observed (client capture); meaning inferred |
+| A 517 request can be answered with status **442** and an empty body, 0.3 s after the request. It happened on the second page of two searches, for two particular phrases, while other phrases completed; both 516 requests had been answered 200 with a handle and page 1 had returned a few low-score hits. No timeout or other status appeared. After the 442 the client sent 518 (once, or twice in quick succession) and showed an error; its Retry button opened a fresh 516 with the previous successful phrase, not the failed one, and that search completed. What 442 means is unknown. | observed (client capture); meaning unknown |
+| A whole successful search, from the 516 to the 518, took about 17 s. | observed (client capture) |
 
 ### Playback
 
@@ -878,7 +925,7 @@ observed (client capture); the rest are reported (client) and did not appear.
 
 | Command | Use | Body | Provenance |
 | --- | --- | --- | --- |
-| 5 / 7 | play a recording file / stop | 5: `FileInfo` with `channelId`, `Id`, `uid`, `supportSub` (0), `playSpeed` (1), `streamType`; no `startTime` was sent. 7: `FileInfo` with `channelId`, `name`, `streamType` | observed |
+| 5 / 7 | play a recording file / stop | 5: `FileInfo` with `channelId`, `Id`, `uid`, `supportSub` (0, or 1 for a sub-stream), `playSpeed` (1, 2, 4, 8 or 16), `streamType`; no `startTime` was sent. 7: `FileInfo` with `channelId`, `name`, `streamType` | observed |
 | 123 | set the start position of the next play | `ReplaySeek` with `channelId`, `seq`, `seekTime` (a time block) | observed |
 | 298 | cover images for the timeline | `CoverPreview` with `channelId`, `uid`, `logicChnBitmap`, `desc` (0), `streamType`, `startTime`, `endTime`, `frameList/frameNo` (1) | observed (client capture) |
 | 382 | stop a play by time range | empty; sent once per NVR session just before the logout when the client quit | observed (client capture) |
@@ -907,9 +954,10 @@ observed (client capture); the rest are reported (client) and did not appear.
 5. The first keyframe's wall-clock seconds (video extra header) matched
    `seekTime` exactly in five plays and lay 1 s before it in two, with a GOP
    of about 1.1 s: play starts at the keyframe at or before `seekTime`.
-   (Measured later with nvrview on an NVR whose local time is not UTC, the
-   seconds read UTC while `seekTime` is local: see "Live view and plays on
-   one session" below. Which reading holds on which device is open.)
+   (Superseded: measured later, on devices whose local time is not UTC, the
+   seconds are UTC and the first keyframe is at or up to 1 s **after** the
+   seek time converted to UTC; see "Rates, keyframes, and how a play ends"
+   below. Why this early capture read differently is not explained.)
 6. Pacing: about 2 to 4.4 s of video arrived within the first 0.25 s, then
    roughly real time (about 1.1 s of video per second). Whether the device or
    TCP flow control set that pace was not determined.
@@ -922,14 +970,15 @@ allowlist, viewing tier: they position and stream a replay on our own
 session and stop it, and change nothing on the device (the observed
 client's playback used exactly these three). A play is the observed
 sequence: 123 with a `seq` and the start time, its empty status-200 reply,
-then 5 naming the file by `Id`, at `playSpeed` 1 only (the one value seen
-decrypted); 7 on every exit path, naming the file. `seq` numbers increase
+then 5 naming the file by `Id`, at `playSpeed` 1 for now (the client also
+sent 2, 4, 8 and 16, now observed, but nvrview does not send them yet); 7 on
+every exit path, naming the file. `seq` numbers increase
 from the current Unix time, as the client's did; 123's `channelId` is 0, as
 the client sent it. With no observation of how a play ends or is refused,
 `bc-session` takes an empty message as the end and a non-200 reply without
 the play's `seq` as a refusal; at most four plays run per device by default
 (four were observed on one session). Not sent: 150, 381–383 (not observed in
-use), and any other `playSpeed`.
+use), and any other `playSpeed` (so far).
 
 #### Speed, file boundaries, and concurrent plays
 
@@ -945,12 +994,32 @@ observed (client capture).
 | Fact | Provenance |
 | --- | --- |
 | **Changing speed is stop, seek, play**, the same three commands as scrubbing: every rate change (1×, 2×, 4×, 8×, 16× were exercised) was a 7, then a 123 with a new `seq` and `seekTime`, then a 5. No dedicated speed command, no keyframe-only command (150), and no play-by-time (381/383) appeared. The rate rides in the 5 body's `playSpeed`; the play request grew by one byte at two-digit speeds, consistent with that. | observed (client capture) |
-| **Faster rates deliver far less than N× the data.** Per play, the command-5 media delivered (D→C bytes over the play's wall time): 1× about 1.0 MB/s, 2× about 1.2, 4× about 2.5, 8× about 2.5, 16× about 3.0. The rate rises then plateaus at roughly 3× the 1× byte rate, not 16×, so the device serves a thinned (keyframe-biased) stream at higher speeds rather than every frame faster. Which frames are kept could not be read (records encrypted). | observed (client capture) |
+| **Faster rates deliver far less than N× the data.** Per play, the command-5 media delivered (D→C bytes over the play's wall time): 1× about 1.0 MB/s, 2× about 1.2, 4× about 2.5, 8× about 2.5, 16× about 3.0. The rate rises then plateaus at roughly 3× the 1× byte rate, not 16×, so the device serves a thinned (keyframe-biased) stream at higher speeds rather than every frame faster. Which frames are kept could not be read there (records encrypted); a later decrypted capture answered it (next subsection: keyframes only, a stride that keeps the media clock at the requested rate). | observed (client capture) |
 | **Each play starts with a burst, then paces.** A few MB arrived in the first ~0.5 s (about 3 MB at 1×, up to ~8 MB at 4×–8×), then media came in roughly 2 s chunks about 2 s apart — the same burst-then-pace shape as a single-speed play, at every rate. | observed (client capture) |
 | **A play crosses a recording-file boundary with no visible event.** One 1× play ran for about 180 s (one command-5 stream, one status-200 reply then only media) spanning a file boundary, with no stop/seek/replay from the client, no status change, no empty message, and no stall beyond the normal ~2 s pacing. So the device continues across files within a single play; the boundary is not marked on the wire. (The boundary time inside the stream could not be read.) | observed (client capture) |
 | **One session carried several plays at once.** Up to four simultaneous command-5 plays ran on the one session, each with its own message ID (two started together, and four within 40 ms), all answered status 200 with no refusal, demultiplexed by message ID like live streams. The synchronized multi-view plays were low bit rate (about 0.05 MB/s each, media every ~4 s) against about 1 MB/s for a single main-stream play, so the client plays the **sub-stream** for synchronized views. No concurrency limit was reached at four. | observed (client capture) |
 | **The client stops live view when the playback tab opens.** Live media (command 3) flowed only before playback began; once the playback tab was open, no command-3 media arrived on either NVR for the rest of the capture (the client sent a stop (4) for each live stream). So this capture shows concurrent *replay* streams but not live and replay media together; whether one session can carry both at once is still unmeasured (the download step was not exercised here). | observed (client capture) |
 | **No error status appeared.** Across the whole capture every seek (123) and play (5) was answered status 200 (the only non-200 statuses were the 300 that commands 146 and 199 use for large replies). A seek to a time with no recording produced no error reply; the client decides "no recording" from the search results (142/14–16/272–274) and does not start a play. How a play or seek reports an error is therefore still unknown. | observed (client capture) |
+
+#### Rates, keyframes, and how a play ends
+
+Observed (client capture), from a later capture of the official client that
+included the login, so every body and BCMEDIA record could be decrypted. One
+session, one NVR on recent firmware, one play at a time, a 4K main stream
+recorded at 25 frames per second with a 2.0 s GOP (one keyframe in 50 frames).
+
+| Fact | Provenance |
+| --- | --- |
+| `playSpeed` in the 5 body took exactly the values 1, 2, 4, 8 and 16 (decimal integers). Every rate change was 7, then 123 with a new `seq` and `seekTime`, then 5; no 150, 381 or 383. | observed (client capture) |
+| **At `playSpeed` 1 a play carries every video frame and the audio records. At 2 and above it carries video keyframes only and no audio records.** | observed (client capture) |
+| Which keyframes are kept: every keyframe at 2× and 4× (timestamps 2.0 s apart), every second one at 8× (4.0 s apart), every fourth at 16× (8.0 s apart). So the media clock (frame timestamps against wall time) advanced at the requested rate: 1.0, 2.0, 4.0, 8.0, 16.0 media seconds per wall second. | observed (client capture) |
+| The device delivered at most about two keyframes per wall second: 1 per second at 2×, 2 per second at 4×, 8× and 16×. A 4K keyframe was about 1 MB, so the data rate plateaued near 2 MB/s from 4× up (about 1 MB/s at 1× and 2×). | observed (client capture) |
+| Each play opened with a burst, then paced: about 4 s of video within the first second at 1× (6 s in two plays), and 4, 8, 10 and 9 keyframes at 2×, 4×, 8× and 16×; after that the arrival rate was constant, in groups about every 1 s (2× to 16×) or 2 s (1×). At 1× the delivery then stayed about 4 to 5 s ahead of real time for the whole play. The first picture arrived 0.2 to 0.45 s after the 5, in the same instant as its 200 reply. | observed (client capture) |
+| A sub-stream play at 1× on the same NVR had 60 ms frame spacing (16.7 frames per second), a GOP of 3.84 s, about 0.09 MB/s, and messages about every 4 s. | observed (client capture) |
+| **Keyframe seconds are UTC.** The wall-clock seconds in a keyframe's extra header are Unix epoch (UTC) in both live view and replay (a live keyframe's seconds equaled the packet's arrival time in UTC to within a second). `seekTime` and all search times are device local. In every play the first keyframe was at the seek time converted to UTC, or up to 1 s after it, on a device not on UTC; this reproduces nvrview's own probe measurement. The earlier capture's "equal to `seekTime`" reading is not reproduced. | observed (client capture) |
+| **No play was ended by the device.** All plays ended with the client's own 7 (empty reply, status 200). In each, the last device message was an ordinary media message: no empty message, no status 300 or 201, no other command. The client stopped when its playhead reached the end of the file list it had last loaded (a list ends at the time of its search, see command 15), though the device had data past that point and the recording kept growing. Re-searching, then playing from the old end, ran until the new list end. A play running to a real end of data was not observed, so what the device sends then is unknown. | observed (client capture); end-of-data unknown |
+| 5, 123 and 7 were answered status 200 every time. Other non-200 statuses in that capture were 400 on 44 and 318 and a few others for channels without a feature (empty body), 300 for large replies of 146 and 199, 442 on one 517 (see above) and 201 ending each 653. No 143, 144, 106, 38 or live view occurred after the playback tab opened. | observed (client capture) |
+| Unsolicited messages on the event subscription's message ID besides 33: 600 `yoloWorldEventList` with a `range` (`start`, `end`, 0 to 23; probably the supported hit-type slots), and once at login 145, 291, 623, 677, 723 and 727 (not decoded further). | observed (client capture) |
 
 #### Live view and plays on one session
 
@@ -1173,15 +1242,22 @@ port as `N`). Nothing else was sent.
   media had `encryptLen` 0 when the official client's did not; the playback
   commands 381 and 383 (unused by the client so far) and why it sends 382 at
   quit; how a 143 error (bad stream name, no disk) is reported. A play across a
-  file boundary is now observed to continue with no wire event, and a play at
-  2×–16× is served by stop/seek/play with `playSpeed` (not 150 or 381/383);
-  still open at the frame level (needs a decryptable capture): which frames a
-  fast rate keeps (keyframe-only?), the frames-per-second and keyframe ratio
-  per rate, the `playSpeed` values the client sends, and how a play (5) *ends*
-  at the end of the last file.
-- Time settings: the field layout of the 104, 106 and 38 replies (time-zone
-  format, DST rule, NTP server and offset); the reads are observed, the
-  bodies not yet decrypted.
+  file boundary is observed to continue with no wire event, and rates
+  2×–16× are served by stop/seek/play with `playSpeed` 2, 4, 8, 16 (keyframes
+  only, no audio; settled, see "Rates, keyframes, and how a play ends").
+  Still open: how a play (5) *ends* when it reaches the true end of the
+  recorded data (the official client always stopped it first, so no device
+  end message has been seen), and what the device does when asked to play
+  past the end of the last file.
+- Time settings: the 104 reply is now known (`timeZone` in seconds west of
+  UTC for standard time, `isDst`, local date and time). Still open: the
+  layouts of 106 (DST rule) and 38 (NTP server and offset), which the newer
+  client's Date & Time screen did not read; whether `timeZone` and `isDst`
+  describe every device the same way (checked on one).
+- Time bases: whether keyframe seconds are UTC on every device and firmware
+  (observed UTC on the devices measured, including a recent-firmware NVR in
+  the official client's capture); why the very first capture read as equal to
+  `seekTime`; what the recording `Id` suffix after the packed time means.
 - Detection events: 192 → 33 and the type names `people` and `dog_cat` are
   observed. Still open: whether a device pushes 33 without 192; how
   `vehicle`, `face`, `package`, a doorbell press (`visitor`) and two types
@@ -1190,12 +1266,15 @@ port as `N`). Nothing else was sent.
   through an NVR, may differ); the layout of the in-stream detection data
   (boxes) in video extra headers; what non-empty 600 lists hold; and the
   meaning of `aitype` bits not named above.
-- Event log and AI search (516–519, 759, 653): not yet seen on the wire.
-  Open: whether the NVRs observed so far accept them (only the newer one advertises
-  `eventLogVersion`), the page size and how long a page takes, whether
-  hits include the NVR's own detections for cameras without AI, the cover
-  image format, and the wire command behind the client's "set text
-  feature" step.
+- Event log and AI search (516–518, 653): seen on the wire on a recent NVR
+  (see "What the AI search sent on the wire"); the text goes to the NVR as
+  `textOfPicture`, so no "set text feature" command was needed there. Still
+  open: why a 517 page is sometimes answered status 442 with an empty body
+  (the phrase may matter; the meaning is unknown); whether older NVR
+  firmware accepts these commands or needs the feature-vector path; what 519
+  and 759 return (never sent by that client); the exact meaning of `pts`
+  and `offset`; and whether hits include the NVR's own detections for
+  cameras without AI.
 - How many sessions an NVR accepts. Its HTTP API refused new connections
   after six logins without logout (observed); the limit for port 9000
   sessions is not measured.
