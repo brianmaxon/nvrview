@@ -1144,16 +1144,24 @@ impl Inner {
                                 matches!(c.state, CameraState::Queued | CameraState::Running);
                             let device_ready =
                                 ready.get(&c.camera.device).copied().unwrap_or(false);
+                            let waiting_device = active && (!device_ready || live.waiting);
                             CameraProgress {
                                 camera: c.camera.clone(),
                                 name: c.name.clone(),
                                 chunks_done: c.chunks.iter().filter(|x| x.done).count(),
                                 chunks_total: c.chunks.len(),
                                 bytes,
-                                bytes_estimate: live.estimate.map(|e| bytes + e),
+                                // A camera waiting for its device transfers
+                                // nothing: its estimate is cleared in the same
+                                // update that says so, not in a second one when
+                                // the worker notices.
+                                bytes_estimate: live
+                                    .estimate
+                                    .filter(|_| !waiting_device)
+                                    .map(|e| bytes + e),
                                 state: c.state.clone(),
                                 paused: c.paused,
-                                waiting_device: active && (!device_ready || live.waiting),
+                                waiting_device,
                                 working: live.running,
                                 first_picture_wall_ms: c.first_picture_wall_ms,
                                 output: j.folder.join(&c.file),
