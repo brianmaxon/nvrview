@@ -159,19 +159,41 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     /// <summary>The zoom last reported to the tier planner (Auto switches to the main stream past 2x).</summary>
     public float DemandZoom { get; set; } = 1;
 
-    // Digital zoom: written by the UI thread, read by the render thread.
-    // Zoom 1..8; the center in visible-picture coordinates 0..1, so it is
-    // the same region whatever the stream's resolution.
+    // Digital zoom (NvrView.Tiles TileZoom): written by the UI thread, read
+    // by the render thread. Zoom 1..8; the center is the picture point at
+    // the tile's center, 0..1 of the picture, so it is the same region
+    // whatever the stream's resolution.
     public volatile float Zoom = 1;
     public volatile float CenterX = 0.5f;
     public volatile float CenterY = 0.5f;
 
+    /// <summary>The digital zoom as one value (UI thread).</summary>
+    public TileZoom DigitalZoom
+    {
+        get => new(Zoom, CenterX, CenterY);
+        set
+        {
+            CenterX = (float)value.CenterX;
+            CenterY = (float)value.CenterY;
+            Zoom = (float)value.Scale;
+        }
+    }
+
+    /// <summary>How the picture sits in the tile's area at 1x (from what the render thread published).</summary>
+    public ZoomBase ZoomBase => ZoomBase.Of(PictureWidth, PictureHeight, ViewWidth, ViewHeight);
+
     // Written by the render thread each frame, read by the UI thread: where
-    // the tile is drawn, in panel units (DIPs), and its picture size.
+    // the picture is drawn at 1x (the chrome sits on it), in panel units
+    // (DIPs); the tile's whole area, which a zoomed picture grows into; and
+    // the picture's size.
     public volatile float X;
     public volatile float Y;
     public volatile float Width;
     public volatile float Height;
+    public volatile float ViewX;
+    public volatile float ViewY;
+    public volatile float ViewWidth;
+    public volatile float ViewHeight;
     public volatile bool Visible;
     public volatile int PictureWidth;
     public volatile int PictureHeight;

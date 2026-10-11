@@ -636,9 +636,14 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   tier"). Leaving focus asks for the sub stream at once and animates back.
   Each tile's rectangle (in DIPs) is published for the chrome and hit
   testing, so the overlays follow the picture exactly.
-- **Digital zoom** changes only the source rectangle: a zoom factor (1 to 8)
-  and a center in visible-picture coordinates (0 to 1), so the same region
-  stays in view when the tier switch changes the resolution.
+- **Digital zoom** (`TileZoom` in NvrView.Tiles, the same geometry as the
+  macOS app): a zoom factor (1 to 8) and a center in picture coordinates
+  (0 to 1), so the same region stays in view when the tier switch changes
+  the resolution. Zoomed, the picture grows over the tile's bars until it
+  fills the tile (or the focused stage), then crops; the renderer draws the
+  zoomed picture intersected with the tile and samples the matching part
+  of the picture. The tile's whole area is published beside its 1x picture
+  rectangle, for zooming around the pointer and panning.
 - **Device loss.** A `Present` or `ResizeBuffers` that reports
   `DXGI_ERROR_DEVICE_REMOVED` or `_RESET` (or a call that fails while
   `GetDeviceRemovedReason` reports a removal) releases the swap chain and

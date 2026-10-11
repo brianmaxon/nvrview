@@ -13,9 +13,10 @@
 // - Layout: the window's split tree, laid out by the UI thread into cells
 //   (DIPs) whenever it or the size changes (StageLayout); here each picture
 //   is fitted into its cell, the focused tile's rectangle animated between
-//   its cell and the whole stage, and digital zoom applied as a smaller
-//   source rectangle. Each tile's rectangle (DIPs) is published on its
-//   StageTile for the chrome and hit testing.
+//   its cell and the whole stage, and digital zoom applied (the picture
+//   grows over its bars until it fills the tile, then crops: TileZoom).
+//   Each tile's picture rectangle at 1x and its whole area (DIPs) are
+//   published on its StageTile for the chrome, hit testing and zooming.
 // - Device loss: a Present that reports the device removed or reset (or a
 //   simulated loss in the self-test) releases the swap chain and renderer,
 //   has CoreHost replace the device once (other windows' render threads see
@@ -446,13 +447,16 @@ internal sealed unsafe class StageRenderer : IDisposable
             // A dewarped view fills its whole cell (the views are laid out for its shape).
             FisheyeChoice? fisheye = pw > 0 && t.Fisheye is { } f && f.Mode.Dewarps() ? f : null;
             Rect dest = fisheye is null ? LayoutGeometry.Fit(pw, ph, cell) : cell;
+            // The tile's area: a zoomed picture grows over its bars.
+            Rect view = cell;
             if (k == focused)
             {
                 Rect stage = new(0, 0, dipW, dipH);
                 dest = Rect.Lerp(dest, fisheye is null ? LayoutGeometry.Fit(pw, ph, stage) : stage, progress);
+                view = Rect.Lerp(cell, stage, progress);
             }
             bool hidden = focused >= 0 && k != focused && progress >= 1;
-            Draw(ref _draws[n], t, dest, pw, ph, hidden, bx, by);
+            Draw(ref _draws[n], t, dest, fisheye is null ? view : null, pw, ph, hidden, bx, by);
             _draws[n].Dewarp = false;
             if (fisheye is not null && !hidden)
             {
@@ -474,7 +478,7 @@ internal sealed unsafe class StageRenderer : IDisposable
             int pw = p is { HasPicture: true } ? (int)p.PictureSize.Width : 0, ph = p is { HasPicture: true } ? (int)p.PictureSize.Height : 0;
             t.PictureWidth = pw;
             t.PictureHeight = ph;
-            Draw(ref _draws[n], t, LayoutGeometry.Fit(pw, ph, o.Rect), pw, ph, false, bx, by);
+            Draw(ref _draws[n], t, LayoutGeometry.Fit(pw, ph, o.Rect), null, pw, ph, false, bx, by);
             _draws[n].Dewarp = false;
             n++;
         }
@@ -518,26 +522,44 @@ internal sealed unsafe class StageRenderer : IDisposable
         d.DewarpRows = t.DewarpRows;
     }
 
-    private static void Draw(ref TileDraw d, StageTile t, Rect dest, int pw, int ph, bool hidden, float bx, float by)
+    // dest: the picture at 1x (DIPs). view: the tile's area when it has a
+    // digital zoom (not a dewarped view or a call card's picture).
+    private static void Draw(ref TileDraw d, StageTile t, Rect dest, Rect? view, int pw, int ph, bool hidden, float bx, float by)
     {
         d.Tile = hidden ? null : t.Video;
         d.Tag = t;
-        d.DestX = (float)dest.X * bx;
-        d.DestY = (float)dest.Y * by;
-        d.DestWidth = (float)dest.Width * bx;
-        d.DestHeight = (float)dest.Height * by;
-        // Digital zoom: a smaller source around the tile's center, kept inside the picture.
-        float zoom = Math.Clamp(t.Zoom, 1, 8);
-        float sw = pw / zoom, sh = ph / zoom;
-        float cx = t.CenterX * pw, cy = t.CenterY * ph;
-        d.SrcWidth = sw;
-        d.SrcHeight = sh;
-        d.SrcX = zoom > 1 ? Math.Clamp(cx - sw / 2, 0, pw - sw) : 0;
-        d.SrcY = zoom > 1 ? Math.Clamp(cy - sh / 2, 0, ph - sh) : 0;
+        Rect drawn = dest;
+        d.SrcX = 0;
+        d.SrcY = 0;
+        d.SrcWidth = pw;
+        d.SrcHeight = ph;
+        // Digital zoom (NvrView.Tiles TileZoom): the picture grows over the
+        // bars until it fills the tile, then crops; the source is the part
+        // of the picture under the destination.
+        TileZoom zoom = t.DigitalZoom;
+        if (view is { } v && zoom.IsZoomed && pw > 0 && ph > 0)
+        {
+            ZoomBase b = ZoomBase.Of(pw, ph, v.Width, v.Height);
+            UnitRect u = zoom.Destination(b), s = zoom.Visible(b);
+            drawn = new Rect(v.X + u.X * v.Width, v.Y + u.Y * v.Height, u.Width * v.Width, u.Height * v.Height);
+            d.SrcX = (float)(s.X * pw);
+            d.SrcY = (float)(s.Y * ph);
+            d.SrcWidth = (float)(s.Width * pw);
+            d.SrcHeight = (float)(s.Height * ph);
+        }
+        d.DestX = (float)drawn.X * bx;
+        d.DestY = (float)drawn.Y * by;
+        d.DestWidth = (float)drawn.Width * bx;
+        d.DestHeight = (float)drawn.Height * by;
         t.X = (float)dest.X;
         t.Y = (float)dest.Y;
         t.Width = (float)dest.Width;
         t.Height = (float)dest.Height;
+        Rect area = view ?? dest;
+        t.ViewX = (float)area.X;
+        t.ViewY = (float)area.Y;
+        t.ViewWidth = (float)area.Width;
+        t.ViewHeight = (float)area.Height;
         t.Visible = !hidden;
     }
 
