@@ -21,9 +21,10 @@
 /**
  * Bumped for each addition that leaves every existing declaration
  * unchanged (new functions, events, status codes); resets to 0 with a new
- * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates.
+ * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
+ * nv_tile_retry. Minor 4: nv_talk_set_conversation.
  */
-#define NV_ABI_MINOR 3
+#define NV_ABI_MINOR 4
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -544,12 +545,30 @@ enum NvStatus nv_talk_push(struct NvCore *core,
 
 /**
  * Ends a tile's talk: at once, or with `drain` after the audio already
- * pushed has been sent. The device's close is sent either way.
+ * pushed has been sent and then 1.5 s of silence (the device plays about
+ * a second behind and drops what it has not played at the close); audio
+ * pushed before the close continues the same talk. The device's close is
+ * sent either way.
  *
  * # Safety
  * `core` is a live handle.
  */
 enum NvStatus nv_talk_stop(struct NvCore *core, uint64_t tile, bool drain);
+
+/**
+ * Marks a tile's camera as in a conversation the user has open in the app
+ * (a doorbell call, from a ring or Start Conversation), or no longer
+ * (`open` false, when the call ends). While marked, talk-back starts on
+ * that camera are not limited per minute (outside a conversation: 20 per
+ * camera per minute); they still need nv_talk_set_permission and are
+ * logged. The mark also ends when the tile closes, when the camera's
+ * permission is withdrawn, and when the core is freed. NV_ERR_UNKNOWN_ID
+ * for an unknown tile. Added in minor 4.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_talk_set_conversation(struct NvCore *core, uint64_t tile, bool open);
 
 /**
  * The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,

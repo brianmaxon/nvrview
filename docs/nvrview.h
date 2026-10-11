@@ -22,8 +22,8 @@ extern "C" {
 /* Bumped for each addition that leaves every existing declaration unchanged
  * (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
- * nv_tile_retry. */
-#define NV_ABI_MINOR 3
+ * nv_tile_retry. Minor 4: nv_talk_set_conversation. */
+#define NV_ABI_MINOR 4
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -315,8 +315,18 @@ NvStatus nv_talk_start(NvCore *core, uint64_t tile);
 NvStatus nv_talk_push(NvCore *core, uint64_t tile, const float *samples, size_t count,
                       uint32_t sample_rate);
 
-/* Ends a tile's talk at once, or (drain) after the audio already pushed. */
+/* Ends a tile's talk at once, or (drain) after the audio already pushed and
+ * 1.5 s of silence (the device drops what it has not played at the close);
+ * audio pushed before the close continues the same talk. */
 NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
+
+/* Marks a tile's camera as in a conversation the user has open in the app
+ * (a doorbell call), or no longer. While marked, talk-back starts on it are
+ * not limited per minute (otherwise 20 per camera per minute); they still
+ * need the permission and are logged. The mark also ends when the tile
+ * closes, the permission is withdrawn, or the core is freed. Added in
+ * minor 4. */
+NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open);
 
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back
  * UTF-8 and NUL-terminated in `out`; *len receives the length without the

@@ -37,6 +37,9 @@ final class DoorbellCalls {
         /// refusal from the core can be answered by the same prompt.
         var lastAction: TalkPermission.Action?
         var lastReply: [Float]?
+        /// The doorbell tile the core was told is in this conversation (its
+        /// talk starts skip the per-minute limit while the call is open).
+        var conversationTile: CoreTile?
 
         init(call: DoorbellCall) { self.call = call }
     }
@@ -156,9 +159,35 @@ final class DoorbellCalls {
         tileChanged(camera)
     }
 
-    /// The doorbell's tile opened or closed: its tap follows.
+    /// Tells the core the call is open on the doorbell's current tile, so
+    /// its talk starts are not limited per minute (the core clears the mark
+    /// when the tile closes or the permission is withdrawn; marking again is
+    /// harmless).
+    private func markConversation(_ s: Session) {
+        let tile = model.leases.tile(for: s.call.camera)
+        if let old = s.conversationTile, old !== tile {
+            try? model.bridge.setTalkConversation(old, open: false)
+            s.conversationTile = nil
+        }
+        guard let tile else { return }
+        if (try? model.bridge.setTalkConversation(tile, open: true)) != nil { s.conversationTile = tile }
+    }
+
+    /// The call ended: its tile is no longer in a conversation.
+    private func unmarkConversation(_ s: Session) {
+        guard let tile = s.conversationTile else { return }
+        s.conversationTile = nil
+        try? model.bridge.setTalkConversation(tile, open: false)
+    }
+
+    /// The doorbell tile the core was told is in a conversation (self-test).
+    func conversationTile(_ camera: CameraRef) -> CoreTile? { sessions[camera.firstLens]?.conversationTile }
+
+    /// The doorbell's tile opened or closed: its tap and the conversation
+    /// mark follow.
     func tileChanged(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens] else { return }
+        markConversation(s)
         let tile = model.leases.tile(for: camera.firstLens)
         if let old = s.tapped, old !== tile {
             taps.remove(old.id)
@@ -207,7 +236,11 @@ final class DoorbellCalls {
 
     private func transcribed(_ camera: CameraRef, _ source: TranscriptSource, _ text: String, final: Bool) {
         guard let s = sessions[camera] else { return }
-        if final { s.call.transcript.final(text, source: source) } else { s.call.transcript.partial(text, source: source) }
+        if final {
+            s.call.transcript.final(text, source: source, at: Date())
+        } else {
+            s.call.transcript.partial(text, source: source)
+        }
         // Speech is activity: the call stays open.
         s.call.activity(now: model.clock.now)
         model.changed()
@@ -303,8 +336,11 @@ final class DoorbellCalls {
         s.you?.finish()
         s.you = nil
         s.call.activity(now: model.clock.now)
+        // Drains: what the microphone pushed goes out, then the core's
+        // silent tail, so the doorbell plays the last words before the talk
+        // closes (talking again meanwhile continues the same talk).
         if s.pendingReply == nil, let tile = model.leases.tile(for: s.call.camera) {
-            try? model.bridge.stopTalk(tile, drain: false)
+            try? model.bridge.stopTalk(tile, drain: true)
         }
         s.call.talk.stopRequested()
         model.changed()
@@ -320,6 +356,9 @@ final class DoorbellCalls {
             return false
         }
         guard s.call.talk.requestStart() else { return true }
+        // Again before each start: withdrawing and allowing the permission
+        // during the call cleared the core's mark.
+        markConversation(s)
         do throws(CoreStatus) {
             try model.bridge.startTalk(tile)
             s.call.talk.startSent()
@@ -480,6 +519,7 @@ final class DoorbellCalls {
         if let tile = model.leases.tile(for: s.call.camera), s.call.talk.isTalking || s.pendingReply != nil {
             try? model.bridge.stopTalk(tile, drain: false)
         }
+        unmarkConversation(s)
         if let tapped = s.tapped {
             taps.remove(tapped.id)
             try? model.bridge.setTileAudioTap(tapped, enabled: false)
@@ -491,8 +531,19 @@ final class DoorbellCalls {
             model.setAudible(s.call.mutedForCall)
         }
         model.leases.release(s.call.camera)
-        let text = s.call.logText(endedAt: Date(), saveTranscript: model.saveCallTranscripts)
+        let endedAt = Date()
+        let text = s.call.logText(endedAt: endedAt, saveTranscript: model.saveCallTranscripts)
         model.logEvent(text + " (\(reason))", transcriptFollows: model.saveCallTranscripts && !s.call.transcript.finals.isEmpty)
+        // And as a text file of its own (nothing when nothing was transcribed).
+        if model.saveCallTranscripts,
+            let file = s.call.transcriptFile(cameraName: model.name(of: s.call.camera), endedAt: endedAt)
+        {
+            if let url = model.transcripts.save(name: file.name, text: file.text) {
+                model.logEvent("Transcript saved: \(url.lastPathComponent)")
+            } else {
+                model.logEvent("Transcript not saved: the Transcripts folder could not be written")
+            }
+        }
         model.changed()
     }
 

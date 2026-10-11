@@ -9,6 +9,12 @@
 //! (11) on every exit path. Audio the caller pushes faster than real time
 //! is buffered up to a fixed limit and then dropped, never queued without
 //! bound.
+//!
+//! A talk that finishes ([`Talk::finish`]) stays open after its last audio
+//! for [`crate::SessionConfig::talk_tail`], sending silence at the same
+//! pace, because the device plays about a second behind and drops what it
+//! has not played when the talk closes. Audio pushed meanwhile continues
+//! the same talk. Every other ending closes at once.
 
 use crate::supervisor::{DeviceSession, QueryError, Request};
 use bc_protocol::session::{Command, Session, SessionError};
@@ -51,7 +57,8 @@ pub enum TalkState {
 pub enum StopReason {
     /// [`Talk::stop`].
     Stopped,
-    /// [`Talk::finish`], after the buffered audio was sent.
+    /// [`Talk::finish`], after the buffered audio and the silent tail
+    /// were sent.
     Finished,
     /// The [`Talk`] was dropped.
     Dropped,
@@ -167,6 +174,9 @@ pub struct TalkStats {
     pub samples_dropped: u64,
     /// Times the send clock fell too far behind and restarted from now.
     pub clock_restarts: u64,
+    /// Silent records sent after the last audio of a finishing talk
+    /// (included in `records_sent`).
+    pub tail_records: u64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -201,6 +211,7 @@ pub(crate) struct TalkShared {
     samples_accepted: AtomicU64,
     samples_dropped: AtomicU64,
     clock_restarts: AtomicU64,
+    tail_records: AtomicU64,
     wake: Arc<crate::Shared>,
 }
 
@@ -253,17 +264,22 @@ impl Talk {
 
     /// Queues 16 kHz mono samples to send. Returns how many were accepted:
     /// beyond the buffer's capacity ([`crate::SessionConfig::talk_buffer`])
-    /// the rest are dropped and counted. Nothing is accepted once the talk
-    /// is ending or over. Never blocks on the network.
+    /// the rest are dropped and counted. Pushing to a finishing talk (its
+    /// audio or its silent tail still going out) takes back the
+    /// [`Talk::finish`]: the same talk continues. Nothing is accepted once
+    /// the talk is stopping or over. Never blocks on the network.
     pub fn push(&self, samples: &[i16]) -> usize {
         let mut b = lock(&self.shared.buf);
-        if b.ending != Ending::None
+        if matches!(b.ending, Ending::Now(_))
             || matches!(
                 self.shared.state(),
                 TalkState::Stopped(_) | TalkState::Refused(_)
             )
         {
             return 0;
+        }
+        if b.ending == Ending::Finish && !samples.is_empty() {
+            b.ending = Ending::None;
         }
         let room = self.shared.capacity.saturating_sub(b.samples.len());
         let n = samples.len().min(room);
@@ -300,6 +316,7 @@ impl Talk {
             samples_accepted: s.samples_accepted.load(Ordering::Relaxed),
             samples_dropped: s.samples_dropped.load(Ordering::Relaxed),
             clock_restarts: s.clock_restarts.load(Ordering::Relaxed),
+            tail_records: s.tail_records.load(Ordering::Relaxed),
         }
     }
 
@@ -309,7 +326,9 @@ impl Talk {
     }
 
     /// Ends the talk after the buffered audio has been sent (the last
-    /// partial record padded with silence).
+    /// partial record padded with silence) and then the silent tail
+    /// ([`crate::SessionConfig::talk_tail`]). A later [`Talk::push`] before
+    /// the close continues the talk.
     pub fn finish(&self) {
         let mut b = lock(&self.shared.buf);
         if b.ending == Ending::None {
@@ -372,9 +391,13 @@ impl fmt::Debug for Talk {
 }
 
 /// Per-device talk-back control shared by the handle and the supervisor:
-/// the channels the caller allowed, and the start rate limit.
+/// the channels the caller allowed, the channels in a conversation, and
+/// the start rate limit.
 pub(crate) struct TalkControl {
     allowed: Mutex<HashSet<u8>>,
+    /// Channels whose talk the caller marked as part of an open
+    /// conversation: their starts skip the rate limit.
+    conversations: Mutex<HashSet<u8>>,
     starts: Mutex<HashMap<u8, VecDeque<Instant>>>,
     refusal_log: Mutex<Option<Instant>>,
 }
@@ -383,6 +406,7 @@ impl TalkControl {
     pub(crate) fn new() -> TalkControl {
         TalkControl {
             allowed: Mutex::new(HashSet::new()),
+            conversations: Mutex::new(HashSet::new()),
             starts: Mutex::new(HashMap::new()),
             refusal_log: Mutex::new(None),
         }
@@ -393,8 +417,23 @@ impl TalkControl {
         if allowed {
             a.insert(channel)
         } else {
+            // Withdrawing the permission ends the conversation's exemption.
+            lock(&self.conversations).remove(&channel);
             a.remove(&channel)
         }
+    }
+
+    pub(crate) fn set_conversation(&self, channel: u8, open: bool) -> bool {
+        let mut c = lock(&self.conversations);
+        if open {
+            c.insert(channel)
+        } else {
+            c.remove(&channel)
+        }
+    }
+
+    pub(crate) fn in_conversation(&self, channel: u8) -> bool {
+        lock(&self.conversations).contains(&channel)
     }
 
     pub(crate) fn is_allowed(&self, channel: u8) -> bool {
@@ -406,8 +445,12 @@ impl TalkControl {
     }
 
     /// Counts a start against the channel's limit of `per_minute`, or says
-    /// how long until one is allowed.
-    pub(crate) fn take_start(&self, channel: u8, per_minute: u32) -> Result<(), Duration> {
+    /// how long until one is allowed. A channel in a conversation is not
+    /// limited, and its starts are not counted (`Ok(true)`).
+    pub(crate) fn take_start(&self, channel: u8, per_minute: u32) -> Result<bool, Duration> {
+        if self.in_conversation(channel) {
+            return Ok(true);
+        }
         let now = Instant::now();
         let window = Duration::from_secs(60);
         let mut s = lock(&self.starts);
@@ -420,7 +463,7 @@ impl TalkControl {
             return Err(window.saturating_sub(now.duration_since(oldest)));
         }
         q.push_back(now);
-        Ok(())
+        Ok(false)
     }
 
     /// Logs a refusal, at most one line every few seconds.
@@ -441,6 +484,7 @@ pub(crate) struct TalkLimits {
     pub(crate) max_duration: Duration,
     pub(crate) catch_up: Duration,
     pub(crate) reply_timeout: Duration,
+    pub(crate) tail: Duration,
 }
 
 /// A new talk on its way to the supervisor.
@@ -471,6 +515,7 @@ pub(crate) fn new_talk(
         samples_accepted: AtomicU64::new(0),
         samples_dropped: AtomicU64::new(0),
         clock_restarts: AtomicU64::new(0),
+        tail_records: AtomicU64::new(0),
         wake,
     });
     (
@@ -502,6 +547,11 @@ struct Entry {
     refused: Option<u16>,
     /// A finishing talk sent its last record at this time.
     drained: Option<Instant>,
+    /// When the last record carrying pushed audio went out.
+    last_audio: Option<Instant>,
+    /// A finishing talk's silent records still to send, once its audio
+    /// is out; `None` until then (and again when a push continues it).
+    tail_left: Option<u32>,
 }
 
 /// The supervisor's talks.
@@ -588,6 +638,8 @@ impl Talks {
                             opened: now,
                             refused: None,
                             drained: None,
+                            last_audio: None,
+                            tail_left: None,
                         },
                     );
                 }
@@ -642,7 +694,11 @@ impl Talks {
                                 (acked || now.duration_since(since) >= DRAIN_WAIT)
                                     .then_some(StopReason::Finished)
                             }
-                            Ok(false) => None,
+                            Ok(false) => {
+                                // A push continued the talk.
+                                e.drained = None;
+                                None
+                            }
                             Err(err) => {
                                 debug!(%err, "talk audio not built");
                                 Some(StopReason::PermissionRevoked)
@@ -666,6 +722,7 @@ impl Talks {
             channel = e.shared.channel,
             reason = reason.name(),
             records = st,
+            tail_records = e.shared.tail_records.load(Ordering::Relaxed),
             ms = e.opened.elapsed().as_millis() as u64,
             "talk-back stopped"
         );
@@ -698,7 +755,7 @@ impl Talks {
     }
 
     /// Sends the records that are due. True when a finishing talk has sent
-    /// everything.
+    /// everything, its silent tail included.
     fn send_due(
         e: &mut Entry,
         session: &mut Session,
@@ -709,8 +766,28 @@ impl Talks {
         loop {
             let mut b = lock(&e.shared.buf);
             let finishing = b.ending == Ending::Finish;
-            if b.samples.is_empty() && finishing {
-                return Ok(true);
+            if !finishing || !b.samples.is_empty() {
+                // Audio to send (a push continued the talk): any tail
+                // starts again after it.
+                e.tail_left = None;
+            }
+            let silent = finishing && b.samples.is_empty();
+            if silent {
+                let left = *e.tail_left.get_or_insert_with(|| {
+                    // Silence until `tail` after the last audio went out
+                    // (none when no audio was ever sent).
+                    let since = e.last_audio.map(|t| now.saturating_duration_since(t));
+                    match since {
+                        Some(since) if since < limits.tail => {
+                            let rest = limits.tail - since;
+                            rest.as_micros().div_ceil(RECORD.as_micros()) as u32
+                        }
+                        _ => 0,
+                    }
+                });
+                if left == 0 {
+                    return Ok(true);
+                }
             }
             if b.samples.len() < SAMPLES_PER_RECORD && !finishing {
                 // Ran dry: the next record starts the clock again.
@@ -742,6 +819,14 @@ impl Talks {
             let payload = e.encoder.encode_record(&block);
             out.push(session.talk_audio(e.shared.channel, &payload)?);
             e.shared.records_sent.fetch_add(1, Ordering::Relaxed);
+            if silent {
+                e.shared.tail_records.fetch_add(1, Ordering::Relaxed);
+                if let Some(left) = e.tail_left.as_mut() {
+                    *left -= 1;
+                }
+            } else {
+                e.last_audio = Some(now);
+            }
             e.next_due = Some(due + RECORD);
         }
     }
@@ -757,8 +842,10 @@ impl Talks {
                     take(e.opened + self.limits.max_duration);
                     let b = lock(&e.shared.buf);
                     take(b.last_push + self.limits.idle_timeout);
+                    // A finishing talk has its rest of audio or its silent
+                    // tail to send until it has drained.
                     let ready = b.samples.len() >= SAMPLES_PER_RECORD
-                        || (b.ending == Ending::Finish && !b.samples.is_empty());
+                        || (b.ending == Ending::Finish && e.drained.is_none());
                     if ready {
                         take(e.next_due.unwrap_or_else(Instant::now));
                     }
@@ -893,10 +980,28 @@ impl DeviceSession {
         self.talk_control.is_allowed(channel)
     }
 
+    /// Marks `channel`'s talk-back as part of a conversation the user has
+    /// open (a doorbell call in the app), or no longer. While marked, talk
+    /// starts on it skip [`crate::SessionConfig::talk_starts_per_minute`]
+    /// (and do not count against it later); they still need the permission
+    /// and are logged. Withdrawing the permission clears the mark.
+    pub fn set_talk_conversation(&self, channel: u8, open: bool) {
+        if self.talk_control.set_conversation(channel, open) {
+            info!(channel, open, "talk-back conversation changed");
+        }
+    }
+
+    /// Whether `channel` is marked as in a conversation.
+    pub fn talk_conversation(&self, channel: u8) -> bool {
+        self.talk_control.in_conversation(channel)
+    }
+
     /// Starts talk-back on `channel` and returns once the device has
     /// accepted it. Refused without the channel's permission
     /// ([`DeviceSession::set_motion_allowed`]), beyond
-    /// [`crate::SessionConfig::talk_starts_per_minute`], on a channel whose
+    /// [`crate::SessionConfig::talk_starts_per_minute`] (unless the channel
+    /// is in a conversation, [`DeviceSession::set_talk_conversation`]), on
+    /// a channel whose
     /// capabilities (199) lack `ipcAudioTalk` 1 or whose ability (10)
     /// offers no supported configuration, while another talk runs on the
     /// channel, or when the device refuses. Runs on the session's one
@@ -912,12 +1017,13 @@ impl DeviceSession {
         if !self.talk_control.is_allowed(channel) {
             return refuse(Refusal::NotPermitted);
         }
-        if let Err(retry_after) = self
+        let conversation = match self
             .talk_control
             .take_start(channel, self.talk_starts_per_minute)
         {
-            return refuse(Refusal::RateLimited { retry_after });
-        }
+            Ok(c) => c,
+            Err(retry_after) => return refuse(Refusal::RateLimited { retry_after }),
+        };
         let support = match self.query(Command::Support, None).await {
             Ok(r) => r,
             Err(e) => return refuse(query_refusal(e)),
@@ -940,7 +1046,7 @@ impl DeviceSession {
             Ok(None) => return refuse(Refusal::UnsupportedAbility),
             Err(_) => return refuse(Refusal::QueryFailed),
         };
-        info!(channel, "talk-back starting");
+        info!(channel, conversation, "talk-back starting");
         let (mut talk, req) = new_talk(channel, config, self.talk_buffer, self.shared.clone());
         if self.cmd_tx.send(Request::Talk(req)).await.is_err() {
             return refuse(Refusal::SessionClosed);

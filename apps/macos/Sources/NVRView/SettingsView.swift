@@ -392,11 +392,15 @@ struct AlertSettingsView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                Toggle(
-                    "Save call transcripts in the event log",
-                    isOn: Binding(get: { model.saveCallTranscripts }, set: { model.saveCallTranscripts = $0 }))
+                HStack {
+                    Toggle(
+                        "Save call transcripts",
+                        isOn: Binding(get: { model.saveCallTranscripts }, set: { model.saveCallTranscripts = $0 }))
+                    Spacer()
+                    Button("Open Transcripts Folder") { model.transcripts.openFolder() }
+                }
                 Text(
-                    "Calls are transcribed on this Mac while they last. With saving off (the default), the transcript is gone when the call ends. Recording a conversation may need the other person's consent where you live."
+                    "Calls are transcribed on this Mac while they last. With saving on, each call's transcript goes into the event log and into a text file in the Transcripts folder (the newest 500 files, at most 50 MB in all, are kept). With saving off (the default), the transcript is gone when the call ends. Recording a conversation may need the other person's consent where you live."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

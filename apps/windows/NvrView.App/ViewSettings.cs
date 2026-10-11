@@ -31,6 +31,9 @@ internal sealed class ViewSettingsFile
 
     /// <summary>Cameras the user allowed talk-back to ("deviceKey:channel"); camera motion control, off unless listed.</summary>
     public List<string>? TalkAllowed { get; set; }
+
+    /// <summary>Call transcripts go into the log and, one text file per call, the Transcripts folder (off by default).</summary>
+    public bool SaveCallTranscripts { get; set; }
 }
 
 [JsonSerializable(typeof(ViewSettingsFile))]
@@ -42,6 +45,7 @@ internal sealed class ViewSettings(string? file)
     private ChromeCorner _corner = ChromeCorners.Default;
     private ChromeCorner? _insetCorner;
     private bool _hideOffline = true;
+    private bool _saveTranscripts;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
@@ -115,6 +119,31 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
+    /// <summary>
+    /// "Save call transcripts" (docs/UX.md "Doorbell calls"): each call's transcript goes into the
+    /// log and into a text file in the Transcripts folder. Off by default (recording a conversation
+    /// may need consent).
+    /// </summary>
+    public bool SaveCallTranscripts
+    {
+        get
+        {
+            Load();
+            return _saveTranscripts;
+        }
+        set
+        {
+            Load();
+            if (_saveTranscripts == value)
+            {
+                return;
+            }
+            _saveTranscripts = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
     /// <summary>Raised on the UI thread after a setting changes.</summary>
     public event Action? Changed;
 
@@ -182,6 +211,7 @@ internal sealed class ViewSettings(string? file)
             _insetCorner = read?.InsetCorner is { } ic ? ChromeCorners.Parse(ic) : null;
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
+            _saveTranscripts = read?.SaveCallTranscripts ?? false;
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
@@ -208,6 +238,7 @@ internal sealed class ViewSettings(string? file)
                     InsetCorner = _insetCorner?.Name(),
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
+                    SaveCallTranscripts = _saveTranscripts,
                 }, ViewSettingsJson.Default.ViewSettingsFile);
                 s.Flush(flushToDisk: true);
             }

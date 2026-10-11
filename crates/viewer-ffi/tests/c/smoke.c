@@ -225,6 +225,13 @@ int main(int argc, char **argv) {
     if (nv_tile_retry(core, tile + 100) != NV_ERR_UNKNOWN_ID) {
         problem("nv_tile_retry accepted an unknown tile");
     }
+    if (nv_talk_set_conversation(core, tile + 100, true) != NV_ERR_UNKNOWN_ID) {
+        problem("nv_talk_set_conversation accepted an unknown tile");
+    }
+    if (nv_talk_set_conversation(core, tile, true) != NV_OK ||
+        nv_talk_set_conversation(core, tile, false) != NV_OK) {
+        problem("nv_talk_set_conversation refused a tile");
+    }
     if (atomic_load(&g_gen_answered[1]) < 20 || atomic_load(&g_gen_resets[0]) != 1) {
         problem("the tier switch did not complete");
     }

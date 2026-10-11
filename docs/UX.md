@@ -527,7 +527,11 @@ the same call themselves without a press ("Start Conversation", below):
   speaker. This is camera motion control (CLAUDE.md, docs/ARCHITECTURE.md
   "Device commands"): available only on a doorbell where the user enabled
   it, rate-limited, every use logged; the talk-back protocol facts go into
-  docs/protocol.md before any code sends them.
+  docs/protocol.md before any code sends them. The limit is 20 talk starts
+  per camera per minute outside a call; while a call (a press or Start
+  Conversation) is open on the camera there is none, so pressing Talk again
+  and again in a conversation is never refused: each app tells the core
+  when a call opens and ends (FFI.md, "Talk-back", item 5).
 - **Live transcript:** from the press, both sides are transcribed on this
   computer (a local speech recognition model on both macOS and Windows,
   possibly a different engine on each; nothing leaves the house): the
@@ -549,7 +553,8 @@ the same call themselves without a press ("Start Conversation", below):
   permission and limits). Text comes only from what the user types or picks
   from their own templates, never from the transcript, detected text, or any
   other untrusted source (see docs/ARCHITECTURE.md "Doorbell text-to-speech").
-- The call ends when the user closes it or about 60 s after the last activity
+- The call ends when the user closes it or, while it shows in the insets
+  (not in a call window of its own, see below), about 60 s after the last activity
   (press, speech, talk-back, typing a reply, hovering or clicking its inset),
   and is listed in the event log with its times and, if saved, its
   transcript.
@@ -581,7 +586,12 @@ Details settled while building it (macOS):
   when Talk is first pressed; a typed reply needs no microphone.
 - A typed reply is rendered by the system voice into buffers (never played
   locally), converted to 16 kHz mono, held until talk-back is active, pushed
-  in one go, and ended with a draining stop unless Talk is held.
+  in one go, and ended with a draining stop unless Talk is held. Letting go
+  of Talk is a draining stop too. After a draining stop the core keeps the
+  talk open for 1.5 s of silence before closing it, because the doorbell
+  plays about a second behind and drops what it has not played at the close
+  (AUDIO.md, "Talk-back (sending)"); talking or sending again meanwhile
+  continues the same talk. Both apps do this.
 - The visitor's transcript comes from the doorbell tile's audio tap (16 kHz
   mono), enabled for the call; the user's from the microphone while talking,
   not while the doorbell's audio is audible and carrying sound (and 0.4 s
@@ -593,6 +603,23 @@ Details settled while building it (macOS):
   length, not their text) and the call's end in the session's event log; the
   transcript goes there only with "Save call transcripts" (Settings >
   Alerts), never to the system log.
+- **Transcript files** (both apps, with the same setting, off by default):
+  when a call that transcribed something ends, its transcript is also
+  written as a plain-text file (UTF-8), atomically, to
+  `~/Library/Application Support/NVRView/Transcripts` on macOS and
+  `%LOCALAPPDATA%\NvrView\Transcripts` on Windows (the data directory's
+  `Transcripts` folder when one is given). The name is the call's start and
+  the camera's name, `2026-10-11 17.02.03 Front door.txt` (path separators,
+  reserved and control characters become `-`, at most 60 characters of the
+  name, " 2", " 3", ... when taken). The text: a header (`NVRView call
+  transcript`, `Camera:`, `Call:` a doorbell press count or a conversation,
+  `Started:` date, time and UTC offset, `Ended:` with the length), a blank
+  line, then each finished caption line as `17:02:10 Visitor: ...` or
+  `17:02:15 You: ...`. The folder is bounded like the logs: after each file
+  the newest 500 files and at most 50 MB in all are kept, the oldest deleted
+  first (only `.txt` files). An "Open Transcripts Folder" button sits next to
+  the setting. Nothing is written with the setting off, or for a call with
+  no finished caption.
 
 Details settled while building it (Windows):
 
@@ -630,9 +657,11 @@ Details settled while building it (Windows):
   transcript" and goes on. Partial results show with an ellipsis until the
   recognizer settles on a phrase, and a phrase it is not sure of stays a
   partial.
-- Not on Windows yet: the setting that saves call transcripts into the event
-  log (a call is logged without its text) and a per-doorbell "unmute on ring"
-  (a press unmutes only if the user was already listening, else Unmute shows).
+- "Save call transcripts" is in Settings with an "Open transcripts folder"
+  button, kept in `view-settings.json`: the transcript goes into the app's
+  log and into a transcript file, as on the Mac.
+- Not on Windows yet: a per-doorbell "unmute on ring" (a press unmutes only
+  if the user was already listening, else Unmute shows).
 
 ### A call in its own window
 
@@ -655,8 +684,11 @@ example to keep it beside other work. Both apps follow these rules.
   any view built for it shows them.
 - **Ending:** closing the call window (its close button, ⌘W, Alt+F4) ends the
   call, as closing its inset does; so do Esc while the reply field is not
-  being edited, the 60 s without activity, and the device going away.
-  Activity in the call window counts like activity in an inset.
+  being edited, the device going away, and quitting the app. A call in its
+  own window **never ends by inactivity**: the user put it there to keep
+  it, so the 60 s rule applies only in the insets. Pop In restarts that
+  rule with a fresh minute. (Windows: the same rule for its call windows,
+  which are planned; its call model already applies it.)
 - **Focus:** a call window opened by a ring never takes the keyboard focus
   from what the user is doing; an explicit Pop Out activates it, and so does
   Start Conversation opening one (the user asked for the call). Inside it,

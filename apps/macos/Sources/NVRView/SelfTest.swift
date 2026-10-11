@@ -694,7 +694,10 @@ final class SelfTest {
                 model.calls.setDraft(doorbell, "Hello, one moment please")
                 model.calls.sendReply("Hello, one moment please", to: doorbell)
                 if model.calls.call(for: doorbell)?.draft.isEmpty != true { problems.append("a sent reply stayed in the call's draft") }
+                // (Letting go of Talk above also drained, so "finished"
+                // alone does not show that the reply went out.)
                 when({
+                    guard model.calls.fakeSpeech?.rendered.isEmpty == false else { return false }
                     if case .stopped(let r)? = model.calls.call(for: doorbell)?.talk.phase { return r == "finished" }
                     return false
                 }, timeout: 3) { [self] in
@@ -809,6 +812,15 @@ final class SelfTest {
         }
         if !model.audible.contains(doorbell) { problems.append("a conversation did not make the camera audible") }
         if fake.talkStarts != startsBefore { problems.append("a conversation sent talk-back by itself") }
+        // parity: call-talk-conversation
+        // The core is told the call is open on the doorbell's tile (its talk
+        // starts skip the per-minute limit), and told again when it ends.
+        let markedTile = model.leases.tile(for: doorbell)
+        let marked = markedTile.map { fake.inConversation(tile: $0.id) } ?? false
+        print("conversation: core told the call is open \(marked)")
+        if !marked || model.calls.conversationTile(doorbell) !== markedTile {
+            problems.append("opening a conversation did not tell the core (no talk-back limit during a call)")
+        }
         model.calls.startTalking(doorbell)
         if model.calls.fakePrompter?.asked.count != 5 || model.calls.call(for: doorbell)?.talk.phase != .idle {
             problems.append("Talk in a conversation did not ask first (and send nothing on Cancel)")
@@ -820,8 +832,56 @@ final class SelfTest {
         let ended = model.calls.call(for: doorbell) == nil && stage.insetBoard.item(for: doorbell) == nil
         print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
         if !ended { problems.append("ending a conversation left its call or inset open") }
+        if let markedTile, fake.inConversation(tile: markedTile.id) {
+            problems.append("ending a conversation did not tell the core it ended")
+        }
         if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
-        popOutStep(doorbell)
+        transcriptFileStep(doorbell)
+    }
+
+    /// "Save call transcripts" on: a call's transcript is written as a text
+    /// file when it ends (in a temporary folder here); off: nothing is.
+    private func transcriptFileStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
+        let stage = window.stage
+        // parity: call-transcript-file
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "nvrview-selftest-transcripts-\(UUID().uuidString)", isDirectory: true)
+        let before = model.transcripts.folder
+        model.transcripts.folder = folder
+        model.saveCallTranscripts = true
+        stage.startConversation(doorbell)
+        guard let tile = model.leases.tile(for: doorbell) else {
+            problems.append("the conversation has no tile")
+            return popOutStep(doorbell)
+        }
+        fake.pumpAudio(tile: tile.id, count: 17)
+        when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
+            stage.endConversation(doorbell)
+            let names = model.transcripts.names()
+            let text = names.first.flatMap { try? String(contentsOf: folder.appendingPathComponent($0), encoding: .utf8) } ?? ""
+            let camera = CallTranscriptFile.sanitized(model.name(of: doorbell))
+            print("transcript file: \(names), \(text.split(separator: "\n").count) lines")
+            if names.count != 1 || names.first?.hasSuffix(" \(camera).txt") != true {
+                problems.append("ending a call with saving on did not write one transcript file named for the camera: \(names)")
+            }
+            if !text.hasPrefix("NVRView call transcript\nCamera: \(model.name(of: doorbell))\n")
+                || !text.contains("\nCall: conversation started in the app\n") || !text.contains(" Visitor: ")
+            {
+                problems.append("the transcript file lacks its header or the visitor's line")
+            }
+            // Off (the default): the next call writes nothing.
+            model.saveCallTranscripts = false
+            stage.startConversation(doorbell)
+            fake.pumpAudio(tile: tile.id, count: 17)
+            when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
+                stage.endConversation(doorbell)
+                if model.transcripts.names().count != 1 { problems.append("a call with saving off wrote a transcript file") }
+                try? FileManager.default.removeItem(at: folder)
+                model.transcripts.folder = before
+                popOutStep(doorbell)
+            }
+        }
     }
 
     // MARK: Calls in their own windows (docs/UX.md "A call in its own window")
@@ -990,8 +1050,9 @@ final class SelfTest {
         popOutEndStep(doorbell, stages: stages, second: second, baseline: baseline)
     }
 
-    /// Closing the call window, Esc in it, and a minute without activity
-    /// end the call and close the window; the viewer windows keep nothing.
+    /// Closing the call window and Esc in it end the call and close the
+    /// window; the viewer windows keep nothing. A call in its own window
+    /// never ends by inactivity; Pop In restarts the minute.
     private func popOutEndStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
         guard let model = app.model, let calls = app.callWindows, let window else { return finishPopOut(second) }
         // parity: call-popout-end
@@ -1019,14 +1080,22 @@ final class SelfTest {
             panel.sendEvent(esc)
         }
         ended("Esc")
-        // A minute without activity, on the manual clock.
+        // No expiry while popped out: ten minutes without activity, on the
+        // manual clock, leave the call and its window open.
         window.stage.startConversation(doorbell)
         model.popOutCall(doorbell)
+        advance(10 * DoorbellCall.idleTimeout)
+        let stayed = calls.controller(for: doorbell) != nil && model.calls.call(for: doorbell) != nil
+        print("call window after 10 min without activity: still open \(stayed)")
+        if !stayed { problems.append("a call in its own window ended by itself without activity") }
+        // Pop In restores the minute, starting fresh.
+        model.popInCall(doorbell)
         advance(DoorbellCall.idleTimeout - 1)
-        let stayed = calls.controller(for: doorbell) != nil
+        let fresh = model.calls.call(for: doorbell) != nil
         advance(2)
-        if !stayed { problems.append("the call window closed before a minute without activity") }
-        ended("expiry")
+        print("popped in: open after 59 s \(fresh), ended after 61 s \(model.calls.call(for: doorbell) == nil)")
+        if !fresh { problems.append("Pop In did not give the call a fresh minute") }
+        ended("expiry after Pop In")
         callWindowFrameStep(doorbell, second: second)
     }
 

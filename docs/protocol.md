@@ -714,6 +714,7 @@ sent):
 | The device answered **every** 202 with an empty 202 reply, status 200, message ID 0, after 4–118 ms (median 29 ms). | observed |
 | No talk-status push (693) arrived during talk. | observed (client capture) |
 | Commands 12 and 203–205 (other talk stream variants) are not used by this client. | reported (client) |
+| The device plays talk audio roughly a second behind what it has received, and **discards what it has not played when the talk is closed** (11). A 3.6 s typed reply sent completely and in real time (3.6 s from the first 202 to the close, every record acknowledged) was heard only for about its first 2.4 s on a doorbell. | observed (nvrview, 2026-10) |
 
 **What nvrview does with this** (the reason the allowlist grew): 10 joins the
 viewing tier (a read-only query); 201, 202 and 11 form the talk-back part of
@@ -726,7 +727,13 @@ from client-supplied XML); sends 202 in real time from a local clock, one
 does but restarting its clock after a longer one rather than bursting, and
 drops audio rather than queueing it without bound; and sends
 11 on every exit path (stop, drop, session close, a refused or failed
-record), since nothing observed ends a talk but 11.
+record), since nothing observed ends a talk but 11. Because the device
+drops what it has not played at the close, a talk that ends normally (all
+pushed audio sent, or the user let go of Talk) stays open for a tail of
+1.5 s after its last audio, sending silent records at the same pace, and
+only then sends 11; audio pushed during the tail continues the same talk
+(no new 201). Aborts (permission withdrawn, tile closed, shutdown, a
+device error) send 11 at once.
 
 ## Recordings: search and download
 

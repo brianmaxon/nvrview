@@ -101,10 +101,26 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
     assert_eq!(log.channel, BELL);
     assert!(log.continuous());
     // 1 s at 48 kHz is 16000 samples at 16 kHz: 15 or 16 records,
-    // depending on the resampler's delay.
-    let n = log.records.len();
+    // depending on the resampler's delay; then the silent tail (1.5 s:
+    // 24 records), so the device plays the end before the close.
+    let tail = last["tail_ms"].as_u64().unwrap() as usize / 64;
+    assert_eq!(tail, 24);
+    let n = log.records.len() - tail;
     assert!((15..=16).contains(&n), "{n} records");
     assert_eq!(last["sent_ms"], (n * 64) as u64);
+    let closed = log.ended.unwrap().duration_since(log.records[n - 1].at);
+    assert!(
+        closed >= std::time::Duration::from_millis(1500),
+        "closed {closed:?} after the last audio"
+    );
+    assert!(
+        log.records[n..].iter().skip(1).all(|r| r
+            .decode()
+            .unwrap()
+            .samples
+            .iter()
+            .all(|x| x.abs() < 64))
+    );
     // What arrived is the 500 Hz tone: check its frequency by counting
     // zero crossings in the middle of the decoded audio.
     let pcm = log.samples().unwrap();
@@ -201,4 +217,87 @@ fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
             .get(2)
             .is_some_and(|t| t.end == TalkEnd::Closed)
     });
+}
+
+/// One start and stop on `tile`: the final state's reason (`stopped` when
+/// it ran, else the refusal).
+fn start_and_stop(
+    sim: &SimRuntime,
+    core: &viewer_core::Core,
+    rec: &common::Recorder,
+    tile: u64,
+) -> String {
+    let before = talk_events(rec, tile).len();
+    core.talk_start(tile).unwrap();
+    sim_until(sim, core, "talk started or refused", 10, || {
+        talk_events(rec, tile)[before..]
+            .iter()
+            .any(|e| e["state"] == "active" || e["state"] == "refused")
+    });
+    core.talk_stop(tile, false).unwrap();
+    sim_until(sim, core, "talk ended", 10, || {
+        talk_events(rec, tile)[before..]
+            .iter()
+            .any(|e| e["state"] == "stopped" || e["state"] == "refused")
+    });
+    let last = talk_events(rec, tile).pop().unwrap();
+    last["reason"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn an_open_conversation_lifts_the_start_limit_until_it_ends() {
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let dev = core
+        .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
+        .unwrap();
+    core.set_talk_permission(dev, BELL, true).unwrap();
+    let tile = core.open_tile(dev, BELL, StreamTier::Sub).unwrap();
+    assert_eq!(
+        core.set_talk_conversation(tile + 100, true),
+        Err(CoreError::UnknownId)
+    );
+
+    // Outside a conversation: 20 starts a minute, then refused.
+    for i in 0..20 {
+        assert_eq!(
+            start_and_stop(&sim, &core, &rec, tile),
+            "stopped",
+            "start {i}"
+        );
+    }
+    assert_eq!(start_and_stop(&sim, &core, &rec, tile), "rate_limited");
+
+    // A call is open: no limit.
+    core.set_talk_conversation(tile, true).unwrap();
+    assert!(core.talk_conversation(tile));
+    for i in 0..5 {
+        assert_eq!(
+            start_and_stop(&sim, &core, &rec, tile),
+            "stopped",
+            "start {i}"
+        );
+    }
+    // It ended: limited again.
+    core.set_talk_conversation(tile, false).unwrap();
+    assert!(!core.talk_conversation(tile));
+    assert_eq!(start_and_stop(&sim, &core, &rec, tile), "rate_limited");
+
+    // Withdrawing the permission ends the conversation's exemption.
+    core.set_talk_conversation(tile, true).unwrap();
+    core.set_talk_permission(dev, BELL, false).unwrap();
+    assert!(!core.talk_conversation(tile));
+    core.set_talk_permission(dev, BELL, true).unwrap();
+    assert_eq!(start_and_stop(&sim, &core, &rec, tile), "rate_limited");
+
+    // Closing the tile ends it too: a new tile on the camera is limited.
+    core.set_talk_conversation(tile, true).unwrap();
+    assert_eq!(start_and_stop(&sim, &core, &rec, tile), "stopped");
+    core.close_tile(tile).unwrap();
+    assert!(!core.talk_conversation(tile));
+    let tile = core.open_tile(dev, BELL, StreamTier::Sub).unwrap();
+    assert_eq!(start_and_stop(&sim, &core, &rec, tile), "rate_limited");
+    assert_eq!(nvr.command_count(201), 26);
+    sim.run_free(|| core.shutdown());
 }

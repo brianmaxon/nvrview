@@ -171,8 +171,16 @@ import Testing
         #expect(call.draft == "One moment please")
         call.sent("One moment please")
         #expect(call.draft.isEmpty)
-        #expect(!call.expired(now: 31 + DoorbellCall.idleTimeout - 1))
-        #expect(call.expired(now: 31 + DoorbellCall.idleTimeout))
+        // In its own window the call never ends by itself.
+        #expect(!call.expired(now: 31 + DoorbellCall.idleTimeout))
+        #expect(!call.expired(now: 31 + 100 * DoorbellCall.idleTimeout))
+        // Pop In (with the activity it counts as) restores the minute,
+        // starting fresh.
+        let popIn = 31 + 10 * DoorbellCall.idleTimeout
+        call.presentation = .inset
+        call.activity(now: popIn)
+        #expect(!call.expired(now: popIn + DoorbellCall.idleTimeout - 1))
+        #expect(call.expired(now: popIn + DoorbellCall.idleTimeout))
     }
 
     // MARK: Detached insets

@@ -96,16 +96,17 @@ less than that. Nothing here was run on a Windows machine.
 | Call controls over the stage when the doorbell fills it (focused or only tile) | yes | yes | Windows step `call-stage-controls`. |
 | Start Conversation / End Conversation without a press | yes | yes | Tile menu on both. |
 | Unmute control for a silent call | yes | yes | |
-| Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. |
+| Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. Letting go drains: the core sends a 1.5 s silent tail before closing, so the last words play. |
+| No talk-back limit while a call is open (20 starts a minute otherwise) | yes | yes | Both apps call `nv_talk_set_conversation` when the call opens (and on each start) and when it ends. Self-test step `call-talk-conversation`. |
 | Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu. |
 | "Allow talk-back for <camera>?" prompt on Talk or Send when it is off (Allow saves and continues, Cancel sends nothing and keeps the typed text) | yes | yes | Self-test step `call-talk-permission-prompt`. macOS: alert sheet; Windows: ContentDialog. |
 | Typed reply spoken by the system voice | yes | yes | |
 | Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
 | Call ends after 60 s of inactivity, gives audio back | yes | yes | |
 | Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
-| Save call transcripts in the event log | yes | no | Windows README "Not yet on Windows". |
+| Save call transcripts (event log and one text file per call, bounded folder, Open Transcripts Folder) | yes | yes | UX.md "Transcript files". macOS: Settings > Alerts; Windows: Settings. Pure naming, text and pruning in `CallTranscriptFile` (NVRCore) and `TranscriptFiles` (NvrView.Tiles) with the same test vectors. Self-test step `call-transcript-file`. |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
-| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. |
+| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. A call in its own window never ends by inactivity; Pop In restarts the minute (the Windows call model already has the rule). |
 | Open calls in their own window: global setting and per-doorbell choice | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"); `CallPresentation.resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
 | Call window placement (where I left it, or top right of the active screen) | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls ("Open call windows"); `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. |
 
@@ -118,7 +119,7 @@ less than that. Nothing here was run on a Windows machine.
 | Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
 | Settings: Devices | yes | yes | |
 | Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
-| Settings: Alerts (inset corner, save transcripts, call windows) | yes | partial (the call cards' corner, in Settings; no transcript saving) | |
+| Settings: Alerts (inset corner, save transcripts, call windows) | yes | partial (the call cards' corner and saving transcripts, in Settings; no call windows) | |
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
@@ -132,7 +133,7 @@ What the table shows that is not just a platform difference:
 
 - Windows insets are call cards only: no smoke, CO or entrance insets, no
   swap with the stage, and no Entrance option.
-- Windows lacks "unmute on ring" and saving call transcripts.
+- Windows lacks "unmute on ring".
 - Windows has no zoom map, no header reset-zoom control, no Fill Tiles, and
   digital zoom does not follow a touch screen's pinch.
 - The layout preset lists on the two apps were not compared.

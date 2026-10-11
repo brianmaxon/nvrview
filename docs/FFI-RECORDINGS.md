@@ -1,12 +1,12 @@
-# C interface for recordings, ABI 3 minor 4 (proposal for milestone P)
+# C interface for recordings, ABI 3 minor 5 (proposal for milestone P)
 
 > **Proposal, not implemented.** This is the contract for review before
 > the core and the apps are built in parallel, as [FFI-ABI3.md](FFI-ABI3.md)
 > was for M3. Everything in [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h)
 > still holds; on implementation this moves into FFI.md and the header as
-> **ABI 3, minor 4**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` becomes 4
-> (minors 1 to 3 are discovery, updates, and `nv_tile_retry`; FFI.md,
-> "Versioning"). Requirements come from
+> **ABI 3, minor 5**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` becomes 5
+> (minors 1 to 4 are discovery, updates, `nv_tile_retry`, and
+> `nv_talk_set_conversation`; FFI.md, "Versioning"). Requirements come from
 > [PLAYBACK.md](PLAYBACK.md), [UX.md](UX.md), and
 > [ARCHITECTURE.md](ARCHITECTURE.md); protocol facts from
 > [protocol.md](protocol.md) ("Recordings: search and download",
@@ -39,7 +39,7 @@
 
 | | Decision | Why |
 | --- | --- | --- |
-| Version | **ABI 3, minor 4**: every ABI 3 declaration unchanged, plus the functions, types, status codes, and events below | Decision 1: the major number changes only for incompatible changes, and recordings are additions, so they take the next minor (`NV_ABI_MINOR` 4; minors 1 to 3 are taken). An app checks `nv_abi_minor() >= 4` before calling any function here. New `NvStatus` values can reach an older app only through these new functions, and no existing struct changes size (section 13) |
+| Version | **ABI 3, minor 5**: every ABI 3 declaration unchanged, plus the functions, types, status codes, and events below | Decision 1: the major number changes only for incompatible changes, and recordings are additions, so they take the next minor (`NV_ABI_MINOR` 5; minors 1 to 4 are taken). An app checks `nv_abi_minor() >= 5` before calling any function here. New `NvStatus` values can reach an older app only through these new functions, and no existing struct changes size (section 13) |
 | Objects | One new object, the **playback** (an ID like devices and tiles). Everything else (index, incidents, downloads, thumbnails) is core-wide state addressed by JSON keys | Recordings are shared by every window (one index per device, one download queue), so they are not owned by a handle an app could leak |
 | Cameras | `{"device": "<device key>", "channel": 3, "lens": 0}` everywhere in JSON | Incidents, edits, downloads, and groups persist across runs, so they use the stable device key (FFI.md, "Layouts"), never per-run device IDs. `lens` (0 or 1) replaces the Baichuan stream names for a second lens of a multi-lens camera; it defaults to 0 and may be omitted |
 | Tiers | `"main"` or `"sub"` in JSON; `NV_TIER_MAIN`/`NV_TIER_SUB` in C | The core maps lens and tier to the device's stream (lens 1 main is `externStream` on Baichuan). `NV_TIER_MOBILE`/`NV_TIER_EXTERN` are refused for playback tiles |
@@ -311,7 +311,7 @@ already has `nv_tile_audio_level`), so an event per tile per second would
 mostly be thrown away, and with many tiles it would crowd the event queue
 that carries state changes. A pull answers from memory when the lane is
 drawn, in the same byte form as `nv_recordings_loudness`, and costs nothing
-while nobody asks. It is proposed here as an addition in minor 4:
+while nobody asks. It is proposed here as an addition in minor 5:
 
 ```c
 /* A live tile's recent loudness, oldest first, one byte per second and
@@ -1322,11 +1322,11 @@ or a counted drop, never growth):
   component, so paths stay well below the long-path limit in ordinary
   folders.
 
-## 13. Header additions (ABI 3, minor 4)
+## 13. Header additions (ABI 3, minor 5)
 
 ```c
 #define NV_ABI_VERSION 3   /* unchanged */
-#define NV_ABI_MINOR 4     /* was 3 (nv_tile_retry) */
+#define NV_ABI_MINOR 5     /* was 4 (nv_talk_set_conversation) */
 
 /* NvStatus gains: */
 NV_PENDING = 1,                /* accepted; the answer arrives as an event (thumbnails) */
@@ -1355,7 +1355,7 @@ it as "not yet", and only `nv_thumbnail_get` returns it.
 An earlier draft added two members at the end of `NvConfig`
 (`sound_alarms_off`, `loudness_history_s`). That changes the struct's size,
 which an addition under a minor version may not do (an app built against
-minor 3 passes the shorter struct), so the two settings are a JSON call
+minor 4 passes the shorter struct), so the two settings are a JSON call
 instead.
 
 ## Decisions (2026-10-10)
@@ -1536,7 +1536,8 @@ and what changed above.
     (one replay-probe run).
 
 Also corrected in this review, without a decision: ABI 3 minor 4
-throughout; `NvConfig` no longer grows (the two sound settings became
+throughout (since moved to minor 5, when `nv_talk_set_conversation` took
+minor 4); `NvConfig` no longer grows (the two sound settings became
 `nv_sound_configure`, because a minor may not change a struct's size); the
 new status codes are -8 and -9, because talk-back took -7; the incident key
 example; `NV_ERR_LIMIT` at the download cap; the JSON camera argument of

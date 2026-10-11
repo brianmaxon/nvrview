@@ -5,7 +5,9 @@
 //! starts only on a channel the app has allowed with
 //! [`crate::Core::set_talk_permission`] (off by default) and only when the
 //! app asks ([`crate::Core::talk_start`]); the device session adds its rate
-//! limit and logs every start and stop. The app pushes mono float samples
+//! limit and logs every start and stop. While the app has a conversation
+//! open on a tile ([`crate::Core::set_talk_conversation`]), that camera's
+//! starts skip the rate limit. The app pushes mono float samples
 //! at its own rate; the core resamples them to the device's 16 kHz, and the
 //! session encodes and paces them.
 
@@ -15,7 +17,7 @@ use audio_pipeline::resample::Resampler;
 use bc_session::{DeviceSession, Refusal, StopReason, Talk, TalkState};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use tokio::runtime::Handle;
 use tracing::debug;
 
@@ -72,9 +74,19 @@ impl Slot {
     }
 }
 
+/// A tile the app marked as in an open conversation.
+struct Conversation {
+    device: u64,
+    channel: u8,
+    session: Weak<DeviceSession>,
+}
+
 /// Every tile's talk and the app's permissions.
 pub(crate) struct TalkHub {
     allowed: Mutex<HashSet<(u64, u8)>>,
+    /// Tiles in an open conversation; a camera is exempt from the start
+    /// limit while any of its tiles is.
+    conversations: Mutex<HashMap<u64, Conversation>>,
     slots: Arc<Mutex<HashMap<u64, Arc<Slot>>>>,
     events: EventSink,
     runtime: Handle,
@@ -90,6 +102,7 @@ impl TalkHub {
     pub(crate) fn new(events: EventSink, runtime: Handle) -> TalkHub {
         TalkHub {
             allowed: Mutex::new(HashSet::new()),
+            conversations: Mutex::new(HashMap::new()),
             slots: Arc::new(Mutex::new(HashMap::new())),
             events,
             runtime,
@@ -105,16 +118,79 @@ impl TalkHub {
         allowed: bool,
         session: Option<&DeviceSession>,
     ) {
-        {
+        let withdrawn = {
             let mut a = lock(&self.allowed);
             if allowed {
                 a.insert((device, channel));
+                false
             } else {
-                a.remove(&(device, channel));
+                a.remove(&(device, channel))
             }
+        };
+        if withdrawn {
+            // Withdrawing the permission ends the exemption (the session
+            // clears its own mark too).
+            lock(&self.conversations).retain(|_, c| (c.device, c.channel) != (device, channel));
         }
         if let Some(s) = session {
             s.set_motion_allowed(channel, allowed);
+        }
+    }
+
+    /// Marks `tile` as in an open conversation (`open`) or no longer, and
+    /// tells the device session whether its camera still has one.
+    pub(crate) fn set_conversation(
+        &self,
+        tile: u64,
+        device: u64,
+        channel: u8,
+        open: bool,
+        session: Option<&Arc<DeviceSession>>,
+    ) {
+        let any = {
+            let mut c = lock(&self.conversations);
+            if open {
+                c.insert(
+                    tile,
+                    Conversation {
+                        device,
+                        channel,
+                        session: session.map(Arc::downgrade).unwrap_or_default(),
+                    },
+                );
+            } else {
+                c.remove(&tile);
+            }
+            Self::camera_in_conversation(&c, device, channel)
+        };
+        if let Some(s) = session {
+            s.set_talk_conversation(channel, any);
+        }
+    }
+
+    fn camera_in_conversation(c: &HashMap<u64, Conversation>, device: u64, channel: u8) -> bool {
+        c.values()
+            .any(|v| v.device == device && v.channel == channel)
+    }
+
+    /// Whether `tile` is marked as in a conversation.
+    pub(crate) fn in_conversation(&self, tile: u64) -> bool {
+        lock(&self.conversations).contains_key(&tile)
+    }
+
+    /// The tile closed: its conversation mark goes with it.
+    fn end_conversation(&self, tile: u64) {
+        let ended = {
+            let mut c = lock(&self.conversations);
+            c.remove(&tile).map(|v| {
+                let any = Self::camera_in_conversation(&c, v.device, v.channel);
+                (v, any)
+            })
+        };
+        if let Some((v, any)) = ended
+            && let Some(s) = v.session.upgrade()
+        {
+            s.set_talk_conversation(v.channel, any);
         }
     }
 
@@ -125,6 +201,7 @@ impl TalkHub {
     /// The permissions of `device`, for a session that starts later.
     pub(crate) fn forget_device(&self, device: u64) {
         lock(&self.allowed).retain(|(d, _)| *d != device);
+        lock(&self.conversations).retain(|_, c| c.device != device);
     }
 
     /// Starts a talk for `tile` (progress as `talk` events). Starting one
@@ -206,8 +283,12 @@ impl TalkHub {
         };
         let mut g = lock(&slot.inner);
         let inner = &mut *g;
-        if inner.ending.is_some() {
-            return true;
+        match inner.ending {
+            Some(Ending::Stop) => return true,
+            // More audio takes back a draining stop asked for while the
+            // talk was starting (as it does on a running talk).
+            Some(Ending::Drain) if !samples.is_empty() => inner.ending = None,
+            _ => {}
         }
         if inner.resampler.as_ref().is_none_or(|(r, _, _)| *r != rate) {
             inner.resampler = (rate != TALK_RATE).then(|| {
@@ -243,8 +324,9 @@ impl TalkHub {
         true
     }
 
-    /// Ends `tile`'s talk: at once, or after the audio already pushed
-    /// (`drain`). Returns false when it has none.
+    /// Ends `tile`'s talk: at once, or after the audio already pushed and
+    /// the session's silent tail (`drain`; a later push continues it).
+    /// Returns false when it has none.
     pub(crate) fn stop(&self, tile: u64, drain: bool) -> bool {
         let Some(slot) = lock(&self.slots).get(&tile).cloned() else {
             return false;
@@ -261,8 +343,10 @@ impl TalkHub {
         true
     }
 
-    /// The tile is closing: its talk stops now (reason `tile_closed`).
+    /// The tile is closing: its talk stops now (reason `tile_closed`), and
+    /// its conversation mark ends.
     pub(crate) fn tile_closed(&self, tile: u64) {
+        self.end_conversation(tile);
         let Some(slot) = lock(&self.slots).remove(&tile) else {
             return;
         };
@@ -275,7 +359,8 @@ impl TalkHub {
                 &slot,
                 slot.event("stopped")
                     .str("reason", "tile_closed")
-                    .u64("sent_ms", stats.records_sent * 64)
+                    .u64("sent_ms", (stats.records_sent - stats.tail_records) * 64)
+                    .u64("tail_ms", stats.tail_records * 64)
                     .u64("dropped_ms", (inner.dropped + stats.samples_dropped) / 16),
             );
         } else {
@@ -285,6 +370,7 @@ impl TalkHub {
 
     /// Stops every talk (shutdown); events are not needed any more.
     pub(crate) fn shutdown(&self) {
+        lock(&self.conversations).clear();
         let slots: Vec<Arc<Slot>> = lock(&self.slots).drain().map(|(_, s)| s).collect();
         for s in slots {
             let mut inner = lock(&s.inner);
@@ -358,11 +444,15 @@ impl HubRef {
                 break None;
             }
         };
-        let (sent, dropped) = {
+        let (sent, tail, dropped) = {
             let mut inner = lock(&slot.inner);
             let t = inner.talk.take();
             let stats = t.as_ref().map(Talk::stats).unwrap_or_default();
-            (stats.records_sent, inner.dropped + stats.samples_dropped)
+            (
+                stats.records_sent - stats.tail_records,
+                stats.tail_records,
+                inner.dropped + stats.samples_dropped,
+            )
         };
         let mut obj = slot
             .event("stopped")
@@ -372,6 +462,7 @@ impl HubRef {
         }
         obj = obj
             .u64("sent_ms", sent * 64)
+            .u64("tail_ms", tail * 64)
             .u64("dropped_ms", dropped / 16);
         if !slot.reported.swap(true, Ordering::AcqRel) {
             self.events.send(obj.finish(), Priority::State);

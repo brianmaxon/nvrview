@@ -267,6 +267,7 @@ impl DeviceSession {
                 max_duration: config.talk_max_duration,
                 catch_up: config.talk_catch_up,
                 reply_timeout: config.query_timeout,
+                tail: config.talk_tail,
             },
         );
         let ctx = Ctx {

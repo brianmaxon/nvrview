@@ -241,11 +241,14 @@ public struct Transcript: Sendable, Equatable {
         public var source: TranscriptSource
         public var text: String
         public var isFinal: Bool
+        /// When the phrase was finished (wall clock), for a saved transcript.
+        public var at: Date?
 
-        public init(source: TranscriptSource, text: String, isFinal: Bool) {
+        public init(source: TranscriptSource, text: String, isFinal: Bool, at: Date? = nil) {
             self.source = source
             self.text = text
             self.isFinal = isFinal
+            self.at = at
         }
     }
 
@@ -261,11 +264,12 @@ public struct Transcript: Sendable, Equatable {
     }
 
     /// A final result: appended; the source's phrase in progress is done.
-    public mutating func final(_ text: String, source: TranscriptSource) {
+    /// `at` is when it was heard (wall clock), kept for a saved transcript.
+    public mutating func final(_ text: String, source: TranscriptSource, at: Date? = nil) {
         partials[source] = nil
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        finals.append(Line(source: source, text: t, isFinal: true))
+        finals.append(Line(source: source, text: t, isFinal: true, at: at))
     }
 
     /// What the call shows: the finished lines, then the phrases in progress.
@@ -438,9 +442,13 @@ public struct DoorbellCall: Sendable, Equatable {
         showsUnmute = false
     }
 
-    /// Whether the call has ended by itself at `now` (talking keeps it open).
+    /// Whether the call has ended by itself at `now`: a minute after the
+    /// last activity, in the insets only. Talking keeps it open, and a call
+    /// in its own window never ends by itself (only when the user closes it,
+    /// the device goes away, or the app quits); Pop In gives it a fresh
+    /// minute (`activity`).
     public func expired(now: Double) -> Bool {
-        !talk.isTalking && now - lastActivity >= Self.idleTimeout
+        presentation == .inset && !talk.isTalking && now - lastActivity >= Self.idleTimeout
     }
 
     /// The event log's line when it ends; the transcript only when saving is

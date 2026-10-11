@@ -108,6 +108,7 @@ public partial class App : Application
             new DeviceStore(memoryOnly ? null : Path.Combine(dataDir, "settings.json")),
             new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")),
             new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
+        _viewer.Transcripts = new TranscriptStore(Path.Combine(dataDir, "Transcripts"));
         _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
         Updater = new Updater(
             _viewer, ui, memoryOnly ? null : Path.Combine(dataDir, "update-settings.json"),

@@ -30,8 +30,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 
 /// Bumped for each addition that leaves every existing declaration
 /// unchanged (new functions, events, status codes); resets to 0 with a new
-/// NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates.
-pub const NV_ABI_MINOR: u32 = 3;
+/// NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
+/// nv_tile_retry. Minor 4: nv_talk_set_conversation.
+pub const NV_ABI_MINOR: u32 = 4;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -1106,7 +1107,10 @@ pub unsafe extern "C" fn nv_talk_push(
 }
 
 /// Ends a tile's talk: at once, or with `drain` after the audio already
-/// pushed has been sent. The device's close is sent either way.
+/// pushed has been sent and then 1.5 s of silence (the device plays about
+/// a second behind and drops what it has not played at the close); audio
+/// pushed before the close continues the same talk. The device's close is
+/// sent either way.
 ///
 /// # Safety
 /// `core` is a live handle.
@@ -1116,6 +1120,32 @@ pub unsafe extern "C" fn nv_talk_stop(core: *mut NvCore, tile: u64, drain: bool)
         // SAFETY: per the caller.
         match unsafe { core_ref(core) } {
             Some(c) => status(c.talk_stop(tile, drain)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Marks a tile's camera as in a conversation the user has open in the app
+/// (a doorbell call, from a ring or Start Conversation), or no longer
+/// (`open` false, when the call ends). While marked, talk-back starts on
+/// that camera are not limited per minute (outside a conversation: 20 per
+/// camera per minute); they still need nv_talk_set_permission and are
+/// logged. The mark also ends when the tile closes, when the camera's
+/// permission is withdrawn, and when the core is freed. NV_ERR_UNKNOWN_ID
+/// for an unknown tile. Added in minor 4.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_talk_set_conversation(
+    core: *mut NvCore,
+    tile: u64,
+    open: bool,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.set_talk_conversation(tile, open)),
             None => NvStatus::NV_ERR_INVALID_ARGUMENT,
         }
     })

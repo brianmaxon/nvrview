@@ -497,6 +497,12 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             await CallCardPicture(v, stage, card, camera);
         }
+        // parity: call-talk-conversation
+        // The core is told the call is open on the camera's tile (its talk starts skip the per-minute limit).
+        CameraTile? conversationTile = v.Calls.ConversationTileFor(camera);
+        Say($"calls: core told the call is open on tile {conversationTile?.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}");
+        Expect(conversationTile is not null && conversationTile == v.Leases.Tile(camera), "opening a conversation did not tell the core (no talk-back limit during a call)");
+
         // parity: call-camera-audio-recognized
         Expect(engines.Count == 1 && engines[0].Source == TranscriptSource.Visitor, "the camera's audio has no recognizer");
         bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);
@@ -543,7 +549,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: call-typed-reply
         // 4. A typed reply: rendered by the voice (never played here), pushed in one go, ended by a draining stop.
         await v.Calls.SendReplyAsync("Hello, one moment please", camera);
-        bool replied = await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
+        // Letting go of Talk above also drained ("finished"), so the reply must start a talk of its own first.
+        bool replyStarted = call.Talk.IsTalking;
+        bool replied = replyStarted && await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
         Say($"calls: typed reply: voice rendered {string.Join("|", voice.Rendered)}, talk ended \"{call.Talk.Reason}\", {call.Talk.SentMs} ms sent");
         Expect(voice.Rendered.SequenceEqual(["Hello, one moment please"]), "the voice did not render exactly the typed text");
         Expect(replied && call.Talk.SentMs >= 300, "the typed reply was not sent and finished");
@@ -569,6 +577,14 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(card?.TitleText.StartsWith("Doorbell", StringComparison.Ordinal) == true, "the card does not say Doorbell after a press");
         v.Apply(Alarm(device, 0, "visitor", false));
 
+        // parity: call-transcript-file
+        // With "Save call transcripts" on (a temporary folder here), the call's transcript is written as a
+        // text file when it ends (checked after step 7); off, the next call writes none (step 8).
+        string transcriptFolder = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-transcripts-{Guid.NewGuid():N}");
+        string transcriptsBefore = v.Transcripts.Folder;
+        v.Transcripts.Folder = transcriptFolder;
+        v.Settings.SaveCallTranscripts = true;
+
         // parity: call-auto-close
         // 7. A call ends a minute after its last activity and gives the audio back.
         clock.Advance(59);
@@ -583,6 +599,17 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool undrawn = await Until(() => app.Renderer!.Overlays.Length == 0 && stage.CallCards.Overlays.Count == 0, 2);
         Expect(undrawn, "the ended call's picture is still drawn over the grid");
         Expect(engines.All(e => e.Finished), "ending the call left a recognizer running");
+        string[] transcriptNames = v.Transcripts.Names();
+        string transcriptText = transcriptNames.Length == 1 ? File.ReadAllText(Path.Combine(transcriptFolder, transcriptNames[0])) : "";
+        string safeName = TranscriptFiles.Sanitized(v.CameraName(camera));
+        Say($"calls: transcript file {string.Join("|", transcriptNames)}, {transcriptText.Split('\n').Length} lines");
+        Expect(transcriptNames.Length == 1 && transcriptNames[0].EndsWith($" {safeName}.txt", StringComparison.Ordinal), "ending a call with saving on did not write one transcript file named for the camera");
+        Expect(
+            transcriptText.StartsWith($"NVRView call transcript\nCamera: {v.CameraName(camera)}\n", StringComparison.Ordinal)
+                && transcriptText.Contains("\nCall: doorbell, 1 press\n", StringComparison.Ordinal)
+                && transcriptText.Contains(" Visitor: Hello there.\n", StringComparison.Ordinal),
+            "the transcript file lacks its header or the visitor's line");
+        v.Settings.SaveCallTranscripts = false;
 
         // parity: call-press-opens-call
         // 8. A press alone opens a silent call with Unmute; Unmute plays it; closing gives it back.
@@ -594,9 +621,22 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: call-unmute
         v.Calls.Unmute(camera);
         Expect(v.IsAudible(camera) && ring is { ShowsUnmute: false }, "Unmute did not play the camera");
+        // (Saving is off now: what this call transcribes is not written.)
+        engines[^1].Say("hi", "Hi.");
+        bool ringCaptioned = await Until(() => ring?.Transcript.Finals.Count == 1, 5);
         // parity: call-close-ends
         v.Calls.End(camera, "closed");
         Expect(v.Calls.CallFor(camera) is null && !v.IsAudible(camera), "closing the call did not end it and mute the camera");
+        Expect(ringCaptioned && v.Transcripts.Names().Length == 1, "a call with saving off wrote a transcript file");
+        try
+        {
+            Directory.Delete(transcriptFolder, recursive: true);
+        }
+        catch (IOException)
+        {
+            // Left for the system's temporary-file cleanup.
+        }
+        v.Transcripts.Folder = transcriptsBefore;
 
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.

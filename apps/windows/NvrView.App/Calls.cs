@@ -88,6 +88,9 @@ internal sealed class CallSession(Call call)
     public TalkAction? LastAction { get; set; }
 
     public List<float>? LastReply { get; set; }
+
+    /// <summary>The camera tile the core was told is in this call (its talk starts skip the per-minute limit while the call is open).</summary>
+    public CameraTile? ConversationTile { get; set; }
 }
 
 internal sealed class ViewerCalls
@@ -179,13 +182,58 @@ internal sealed class ViewerCalls
         TileChanged(camera);
     }
 
-    /// <summary>The camera's tile opened or closed: its tap follows.</summary>
+    /// <summary>The tile the core was told is in the camera's open call, for the self-test.</summary>
+    public CameraTile? ConversationTileFor(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.ConversationTile;
+
+    // Tells the core the call is open on the camera's current tile, so its talk starts are not limited
+    // per minute. The core clears the mark when the tile closes or the permission is withdrawn;
+    // marking again is harmless.
+    private void MarkConversation(CallSession s)
+    {
+        CameraTile? tile = _viewer.Leases.Tile(s.Call.Camera);
+        if (s.ConversationTile is { } old && old != tile)
+        {
+            SetConversationQuietly(old, false);
+            s.ConversationTile = null;
+        }
+        if (tile is not null && SetConversationQuietly(tile, true))
+        {
+            s.ConversationTile = tile;
+        }
+    }
+
+    // The call ended: its tile is no longer in a conversation.
+    private void UnmarkConversation(CallSession s)
+    {
+        if (s.ConversationTile is { } tile)
+        {
+            s.ConversationTile = null;
+            SetConversationQuietly(tile, false);
+        }
+    }
+
+    private bool SetConversationQuietly(CameraTile tile, bool open)
+    {
+        try
+        {
+            _viewer.Core.TalkSetConversation(tile.Id, open);
+            return true;
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"the core was not told about the call on tile {tile.Id}: {e.Status}");
+            return false;
+        }
+    }
+
+    /// <summary>The camera's tile opened or closed: its tap and the conversation mark follow.</summary>
     private void TileChanged(CameraRef camera)
     {
         if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s))
         {
             return;
         }
+        MarkConversation(s);
         CameraTile? tile = _viewer.Leases.Tile(s.Call.Camera);
         if (s.Tapped is { } old && old != tile)
         {
@@ -241,7 +289,7 @@ internal sealed class ViewerCalls
         }
         if (final)
         {
-            s.Call.Transcript.Final(text, source);
+            s.Call.Transcript.Final(text, source, _viewer.WallClock());
         }
         else
         {
@@ -381,9 +429,11 @@ internal sealed class ViewerCalls
         Retire(s.You);
         s.You = null;
         s.Call.Activity(Now);
+        // Drains: what the microphone pushed goes out, then the core's silent tail, so the doorbell
+        // plays the last words before the talk closes (talking again meanwhile continues the talk).
         if (s.PendingReply is null && _viewer.Leases.Tile(s.Call.Camera) is { } tile)
         {
-            StopTalkQuietly(tile, drain: false);
+            StopTalkQuietly(tile, drain: true);
         }
         s.Call.Talk.StopRequested();
         _viewer.RaiseCallsChanged();
@@ -403,6 +453,8 @@ internal sealed class ViewerCalls
         }
         // The permission is the user's setting; the core keeps it for this run only.
         _viewer.ApplyTalkPermission(s.Call.Camera);
+        // Again before each start: withdrawing and allowing the permission during the call cleared the core's mark.
+        MarkConversation(s);
         try
         {
             _viewer.Core.TalkStart(tile.Id);
@@ -616,7 +668,8 @@ internal sealed class ViewerCalls
     /// <summary>
     /// Ends a call (closed, timed out, or the device went away): talk-back stops, the tap and the
     /// transcription end, the audio goes back to what played before, the lease is released, and the
-    /// call is logged (no transcript is saved: Windows has no setting for it yet).
+    /// call is logged: with its transcript, and as a text file in the Transcripts folder, only when the user
+    /// turned "Save call transcripts" on.
     /// </summary>
     public void End(CameraRef camera, string reason)
     {
@@ -632,6 +685,7 @@ internal sealed class ViewerCalls
         {
             StopTalkQuietly(tile, drain: false);
         }
+        UnmarkConversation(s);
         if (s.Tapped is { } tapped)
         {
             _viewer.Host.Taps.Remove(tapped.Id);
@@ -652,7 +706,16 @@ internal sealed class ViewerCalls
             _viewer.SetAudible(s.Call.MutedForCall);
         }
         _viewer.Leases.Release(s.Call.Camera);
-        AppLog.Info(s.Call.LogText(_viewer.WallClock(), saveTranscript: false) + $" ({reason})");
+        DateTime endedAt = _viewer.WallClock();
+        bool save = _viewer.Settings.SaveCallTranscripts;
+        AppLog.Info(s.Call.LogText(endedAt, saveTranscript: save) + $" ({reason})");
+        // And as a text file of its own (nothing when nothing was transcribed).
+        if (save && s.Call.TranscriptFile(_viewer.CameraName(s.Call.Camera), endedAt, TimeZoneInfo.Local) is { } file)
+        {
+            AppLog.Info(_viewer.Transcripts.Save(file.Name, file.Text) is { } path
+                ? $"Transcript saved: {Path.GetFileName(path)}"
+                : "Transcript not saved: the Transcripts folder could not be written");
+        }
         _viewer.RaiseCallsChanged();
     }
 

@@ -1180,6 +1180,35 @@ impl Core {
             .map_err(|talk::StartError::NotPermitted| CoreError::NotPermitted)
     }
 
+    /// Marks a tile's camera as in a conversation the user has open (a
+    /// doorbell call: a ring or Start Conversation) or no longer. While a
+    /// conversation is open, talk starts on that camera skip the device
+    /// session's per-minute limit; they still need the permission and are
+    /// logged. The mark ends with `open` false, when the tile closes, when
+    /// the camera's permission is withdrawn, and at shutdown.
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn set_talk_conversation(&self, tile: u64, open: bool) -> Result<(), CoreError> {
+        self.check_api()?;
+        let reg = lock(&self.registry);
+        let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+        let (device, channel) = (t.device, t.channel);
+        let session = reg.devices.get(&device).and_then(|d| d.handle.session());
+        drop(reg);
+        self.talk
+            .set_conversation(tile, device, channel, open, session.as_ref());
+        info!(tile, device, channel, open, "talk-back conversation set");
+        Ok(())
+    }
+
+    /// Whether a tile is marked as in a conversation
+    /// ([`Core::set_talk_conversation`]).
+    pub fn talk_conversation(&self, tile: u64) -> bool {
+        self.talk.in_conversation(tile)
+    }
+
     /// Queues mono samples (-1 to 1) at `sample_rate` Hz for a tile's talk;
     /// the core resamples them to the device's 16 kHz. Samples for a tile
     /// without a talk are ignored. Takes a short lock and may allocate: not

@@ -82,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             defaults = .standard
         }
         model.useCallDefaults(defaults)
+        if let data = options.dataDirectory { model.transcripts.folder = data.appendingPathComponent("Transcripts") }
         let calls = CallWindows(model: model, defaults: defaults, keepsBehind: test)
         calls.activeScreen = { [weak self] in self?.activeViewerWindow?.window?.screen ?? NSScreen.screens.first }
         model.popOutCall = { [weak calls] camera in calls?.popOut(camera) }

@@ -836,6 +836,16 @@ internal sealed class Smoke(Options options)
         catch (NvException e) when (e.Status == NvStatus.UnknownId)
         {
         }
+        try
+        {
+            core.TalkSetConversation(tile + 100, true);
+            Problem("nv_talk_set_conversation accepted an unknown tile");
+        }
+        catch (NvException e) when (e.Status == NvStatus.UnknownId)
+        {
+        }
+        core.TalkSetConversation(tile, true);
+        core.TalkSetConversation(tile, false);
         core.SetTier(tile, tier);
         bool done = WaitUntil(() =>
             _app.Gen(generation).Answered >= 20 &&

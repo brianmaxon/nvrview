@@ -129,7 +129,7 @@ fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
     assert_eq!(NV_ABI_VERSION, 3);
     assert_eq!(nv_abi_minor(), NV_ABI_MINOR);
-    assert_eq!(NV_ABI_MINOR, 3);
+    assert_eq!(NV_ABI_MINOR, 4);
 }
 
 #[test]
@@ -679,6 +679,15 @@ fn talk_back_through_the_c_interface() {
             nv_talk_push(core, tile, tone.as_ptr(), tone.len(), 16_000),
             NvStatus::NV_OK
         );
+        assert_eq!(nv_talk_set_conversation(core, tile, true), NvStatus::NV_OK);
+        assert_eq!(
+            nv_talk_set_conversation(core, tile + 100, true),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(
+            nv_talk_set_conversation(ptr::null_mut(), tile, true),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
         assert_eq!(nv_talk_stop(core, tile, true), NvStatus::NV_OK);
     }
     wait_until("talk stopped", || talk_state("stopped"));
@@ -694,8 +703,16 @@ fn talk_back_through_the_c_interface() {
             .first()
             .is_some_and(|t| t.end == mock_nvr::talk::TalkEnd::Closed)
     });
-    // 16000 samples at 16 kHz: 15 full records and one padded.
-    assert_eq!(nvr.talk_log()[0].records.len(), 16);
+    // 16000 samples at 16 kHz: 15 full records and one padded, then the
+    // 1.5 s silent tail (24 records) before the close.
+    assert_eq!(nvr.talk_log()[0].records.len(), 16 + 24);
+    assert!(
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| j.contains("\"sent_ms\":1024") && j.contains("\"tail_ms\":1536"))
+    );
     assert!(!ctx.bad.load(Ordering::SeqCst));
     // SAFETY: live core, freed once.
     unsafe { nv_core_free(core) };
