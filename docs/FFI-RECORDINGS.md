@@ -88,15 +88,16 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
   only.
 - `refresh_today_s` is how old today's entry may get while a view holds
   today before it is searched again (`LaneConfig::refresh_today`).
-- `background`, when present, runs the whole-range pass
-  (`recordings::indexer`) for this device: the last `days_back` days,
-  newest first, again every `pass_interval_s` seconds, below thumbnails
-  and requested days in the device's search lane. It is for people who
-  want the index filled ahead of time; apps leave it off unless the user
-  turns it on.
+- `background`, when present, fills the last `days_back` days for this
+  device, newest first, again every `pass_interval_s` seconds, through the
+  device's search lane, after thumbnails (so its days are reported like
+  requested ones). It asks only while the session is connected and the
+  lane has nothing waiting, so a refused login stops it. It is for people
+  who want the index filled ahead of time; apps leave it off unless the
+  user turns it on.
 - `utc_offset_s` is the device's offset from UTC, used only to know which
-  day is "today" on the device (`recordings::system_clock`); default: the
-  computer's current offset, which the app passes (Decision 6).
+  day is "today" on the device; the app passes the computer's current
+  offset (Decision 6). The core has no time-zone database: absent means 0.
 - `device_info` gains `"recordings": {"search": true, "playback": true,
   "download": true, "thumbnails": true}` so an app can hide what a backend
   cannot do.
@@ -1198,13 +1199,13 @@ or a counted drop, never growth):
 | --- | --- | --- |
 | `nv_recordings_configure`, `nv_recordings_enable` | `IndexConfig`, `IndexerConfig`, `LaneConfig`, `GroupingConfig`, `ThumbCacheConfig`, `SchedulerConfig`, `NamePattern`, `system_clock` | the `recordings` owner in `viewer-core` (C11) holding one `DeviceIndex` and `DeviceLane` per device key, the `Scheduler`, the `ThumbnailCache`, the `EditLog`, the `GroupStore`; config parsing; `device_info.recordings` |
 | `nv_recordings_calendar`, `_spans`, `_events` | `DeviceIndex::recorded_days`, `files`, `events` (lens in keys) | JSON shaping, `revision`, `limit`, `md` → `motion` |
-| `nv_recordings_want`, `_hold_today`, `_status`, `recordings_index`, `recordings_day_failed`, `recordings_changed` | `LaneHandle::{request_days, hold_today, pending}` (`TodayHold` per app hold number), `LaneEvent`, `LaneState`; `Indexer` for the optional `background` block | owner-side aggregation into per-device events, the hold table |
+| `nv_recordings_want`, `_hold_today`, `_status`, `recordings_index`, `recordings_day_failed`, `recordings_changed` | `LaneHandle::{request_days, hold_today, pending}` (`TodayHold` per app hold number), `LaneEvent`, `LaneState`; `request_days` again for the optional `background` block | owner-side aggregation into per-device events, the hold table |
 | `nv_incidents_get`, `nv_incident_get` | `group`, `Incident::{key, is_growing, intervals, download_ranges, kinds}` | regroup on index change, JSON shaping |
 | `nv_incident_edit` | `EditLog` (store, replay, expiry, `revert`), `merge`, `split`, `add_camera`, `remove_camera` | JSON shaping; no expiry for edits of locked incidents |
 | `nv_incident_lock`, `locked` | `EditLog`'s atomic store, `DeviceIndex` age and size eviction, `ThumbnailCache` eviction | the lock store and its matching rule, eviction exemptions, edit key rewriting on regroup, download on lock (C13) |
 | `nv_camera_groups_get`/`_put` | `GroupStore`, `CameraGroups` (bounded, stored like layouts, name overrides) | JSON shaping |
 | `nv_thumbnail_get`/`_put`/`_cancel` | `ThumbnailCache::{get, put}`, `LaneHandle::{request_thumbnail, cancel_thumbnails}` (newest first, 256, thumbnails before index work) | key mapping, `NV_PENDING` |
-| `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, set_camera_paused, retry, retry_camera, forget, remove_device, resume_all, progress}`, `FailReason`, `Mp4Finalizer` | dedupe by incident key while unfinished (the scheduler dedupes by `id` today) and trash (C15), coalesced events (4 per second), derived `state` |
+| `nv_download_*`, `download` | `Scheduler::{enqueue_incident, trash, set_paused, set_camera_paused, retry, retry_camera, forget, remove_device, resume_all, progress}`, `FailReason`, `Mp4Finalizer` | coalesced events (4 per second), derived `state` (C11; key dedupe and trash done with it, C15) |
 | `nv_download_range`, `dest`, `share_safe` | `Scheduler` (jobs are per camera range already), `naming` | range jobs and folder names, the downloads registry for `dest`, share-safe names and MP4 times (C14) |
 | `nv_edit_compute` `trim`, `in_ms`/`out_ms`, `nv_still_plan` | `edl`, `sync_samples`, playback tiles' answered pictures | the trim and still planners (C14) |
 | `nv_playback_*`, playback events | tiles, `TilePipeline`, generations (`tile.rs`), audio hub, `Subscription`-style bounded queue, replay framing (`encode_replay_media`, `replay_seq`) | playback commands in `bc-protocol` and `bc-session`, play streams routed by message ID and seq, file-boundary handling, the shared clock and paced release, buffering policy, mock-nvr playback |
@@ -1238,12 +1239,14 @@ or a counted drop, never growth):
    `file_start_ms` in device-local time follows once B7 is settled.
 7. **Thumbnail priority.** Done (C4, C5): one search lane per device
    (`recordings::lane`) serves thumbnails first, then requested days, then
-   a held today; the whole-range `indexer` remains for the optional
-   background block only.
-8. **`viewer-core` does not use `recordings` yet** (MILESTONE-P.md, C11):
-   every function in this document waits for that owner. mock-nvr serves
-   playback (123/5/7) at 1× with the observed burst-then-pace, across
-   files.
+   a held today; the optional background block asks the same lane for
+   its days (the whole-range `indexer` is no longer used by the core).
+8. **The recordings owner in `viewer-core`** is done (MILESTONE-P.md,
+   C11): sections 1 to 5 and the events of section 8 have a Rust API on
+   `viewer_core::Core` (JSON in, JSON out, `RecError` for the new
+   statuses) that the C functions (F1) wrap; locks (C13) and export (C14)
+   are not in it yet. mock-nvr serves playback (123/5/7) at 1× with the
+   observed burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
    everything new (Decision 7).
@@ -1481,3 +1484,52 @@ new status codes are -8 and -9, because talk-back took -7; the incident key
 example; `NV_ERR_LIMIT` at the download cap; the JSON camera argument of
 pause and retry; derived download and camera states; the missing caps in
 the limits table; and sections 10 and 11 brought up to date.
+
+## Clarifications from the implementation (C11, 2026-10-11)
+
+What building the recordings owner (MILESTONE-P.md, C11) settled where
+the text above was silent or could be read two ways. Sections 1 and 11
+above are updated; the rest is stated here.
+
+1. **`utc_offset_s`** absent means 0: the core has no time-zone database,
+   so the app passes the computer's offset (section 1).
+2. **`background`** goes through the device's search lane (section 1)
+   instead of a separate pass, so its days produce the same events, wait
+   behind thumbnails, and stop after a refused login.
+3. **Devices not added.** Enabling opens the device's index, so queries
+   answer from it (and from earlier runs' files) before the device is
+   added. `nv_recordings_want` for an enabled device that is not added
+   keeps the request (it counts toward the 4096 camera-days) and searches
+   once the device is added; `recordings_index` says `waiting_device`,
+   also after `nv_remove_device` of an enabled device. A thumbnail of a
+   device that is not enabled and added returns `NV_PENDING` and a
+   `thumbnail` event `failed` follows.
+4. **`nv_recordings_status`** answers `{"revision": N, "devices":
+   [{"device", "state", "pending_days", "revision"}]}`, one entry per
+   enabled device.
+5. **`nv_incident_get`** answers `{"revision": N, "incident": {...}}`, the
+   incident as in `nv_incidents_get`.
+6. **`truncated`** is in every query answer (calendar, spans, events,
+   incidents); `limit` counts a calendar's camera lists, a span list's
+   spans, events, and incidents.
+7. **`recordings_changed` at the end of a fill** is sent at once (when the
+   lane leaves `busy`), even within a second of the previous one; while
+   busy, one a second at most. `recordings_index` follows it.
+8. **`nv_download_forget`** of a download with a camera job running (not
+   paused, or still stopping) returns `NV_ERR_INVALID_ARGUMENT`.
+9. **Trash is final.** A trashed download's job file is marked, so it is
+   never resumed after a restart, nor returned by a later
+   `nv_download_incident`, even if moving its folder to the Trash failed
+   (a later download of the incident then takes a ` (2)` folder).
+10. **Finished downloads after a restart** are not loaded (memory stays
+    bounded), but `nv_download_incident` of the unchanged incident finds
+    the finished folder on disk and returns it (`existing` true), as rule
+    2 of "Download IDs" says.
+11. **Changing settings.** The thumbnail cache and each device's index
+    keep the limits they were opened with (the first configure, and each
+    enable); a change of `downloads_dir`, `downloads`, or `naming` stops
+    the scheduler (job files keep the progress) and starts a new one,
+    which resumes from disk.
+12. **Without `data_dir`** the index and thumbnails live in a scratch
+    directory for the run (removed when the core stops); edits and groups
+    live in memory.

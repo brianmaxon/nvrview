@@ -58,8 +58,9 @@ fn wall_now_us() -> i64 {
 const SIMULATED_START_NS: u64 = 1_000_000_000_000;
 
 impl HostClock {
-    /// A clock on `handle`'s runtime, starting now.
-    pub(crate) fn runtime(handle: tokio::runtime::Handle) -> HostClock {
+    /// A clock on `handle`'s runtime, starting now; its wall clock starts
+    /// at `wall_start_us` (the real time when `None`).
+    pub(crate) fn runtime(handle: tokio::runtime::Handle, wall_start_us: Option<i64>) -> HostClock {
         let origin = {
             let _in = handle.enter();
             tokio::time::Instant::now()
@@ -67,7 +68,7 @@ impl HostClock {
         HostClock::Runtime {
             handle,
             origin,
-            wall_origin_us: wall_now_us(),
+            wall_origin_us: wall_start_us.unwrap_or_else(wall_now_us),
         }
     }
 
@@ -217,7 +218,7 @@ mod tests {
             .start_paused(true)
             .build()
             .unwrap();
-        let c = HostClock::runtime(rt.handle().clone());
+        let c = HostClock::runtime(rt.handle().clone(), None);
         let t0 = c.now_ns();
         assert_eq!(t0, SIMULATED_START_NS);
         std::thread::sleep(Duration::from_millis(5));

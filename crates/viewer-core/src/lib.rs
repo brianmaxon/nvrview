@@ -48,6 +48,7 @@ pub mod discover;
 mod events;
 mod json;
 mod lens;
+mod recordings_owner;
 pub mod sound;
 pub mod store;
 pub mod talk;
@@ -56,6 +57,7 @@ pub mod update;
 
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector};
+pub use recordings_owner::{RecError, ThumbKind, Thumbnail, ThumbnailAnswer};
 pub use video_pipeline::{
     Action, ActionKind, Codec, ColorMatrix, DecodeFailureKind, PipelineConfig, TileStatus,
 };
@@ -195,6 +197,11 @@ pub struct CoreConfig {
     /// Test support: run on a test's runtime and clock instead of the
     /// core's own runtime and the host clock. `None` (the default) in apps.
     pub test_runtime: Option<TestRuntime>,
+    /// Test support, with [`CoreConfig::test_runtime`] only: the wall clock
+    /// (microseconds since the Unix epoch) at which the simulated clock
+    /// starts, instead of the real time, so recordings tests know which day
+    /// is "today". `None` (the default) in apps.
+    pub test_wall_clock_start_us: Option<i64>,
 }
 
 /// Test support ([`CoreConfig::test_runtime`]): the core runs every task,
@@ -243,6 +250,7 @@ impl Default for CoreConfig {
             lens_probe_window: lens::ProbeTiming::default().window,
             sound: sound::SoundSettings::default(),
             test_runtime: None,
+            test_wall_clock_start_us: None,
         }
     }
 }
@@ -338,6 +346,8 @@ pub struct Core {
     discover: discover::DiscoverHub,
     /// The one update check or download ([`update`]).
     update: update::UpdateHub,
+    /// The recordings owner (docs/FFI-RECORDINGS.md).
+    recordings: recordings_owner::RecordingsHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -371,7 +381,7 @@ impl Core {
             Some(t) => (
                 None,
                 t.runtime.clone(),
-                HostClock::runtime(t.runtime.clone()),
+                HostClock::runtime(t.runtime.clone(), config.test_wall_clock_start_us),
             ),
         };
         let started_ns = clock.now_ns();
@@ -414,6 +424,12 @@ impl Core {
         let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
         let update =
             update::UpdateHub::new(event_sink.clone(), config.data_dir.clone(), clock.clone());
+        let recordings = recordings_owner::RecordingsHub::new(
+            handle.clone(),
+            event_sink.clone(),
+            clock.clone(),
+            config.data_dir.clone(),
+        );
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -436,6 +452,7 @@ impl Core {
             talk,
             discover,
             update,
+            recordings,
         })
     }
 
@@ -572,7 +589,7 @@ impl Core {
         let handle = {
             let _rt = self.handle.enter();
             let session = bc_session::DeviceSession::spawn(connector, cfg);
-            DeviceHandle::start(
+            let handle = DeviceHandle::start(
                 id,
                 key.clone(),
                 session,
@@ -580,7 +597,11 @@ impl Core {
                 gate_rx,
                 self.lens.clone(),
                 self.clock.clone(),
-            )
+            );
+            if let Some(s) = handle.session() {
+                self.recordings.device_added(&key, id, s);
+            }
+            handle
         };
         reg.devices.insert(id, Device { handle, key });
         info!(device = id, "device added");
@@ -739,6 +760,8 @@ impl Core {
         drop(reg);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
         self.talk.forget_device(device);
+        // Recordings let go of the session before it closes.
+        self.recordings.device_removed(&dev.key, device);
         dev.handle.close_blocking(&self.handle);
         self.event_sink
             .send(device::closed_event(device), Priority::State);
@@ -1247,6 +1270,9 @@ impl Core {
         // A running update check or download is canceled (its folder
         // removed); its `canceled` event comes first if it ends in time.
         self.update.cancel();
+        // Searches, thumbnail fetches, and downloads stop and let go of
+        // the sessions before they close.
+        self.recordings.shutdown();
         // Close every session at once; each is bounded by its write timeout.
         let closes: Vec<_> = devices
             .into_iter()
