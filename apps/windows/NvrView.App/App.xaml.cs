@@ -14,6 +14,7 @@ namespace NvrView.App;
 public partial class App : Application
 {
     private readonly List<ViewerWindow> _windows = [];
+    private ViewerWindow? _active;
     private AudioOutput? _audio;
     private Viewer? _viewer;
     private CoreHost? _host;
@@ -50,6 +51,9 @@ public partial class App : Application
 
     /// <summary>The open windows, the first opened first.</summary>
     internal IReadOnlyList<ViewerWindow> Windows => _windows;
+
+    /// <summary>The viewer window the user worked in last (the first one until another is activated).</summary>
+    internal ViewerWindow? ActiveViewerWindow => _active is { } a && _windows.Contains(a) ? a : _windows.FirstOrDefault();
 
     /// <summary>The first window's stage, renderer, and window (the self-test's main window).</summary>
     internal StageView? Stage => _windows.FirstOrDefault()?.Stage;
@@ -109,6 +113,7 @@ public partial class App : Application
             new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")),
             new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
         _viewer.Transcripts = new TranscriptStore(Path.Combine(dataDir, "Transcripts"));
+        _viewer.CallWindows = new CallWindows(_viewer, _host, () => ActiveViewerWindow, o.Background);
         _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
         Updater = new Updater(
             _viewer, ui, memoryOnly ? null : Path.Combine(dataDir, "update-settings.json"),
@@ -210,6 +215,7 @@ public partial class App : Application
         _windows.Add(w);
         w.Changed += ScheduleSave;
         w.Closed += WindowClosed;
+        w.Activated += a => _active = a;
         ScheduleSave();
         return w;
     }
@@ -264,6 +270,8 @@ public partial class App : Application
         _shutDown = true;
         _saveTimer?.Stop();
         Updater?.Stop();
+        // The call windows go first (their renderers and leases), then the viewer windows.
+        _viewer?.CallWindows?.CloseAll();
         foreach (ViewerWindow w in _windows.ToArray())
         {
             w.Close();

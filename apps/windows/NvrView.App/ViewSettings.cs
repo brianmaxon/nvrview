@@ -5,7 +5,9 @@
 // offline channels, and the mount of each fisheye camera (docs/UX.md
 // "Fisheye cameras"; only those not on the default ceiling mount). Written
 // whole and atomically; the cameras the user allowed talk-back to (docs/UX.md "Doorbell calls");
-// unreadable or missing reads as the defaults. Memory only when file is null.
+// the call window's settings (docs/UX.md "A call in its own window"): whether calls open in their
+// own window, each doorbell's own choice, where call windows open, the frame the user left one at,
+// and its pin; unreadable or missing reads as the defaults. Memory only when file is null.
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -32,6 +34,21 @@ internal sealed class ViewSettingsFile
     /// <summary>Cameras the user allowed talk-back to ("deviceKey:channel"); camera motion control, off unless listed.</summary>
     public List<string>? TalkAllowed { get; set; }
 
+    /// <summary>"Open calls in their own window" (docs/UX.md "A call in its own window"); off by default.</summary>
+    public bool CallsOpenInWindow { get; set; }
+
+    /// <summary>Doorbells whose calls open where the user chose, by camera ("deviceKey:channel"): "window" or "inset"; absent: the app's setting.</summary>
+    public Dictionary<string, string>? CallPresentation { get; set; }
+
+    /// <summary>"Open call windows": absent for where the user left them (default), or activeScreen.</summary>
+    public string? CallWindowPlacement { get; set; }
+
+    /// <summary>The frame the user last left a call window at, in physical pixels: x, y, width, height.</summary>
+    public double[]? CallWindowFrame { get; set; }
+
+    /// <summary>The call window's pin (always on top); absent: on.</summary>
+    public bool? CallWindowOnTop { get; set; }
+
     /// <summary>Call transcripts go into the log and, one text file per call, the Transcripts folder (off by default).</summary>
     public bool SaveCallTranscripts { get; set; }
 }
@@ -49,6 +66,11 @@ internal sealed class ViewSettings(string? file)
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
+    private bool _callsInWindow;
+    private Dictionary<string, string> _callPresentations = [];
+    private CallWindowPlacement.Mode _placement = CallWindowPlacement.Mode.Remembered;
+    private WindowRect? _callFrame;
+    private bool _callOnTop = true;
 
     private static string MountKey(CameraRef camera) => $"{camera.Device}:{camera.Channel}";
 
@@ -96,6 +118,115 @@ internal sealed class ViewSettings(string? file)
         }
         Save();
         Changed?.Invoke();
+    }
+
+    /// <summary>"Open calls in their own window": a ring or Start Conversation opens the call in a call window (a doorbell's own choice wins).</summary>
+    public bool CallsOpenInWindow
+    {
+        get
+        {
+            Load();
+            return _callsInWindow;
+        }
+        set
+        {
+            Load();
+            if (_callsInWindow == value)
+            {
+                return;
+            }
+            _callsInWindow = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The doorbell's own choice of where its calls open, null for Default (the setting above decides).</summary>
+    public CallPresentation? CallPresentationFor(CameraRef camera)
+    {
+        Load();
+        return _callPresentations.TryGetValue(MountKey(camera), out string? p) ? (p == "window" ? CallPresentation.Window : CallPresentation.Inset) : null;
+    }
+
+    /// <summary>Sets the doorbell's choice (saved); null is Default and removes the entry.</summary>
+    public void SetCallPresentation(CameraRef camera, CallPresentation? presentation)
+    {
+        Load();
+        if (CallPresentationFor(camera) == presentation)
+        {
+            return;
+        }
+        if (presentation is null)
+        {
+            _callPresentations.Remove(MountKey(camera));
+        }
+        else
+        {
+            _callPresentations[MountKey(camera)] = presentation == CallPresentation.Window ? "window" : "inset";
+        }
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>"Open call windows": where the user left them, or the top right of the active screen.</summary>
+    public CallWindowPlacement.Mode CallWindowPlacementMode
+    {
+        get
+        {
+            Load();
+            return _placement;
+        }
+        set
+        {
+            Load();
+            if (_placement == value)
+            {
+                return;
+            }
+            _placement = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The frame the user last left a call window at (physical pixels, virtual-screen origin); saved without raising Changed (the app debounces moves).</summary>
+    public WindowRect? CallWindowFrame
+    {
+        get
+        {
+            Load();
+            return _callFrame;
+        }
+        set
+        {
+            Load();
+            if (_callFrame == value)
+            {
+                return;
+            }
+            _callFrame = value;
+            Save();
+        }
+    }
+
+    /// <summary>The call window's pin: on top of other windows (on by default).</summary>
+    public bool CallWindowOnTop
+    {
+        get
+        {
+            Load();
+            return _callOnTop;
+        }
+        set
+        {
+            Load();
+            if (_callOnTop == value)
+            {
+                return;
+            }
+            _callOnTop = value;
+            Save();
+        }
     }
 
     /// <summary>The sidebar lists only connected channels.</summary>
@@ -212,6 +343,11 @@ internal sealed class ViewSettings(string? file)
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
+            _callsInWindow = read?.CallsOpenInWindow ?? false;
+            _callPresentations = read?.CallPresentation is { } cp ? new Dictionary<string, string>(cp) : [];
+            _placement = read?.CallWindowPlacement == "activeScreen" ? CallWindowPlacement.Mode.ActiveScreen : CallWindowPlacement.Mode.Remembered;
+            _callFrame = read?.CallWindowFrame is { Length: 4 } f && f.All(double.IsFinite) && f[2] > 0 && f[3] > 0 ? new WindowRect(f[0], f[1], f[2], f[3]) : null;
+            _callOnTop = read?.CallWindowOnTop ?? true;
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
@@ -239,6 +375,11 @@ internal sealed class ViewSettings(string? file)
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
                     SaveCallTranscripts = _saveTranscripts,
+                    CallsOpenInWindow = _callsInWindow,
+                    CallPresentation = _callPresentations.Count > 0 ? new Dictionary<string, string>(_callPresentations) : null,
+                    CallWindowPlacement = _placement == CallWindowPlacement.Mode.ActiveScreen ? "activeScreen" : null,
+                    CallWindowFrame = _callFrame is { } fr ? [fr.X, fr.Y, fr.Width, fr.Height] : null,
+                    CallWindowOnTop = _callOnTop ? null : false,
                 }, ViewSettingsJson.Default.ViewSettingsFile);
                 s.Flush(flushToDisk: true);
             }

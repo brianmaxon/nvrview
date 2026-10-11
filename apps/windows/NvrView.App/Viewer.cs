@@ -373,6 +373,9 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     /// <summary>The calls in progress: doorbell presses and the user's conversations (docs/UX.md "Doorbell calls").</summary>
     public ViewerCalls Calls { get; }
 
+    /// <summary>The call windows (docs/UX.md "A call in its own window"); set by the app, null in tests that have no windows.</summary>
+    internal CallWindows? CallWindows { get; set; }
+
     /// <summary>Raised on the UI thread when a call opens, ends, or changes (captions, talk state).</summary>
     public event Action? CallsChanged;
 

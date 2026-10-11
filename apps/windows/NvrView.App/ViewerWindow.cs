@@ -149,6 +149,13 @@ internal sealed class ViewerWindow
         viewer.Changed += OnViewerChanged;
         AppWindow.Changed += OnAppWindowChanged;
         Window.Closed += (_, _) => Close();
+        Window.Activated += (_, e) =>
+        {
+            if (e.WindowActivationState != WindowActivationState.Deactivated)
+            {
+                Activated?.Invoke(this);
+            }
+        };
 
         if (restore is not null)
         {
@@ -185,6 +192,9 @@ internal sealed class ViewerWindow
 
     /// <summary>What a relaunch should restore changed (content, frame, full screen, sidebar).</summary>
     public event Action? Changed;
+
+    /// <summary>The window became the active one (the user is working in it).</summary>
+    public event Action<ViewerWindow>? Activated;
 
     /// <summary>The window closed (after its renderer stopped and its leases were given back).</summary>
     public event Action<ViewerWindow>? Closed;
