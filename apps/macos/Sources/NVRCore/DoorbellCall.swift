@@ -373,6 +373,9 @@ public struct DoorbellCall: Sendable, Equatable {
     public var mutedForCall: Set<CameraRef>
     public var talk = TalkState()
     public var transcript = Transcript()
+    /// Tells our own talk-back, heard again by the doorbell's microphone,
+    /// from what the visitor says (`caption`).
+    public private(set) var echo = CaptionEcho()
     public var transcription: TranscriptionStatus = .preparing
     /// In the viewer windows' insets or in its own window; one state for the
     /// whole app, kept when another press joins the call.
@@ -404,6 +407,40 @@ public struct DoorbellCall: Sendable, Equatable {
             mutedForCall = []
         }
     }
+
+    /// A caption from a transcription engine (volatile, or final). Our own
+    /// words are remembered for the echo filter; a visitor caption that is
+    /// echo of them is dropped (not shown, not saved). Returns whether it
+    /// counts as activity: false for echo.
+    @discardableResult
+    public mutating func caption(
+        _ text: String, source: TranscriptSource, final: Bool, now: Double, at: Date? = nil
+    ) -> Bool {
+        talkChanged(now: now)
+        switch source {
+        case .you:
+            echo.said(text, now: now, final: final)
+        case .visitor:
+            if echo.filter(text, now: now) {
+                transcript.partial("", source: .visitor)
+                return false
+            }
+        }
+        if final {
+            transcript.final(text, source: source, at: at)
+        } else {
+            transcript.partial(text, source: source)
+        }
+        activity(now: now)
+        return true
+    }
+
+    /// A typed reply is being spoken: the doorbell will play it back.
+    public mutating func replySpoken(_ text: String, now: Double) { echo.said(text, now: now) }
+
+    /// Talk-back started, ended or was refused: the echo window follows
+    /// `talk.isTalking`. Called after each change of the talk state.
+    public mutating func talkChanged(now: Double) { echo.talking(talk.isTalking, now: now) }
 
     /// Activity keeps the call open.
     public mutating func activity(now: Double) { lastActivity = max(lastActivity, now) }

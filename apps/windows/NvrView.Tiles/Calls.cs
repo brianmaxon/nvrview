@@ -444,6 +444,44 @@ public sealed class Call
 
     public Transcript Transcript { get; } = new();
 
+    /// <summary>Tells our own talk-back, heard again by the camera's microphone, from what the visitor says (<see cref="Caption"/>).</summary>
+    public CaptionEcho Echo { get; } = new();
+
+    /// <summary>
+    /// A caption from a transcription engine (volatile, or final). Our own words are remembered for
+    /// the echo filter; a visitor caption that is echo of them is dropped (not shown, not saved).
+    /// Returns whether it counts as activity: false for echo.
+    /// </summary>
+    public bool Caption(string text, TranscriptSource source, bool final, double now, DateTime? at = null)
+    {
+        TalkChanged(now);
+        if (source == TranscriptSource.You)
+        {
+            Echo.Said(text, now, final);
+        }
+        else if (Echo.Filter(text, now))
+        {
+            Transcript.Partial("", TranscriptSource.Visitor);
+            return false;
+        }
+        if (final)
+        {
+            Transcript.Final(text, source, at);
+        }
+        else
+        {
+            Transcript.Partial(text, source);
+        }
+        Activity(now);
+        return true;
+    }
+
+    /// <summary>A typed reply is being spoken: the camera will play it back.</summary>
+    public void ReplySpoken(string text, double now) => Echo.Said(text, now);
+
+    /// <summary>Talk-back started, ended, or was refused: the echo window follows <c>Talk.IsTalking</c>. Called after each change of the talk state.</summary>
+    public void TalkChanged(double now) => Echo.Talking(Talk.IsTalking, now);
+
     public TranscriptionStatus Transcription { get; set; } = TranscriptionStatus.Preparing;
 
     /// <summary>

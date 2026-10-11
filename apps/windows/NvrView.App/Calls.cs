@@ -287,16 +287,9 @@ internal sealed class ViewerCalls
         {
             return;
         }
-        if (final)
-        {
-            s.Call.Transcript.Final(text, source, _viewer.WallClock());
-        }
-        else
-        {
-            s.Call.Transcript.Partial(text, source);
-        }
-        // Speech is activity: the call stays open.
-        s.Call.Activity(Now);
+        // Speech is activity (the call stays open), except the visitor caption that is our own
+        // talk-back heard again (echo): dropped.
+        s.Call.Caption(text, source, final, Now, final ? _viewer.WallClock() : null);
         _viewer.RaiseCallsChanged();
     }
 
@@ -436,6 +429,7 @@ internal sealed class ViewerCalls
             StopTalkQuietly(tile, drain: true);
         }
         s.Call.Talk.StopRequested();
+        s.Call.TalkChanged(Now);
         _viewer.RaiseCallsChanged();
     }
 
@@ -451,6 +445,7 @@ internal sealed class ViewerCalls
         {
             return true;
         }
+        s.Call.TalkChanged(Now);
         // The permission is the user's setting; the core keeps it for this run only.
         _viewer.ApplyTalkPermission(s.Call.Camera);
         // Again before each start: withdrawing and allowing the permission during the call cleared the core's mark.
@@ -465,6 +460,7 @@ internal sealed class ViewerCalls
         catch (NvException e)
         {
             s.Call.Talk.StartFailed(e.Status == NvStatus.NotPermitted);
+            s.Call.TalkChanged(Now);
             AppLog.Info(TalkPermission.Refusal(_viewer.CameraName(s.Call.Camera), e.Status == NvStatus.NotPermitted ? "not_permitted" : "error"));
             return false;
         }
@@ -525,6 +521,7 @@ internal sealed class ViewerCalls
             return false;
         }
         accepted?.Invoke();
+        s.Call.ReplySpoken(typed, Now);
         AppLog.Info($"Typed reply sent: {_viewer.CameraName(s.Call.Camera)}, {typed.Length} characters");
         (float[] samples, uint rate) = await Services.Speech.RenderAsync(typed);
         if (!_sessions.TryGetValue(camera.ChannelKey, out s) || samples.Length == 0)
@@ -620,6 +617,7 @@ internal sealed class ViewerCalls
         {
             return;
         }
+        s.Call.TalkChanged(Now);
         s.Call.Activity(Now);
         string name = _viewer.CameraName(s.Call.Camera);
         switch (e.State)
