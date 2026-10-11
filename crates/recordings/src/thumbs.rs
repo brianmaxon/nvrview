@@ -15,6 +15,8 @@
 //! [`ThumbCacheConfig::max_bytes`] bytes of files; when a put exceeds either,
 //! the least recently used entries are removed (a [`get`](ThumbnailCache::get)
 //! counts as use). An entry larger than the byte limit by itself is refused.
+//! Entries a locked incident covers ([`Pin`], at most
+//! [`MAX_PINNED_PER_LOCK`] per lock) are evicted only after every other.
 //!
 //! **Store.** One file per entry under the cache directory, named by a hash
 //! of the key and holding the key itself, so a hash collision is a miss and
@@ -153,6 +155,37 @@ impl Default for ThumbCacheConfig {
     }
 }
 
+/// Most entries one lock pins.
+pub const MAX_PINNED_PER_LOCK: usize = 16;
+
+/// One camera's time range a lock covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinRange {
+    /// The device.
+    pub device: String,
+    /// Channel.
+    pub channel: u8,
+    /// Lens (0 first, 1 second); both tiers of it are covered.
+    pub lens: u8,
+    /// Start (naive seconds).
+    pub start: Secs,
+    /// End (naive seconds).
+    pub end: Secs,
+}
+
+/// A locked incident's claim on cached thumbnails (docs/FFI-RECORDINGS.md,
+/// "Locked incidents"): up to [`MAX_PINNED_PER_LOCK`] entries whose camera
+/// and range overlap one of `ranges` (the most recently used first) are
+/// exempt from least-recently-used eviction. If pinned entries alone exceed
+/// the limits, those of the lowest `rank` (the oldest lock) go first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    /// Age of the lock: lower is older.
+    pub rank: u64,
+    /// What it covers.
+    pub ranges: Vec<PinRange>,
+}
+
 struct Entry {
     key: String,
     bytes: u64,
@@ -169,6 +202,8 @@ pub struct ThumbnailCache {
     order: BTreeMap<u64, String>,
     bytes: u64,
     clock: u64,
+    /// Locks' claims, oldest lock first.
+    pins: Vec<Pin>,
 }
 
 fn encode(key: &str, t: &Thumbnail) -> Vec<u8> {
@@ -264,6 +299,7 @@ impl ThumbnailCache {
             order: BTreeMap::new(),
             bytes: 0,
             clock: 0,
+            pins: Vec::new(),
         };
         for (_, name, key, bytes) in found {
             c.clock += 1;
@@ -397,13 +433,93 @@ impl ThumbnailCache {
         let _ = fs::remove_file(self.dir.join(name));
     }
 
-    fn evict(&mut self) -> io::Result<()> {
-        while self.entries.len() > self.cfg.max_entries || self.bytes > self.cfg.max_bytes {
-            let Some((_, name)) = self.order.pop_first() else {
-                break;
+    /// Replaces the locks' claims (see [`Pin`]). Nothing is evicted until
+    /// the next put.
+    pub fn set_pins(&mut self, mut pins: Vec<Pin>) {
+        pins.sort_by_key(|p| p.rank);
+        self.pins = pins;
+    }
+
+    /// Entries pinned now: file name to (rank of the lock, recency tick).
+    fn pinned(&self) -> HashMap<String, (u64, u64)> {
+        let mut out = HashMap::new();
+        if self.pins.is_empty() {
+            return out;
+        }
+        // (device, channel, lens) to (pin, start, end).
+        type Claims<'a> = HashMap<(&'a str, u8, u8), Vec<(usize, Secs, Secs)>>;
+        let mut by_camera: Claims<'_> = HashMap::new();
+        for (i, p) in self.pins.iter().enumerate() {
+            for r in &p.ranges {
+                by_camera
+                    .entry((r.device.as_str(), r.channel, r.lens))
+                    .or_default()
+                    .push((i, r.start, r.end));
+            }
+        }
+        let mut counts = vec![0usize; self.pins.len()];
+        for (tick, name) in self.order.iter().rev() {
+            let Some(e) = self.entries.get(name) else {
+                continue;
             };
+            let mut parts = e.key.split('\u{0}');
+            let (Some(device), Some(channel), Some(stream), Some(start), Some(end)) = (
+                parts.next(),
+                parts.next().and_then(|s| s.parse::<u8>().ok()),
+                parts.next().and_then(StreamTier::from_name),
+                parts.next().and_then(|s| s.parse::<Secs>().ok()),
+                parts.next().and_then(|s| s.parse::<Secs>().ok()),
+            ) else {
+                continue;
+            };
+            let lens = crate::lens_and_tier(stream).0;
+            let Some(claims) = by_camera.get(&(device, channel, lens)) else {
+                continue;
+            };
+            // Claims are in pin order, so the oldest lock with room takes it.
+            if let Some((i, _, _)) = claims
+                .iter()
+                .find(|(i, s, en)| *s <= end && start <= *en && counts[*i] < MAX_PINNED_PER_LOCK)
+            {
+                counts[*i] += 1;
+                out.insert(name.clone(), (self.pins[*i].rank, *tick));
+            }
+        }
+        out
+    }
+
+    /// Entries pinned now (for tests and diagnostics).
+    pub fn pinned_count(&self) -> usize {
+        self.pinned().len()
+    }
+
+    fn over(&self) -> bool {
+        self.entries.len() > self.cfg.max_entries || self.bytes > self.cfg.max_bytes
+    }
+
+    fn evict(&mut self) -> io::Result<()> {
+        if !self.over() {
+            return Ok(());
+        }
+        let pinned = self.pinned();
+        // Unpinned entries first, least recently used first; then pinned
+        // ones, the oldest lock's first.
+        let mut victims: Vec<String> = self
+            .order
+            .values()
+            .filter(|n| !pinned.contains_key(*n))
+            .cloned()
+            .collect();
+        let mut held: Vec<(&(u64, u64), &String)> = pinned.iter().map(|(n, r)| (r, n)).collect();
+        held.sort();
+        victims.extend(held.into_iter().map(|(_, n)| n.clone()));
+        for name in victims {
+            if !self.over() {
+                break;
+            }
             if let Some(e) = self.entries.remove(&name) {
                 self.bytes -= e.bytes;
+                self.order.remove(&e.tick);
             }
             match fs::remove_file(self.dir.join(&name)) {
                 Ok(()) => {}
@@ -567,6 +683,64 @@ mod tests {
         assert!(!c.contains(&key(3)));
         assert!([1, 4, 5].iter().all(|n| c.contains(&key(*n))));
         assert_eq!(c.len(), 3);
+    }
+
+    fn pin(rank: u64, start: Secs, end: Secs) -> Pin {
+        Pin {
+            rank,
+            ranges: vec![PinRange {
+                device: "nvr-a".into(),
+                channel: 0,
+                lens: 0,
+                start,
+                end,
+            }],
+        }
+    }
+
+    #[test]
+    fn locked_entries_are_evicted_last_oldest_lock_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cache(dir.path(), 4, u64::MAX);
+        // Lock 1 covers keys 1 and 2, lock 2 key 4 (another camera never).
+        let mut other = pin(1, 61, 170);
+        other.ranges[0].channel = 1;
+        c.set_pins(vec![pin(2, 250, 290), pin(1, 61, 170), other]);
+        for n in 1..=4 {
+            c.put(&key(n), &thumb(10, n as u8)).unwrap();
+        }
+        assert_eq!(c.pinned_count(), 3);
+        c.put(&key(5), &thumb(10, 5)).unwrap();
+        c.put(&key(6), &thumb(10, 6)).unwrap();
+        assert!([1, 2, 4, 6].iter().all(|n| c.contains(&key(*n))));
+        // Pinned entries alone over the limit: the oldest lock's go first.
+        c.cfg.max_entries = 2;
+        c.put(&key(7), &thumb(10, 7)).unwrap();
+        assert_eq!(c.len(), 2);
+        assert!(c.contains(&key(2)) && c.contains(&key(4)), "1 used least");
+        c.cfg.max_entries = 1;
+        c.put(&key(8), &thumb(10, 8)).unwrap();
+        assert!(c.contains(&key(4)) && c.len() == 1);
+    }
+
+    #[test]
+    fn a_lock_pins_at_most_sixteen_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cache(dir.path(), 18, u64::MAX);
+        c.set_pins(vec![pin(1, 0, 100 * 60)]);
+        for n in 1..=18 {
+            c.put(&key(n), &thumb(10, n as u8)).unwrap();
+        }
+        assert_eq!(c.pinned_count(), MAX_PINNED_PER_LOCK);
+        // The two least recently used are not pinned and go first.
+        c.put(&key(200), &thumb(10, 0)).unwrap();
+        c.put(&key(201), &thumb(10, 0)).unwrap();
+        assert!(!c.contains(&key(1)) && !c.contains(&key(2)));
+        assert!((3..=18).all(|n| c.contains(&key(n))));
+        // No pins: plain least recently used again.
+        c.set_pins(Vec::new());
+        c.put(&key(202), &thumb(10, 0)).unwrap();
+        assert!(!c.contains(&key(3)));
     }
 
     #[test]

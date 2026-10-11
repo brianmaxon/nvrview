@@ -190,14 +190,13 @@ impl Incident {
             .min()
             .map(|(s, c)| (s, c.clone()))
             .or_else(|| self.extra_cameras.first().map(|c| (0, c.clone())));
-        let mut key = match first {
-            Some((start, c)) => format!("i-{start}-{}-{}-{}", c.device, c.channel, c.lens),
-            None => "i-0".to_owned(),
-        };
-        if let Some(g) = &self.group {
-            key.push_str(&format!("-{:08x}", fnv(&[g]) as u32));
+        match first {
+            Some((start, c)) => make_key(start, &c, self.group.as_deref()),
+            None => match &self.group {
+                Some(g) => format!("i-0{}", group_suffix(g)),
+                None => "i-0".to_owned(),
+            },
         }
-        key
     }
 
     /// Whether more events may still join: its end is within `gap` seconds
@@ -277,6 +276,60 @@ impl Incident {
         self.extra_cameras.remove(camera);
         true
     }
+}
+
+fn group_suffix(group: &str) -> String {
+    format!("-{:08x}", fnv(&[group]) as u32)
+}
+
+fn make_key(start: Secs, c: &CameraId, group: Option<&str>) -> String {
+    let mut key = format!("i-{start}-{}-{}-{}", c.device, c.channel, c.lens);
+    if let Some(g) = group {
+        key.push_str(&group_suffix(g));
+    }
+    key
+}
+
+/// What an incident key says about the incident's earliest event: its
+/// start and camera (the key's anchor, the same whatever the group). `None`
+/// for a key [`Incident::key`] could not have made.
+pub fn key_anchor(key: &str) -> Option<(Secs, CameraId)> {
+    let rest = key.strip_prefix("i-")?;
+    let digits = rest
+        .char_indices()
+        .find(|(i, c)| !(c.is_ascii_digit() || (*i == 0 && *c == '-')))
+        .map(|(i, _)| i)?;
+    let start: Secs = rest[..digits].parse().ok()?;
+    let rest = rest[digits..].strip_prefix('-')?;
+    let camera = |s: &str| -> Option<CameraId> {
+        let mut it = s.rsplitn(3, '-');
+        let lens: u8 = it.next()?.parse().ok()?;
+        let channel: u8 = it.next()?.parse().ok()?;
+        let device = it.next().filter(|d| !d.is_empty())?;
+        Some(CameraId::with_lens(device, channel, lens))
+    };
+    // A group's hash is 8 hex digits, which a lens (at most 3) never is.
+    if let Some((head, tail)) = rest.rsplit_once('-')
+        && tail.len() == 8
+        && tail.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return camera(head).map(|c| (start, c));
+    }
+    camera(rest).map(|c| (start, c))
+}
+
+/// The key the same incident has under the groups of `new`, for a key made
+/// under the groups of `old`: renaming a group, deleting one, or moving a
+/// camera between groups changes the keys (docs/FFI-RECORDINGS.md,
+/// "Locked incidents"). `None` when the key stays the same, or when it was
+/// not made under `old` (a merge across groups, for example).
+pub fn rekey(key: &str, old: &GroupingConfig, new: &GroupingConfig) -> Option<String> {
+    let (start, cam) = key_anchor(key)?;
+    if make_key(start, &cam, group_of(old, &cam).1.as_deref()) != key {
+        return None;
+    }
+    let k = make_key(start, &cam, group_of(new, &cam).1.as_deref());
+    (k != key).then_some(k)
 }
 
 /// Which group a camera is in: the first configured group that lists it,
@@ -512,6 +565,43 @@ mod tests {
         };
         let k = group(&evs[..1], &cfg)[0].key();
         assert!(k.starts_with("i-1000-nvr-a-1-0-") && k.len() == "i-1000-nvr-a-1-0-".len() + 8);
+    }
+
+    #[test]
+    fn keys_are_followed_across_group_changes() {
+        let evs = vec![ev("d-1-x", 1, "vehicle", 1000, 1015)];
+        let none = GroupingConfig::default();
+        let named = |name: &str| GroupingConfig {
+            groups: vec![CameraGroup {
+                name: name.into(),
+                cameras: vec![CameraId::new("d-1-x", 1)],
+            }],
+            ..GroupingConfig::default()
+        };
+        let plain = group(&evs, &none)[0].key();
+        let front = group(&evs, &named("front"))[0].key();
+        let back = group(&evs, &named("back"))[0].key();
+        // The anchor is the same whatever the group, and devices may hold
+        // dashes.
+        for k in [&plain, &front, &back] {
+            assert_eq!(key_anchor(k), Some((1000, CameraId::new("d-1-x", 1))));
+        }
+        assert_eq!(
+            key_anchor("i--5-d-0-1"),
+            Some((-5, CameraId::with_lens("d", 0, 1)))
+        );
+        assert_eq!(key_anchor("i-0"), None);
+        assert_eq!(key_anchor("x-1-d-0-0"), None);
+        // Renaming, adding, and deleting the group.
+        assert_eq!(
+            rekey(&front, &named("front"), &named("back")),
+            Some(back.clone())
+        );
+        assert_eq!(rekey(&plain, &none, &named("front")), Some(front.clone()));
+        assert_eq!(rekey(&back, &named("back"), &none), Some(plain.clone()));
+        assert_eq!(rekey(&front, &named("front"), &named("front")), None);
+        // A key not made under the old groups is left alone.
+        assert_eq!(rekey(&plain, &named("front"), &named("back")), None);
     }
 
     #[test]

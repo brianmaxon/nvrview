@@ -20,7 +20,9 @@
 //!
 //! **Bounds.** Days older than [`IndexConfig::max_age_days`] are dropped,
 //! and the oldest days go first whenever the files exceed
-//! [`IndexConfig::max_bytes`].
+//! [`IndexConfig::max_bytes`]. Days a locked incident covers
+//! ([`DeviceIndex::set_kept_days`]) are never dropped; they count toward
+//! the byte limit, so every other day goes first.
 //!
 //! **Revision.** Every stored change raises [`DeviceIndex::revision`], so a
 //! view can tell whether what it shows is current.
@@ -151,7 +153,7 @@ pub struct CameraDay {
 }
 
 /// A map stored as a list of pairs (JSON object keys must be strings).
-mod pairs {
+pub(crate) mod pairs {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
@@ -219,6 +221,8 @@ pub struct DeviceIndex {
     days: BTreeMap<Secs, DayFile>,
     sizes: BTreeMap<Secs, u64>,
     calendar: Calendar,
+    /// Days a lock keeps (never dropped by age or size).
+    kept: BTreeSet<Secs>,
     revision: u64,
 }
 
@@ -240,6 +244,7 @@ impl DeviceIndex {
             days: BTreeMap::new(),
             sizes: BTreeMap::new(),
             calendar: Calendar::default(),
+            kept: BTreeSet::new(),
             revision: 0,
         };
         let calendar_path = dir.join("calendar.json");
@@ -454,15 +459,34 @@ impl DeviceIndex {
         self.sizes.values().sum()
     }
 
-    /// Applies the age and size limits relative to `now`; returns how many
-    /// days were dropped.
+    /// Sets the days locked incidents cover (starts of day): they are kept
+    /// past the age limit and never dropped to make room, but still count
+    /// toward the byte limit, so other days go first (docs/FFI-RECORDINGS.md,
+    /// "Locked incidents").
+    pub fn set_kept_days(&mut self, days: BTreeSet<Secs>) {
+        self.kept = days.into_iter().map(day_start).collect();
+    }
+
+    /// The days kept for locks.
+    pub fn kept_days(&self) -> &BTreeSet<Secs> {
+        &self.kept
+    }
+
+    /// Applies the age and size limits relative to `now`, except to the
+    /// kept days; returns how many days were dropped.
     pub fn prune(&mut self, now: Secs) -> io::Result<usize> {
         let oldest = day_start(now) - i64::from(self.cfg.max_age_days) * 86_400;
-        let mut drop: Vec<Secs> = self.days.range(..oldest).map(|(d, _)| *d).collect();
+        let kept = &self.kept;
+        let mut drop: Vec<Secs> = self
+            .days
+            .range(..oldest)
+            .map(|(d, _)| *d)
+            .filter(|d| !kept.contains(d))
+            .collect();
         let mut total: u64 = self
             .sizes
             .iter()
-            .filter(|(d, _)| **d >= oldest)
+            .filter(|(d, _)| **d >= oldest || kept.contains(d))
             .map(|(_, s)| s)
             .sum();
         for (d, s) in self.sizes.range(oldest..) {
@@ -472,6 +496,9 @@ impl DeviceIndex {
             // Never drop today's file to make room.
             if *d >= day_start(now) {
                 break;
+            }
+            if kept.contains(d) {
+                continue;
             }
             drop.push(*d);
             total -= s;
@@ -488,7 +515,7 @@ impl DeviceIndex {
         let mut changed = false;
         for set in self.calendar.days.values_mut() {
             let before = set.len();
-            set.retain(|d| *d >= oldest);
+            set.retain(|d| *d >= oldest || self.kept.contains(d));
             changed |= set.len() != before;
         }
         for months in self.calendar.months.values_mut() {
@@ -603,6 +630,44 @@ mod tests {
         assert_eq!(idx.prune(day(10) + 5).unwrap(), 1);
         assert!(idx.days().is_empty());
         assert!(!dir.path().join("days").join(day_name(day(9))).exists());
+    }
+
+    #[test]
+    fn kept_days_outlive_the_age_limit_and_go_last_by_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = DeviceIndex::open(dir.path(), IndexConfig::default()).unwrap();
+        idx.set_month(cam(0), day(1), day(31), [3, 4, 5, 6, 7].map(day), day(10))
+            .unwrap();
+        for d in [3, 4, 5, 6, 7] {
+            idx.put_day(
+                day(d),
+                cam(0),
+                vec![],
+                vec![ev(cam(0), "md", day(d) + 10, 5)],
+                day(10),
+            )
+            .unwrap();
+        }
+        idx.set_kept_days(BTreeSet::from([day(3) + 7, day(6)]));
+        assert_eq!(idx.kept_days(), &BTreeSet::from([day(3), day(6)]));
+        // Age: the 3rd is older than the limit but kept; the 4th goes.
+        idx.cfg.max_age_days = 5;
+        assert_eq!(idx.prune(day(10)).unwrap(), 1);
+        assert_eq!(idx.days(), vec![day(3), day(5), day(6), day(7)]);
+        assert!(idx.recorded_days(cam(0)).contains(&day(3)));
+        // Size: kept days count, so every other day goes first, oldest
+        // first; kept days stay even when the limit cannot be met.
+        let one = idx.sizes[&day(5)];
+        idx.cfg.max_bytes = idx.bytes() - one;
+        assert_eq!(idx.prune(day(10)).unwrap(), 1);
+        assert_eq!(idx.days(), vec![day(3), day(6), day(7)]);
+        idx.cfg.max_bytes = 1;
+        assert_eq!(idx.prune(day(10)).unwrap(), 1);
+        assert_eq!(idx.days(), vec![day(3), day(6)]);
+        // Unkept, they go like any other.
+        idx.set_kept_days(BTreeSet::new());
+        assert_eq!(idx.prune(day(10)).unwrap(), 2);
+        assert!(idx.days().is_empty());
     }
 
     #[test]
