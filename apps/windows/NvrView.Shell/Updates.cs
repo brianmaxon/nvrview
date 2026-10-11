@@ -241,11 +241,15 @@ public static class SideBySide
 
     public const string Executable = "NvrView.App.exe";
 
-    /// <summary>Where updates of the app in <paramref name="appDir"/> stage, or why they cannot.</summary>
+    /// <summary>The staging folder's path for the app in <paramref name="appDir"/>, without creating it.</summary>
+    public static string FolderPath(string appDir) =>
+        System.IO.Path.Combine(System.IO.Path.GetDirectoryName(System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(appDir)))!, FolderName);
+
+    /// <summary>Where updates of the app in <paramref name="appDir"/> stage (created), or why they cannot.</summary>
     public static string? UpdateFolder(string appDir, out string? problem)
     {
-        string parent = System.IO.Path.GetDirectoryName(System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(appDir)))!;
-        string folder = System.IO.Path.Combine(parent, FolderName);
+        string folder = FolderPath(appDir);
+        string parent = System.IO.Path.GetDirectoryName(folder)!;
         try
         {
             Directory.CreateDirectory(folder);

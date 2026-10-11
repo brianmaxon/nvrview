@@ -97,6 +97,8 @@ internal static class UpdateTests
                 string app = Path.Combine(root, "NvrView-0.3.0");
                 Directory.CreateDirectory(app);
                 File.WriteAllText(Path.Combine(app, SideBySide.Executable), "old");
+                SideBySide.RemoveLeftovers(SideBySide.FolderPath(app));
+                T.Check(!Directory.Exists(Path.Combine(root, SideBySide.FolderName)), "nothing is created before a download");
                 string folder = T.NotNull(SideBySide.UpdateFolder(app, out string? problem));
                 T.Check(problem is null);
                 T.Equal(Path.Combine(root, SideBySide.FolderName), folder);

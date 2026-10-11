@@ -33,10 +33,9 @@ internal sealed class Updater
         Current = typeof(Updater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         AppDir = AppContext.BaseDirectory;
         viewer.UpdateReceived += Handle;
-        if (SideBySide.UpdateFolder(AppDir, out _) is { } folder)
-        {
-            SideBySide.RemoveLeftovers(folder);
-        }
+        // Only where an earlier download made the folder: with updates off,
+        // nothing is created next to the app folder.
+        SideBySide.RemoveLeftovers(SideBySide.FolderPath(AppDir));
         if (automaticAllowed)
         {
             _timer = ui.CreateTimer();
