@@ -11,8 +11,9 @@ import Synchronization
 /// windows show), taps its audio for the visitor's transcript, decides
 /// whether it is audible, and runs talk-back only when the user presses Talk
 /// or sends a typed reply: talk-back is camera motion control, off unless the
-/// user allowed it for that doorbell in Settings (the core refuses
-/// otherwise), and never started on its own.
+/// user allowed it for that camera (Settings, or the confirmation shown when
+/// Talk or Send finds it off; the core refuses otherwise), and never started
+/// on its own.
 @MainActor
 final class DoorbellCalls {
     /// One call's moving parts besides its pure state.
@@ -30,6 +31,12 @@ final class DoorbellCalls {
         var tapped: CoreTile?
         /// A status note for the call (microphone refused, ...).
         var note: String?
+        /// The confirmation to allow talk-back is on screen.
+        var asking = false
+        /// What the user last started, and the typed reply's audio, so a
+        /// refusal from the core can be answered by the same prompt.
+        var lastAction: TalkPermission.Action?
+        var lastReply: [Float]?
 
         init(call: DoorbellCall) { self.call = call }
     }
@@ -53,6 +60,7 @@ final class DoorbellCalls {
 
     /// The fake microphone, when the services are fakes (self-test).
     var fakeMicrophone: FakeMicrophone? { services.microphone as? FakeMicrophone }
+    var fakePrompter: FakeTalkPrompter? { services.prompter as? FakeTalkPrompter }
     var fakeSpeech: FakeSpeechRenderer? { services.speech as? FakeSpeechRenderer }
 
     // MARK: Ring
@@ -177,13 +185,46 @@ final class DoorbellCalls {
 
     // MARK: Talk-back
 
+    /// Whether the camera's own option allows talk-back.
+    private func talkAllowed(_ camera: CameraRef) -> Bool { model.cameraOptions(camera.firstLens).allowTalk }
+
+    /// The confirmation "Allow talk-back for <camera>?". Allow persists the
+    /// option as the Settings toggle does (which also tells the core) and
+    /// then runs `onAllow`; Cancel changes nothing. One prompt at a time.
+    private func askTalkPermission(_ s: Session, action: TalkPermission.Action, onAllow: @escaping () -> Void, onCancel: @escaping () -> Void = {}) {
+        guard !s.asking else { return onCancel() }
+        s.asking = true
+        let camera = s.call.camera
+        let prompt = TalkPermission.prompt(cameraName: model.name(of: camera))
+        services.prompter.ask(prompt) { [weak self] allow in
+            guard let self else { return }
+            s.asking = false
+            let outcome = TalkPermission.outcome(allow: allow, action: action)
+            if outcome.allowTalkBack { self.model.setAllowTalk(camera, true) }
+            if outcome.continueAction, self.sessions[camera] === s { onAllow() } else { onCancel() }
+            self.model.changed()
+        }
+    }
+
     /// Talk pressed (held, or the toggle on): starts talk-back with the
-    /// microphone. Nothing is sent without the doorbell's permission: the
-    /// core refuses with `not_permitted`.
+    /// microphone. When the camera's talk-back is off the user is asked
+    /// first (nothing is sent before the answer); a `not_permitted` refusal
+    /// from the core (options out of sync) asks the same way.
     func startTalking(_ camera: CameraRef) {
-        guard let s = sessions[camera.firstLens], !s.micTalk else { return }
-        s.micTalk = true
+        guard let s = sessions[camera.firstLens], !s.micTalk, !s.asking else { return }
         s.call.activity(now: model.clock.now)
+        s.lastAction = .microphone
+        if TalkPermission.gate(allowed: talkAllowed(camera)) == .ask {
+            askTalkPermission(s, action: .microphone) { [weak self] in self?.beginMicrophoneTalk(s) }
+            return
+        }
+        beginMicrophoneTalk(s)
+    }
+
+    private func beginMicrophoneTalk(_ s: Session) {
+        let camera = s.call.camera
+        guard !s.micTalk else { return }
+        s.micTalk = true
         services.microphone.requestAccess { [weak self] granted, reason in
             guard let self, let s = self.sessions[camera.firstLens], s.micTalk else { return }
             guard granted else {
@@ -231,11 +272,11 @@ final class DoorbellCalls {
         do throws(CoreStatus) {
             try model.bridge.startTalk(tile)
             s.call.talk.startSent()
-            model.logEvent("Talk-back started: channel \(s.call.camera.channel + 1)")
+            model.logEvent("Talk-back started: \(model.name(of: s.call.camera))")
             return true
         } catch {
             s.call.talk.startFailed(error)
-            model.logEvent("Talk-back refused: channel \(s.call.camera.channel + 1), \(TalkState.words(error == .notPermitted ? "not_permitted" : "error"))")
+            model.logEvent(TalkPermission.refusal(cameraName: model.name(of: s.call.camera), reason: error == .notPermitted ? "not_permitted" : "error"))
             return false
         }
     }
@@ -263,16 +304,36 @@ final class DoorbellCalls {
 
     /// Send: speaks `text` (what the user typed in the call, nothing else)
     /// through the doorbell with the system voice, under the same permission
-    /// and limits as Talk.
-    func sendReply(_ text: String, to camera: CameraRef) {
+    /// and limits as Talk. `accepted(false)` when nothing was sent (the user
+    /// answered Cancel to the talk-back prompt): the caller keeps the text.
+    func sendReply(_ text: String, to camera: CameraRef, accepted: @escaping (Bool) -> Void = { _ in }) {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let s = sessions[camera.firstLens], !typed.isEmpty else { return }
+        guard let s = sessions[camera.firstLens], !typed.isEmpty, !s.asking else { return accepted(false) }
         s.call.activity(now: model.clock.now)
-        model.logEvent("Typed reply sent: channel \(s.call.camera.channel + 1), \(typed.count) characters")
+        s.lastAction = .reply
+        if TalkPermission.gate(allowed: talkAllowed(camera)) == .ask {
+            // Asked before anything is rendered or sent. Cancel drops
+            // nothing: the text stays in the field (`accepted(false)`).
+            askTalkPermission(
+                s, action: .reply,
+                onAllow: { [weak self] in
+                    accepted(true)
+                    self?.speakReply(typed, s)
+                }, onCancel: { accepted(false) })
+            return
+        }
+        accepted(true)
+        speakReply(typed, s)
+    }
+
+    private func speakReply(_ typed: String, _ s: Session) {
+        let camera = s.call.camera
+        model.logEvent("Typed reply sent: \(model.name(of: camera)), \(typed.count) characters")
         let speech = services.speech
         Task { @MainActor [weak self] in
             let samples = await speech.render(typed)
-            guard let self, let s = self.sessions[camera.firstLens], !samples.isEmpty else { return }
+            guard let self, let s = self.sessions[camera], !samples.isEmpty else { return }
+            s.lastReply = samples
             s.pendingReply = (s.pendingReply ?? []) + samples
             if s.call.talk.isActive {
                 self.flushReply(s)
@@ -301,7 +362,9 @@ final class DoorbellCalls {
         case .active:
             flushReply(s)
         case .refused, .stopped:
+            let samples = s.lastReply
             s.pendingReply = nil
+            let wasMic = s.micTalk
             if s.micTalk {
                 s.micTalk = false
                 services.microphone.stop()
@@ -309,14 +372,31 @@ final class DoorbellCalls {
                 s.you = nil
             }
             if e.state == .refused {
-                model.logEvent("Talk-back refused: channel \(camera.channel + 1), \(TalkState.words(e.reason ?? "refused", retryMilliseconds: e.retryMilliseconds))")
+                model.logEvent(TalkPermission.refusal(cameraName: model.name(of: camera), reason: e.reason ?? "refused", retryMilliseconds: e.retryMilliseconds))
+                if e.reason == "not_permitted" { coreRefusedPermission(s, wasMic: wasMic, reply: samples) }
             } else {
-                model.logEvent("Talk-back stopped: channel \(camera.channel + 1), \(e.reason ?? "stopped"), \(e.sentMilliseconds ?? 0) ms sent")
+                model.logEvent("Talk-back stopped: \(model.name(of: camera)), \(e.reason ?? "stopped"), \(e.sentMilliseconds ?? 0) ms sent")
             }
         default:
             break
         }
         model.changed()
+    }
+
+    /// The core refused for lack of permission although the camera's option
+    /// is on (out of sync) or was off: the same prompt; Allow tells the core
+    /// again and repeats what the user asked.
+    private func coreRefusedPermission(_ s: Session, wasMic: Bool, reply: [Float]?) {
+        let action = wasMic ? TalkPermission.Action.microphone : (s.lastAction ?? .microphone)
+        askTalkPermission(s, action: action) { [weak self] in
+            guard let self else { return }
+            if action == .reply, let reply {
+                s.pendingReply = reply
+                if !self.beginTalk(s) { s.pendingReply = nil }
+            } else {
+                self.beginMicrophoneTalk(s)
+            }
+        }
     }
 
     // MARK: Time

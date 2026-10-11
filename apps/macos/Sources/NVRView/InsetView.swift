@@ -49,7 +49,8 @@ struct CallContent: Equatable {
 protocol CallControlsDelegate: AnyObject {
     func callUnmute()
     func callTalk(_ down: Bool)
-    func callSend(_ text: String)
+    /// `accepted(false)` when nothing was sent: the text stays in the field.
+    func callSend(_ text: String, accepted: @escaping (Bool) -> Void)
 }
 
 /// One alert inset above the stage (docs/UX.md "Alert insets"): a border in
@@ -209,7 +210,7 @@ final class InsetView: NSView, CallControlsDelegate {
 
     func callUnmute() { callDelegate?.callUnmute() }
     func callTalk(_ down: Bool) { callDelegate?.callTalk(down) }
-    func callSend(_ text: String) { callDelegate?.callSend(text) }
+    func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callDelegate?.callSend(text, accepted: accepted) }
 }
 
 /// The call's controls: Talk (held, or kept on with the toggle), the
@@ -299,8 +300,11 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
     @objc private func sendClicked() {
         let text = reply.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        reply.stringValue = ""
-        delegate?.callSend(text)
+        // The field is cleared once the reply is on its way; if the user
+        // declines the talk-back prompt it keeps what was typed.
+        delegate?.callSend(text) { [weak self] sent in
+            if sent, self?.reply.stringValue == text { self?.reply.stringValue = "" }
+        }
     }
 }
 

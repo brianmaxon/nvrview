@@ -165,8 +165,15 @@ internal sealed class CallCard : UserControl
         {
             return;
         }
-        _reply.Text = "";
-        _ = _viewer.Calls.SendReplyAsync(text, Camera);
+        // The box is cleared once the reply is on its way; if the user declines the talk-back
+        // prompt it keeps what was typed.
+        _ = _viewer.Calls.SendReplyAsync(text, Camera, accepted: () =>
+        {
+            if (_reply.Text.Trim() == text)
+            {
+                _reply.Text = "";
+            }
+        });
     }
 
     /// <summary>Shows the call's state.</summary>

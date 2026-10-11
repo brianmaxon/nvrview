@@ -35,6 +35,43 @@ internal interface IMicrophone
     void Stop();
 }
 
+/// <summary>Asks the user to allow talk-back for a camera (the confirmation of <see cref="TalkPermission"/>).</summary>
+internal interface ITalkPrompter
+{
+    /// <summary>True for Allow; false for Cancel (or when no window can show the question: nothing is allowed).</summary>
+    Task<bool> AskAsync(TalkPrompt prompt);
+}
+
+/// <summary>The real prompt: a dialog on the main window.</summary>
+internal sealed class DialogTalkPrompter : ITalkPrompter
+{
+    public async Task<bool> AskAsync(TalkPrompt prompt)
+    {
+        if (App.Instance.MainWindow?.Content?.XamlRoot is not { } root)
+        {
+            return false;
+        }
+        var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
+        {
+            XamlRoot = root,
+            Title = prompt.Title,
+            Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = prompt.Message, TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap, MaxWidth = 420 },
+            PrimaryButtonText = prompt.Allow,
+            CloseButtonText = prompt.Cancel,
+            DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Close,
+        };
+        try
+        {
+            return await dialog.ShowAsync() == Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary;
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            // Another dialog is open: nothing is allowed; the user presses again.
+            return false;
+        }
+    }
+}
+
 /// <summary>Renders text with the system voice.</summary>
 internal interface ISpeechRenderer
 {
@@ -43,8 +80,11 @@ internal interface ISpeechRenderer
 }
 
 /// <summary>The services of a call.</summary>
-internal sealed class CallServices(IMicrophone microphone, ISpeechRenderer speech, Func<ITranscriptionEngine> transcriber)
+internal sealed class CallServices(IMicrophone microphone, ISpeechRenderer speech, Func<ITranscriptionEngine> transcriber, ITalkPrompter? prompter = null)
 {
+    /// <summary>Asks the user to allow talk-back for a camera (a dialog; the self-test answers by itself).</summary>
+    public ITalkPrompter Prompter { get; } = prompter ?? new DialogTalkPrompter();
+
     public IMicrophone Microphone { get; } = microphone;
 
     public ISpeechRenderer Speech { get; } = speech;
@@ -494,6 +534,20 @@ internal sealed class SapiTranscriber : ITranscriptionEngine
 }
 
 // ---- fakes (self-test) ----
+
+/// <summary>The self-test's prompt: records what was asked and answers with the next queued answer (Cancel when none).</summary>
+internal sealed class FakeTalkPrompter : ITalkPrompter
+{
+    public List<TalkPrompt> Asked { get; } = [];
+
+    public Queue<bool> Answers { get; } = new();
+
+    public Task<bool> AskAsync(TalkPrompt prompt)
+    {
+        Asked.Add(prompt);
+        return Task.FromResult(Answers.Count > 0 && Answers.Dequeue());
+    }
+}
 
 /// <summary>A microphone that sends what the test says.</summary>
 internal sealed class FakeMicrophone : IMicrophone

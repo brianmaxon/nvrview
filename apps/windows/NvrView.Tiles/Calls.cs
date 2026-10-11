@@ -205,6 +205,59 @@ public sealed class TalkState
     };
 }
 
+/// <summary>What the user asked for when talk-back is off for the camera.</summary>
+public enum TalkAction
+{
+    /// <summary>Talk with the microphone (held, or the toggle).</summary>
+    Microphone,
+
+    /// <summary>A typed reply, spoken with the system voice.</summary>
+    Reply,
+}
+
+/// <summary>Whether to go on or to ask first.</summary>
+public enum TalkGate
+{
+    /// <summary>The camera allows talk-back.</summary>
+    Proceed,
+
+    /// <summary>Ask first; nothing is sent until the user answers.</summary>
+    Ask,
+}
+
+/// <summary>What happens after the user answers the prompt.</summary>
+/// <param name="AllowTalkBack">Save the camera's allow-talk-back setting (as its menu item does, which also tells the core).</param>
+/// <param name="ContinueAction">Carry on with what the user started.</param>
+/// <param name="KeepTypedText">A canceled typed reply stays in the box.</param>
+public sealed record TalkOutcome(bool AllowTalkBack, bool ContinueAction, bool KeepTypedText);
+
+/// <summary>The prompt's words.</summary>
+public sealed record TalkPrompt(string Title, string Message, string Allow, string Cancel);
+
+/// <summary>
+/// The confirmation shown when the user presses Talk or sends a typed reply on a camera whose
+/// talk-back is off. Talk-back is camera motion control: allowed only by the user's own choice, per
+/// camera, never by a ring. The same rules as the Mac app's TalkPermission.
+/// </summary>
+public static class TalkPermission
+{
+    /// <summary>Decided before the core is asked, from the camera's own setting.</summary>
+    public static TalkGate Gate(bool allowed) => allowed ? TalkGate.Proceed : TalkGate.Ask;
+
+    public static TalkOutcome Outcome(bool allow, TalkAction action) =>
+        new(allow, allow, !allow && action == TalkAction.Reply);
+
+    public static TalkPrompt Prompt(string cameraName) => new(
+        $"Allow talk-back for {cameraName}?",
+        "Talk-back sends sound through this camera's speaker. You can turn it off in Settings.",
+        "Allow",
+        "Cancel");
+
+    /// <summary>A refused talk-back in words, naming the camera (log lines).</summary>
+    public static string Refusal(string cameraName, string reason, long retryMs = 0) =>
+        $"Talk-back refused: {cameraName}, {TalkState.Words(reason, retryMs)}";
+}
+
 /// <summary>Who spoke: the camera's audio or this computer's microphone. One transcription session per source.</summary>
 public enum TranscriptSource
 {

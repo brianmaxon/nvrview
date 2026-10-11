@@ -188,8 +188,9 @@ someone through a camera's speaker.
   conversation joins it.
 - **Nothing is sent by itself.** Starting a conversation opens no talk-back.
   Talk-back still starts only when the user presses Talk or sends a reply,
-  needs the camera's "Allow talk-back" setting, and is rate-limited and
-  logged like any other (camera motion control, CLAUDE.md).
+  needs the camera's "Allow talk-back" setting (when it is off, that press
+  asks "Allow talk-back for <camera>?" first; Cancel sends nothing), and is
+  rate-limited and logged like any other (camera motion control, CLAUDE.md).
 - **Ending.** The inset's close control or Esc, "End Conversation", or about
   60 s after the last activity (speech, Talk, a reply, using the inset), as for
   a press. When the camera fills the stage there is no inset to close, so a
@@ -517,10 +518,23 @@ Details settled while building it (macOS):
   it. Cameras muted for the call play again when it ends, unless the user
   changed what plays meanwhile.
 - Talk: hold the button, or turn on "Keep talking". Both, and Send, ask the
-  core for talk-back; without the doorbell's "Allow talk-back" (Settings >
-  Cameras, off by default) the core refuses with `not_permitted` and the call
-  says so. The permission is passed to the core after every connection and
-  whenever it changes. The microphone is asked for (the system prompt) only
+  core for talk-back, but the app decides first from the camera's own
+  "Allow talk-back" option (Settings > Cameras, off by default): when it is
+  off, Talk or Send shows **"Allow talk-back for <camera name>?"** ("Talk-back
+  sends sound through this camera's speaker. You can turn it off in
+  Settings.", buttons Allow and Cancel) before anything reaches the core. A
+  sheet on the window that holds the call (a dialog on Windows). Allow saves
+  the option exactly as the toggle does (which also tells the core) and then
+  goes on with what the user started, with no second press: the microphone
+  opens (it stays open like "Keep talking" until Talk is pressed and released
+  or the toggle is used), or the typed reply is spoken. Cancel sends nothing,
+  leaves the option off and the call open, and a typed reply stays in the
+  field (it is cleared only once the reply is on its way). The prompt appears
+  only for the user's own Talk or Send, never for a ring or Start
+  Conversation. If the core still refuses with `not_permitted` (the options
+  out of sync), the same prompt appears, and Allow repeats the action. Every
+  other refusal is logged and shown with the camera's name. The permission is
+  passed to the core after every connection and whenever it changes. The microphone is asked for (the system prompt) only
   when Talk is first pressed; a typed reply needs no microphone.
 - A typed reply is rendered by the system voice into buffers (never played
   locally), converted to 16 kHz mono, held until talk-back is active, pushed

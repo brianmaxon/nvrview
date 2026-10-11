@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import Foundation
 import NVRCore
@@ -28,12 +29,20 @@ protocol SpeechRenderer: AnyObject {
     func render(_ text: String) async -> [Float]
 }
 
+/// Asks the user to allow talk-back for a camera (the confirmation of
+/// `TalkPermission`); `answer(true)` is Allow. Never answers by itself.
+@MainActor
+protocol TalkPrompter: AnyObject {
+    func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void)
+}
+
 /// Everything a call needs from the system.
 @MainActor
 struct CallServices {
     var makeTranscriber: @MainActor (TranscriptSource) -> any TranscriptionEngine
     var microphone: any MicrophoneInput
     var speech: any SpeechRenderer
+    var prompter: any TalkPrompter = AlertTalkPrompter()
 
     /// The real ones.
     static func system() -> CallServices {
@@ -44,7 +53,8 @@ struct CallServices {
     /// Fakes for the self-test and development: no permission prompt, no
     /// device; the transcriber turns fed audio into placeholder text.
     static func fakes() -> CallServices {
-        CallServices(makeTranscriber: { _ in FakeTranscriber() }, microphone: FakeMicrophone(), speech: FakeSpeechRenderer())
+        CallServices(makeTranscriber: { _ in FakeTranscriber() }, microphone: FakeMicrophone(), speech: FakeSpeechRenderer(),
+            prompter: FakeTalkPrompter())
     }
 }
 
@@ -341,6 +351,38 @@ final class FakeMicrophone: MicrophoneInput {
     func speak(count: Int) {
         let samples = (0..<count).map { Float(0.1 * sin(Double($0) * 2 * Double.pi * 300 / 16_000)) }
         onSamples?(samples)
+    }
+}
+
+/// The real prompt: an alert sheet on the window that holds the call (a
+/// modal alert when no window is showing).
+@MainActor
+final class AlertTalkPrompter: TalkPrompter {
+    func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.message
+        alert.addButton(withTitle: prompt.allow)
+        alert.addButton(withTitle: prompt.cancel)
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated { answer(response == .alertFirstButtonReturn) }
+            }
+        } else {
+            answer(alert.runModal() == .alertFirstButtonReturn)
+        }
+    }
+}
+
+/// The self-test's prompt: records what was asked and answers with the next
+/// queued answer (Cancel when none), so no human is needed.
+@MainActor
+final class FakeTalkPrompter: TalkPrompter {
+    private(set) var asked: [TalkPermission.Prompt] = []
+    var answers: [Bool] = []
+    func ask(_ prompt: TalkPermission.Prompt, answer: @escaping @MainActor (Bool) -> Void) {
+        asked.append(prompt)
+        answer(answers.isEmpty ? false : answers.removeFirst())
     }
 }
 

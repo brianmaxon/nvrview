@@ -33,6 +33,74 @@ public enum CallAudio {
     }
 }
 
+// MARK: Talk-back permission
+
+/// The confirmation shown when the user presses Talk or sends a typed reply
+/// on a camera whose talk-back is off (docs/UX.md "Doorbell calls"). Talk-back
+/// is camera motion control: it is allowed only by the user's own choice, per
+/// camera, never by a ring and never without being asked.
+public enum TalkPermission {
+    /// What the user asked for.
+    public enum Action: Sendable, Equatable {
+        /// Talk with the microphone (held, or the toggle).
+        case microphone
+        /// A typed reply, spoken with the system voice.
+        case reply
+    }
+
+    public enum Gate: Sendable, Equatable {
+        /// The camera allows talk-back: go on.
+        case proceed
+        /// Ask first; nothing is sent until the user answers.
+        case ask
+    }
+
+    /// Decided before the core is asked, from the camera's own option.
+    public static func gate(allowed: Bool) -> Gate { allowed ? .proceed : .ask }
+
+    /// What happens after the user answers the prompt.
+    public struct Outcome: Sendable, Equatable {
+        /// Persist the camera's allow-talk-back option (as the Settings
+        /// toggle does, which also tells the core).
+        public var allowTalkBack: Bool
+        /// Carry on with the action the user started.
+        public var continueAction: Bool
+        /// A typed reply stays in the field to send later (Cancel), instead
+        /// of being cleared.
+        public var keepTypedText: Bool
+
+        public init(allowTalkBack: Bool, continueAction: Bool, keepTypedText: Bool) {
+            self.allowTalkBack = allowTalkBack
+            self.continueAction = continueAction
+            self.keepTypedText = keepTypedText
+        }
+    }
+
+    public static func outcome(allow: Bool, action: Action) -> Outcome {
+        Outcome(allowTalkBack: allow, continueAction: allow, keepTypedText: !allow && action == .reply)
+    }
+
+    /// The prompt's words.
+    public struct Prompt: Sendable, Equatable {
+        public var title: String
+        public var message: String
+        public var allow: String
+        public var cancel: String
+    }
+
+    public static func prompt(cameraName: String) -> Prompt {
+        Prompt(
+            title: "Allow talk-back for \(cameraName)?",
+            message: "Talk-back sends sound through this camera's speaker. You can turn it off in Settings.",
+            allow: "Allow", cancel: "Cancel")
+    }
+
+    /// A refused talk-back in words, naming the camera (log lines).
+    public static func refusal(cameraName: String, reason: String, retryMilliseconds: Int? = nil) -> String {
+        "Talk-back refused: \(cameraName), " + TalkState.words(reason, retryMilliseconds: retryMilliseconds)
+    }
+}
+
 // MARK: Talk-back
 
 /// Where the call's talk-back stands, from what the app asked and the core's
@@ -130,7 +198,7 @@ public struct TalkState: Sendable, Equatable {
     /// A refusal or stop reason in words.
     public static func words(_ reason: String, retryMilliseconds: Int? = nil) -> String {
         switch reason {
-        case "not_permitted": return "not enabled for this doorbell (Settings > Cameras)"
+        case "not_permitted": return "not enabled for this camera (Settings > Cameras)"
         case "rate_limited":
             let s = retryMilliseconds.map { " (try again in \(($0 + 999) / 1000) s)" } ?? ""
             return "too many attempts\(s)"

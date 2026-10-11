@@ -21,7 +21,7 @@ extension StageView {
         }
         func callUnmute() { stage?.unmuteCall(camera) }
         func callTalk(_ down: Bool) { stage?.talk(camera, down) }
-        func callSend(_ text: String) { stage?.sendReply(text, camera) }
+        func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { stage?.sendReply(text, camera, accepted: accepted) }
     }
 
     func installInsets() {
@@ -192,8 +192,8 @@ extension StageView {
         insetBoard.use(camera, now: clock.now)
     }
 
-    fileprivate func sendReply(_ text: String, _ camera: CameraRef) {
-        model.calls.sendReply(text, to: camera)
+    fileprivate func sendReply(_ text: String, _ camera: CameraRef, accepted: @escaping (Bool) -> Void) {
+        model.calls.sendReply(text, to: camera, accepted: accepted)
         insetBoard.use(camera, now: clock.now)
     }
 
@@ -466,5 +466,5 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
 
     func callUnmute() { callTarget?.callUnmute() }
     func callTalk(_ down: Bool) { callTarget?.callTalk(down) }
-    func callSend(_ text: String) { callTarget?.callSend(text) }
+    func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callTarget?.callSend(text, accepted: accepted) }
 }

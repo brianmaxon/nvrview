@@ -428,7 +428,8 @@ that is refused once, then streams):
     conversation (the tile menu offers it, with Allow talk-back) opens a
     call with no press, audible, a card over the stage, the camera's tapped
     audio reaching the recognizer, and nothing sent by itself; Talk is
-    refused until talk-back is allowed and then really talks (the core's
+    asks "Allow talk-back for the camera?" until talk-back is allowed (Cancel
+    sends nothing; Allow saves the setting and talks) and then really talks (the core's
     `sent_ms` is checked); a typed reply is rendered by the voice at its own
     rate, pushed in one go and ended with a draining stop (`finished`);
     captions reach the card; a press (an injected `alarm`) joins the call

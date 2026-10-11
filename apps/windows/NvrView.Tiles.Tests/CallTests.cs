@@ -18,6 +18,7 @@ internal static class CallTests
         ("calls: talk goes through starting to active and stops", TalkLifecycle),
         ("calls: a late refusal of an earlier start changes nothing", LateRefusal),
         ("calls: refusal reasons in words", RefusalWords),
+        ("calls: the talk-back prompt gate and its outcomes", TalkPrompts),
         ("calls: partials are replaced and finals appended", TranscriptModel),
         ("calls: the echo gate holds the microphone while the camera plays", EchoGateTest),
         ("calls: a call ends a minute after its last activity unless talking", CallExpiry),
@@ -124,6 +125,22 @@ internal static class CallTests
         Check.True(talk.IsTalking, "the second start is still going");
         talk.Apply(new TalkEvent("active"));
         Check.True(talk.IsActive, "its own events count");
+    }
+
+    private static void TalkPrompts()
+    {
+        Check.Equal(TalkGate.Ask, TalkPermission.Gate(false), "asks when talk-back is off");
+        Check.Equal(TalkGate.Proceed, TalkPermission.Gate(true), "goes on when it is on");
+        Check.Equal(new TalkOutcome(true, true, false), TalkPermission.Outcome(true, TalkAction.Microphone), "Allow for Talk");
+        Check.Equal(new TalkOutcome(true, true, false), TalkPermission.Outcome(true, TalkAction.Reply), "Allow for a reply");
+        Check.Equal(new TalkOutcome(false, false, false), TalkPermission.Outcome(false, TalkAction.Microphone), "Cancel for Talk");
+        Check.Equal(new TalkOutcome(false, false, true), TalkPermission.Outcome(false, TalkAction.Reply), "Cancel keeps the typed text");
+        TalkPrompt p = TalkPermission.Prompt("Front Door");
+        Check.Equal("Allow talk-back for Front Door?", p.Title, "the prompt names the camera");
+        Check.Equal("Talk-back sends sound through this camera's speaker. You can turn it off in Settings.", p.Message, "the explanation");
+        Check.True(p.Allow == "Allow" && p.Cancel == "Cancel", "the buttons");
+        Check.Equal("Talk-back refused: Front Door, another client is talking", TalkPermission.Refusal("Front Door", "busy"), "a refusal names the camera");
+        Check.Equal("Talk-back refused: Front Door, too many attempts (try again in 2 s)", TalkPermission.Refusal("Front Door", "rate_limited", 2000), "with the wait");
     }
 
     private static void RefusalWords()
