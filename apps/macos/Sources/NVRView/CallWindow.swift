@@ -17,7 +17,6 @@ import VideoKit
 final class CallWindows {
     static let frameKey = "callWindowFrame"
     static let onTopKey = "callWindowOnTop"
-    static let placementKey = "callWindowPlacement"
 
     private unowned let model: AppModel
     /// Where the frame, the pin and the placement choice are remembered (a
@@ -50,11 +49,15 @@ final class CallWindows {
         set { defaults.set(newValue, forKey: Self.onTopKey) }
     }
 
-    /// "Open call windows" (the setting itself comes with Settings).
+    /// "Open call windows" (Settings > Alerts, kept by the model).
     var placementMode: CallWindowPlacement.Mode {
-        get { defaults.string(forKey: Self.placementKey).flatMap(CallWindowPlacement.Mode.init(rawValue:)) ?? .remembered }
-        set { defaults.set(newValue.rawValue, forKey: Self.placementKey) }
+        get { model.callWindowPlacement }
+        set { model.callWindowPlacement = newValue }
     }
+
+    /// Whether the last window opened took the focus (self-test): a ring
+    /// never does; Pop Out and Start Conversation, the user's own actions, do.
+    private(set) var lastOpenActivated: Bool?
 
     /// The frame the user last left a call window at (top-left origin).
     var rememberedFrame: WindowRect? {
@@ -71,17 +74,18 @@ final class CallWindows {
     // MARK: Following the calls
 
     /// After every model change: a call that ended closes its window; a
-    /// call shown in a window without one gets it (opened without taking
-    /// the focus: a ring must not take it from what the user is doing); the
-    /// windows show the calls as they are now.
+    /// call shown in a window without one gets it (a press opens it without
+    /// taking the focus from what the user is doing; Start Conversation,
+    /// which the user chose, brings it forward); the windows show the calls
+    /// as they are now.
     func sync() {
         for (camera, c) in Array(controllers) where model.calls.call(for: camera) == nil {
             controllers[camera] = nil
             c.close()
         }
-        for camera in model.calls.cameras
-        where model.calls.call(for: camera)?.presentation == .window && controllers[camera] == nil {
-            open(camera, activate: false)
+        for camera in model.calls.cameras where controllers[camera] == nil {
+            guard let call = model.calls.call(for: camera), call.presentation == .window else { continue }
+            open(camera, activate: call.origin == .conversation)
         }
         for c in controllers.values { c.refresh() }
     }
@@ -133,6 +137,7 @@ final class CallWindows {
         c.onMoved = { [weak self] frame in self?.rememberedFrame = Self.topLeft(frame) }
         c.place(frame(index: controllers.count))
         controllers[camera] = c
+        lastOpenActivated = activate
         c.refresh()
         show(c, activate: activate)
         // AppKit puts the keyboard in the reply field when the window comes

@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         } else {
             defaults = .standard
         }
+        model.useCallDefaults(defaults)
         let calls = CallWindows(model: model, defaults: defaults, keepsBehind: test)
         calls.activeScreen = { [weak self] in self?.activeViewerWindow?.window?.screen ?? NSScreen.screens.first }
         model.popOutCall = { [weak calls] camera in calls?.popOut(camera) }

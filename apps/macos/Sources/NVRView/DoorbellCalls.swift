@@ -138,9 +138,14 @@ final class DoorbellCalls {
         for camera in Array(sessions.keys) where camera.device == key { end(camera, reason: "device removed") }
     }
 
-    /// Opens the call: lease, audio, and the visitor's transcript.
+    /// Opens the call: lease, audio, and the visitor's transcript. Where it
+    /// shows is decided now (the doorbell's choice, else "Open calls in
+    /// their own window") and kept for presses that join it.
     private func open(_ camera: CameraRef, at date: Date, audio: CallAudio.Decision, origin: DoorbellCall.Origin) {
-        let s = Session(call: DoorbellCall(camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin))
+        let s = Session(
+            call: DoorbellCall(
+                camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin,
+                presentation: model.callPresentation(for: camera)))
         sessions[camera] = s
         model.leases.acquire(camera)
         if case .audible = audio {

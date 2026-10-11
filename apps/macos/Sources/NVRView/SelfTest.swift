@@ -70,7 +70,11 @@ import VideoKit
 ///    window (that one too); closing the
 ///    window, Esc in it and a minute without activity end the call; the
 ///    remembered frame is reused, and one off every screen falls back to the
-///    top right of the active screen;
+///    top right of the active screen; with "Open calls in their own window"
+///    on, a ring opens a call window without the focus (the insets kept
+///    detached, a joining press keeping it there), a doorbell's Inset
+///    choice wins over the setting, and its Window choice opens Start
+///    Conversation in a window;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -1033,6 +1037,89 @@ final class SelfTest {
         if !near(fallback, topRight) {
             problems.append("a remembered frame off every screen did not fall back to the top right: \(String(describing: fallback))")
         }
+        callDefaultRingStep(doorbell, second: second)
+    }
+
+    /// "Open calls in their own window": a ring opens the call in a call
+    /// window that does not take the focus, the viewer windows keep its
+    /// item detached, a press that joins keeps the presentation, and the
+    /// doorbell's own choice (Inset) wins over the setting.
+    private func callDefaultRingStep(_ doorbell: CameraRef, second: ViewerWindowController) {
+        guard let model = app.model, let window, let fake = model.fake, let calls = app.callWindows,
+            let id = model.runtime(doorbell.device)?.deviceID
+        else { return finishPopOut(second) }
+        let stages = [window.stage, second.stage]
+        // parity: call-default-ring
+        model.callsOpenInWindow = true
+        let saved = calls.defaults.bool(forKey: AppModel.callsOpenInWindowKey)
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+        when({ calls.controller(for: doorbell) != nil && stages.allSatisfy { !$0.insetBoard.detachedCameras.isEmpty } }, timeout: 3) {
+            [self] in
+            let call = model.calls.call(for: doorbell)
+            let c = calls.controller(for: doorbell)
+            let detached = stages.allSatisfy { $0.insetBoard.detachedCameras == [doorbell] && $0.shownInsetViews.isEmpty }
+            let quiet = calls.lastOpenActivated == false && c?.window?.isKeyWindow != true && !NSApp.isActive
+            // A press that joins keeps the call where it is, whatever the setting says now.
+            model.callsOpenInWindow = false
+            fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+            when({ model.calls.call(for: doorbell)?.presses == 2 }, timeout: 3) { [self] in
+                let joined = model.calls.call(for: doorbell)
+                let kept = joined?.presentation == .window && calls.controller(for: doorbell) === c
+                    && stages.allSatisfy { $0.shownInsetViews.isEmpty }
+                model.calls.end(doorbell, reason: "closed")
+                print(
+                    "ring with calls in windows: saved \(saved), window \(call?.presentation == .window && c != nil), "
+                        + "opened without focus \(quiet), insets detached \(detached), a joining press kept it \(kept)")
+                if !saved { problems.append("Open calls in their own window was not saved") }
+                if call?.presentation != .window || c == nil { problems.append("with the setting on, a ring did not open a call window") }
+                if !quiet { problems.append("a call window opened by a ring took the focus (or asked to)") }
+                if !detached { problems.append("a ring into a call window left an inset or no detached item in a viewer window") }
+                if !kept { problems.append("a press joining a call in its window moved it") }
+                // The doorbell's own choice wins: Inset with the setting on.
+                model.callsOpenInWindow = true
+                model.setCallPresentation(doorbell, .inset)
+                fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+                when({ stages.allSatisfy { !$0.shownInsetViews.isEmpty } }, timeout: 3) { [self] in
+                    let inset = model.calls.call(for: doorbell)?.presentation == .inset && calls.controller(for: doorbell) == nil
+                    print("ring with the doorbell set to Inset: insets in both windows \(inset)")
+                    if !inset { problems.append("the doorbell's Inset choice did not win over Open calls in their own window") }
+                    for stage in stages { stage.dismissInset(doorbell) }
+                    model.callsOpenInWindow = false
+                    callDefaultConversationStep(doorbell, second: second)
+                }
+            }
+        }
+    }
+
+    /// The doorbell's Window choice opens Start Conversation in a call
+    /// window (brought forward: the user asked for it) with the setting off;
+    /// Default again leaves the camera's options empty.
+    private func callDefaultConversationStep(_ doorbell: CameraRef, second: ViewerWindowController) {
+        guard let model = app.model, let window, let calls = app.callWindows else { return finishPopOut(second) }
+        // parity: call-default-conversation
+        model.setCallPresentation(doorbell, .window)
+        let stored = model.cameraOptions(doorbell)
+        window.stage.startConversation(doorbell)
+        let call = model.calls.call(for: doorbell)
+        let opened = call?.presentation == .window && call?.origin == .conversation && calls.controller(for: doorbell) != nil
+        let activates = calls.lastOpenActivated == true
+        let detached = window.stage.insetBoard.detachedCameras == [doorbell] && window.stage.shownInsetViews.isEmpty
+        model.calls.end(doorbell, reason: "closed")
+        model.setCallPresentation(doorbell, nil)
+        let cleared = model.cameraOptions(doorbell).callWindow == nil && model.cameraOptions(doorbell).isDefault
+        // The saved choice reads back; a file without it reads as Default.
+        let encoder = JSONEncoder()
+        let roundTrip = (try? encoder.encode(stored)).flatMap { try? JSONDecoder().decode(CameraOptions.self, from: $0) }
+        let plain = (try? encoder.encode(CameraOptions(camera: doorbell))).flatMap { String(data: $0, encoding: .utf8) }
+        let readsBack = roundTrip?.callPresentation == .window && plain?.contains("callWindow") == false
+        print(
+            "conversation with the doorbell set to Window: call window \(opened), brought forward \(activates), "
+                + "inset detached \(detached), Default clears the option \(cleared), saved choice reads back \(readsBack)")
+        if !opened { problems.append("the doorbell's Window choice did not open Start Conversation in a call window") }
+        if !activates { problems.append("a call window opened by Start Conversation was not brought forward") }
+        if !detached { problems.append("Start Conversation into a call window left an inset in the viewer window") }
+        if !cleared { problems.append("choosing Default did not clear the camera's call option") }
+        if !readsBack { problems.append("the camera's call choice did not save and read back") }
         finishPopOut(second)
     }
 

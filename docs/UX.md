@@ -632,7 +632,8 @@ example to keep it beside other work. Both apps follow these rules.
   being edited, the 60 s without activity, and the device going away.
   Activity in the call window counts like activity in an inset.
 - **Focus:** a call window opened by a ring never takes the keyboard focus
-  from what the user is doing; an explicit Pop Out activates it. Inside it,
+  from what the user is doing; an explicit Pop Out activates it, and so does
+  Start Conversation opening one (the user asked for the call). Inside it,
   Tab moves between the controls and Return sends the reply.
 - **On top:** the window floats above other windows by default, also over
   full-screen apps, with a pin toggle in its header whose state is
@@ -655,6 +656,11 @@ example to keep it beside other work. Both apps follow these rules.
   and so does a window that had no item when the call pops in, so Pop In
   shows the inset in every viewer window. A conversation started in one
   window therefore shows in the others too, as a press does.
+- **Settings (macOS):** Settings > Alerts > Doorbell calls has "Open calls
+  in their own window" and "Open call windows"; Settings > Cameras has "Calls
+  open in" per camera (Default, which names what the setting gives now;
+  Window; Inset), saved with the camera's other options and left out of the
+  file while it is Default.
 - **Where it opens:** a setting "Open call windows" with "Where I left it"
   (the default) and "Top right of the active screen". Where I left it: the
   frame the user last left a call window at (one frame for the app, its size

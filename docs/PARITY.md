@@ -105,8 +105,8 @@ less than that. Nothing here was run on a Windows machine.
 | Save call transcripts in the event log | yes | no | Windows README "Not yet on Windows". |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
 | Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. |
-| Open calls in their own window: global setting and per-doorbell choice | no (planned) | no (planned) | macOS has the pure rule (`CallPresentation.resolve`, unit tests). |
-| Call window placement (where I left it, or top right of the active screen) | partial (the remembered frame and its fallback; the setting is planned) | no (planned) | macOS: `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. |
+| Open calls in their own window: global setting and per-doorbell choice | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"); `CallPresentation.resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
+| Call window placement (where I left it, or top right of the active screen) | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls ("Open call windows"); `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. |
 
 ### Devices, settings, and updates
 
@@ -117,7 +117,7 @@ less than that. Nothing here was run on a Windows machine.
 | Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
 | Settings: Devices | yes | yes | |
 | Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
-| Settings: Alerts (inset corner, save transcripts) | yes | partial (the call cards' corner, in Settings; no transcript saving) | |
+| Settings: Alerts (inset corner, save transcripts, call windows) | yes | partial (the call cards' corner, in Settings; no transcript saving) | |
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |

@@ -60,6 +60,8 @@ alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so
 alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
+call-default-conversation   macos    gap: Windows has no call window yet, so no per-camera Window choice for Start Conversation
+call-default-ring           macos    gap: Windows has no call window yet, so no "Open calls in their own window" setting
 call-popin                  macos    gap: Windows has no call window yet (docs/UX.md "A call in its own window")
 call-popin-new-window       macos    gap: Windows has no call window yet, so no viewer window opened while a call is popped out
 call-popout-end             macos    gap: Windows has no call window yet, so closing, Esc and expiry do not close one
