@@ -870,14 +870,15 @@ or a counted drop, never growth):
    `CameraState::Failed` carries free text; there is no `remove_device`
    (a removed device's workers keep its old session). Needs per-camera
    pause, reason codes, and device removal.
-5. **No recorded time on frames.** `bc_protocol::media::Demuxer` drops the
-   video extra header, which carries the keyframe's wall-clock seconds the
-   shared clock needs (protocol.md, "Records as the official client reads
-   them": reported; the first keyframe's seconds matching `seekTime` is
-   observed). Needs the first 4 bytes kept on video records.
-6. **Downloads do not record their first picture's time.** A file starts
-   at the keyframe at or before the range start; `incident.json` stores the
-   requested range only. The edit list needs `file_start_ms` per file.
+5. **Recorded time on frames.** The demuxer keeps the video extra header
+   (`Record::Video::extra_header`, `wall_clock_secs`), and download chunks
+   now record each keyframe's seconds (`recordings::recorded_time`). Still
+   open: whether those seconds are device-local or UTC (MILESTONE-P.md,
+   B7), which the shared clock needs to place pictures on the index's
+   timeline.
+6. **First picture time of downloads.** Each camera job records its first
+   picture's time on the keyframes' clock (`first_picture_wall_ms`);
+   `file_start_ms` in device-local time follows once B7 is settled.
 7. **Thumbnails share the search permit** with the indexer (a FIFO
    semaphore), so a long indexing pass delays every thumbnail. Needs a
    priority (thumbnails and user refreshes before background passes).

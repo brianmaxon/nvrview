@@ -272,6 +272,11 @@ pub struct CameraJob {
     /// Paused by the user (this camera only).
     #[serde(default)]
     pub paused: bool,
+    /// When its first picture was taken, in ms on the keyframes' wall
+    /// clock ([`crate::recorded_time`]; whether that clock is local or UTC
+    /// is still open), once every chunk is on disk.
+    #[serde(default)]
+    pub first_picture_wall_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -304,6 +309,8 @@ pub struct CameraProgress {
     pub paused: bool,
     /// Queued or running, but its device is not added or not connected.
     pub waiting_device: bool,
+    /// See [`CameraJob::first_picture_wall_ms`].
+    pub first_picture_wall_ms: Option<i64>,
     /// The final file's path.
     pub output: PathBuf,
 }
@@ -694,6 +701,7 @@ impl Scheduler {
                         .collect(),
                     state: CameraState::Queued,
                     paused: false,
+                    first_picture_wall_ms: None,
                 })
             })
             .collect();
@@ -959,6 +967,7 @@ impl Inner {
                                 state: c.state.clone(),
                                 paused: c.paused,
                                 waiting_device: active && (!device_ready || live.waiting),
+                                first_picture_wall_ms: c.first_picture_wall_ms,
                                 output: j.folder.join(&c.file),
                             }
                         })
@@ -1283,8 +1292,23 @@ async fn run_camera(inner: &Arc<Inner>, session: &Arc<DeviceSession>, p: Picked)
             .await;
         return;
     }
+    let (dir, n) = (p.parts_dir.clone(), job.chunks.len() as u32);
+    let first =
+        tokio::task::spawn_blocking(move || crate::recorded_time::first_picture_wall_ms(&dir, n))
+            .await;
+    let first = match first {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            warn!(error = %e, "cannot read the chunk indexes");
+            None
+        }
+        Err(_) => None,
+    };
     inner
-        .update(slot, |c, _| c.state = CameraState::ChunksComplete)
+        .update(slot, |c, _| {
+            c.state = CameraState::ChunksComplete;
+            c.first_picture_wall_ms = first;
+        })
         .await;
     // The final MP4 step, when a finalizer is installed.
     let Some(fin) = inner.finalizer.clone() else {

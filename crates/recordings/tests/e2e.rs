@@ -462,6 +462,8 @@ async fn three_camera_download(clock: Timing) {
         assert_eq!(c.state, CameraState::ChunksComplete, "{}", c.name);
         assert_eq!(c.chunks_done, c.chunks_total);
         assert!(c.bytes > 0);
+        // The mock's keyframes carry wall-clock seconds.
+        assert!(c.first_picture_wall_ms.is_some(), "{}", c.name);
     }
     // Ranges with margins, in 10 s chunks: Front from 7.42.00 to 7.42.30
     // (3 chunks), Side 7.42.15 to 7.42.45 (3), Gate 7.42.40 to 7.43.15 (4).

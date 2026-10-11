@@ -24,6 +24,8 @@
 //! - [`thumbs`]: cover thumbnails (one keyframe per time range) in a
 //!   bounded on-disk cache, capped by count and bytes.
 //! - [`naming`]: the output folder and file names and `incident.json`.
+//! - [`recorded_time`]: when a recorded picture was taken, from the
+//!   wall-clock seconds keyframes carry.
 //!
 //! Times are the device's local wall-clock time as "naive seconds" (see
 //! [`bc_protocol::archive::DateTime::to_naive_secs`]): the device reports no
@@ -41,6 +43,7 @@ pub mod index;
 pub mod indexer;
 pub mod lane;
 pub mod naming;
+pub mod recorded_time;
 pub mod scheduler;
 mod store;
 pub mod thumbs;

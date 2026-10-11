@@ -64,7 +64,7 @@ fact the slice needs is observed or reported; seams for the rest are named.
 | C4 | **On-demand index** (decision 8): fill the days a view asks for (calendar months, then files and events per channel and day), refresh today only while a view holds it, no default background pass; revision counter and change ranges for `recordings_changed` | C1 | unblocked | Opus |
 | C5 | **One search lane per device with priority.** Thumbnails and user requests before background index work; a thumbnail queue per device, newest request first, at most 256 queued (oldest dropped and reported), cancel by key or all | C1 | unblocked | Opus |
 | C6 | **Scheduler control.** Failure reason codes (`stalled`, `session_closed`, `refused`, `no_recording`, `write_failed`, `join_failed`, `login_failed`, `other`) beside the English detail; per-camera pause and retry; `remove_device` (jobs wait as `waiting_device`, also while the device is offline, without spending attempts); `forget` with `delete_partial`; the device's size estimate in progress; at most 1000 known downloads. (Progress is a watch channel, newest state wins; the 4-per-second event limit belongs to the owner, C11) | — | unblocked | Opus |
-| C7 | **Recorded time on frames.** The demuxer keeps a keyframe's wall-clock seconds; chunk indexes and `incident.json` record each file's first picture time (`file_start_ms`), refined across keyframes as in live view. Optional throughout: a download stream without the seconds still downloads | — | unblocked (seconds observed on live and replay; on 143 downloads assumed the same, checked by test against the mock and noted as such) | Sonnet |
+| C7 | **Recorded time on frames.** Chunk indexes keep each keyframe's wall-clock seconds (the demuxer already kept the extra header); `recordings::recorded_time` refines the offset across keyframes as in live view, and each camera job records its first picture's time. Optional throughout: a stream without the seconds still downloads. **Seam:** times stay on the keyframes' clock, because whether those seconds are device-local or UTC is not established (B7) | — | done (seconds observed on live and replay; on 143 downloads checked only against the mock) | Sonnet |
 | C8 | **Edit decision lists** (follow cut, 2-up, 4-up) as pure planners over an incident and its finished files; keyframe positions read from the MP4's sync samples | C7 | unblocked | Sonnet |
 | C9 | **Playback on the session.** 123, 5, 7 move to the viewing tier with request builders; `bc-session` gains a play stream (seek, play, media routed by message ID and replay `seq`, bounded queue, stop on every exit path, coalesced restarts); `mock-nvr` serves 123/5/7 at 1× with the observed burst-then-pace and continues across files. Seams: `playSpeed` other than 1 is refused until B1; end of last file and error replies are surfaced as "ended" / "refused" from whatever the mock and later hardware show | — | unblocked at 1× | Opus |
 | C10 | **Playback engine** in `viewer-core`: playback tiles on the existing tile pipeline and generations, the shared clock, paced release less decode latency, `wait`/`free` sync, buffer bounds with stop and restart, per-camera anchor refinement and offsets, rates 0.25× to 2× by pacing | C7, C9 | unblocked except B1, B5 | Opus |
@@ -101,6 +101,7 @@ next minor.
 | B4 | Event log and AI search (516–519, 759, 653) | not on the allowlist; nothing built |
 | B5 | Live and replay (or download) media on one session at once; how many plays a device allows beside live view | the design keeps live running (decision 2); plays limited by `max_plays_per_device` (default 4); downloads already share the session today and the end-to-end test checks live view keeps flowing in the mock |
 | B6 | How a play ends at the end of the last file; error replies of 5, 123, 143 | C9 reports `ended` when the core's clock passes the last indexed recording, and `refused` for any non-200 status |
+| B7 | Whether the wall-clock seconds in keyframe extra headers are the device's local time or UTC | recorded times stay on the keyframes' own clock (`recordings::recorded_time`); conversion to the index's local time waits |
 
 ## Order and parallel agents
 
@@ -131,8 +132,8 @@ C12 (after C11) ─────────── F3
 
 ## The re-capture
 
-What the next packet capture of the official client must contain so B1–B3
-and B6 can proceed. Start the capture **before** launching the client (quit
+What the next packet capture of the official client must contain so B1–B3,
+B6, and B7 can proceed. Start the capture **before** launching the client (quit
 it first), so the logins are in it and the bodies can be decrypted locally;
 the capture stays in the git-ignored `captures/` directory.
 
@@ -145,7 +146,8 @@ the capture stays in the git-ignored `captures/` directory.
 4. Pick a day with an animal event and filter by animal (B3: the type name
    in 273 replies).
 5. Open the device's Date & Time screen and close it without saving (B2:
-   104, 106, 38 replies).
+   104, 106, 38 replies). With step 1's plays, this also settles B7: the
+   keyframes' seconds against the play's `seekTime` and the device's zone.
 6. If the client allows it, keep a live view of another camera open in a
    second window during the playback and a download (B5).
 7. If the NVR has it, the AI search screen: a type search, a danger-level
