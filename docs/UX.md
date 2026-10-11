@@ -553,7 +553,8 @@ the same call themselves without a press ("Start Conversation", below):
   permission and limits). Text comes only from what the user types or picks
   from their own templates, never from the transcript, detected text, or any
   other untrusted source (see docs/ARCHITECTURE.md "Doorbell text-to-speech").
-- The call ends when the user closes it or about 60 s after the last activity
+- The call ends when the user closes it or, while it shows in the insets
+  (not in a call window of its own, see below), about 60 s after the last activity
   (press, speech, talk-back, typing a reply, hovering or clicking its inset),
   and is listed in the event log with its times and, if saved, its
   transcript.
@@ -664,8 +665,11 @@ example to keep it beside other work. Both apps follow these rules.
   any view built for it shows them.
 - **Ending:** closing the call window (its close button, ⌘W, Alt+F4) ends the
   call, as closing its inset does; so do Esc while the reply field is not
-  being edited, the 60 s without activity, and the device going away.
-  Activity in the call window counts like activity in an inset.
+  being edited, the device going away, and quitting the app. A call in its
+  own window **never ends by inactivity**: the user put it there to keep
+  it, so the 60 s rule applies only in the insets. Pop In restarts that
+  rule with a fresh minute. (Windows: the same rule for its call windows,
+  which are planned; its call model already applies it.)
 - **Focus:** a call window opened by a ring never takes the keyboard focus
   from what the user is doing; an explicit Pop Out activates it, and so does
   Start Conversation opening one (the user asked for the call). Inside it,

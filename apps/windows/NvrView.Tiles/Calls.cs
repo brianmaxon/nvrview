@@ -501,8 +501,13 @@ public sealed class Call
         ShowsUnmute = false;
     }
 
-    /// <summary>Whether the call has ended by itself at <paramref name="now"/> (talking keeps it open).</summary>
-    public bool Expired(double now) => !Talk.IsTalking && now - LastActivity >= IdleTimeout;
+    /// <summary>
+    /// Whether the call has ended by itself at <paramref name="now"/>: a minute after the last
+    /// activity, in the insets only. Talking keeps it open, and a call in its own window never ends by
+    /// itself (only when the user closes it, the device goes away, or the app quits); Pop In gives it
+    /// a fresh minute (<see cref="Activity"/>).
+    /// </summary>
+    public bool Expired(double now) => Presentation == CallPresentation.Inset && !Talk.IsTalking && now - LastActivity >= IdleTimeout;
 
     /// <summary>The event log's line when it ends; the transcript only when saving is on.</summary>
     public string LogText(DateTime endedAt, bool saveTranscript)

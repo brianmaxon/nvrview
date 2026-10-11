@@ -106,7 +106,7 @@ less than that. Nothing here was run on a Windows machine.
 | Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
 | Save call transcripts in the event log | yes | no | Windows README "Not yet on Windows". |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
-| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. |
+| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. A call in its own window never ends by inactivity; Pop In restarts the minute (the Windows call model already has the rule). |
 | Open calls in their own window: global setting and per-doorbell choice | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"); `CallPresentation.resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
 | Call window placement (where I left it, or top right of the active screen) | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls ("Open call windows"); `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. |
 

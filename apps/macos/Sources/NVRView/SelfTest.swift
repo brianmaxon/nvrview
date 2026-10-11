@@ -1005,8 +1005,9 @@ final class SelfTest {
         popOutEndStep(doorbell, stages: stages, second: second, baseline: baseline)
     }
 
-    /// Closing the call window, Esc in it, and a minute without activity
-    /// end the call and close the window; the viewer windows keep nothing.
+    /// Closing the call window and Esc in it end the call and close the
+    /// window; the viewer windows keep nothing. A call in its own window
+    /// never ends by inactivity; Pop In restarts the minute.
     private func popOutEndStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
         guard let model = app.model, let calls = app.callWindows, let window else { return finishPopOut(second) }
         // parity: call-popout-end
@@ -1034,14 +1035,22 @@ final class SelfTest {
             panel.sendEvent(esc)
         }
         ended("Esc")
-        // A minute without activity, on the manual clock.
+        // No expiry while popped out: ten minutes without activity, on the
+        // manual clock, leave the call and its window open.
         window.stage.startConversation(doorbell)
         model.popOutCall(doorbell)
+        advance(10 * DoorbellCall.idleTimeout)
+        let stayed = calls.controller(for: doorbell) != nil && model.calls.call(for: doorbell) != nil
+        print("call window after 10 min without activity: still open \(stayed)")
+        if !stayed { problems.append("a call in its own window ended by itself without activity") }
+        // Pop In restores the minute, starting fresh.
+        model.popInCall(doorbell)
         advance(DoorbellCall.idleTimeout - 1)
-        let stayed = calls.controller(for: doorbell) != nil
+        let fresh = model.calls.call(for: doorbell) != nil
         advance(2)
-        if !stayed { problems.append("the call window closed before a minute without activity") }
-        ended("expiry")
+        print("popped in: open after 59 s \(fresh), ended after 61 s \(model.calls.call(for: doorbell) == nil)")
+        if !fresh { problems.append("Pop In did not give the call a fresh minute") }
+        ended("expiry after Pop In")
         callWindowFrameStep(doorbell, second: second)
     }
 

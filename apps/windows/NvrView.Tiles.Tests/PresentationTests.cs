@@ -183,8 +183,15 @@ internal static class PresentationTests
         Check.Equal("One moment please", call.Draft, "typed on meanwhile");
         call.Sent("One moment please");
         Check.Equal("", call.Draft, "sent");
-        Check.True(!call.Expired(31 + Call.IdleTimeout - 1), "not yet expired");
-        Check.True(call.Expired(31 + Call.IdleTimeout), "expired");
+        // In its own window the call never ends by itself.
+        Check.True(!call.Expired(31 + Call.IdleTimeout), "a call in its own window does not expire");
+        Check.True(!call.Expired(31 + (100 * Call.IdleTimeout)), "not even much later");
+        // Pop In (with the activity it counts as) restores the minute, starting fresh.
+        double popIn = 31 + (10 * Call.IdleTimeout);
+        call.Presentation = CallPresentation.Inset;
+        call.Activity(popIn);
+        Check.True(!call.Expired(popIn + Call.IdleTimeout - 1), "not yet expired after Pop In");
+        Check.True(call.Expired(popIn + Call.IdleTimeout), "expired a minute after Pop In");
     }
 
     // Visible frames, top-left origin: a screen with a 25 point menu bar, and a second screen to its right.

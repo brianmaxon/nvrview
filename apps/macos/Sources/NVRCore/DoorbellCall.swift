@@ -438,9 +438,13 @@ public struct DoorbellCall: Sendable, Equatable {
         showsUnmute = false
     }
 
-    /// Whether the call has ended by itself at `now` (talking keeps it open).
+    /// Whether the call has ended by itself at `now`: a minute after the
+    /// last activity, in the insets only. Talking keeps it open, and a call
+    /// in its own window never ends by itself (only when the user closes it,
+    /// the device goes away, or the app quits); Pop In gives it a fresh
+    /// minute (`activity`).
     public func expired(now: Double) -> Bool {
-        !talk.isTalking && now - lastActivity >= Self.idleTimeout
+        presentation == .inset && !talk.isTalking && now - lastActivity >= Self.idleTimeout
     }
 
     /// The event log's line when it ends; the transcript only when saving is
