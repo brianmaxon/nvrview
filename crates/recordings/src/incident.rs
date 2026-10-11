@@ -166,7 +166,7 @@ impl Incident {
         inc
     }
 
-    fn compute_id(&self) -> String {
+    pub(crate) fn compute_id(&self) -> String {
         let cams: Vec<String> = self.cameras().iter().map(CameraId::tag).collect();
         let mut parts: Vec<&str> = vec![self.group.as_deref().unwrap_or("")];
         parts.extend(cams.iter().map(String::as_str));

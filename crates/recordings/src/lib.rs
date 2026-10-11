@@ -7,6 +7,9 @@
 //!   days first, today periodically).
 //! - [`incident`]: groups events from all cameras into incidents, with the
 //!   user's merge, split, add, remove, and rename operations.
+//! - [`edits`]: the user's edits to incidents, stored and replayed over
+//!   every fresh grouping, keyed by the incidents' stable keys.
+//! - [`groups`]: the user's camera groups and camera names, stored.
 //! - [`scheduler`]: downloads incidents in the background: one job per
 //!   camera, fetched in chunks with command 143, retried on stalls and
 //!   disconnects, resumed from the first missing chunk after any failure or
@@ -27,7 +30,9 @@
 //! APIs; it builds and tests on Linux, macOS, and Windows.
 
 pub mod chunk;
+pub mod edits;
 pub mod finalize;
+pub mod groups;
 pub mod incident;
 pub mod index;
 pub mod indexer;
