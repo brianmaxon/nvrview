@@ -92,8 +92,11 @@ pub struct SessionConfig {
     /// 64 MiB.
     pub download_buffer_bytes: usize,
     /// Plays of recordings (command 5) running at once on this device;
-    /// more are refused at once. Default 4: four plays on one session were
-    /// observed with no refusal; the device's limit is not known.
+    /// more are refused at once. Default 2: beside live view, two plays
+    /// were observed to deliver fully and a third to degrade silently (one
+    /// play stalled, one got nothing, no refusal; docs/protocol.md, "Live
+    /// view and plays on one session"). The official client ran four only
+    /// with live view stopped.
     pub max_plays: usize,
     /// A play that delivers nothing for this long has stalled. Plays are
     /// paced (media about every 2 s, every 4 s on a low-rate sub-stream),
@@ -170,7 +173,7 @@ impl SessionConfig {
             max_downloads: 1,
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
-            max_plays: 4,
+            max_plays: 2,
             play_stall_timeout: Duration::from_secs(10),
             play_buffer_bytes: 32 * 1024 * 1024,
             alarm_report: true,
