@@ -50,6 +50,7 @@ less than that. Nothing here was run on a Windows machine.
 | Tile status in words (connecting, reconnecting with countdown, waiting) | yes | yes | |
 | Frame rate display | yes | partial (diagnostics overlay, Ctrl+D) | macOS: View > Show Frame Rates; the Windows overlay is a different readout. |
 | Digital zoom: mouse wheel, drag to pan | yes | yes | |
+| Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Windows has no Fill Tiles, so only the fitted case applies there. |
 | Trackpad or touchpad pinch zooms | yes | partial (touchpad pinch arrives as Ctrl+wheel and works; a touch screen's two-finger pinch does not zoom digital zoom) | UX.md "Windows notes". |
 | Zoom map (outline of the visible region) | yes | no | `ZoomInsetView` exists on macOS only. |
 | Reset zoom control in the tile header | yes | partial (0 key and the right-click "Reset zoom" item only) | |
