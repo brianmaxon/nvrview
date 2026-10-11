@@ -1063,6 +1063,44 @@ NvStatus nv_still_plan(NvCore *core, const char *request, char *out, size_t cap,
     `nv_download_forget(..., true)` or goes with the folder to the Trash.
     Share the MP4 files, not the folder, until then.
 
+### (e) What the planners settled (C14)
+
+`recordings::export` implements (a) to (d) as pure planners. Where the text
+above was silent or loose, they do this:
+
+- **Trim.** The out point is exact in both cuts (a copy can end on any
+  picture); only the in point moves. A file with no keyframe at or before
+  the in point starts on its first keyframe. A camera whose file does not
+  overlap `[in_ms, out_ms)` is left out of `outputs`; only when none
+  overlaps is it `NV_ERR_INVALID_ARGUMENT`. A listed camera without a
+  finished file is skipped; an empty `cameras` list is an error. `exact`
+  gives `copy_possible` false. A plan echoes `"share_safe": true` only
+  when it was asked for.
+- **Range download.** The ID hash covers the range and the cameras with
+  tiers in a canonical order, so the camera order does not change it; the
+  name, `dest`, and `share_safe` are not in it. More than 16 cameras are
+  counted as listed (`NV_ERR_LIMIT`); the same camera twice with different
+  tiers is `NV_ERR_INVALID_ARGUMENT`; exactly 24 hours is allowed. A range
+  that ends on another day writes that day's date after the dash in the
+  folder name. The ` (2)` suffix is chosen by the caller, who knows the
+  disk (`range::numbered_folder`).
+- **Stills.** `exact` defaults to true. A still from a file also says where
+  decoding starts (`keyframe_in_ms`, omitted when the picture is itself a
+  keyframe). Without `tiles`, tiles that have shown no picture are skipped;
+  a listed tile that has shown none, or no picture at all, is an error.
+  File names carry milliseconds (`2026-10-10 07.42.11.250 Camera 1.png`);
+  JPEG files end in `.jpg`.
+- **Share-safe names** are `Camera A`, `Camera B`, ... (then `Camera AA`)
+  in the order of the request's cameras (the order of the outputs for a
+  trim, of the tiles for stills), as written above; any "Camera 1" in the
+  examples is a user's own name.
+- **MP4 metadata.** The core's finalizer never records a creation time (the
+  headers carry the 1904 "unknown" epoch) and writes the two generic
+  handler names `VideoHandler` and `SoundHandler`, so share-safe finalized
+  files already comply. `export::mp4_metadata(share_safe, creation)` is the
+  one place that rule lives, so recording a creation time later is gated on
+  `share_safe`.
+
 ## 8. Event summary
 
 Every new event, in addition to FFI.md's list. As there, unknown types and
