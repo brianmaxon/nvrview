@@ -12,6 +12,7 @@ internal static class RetryTests
         ("retry: the button appears after 30 s on the viewer clock", AppearsAfterTheDelay),
         ("retry: a picture or a final state resets the delay", ResetByPictureOrFinalState),
         ("retry: pressing it starts the delay again; tiles are independent", RestartAndIndependence),
+        ("retry: a clock that reads earlier starts the delay again", ClockStepsBack),
     ];
 
     private static void Applicable()
@@ -77,5 +78,16 @@ internal static class RetryTests
         Check.True(watch.Offered(2, TileMessage.Starting, clock.Now), "tile 2 offered");
         watch.Keep([1]);
         Check.True(!watch.Offered(2, TileMessage.Starting, clock.Now), "forgotten tiles start over");
+    }
+
+    private static void ClockStepsBack()
+    {
+        var watch = new TileRetryWatch<int>();
+        watch.Offered(1, TileMessage.Reconnecting, 90_000);
+        // The viewer clock is replaced by one that reads far earlier (the self-test does this).
+        var clock = new ManualViewerClock(7000);
+        Check.True(!watch.Offered(1, TileMessage.Reconnecting, clock.Now), "not at once");
+        clock.Advance(TileRetryRule.OfferAfter);
+        Check.True(watch.Offered(1, TileMessage.Reconnecting, clock.Now), "after 30 s on the new clock");
     }
 }

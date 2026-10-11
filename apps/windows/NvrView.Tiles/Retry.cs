@@ -57,7 +57,9 @@ public sealed class TileRetryWatch<TKey> where TKey : notnull
             _since.Remove(tile);
             return false;
         }
-        if (!_since.TryGetValue(tile, out double start))
+        // A clock that reads earlier than the start (replaced, or stepped back) starts the delay
+        // again; otherwise the button would never show.
+        if (!_since.TryGetValue(tile, out double start) || now < start)
         {
             start = now;
             _since[tile] = start;

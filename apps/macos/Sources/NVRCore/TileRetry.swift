@@ -39,7 +39,9 @@ public enum TileRetry {
                 since[camera] = nil
                 return false
             }
-            let start = since[camera] ?? now
+            // A clock that reads earlier than the start (replaced, or stepped
+            // back) starts the delay again; otherwise the button never shows.
+            let start = since[camera].map { $0 <= now ? $0 : now } ?? now
             since[camera] = start
             return now - start >= TileRetry.offerAfter
         }

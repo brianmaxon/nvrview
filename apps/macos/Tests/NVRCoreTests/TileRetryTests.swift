@@ -48,6 +48,18 @@ import Testing
         #expect(offer4)
     }
 
+    @Test func aClockThatReadsEarlierStartsTheDelayAgain() {
+        var watch = TileRetry.Watch()
+        _ = watch.offered(camera, applies: true, now: 90_000)
+        // The viewer clock is replaced by one that reads far earlier.
+        let clock = ManualViewerClock(now: 7000)
+        let early = watch.offered(camera, applies: true, now: clock.now)
+        #expect(!early)
+        clock.advance(by: TileRetry.offerAfter)
+        let later = watch.offered(camera, applies: true, now: clock.now)
+        #expect(later)
+    }
+
     @Test func aPictureOrAFinalStateResetsTheDelay() {
         let clock = ManualViewerClock(now: 0)
         var watch = TileRetry.Watch()
