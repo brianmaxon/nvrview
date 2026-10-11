@@ -65,6 +65,10 @@ internal sealed class CameraTile(ulong id, DeviceEntry device, CameraRef camera,
     // UI thread.
     public string? Waiting { get; set; }
 
+    /// <summary>The generation whose stream <see cref="Waiting"/> is about: a wait ends with its
+    /// generation, which a tier switch may replace without a <c>streaming</c> event.</summary>
+    public long WaitingGeneration { get; set; }
+
     public string? Error { get; set; }
 
     public bool Audible { get; set; }
@@ -1258,6 +1262,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                 if (FindTile(e.Tile) is { } waiting)
                 {
                     waiting.Waiting = e.State == "waiting" ? "Waiting for the camera" : null;
+                    waiting.WaitingGeneration = e.Generation;
                 }
                 break;
             case "tile_error":
@@ -1281,6 +1286,12 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                 TierEvents.Add((e.Type, e.Tile, e.State, e.Generation));
                 if (FindTile(e.Tile) is { } tier)
                 {
+                    // Another generation took over, or the waiting one failed: that wait is over.
+                    if (tier.Waiting != null && ((e.State == "active" && e.Generation != tier.WaitingGeneration)
+                        || (e.State == "failed" && e.Generation == tier.WaitingGeneration)))
+                    {
+                        tier.Waiting = null;
+                    }
                     if (e.State == "active")
                     {
                         tier.ShownTier = e.Tier ?? tier.ShownTier;
