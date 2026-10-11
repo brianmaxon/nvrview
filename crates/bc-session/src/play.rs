@@ -142,7 +142,7 @@ impl fmt::Debug for Play {
 }
 
 /// A boxed future, for a list of requests to drive together.
-type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Drives the futures together and returns their outputs in order. Each
 /// round polls them in order, so requests that are ready to go out leave

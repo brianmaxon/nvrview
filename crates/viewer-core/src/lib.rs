@@ -48,6 +48,7 @@ pub mod discover;
 mod events;
 mod json;
 mod lens;
+mod playback;
 mod recordings_owner;
 pub mod sound;
 pub mod store;
@@ -57,6 +58,7 @@ pub mod update;
 
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector};
+pub use playback::{MAX_CAMERAS, MAX_PLAYBACKS, PlaybackPending, PlaybackState, SeekMode};
 pub use recordings_owner::{
     AudioChunk, DayAudioSource, MAX_LABELS_PER_DAY, PATTERN_ANALYZER, RecError, SOUND_KINDS,
     SourceError, ThumbKind, Thumbnail, ThumbnailAnswer,
@@ -351,6 +353,8 @@ pub struct Core {
     update: update::UpdateHub,
     /// The recordings owner (docs/FFI-RECORDINGS.md).
     recordings: recordings_owner::RecordingsHub,
+    /// Recorded playbacks (docs/FFI-RECORDINGS.md, section 6).
+    playback: playback::PlaybackHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -459,6 +463,7 @@ impl Core {
             discover,
             update,
             recordings,
+            playback: playback::PlaybackHub::new(),
         })
     }
 
@@ -765,6 +770,8 @@ impl Core {
             .collect();
         drop(reg);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
+        // Its plays stop before the session closes.
+        self.playback_device_removed(&dev.key);
         self.talk.forget_device(device);
         // Recordings let go of the session before it closes.
         self.recordings.device_removed(&dev.key, device);
@@ -818,7 +825,9 @@ impl Core {
             device,
             channel,
             tier,
+            playback: false,
         };
+        let sub = sub.map(tile::Source::Live);
         let (tile, sink) = match tile::spawn(start, sub, self.tile_ctx.clone(), control, gate_rx) {
             Ok(t) => t,
             Err(_) => {
@@ -860,6 +869,13 @@ impl Core {
         self.check_api()?;
         let requested_ns = self.clock.now_ns();
         let mut reg = lock(&self.registry);
+        if !reg.tiles.contains_key(&tile) {
+            drop(reg);
+            // A playback tile restarts its play in the new tier.
+            return self
+                .playback_tile_tier(tile, tier)
+                .unwrap_or(Err(CoreError::UnknownId));
+        }
         let (device, channel, current) = {
             let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
             (t.device, t.channel, t.tier)
@@ -928,9 +944,13 @@ impl Core {
     ///
     /// # Errors
     /// [`CoreError::UnknownId`], [`CoreError::Closed`],
-    /// [`CoreError::InvalidArgument`] from inside a callback.
+    /// [`CoreError::InvalidArgument`] from inside a callback, or for a
+    /// playback tile (remove it from its playback instead).
     pub fn close_tile(&self, tile: u64) -> Result<(), CoreError> {
         self.check_api()?;
+        if self.playback.has_tile(tile) {
+            return Err(CoreError::InvalidArgument);
+        }
         let mut reg = lock(&self.registry);
         let t = reg.tiles.remove(&tile).ok_or(CoreError::UnknownId)?;
         drop(reg);
@@ -1297,6 +1317,8 @@ impl Core {
         drop(reg);
         // Their tile_closed events are delivered before this returns.
         self.end_tiles(tiles, CloseReason::CoreShutdown);
+        // Playbacks stop their plays and close their tiles.
+        self.playback_shutdown();
         // No on_audio_tap after this; the renderer renders silence.
         self.tile_ctx.audio.shutdown();
         self.talk.shutdown();

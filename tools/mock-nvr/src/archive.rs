@@ -117,6 +117,13 @@ pub struct ArchiveConfig {
     /// seen ending a play (docs/protocol.md): with `false` the play just
     /// stops sending, as far as anything is known.
     pub play_end_message: bool,
+    /// Recording files that do not exist: (channel, file start). The file
+    /// search leaves them out and plays skip their time (a camera that did
+    /// not record then).
+    pub missing: Vec<(u8, DateTime)>,
+    /// Channels whose plays are accepted but send nothing (a fault for
+    /// tests of a play that never delivers).
+    pub silent_plays: Vec<u8>,
 }
 
 /// One play (command 5) the fake served, for test assertions.
@@ -164,12 +171,28 @@ impl ArchiveConfig {
             search_delay: None,
             utc_offset_s: 0,
             play_end_message: true,
+            missing: Vec::new(),
+            silent_plays: Vec::new(),
         }
     }
 
     /// One past the last recorded second (naive seconds).
     pub(crate) fn recorded_end(&self) -> i64 {
         self.sorted_days().last().map_or(0, |d| ts(*d) + 86_400)
+    }
+
+    /// Whether `channel` has no recording at naive second `t` (a file
+    /// listed in [`ArchiveConfig::missing`]).
+    pub(crate) fn missing_at(&self, channel: u8, t: i64) -> bool {
+        if self.missing.is_empty() {
+            return false;
+        }
+        let len = i64::from(self.file_minutes.max(1)) * 60;
+        let day = t.div_euclid(86_400) * 86_400;
+        let start = day + (t - day).div_euclid(len) * len;
+        self.missing
+            .iter()
+            .any(|(c, s)| *c == channel && ts(*s) == start)
     }
 
     fn has_day(&self, t: DateTime) -> bool {
@@ -198,7 +221,10 @@ pub(crate) fn file_holds(cfg: &ArchiveConfig, channel: u8, file_id: &str, at: Da
     let len = i64::from(cfg.file_minutes.max(1)) * 60;
     let day_end = start.div_euclid(86_400) * 86_400 + 86_400;
     let t = ts(at);
-    cfg.has_day(dt(start)) && start <= t && t < (start + len).min(day_end)
+    cfg.has_day(dt(start))
+        && !cfg.missing_at(channel, start)
+        && start <= t
+        && t < (start + len).min(day_end)
 }
 
 /// A recording file of the fake store.
@@ -244,7 +270,7 @@ pub(crate) fn files(
         let mut s = d0;
         while s < d0 + 86_400 {
             let e = (s + len).min(d0 + 86_400) - 1;
-            if e >= ts(start) && s <= ts(end) {
+            if e >= ts(start) && s <= ts(end) && !cfg.missing_at(channel, s) {
                 out.push(FileEntry {
                     channel,
                     start: dt(s),

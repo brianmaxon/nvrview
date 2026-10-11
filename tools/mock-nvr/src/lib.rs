@@ -1890,7 +1890,7 @@ impl Conn {
                 served,
             });
         }
-        if !served {
+        if !served || cfg.silent_plays.contains(&ch) {
             return Ok(());
         }
         let thin = PlayPace {
@@ -1904,7 +1904,10 @@ impl Conn {
         shared.active_plays.fetch_add(1, Ordering::SeqCst);
         let task = self.shared.runtime.spawn(async move {
             let _count = PlayCount(Arc::clone(&shared));
-            let _ = serve_play(&shared, &writer, &key, id, &latest, &cfg, at, thin, &stop2).await;
+            let _ = serve_play(
+                &shared, &writer, &key, id, &latest, &cfg, ch, at, thin, &stop2,
+            )
+            .await;
         });
         self.plays.retain(|_, (_, s)| !s.is_finished());
         self.plays.insert(
@@ -1960,6 +1963,7 @@ async fn serve_play(
     id: u32,
     latest_seq: &AtomicU32,
     cfg: &ArchiveConfig,
+    channel: u8,
     at: bc_protocol::archive::DateTime,
     pace: PlayPace,
     stop: &AtomicBool,
@@ -2007,7 +2011,7 @@ async fn serve_play(
             archive::dt(window + gop - 1),
         );
         window += gop;
-        if recs.is_empty() {
+        if recs.is_empty() || cfg.missing_at(channel, window - gop) {
             continue;
         }
         let due_ms = (played - burst).max(0) * 1000 / speed;
