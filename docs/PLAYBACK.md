@@ -318,25 +318,17 @@ compositor and encoder.
 
 ## Review mode: live view during playback
 
-Live view and recorded playback share the device's one session. Measured
-beside live view, a device served two plays fully and degraded a third
-silently (no refusal; protocol.md, "Live view and plays on one session").
-The official client, which stops live view when its playback tab opens,
-ran four plays on the same device.
-
-- **One or two cameras of a device:** live view keeps running.
-- **Three or four cameras of one device** (a 4-up review, or a follow cut
-  over several angles): that device's live tiles pause while the playback
-  holds them, labeled "Live paused while reviewing", and resume as soon as
-  the playback ends or drops to two cameras. Other devices are untouched.
-- **Alerts keep working:** detection and alarm events do not depend on the
-  video, so they keep arriving. A doorbell ring resumes that camera's live
-  tile for the call; if that leaves the playback one play short, the
-  camera added last is shown as unavailable until the call ends.
-- **Setting:** "Pause live view while reviewing: when needed (default) /
-  always".
-- **To measure first:** that the device serves four plays with our live
-  view paused (one `bc-cli replay-probe` run with live view off).
+Live view keeps running during review. A device carries live view and up to
+four plays on its one session, provided the plays are started together at
+one seek time: the device keeps one seek position per session, and a play
+whose recording does not hold it gets no media (protocol.md, "Live view and
+plays on one session": four plays beside a live preview delivered fully and
+live view held its rate). So a review of up to four cameras of a device
+seeks them all to the same time and starts them as a group, and a seek or a
+rate change stops them all, seeks them all, and starts them all again, as
+the official client does. Earlier designs paused live view for three or
+four cameras; the measurements made that unnecessary, so there is no pause
+and no setting for it.
 
 ## Measured goals
 
