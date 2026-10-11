@@ -16,9 +16,11 @@
 
 1. **Everything PLAYBACK.md promises, through one interface** that the
    macOS app, a Windows app, and later the local API share: search by event
-   type, incidents across cameras with the user's edits, background
-   resumable downloads, cover thumbnails, synchronized multi-camera
-   playback, and ready-made edits.
+   type over an index that fills on demand, incidents across cameras with
+   the user's edits and locks, resumable downloads that run beside live
+   view, cover thumbnails, synchronized multi-camera playback, ready-made
+   edits, and exports (trims, time ranges, still images, share-safe
+   output).
 2. **Recorded video looks like live video to the app.** Playback tiles are
    ordinary tiles: the same `on_action`, the same pipeline, the same
    answering rules, the same generations. The app's renderer does not learn
@@ -55,18 +57,18 @@
  * devices). NV_ERR_INVALID_ARGUMENT for invalid JSON or values. */
 NvStatus nv_recordings_configure(NvCore *core, const char *json);
 
-/* Starts (json non-NULL) or stops (json NULL) indexing one device: which
- * channels and lenses, how far back. The device need not be added yet; the
- * index fills while it is connected. NV_ERR_NOT_CONFIGURED before
- * nv_recordings_configure; NV_ERR_UNSUPPORTED if the device's backend has no
- * recordings. */
+/* Allows (json non-NULL) or stops (json NULL) indexing one device: which
+ * channels and lenses may be searched. Nothing is searched until a view
+ * asks (nv_recordings_want, nv_recordings_hold_today, a thumbnail), unless
+ * the optional "background" block is set. The device need not be added
+ * yet. NV_ERR_NOT_CONFIGURED before nv_recordings_configure;
+ * NV_ERR_UNSUPPORTED if the device's backend has no recordings. */
 NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *json);
 ```
 
 ```json
 {"downloads_dir": "<absolute path the app chose>",
- "index": {"days_back": 14, "max_age_days": 90, "max_bytes": 67108864,
-           "refresh_today_s": 60, "pass_interval_s": 60},
+ "index": {"max_age_days": 90, "max_bytes": 67108864, "refresh_today_s": 60},
  "grouping": {"gap_s": 10, "margin_s": 5},
  "thumbnails": {"max_entries": 4096, "max_bytes": 67108864},
  "downloads": {"chunk_s": 60, "per_device": 1, "max_attempts": 8},
@@ -75,13 +77,23 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
 ```
 
 ```json
-{"channels": [{"channel": 0}, {"channel": 3, "lens": 1}], "days_back": 14,
- "utc_offset_s": 7200}
+{"channels": [{"channel": 0}, {"channel": 3, "lens": 1}], "utc_offset_s": 7200,
+ "background": {"days_back": 14, "pass_interval_s": 60}}
 ```
 
 - Every member is optional; the values shown are the defaults (they are
-  the existing Rust defaults). `"channels": "all"` indexes every connected
-  channel the `channels` event lists, first lens only.
+  the existing Rust defaults), except `background`, which is **absent by
+  default** (Decision 8: no background indexing). `"channels": "all"`
+  allows every connected channel the `channels` event lists, first lens
+  only.
+- `refresh_today_s` is how old today's entry may get while a view holds
+  today before it is searched again (`LaneConfig::refresh_today`).
+- `background`, when present, runs the whole-range pass
+  (`recordings::indexer`) for this device: the last `days_back` days,
+  newest first, again every `pass_interval_s` seconds, below thumbnails
+  and requested days in the device's search lane. It is for people who
+  want the index filled ahead of time; apps leave it off unless the user
+  turns it on.
 - `utc_offset_s` is the device's offset from UTC, used only to know which
   day is "today" on the device (`recordings::system_clock`); default: the
   computer's current offset, which the app passes (Decision 6).
@@ -92,9 +104,15 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
 ## 2. Index and search
 
 The core keeps one index per device key (`recordings::index::DeviceIndex`,
-one file per day plus a calendar), filled in the background by
-`recordings::indexer` (newest day first; today refreshed every
-`refresh_today_s`), shared by every window. Queries read memory only.
+one file per day plus a calendar), shared by every window. It is a cache of
+what views asked for (Decision 8), filled **on demand** by the device's
+search lane (`recordings::lane`): the days a view asks for with
+`nv_recordings_want` (newest day first: each month's calendar, then each
+camera-day's files and events), and today again every `refresh_today_s`
+while some view holds it with `nv_recordings_hold_today`. Nothing is
+searched otherwise, unless the device's `background` block is set. Queries
+read memory only and never cause a search: a view asks for what it shows,
+then queries.
 
 ```c
 /* Days with recordings per camera in [start, end]. */
@@ -103,12 +121,34 @@ NvStatus nv_recordings_calendar(NvCore *core, const char *query, char *out, size
 NvStatus nv_recordings_spans(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
 /* Events matching the query, by start. */
 NvStatus nv_recordings_events(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
-/* Asks for a fresh search of some days now (pull to refresh); returns at
- * once, recordings_changed follows. NV_ERR_LIMIT if more than 31 days. */
-NvStatus nv_recordings_refresh(NvCore *core, const char *json);
+/* Asks for these cameras' days to be in the index (JSON below); returns at
+ * once, recordings_changed follows for each device as days arrive. Days
+ * already indexed are not searched again unless "force" (the user's
+ * refresh, which also asks the months' calendars again). NV_ERR_LIMIT for
+ * more than 31 days or when the device's queue (4096 camera-days) would
+ * overflow, and nothing is queued; NV_ERR_INVALID_ARGUMENT if a camera is
+ * not allowed by nv_recordings_enable. */
+NvStatus nv_recordings_want(NvCore *core, const char *json);
+/* Keeps today fresh for these cameras while the hold lasts: hold is any
+ * nonzero number the app chooses per window; json {"cameras":[...]} sets
+ * or replaces that hold's cameras, NULL releases it. The app releases a
+ * window's hold when the window closes or stops showing today; every hold
+ * ends with nv_core_free, and a removed device's cameras leave every hold. */
+NvStatus nv_recordings_hold_today(NvCore *core, uint64_t hold, const char *json);
 /* Index state of every enabled device: the recordings_index events' data. */
 NvStatus nv_recordings_status(NvCore *core, char *out, size_t cap, size_t *len);
 ```
+
+Want (`days` are any second within each day, device-local; `force`
+optional, default false):
+
+```json
+{"cameras": [{"device": "d-3f9a0c1b7e2d4a65", "channel": 3}],
+ "days": [1791590400, 1791504000], "force": false}
+```
+
+There is no separate refresh call: pull to refresh is `nv_recordings_want`
+with `"force": true`.
 
 Query (all members optional except `start` and `end`):
 
@@ -130,8 +170,6 @@ Answers:
 {"revision": 41, "truncated": false, "events": [
   {"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
    "kind": "vehicle", "source": "device", "start": 1791618125, "end": 1791618141}]}
-
-{"refresh": {"device": "d-3f9a0c1b7e2d4a65", "days": [1791590400]}}
 ```
 
 - `revision` grows with every change to any index; a window re-queries
@@ -305,6 +343,14 @@ NvStatus nv_incident_get(NvCore *core, const char *key, char *out, size_t cap, s
 /* Applies one edit (JSON below), stores it, sends incidents_changed, and
  * returns {"revision":N,"keys":[...]} with the resulting incidents' keys. */
 NvStatus nv_incident_edit(NvCore *core, const char *edit, char *out, size_t cap, size_t *len);
+/* Locks (locked true) or unlocks an incident by key (see "Locked
+ * incidents" below); stores it, sends incidents_changed, and returns
+ * {"revision":N,"keys":[...],"download":"<id>"|null,"folder":"<path>"|null,
+ *  "download_status":"queued"|"existing"|"when_settled"|"not_configured"|"limit"}
+ * (download members only when locking). NV_ERR_UNKNOWN_ID if no incident
+ * has the key; NV_ERR_LIMIT when locking beyond 1000 locks. */
+NvStatus nv_incident_lock(NvCore *core, const char *key, bool locked, char *out, size_t cap,
+                          size_t *len);
 /* Camera groups, stored like layouts: {"revision":N,"groups":[...]}. */
 NvStatus nv_camera_groups_get(NvCore *core, char *out, size_t cap, size_t *len);
 /* Replaces the whole list; regroups; sends camera_groups_changed and
@@ -316,7 +362,7 @@ NvStatus nv_camera_groups_put(NvCore *core, const char *json);
 {"revision": 12, "incidents": [
  {"key": "i-1791618125-d-3f9a0c1b7e2d4a65-3-0-5d2e8a41", "id": "1791618125-9c1e5a2b7d40f316",
   "name": null, "group": "Group 1", "start": 1791618125, "end": 1791618160,
-  "margin_s": 5, "kinds": ["vehicle"], "growing": false, "edited": false,
+  "margin_s": 5, "kinds": ["vehicle"], "growing": false, "edited": false, "locked": false,
   "cameras": [
    {"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}, "name": "Camera 1",
     "intervals": [[1791618125, 1791618141]], "download": [1791618120, 1791618146], "added": false}],
@@ -332,6 +378,12 @@ NvStatus nv_camera_groups_put(NvCore *core, const char *json);
   and, for an incident of a named camera group, a hash of the group's name
   (`Incident::key`). Edits refer to keys, so a rename survives an incident
   that is still getting events.
+- **Keys are opaque.** Apps store and pass them back but never parse them
+  or build them; the format may change. Because a key includes the group,
+  **renaming or deleting a camera group, or moving a camera between
+  groups, changes the keys of the incidents in it**: stored edits that
+  referred to the old keys no longer match and expire as unmatched edits
+  do (below), except those of locked incidents, which follow the lock.
 - `growing` is true while the incident's end is within `gap_s` of the
   device's "now" (more events may join). `edited` is true when a stored
   edit shaped it. `name` is the user's name or null (apps label it from
@@ -358,13 +410,76 @@ Edits:
   every regroup (new events, new groups, new settings) the core replays the
   edits; an edit whose key matches no incident stays stored (its events may
   not be indexed yet) until its time is older than the index's
-  `max_age_days`, then it is dropped. At most 10000 edits; a `merge` takes
-  at most 1000 incidents (`NV_ERR_LIMIT` beyond either).
+  `max_age_days`, then it is dropped. Edits of a **locked** incident never
+  expire. At most 10000 edits; a `merge` takes at most 1000 incidents
+  (`NV_ERR_LIMIT` beyond either).
 - An edit that cannot apply (a `split` that would leave a part empty, a
   `remove_camera` of the last camera) returns `NV_ERR_INVALID_ARGUMENT` and
   stores nothing; an unknown key returns `NV_ERR_UNKNOWN_ID`.
 - A download keeps the incident it was queued with (the scheduler stores
   its own copy); later edits change neither its folder nor its files.
+
+### Locked incidents
+
+The NVR overwrites its oldest recordings, and the core's index, edits, and
+thumbnails expire after `max_age_days`. A **locked** incident is one the
+user wants kept: the core keeps everything it holds about it, and its
+video is downloaded, because only a download keeps the video once the NVR
+has overwritten it.
+
+- **What a lock keeps.** The incident's stored edits (never expired), its
+  index days (the day files of every camera and day its range covers, kept
+  past `max_age_days` and exempt from size eviction: they still count
+  toward `max_bytes`, but every unlocked day is evicted first), and its
+  cover thumbnails (exempt from the cache's least-recently-used eviction,
+  at most 16 entries per lock; if locked entries alone exceed the cache's
+  limits, those of the oldest lock are evicted first, and the app can make
+  covers from the downloaded files). Expiry and eviction never remove
+  anything a lock covers.
+- **Locking queues the download** of the whole incident (every camera,
+  main tier), as `nv_download_incident` would, in the default downloads
+  folder. If a download of the incident's key already exists (any state),
+  it is returned instead (`download_status` `existing`). A **growing**
+  incident's download is queued when it stops growing, so it holds the
+  whole incident (`when_settled`; a `download` event follows then). Without
+  `downloads_dir` (`not_configured`) or at the download cap (`limit`), the
+  lock is still stored and the app tells the user the video is not being
+  kept. A locked incident that later grows through edits or regrouping
+  does not queue another download by itself; the app can offer one
+  (`nv_download_incident` makes a new folder, section 5).
+- **Unlocking** makes the incident ordinary again: expiry and eviction
+  resume from that moment. It never deletes, pauses, or forgets a download
+  and never touches downloaded files.
+- **Storage.** `recordings/incident-locks.json`, written atomically like
+  the edits, survives restarts. Each **lock** holds the keys of the
+  incidents it covers now and its extent: per camera, the time range (with
+  margins) those incidents cover. Extents only grow, except by unlocking
+  part of a lock (below).
+- **How locks follow edits and regrouping.** After every regroup and edit
+  replay, an incident is locked when its key is one of a lock's keys or
+  when it overlaps a lock's extent (the same camera, overlapping time);
+  each lock's keys are then set to the incidents it now covers, and its
+  extent grows to include their full ranges. So:
+  - **merge**: the merged incident is locked if any part was; locks that
+    now cover one incident become one lock (freeing a slot);
+  - **split** (and `remove_camera`, and a regroup that cuts an incident):
+    every part stays locked, under the same lock;
+  - **group rename or delete** (keys change): the incident still overlaps
+    its lock's extent, so it stays locked, and the core rewrites the
+    stored edits that referred to its old key to the new key, so a locked
+    incident keeps its edits;
+  - **unlock** of one part removes that incident's ranges from its lock's
+    extent and its key from the lock; other parts stay locked; a lock with
+    nothing left is dropped. `keys` in the answer lists the incidents whose
+    lock state changed.
+  A lock whose incidents are not in the index at the moment (its days not
+  searched yet in this run) stays stored and keeps its extent's days.
+- **Cap: 1000 locks.** At the cap, locking returns `NV_ERR_LIMIT` and
+  changes nothing; locks are never dropped by the core to make room.
+  Because the parts of a split share their lock, edits and regrouping
+  never raise the count; only `nv_incident_lock` does. The extent of one
+  lock covers at most 31 days; a lock or merge that would exceed that
+  returns `NV_ERR_LIMIT`.
 
 Camera groups:
 
@@ -455,10 +570,11 @@ standard MP4.
 
 ```c
 /* Queues an incident's download (JSON below) and returns
- * {"download":"<id>","folder":"<absolute path>"}. Queuing the same incident
- * again returns the existing download. NV_ERR_NOT_CONFIGURED without
- * downloads_dir; NV_ERR_UNKNOWN_ID if the key matches no incident;
- * NV_ERR_LIMIT if 1000 downloads are already known. */
+ * {"download":"<id>","folder":"<absolute path>","existing":bool}. While a
+ * download of the same incident key is unfinished, queuing again returns
+ * it (see "Download IDs"). NV_ERR_NOT_CONFIGURED without downloads_dir;
+ * NV_ERR_UNKNOWN_ID if the key matches no incident; NV_ERR_LIMIT if 1000
+ * downloads are already known. */
 NvStatus nv_download_incident(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
 /* Pauses or resumes a whole download (camera NULL) or one camera of it;
  * `camera` is a JSON camera object, {"device","channel","lens"} as
@@ -473,7 +589,16 @@ NvStatus nv_download_retry(NvCore *core, const char *download, const char *camer
  * delete_partial, removes its .parts folder; finished MP4 files and
  * incident.json are the user's and are never deleted by the core. */
 NvStatus nv_download_forget(NvCore *core, const char *download, bool delete_partial);
-/* Every known download: {"downloads":[...]} as in the download event. */
+/* For moving a download to the Trash (Decision 9): stops its camera jobs,
+ * forgets it, and returns {"folder":"<absolute path>"}. The core deletes
+ * nothing; the app moves the folder to the Trash or Recycle Bin after the
+ * download_removed event for it, which follows once nothing writes there.
+ * NV_ERR_UNKNOWN_ID for an unknown download. */
+NvStatus nv_download_trash(NvCore *core, const char *download, char *out, size_t cap,
+                           size_t *len);
+/* Every known download: {"downloads":[...]} as in the download event. No
+ * paging: a result larger than cap is NV_ERR_BUFFER_TOO_SMALL and the app
+ * loops with a larger buffer (at most 1000 downloads). */
 NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 ```
 
@@ -483,9 +608,29 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 ```
 
 - `cameras` is optional (default: every camera of the incident, main
-  tier). Names come from camera names (section 3).
-- The download ID is the incident's `id` at queue time (the scheduler's
-  job key and folder).
+  tier). Names come from camera names (section 3). `dest` and `share_safe`
+  are optional (section 7a); a range download is also in section 7a.
+- **Download IDs** are opaque strings. An incident's download is
+  identified by the incident's `id` at queue time; queuing decides as
+  follows, so one ID never names two downloads:
+  1. An **unfinished** download (any state but `done`, including `failed`
+     and `paused`) of the same incident **`key`** exists: it is returned,
+     even if the incident has grown since (its range stays the one it was
+     queued with; use retry for failed cameras).
+  2. Otherwise a **finished** download with the same `id` exists (the
+     incident has not changed): it is returned.
+  3. Otherwise a new download is queued. A finished download stays as it
+     is, so queuing an incident that grew after its download finished makes
+     a new folder; when the folder name is taken, ` (2)`, ` (3)`, ... is
+     appended.
+  `existing` in the answer says whether 1 or 2 applied.
+- **Trash.** `nv_download_trash` is the only way the interface removes a
+  download's files, and it does not remove them: it hands the whole folder
+  (finished files, `incident.json`, and any `.parts`) to the app, which
+  moves it with the system (`NSFileManager.trashItem` on macOS, the shell's
+  recycle operation on Windows). If moving fails, the folder simply stays
+  as the user's files. Trashing the download of a locked incident does not
+  unlock it, and the lock does not queue it again.
 - **Resume across restarts**: `nv_recordings_configure` picks up every job
   file under `downloads_dir` (`Scheduler::resume_all`); jobs wait until
   their device is added and connected, and chunks already complete are
@@ -527,7 +672,8 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
   chunk added to the bytes done, when known.
 - Events are coalesced: at most 4 per second per download (the newest
   state wins), plus one on every state change. `download_removed` follows
-  `nv_download_forget`.
+  `nv_download_forget` and `nv_download_trash` (with `"trash": true` and
+  the `folder`, sent once no job writes into it).
 
 ## 6. Recorded playback
 
@@ -744,9 +890,178 @@ For `grid`, `segments` is replaced by cells that run for the whole range:
   into the source file. `file_start_ms` is the recorded time of the file's
   first picture (new; see "Existing code", item 6). `offset_ms` is the
   user's correction for clocks that disagree, the same as in playback.
-- The app writes the output next to the incident's files; the core
-  suggests the name. An edit list holds no pixels and is at most a few
-  hundred KB.
+- The app writes the output next to the incident's files, or in the
+  request's `dest`; the core suggests the name. An edit list holds no
+  pixels and is at most a few hundred KB.
+- Every kind takes optional `in_ms` and `out_ms` (device-local ms) to trim
+  the result to that part of the range, and `dest` and `share_safe`
+  (section 7a).
+
+## 7a. Export
+
+The user takes recordings out of the app in four ways, all planned by the
+core and written by the app, as the edits are: the core decides ranges,
+edit lists, and names; the app decodes, encodes, and writes video and
+images with platform APIs (AVFoundation, VideoToolbox, and ImageIO on
+macOS; Media Foundation and WIC on Windows). Nothing here sends a new kind
+of request to a device: video comes from finished downloads, and a range
+that is not downloaded yet is downloaded first (b).
+
+### (a) Trim
+
+A trim is one more `nv_edit_compute` kind: one output per camera, cut to
+in and out points inside a downloaded incident or range download, the
+points coming from the incident view or the scrubber.
+
+```json
+{"kind": "trim", "download": "1791618125-9c1e5a2b7d40f316",
+ "cameras": [{"device": "d-3f9a0c1b7e2d4a65", "channel": 3}],
+ "in_ms": 1791618128250, "out_ms": 1791618139500, "cut": "keyframe",
+ "dest": "<absolute directory>", "share_safe": false}
+```
+
+```json
+{"version": 1, "kind": "trim", "download": "1791618125-9c1e5a2b7d40f316",
+ "start_ms": 1791618127000, "end_ms": 1791618139500,
+ "outputs": [{"source": 0, "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
+              "name": "Camera 1", "file": "<folder>/2026-10-10 07.42.05 Camera 1.mp4",
+              "source_in_ms": 7600, "source_out_ms": 20100, "copy_possible": true,
+              "suggested_file": "<dest>/2026-10-10 07.42.07 Camera 1 trim.mp4"}]}
+```
+
+- `cut` `keyframe` (fast): the in point moves back to the keyframe at or
+  before `in_ms` (read from the file's sync samples, as for the follow
+  cut), so the moment asked for is included and the app can copy the
+  samples without re-encoding (`copy_possible`). `exact`: the output starts
+  at the picture at `in_ms`, which needs a re-encode of at least the first
+  group of pictures; the app may re-encode the whole output. The out point
+  is exact in both (a copy can end on any picture).
+- `cameras` is optional (default: every camera of the download with a
+  finished file). `start_ms`/`end_ms` are the output's range after the
+  keyframe move. `NV_ERR_INVALID_ARGUMENT` when `in_ms >= out_ms` or the
+  points lie outside every chosen camera's file.
+- To trim while scrubbing a recording that is not downloaded, the app
+  first downloads just that range (b), then computes the trim on it.
+
+### (b) Range download
+
+Any time range of chosen cameras, not tied to a detected incident, through
+the same scheduler, with the same chunks, retries, resume, pause, retry,
+trash, events, and limits as an incident's download.
+
+```c
+/* Queues the download of a time range (JSON below) and returns
+ * {"download":"<id>","folder":"<absolute path>","existing":bool}.
+ * Queuing the same cameras, tiers, and range again returns the existing
+ * download. NV_ERR_NOT_CONFIGURED without downloads_dir (or without
+ * data_dir when dest is outside it); NV_ERR_LIMIT beyond 16 cameras, 24
+ * hours, or 1000 known downloads; NV_ERR_INVALID_ARGUMENT for an empty
+ * range or a camera not allowed by nv_recordings_enable. */
+NvStatus nv_download_range(NvCore *core, const char *request, char *out, size_t cap,
+                           size_t *len);
+```
+
+```json
+{"start": 1791618100, "end": 1791618400,
+ "cameras": [{"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3}, "tier": "main"},
+             {"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 5}, "tier": "main"}],
+ "name": null, "dest": "<absolute directory>", "share_safe": false}
+```
+
+- Seconds, device-local, as for incidents; the device widens each chunk to
+  the keyframe at or before its start, as for any download.
+- **ID**: opaque, `r-<start>-<hash>` of the cameras, tiers, and range, so
+  the same request names the same download. No dedupe across overlapping
+  but different ranges.
+- **Folder**: `<date> <HH.MM>–<HH.MM> range — <camera names>` with the same
+  separator, sanitizing, and 120-character cap as incident folders
+  (`recordings::naming`), or `<date> <HH.MM>–<HH.MM> <name>` when the user
+  named it; ` (2)` and so on when taken. Each camera's file is named as in
+  an incident folder. `incident.json` is written with `"kind": "range"`,
+  the range, the cameras, and the indexed events inside the range (none if
+  the days are not indexed).
+- In the `download` event, `incident` is null and `range` holds `start`
+  and `end`.
+
+### (c) Still images
+
+The current picture, or one picture per camera, as PNG or JPEG. The core
+says which picture and what to call it; the app encodes the image (ImageIO
+on macOS, WIC on Windows) and writes it, with no metadata of its own
+beyond the image format's required fields.
+
+```c
+/* Plans still images (JSON below) and returns their sources and suggested
+ * files. Answers from memory; any thread outside callbacks.
+ * NV_ERR_UNKNOWN_ID for an unknown playback, tile, or download. */
+NvStatus nv_still_plan(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+```
+
+```json
+{"playback": 3, "tiles": [11, 12], "format": "png", "dest": "<absolute directory>", "share_safe": false}
+
+{"download": "1791618125-9c1e5a2b7d40f316", "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3},
+ "at_ms": 1791618131250, "exact": true, "format": "jpeg"}
+```
+
+```json
+{"stills": [{"tile": 11, "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
+             "name": "Camera 1", "generation": 4, "position_ms": 1791618131240,
+             "label": {"name": "Camera 1", "time": "2026-10-10 07.42.11.240"},
+             "suggested_file": "<dest>/2026-10-10 07.42.11.240 Camera 1.png"}]}
+
+{"stills": [{"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}, "name": "Camera 1",
+             "file": "<folder>/2026-10-10 07.42.05 Camera 1.mp4", "source_in_ms": 12250,
+             "position_ms": 1791618131250,
+             "suggested_file": "<folder>/2026-10-10 07.42.11.250 Camera 1.jpg"}]}
+```
+
+- **From a playback** (`tiles` optional, default every tile; "one per
+  camera"): for each tile, the picture it shows now, which is the newest
+  picture of its shown generation that the app answered with
+  `nv_tile_decoded`; `position_ms` is that picture's recorded time and
+  `generation` its generation. The app saves the picture it holds for that
+  tile and generation (it has it on screen). Pause first for a set taken
+  at one moment; while playing, each tile's picture is its own latest.
+- **From a file**: `source_in_ms` is the position in the MP4 of the
+  picture at `at_ms` (`exact` true) or of the keyframe at or before it
+  (`exact` false, decodes only one picture); the app decodes it from the
+  file.
+- `format` `png` (default) or `jpeg`; the extension follows it. `label` is
+  for an optional caption the app burns in (absent with `share_safe` for
+  the name).
+
+### (d) Destination and share-safe output
+
+- **Destination.** Every export request (trims and other edit lists,
+  stills, range and incident downloads) takes an optional `dest`, an
+  absolute directory the app chose (for example with a save panel).
+  Defaults: edit lists and stills from a file go next to their download's
+  files; stills from a playback and downloads go to `downloads_dir`. A
+  download outside `downloads_dir` is recorded in
+  `data_dir/recordings/downloads.json` so it resumes after a restart
+  (without `data_dir`, `NV_ERR_NOT_CONFIGURED`). On macOS a sandboxed app
+  keeps access with a security-scoped bookmark for as long as the download
+  is known.
+- **Share-safe** (`"share_safe": true` on any export request) leaves out
+  everything that identifies the installation:
+  - **Names**: folder and file names use `Camera A`, `Camera B`, ... in the
+    request's camera order instead of camera or device names, and leave
+    out the user's incident name (time and kinds stay).
+  - **Overlays**: `labels` and `label` carry no camera names (time only,
+    if asked); the app burns in nothing else.
+  - **Device details and `incident.json`**: no `incident.json`, no device
+    keys, UIDs, channel numbers, or models in anything written.
+  - **MP4 metadata the core writes**: the core's MP4 writer (finalized
+    downloads) normally records the creation time and its own handler
+    names, and nothing else; for a share-safe download it writes zero
+    times and generic handler names. The
+    app writes no metadata of its own (no location, device, or encoder
+    tags it can omit) into share-safe video and images.
+  - A share-safe download's `.parts` folder still holds the job state
+    (with device keys) while the download is known; it is removed with
+    `nv_download_forget(..., true)` or goes with the folder to the Trash.
+    Share the MP4 files, not the folder, until then.
 
 ## 8. Event summary
 
@@ -754,13 +1069,14 @@ Every new event, in addition to FFI.md's list. As there, unknown types and
 fields must be ignored.
 
 ```json
-{"type": "recordings_index", "device": "d-3f9a0c1b7e2d4a65", "state": "filling", "days_done": 3, "days_total": 14, "revision": 40}
+{"type": "recordings_index", "device": "d-3f9a0c1b7e2d4a65", "state": "busy", "pending_days": 11, "revision": 40}
+{"type": "recordings_day_failed", "device": "d-3f9a0c1b7e2d4a65", "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}, "day": 1791504000, "reason": "session closed during the search"}
 {"type": "recordings_changed", "device": "d-3f9a0c1b7e2d4a65", "revision": 41, "start": 1791590400, "end": 1791676799}
 {"type": "incidents_changed", "revision": 12}
 {"type": "camera_groups_changed", "revision": 3}
 {"type": "thumbnail", "key": {"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}, "tier": "sub", "start": 1791618125, "end": 1791618141}, "state": "ready"}
 {"type": "download", "download": "1791618125-9c1e5a2b7d40f316", "state": "running", "cameras": []}
-{"type": "download_removed", "download": "1791618125-9c1e5a2b7d40f316"}
+{"type": "download_removed", "download": "1791618125-9c1e5a2b7d40f316", "trash": false}
 {"type": "playback_state", "playback": 3, "state": "paused", "position_ms": 1791618120000, "rate": 1.0}
 {"type": "playback_camera", "playback": 3, "tile": 11, "state": "playing"}
 {"type": "playback_seek", "playback": 3, "position_ms": 1791618130000, "generation": 2, "state": "starting"}
@@ -770,9 +1086,17 @@ fields must be ignored.
 
 - `sound_watch` `state`: `watching`, `stopped`, `refused` (`reason`: the
   device's stream limit, or the camera has no audio).
-- `recordings_index` `state`: `idle` (up to date), `filling`,
-  `refreshing`, `waiting_device`, `failed` (`reason`; retried next pass).
-  Sent on state changes and at most once a second while filling.
+- `recordings_index` `state` is the device's search lane's
+  (`LaneState`): `idle` (nothing waiting), `busy` (working through
+  requests), `waiting_device` (not connected; requests stay queued),
+  `ended` (login refused or session closed: every waiting request failed,
+  and nothing is searched until the app adds the device again).
+  `pending_days` is the number of camera-days still queued. Sent on state
+  changes and at most once a second while busy.
+- `recordings_day_failed`: one camera-day (or its month's calendar) could
+  not be searched. It is **not retried automatically**; the view asks
+  again (`nv_recordings_want`) if it still shows that day. `reason` is
+  English, for logs, not for parsing.
 - `recordings_changed` names one device and the range of days that
   changed (`start` of the first day, `end` of the last). The lane reports
   one camera-day at a time; the owner coalesces those into one event per
@@ -786,9 +1110,10 @@ fields must be ignored.
 
 **Threads.**
 
-- Queries, edits, groups, configuration, and download control take short
-  locks on in-memory state and never wait on the network or on a device
-  permit; they may be called from any thread except inside callbacks
+- Queries, edits, locks, groups, configuration, index requests and
+  holds, download control (including trash and range downloads), and
+  export plans take short locks on in-memory state and never wait on the
+  network or on a device permit; they may be called from any thread except inside callbacks
   (FFI.md's rule). Device work happens on core threads and reports by
   event.
 - `nv_playback_position` joins `nv_tile_decoded`, `nv_tile_decode_failed`,
@@ -799,7 +1124,8 @@ fields must be ignored.
   returned the tile's ID, none after `nv_playback_remove_camera` or
   `nv_playback_close` returns, `tile_closed` exactly once. No event names a
   playback before `nv_playback_open` returns.
-- After `nv_core_free` returns, nothing runs: indexers, thumbnail fetches,
+- After `nv_core_free` returns, nothing runs: search lanes (and any
+  background pass), thumbnail fetches,
   downloads (stopped; job files keep the progress), and plays (stopped) are
   all ended first.
 
@@ -831,6 +1157,9 @@ or a counted drop, never growth):
 | Days per index request | 31 (`NV_ERR_LIMIT` beyond) |
 | Camera-days waiting to be searched, per device | 4096 (a request that would exceed it is refused whole with `NV_ERR_LIMIT`) |
 | Known downloads | 1000 (`NV_ERR_LIMIT`; forget finished ones) |
+| Locked incidents | 1000 locks (`NV_ERR_LIMIT`; never dropped by the core); 31 days per lock; 16 pinned thumbnails per lock |
+| Range download | 16 cameras, 24 hours |
+| Still images per plan | 16 (one per playback camera) |
 | Download events | 4 per second per download, coalesced |
 | Event queue | FFI.md's (1024; diagnostics only while short) |
 
@@ -869,12 +1198,15 @@ or a counted drop, never growth):
 | --- | --- | --- |
 | `nv_recordings_configure`, `nv_recordings_enable` | `IndexConfig`, `IndexerConfig`, `LaneConfig`, `GroupingConfig`, `ThumbCacheConfig`, `SchedulerConfig`, `NamePattern`, `system_clock` | the `recordings` owner in `viewer-core` (C11) holding one `DeviceIndex` and `DeviceLane` per device key, the `Scheduler`, the `ThumbnailCache`, the `EditLog`, the `GroupStore`; config parsing; `device_info.recordings` |
 | `nv_recordings_calendar`, `_spans`, `_events` | `DeviceIndex::recorded_days`, `files`, `events` (lens in keys) | JSON shaping, `revision`, `limit`, `md` → `motion` |
-| `nv_recordings_refresh`, `_status`, `recordings_index`, `recordings_changed` | `LaneHandle::{request_days, hold_today, pending}`, `LaneEvent`, `LaneState` | owner-side aggregation into per-device events |
+| `nv_recordings_want`, `_hold_today`, `_status`, `recordings_index`, `recordings_day_failed`, `recordings_changed` | `LaneHandle::{request_days, hold_today, pending}` (`TodayHold` per app hold number), `LaneEvent`, `LaneState`; `Indexer` for the optional `background` block | owner-side aggregation into per-device events, the hold table |
 | `nv_incidents_get`, `nv_incident_get` | `group`, `Incident::{key, is_growing, intervals, download_ranges, kinds}` | regroup on index change, JSON shaping |
-| `nv_incident_edit` | `EditLog` (store, replay, expiry, `revert`), `merge`, `split`, `add_camera`, `remove_camera` | JSON shaping |
+| `nv_incident_edit` | `EditLog` (store, replay, expiry, `revert`), `merge`, `split`, `add_camera`, `remove_camera` | JSON shaping; no expiry for edits of locked incidents |
+| `nv_incident_lock`, `locked` | `EditLog`'s atomic store, `DeviceIndex` age and size eviction, `ThumbnailCache` eviction | the lock store and its matching rule, eviction exemptions, edit key rewriting on regroup, download on lock (C13) |
 | `nv_camera_groups_get`/`_put` | `GroupStore`, `CameraGroups` (bounded, stored like layouts, name overrides) | JSON shaping |
 | `nv_thumbnail_get`/`_put`/`_cancel` | `ThumbnailCache::{get, put}`, `LaneHandle::{request_thumbnail, cancel_thumbnails}` (newest first, 256, thumbnails before index work) | key mapping, `NV_PENDING` |
-| `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, set_camera_paused, retry, retry_camera, forget, remove_device, resume_all, progress}`, `FailReason`, `Mp4Finalizer` | coalesced events (4 per second), derived `state` |
+| `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, set_camera_paused, retry, retry_camera, forget, remove_device, resume_all, progress}`, `FailReason`, `Mp4Finalizer` | dedupe by incident key while unfinished (the scheduler dedupes by `id` today), `nv_download_trash`, coalesced events (4 per second), derived `state` |
+| `nv_download_range`, `dest`, `share_safe` | `Scheduler` (jobs are per camera range already), `naming` | range jobs and folder names, the downloads registry for `dest`, share-safe names and MP4 times (C14) |
+| `nv_edit_compute` `trim`, `in_ms`/`out_ms`, `nv_still_plan` | `edl`, `sync_samples`, playback tiles' answered pictures | the trim and still planners (C14) |
 | `nv_playback_*`, playback events | tiles, `TilePipeline`, generations (`tile.rs`), audio hub, `Subscription`-style bounded queue, replay framing (`encode_replay_media`, `replay_seq`) | playback commands in `bc-protocol` and `bc-session`, play streams routed by message ID and seq, file-boundary handling, the shared clock and paced release, buffering policy, mock-nvr playback |
 | `nv_sound_watch`, `sound_watch` | `Subscription`, audio decoding in `TileAudio` | a tile-less subscription that decodes audio only; stream-limit accounting |
 | `nv_recordings_loudness`, `nv_sound_labels_put` | the level meter (`audio-pipeline`), `DeviceIndex` day files | the 1-second envelope store, the T3/T4 pattern detector, label merge and caps, sound kinds in incidents and search |
@@ -938,7 +1270,11 @@ or a counted drop, never growth):
   small JPEG with WIC, and `nv_thumbnail_put` it back.
 - **Edits**: render the edit list with the D3D11 grid pass offscreen and
   encode with an `IMFSinkWriter` and the hardware encoder; a `copy_possible`
-  follow cut can be remuxed without decoding.
+  follow cut or trim can be remuxed without decoding.
+- **Stills**: encode PNG or JPEG with WIC from the tile's shown texture or a
+  picture decoded from the file.
+- **Trash**: `IFileOperation` with `FOFX_RECYCLEONDELETE` on the folder
+  `nv_download_trash` returns, after its `download_removed` event.
 - **Paths**: the app passes its downloads folder (for example under the
   user's Videos known folder) as UTF-8; output names are already safe for
   Windows (`recordings::naming::sanitize`) and capped at 120 characters per
@@ -953,13 +1289,17 @@ or a counted drop, never growth):
 
 /* NvStatus gains: */
 NV_PENDING = 1,                /* accepted; the answer arrives as an event (thumbnails) */
-NV_ERR_UNSUPPORTED = -7,       /* the device's backend cannot do this */
-NV_ERR_NOT_CONFIGURED = -8,    /* nv_recordings_configure not called, or no downloads_dir */
+NV_ERR_UNSUPPORTED = -8,       /* the device's backend cannot do this */
+NV_ERR_NOT_CONFIGURED = -9,    /* nv_recordings_configure not called, or no downloads_dir */
+/* (-7 is NV_ERR_NOT_PERMITTED, taken by talk-back in ABI 3.) */
 
 /* New types: NvThumbKind, NvThumbnail, NvSeekMode, NvPlaybackState
- * (sections 4 and 6). New functions: the nv_recordings_*, nv_incident*,
- * nv_camera_groups_*, nv_thumbnail_*, nv_download*, nv_playback_*,
- * nv_sound_*, nv_tile_loudness, and nv_edit_compute declarations above.
+ * (sections 4 and 6). New functions: the nv_recordings_* (including
+ * nv_recordings_want and nv_recordings_hold_today), nv_incident* (including
+ * nv_incident_lock), nv_camera_groups_*, nv_thumbnail_*, nv_download*
+ * (including nv_download_trash and nv_download_range), nv_playback_*,
+ * nv_sound_*, nv_tile_loudness, nv_edit_compute, and nv_still_plan
+ * declarations above.
  * No existing function or struct changes. */
 
 /* Live sound settings, JSON (unknown members ignored):
@@ -1062,3 +1402,82 @@ it says so; nothing below depends on an unmeasured fact.
     or camera the user picks; no background pass.
 14. **The ten sound kinds plus the classifier's own label** are enough for
     the first version.
+
+## Decisions (2026-10-11)
+
+The owner's review of sections 1 to 5, 8, and 9 before freezing them (F1),
+and what changed above.
+
+1. **Explicit calls for on-demand indexing.** `nv_recordings_want`
+   ({cameras, days (at most 31), force}) maps to the lane's
+   `request_days`; `nv_recordings_hold_today` maps to `hold_today`, one
+   hold per app-chosen hold number (a window), released with NULL, by
+   `nv_core_free`, or for a removed device. `nv_recordings_refresh` is
+   **folded in**: a refresh is `want` with `"force": true`. Why: Decision 8
+   needs a way for a view to say what it shows; queries that searched as a
+   side effect would hide device traffic behind a read and could not tell
+   "show" from "keep fresh". One call instead of two for the same lane
+   request keeps the surface small; nothing was implemented yet, so
+   dropping `refresh` costs nothing. The hold takes a hold number (an
+   argument the review sketch did not have) so several windows can hold
+   today independently and each release only its own.
+2. **`days_back` and `pass_interval_s` stay, as an optional per-device
+   `"background"` block, off by default**, which runs the existing
+   `indexer`. `nv_recordings_enable` otherwise only names the channels and
+   lenses that may be indexed. Why: some people want the index filled
+   ahead of time and the code exists; off by default keeps Decision 8.
+3. **Downloads are deduplicated by the incident's `key` while
+   unfinished**; a finished download stays, and queuing the grown incident
+   again makes a new folder (` (2)`). The download ID stays the incident's
+   `id` at queue time and is opaque. Why: deduping by `id` made a second
+   folder for every growth step of a live incident; deduping by `key` for
+   finished downloads would refuse to fetch what was added later.
+4. **Trash is in F1**: `nv_download_trash` forgets the download and
+   returns its folder; the app moves it to the Trash or Recycle Bin once
+   `download_removed` says nothing writes there. The core never deletes
+   permanently. Why: Decision 9 needed a call, and the system's Trash is
+   the platform's to use.
+5. **Incident keys are opaque**; renaming or deleting a group changes the
+   keys in it, and the contract says so. Why: the key format already
+   changed once (the group hash), and apps that parse it would break.
+6. **`recordings_index` reports the lane's states** (`idle`, `busy`,
+   `waiting_device`, `ended`) with `pending_days`; failed days are their
+   own event, `recordings_day_failed` (device, camera, day, reason), and
+   are not retried automatically. Why: that is what the lane does; a
+   `days_total` would be a count of a moving set of requests.
+7. **Event volume is frozen as written.** Thumbnail events are batched
+   only if the 1024-entry event queue overflows in testing. Why: the
+   bounds are already per device and per download; batching is an
+   additive change if needed.
+8. **The four `device_info.recordings` flags are frozen** (`search`,
+   `playback`, `download`, `thumbnails`). Why: they cover what a different
+   backend might lack; more can be added as members.
+9. **`nv_downloads_get` uses the buffer-too-small loop**, no paging. Why:
+   at most 1000 downloads, and every other list call works the same way.
+10. **Edits expire with `max_age_days` except for locked incidents**, and
+    **locking** is new: a locked incident's edits, index days, and
+    thumbnails are kept past `max_age_days` and exempt from eviction;
+    locking queues its download; unlocking makes it ordinary and never
+    deletes files. Locks are stored atomically, at most 1000 (`NV_ERR_LIMIT`
+    at the cap, never dropped by the core), and follow merges, splits, and
+    regrouping by overlap with the lock's extent (section 3, "Locked
+    incidents"). Why: the NVR overwrites old video and the index forgets
+    old days; a person who marks an incident as important expects it to be
+    there next year, and only a download keeps the video. Matching by
+    extent rather than key alone keeps a lock across group renames, and
+    keeping split parts under one lock means edits never raise the count.
+11. **Export is planned** (section 7a): trims (keyframe copy or exact, as
+    an edit-list kind), range downloads through the same scheduler, still
+    images (from a playback's shown pictures or a file), a destination per
+    export, and share-safe output. Why: the user wants all of these. The
+    core decides ranges, edit lists, and names; the apps decode, encode,
+    and write with platform APIs, as for the follow cut. They are not part
+    of F1; they ship as their own slices (MILESTONE-P.md).
+
+Also corrected in this review, without a decision: ABI 3 minor 4
+throughout; `NvConfig` no longer grows (the two sound settings became
+`nv_sound_configure`, because a minor may not change a struct's size); the
+new status codes are -8 and -9, because talk-back took -7; the incident key
+example; `NV_ERR_LIMIT` at the download cap; the JSON camera argument of
+pause and retry; derived download and camera states; the missing caps in
+the limits table; and sections 10 and 11 brought up to date.
