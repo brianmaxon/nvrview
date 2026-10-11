@@ -540,11 +540,38 @@ internal sealed class SelfTest(App app, AppOptions options)
             await Task.Delay(100);
         }
         bool youListening = engines.Count > 1 && engines[1].Source == TranscriptSource.You;
+        // What the call took from the (fake) microphone's echo cancellation, checked below.
+        (EchoCancellation? State, string? Note, bool? Gate) echoOn = (v.Calls.EchoFor(camera), v.Calls.NoteFor(camera), v.Calls.EchoGateCancelled(camera));
         v.Calls.StopTalking(camera);
         bool stopped = await Until(() => call.Talk.Current == TalkState.Phase.Stopped, 10);
         Say($"calls: talk with permission: active {active}, then {call.Talk.Text}, {call.Talk.SentMs} ms sent");
         Expect(stopped && !mic.Running && call.Talk.SentMs >= 500, "Talk did not send the microphone's audio");
         Expect(youListening, "the microphone had no recognizer while talking");
+
+        // parity: call-echo-cancellation
+        // 3b. Echo cancellation (docs/AUDIO.md "Echo cancellation"): the talk above had the system's
+        // canceller on; now a microphone without one. Real echo cannot be heard in a self-test: this
+        // checks what the call shows and which caption rule its gate runs (the rules themselves are
+        // EchoCancellationTests); the microphone is sent either way.
+        Say($"calls: echo cancellation on: {echoOn.State}, note \"{echoOn.Note}\", cancelled gate {echoOn.Gate}");
+        Expect(echoOn.State == EchoCancellation.System && echoOn.Gate == true, "the microphone's echo cancellation was not taken up by the call");
+        Expect(echoOn.Note == "Echo cancellation on", "the call does not show that echo cancellation is on");
+        mic.Echo = EchoCancellation.Gated("self-test: no echo canceller");
+        v.Calls.StartTalking(camera);
+        bool gatedTalk = await Until(() => call.Talk.IsActive && mic.Running, 10);
+        (EchoCancellation? State, string? Note, bool? Gate) echoOff = (v.Calls.EchoFor(camera), v.Calls.NoteFor(camera), v.Calls.EchoGateCancelled(camera));
+        for (int i = 0; i < 5; i++)
+        {
+            mic.Speak(1600);
+            await Task.Delay(100);
+        }
+        v.Calls.StopTalking(camera);
+        bool gatedStopped = await Until(() => call.Talk.Current == TalkState.Phase.Stopped, 10);
+        mic.Echo = EchoCancellation.System;
+        Say($"calls: echo cancellation off: {echoOff.State}, note \"{echoOff.Note}\", cancelled gate {echoOff.Gate}, {call.Talk.SentMs} ms sent");
+        Expect(gatedTalk && gatedStopped && call.Talk.SentMs >= 200, "without echo cancellation the microphone was not sent");
+        Expect(echoOff.State == EchoCancellation.Gated("self-test: no echo canceller") && echoOff.Gate == false, "without echo cancellation the caption gate did not take over");
+        Expect(echoOff.Note == "No echo cancellation", "the call does not show that echo cancellation is off");
 
         // parity: call-typed-reply
         // 4. A typed reply: rendered by the voice (never played here), pushed in one go, ended by a draining stop.
@@ -864,7 +891,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: call-microphone
         if (options.MicrophoneTest)
         {
-            var mic = new WasapiMicrophone();
+            var mic = new WasapiMicrophone(() => app.Audio?.DeviceId);
             int blocks = 0, samplesSeen = 0;
             float peak = 0;
             string? problem = mic.Start(block =>
@@ -879,6 +906,9 @@ internal sealed class SelfTest(App app, AppOptions options)
             await Task.Delay(700);
             mic.Stop();
             Say($"calls: microphone {(problem is null ? $"opened: {blocks} blocks, {samplesSeen} samples at 16 kHz, peak {peak:0.000}" : $"not available: {problem}")}");
+            // What Windows reports about its echo canceller for this microphone and the output that plays.
+            Say($"calls: microphone echo cancellation: {(mic.Echo is { } echo ? echo.Active ? "on" : $"off ({echo.Why})" : "not reported")}, playback device {(app.Audio?.DeviceId is null ? "none" : "known")}");
+            Expect(problem is not null || mic.Echo is not null, "the microphone opened but did not report on echo cancellation");
             Expect(problem is not null || blocks > 10, "the microphone opened but delivered no audio");
         }
     }

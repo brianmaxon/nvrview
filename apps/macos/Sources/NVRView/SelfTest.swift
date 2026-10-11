@@ -836,7 +836,100 @@ final class SelfTest {
             problems.append("ending a conversation did not tell the core it ended")
         }
         if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
-        transcriptFileStep(doorbell)
+        echoStep(doorbell)
+    }
+
+    /// Echo cancellation (docs/AUDIO.md "Echo cancellation"): the fake
+    /// microphone reports the system's canceller on, then unavailable. Real
+    /// echo cannot be heard in a self-test: this checks what the call shows
+    /// and logs, and the caption gate's rule in each mode (the microphone is
+    /// always sent; only its captions are gated).
+    private func echoStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake, let mic = model.calls.fakeMicrophone else {
+            return checkLog()
+        }
+        let stage = window.stage
+        // parity: call-echo-cancellation
+        stage.startConversation(doorbell)
+        guard let tile = model.leases.tile(for: doorbell) else {
+            problems.append("the conversation has no tile")
+            return transcriptFileStep(doorbell)
+        }
+        let prepared = mic.prepared
+        func youFinals() -> Int { model.calls.call(for: doorbell)?.transcript.finals.filter { $0.source == .you }.count ?? 0 }
+        let allowed = model.cameraOptions(doorbell).allowTalk
+        model.setAllowTalk(doorbell, true)
+        mic.echo = .system
+        // The doorbell plays ordinary speech (above the half-duplex gate's
+        // threshold, below the safety duck's).
+        fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.3, rms: 0.1))
+        model.calls.startTalking(doorbell)
+        let talking: @MainActor () -> Bool = { model.calls.call(for: doorbell)?.talk.isActive == true && model.calls.echoCancellation(for: doorbell) != nil }
+        when(talking, timeout: 2) { [self] in
+            let state = model.calls.echoCancellation(for: doorbell)
+            let note = model.calls.note(for: doorbell) ?? "-"
+            let gateOn = model.calls.echoGateCancelled(doorbell)
+            mic.speak(count: 16_000)
+            when({ youFinals() > 0 }, timeout: 1) { [self] in
+                let fullDuplex = youFinals()
+                // Very loud: the short safety duck.
+                fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.8, rms: 0.4))
+                mic.speak(count: 16_000)
+                when({ false }, timeout: 0.3) { [self] in
+                    let ducked = youFinals() == fullDuplex
+                    model.calls.stopTalking(doorbell)
+                    print("echo cancellation on: \(String(describing: state)), note \"\(note)\", captions while the doorbell speaks \(fullDuplex > 0), ducked when very loud \(ducked), prepared at call open \(prepared)")
+                    if state != .system || gateOn != true { problems.append("the microphone's echo cancellation was not taken up by the call") }
+                    if note != "Talking · Echo cancellation on" { problems.append("the call does not show that echo cancellation is on: \(note)") }
+                    if fullDuplex == 0 { problems.append("with echo cancellation the microphone was not captioned while the doorbell spoke") }
+                    if !ducked { problems.append("with echo cancellation a very loud doorbell did not duck the microphone's captions") }
+                    if !prepared { problems.append("opening a call did not prepare echo cancellation") }
+                    // The drained talk ends first (its end would stop the next one's microphone).
+                    when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 3) { [self] in
+                        echoFallbackStep(doorbell, tile: tile, allowed: allowed)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fallback: no echo canceller; the half-duplex caption gate.
+    private func echoFallbackStep(_ doorbell: CameraRef, tile: CoreTile, allowed: Bool) {
+        guard let model = app.model, let window, let fake = model.fake, let mic = model.calls.fakeMicrophone else {
+            return checkLog()
+        }
+        mic.echo = .gated("self-test: no echo canceller")
+        fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.3, rms: 0.1))
+        func youFinals() -> Int { model.calls.call(for: doorbell)?.transcript.finals.filter { $0.source == .you }.count ?? 0 }
+        let before = youFinals()
+        model.calls.startTalking(doorbell)
+        let talking: @MainActor () -> Bool = { model.calls.call(for: doorbell)?.talk.isActive == true && model.calls.echoCancellation(for: doorbell) != nil }
+        when(talking, timeout: 2) { [self] in
+            let pushedBefore = fake.talkPushedMilliseconds(tile: tile.id)
+            let note = model.calls.note(for: doorbell) ?? "-"
+            let gateOn = model.calls.echoGateCancelled(doorbell)
+            mic.speak(count: 16_000)
+            when({ false }, timeout: 0.3) { [self] in
+                let gated = youFinals() == before
+                let pushed = fake.talkPushedMilliseconds(tile: tile.id) - pushedBefore
+                model.calls.stopTalking(doorbell)
+                let log = model.alerts.log.map(\.text)
+                let onLogged = log.filter { $0 == "Talk-back microphone: echo cancellation on" }.count
+                let offLogged = log.filter { $0.hasPrefix("Talk-back microphone: echo cancellation unavailable (self-test: no echo canceller)") }.count
+                print("echo cancellation off: note \"\(note)\", captions gated \(gated), \(Int(pushed)) ms still sent, logged on \(onLogged)x, off \(offLogged)x")
+                if gateOn != false { problems.append("without echo cancellation the caption gate did not take over") }
+                if note != "Talking · No echo cancellation" { problems.append("the call does not show that echo cancellation is off: \(note)") }
+                if !gated { problems.append("without echo cancellation the microphone was captioned while the doorbell spoke") }
+                if abs(pushed - 1000) > 1 { problems.append("without echo cancellation the microphone was not sent (\(pushed) ms)") }
+                if onLogged != 1 || offLogged != 1 { problems.append("echo cancellation was not logged once per outcome") }
+                fake.setAudioLevel(tile: tile.id, nil)
+                mic.echo = .system
+                model.setAllowTalk(doorbell, allowed)
+                window.stage.endConversation(doorbell)
+                if mic.prepared { problems.append("the last call ending did not release echo cancellation's preparation") }
+                transcriptFileStep(doorbell)
+            }
+        }
     }
 
     /// "Save call transcripts" on: a call's transcript is written as a text
