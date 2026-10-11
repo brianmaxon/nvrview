@@ -334,7 +334,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 2;
+    public const uint AbiMinor = 3;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -382,6 +382,11 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_tile_set_tier(nint core, ulong tile, NvStreamTier tier);
+
+    /// <summary>Retries a tile without a picture (minor 3): restarts its stream now.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_tile_retry(nint core, ulong tile);
 
     /// <summary>Answers a Decode; any thread, including callbacks.</summary>
     [LibraryImport(Library)]

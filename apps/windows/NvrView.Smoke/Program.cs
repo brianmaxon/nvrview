@@ -828,6 +828,14 @@ internal sealed class Smoke(Options options)
     private void SwitchTier(NvCore core, ulong tile, NvStreamTier tier, string name, uint generation)
     {
         Generation old = _app.Gen(generation - 1);
+        try
+        {
+            core.RetryTile(tile + 100);
+            Problem("nv_tile_retry accepted an unknown tile");
+        }
+        catch (NvException e) when (e.Status == NvStatus.UnknownId)
+        {
+        }
         core.SetTier(tile, tier);
         bool done = WaitUntil(() =>
             _app.Gen(generation).Answered >= 20 &&

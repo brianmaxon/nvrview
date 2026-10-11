@@ -186,6 +186,13 @@ public final class CoreBridge: Sendable {
         }
     }
 
+    /// Minor 3 `nv_tile_retry`: the Retry button. The core restarts the
+    /// tile's stream now, or connects now when its device is waiting to; it
+    /// ignores a second ask within 2 s and does nothing for a refused login.
+    public func retryTile(_ tile: CoreTile) throws(CoreStatus) {
+        try live().tileRetry(tile.id)
+    }
+
     /// ABI 3 `nv_device_key`: the device's stable key, the name layouts use
     /// for it; nil when the core has none (an older core).
     public func deviceKey(_ device: UInt64) -> String? {

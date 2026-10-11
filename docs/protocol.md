@@ -271,8 +271,11 @@ follows on its message ID is delivered; until media arrives, the session
 stops it and sends the same start again (with a new message ID, as the
 official client does) 6 s after each 400, and gives up
 (reporting the refusal) 60 s after the first one. Both times are settings
-(`SessionConfig::preview_retry_interval`, `preview_wait_limit`). Other
-refusal statuses stay final at once. The wait is reported to apps as
+(`SessionConfig::preview_retry_interval`, `preview_wait_limit`). After
+that the refusal stays visible and one start is tried every
+`preview_slow_retry` (60 s) until media arrives (docs/ARCHITECTURE.md,
+"Previews that deliver nothing"). Other refusal statuses stay final at
+once. The wait is reported to apps as
 `tile_waiting` (docs/FFI.md).
 
 ### Audio in the official client

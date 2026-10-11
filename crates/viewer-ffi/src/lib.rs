@@ -31,7 +31,7 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// Bumped for each addition that leaves every existing declaration
 /// unchanged (new functions, events, status codes); resets to 0 with a new
 /// NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates.
-pub const NV_ABI_MINOR: u32 = 2;
+pub const NV_ABI_MINOR: u32 = 3;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -792,6 +792,27 @@ pub unsafe extern "C" fn nv_tile_set_tier(
             return NvStatus::NV_ERR_INVALID_ARGUMENT;
         };
         status(c.set_tile_tier(tile, tier))
+    })
+}
+
+/// Retries a tile that has no picture (the app's Retry button): its stream
+/// is stopped and started again now, on the same login. When the device is
+/// waiting before a reconnect, the next connection attempt is made now. A
+/// tile asked again within 2 s does nothing (NV_OK), and so does one whose
+/// device refused the login (that state stays terminal; apps do not offer
+/// the button for it). Returns at once; progress arrives as the usual
+/// events. NV_ERR_UNKNOWN_ID for an unknown tile. Added in minor 3.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_tile_retry(core: *mut NvCore, tile: u64) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.retry_tile(tile)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
     })
 }
 

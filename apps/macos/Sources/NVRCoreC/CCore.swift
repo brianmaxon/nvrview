@@ -140,6 +140,11 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    public func tileRetry(_ tile: UInt64) throws(CoreStatus) {
+        let status = CoreStatus(nv_tile_retry(try core(), tile))
+        if !status.isOK { throw status }
+    }
+
     public func tileAudioLevel(_ tile: UInt64) throws(CoreStatus) -> AudioLevel {
         // Lock-free in the core; held here only so `free` cannot run underneath.
         try handle.withLock { h throws(CoreStatus) -> AudioLevel in

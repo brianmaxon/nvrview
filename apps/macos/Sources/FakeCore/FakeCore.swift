@@ -216,6 +216,11 @@ public final class FakeCore: CoreAPI {
         var devices: [UInt64: Device] = [:]
         var tiles: [UInt64: FakeTile] = [:]
         var freed = false
+        /// Tiles whose start was refused (`startRejectedTiers`); a retry
+        /// revives them.
+        var rejected: Set<UInt64> = []
+        /// Every `tileRetry` so far.
+        var retries: [UInt64] = []
     }
 
     let options: Options
@@ -287,6 +292,10 @@ public final class FakeCore: CoreAPI {
         }
     }
 
+    /// Sends an event the way the core would (the self-test uses it to put a
+    /// device into a connection state).
+    public func emitForTest(_ json: String) { emitEvent(json) }
+
     // MARK: CoreAPI
 
     public func addDevice(host: String, port: UInt16, user: String, password: String) throws(CoreStatus) -> UInt64 {
@@ -356,11 +365,27 @@ public final class FakeCore: CoreAPI {
             return (id, tile)
         }
         if options.startRejectedTiers.contains(tier) {
+            world.withLock { $0.rejected.insert(id) }
             emitEvent(#"{"type":"tile_error","tile":\#(id),"reason":"start_rejected","status":400}"#)
             return id
         }
         if case .realtime(let fps) = options.pacing, !tile.silent { tile.start(fps: fps) }
         return id
+    }
+
+    /// The tiles `tileRetry` was called for, in order.
+    public var retriedTiles: [UInt64] { world.withLock { $0.retries } }
+
+    /// A retry restarts a refused tile's stream (real-time pacing); for any
+    /// other tile it is only recorded.
+    public func tileRetry(_ tile: UInt64) throws(CoreStatus) {
+        let (known, revive): (FakeTile?, Bool) = world.withLock { w in
+            guard let t = w.tiles[tile] else { return (nil, false) }
+            w.retries.append(tile)
+            return (t, w.rejected.remove(tile) != nil)
+        }
+        guard let t = known else { throw .unknownID }
+        if revive, case .realtime(let fps) = options.pacing, !t.silent { t.start(fps: fps) }
     }
 
     public func closeTile(_ tile: UInt64) throws(CoreStatus) {

@@ -419,6 +419,20 @@ public sealed unsafe class NvCore : IDisposable
     }
 
     /// <summary>
+    /// The Retry button of a tile without a picture (minor 3): the core restarts
+    /// the tile's stream now, or connects now when the device is waiting to. It
+    /// ignores a second ask within 2 s and does nothing for a refused login.
+    /// </summary>
+    public void RetryTile(ulong tile)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_tile_retry(core, tile), nameof(NvNative.nv_tile_retry));
+        }
+    }
+
+    /// <summary>
     /// Answers a Decode of <paramref name="generation"/>. Any thread, including
     /// callbacks; never blocks or throws. Returns the core's status
     /// (<see cref="NvStatus.Closed"/> once the core is freed).

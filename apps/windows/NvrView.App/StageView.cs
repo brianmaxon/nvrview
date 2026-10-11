@@ -1356,7 +1356,7 @@ internal sealed partial class StageView : UserControl
         _chromes.Clear();
         foreach (StageTile t in _tiles)
         {
-            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera) };
+            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked };
             chrome.Speaker.Visibility = t.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
@@ -1369,7 +1369,7 @@ internal sealed partial class StageView : UserControl
         foreach (TileChrome c in _chromes)
         {
             StageTile t = c.Tile;
-            c.Refresh(TitleOf(t), StatusText(t), t.Audible, _diagnostics ? DiagnosticsText(t) : null);
+            RefreshChrome(c);
         }
         SyncOverlays();
         bool empty = _viewer.Devices.Count == 0 && State.Tree.Cameras.Count == 0;
@@ -1463,45 +1463,82 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    private readonly TileRetryWatch<StageTile> _retryWatch = new();
+
+    /// <summary>Title, status line, and the Retry button of one tile.</summary>
+    private void RefreshChrome(TileChrome c)
+    {
+        (string? text, TileMessage kind) = StatusOf(c.Tile);
+        c.Refresh(TitleOf(c.Tile), text, c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null);
+        c.SetRetry(_retryWatch.Offered(c.Tile, kind, _viewer.Clock.Now));
+    }
+
+    /// <summary>The Retry button was pressed (or invoked by the self-test).</summary>
+    private void RetryClicked(StageTile tile)
+    {
+        _retryWatch.Restart(tile, _viewer.Clock.Now);
+        _viewer.RetryTile(tile);
+        if (_chromes.FirstOrDefault(c => c.Tile == tile) is { } chrome)
+        {
+            RefreshChrome(chrome);
+        }
+    }
+
+    /// <summary>The device's state as a message a retry may or may not help.</summary>
+    private static TileMessage DeviceMessage(DeviceEntry d) => d.State switch
+    {
+        "connecting" => TileMessage.Connecting,
+        "backoff" => TileMessage.Reconnecting,
+        "login_failed" => TileMessage.LoginFailed,
+        "no_password" => TileMessage.NoPassword,
+        "invalid" => TileMessage.InvalidAddress,
+        "closed" => TileMessage.Disconnected,
+        _ => TileMessage.None,
+    };
+
     /// <summary>The tile's status line, or null while it plays normally.</summary>
-    public string? StatusText(StageTile t)
+    public string? StatusText(StageTile t) => StatusOf(t).Text;
+
+    /// <summary>The tile's status line and what kind of message it is.</summary>
+    public (string? Text, TileMessage Kind) StatusOf(StageTile t)
     {
         if (t.CameraOrNone is not { } camera)
         {
-            return State.Editing ? "Empty tile: drop a camera here, or pick one in the sidebar" : null;
+            return (State.Editing ? "Empty tile: drop a camera here, or pick one in the sidebar" : null, TileMessage.None);
         }
         if (t.Device is not { } device)
         {
-            return "This camera's device was removed.";
+            return ("This camera's device was removed.", TileMessage.DeviceRemoved);
         }
         if (DeviceText(device) is { } text)
         {
-            return text;
+            return (text, DeviceMessage(device));
         }
         if (t.Shared is not { } shared)
         {
             return _viewer.ChannelOf(camera) is { Connected: false } || (device.Channels.Count > 0 && _viewer.ChannelOf(camera) is null)
-                ? "Camera offline"
-                : "Starting…";
+                ? ("Camera offline", TileMessage.CameraOffline)
+                : ("Starting…", TileMessage.Starting);
         }
-        if (shared.Error is { } error)
+        // A refusal is shown until a picture arrives: the core tries a refused stream again.
+        if (shared.Error is { } error && t.PictureWidth == 0)
         {
-            return error;
+            return (error, TileMessage.Refused);
         }
         if (shared.Video.MissingDecoder == NvCodec.H265)
         {
-            return "This camera sends H.265 video. Install the HEVC Video Extension from the Microsoft Store to watch it.";
+            return ("This camera sends H.265 video. Install the HEVC Video Extension from the Microsoft Store to watch it.", TileMessage.Undecodable);
         }
         if (shared.Waiting is { } waiting)
         {
-            return waiting + "…";
+            return (waiting + "…", TileMessage.WaitingForCamera);
         }
         return shared.Video.Status switch
         {
-            NvTileStatus.Undecodable => "This stream cannot be decoded." + (shared.Video.ConfigureError is { } why ? $"\n{why}" : ""),
-            NvTileStatus.Recovering => "Recovering…",
-            NvTileStatus.Waiting when t.PictureWidth == 0 => "Starting…",
-            _ => null,
+            NvTileStatus.Undecodable => ("This stream cannot be decoded." + (shared.Video.ConfigureError is { } why ? $"\n{why}" : ""), TileMessage.Undecodable),
+            NvTileStatus.Recovering => ("Recovering…", t.PictureWidth == 0 ? TileMessage.Recovering : TileMessage.None),
+            NvTileStatus.Waiting when t.PictureWidth == 0 => ("Starting…", TileMessage.Starting),
+            _ => (null, TileMessage.None),
         };
     }
 
@@ -1556,7 +1593,7 @@ internal sealed partial class StageView : UserControl
         UpdateHover();
         foreach (TileChrome c in _chromes)
         {
-            c.Refresh(TitleOf(c.Tile), StatusText(c.Tile), c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null);
+            RefreshChrome(c);
         }
         SyncOverlays();
     }

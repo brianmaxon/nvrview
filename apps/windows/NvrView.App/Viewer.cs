@@ -893,6 +893,26 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         }
     }
 
+    /// <summary>
+    /// The Retry button: the core restarts the tile's stream now (or connects now, when its device is
+    /// waiting to). The core keeps a 2 s floor and does nothing for a refused login.
+    /// </summary>
+    public void RetryTile(StageTile tile)
+    {
+        if (tile.Id == 0)
+        {
+            return;
+        }
+        try
+        {
+            Core.RetryTile(tile.Id);
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"retry on tile {tile.Id} failed: {e.Status}");
+        }
+    }
+
     // ---- listening ----
 
     public bool IsAudible(CameraRef camera) => _audible.Contains(camera);

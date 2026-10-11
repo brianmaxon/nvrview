@@ -70,7 +70,9 @@ pub use config::{BackoffConfig, SessionConfig};
 pub use lens::LensProbe;
 pub use play::{Play, PlayStart};
 pub use queue::{Item, Subscription};
-pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
+pub use supervisor::{
+    AlarmPush, ConnState, DeviceSession, MANUAL_RETRY_FLOOR, QueryError, QueryReply, SessionClosed,
+};
 pub use talk::{Refusal, StopReason, Talk, TalkState, TalkStats};
 pub use transport::{Connector, FnConnector, TcpConnector};
 
@@ -81,6 +83,9 @@ use tokio::sync::Notify;
 pub(crate) struct Shared {
     pub(crate) closing: AtomicBool,
     pub(crate) wake: Notify,
+    /// Streams the user asked to retry by hand ([`DeviceSession::retry_stream`]);
+    /// bounded, deduplicated.
+    pub(crate) retry: std::sync::Mutex<Vec<(u8, bc_protocol::stream::StreamTier)>>,
 }
 
 impl Shared {

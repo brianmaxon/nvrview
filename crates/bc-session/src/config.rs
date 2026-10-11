@@ -114,9 +114,24 @@ pub struct SessionConfig {
     /// (about every 6 s). Default 6 s.
     pub preview_retry_interval: Duration,
     /// How long after the first 400 the session keeps waiting and retrying
-    /// before it gives up and reports [`crate::Item::StartRejected`].
-    /// Zero makes a 400 final at once. Default 60 s.
+    /// before it reports [`crate::Item::StartRejected`] and falls back to
+    /// one start every [`Self::preview_slow_retry`]. Zero makes a 400 final
+    /// at once. Default 60 s.
     pub preview_wait_limit: Duration,
+    /// A started preview with subscribers that delivers no media for this
+    /// long is stopped and started again (a new message ID, on the same
+    /// login). Default 15 s. Zero turns the watchdog off.
+    pub preview_silence_timeout: Duration,
+    /// The wait before each further silent restart doubles, up to this.
+    /// Default 60 s.
+    pub preview_restart_cap: Duration,
+    /// After a start was refused for [`Self::preview_wait_limit`], one more
+    /// start is tried this often. Default 60 s.
+    pub preview_slow_retry: Duration,
+    /// After this many silent restarts in a row on every started preview
+    /// (and no media on the connection), reconnect once through the normal
+    /// backoff. Zero never reconnects. Default 3.
+    pub preview_escalate_after: u32,
     /// Most talk-back starts per channel in any minute
     /// ([`crate::DeviceSession::talk`]); more are refused
     /// ([`crate::Refusal::RateLimited`]). Default 6.
@@ -161,6 +176,10 @@ impl SessionConfig {
             alarm_report: true,
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            preview_silence_timeout: Duration::from_secs(15),
+            preview_restart_cap: Duration::from_secs(60),
+            preview_slow_retry: Duration::from_secs(60),
+            preview_escalate_after: 3,
             talk_starts_per_minute: 6,
             talk_buffer: 16_000 * 10,
             talk_idle_timeout: Duration::from_secs(10),

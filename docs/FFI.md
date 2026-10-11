@@ -83,6 +83,29 @@ decoder that outputs the coded size must add `visible_rect`'s origin.
 The core also drives each pipeline's clock (`tick`) and tells it about
 reconnects (`discontinuity`); the app does not.
 
+## Retrying a tile
+
+`nv_tile_retry(core, tile)` (minor 3) is the Retry button of a tile that
+has shown no picture for a while. The core restarts that tile's stream now
+(stop, then a new start with a new message ID, on the same login), and when
+its device is waiting before a reconnect it makes the next connection
+attempt now instead of waiting out the backoff. It goes through the same
+supervisor as every other connection attempt, so the device's login limits
+hold: a tile asked again within 2 s does nothing (`NV_OK`), connection
+attempts made early are at least 2 s apart, and a device whose login was
+refused (`tile_closed` with `login_failed`, state `LoginFailed`) is never
+retried: the session is over, so the call does nothing and apps do not show
+the button there. Progress arrives as the usual events (`tile_waiting`,
+`tile_error`, then pictures).
+
+The core also recovers on its own, without the button: a started preview
+that delivers no media is restarted with growing waits (15 s, doubling to
+60 s), a start refused with 400 is tried again every 60 s after the first
+minute of waiting, and when every preview stays silent the connection is
+reestablished once (docs/ARCHITECTURE.md, "Previews that deliver nothing").
+`tile_error` `start_rejected` can therefore be followed by a picture; apps
+clear their message at the first decoded picture.
+
 ## Switching a tile's stream tier
 
 `nv_tile_set_tier(core, tile, tier)` asks a tile to show another tier (main
@@ -695,6 +718,7 @@ symbol at all, so a bound app checks first):
 | --- | --- |
 | 1 | `nv_abi_minor`, device discovery (`nv_discover_start`, `nv_discover_stop`, the `discovered` and `discovery_done` events) |
 | 2 | updates (`nv_update_check`, `nv_update_download`, `nv_update_cancel`, `nv_update_parse_key`, `nv_update_parse_source`, the `update` event) |
+| 3 | `nv_tile_retry` (the Retry button of a tile without a picture) |
 
 ## Builds
 
