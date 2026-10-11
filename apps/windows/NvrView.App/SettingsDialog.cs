@@ -320,6 +320,26 @@ internal static class SettingsDialog
         corners.Children.Add(corner);
         corners.Children.Add(insetCorner);
 
+        // Saved call transcripts (docs/UX.md "Doorbell calls"): off by default; kept in view-settings.json.
+        var saveTranscripts = new CheckBox { Content = "Save call transcripts", IsChecked = viewer.Settings.SaveCallTranscripts };
+        saveTranscripts.Click += (_, _) => viewer.Settings.SaveCallTranscripts = saveTranscripts.IsChecked == true;
+        var openTranscripts = new Button { Content = "Open transcripts folder" };
+        openTranscripts.Click += (_, _) => viewer.Transcripts.OpenFolder();
+        var transcriptRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
+        transcriptRow.Children.Add(saveTranscripts);
+        transcriptRow.Children.Add(openTranscripts);
+        var transcriptNote = new TextBlock
+        {
+            Text = "Calls are transcribed on this PC while they last. With saving on, each call's transcript goes into the log and into a text file in the Transcripts folder (the newest 500 files, at most 50 MB in all, are kept). With saving off (the default), the transcript is gone when the call ends. Recording a conversation may need the other person's consent where you live.",
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 560,
+            Opacity = 0.7,
+        };
+        var callSettings = new StackPanel { Spacing = 8 };
+        callSettings.Children.Add(corners);
+        callSettings.Children.Add(transcriptRow);
+        callSettings.Children.Add(transcriptNote);
+
         // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
         // like the menu's choice; shown only when a connected camera reports a fisheye lens.
         var mounts = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
@@ -388,9 +408,9 @@ internal static class SettingsDialog
         layout.Children.Add(left);
         Grid.SetColumn(form, 1);
         layout.Children.Add(form);
-        Grid.SetRow(corners, 1);
-        Grid.SetColumnSpan(corners, 2);
-        layout.Children.Add(corners);
+        Grid.SetRow(callSettings, 1);
+        Grid.SetColumnSpan(callSettings, 2);
+        layout.Children.Add(callSettings);
         Grid.SetRow(mounts, 2);
         Grid.SetColumnSpan(mounts, 2);
         layout.Children.Add(mounts);

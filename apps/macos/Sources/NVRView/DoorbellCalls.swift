@@ -236,7 +236,11 @@ final class DoorbellCalls {
 
     private func transcribed(_ camera: CameraRef, _ source: TranscriptSource, _ text: String, final: Bool) {
         guard let s = sessions[camera] else { return }
-        if final { s.call.transcript.final(text, source: source) } else { s.call.transcript.partial(text, source: source) }
+        if final {
+            s.call.transcript.final(text, source: source, at: Date())
+        } else {
+            s.call.transcript.partial(text, source: source)
+        }
         // Speech is activity: the call stays open.
         s.call.activity(now: model.clock.now)
         model.changed()
@@ -527,8 +531,19 @@ final class DoorbellCalls {
             model.setAudible(s.call.mutedForCall)
         }
         model.leases.release(s.call.camera)
-        let text = s.call.logText(endedAt: Date(), saveTranscript: model.saveCallTranscripts)
+        let endedAt = Date()
+        let text = s.call.logText(endedAt: endedAt, saveTranscript: model.saveCallTranscripts)
         model.logEvent(text + " (\(reason))", transcriptFollows: model.saveCallTranscripts && !s.call.transcript.finals.isEmpty)
+        // And as a text file of its own (nothing when nothing was transcribed).
+        if model.saveCallTranscripts,
+            let file = s.call.transcriptFile(cameraName: model.name(of: s.call.camera), endedAt: endedAt)
+        {
+            if let url = model.transcripts.save(name: file.name, text: file.text) {
+                model.logEvent("Transcript saved: \(url.lastPathComponent)")
+            } else {
+                model.logEvent("Transcript not saved: the Transcripts folder could not be written")
+            }
+        }
         model.changed()
     }
 

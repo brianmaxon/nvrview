@@ -836,7 +836,52 @@ final class SelfTest {
             problems.append("ending a conversation did not tell the core it ended")
         }
         if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
-        popOutStep(doorbell)
+        transcriptFileStep(doorbell)
+    }
+
+    /// "Save call transcripts" on: a call's transcript is written as a text
+    /// file when it ends (in a temporary folder here); off: nothing is.
+    private func transcriptFileStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
+        let stage = window.stage
+        // parity: call-transcript-file
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "nvrview-selftest-transcripts-\(UUID().uuidString)", isDirectory: true)
+        let before = model.transcripts.folder
+        model.transcripts.folder = folder
+        model.saveCallTranscripts = true
+        stage.startConversation(doorbell)
+        guard let tile = model.leases.tile(for: doorbell) else {
+            problems.append("the conversation has no tile")
+            return popOutStep(doorbell)
+        }
+        fake.pumpAudio(tile: tile.id, count: 17)
+        when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
+            stage.endConversation(doorbell)
+            let names = model.transcripts.names()
+            let text = names.first.flatMap { try? String(contentsOf: folder.appendingPathComponent($0), encoding: .utf8) } ?? ""
+            let camera = CallTranscriptFile.sanitized(model.name(of: doorbell))
+            print("transcript file: \(names), \(text.split(separator: "\n").count) lines")
+            if names.count != 1 || names.first?.hasSuffix(" \(camera).txt") != true {
+                problems.append("ending a call with saving on did not write one transcript file named for the camera: \(names)")
+            }
+            if !text.hasPrefix("NVRView call transcript\nCamera: \(model.name(of: doorbell))\n")
+                || !text.contains("\nCall: conversation started in the app\n") || !text.contains(" Visitor: ")
+            {
+                problems.append("the transcript file lacks its header or the visitor's line")
+            }
+            // Off (the default): the next call writes nothing.
+            model.saveCallTranscripts = false
+            stage.startConversation(doorbell)
+            fake.pumpAudio(tile: tile.id, count: 17)
+            when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
+                stage.endConversation(doorbell)
+                if model.transcripts.names().count != 1 { problems.append("a call with saving off wrote a transcript file") }
+                try? FileManager.default.removeItem(at: folder)
+                model.transcripts.folder = before
+                popOutStep(doorbell)
+            }
+        }
     }
 
     // MARK: Calls in their own windows (docs/UX.md "A call in its own window")

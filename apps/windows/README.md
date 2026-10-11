@@ -581,8 +581,14 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   picture holds its own lease on the camera besides the call's (acquired
   before any is released when the cards change, released when the card
   goes, moves over the stage, or the window closes).
-- **Not yet on Windows:** saving transcripts into the event log (the call is
-  logged without them), a per-doorbell "unmute on ring" setting.
+- **Saved transcripts:** "Save call transcripts" in Settings (off by
+  default, kept in `view-settings.json`) writes each call's transcript into
+  the app's log and as a text file in `%LOCALAPPDATA%\NvrView\Transcripts`
+  (the data directory's `Transcripts`), atomically; the newest 500 files and
+  at most 50 MB are kept. Names, text and pruning are `TranscriptFiles` in
+  NvrView.Tiles, tested with the Mac's vectors; "Open transcripts folder"
+  shows the folder. Self-test step `call-transcript-file`.
+- **Not yet on Windows:** a per-doorbell "unmute on ring" setting.
 
 ### How it works
 

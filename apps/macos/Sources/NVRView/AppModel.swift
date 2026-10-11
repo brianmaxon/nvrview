@@ -139,15 +139,19 @@ final class AppModel {
         }
     }
     static let hideOfflineKey = "hideOfflineChannels"
-    /// Doorbell call transcripts go into the event log only when this is on
-    /// (recording a conversation may need consent). Off by default.
+    /// Doorbell call transcripts go into the event log and, one text file
+    /// per call, into the Transcripts folder only when this is on (recording
+    /// a conversation may need consent). Off by default. Kept with the call
+    /// settings (`callDefaults`).
     var saveCallTranscripts = UserDefaults.standard.bool(forKey: AppModel.saveTranscriptsKey) {
         didSet {
-            UserDefaults.standard.set(saveCallTranscripts, forKey: Self.saveTranscriptsKey)
+            callDefaults.set(saveCallTranscripts, forKey: Self.saveTranscriptsKey)
             notify()
         }
     }
     static let saveTranscriptsKey = "saveCallTranscripts"
+    /// Where saved transcripts go (`saveCallTranscripts`).
+    @ObservationIgnored let transcripts = TranscriptStore(folder: JSONFileStore<DeviceConfig>.appSupport("Transcripts"))
     /// The stage corner for alert insets; nil: opposite the indicators.
     var insetCornerChoice: ChromeCorner? = UserDefaults.standard.string(forKey: AppModel.insetCornerKey)
         .flatMap(ChromeCorner.init(rawValue:))
@@ -190,6 +194,7 @@ final class AppModel {
         callDefaults = defaults
         callsOpenInWindow = defaults.bool(forKey: Self.callsOpenInWindowKey)
         callWindowPlacement = Self.placement(in: defaults)
+        saveCallTranscripts = defaults.bool(forKey: Self.saveTranscriptsKey)
     }
     /// Where the insets go now.
     var insetCorner: ChromeCorner { insetCornerChoice ?? indicatorCorner.opposite }

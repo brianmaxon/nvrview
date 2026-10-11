@@ -603,6 +603,23 @@ Details settled while building it (macOS):
   length, not their text) and the call's end in the session's event log; the
   transcript goes there only with "Save call transcripts" (Settings >
   Alerts), never to the system log.
+- **Transcript files** (both apps, with the same setting, off by default):
+  when a call that transcribed something ends, its transcript is also
+  written as a plain-text file (UTF-8), atomically, to
+  `~/Library/Application Support/NVRView/Transcripts` on macOS and
+  `%LOCALAPPDATA%\NvrView\Transcripts` on Windows (the data directory's
+  `Transcripts` folder when one is given). The name is the call's start and
+  the camera's name, `2026-10-11 17.02.03 Front door.txt` (path separators,
+  reserved and control characters become `-`, at most 60 characters of the
+  name, " 2", " 3", ... when taken). The text: a header (`NVRView call
+  transcript`, `Camera:`, `Call:` a doorbell press count or a conversation,
+  `Started:` date, time and UTC offset, `Ended:` with the length), a blank
+  line, then each finished caption line as `17:02:10 Visitor: ...` or
+  `17:02:15 You: ...`. The folder is bounded like the logs: after each file
+  the newest 500 files and at most 50 MB in all are kept, the oldest deleted
+  first (only `.txt` files). An "Open Transcripts Folder" button sits next to
+  the setting. Nothing is written with the setting off, or for a call with
+  no finished caption.
 
 Details settled while building it (Windows):
 
@@ -640,9 +657,11 @@ Details settled while building it (Windows):
   transcript" and goes on. Partial results show with an ellipsis until the
   recognizer settles on a phrase, and a phrase it is not sure of stays a
   partial.
-- Not on Windows yet: the setting that saves call transcripts into the event
-  log (a call is logged without its text) and a per-doorbell "unmute on ring"
-  (a press unmutes only if the user was already listening, else Unmute shows).
+- "Save call transcripts" is in Settings with an "Open transcripts folder"
+  button, kept in `view-settings.json`: the transcript goes into the app's
+  log and into a transcript file, as on the Mac.
+- Not on Windows yet: a per-doorbell "unmute on ring" (a press unmutes only
+  if the user was already listening, else Unmute shows).
 
 ### A call in its own window
 

@@ -361,6 +361,9 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     /// <summary>View preferences (the indicator corner, hiding offline channels).</summary>
     public ViewSettings Settings { get; }
 
+    /// <summary>Where saved call transcripts go (Settings, "Save call transcripts"): the data directory's Transcripts folder.</summary>
+    public TranscriptStore Transcripts { get; set; } = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NvrView", "Transcripts"));
+
     /// <summary>The tier planner every window shares (quality, focus, zoom, second lenses).</summary>
     public TierPlanner Planner => _host.Tiers;
 

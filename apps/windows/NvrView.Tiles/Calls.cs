@@ -265,8 +265,8 @@ public enum TranscriptSource
     You,
 }
 
-/// <summary>One line of the transcript.</summary>
-public sealed record TranscriptLine(TranscriptSource Source, string Text, bool IsFinal)
+/// <summary>One line of the transcript; <paramref name="At"/> is when a finished phrase was heard (wall clock), for a saved transcript.</summary>
+public sealed record TranscriptLine(TranscriptSource Source, string Text, bool IsFinal, DateTime? At = null)
 {
     public static string Label(TranscriptSource source) => source == TranscriptSource.Visitor ? "Visitor" : "You";
 
@@ -301,14 +301,14 @@ public sealed class Transcript
         }
     }
 
-    /// <summary>A final result: appended; the source's phrase in progress is done.</summary>
-    public void Final(string text, TranscriptSource source)
+    /// <summary>A final result: appended; the source's phrase in progress is done. <paramref name="at"/> is when it was heard (wall clock), kept for a saved transcript.</summary>
+    public void Final(string text, TranscriptSource source, DateTime? at = null)
     {
         _partials.Remove(source);
         string t = text.Trim();
         if (t.Length > 0)
         {
-            _finals.Add(new TranscriptLine(source, t, true));
+            _finals.Add(new TranscriptLine(source, t, true, at));
         }
     }
 
@@ -522,6 +522,18 @@ public sealed class Call
             text += "\n" + Transcript.SavedText;
         }
         return text;
+    }
+
+    /// <summary>The saved transcript's file name and text when the call ends; null when nothing was transcribed (no file is written).</summary>
+    public (string Name, string Text)? TranscriptFile(string cameraName, DateTime endedAt, TimeZoneInfo zone)
+    {
+        if (Transcript.Finals.Count == 0)
+        {
+            return null;
+        }
+        return (
+            TranscriptFiles.FileName(StartedAt, cameraName, zone),
+            TranscriptFiles.Text(cameraName, Presses, StartedAt, endedAt, Transcript.Finals, zone));
     }
 
     /// <summary>The caption lines the call shows: the last few, and why there is no transcript yet.</summary>

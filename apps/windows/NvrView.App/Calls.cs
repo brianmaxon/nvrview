@@ -289,7 +289,7 @@ internal sealed class ViewerCalls
         }
         if (final)
         {
-            s.Call.Transcript.Final(text, source);
+            s.Call.Transcript.Final(text, source, _viewer.WallClock());
         }
         else
         {
@@ -668,7 +668,8 @@ internal sealed class ViewerCalls
     /// <summary>
     /// Ends a call (closed, timed out, or the device went away): talk-back stops, the tap and the
     /// transcription end, the audio goes back to what played before, the lease is released, and the
-    /// call is logged (no transcript is saved: Windows has no setting for it yet).
+    /// call is logged: with its transcript, and as a text file in the Transcripts folder, only when the user
+    /// turned "Save call transcripts" on.
     /// </summary>
     public void End(CameraRef camera, string reason)
     {
@@ -705,7 +706,16 @@ internal sealed class ViewerCalls
             _viewer.SetAudible(s.Call.MutedForCall);
         }
         _viewer.Leases.Release(s.Call.Camera);
-        AppLog.Info(s.Call.LogText(_viewer.WallClock(), saveTranscript: false) + $" ({reason})");
+        DateTime endedAt = _viewer.WallClock();
+        bool save = _viewer.Settings.SaveCallTranscripts;
+        AppLog.Info(s.Call.LogText(endedAt, saveTranscript: save) + $" ({reason})");
+        // And as a text file of its own (nothing when nothing was transcribed).
+        if (save && s.Call.TranscriptFile(_viewer.CameraName(s.Call.Camera), endedAt, TimeZoneInfo.Local) is { } file)
+        {
+            AppLog.Info(_viewer.Transcripts.Save(file.Name, file.Text) is { } path
+                ? $"Transcript saved: {Path.GetFileName(path)}"
+                : "Transcript not saved: the Transcripts folder could not be written");
+        }
         _viewer.RaiseCallsChanged();
     }
 
