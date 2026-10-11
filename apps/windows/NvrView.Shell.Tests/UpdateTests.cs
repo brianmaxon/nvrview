@@ -54,6 +54,10 @@ internal static class UpdateTests
             T.Equal("0.4.0", d.Version);
             UpdateStatus f = UpdateStatus.After(new UpdateEvent(3, "check", "failed", Reason: "bad_signature"), now, null)!;
             T.Check(f.Line("0.3.0").Contains("signature", StringComparison.Ordinal));
+            foreach (string reason in new[] { "expired", "stale_manifest", "not_yet_valid", "unpublished" })
+            {
+                T.Check(UpdateStatus.Describe(reason, null) != UpdateStatus.Describe(null, null), reason);
+            }
             T.Equal(UpdateStatus.Idle, UpdateStatus.After(new UpdateEvent(4, "check", "canceled"), now, null));
             T.Check(UpdateStatus.After(new UpdateEvent(5, "check", "later-state"), now, null) is null);
         });

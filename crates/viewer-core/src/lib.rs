@@ -402,7 +402,8 @@ impl Core {
         };
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
         let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
-        let update = update::UpdateHub::new(event_sink.clone());
+        let update =
+            update::UpdateHub::new(event_sink.clone(), config.data_dir.clone(), clock.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),

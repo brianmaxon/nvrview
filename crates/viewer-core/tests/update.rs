@@ -222,3 +222,78 @@ fn one_operation_at_a_time_and_cancel() {
         assert_eq!(finals[0]["state"], "canceled");
     }
 }
+
+/// Publishes 0.4.0 in `dir` with an optional `published` time (dates long
+/// past, so no test depends on the real clock); returns the key text.
+fn publish_dated(dir: &Path, published: Option<&str>) -> String {
+    publish(dir);
+    let key = updates::SecretKey::from_seed([9; 32]);
+    let text = fs::read_to_string(dir.join("updates.json")).unwrap();
+    let text = match published {
+        Some(p) => text.replacen("{", &format!(r#"{{"published":"{p}","#), 1),
+        None => text,
+    };
+    fs::write(dir.join("updates.json"), &text).unwrap();
+    fs::write(dir.join("updates.json.sig"), key.sign_line(text.as_bytes())).unwrap();
+    key.public().to_text()
+}
+
+fn check_once(core: &viewer_core::Core, rec: &Recorder, req: &str) -> serde_json::Value {
+    let op = core
+        .update_start(parse_request(req, false).unwrap())
+        .unwrap();
+    wait_until("the check", 10, || finished(rec, op));
+    core.flush_events();
+    updates_of(rec, op).pop().unwrap()
+}
+
+#[test]
+fn an_older_manifest_is_a_replay_even_after_a_restart() {
+    let data = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let source = src.path().to_str().unwrap();
+    let config = || CoreConfig {
+        data_dir: Some(data.path().to_path_buf()),
+        ..CoreConfig::default()
+    };
+
+    let key = publish_dated(src.path(), Some("2020-02-01T00:00:00Z"));
+    let (core, rec) = start(config());
+    let last = check_once(&core, &rec, &request(source, &key, "0.3.0"));
+    assert_eq!(last["state"], "available");
+    assert_eq!(last["published"], "2020-02-01T00:00:00Z");
+    assert!(last.get("warning").is_none());
+    core.shutdown();
+    let stored = fs::read_to_string(data.path().join(viewer_core::update::STATE_FILE)).unwrap();
+    assert!(stored.contains("2020-02-01T00:00:00Z"), "{stored}");
+
+    // A new core reads what was accepted: an older signed manifest, or
+    // an undated one, from the same source is refused.
+    let (core, rec) = start(config());
+    publish_dated(src.path(), Some("2020-01-01T00:00:00Z"));
+    let last = check_once(&core, &rec, &request(source, &key, "0.3.0"));
+    assert_eq!(last["state"], "failed");
+    assert_eq!(last["reason"], "stale_manifest");
+    publish_dated(src.path(), None);
+    let last = check_once(&core, &rec, &request(source, &key, "0.3.0"));
+    assert_eq!(last["reason"], "stale_manifest");
+    // The same date again, and a newer one, are fine.
+    publish_dated(src.path(), Some("2020-02-01T00:00:00Z"));
+    let last = check_once(&core, &rec, &request(source, &key, "0.3.0"));
+    assert_eq!(last["state"], "available");
+
+    // Another source has its own history: undated is accepted with a
+    // warning, unless the request requires a date.
+    let other = tempfile::tempdir().unwrap();
+    let other_source = other.path().to_str().unwrap();
+    publish_dated(other.path(), None);
+    let last = check_once(&core, &rec, &request(other_source, &key, "0.3.0"));
+    assert_eq!(last["state"], "available");
+    assert_eq!(last["warning"], "unpublished");
+    let mut req: serde_json::Value =
+        serde_json::from_str(&request(other_source, &key, "0.3.0")).unwrap();
+    req["require_published"] = true.into();
+    let last = check_once(&core, &rec, &req.to_string());
+    assert_eq!(last["reason"], "unpublished");
+    core.shutdown();
+}

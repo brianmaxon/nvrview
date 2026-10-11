@@ -41,6 +41,8 @@ NvrView-0.4.0-win-x64.zip        the Windows package
 {
   "format": 1,
   "version": "0.4.0",
+  "published": "2026-10-11T12:00:00Z",
+  "expires": "2027-01-09T12:00:00Z",
   "notes": "Short release notes, shown in the update prompt.",
   "packages": {
     "macos-arm64": {
@@ -63,6 +65,10 @@ NvrView-0.4.0-win-x64.zip        the Windows package
   `-prerelease`; build metadata after `+` is ignored when comparing). The apps
   compare it with their own version, which both read from the `VERSION` file
   at the repository root when they are built.
+- `published` (optional, recommended; `sign-update manifest` always sets
+  it) is when the manifest was made, and `expires` (optional) is when apps
+  stop accepting it, both UTC as `YYYY-MM-DDTHH:MM:SSZ`; `expires` must be
+  after `published`. See "Dates and replays".
 - `notes` is plain text, at most 2000 characters.
 - `packages` has one entry per platform; a platform without an entry has no
   update in this release. The platform names are `macos-arm64` and `win-x64`
@@ -174,11 +180,41 @@ settings).
    there is no trust on first use, and no key ships with the app or the
    repository.
 3. Parse and validate the manifest (only after the signature verified).
-4. Compare versions. Only a version **strictly newer** than the running one
+4. Check its dates ("Dates and replays" below): `expired`,
+   `not_yet_valid`, `stale_manifest`, `unpublished`.
+5. Compare versions. Only a version **strictly newer** than the running one
    is offered (`available`); an equal or older one is `up_to_date`. The
    manifest cannot make an app go back: there is no downgrade through this
    path. (Going back is done by hand, see "Rolling back".)
-5. Find this platform's package. None is `up_to_date` with `no_package`.
+6. Find this platform's package. None is `up_to_date` with `no_package`.
+
+### Dates and replays
+
+A signature proves who made a manifest, not when. Without dates, whoever
+controls the source or the network path to it (a stale mirror, a captured
+copy of an old folder) could keep serving an old, validly signed manifest:
+it can never install an older version (step 5), but it can hide newer ones
+indefinitely. The signed `published` and `expires` times close that:
+
+- **Expiry.** A manifest whose `expires` time has passed on this computer's
+  clock is refused (`expired`). Publishers who set it re-sign the manifest
+  before it runs out (`sign-update manifest --expires-in DAYS`).
+- **No going back in time.** The core remembers, per source (as the source
+  is shown in Settings), the newest `published` time of a manifest it
+  accepted: in `update-state.json` in the core's data directory, written by
+  the core, at most 32 sources. A manifest from that source published
+  earlier is refused (`stale_manifest`); the same time again (the same
+  manifest) is fine. Once a source has served a dated manifest, an undated
+  one from it is refused too.
+- **Clocks.** A `published` time more than a day ahead of this computer's
+  clock is refused (`not_yet_valid`), so a wrong clock on the signing side
+  cannot lift the remembered time into the future and block later
+  releases; a computer whose own clock is far behind sees the same reason.
+- **Undated manifests** (no `published`, as before this field existed) are
+  accepted with a warning: the event carries `"warning":"unpublished"` and
+  the core logs that replays of it cannot be detected. A request with
+  `"require_published": true` refuses them instead (`unpublished`); the
+  apps do not set it yet, so manifests signed with older tools keep working.
 
 ### Downloading and staging (after the user says yes)
 
@@ -286,7 +322,9 @@ Windows: devices, layouts, groups, window positions, the core's store, logs)
 or device settings. Passwords stay in the Keychain or Credential Manager.
 Update settings (source, trusted keys, automatic checks, the last check time)
 are kept with the app's other settings in the data directory, written by the
-app as it writes any setting, never by the updater.
+app as it writes any setting, never by the updater. The one update file the
+core writes there is `update-state.json`, the newest accepted publish time
+per source ("Dates and replays").
 
 ### Rolling back
 
@@ -344,14 +382,16 @@ cp build/NVRView-"$(cat VERSION)"-macos-arm64.zip dist/
 # (scripts/windows-app.sh update does exactly this for its test)
 
 cargo run -p sign-update -- manifest --version "$(cat VERSION)" \
-  --notes-file notes.txt --out dist/updates.json dist/*.zip
+  --notes-file notes.txt --expires-in 90 --out dist/updates.json dist/*.zip
 cargo run -p sign-update -- sign --secret ~/.config/nvrview-signing/update.key dist/updates.json
 cargo run -p sign-update -- check --source dist --key update.pub --current 0.0.0
 ```
 
 `manifest` reads each package's platform and version from its name
 (`<name>-<version>-<platform>.zip`), refuses names that disagree with
-`--version`, and computes size and SHA-256. `sign` writes
+`--version`, computes size and SHA-256, sets `published` to now, and with
+`--expires-in DAYS` sets `expires` (re-run `manifest` and `sign` before it
+passes, even without a new release). `sign` writes
 `updates.json.sig` (`--append` adds a line for a second key during a
 rotation). `check` runs the same core code as the apps against the folder or
 URL: signature, manifest, download, hash, and unpacking into a temporary

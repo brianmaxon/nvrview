@@ -8,15 +8,18 @@
 //! version into place after the user agrees.
 
 use crate::CoreError;
+use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json;
+use crate::store;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use updates::{Cancel, CheckOutcome, Config, PublicKey, Source, UpdateError, Version};
 
 /// How long `cancel` (and shutdown) wait for the running operation to end
@@ -25,6 +28,69 @@ use updates::{Cancel, CheckOutcome, Config, PublicKey, Source, UpdateError, Vers
 /// canceled and its thread is left to end on its own (nothing it does
 /// reaches the app any more).
 const CANCEL_WAIT: Duration = Duration::from_millis(500);
+
+/// The file in the data directory that keeps, per source, the newest
+/// `published` time of a manifest the core accepted (docs/UPDATES.md,
+/// "Dates and replays").
+pub const STATE_FILE: &str = "update-state.json";
+/// Most sources remembered; past it the one with the oldest date goes.
+const MAX_REMEMBERED_SOURCES: usize = 32;
+
+/// The newest accepted `published` time per source (by the source's
+/// normalized form), kept in [`STATE_FILE`], or in memory without a data
+/// directory.
+pub(crate) struct DateState {
+    dir: Option<PathBuf>,
+    published: BTreeMap<String, u64>,
+}
+
+impl DateState {
+    pub(crate) fn open(dir: Option<PathBuf>) -> DateState {
+        let mut published = BTreeMap::new();
+        if let Some(v) = dir.as_deref().and_then(|d| store::read(d, STATE_FILE))
+            && let Some(o) = v.get("published").and_then(Value::as_object)
+        {
+            for (source, t) in o {
+                if let Some(t) = t.as_str().and_then(updates::time::parse) {
+                    published.insert(source.clone(), t);
+                }
+            }
+        }
+        DateState { dir, published }
+    }
+
+    fn get(&self, source: &str) -> Option<u64> {
+        self.published.get(source).copied()
+    }
+
+    /// Remembers `t` for `source` if it is newer than what is kept.
+    fn record(&mut self, source: &str, t: u64) {
+        if self.get(source).is_some_and(|seen| seen >= t) {
+            return;
+        }
+        self.published.insert(source.to_string(), t);
+        while self.published.len() > MAX_REMEMBERED_SOURCES {
+            let oldest = self
+                .published
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| k.clone());
+            if let Some(k) = oldest {
+                self.published.remove(&k);
+            }
+        }
+        let Some(dir) = &self.dir else { return };
+        let map: serde_json::Map<String, Value> = self
+            .published
+            .iter()
+            .map(|(k, t)| (k.clone(), Value::String(updates::time::format(*t))))
+            .collect();
+        let value = serde_json::json!({"format": 1, "published": map});
+        if let Err(e) = store::write_atomic(dir, STATE_FILE, &value) {
+            warn!(error = %e, "cannot write the update state");
+        }
+    }
+}
 
 /// What the app asked for, parsed.
 #[derive(Debug)]
@@ -37,6 +103,8 @@ pub struct Request {
     pub platform: Option<String>,
     /// `nv_update_download` only.
     pub download: Option<(Version, PathBuf)>,
+    /// Refuse a manifest without a `published` time.
+    pub require_published: bool,
 }
 
 /// Parses `{"source":"...","keys":["..."],"current":"0.3.0",
@@ -68,6 +136,11 @@ pub fn parse_request(text: &str, download: bool) -> Result<Request, CoreError> {
         Some(Value::String(p)) if !p.is_empty() && p.len() <= 32 => Some(p.clone()),
         Some(_) => return Err(bad),
     };
+    let require_published = match o.get("require_published") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad),
+    };
     let download = if download {
         let version = string("version").and_then(Version::parse).ok_or(bad)?;
         let staging = PathBuf::from(string("staging_dir").filter(|s| !s.is_empty()).ok_or(bad)?);
@@ -81,6 +154,7 @@ pub fn parse_request(text: &str, download: bool) -> Result<Request, CoreError> {
         current,
         platform,
         download,
+        require_published,
     })
 }
 
@@ -164,14 +238,18 @@ pub(crate) struct UpdateHub {
     events: EventSink,
     next_op: AtomicU64,
     running: Mutex<Option<Running>>,
+    dates: Arc<Mutex<DateState>>,
+    clock: HostClock,
 }
 
 impl UpdateHub {
-    pub(crate) fn new(events: EventSink) -> UpdateHub {
+    pub(crate) fn new(events: EventSink, data_dir: Option<PathBuf>, clock: HostClock) -> UpdateHub {
         UpdateHub {
             events,
             next_op: AtomicU64::new(1),
             running: Mutex::new(None),
+            dates: Arc::new(Mutex::new(DateState::open(data_dir))),
+            clock,
         }
     }
 
@@ -209,6 +287,8 @@ impl UpdateHub {
         let worker = Worker {
             op,
             action,
+            dates: self.dates.clone(),
+            now: u64::try_from(self.clock.wall_now_us() / 1_000_000).unwrap_or(0),
             last: last.clone(),
             cancel: cancel.clone(),
         };
@@ -258,6 +338,15 @@ impl UpdateHub {
     }
 }
 
+/// Adds the manifest's `published` time, or `"warning":"unpublished"` for
+/// an undated manifest.
+fn dated(o: json::Object, published: Option<u64>) -> json::Object {
+    match published {
+        Some(t) => o.str("published", &updates::time::format(t)),
+        None => o.str("warning", "unpublished"),
+    }
+}
+
 fn event(op: u64, action: &str, state: &str) -> json::Object {
     json::Object::event("update")
         .u64("op", op)
@@ -268,6 +357,9 @@ fn event(op: u64, action: &str, state: &str) -> json::Object {
 struct Worker {
     op: u64,
     action: &'static str,
+    dates: Arc<Mutex<DateState>>,
+    /// Wall-clock now, seconds since the epoch, from the core's clock.
+    now: u64,
     last: Final,
     cancel: Cancel,
 }
@@ -297,23 +389,55 @@ impl Worker {
         }
     }
 
+    /// A verified manifest was accepted: remember its date for this
+    /// source, or log that it had none.
+    fn accepted(&self, source_key: &str, published: Option<u64>) {
+        match published {
+            Some(t) => self
+                .dates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(source_key, t),
+            None => warn!(
+                op = self.op,
+                "the update manifest has no published time; replays of it cannot be detected"
+            ),
+        }
+    }
+
     fn run(self, request: Request) {
         let op = self.op;
         let source = match Source::parse(&request.source) {
             Ok(s) => s,
             Err(e) => return self.failed(&e),
         };
+        let source_key = source.display();
         let mut config = Config::new(source, request.keys, request.current.clone());
         if let Some(p) = request.platform {
             config.platform = p;
         }
+        config.now = self.now;
+        config.require_published = request.require_published;
+        config.accepted_published = self
+            .dates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&source_key);
         let current = request.current.to_string();
         let Some((version, staging)) = request.download else {
             match updates::check(&config, &self.cancel) {
-                Ok(CheckOutcome::UpToDate { latest, no_package }) => {
-                    let mut o = event(op, self.action, "up_to_date")
-                        .str("current", &current)
-                        .str("latest", &latest.to_string());
+                Ok(CheckOutcome::UpToDate {
+                    latest,
+                    no_package,
+                    published,
+                }) => {
+                    self.accepted(&source_key, published);
+                    let mut o = dated(
+                        event(op, self.action, "up_to_date")
+                            .str("current", &current)
+                            .str("latest", &latest.to_string()),
+                        published,
+                    );
                     if no_package {
                         o = o.bool("no_package", true);
                     }
@@ -322,14 +446,16 @@ impl Worker {
                     }
                 }
                 Ok(CheckOutcome::Available(offer)) => {
-                    if self.last.send(
+                    self.accepted(&source_key, offer.published);
+                    if self.last.send(dated(
                         event(op, self.action, "available")
                             .str("current", &current)
                             .str("version", &offer.version.to_string())
                             .str("notes", &offer.notes)
                             .u64("size", offer.package.size)
                             .str("key_id", &offer.key_id),
-                    ) {
+                        offer.published,
+                    )) {
                         info!(op, version = %offer.version, "update check: newer version available");
                     }
                 }
@@ -357,11 +483,13 @@ impl Worker {
         };
         match updates::download(&config, &version, &staging, &self.cancel, &mut progress) {
             Ok(staged) => {
-                let sent = self.last.send(
+                self.accepted(&source_key, staged.published);
+                let sent = self.last.send(dated(
                     event(op, self.action, "ready")
                         .str("version", &staged.version.to_string())
                         .str("path", &staged.content.to_string_lossy()),
-                );
+                    staged.published,
+                ));
                 if sent {
                     info!(op, version = %staged.version, "update downloaded and verified");
                 } else {
@@ -409,6 +537,9 @@ mod tests {
             r#"{"source":"/s","keys":["nope"],"current":"0.3.0"}"#.into(),
             format!(r#"{{"source":"/s","keys":["{k}"],"current":"0.3"}}"#),
             format!(r#"{{"source":"/s","keys":["{k}"],"current":"0.3.0","platform":1}}"#),
+            format!(
+                r#"{{"source":"/s","keys":["{k}"],"current":"0.3.0","require_published":"yes"}}"#
+            ),
         ] {
             assert_eq!(
                 parse_request(&bad, false).unwrap_err(),

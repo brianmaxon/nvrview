@@ -8,7 +8,7 @@ usage:
   sign-update keygen --secret FILE [--public FILE]
   sign-update pubkey --secret FILE
   sign-update manifest --version VERSION [--notes TEXT | --notes-file FILE]
-              --out DIR/updates.json PACKAGE.zip...
+              [--expires-in DAYS] --out DIR/updates.json PACKAGE.zip...
   sign-update sign --secret FILE [--append] DIR/updates.json
   sign-update check --source FOLDER|URL --key FILE|KEY [--key ...]
               --current VERSION [--platform NAME] [--stage DIR]
@@ -16,7 +16,9 @@ usage:
 keygen writes a new secret key (mode 0600, never over an existing file, never
 inside a git working tree) and prints the public key line to give to users.
 manifest reads each package's platform from its name,
-<name>-<version>-<platform>.zip, and records its size and SHA-256.
+<name>-<version>-<platform>.zip, and records its size and SHA-256; it dates
+the manifest now (published) and, with --expires-in, sets when apps stop
+accepting it (expires).
 sign writes updates.json.sig next to the manifest; --append adds a line for a
 second key (key rotation).
 check does what the apps do: fetch and verify the manifest, compare versions,
@@ -112,7 +114,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "manifest" => {
             let a = Args::parse(
                 rest,
-                &["--version", "--notes", "--notes-file", "--out"],
+                &[
+                    "--version",
+                    "--notes",
+                    "--notes-file",
+                    "--out",
+                    "--expires-in",
+                ],
                 &[],
             )?;
             let notes = match (a.one("--notes"), a.one("--notes-file")) {
@@ -124,7 +132,20 @@ fn run(args: &[String]) -> Result<(), String> {
                 (None, None) => String::new(),
             };
             let packages: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
-            let text = sign_update::build_manifest(a.need("--version")?, &notes, &packages)?;
+            let now = updates::time::now();
+            let expires = match a.one("--expires-in") {
+                None => None,
+                Some(d) => {
+                    let days: u64 = d
+                        .parse()
+                        .ok()
+                        .filter(|n| (1..=3650).contains(n))
+                        .ok_or("--expires-in takes a number of days, 1 to 3650")?;
+                    Some(now + days * 86_400)
+                }
+            };
+            let text =
+                sign_update::build_manifest(a.need("--version")?, &notes, &packages, now, expires)?;
             let out = PathBuf::from(a.need("--out")?);
             std::fs::write(&out, text).map_err(|e| format!("writing {}: {e}", out.display()))?;
             println!("wrote {}", out.display());
@@ -161,6 +182,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 a.need("--current")?,
                 a.one("--platform"),
                 stage.as_deref(),
+                updates::time::now(),
             )?;
             for line in report.lines {
                 println!("{line}");

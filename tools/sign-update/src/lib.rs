@@ -104,8 +104,18 @@ pub fn package_platform(file_name: &str, version: &str) -> Result<String, String
 }
 
 /// Builds the manifest text for `packages` (each named
-/// `<name>-<version>-<platform>.zip`), and checks it parses.
-pub fn build_manifest(version: &str, notes: &str, packages: &[PathBuf]) -> Result<String, String> {
+/// `<name>-<version>-<platform>.zip`), dated `published` (seconds since the
+/// epoch; normally now) and optionally `expires`, and checks it parses.
+pub fn build_manifest(
+    version: &str,
+    notes: &str,
+    packages: &[PathBuf],
+    published: u64,
+    expires: Option<u64>,
+) -> Result<String, String> {
+    if expires.is_some_and(|e| e <= published) {
+        return Err("the expiry must be after the publish time".into());
+    }
     if Version::parse(version).is_none() {
         return Err(format!("{version}: not a semantic version"));
     }
@@ -137,10 +147,14 @@ pub fn build_manifest(version: &str, notes: &str, packages: &[PathBuf]) -> Resul
             keys::encode_hex(&sha)
         ));
     }
+    let expires = expires
+        .map(|e| format!("  \"expires\": \"{}\",\n", updates::time::format(e)))
+        .unwrap_or_default();
     let text = format!(
-        "{{\n  \"format\": {},\n  \"version\": {},\n  \"notes\": {},\n  \"packages\": {{\n{}\n  }}\n}}\n",
+        "{{\n  \"format\": {},\n  \"version\": {},\n  \"published\": \"{}\",\n{expires}  \"notes\": {},\n  \"packages\": {{\n{}\n  }}\n}}\n",
         updates::manifest::FORMAT,
         json_string(version),
+        updates::time::format(published),
         json_string(notes.trim()),
         entries.join(",\n")
     );
@@ -188,7 +202,8 @@ pub struct CheckReport {
     pub staged: Option<PathBuf>,
 }
 
-/// Runs the apps' check against `source`; when a newer version is offered,
+/// Runs the apps' check against `source` at time `now` (seconds since the
+/// epoch; the system clock in the tool); when a newer version is offered,
 /// also downloads, verifies, and unpacks it, into `stage` (kept) or a
 /// temporary folder (removed).
 pub fn check(
@@ -197,6 +212,7 @@ pub fn check(
     current: &str,
     platform: Option<&str>,
     stage: Option<&Path>,
+    now: u64,
 ) -> Result<CheckReport, String> {
     let source = Source::parse(source).map_err(|e| e.to_string())?;
     let current =
@@ -205,6 +221,7 @@ pub fn check(
     if let Some(p) = platform {
         config.platform = p.to_string();
     }
+    config.now = now;
     let mut lines = vec![format!(
         "source: {} ({}); platform {}; current version {current}",
         config.source.display(),
@@ -213,7 +230,9 @@ pub fn check(
     )];
     let cancel = Cancel::new();
     let offer = match updates::check(&config, &cancel).map_err(|e| e.to_string())? {
-        CheckOutcome::UpToDate { latest, no_package } => {
+        CheckOutcome::UpToDate {
+            latest, no_package, ..
+        } => {
             lines.push(if no_package {
                 format!(
                     "signed manifest for {latest}, but no package for {}",
@@ -230,8 +249,15 @@ pub fn check(
         CheckOutcome::Available(o) => o,
     };
     lines.push(format!(
-        "available: {} ({}, {} bytes), signed by key {}",
-        offer.version, offer.package.file, offer.package.size, offer.key_id
+        "available: {} ({}, {} bytes), signed by key {}, {}",
+        offer.version,
+        offer.package.file,
+        offer.package.size,
+        offer.key_id,
+        match offer.published {
+            Some(t) => format!("published {}", updates::time::format(t)),
+            None => "undated (no published time: the apps cannot detect a replay of it)".into(),
+        }
     ));
     if !offer.notes.is_empty() {
         lines.push(format!("notes: {}", offer.notes));
@@ -275,6 +301,9 @@ pub fn check(
 mod tests {
     use super::*;
 
+    /// The tests' "now": 2026-10-11T12:00:00Z; no test reads the clock.
+    const NOW: u64 = 1_791_720_000;
+
     #[test]
     fn keygen_writes_a_private_file_once_and_never_in_a_repository() {
         let dir = tempfile::tempdir().unwrap();
@@ -314,15 +343,24 @@ mod tests {
         let win = dir.path().join("NvrView-0.4.0-win-x64.zip");
         fs::write(&mac, b"mac package").unwrap();
         fs::write(&win, b"windows package").unwrap();
-        let text =
-            build_manifest("0.4.0", "Fixes \"quoted\".\n", &[mac.clone(), win.clone()]).unwrap();
+        let text = build_manifest(
+            "0.4.0",
+            "Fixes \"quoted\".\n",
+            &[mac.clone(), win.clone()],
+            NOW,
+            Some(NOW + 86_400),
+        )
+        .unwrap();
         let m = Manifest::parse(text.as_bytes()).unwrap();
         assert_eq!(m.notes, "Fixes \"quoted\".");
+        assert_eq!(m.published, Some(NOW));
+        assert_eq!(m.expires, Some(NOW + 86_400));
+        assert!(build_manifest("0.4.0", "", std::slice::from_ref(&mac), NOW, Some(NOW)).is_err());
         assert_eq!(m.packages["macos-arm64"].size, 11);
         assert_eq!(m.packages["win-x64"].file, "NvrView-0.4.0-win-x64.zip");
-        assert!(build_manifest("0.5.0", "", std::slice::from_ref(&mac)).is_err());
-        assert!(build_manifest("0.4", "", std::slice::from_ref(&mac)).is_err());
-        assert!(build_manifest("0.4.0", "", &[mac.clone(), mac]).is_err());
+        assert!(build_manifest("0.5.0", "", std::slice::from_ref(&mac), NOW, None).is_err());
+        assert!(build_manifest("0.4", "", std::slice::from_ref(&mac), NOW, None).is_err());
+        assert!(build_manifest("0.4.0", "", &[mac.clone(), mac], NOW, None).is_err());
         assert_eq!(
             package_platform("NVRView-1.2.3-beta.1-macos-arm64.zip", "1.2.3-beta.1").unwrap(),
             "macos-arm64"
@@ -345,7 +383,14 @@ mod tests {
         let manifest = dist.path().join("updates.json");
         fs::write(
             &manifest,
-            build_manifest("0.4.0", "notes", std::slice::from_ref(&package)).unwrap(),
+            build_manifest(
+                "0.4.0",
+                "notes",
+                std::slice::from_ref(&package),
+                NOW - 60,
+                None,
+            )
+            .unwrap(),
         )
         .unwrap();
         let old = read_secret(&keys_dir.path().join("old.key")).unwrap();
@@ -356,9 +401,18 @@ mod tests {
         assert_eq!(sig.lines().count(), 2);
         for key in [old_key, new_key] {
             let source = dist.path().to_str().unwrap();
-            let r = check(source, vec![key.clone()], "0.3.0", Some("test-os"), None).unwrap();
+            let r = check(
+                source,
+                vec![key.clone()],
+                "0.3.0",
+                Some("test-os"),
+                None,
+                NOW,
+            )
+            .unwrap();
             assert!(
-                r.lines.iter().any(|l| l.starts_with("available: 0.4.0")),
+                r.lines.iter().any(|l| l.starts_with("available: 0.4.0")
+                    && l.contains("published 2026-10-11T11:59:00Z")),
                 "{:?}",
                 r.lines
             );
@@ -367,7 +421,7 @@ mod tests {
                 "{:?}",
                 r.lines
             );
-            let r = check(source, vec![key], "0.4.0", Some("test-os"), None).unwrap();
+            let r = check(source, vec![key], "0.4.0", Some("test-os"), None, NOW).unwrap();
             assert!(r.lines.iter().any(|l| l.starts_with("up to date")));
         }
         let stage = tempfile::tempdir().unwrap();
@@ -382,6 +436,7 @@ mod tests {
             "0.3.0",
             Some("test-os"),
             Some(stage.path()),
+            NOW,
         )
         .unwrap();
         let kept = r.staged.unwrap();

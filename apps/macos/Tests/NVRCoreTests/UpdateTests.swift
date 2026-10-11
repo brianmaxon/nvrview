@@ -17,6 +17,12 @@ struct UpdateTests {
         let failed = #"{"type":"update","op":4,"action":"download","state":"failed","reason":"bad_package","message":"x"}"#
         guard case .update(let f) = try #require(CoreEvent.parse(Data(failed.utf8))) else { return }
         #expect(f.reason == "bad_package")
+        let dated = #"{"type":"update","op":5,"action":"check","state":"up_to_date","latest":"0.4.0","published":"2026-10-11T12:00:00Z"}"#
+        guard case .update(let d) = try #require(CoreEvent.parse(Data(dated.utf8))) else { return }
+        #expect(d.published == "2026-10-11T12:00:00Z" && d.warning == nil)
+        let undated = #"{"type":"update","op":6,"action":"check","state":"up_to_date","latest":"0.4.0","warning":"unpublished"}"#
+        guard case .update(let u) = try #require(CoreEvent.parse(Data(undated.utf8))) else { return }
+        #expect(u.warning == "unpublished")
     }
 
     @Test func scheduleChecksAfterStartupThenDaily() {
@@ -67,6 +73,9 @@ struct UpdateTests {
             return
         }
         #expect(m.contains("signature"))
+        for reason in ["expired", "stale_manifest", "not_yet_valid", "unpublished"] {
+            #expect(UpdateStatus.message(reason: reason, detail: nil) != UpdateStatus.message(reason: nil, detail: nil), "\(reason)")
+        }
         #expect(UpdateStatus.after(e("check", "canceled"), now: now, pendingVersion: nil) == .idle)
         #expect(UpdateStatus.after(e("check", "later-state"), now: now, pendingVersion: nil) == nil)
     }

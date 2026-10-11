@@ -24,6 +24,10 @@ public struct UpdateEvent: Sendable, Equatable, Decodable {
     public var message: String?
     public var no_package: Bool?
     public var key_id: String?
+    /// The manifest's signed publish time (`YYYY-MM-DDTHH:MM:SSZ`).
+    public var published: String?
+    /// `unpublished` for a manifest without a publish time.
+    public var warning: String?
 
     public init(op: UInt64, action: String, state: String) {
         self.op = op
@@ -125,6 +129,11 @@ public enum UpdateStatus: Equatable, Sendable {
         case "bad_package", "unsafe_archive": lead = "The update package was refused."
         case "staging": lead = "The update could not be prepared next to the app."
         case "unsupported_cpu": lead = "This computer cannot use HTTPS update sources; use a folder."
+        case "expired": lead = "The update source's signed list has expired; its publisher needs to sign it again."
+        case "stale_manifest":
+            lead = "The update source offers an older signed list than one already seen, so it was refused (a replay or a stale copy)."
+        case "not_yet_valid": lead = "The update's publish date is ahead of this Mac's clock; check the date and time."
+        case "unpublished": lead = "The update source's signed list has no publish date."
         default: lead = "The update check failed."
         }
         guard let detail, !detail.isEmpty else { return lead }

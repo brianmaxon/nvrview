@@ -12,6 +12,7 @@ pub mod keys;
 pub mod manifest;
 pub mod platform;
 pub mod source;
+pub mod time;
 pub mod version;
 pub mod zip;
 
@@ -66,6 +67,16 @@ pub enum Reason {
     Canceled,
     /// HTTPS needs CPU features this processor lacks.
     UnsupportedCpu,
+    /// The manifest's `expires` time has passed.
+    Expired,
+    /// The manifest is older than one already accepted from this source
+    /// (an older `published`, or none after a dated one): a replay.
+    StaleManifest,
+    /// The manifest's `published` time is more than a day ahead of this
+    /// computer's clock (one of the two clocks is wrong).
+    NotYetValid,
+    /// The manifest has no `published` time and the app requires one.
+    Unpublished,
 }
 
 impl Reason {
@@ -88,6 +99,10 @@ impl Reason {
             Reason::Staging => "staging",
             Reason::Canceled => "canceled",
             Reason::UnsupportedCpu => "unsupported_cpu",
+            Reason::Expired => "expired",
+            Reason::StaleManifest => "stale_manifest",
+            Reason::NotYetValid => "not_yet_valid",
+            Reason::Unpublished => "unpublished",
         }
     }
 }
@@ -185,7 +200,20 @@ pub struct Config {
     /// Mozilla root list. For tests with a local HTTPS server; `None` in
     /// the apps.
     pub tls_roots: Option<Vec<Vec<u8>>>,
+    /// Now, seconds since the Unix epoch: the system clock by default;
+    /// tests set it.
+    pub now: u64,
+    /// The highest `published` time already accepted from this source
+    /// (kept by the caller): an older manifest is a replay and refused.
+    pub accepted_published: Option<u64>,
+    /// Refuse a manifest without a `published` time (by default it is
+    /// accepted, and the outcome says it was undated).
+    pub require_published: bool,
 }
+
+/// How far a manifest's `published` time may be ahead of this computer's
+/// clock: a day, for time zones mistaken for UTC and clocks a little off.
+pub const MAX_CLOCK_AHEAD: u64 = 24 * 3600;
 
 impl Config {
     pub fn new(source: Source, keys: Vec<PublicKey>, current: Version) -> Config {
@@ -197,6 +225,9 @@ impl Config {
             timeouts: Timeouts::default(),
             archive: zip::Limits::default(),
             tls_roots: None,
+            now: time::now(),
+            accepted_published: None,
+            require_published: false,
         }
     }
 }
@@ -209,6 +240,8 @@ pub struct Offer {
     pub package: Package,
     /// The ID of the trusted key that verified the manifest.
     pub key_id: String,
+    /// The manifest's `published` time; `None` for an undated manifest.
+    pub published: Option<u64>,
 }
 
 /// What a check found.
@@ -220,6 +253,8 @@ pub enum CheckOutcome {
     UpToDate {
         latest: Version,
         no_package: bool,
+        /// The manifest's `published` time; `None` for an undated one.
+        published: Option<u64>,
     },
     Available(Offer),
 }
@@ -230,6 +265,8 @@ pub struct Staged {
     pub version: Version,
     /// The unpacked package: `<staging>/content`.
     pub content: PathBuf,
+    /// The verified manifest's `published` time.
+    pub published: Option<u64>,
 }
 
 /// Fetches the manifest and its signature, verifies the signature with
@@ -265,7 +302,52 @@ pub fn fetch_manifest(config: &Config, cancel: &Cancel) -> Result<(Manifest, Str
         )
     })?;
     let manifest = Manifest::parse(&manifest_bytes)?;
+    check_dates(&manifest, config)?;
     Ok((manifest, key.id()))
+}
+
+/// The date rules (docs/UPDATES.md, "Dates and replays"), after the
+/// signature verified: not expired, not from the future, not older than a
+/// manifest already accepted from this source.
+pub fn check_dates(manifest: &Manifest, config: &Config) -> Result<(), UpdateError> {
+    if let Some(expires) = manifest.expires
+        && config.now >= expires
+    {
+        return Err(UpdateError::new(
+            Reason::Expired,
+            format!("the manifest expired at {}", time::format(expires)),
+        ));
+    }
+    match (manifest.published, config.accepted_published) {
+        (Some(p), _) if p > config.now.saturating_add(MAX_CLOCK_AHEAD) => Err(UpdateError::new(
+            Reason::NotYetValid,
+            format!(
+                "the manifest was published at {}, ahead of this computer's clock ({})",
+                time::format(p),
+                time::format(config.now)
+            ),
+        )),
+        (Some(p), Some(seen)) if p < seen => Err(UpdateError::new(
+            Reason::StaleManifest,
+            format!(
+                "the manifest was published at {}, before one already accepted ({})",
+                time::format(p),
+                time::format(seen)
+            ),
+        )),
+        (None, Some(seen)) => Err(UpdateError::new(
+            Reason::StaleManifest,
+            format!(
+                "the manifest has no published time, but one published at {} was already accepted",
+                time::format(seen)
+            ),
+        )),
+        (None, None) if config.require_published => Err(UpdateError::new(
+            Reason::Unpublished,
+            "the manifest has no published time",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// An error after the operation was canceled is reported as the cancel
@@ -280,22 +362,26 @@ fn or_canceled<T>(r: Result<T, UpdateError>, cancel: &Cancel) -> Result<T, Updat
 /// Checks the source: is there a strictly newer version for this platform?
 pub fn check(config: &Config, cancel: &Cancel) -> Result<CheckOutcome, UpdateError> {
     let (manifest, key_id) = or_canceled(fetch_manifest(config, cancel), cancel)?;
+    let published = manifest.published;
     if !manifest.version.is_newer_than(&config.current) {
         return Ok(CheckOutcome::UpToDate {
             latest: manifest.version,
             no_package: false,
+            published,
         });
     }
     match manifest.packages.get(&config.platform) {
         None => Ok(CheckOutcome::UpToDate {
             latest: manifest.version,
             no_package: true,
+            published,
         }),
         Some(p) => Ok(CheckOutcome::Available(Offer {
             version: manifest.version,
             notes: manifest.notes,
             package: p.clone(),
             key_id,
+            published,
         })),
     }
 }
@@ -401,6 +487,7 @@ fn download_inner(
     Ok(Staged {
         version: offer.version,
         content,
+        published: offer.published,
     })
 }
 

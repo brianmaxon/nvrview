@@ -33,6 +33,11 @@ pub struct Package {
 pub struct Manifest {
     pub version: Version,
     pub notes: String,
+    /// When the manifest was signed, seconds since the Unix epoch
+    /// (`published`; optional but recommended, see docs/UPDATES.md).
+    pub published: Option<u64>,
+    /// After this time the manifest is refused (`expires`; optional).
+    pub expires: Option<u64>,
     /// By platform name (`macos-arm64`, `win-x64`, ...).
     pub packages: BTreeMap<String, Package>,
 }
@@ -43,6 +48,10 @@ struct RawManifest {
     version: String,
     #[serde(default)]
     notes: String,
+    #[serde(default)]
+    published: Option<String>,
+    #[serde(default)]
+    expires: Option<String>,
     packages: BTreeMap<String, RawPackage>,
 }
 
@@ -83,6 +92,21 @@ impl Manifest {
             serde_json::from_slice(bytes).map_err(|e| bad(&format!("invalid manifest: {e}")))?;
         debug_assert_eq!(raw.format, FORMAT);
         let version = Version::parse(&raw.version).ok_or_else(|| bad("invalid version"))?;
+        let date = |text: &Option<String>, what: &str| -> Result<Option<u64>, UpdateError> {
+            match text {
+                None => Ok(None),
+                Some(t) => crate::time::parse(t)
+                    .map(Some)
+                    .ok_or_else(|| bad(&format!("invalid {what} time (YYYY-MM-DDTHH:MM:SSZ)"))),
+            }
+        };
+        let published = date(&raw.published, "published")?;
+        let expires = date(&raw.expires, "expires")?;
+        if let (Some(p), Some(e)) = (published, expires)
+            && e <= p
+        {
+            return Err(bad("expires is not after published"));
+        }
         if raw.notes.chars().count() > MAX_NOTES {
             return Err(bad("notes longer than 2000 characters"));
         }
@@ -113,6 +137,8 @@ impl Manifest {
         Ok(Manifest {
             version,
             notes: raw.notes,
+            published,
+            expires,
             packages,
         })
     }
@@ -170,6 +196,12 @@ mod tests {
         assert_eq!(m.notes, "Fixes.");
         assert_eq!(m.packages["win-x64"].size, 20);
         assert_eq!(m.packages["macos-arm64"].sha256[1], 0x11);
+        assert_eq!((m.published, m.expires), (None, None));
+        let dated = r#"{"format":1,"version":"0.4.0","published":"2026-10-11T12:00:00Z",
+            "expires":"2026-11-10T12:00:00Z","packages":{}}"#;
+        let m = Manifest::parse(dated.as_bytes()).unwrap();
+        assert_eq!(m.published, crate::time::parse("2026-10-11T12:00:00Z"));
+        assert_eq!(m.expires, crate::time::parse("2026-11-10T12:00:00Z"));
     }
 
     #[test]
@@ -198,6 +230,10 @@ mod tests {
             r#"{"version":"0.4.0","packages":{}}"#.to_string(),
             r#"{"format":1,"version":"0.4.0"}"#.to_string(),
             r#"[1]"#.to_string(),
+            r#"{"format":1,"version":"0.4.0","published":"2026-10-11","packages":{}}"#.to_string(),
+            r#"{"format":1,"version":"0.4.0","published":1792000000,"packages":{}}"#.to_string(),
+            r#"{"format":1,"version":"0.4.0","expires":"tomorrow","packages":{}}"#.to_string(),
+            r#"{"format":1,"version":"0.4.0","published":"2026-10-11T12:00:00Z","expires":"2026-10-11T12:00:00Z","packages":{}}"#.to_string(),
             format!(
                 r#"{{"format":1,"version":"0.4.0","notes":"{}","packages":{{}}}}"#,
                 "n".repeat(MAX_NOTES + 1)

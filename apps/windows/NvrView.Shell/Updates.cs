@@ -199,6 +199,10 @@ public sealed record UpdateStatus(UpdateStatus.Kind State, string Version = "", 
             "bad_package" or "unsafe_archive" => "The update package was refused.",
             "staging" => "The update could not be prepared next to the app.",
             "unsupported_cpu" => "This computer cannot use HTTPS update sources; use a folder.",
+            "expired" => "The update source's signed list has expired; its publisher needs to sign it again.",
+            "stale_manifest" => "The update source offers an older signed list than one already seen, so it was refused (a replay or a stale copy).",
+            "not_yet_valid" => "The update's publish date is ahead of this computer's clock; check the date and time.",
+            "unpublished" => "The update source's signed list has no publish date.",
             _ => "The update check failed.",
         };
         return string.IsNullOrEmpty(detail) ? lead : $"{lead} ({detail})";

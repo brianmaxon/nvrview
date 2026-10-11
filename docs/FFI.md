@@ -605,8 +605,9 @@ NvStatus nv_update_parse_source(const char *text, char *out, size_t cap, size_t 
   "platform":"macos-arm64"}`; a download adds `"version":"0.4.0"` (the
   version the user accepted) and `"staging_dir":"/abs/path"` (must not
   exist; on the same volume as the installed app). `platform` is optional
-  (the core's own: `macos-arm64`, `win-x64`, ...). Unknown members are
-  ignored. Invalid JSON, a key that does not parse, more than 16 keys, or a
+  (the core's own: `macos-arm64`, `win-x64`, ...). `"require_published":
+  true` (optional, default false) refuses a manifest without a `published`
+  time (`unpublished`). Unknown members are ignored. Invalid JSON, a key that does not parse, more than 16 keys, or a
   version that is not semantic is `NV_ERR_INVALID_ARGUMENT`; an unacceptable
   source is reported by the operation's `failed` event, so the app shows one
   kind of message for every failure.
@@ -625,11 +626,11 @@ Events (ignore unknown types and fields, as always):
 
 ```json
 {"type":"update","op":1,"action":"check","state":"started"}
-{"type":"update","op":1,"action":"check","state":"available","current":"0.3.0","version":"0.4.0","notes":"Fixes.","size":31457280,"key_id":"0011223344556677"}
-{"type":"update","op":2,"action":"check","state":"up_to_date","current":"0.4.0","latest":"0.4.0"}
-{"type":"update","op":3,"action":"check","state":"up_to_date","current":"0.3.0","latest":"0.4.0","no_package":true}
+{"type":"update","op":1,"action":"check","state":"available","current":"0.3.0","version":"0.4.0","notes":"Fixes.","size":31457280,"key_id":"0011223344556677","published":"2026-10-11T12:00:00Z"}
+{"type":"update","op":2,"action":"check","state":"up_to_date","current":"0.4.0","latest":"0.4.0","published":"2026-10-11T12:00:00Z"}
+{"type":"update","op":3,"action":"check","state":"up_to_date","current":"0.3.0","latest":"0.4.0","no_package":true,"warning":"unpublished"}
 {"type":"update","op":4,"action":"download","state":"downloading","received":1048576,"total":31457280}
-{"type":"update","op":4,"action":"download","state":"ready","version":"0.4.0","path":"/Applications/.NVRView-update/staging-0.4.0/content"}
+{"type":"update","op":4,"action":"download","state":"ready","version":"0.4.0","path":"/Applications/.NVRView-update/staging-0.4.0/content","published":"2026-10-11T12:00:00Z"}
 {"type":"update","op":5,"action":"check","state":"failed","reason":"bad_signature","message":"the manifest's signature does not verify with any trusted key"}
 {"type":"update","op":6,"action":"download","state":"canceled"}
 ```
@@ -642,11 +643,18 @@ Events (ignore unknown types and fields, as always):
   `no_trusted_keys`, `unreachable`, `not_found`, `too_large`,
   `redirect_refused`, `bad_signature`, `bad_manifest`, `unsupported_format`,
   `version_changed`, `not_newer`, `bad_package`, `unsafe_archive`,
-  `staging`, `unsupported_cpu` (UPDATES.md says when each happens).
+  `staging`, `unsupported_cpu`, `expired`, `stale_manifest`,
+  `not_yet_valid`, `unpublished` (UPDATES.md says when each happens).
   `message` is a sentence for people; it can name the source's host or
   folder, so apps show it but log only the reason.
 - `available` only for a version strictly newer than `current` with a
   package for the platform; `no_package` marks a newer version without one.
+- `available`, `up_to_date`, and `ready` carry the verified manifest's
+  `published` time (`YYYY-MM-DDTHH:MM:SSZ`), or `"warning":"unpublished"`
+  when it has none (UPDATES.md, "Dates and replays"). The core keeps the
+  newest accepted `published` per source in `update-state.json` in
+  `data_dir` (in memory without one) and refuses older manifests from that
+  source.
 - `ready`'s `path` is the unpacked package (`<staging_dir>/content`): on
   macOS it holds `NVRView.app`, on Windows the app folder's files.
 - The core logs one line per outcome with its reason; sources and messages

@@ -24,7 +24,28 @@ fn config(source: Source, keys: Vec<PublicKey>, current: &str) -> Config {
     c.timeouts.response = Duration::from_secs(2);
     c.timeouts.small_body = Duration::from_secs(5);
     c.timeouts.package_body = Duration::from_secs(10);
+    // A made-up "now"; no test reads the real clock.
+    c.now = NOW;
     c
+}
+
+/// The tests' "now": 2026-10-11T12:00:00Z.
+const NOW: u64 = 1_791_720_000;
+const DAY: u64 = 24 * 3600;
+
+/// A manifest for one package with optional `published` and `expires`.
+fn dated_manifest(package: &[u8], published: Option<u64>, expires: Option<u64>) -> String {
+    let date = |name: &str, t: Option<u64>| {
+        t.map(|t| format!(r#""{name}":"{}","#, updates::time::format(t)))
+            .unwrap_or_default()
+    };
+    format!(
+        r#"{{"format":1,"version":"0.4.0",{}{}"packages":{{"{PLATFORM}":{{"file":"{PKG}","size":{},"sha256":"{}"}}}}}}"#,
+        date("published", published),
+        date("expires", expires),
+        package.len(),
+        sha256_hex(package)
+    )
 }
 
 fn folder_config(dir: &Path, keys: Vec<PublicKey>, current: &str) -> Config {
@@ -215,7 +236,8 @@ fn only_strictly_newer_versions_are_offered() {
             check(&c, &Cancel::new()).unwrap(),
             CheckOutcome::UpToDate {
                 latest: v("0.4.0"),
-                no_package: false
+                no_package: false,
+                published: None,
             },
             "{current}"
         );
@@ -243,7 +265,8 @@ fn no_package_for_this_platform() {
         check(&c, &Cancel::new()).unwrap(),
         CheckOutcome::UpToDate {
             latest: v("0.4.0"),
-            no_package: true
+            no_package: true,
+            published: None,
         }
     );
 }
@@ -353,6 +376,7 @@ fn stage_package(package: &[u8]) -> Result<updates::Staged, UpdateError> {
         updates::Staged {
             version: s.version,
             content: dest,
+            published: s.published,
         }
     })
 }
@@ -777,4 +801,76 @@ fn https_never_redirects_to_http() {
     let before = plain.hit_count();
     assert_eq!(reason(check(&c, &Cancel::new())), Reason::RedirectRefused);
     assert_eq!(plain.hit_count(), before, "nothing was requested over http");
+}
+
+#[test]
+fn dates_expire_and_old_manifests_are_replays() {
+    let key = new_key();
+    let src = tempfile::tempdir().unwrap();
+    let package = app_zip();
+    fs::write(src.path().join(PKG), &package).unwrap();
+    let base = folder_config(src.path(), vec![key.public()], "0.3.0");
+    let sign = |published: Option<u64>, expires: Option<u64>| {
+        write_signed(
+            src.path(),
+            &key,
+            &dated_manifest(&package, published, expires),
+        );
+    };
+    let outcome = |c: &Config| check(c, &Cancel::new());
+
+    // A dated manifest: offered, with its date.
+    let published = NOW - 10 * DAY;
+    sign(Some(published), Some(NOW + DAY));
+    match outcome(&base).unwrap() {
+        CheckOutcome::Available(o) => assert_eq!(o.published, Some(published)),
+        other => panic!("{other:?}"),
+    }
+
+    // Expired at exactly `expires`, fine a second before.
+    let mut c = base.clone();
+    c.now = NOW + DAY;
+    assert_eq!(reason(outcome(&c)), Reason::Expired);
+    c.now = NOW + DAY - 1;
+    assert!(outcome(&c).is_ok());
+
+    // Older than one already accepted: a replay, for the check and the
+    // download. The same date again is fine.
+    let mut c = base.clone();
+    c.accepted_published = Some(published + 1);
+    assert_eq!(reason(outcome(&c)), Reason::StaleManifest);
+    let (_w, r) = fetch_staged(&c, "0.4.0");
+    assert_eq!(reason(r), Reason::StaleManifest);
+    c.accepted_published = Some(published);
+    assert!(outcome(&c).is_ok());
+    let (_w, r) = fetch_staged(&c, "0.4.0");
+    assert_eq!(r.unwrap().published, Some(published));
+
+    // Published more than a day ahead of this clock.
+    sign(Some(NOW + DAY + 1), None);
+    assert_eq!(reason(outcome(&base)), Reason::NotYetValid);
+    sign(Some(NOW + DAY), None);
+    assert!(outcome(&base).is_ok());
+
+    // Undated: accepted (the outcome says so) unless required, and never
+    // after a dated manifest was accepted from this source.
+    sign(None, None);
+    match outcome(&base).unwrap() {
+        CheckOutcome::Available(o) => assert_eq!(o.published, None),
+        other => panic!("{other:?}"),
+    }
+    let mut c = base.clone();
+    c.require_published = true;
+    assert_eq!(reason(outcome(&c)), Reason::Unpublished);
+    let mut c = base.clone();
+    c.accepted_published = Some(published);
+    assert_eq!(reason(outcome(&c)), Reason::StaleManifest);
+
+    // The dates are signed: changing one breaks the signature.
+    sign(Some(published), Some(NOW - 1));
+    let text = fs::read_to_string(src.path().join("updates.json")).unwrap();
+    let later = updates::time::format(NOW + 30 * DAY);
+    let old = updates::time::format(NOW - 1);
+    fs::write(src.path().join("updates.json"), text.replace(&old, &later)).unwrap();
+    assert_eq!(reason(outcome(&base)), Reason::BadSignature);
 }
