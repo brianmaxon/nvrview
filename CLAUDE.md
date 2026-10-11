@@ -73,6 +73,7 @@ failure. Run it before every commit.
 | what | command |
 | --- | --- |
 | sanitization, whole tree | `python3 -I scripts/check-sanitized.py --all` |
+| self-test parity (both apps' step IDs) | `python3 -I scripts/check-parity.py` (`--list` prints the matrix) |
 | Rust core | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
 | Windows portability (from macOS) | `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc` |
 | macOS app | `cd apps/macos && swift test` |

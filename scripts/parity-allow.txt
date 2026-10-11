@@ -1,0 +1,64 @@
+# Self-test steps that exist in one app only (docs/PARITY.md).
+#
+# One entry per line: `id  platform  reason`. The platform is the app that HAS
+# the step; the other app lacks it. The reason starts with:
+#   n/a:  the step makes no sense on the other platform
+#   gap:  the other app should get the check (or the feature); fix it and
+#         delete the line
+# scripts/check-parity.py fails on a step in one app only that is not listed
+# here, and on an entry that no longer matches (the step now exists in both
+# apps, or in neither).
+
+# ---- on Windows only, platform specific -------------------------------------
+audio-output-renders        windows  n/a: checks the WASAPI render; the macOS self-test runs muted and does not look at the audio engine
+call-desktop-recognizer     windows  n/a: the Windows desktop recognizer (System.Speech); the macOS self-test uses a fake engine and never prompts
+call-microphone             windows  n/a: opens the real WASAPI microphone with --mic-test; the macOS self-test uses a fake microphone, no permission prompt
+call-system-voice           windows  n/a: renders a sentence with the Windows voice; the macOS self-test uses a fake voice
+render-no-alloc             windows  n/a: counts .NET allocations on the render thread; Swift has no equivalent counter
+
+# ---- on Windows only, macOS self-test lacks the check -----------------------
+alert-dismiss-enter         windows  gap: the macOS self-test never raises a tile alert end to end (AlertCenter has unit tests; the smoke inset step dismisses with Esc)
+alert-raise                 windows  gap: no tile alert step in the macOS self-test (red border on every lens, header text, count)
+alert-reduce-motion         windows  gap: the macOS self-test does not check the border against Reduce Motion
+alert-survives-stop         windows  gap: no macOS step for an alert outliving the detection that raised it
+call-permission-revoke      windows  gap: the macOS self-test turns the permission off again without asserting it
+call-press-joins-conversation windows gap: the macOS self-test does not press the doorbell during a conversation
+call-tile-menu              windows  gap: the macOS self-test does not check the tile menu's Start/End Conversation item
+corner-indicators           windows  gap: no macOS step for detections reaching a tile's corner symbols
+corner-setting              windows  gap: no macOS step for the indicator corner setting moving the symbols
+credential-store            windows  gap: the macOS self-test does not exercise the Keychain (it runs against the fake core)
+decode-failures             windows  gap: the macOS self-test does not count decode failures
+detection-events            windows  gap: the macOS self-test does not check that detections arrive
+device-loss                 windows  gap: no macOS step simulating a lost GPU device and checking every tile plays again (unverified whether the Metal renderer needs one)
+fisheye-mount-settings      windows  gap: the macOS Settings > Cameras mount picker exists but the self-test does not drive it
+fisheye-pinch               windows  gap: the macOS pinch (magnify) path into the virtual camera is not in the self-test
+fisheye-view-saved          windows  gap: the macOS self-test does not read the view back from the layout leaf
+indicator-hold              windows  gap: no macOS step for the 2 s hold of a symbol after a stop
+indicator-strip-render      windows  gap: the macOS self-test does not render the symbol strip
+layout-designer-edits       windows  gap: split, pick a camera, and swap are unit-tested on macOS (LayoutEngineTests), not in the self-test
+layout-quality-saved        windows  gap: a tile's quality kept in its layout leaf is unit-tested on macOS only
+layout-roundtrip            windows  gap: the stored layout round trip is unit-tested on macOS only
+layout-save                 windows  gap: Save as Layout is not in the macOS self-test
+quality-balanced            windows  gap: the macOS self-test covers Clear and Auto only
+quality-menu-choices        windows  gap: the macOS self-test does not check which Quality choices a tile offers
+second-lens-refused         windows  gap: macOS unit-tests the lens tiers (MultiLensTests) but not the refused-mobile fallback end to end (unverified)
+second-window               windows  gap: a second window on the same core tiles is not in the macOS self-test
+second-window-close         windows  gap: closing a window giving its leases back is not in the macOS self-test
+second-window-follows       windows  gap: one window following an edit made in another is not in the macOS self-test
+settings-dialog-opens       windows  gap: the macOS self-test opens Settings only for the device search
+settings-save-remove        windows  gap: saving and removing a device is not in the macOS self-test
+third-party-channel         windows  gap: the macOS fake core does not model a channel waiting for a third-party camera
+tile-reconnect-text         windows  gap: the macOS self-test does not check the reconnecting wording on tiles (StatusTests covers it as a unit)
+window-restore              windows  gap: the restore record is unit-tested on macOS (WindowRestoreTests), not in the self-test
+wrong-password              windows  gap: the macOS self-test does not log in with a wrong password (StatusTests covers the wording)
+
+# ---- on macOS only ----------------------------------------------------------
+alert-inset-in-grid         macos    gap: Windows has no alert insets (docs/UX.md "Alert insets")
+alert-inset-smoke-stays     macos    gap: Windows has no alert insets, so a smoke alarm does not open one
+alert-inset-swap            macos    gap: Windows has no alert insets to swap with the stage
+appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
+call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
+fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
+key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
+sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
+zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0

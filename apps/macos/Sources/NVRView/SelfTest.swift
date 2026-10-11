@@ -68,6 +68,10 @@ import VideoKit
 /// switches, display refreshes, drawable resizes) is waited for by polling
 /// for the condition, with a timeout.
 ///
+/// Every step carries a parity marker (a comment naming a kebab-case ID) above its code, shared with
+/// the Windows self-test where it checks the same thing (docs/PARITY.md;
+/// `scripts/check-parity.py` compares them).
+///
 /// Prints what it measured and exits 0 or 1.
 @MainActor
 final class SelfTest {
@@ -141,6 +145,7 @@ final class SelfTest {
     }
 
     private func checkGrid() {
+        // parity: grid-plays
         guard let model = app.model, let window else { finish(["no window"]) }
         let connected = model.devices.filter { $0.link.state == .connected }.count
         print(String(format: "grid after %.2f s", CACurrentMediaTime() - began))
@@ -168,6 +173,7 @@ final class SelfTest {
     /// full-screen transition: the grid keeps drawing while the drawable
     /// size follows only now and then, and exactly once it settles.
     private func resizeStep() {
+        // parity: resize
         guard let window, let nsWindow = window.window else { finish(problems) }
         let grid = window.stage.grid
         let start = nsWindow.frame
@@ -219,6 +225,7 @@ final class SelfTest {
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera else {
             finish(problems + ["no camera to focus"])
         }
+        // parity: focus-content-change
         // Replacing the window's content while a tile is focused must only
         // end the focus: the renderer keeps following the stage (it once
         // kept drawing the old arrangement under the new tiles).
@@ -227,6 +234,7 @@ final class SelfTest {
         if window.stage.isFocused { problems.append("focus survived a change of content") }
         if window.stage.grid.prepare == nil { problems.append("a change of content during focus stopped the renderer") }
         window.stage.focus(leaf.path)
+        // parity: focus-main-stream
         // The animation (on the test clock), then the switch after the main
         // stream's first keyframe (real).
         advance(StageView.focusDuration)
@@ -242,10 +250,12 @@ final class SelfTest {
 
     private func listenStep(_ camera: CameraRef) {
         guard let model = app.model else { finish(problems) }
+        // parity: audio-level-muted
         // A muted camera's meter (on hover) reads its decoded audio too.
         let muted = model.level(camera)
         print("muted level \(muted.map { String(format: "%.2f", $0.peak) } ?? "n/a")")
         if model.fake != nil, (muted?.peak ?? 0) <= 0 { problems.append("no audio level while muted") }
+        // parity: audio-listen
         model.toggleListening(camera, additive: false)
         when({ model.audible.contains(camera) && (model.level(camera)?.peak ?? 0) > 0 }, timeout: 2) { [self] in
             let level = model.level(camera)
@@ -259,6 +269,7 @@ final class SelfTest {
 
     private func unfocusStep(_ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
+        // parity: unfocus-sub-stream
         window.stage.unfocus()
         // The sub-stream is asked for at once; the animation ends on the clock.
         advance(StageView.focusDuration)
@@ -273,6 +284,7 @@ final class SelfTest {
             for (what, ns) in model.timings.sorted(by: { $0.key < $1.key }) {
                 print(String(format: "timing %@: %.1f ms", what, Double(ns) / 1e6))
             }
+            // parity: core-contract
             if let fake = model.fake {
                 problems += fake.violations.map { "core contract: \($0)" }
             }
@@ -285,6 +297,7 @@ final class SelfTest {
     private func qualityStep(_ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera == camera }) else { return sidebarStep() }
+        // parity: quality-clear-auto
         window.stage.setQuality(.clear, at: leaf.path)
         when({ model.leases.tile(for: camera)?.tierState.shown == .main }, timeout: 5) { [self] in
             let tier = model.leases.tile(for: camera)?.tierState
@@ -308,6 +321,7 @@ final class SelfTest {
         // Only with `--fake`: never touch the user's stored groups.
         guard model.fake != nil else { return checkLog() }
         let cameras = model.allCameras
+        // parity: sidebar-rows-update
         let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
         let layout = model.createLayout(name: "Self-Test", root: LayoutNode.balanced(Array(cameras.prefix(2))))
         // A run-loop turn for the sidebar to take each update.
@@ -324,6 +338,7 @@ final class SelfTest {
     /// The dwell and the hide delay run on the test clock.
     private func revealStep() {
         guard let window else { return lensStep() }
+        // parity: sidebar-reveal
         window.setSidebarCollapsedForTest(true)
         let grid = window.stage.grid
         when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in
@@ -360,6 +375,7 @@ final class SelfTest {
             problems.append("no second lens among the cameras")
             return checkLog()
         }
+        // parity: second-lens
         model.leases.acquire(lens)
         when({ model.leases.tile(for: lens).map { $0.tierState.shown == .mobile && $0.latestPicture() != nil } == true },
             timeout: 3)
@@ -397,12 +413,14 @@ final class SelfTest {
             problems.append("no two tiles side by side for the keys")
             return checkLog()
         }
+        // parity: key-selection-right
         window.window?.makeFirstResponder(stage)
         window.state.selected = first
         press(String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)), keyCode: ViewerKeys.rightArrow)
         let moved = window.state.selected
         print("key right arrow: selection \(moved == right ? "moved right" : "did not move")")
         if moved != right { problems.append("the right arrow did not move the selection") }
+        // parity: key-space-focus
         press(" ", keyCode: ViewerKeys.space)
         advance(StageView.focusDuration)
         let focused = window.state.focused
@@ -426,10 +444,12 @@ final class SelfTest {
         // a window behind others may not have had a refresh yet).
         stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
         let before = stage.renderedSource(of: path)
+        // parity: zoom-digital
         // One mouse-wheel step's worth, eased over the next refreshes.
         stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
         advance(1)
         if stage.isEasingZoom { problems.append("the zoom was still easing after a second") }
+        // parity: zoom-auto-quality
         if model.leases.wantedTier(camera) != .main { problems.append("Auto zoomed to 2x did not ask for the main stream") }
         // The renderer takes the zoom in the stage's layout pass, which the
         // display link runs before drawing; run it now rather than wait for
@@ -461,6 +481,7 @@ final class SelfTest {
         let stage = window.stage
         let grid = stage.grid
         let resizes = grid.drawableResizes
+        // parity: fullscreen-chrome-autohide
         // Another tile, with an active alert: its header must stay.
         let other = window.state.tree.leaves.first { $0.path != path && $0.camera != nil && $0.camera != camera }
         let alerting = other?.camera
@@ -484,6 +505,7 @@ final class SelfTest {
             if stage.chromeVisible || header || map { problems.append("the chrome did not hide when idle") }
             if pinned == false { problems.append("the header of a tile with an active alert hid") }
             if grid.drawableResizes != resizes { problems.append("hiding the chrome resized the drawable") }
+            // parity: zoom-reset-key
             // 0 resets the selected tile's zoom: select the zoomed one.
             window.state.selected = path
             press("0", keyCode: 29)
@@ -527,6 +549,7 @@ final class SelfTest {
         stage.focus(other.path)
         advance(StageView.focusDuration)
         let startsBefore = fake.talkStarts
+        // parity: call-press-opens-call
         fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
         when({ stage.insetBoard.item(for: doorbell) != nil && model.calls.call(for: doorbell) != nil }, timeout: 3) { [self] in
             guard stage.insetBoard.item(for: doorbell) != nil, let call = model.calls.call(for: doorbell) else {
@@ -541,6 +564,7 @@ final class SelfTest {
             }
             if model.audible.contains(doorbell) { problems.append("the doorbell became audible without listening or the setting") }
             if fake.talkStarts != startsBefore { problems.append("talk-back started on its own") }
+            // parity: alert-inset-in-grid
             // The inset is one more tile of the same grid, drawn on top.
             let grid = stage.grid
             grid.prepare?(grid.renderer, grid.drawableSize)
@@ -555,6 +579,8 @@ final class SelfTest {
             if grid.renderer.tiles.last.map({ ObjectIdentifier($0.picture as AnyObject) }) != ObjectIdentifier(tile) {
                 problems.append("the inset is not drawn last (on top)")
             }
+            // parity: call-camera-audio-recognized
+            // parity: call-captions
             // Its tapped audio reaches the visitor's transcript (fake engine).
             fake.pumpAudio(tile: tile.id, count: 17)
             when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
@@ -570,6 +596,7 @@ final class SelfTest {
         guard let model = app.model, let fake = model.fake, let tile = model.leases.tile(for: doorbell) else {
             return checkLog()
         }
+        // parity: call-talk-refused
         // Without the permission: refused, nothing sent.
         model.calls.startTalking(doorbell)
         let refused = model.calls.call(for: doorbell)?.talk.phase
@@ -579,6 +606,7 @@ final class SelfTest {
         }
         if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
         model.calls.stopTalking(doorbell)
+        // parity: call-talk-allowed
         // With it: the microphone's audio goes out while Talk is held.
         model.setAllowTalk(doorbell, true)
         model.calls.startTalking(doorbell)
@@ -590,6 +618,7 @@ final class SelfTest {
             if abs(sent - 1000) > 1 { problems.append("the microphone's audio was not pushed (\(sent) ms)") }
             model.calls.stopTalking(doorbell)
             when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
+                // parity: call-typed-reply
                 // A typed reply: rendered, pushed once active, drained.
                 model.calls.sendReply("Hello, one moment please", to: doorbell)
                 when({
@@ -612,8 +641,10 @@ final class SelfTest {
     private func swapStep(_ doorbell: CameraRef, _ otherCamera: CameraRef) {
         guard let model = app.model, let window else { return checkLog() }
         let stage = window.stage
+        // parity: call-unmute
         model.calls.unmute(doorbell)
         if !model.audible.contains(doorbell) { problems.append("Unmute did not make the doorbell audible") }
+        // parity: alert-inset-swap
         // A click swaps: the doorbell fills the stage, the focused camera
         // goes into the return inset.
         stage.swapInset(doorbell)
@@ -629,6 +660,7 @@ final class SelfTest {
         let back = stage.insetBoard.swap == nil && stage.insetBoard.item(for: doorbell) != nil
         print("tab: swapped back \(back)")
         if !back { problems.append("Tab did not swap back") }
+        // parity: call-close-ends
         press("\u{1b}", keyCode: ViewerKeys.escape)
         let gone = stage.insetBoard.isEmpty && model.calls.call(for: doorbell) == nil
         print("esc: inset dismissed and call ended \(gone), audible \(model.audible.count)")
@@ -646,6 +678,7 @@ final class SelfTest {
             return checkLog()
         }
         let stage = window.stage
+        // parity: call-auto-close
         fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
         fake.emitDetection(device: id, channel: 3, kind: "visitor", start: false, alarm: true)
         when({ stage.insetBoard.item(for: doorbell)?.active == false }, timeout: 3) { [self] in
@@ -667,6 +700,7 @@ final class SelfTest {
         guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
         let stage = window.stage
         let startsBefore = fake.talkStarts
+        // parity: call-conversation-start
         stage.startConversation(doorbell)
         let call = model.calls.call(for: doorbell)
         let opened = stage.insetBoard.item(for: doorbell)?.kind == .conversation
@@ -681,6 +715,7 @@ final class SelfTest {
             problems.append("Talk in a conversation was not refused without the permission")
         }
         model.calls.stopTalking(doorbell)
+        // parity: call-conversation-end
         stage.endConversation(doorbell)
         let ended = model.calls.call(for: doorbell) == nil && stage.insetBoard.item(for: doorbell) == nil
         print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
@@ -697,6 +732,7 @@ final class SelfTest {
         else { return checkLog() }
         let stage = window.stage
         let hall = CameraRef(device: device.key, channel: 4)
+        // parity: alert-inset-smoke-stays
         fake.emitSoundDetection(device: id, channel: 4, start: true)
         fake.emitSoundDetection(device: id, channel: 4, start: false)
         when({ stage.insetBoard.item(for: hall)?.active == false }, timeout: 3) { [self] in
@@ -737,6 +773,7 @@ final class SelfTest {
     /// (eased on the clock), saved with the layout; 0 resets it.
     private func fisheyeStep() {
         guard let model = app.model, let window else { finish(problems) }
+        // parity: fisheye-detected
         guard let camera = model.allCameras.first(where: { model.isFisheye($0) }) else {
             problems.append("no fisheye camera (run with fixtures/synthetic/fisheye/h264-fisheye.h264 among the files)")
             return checkLog()
@@ -749,6 +786,7 @@ final class SelfTest {
         stage.assign(camera, at: path)
         when({ model.leases.tile(for: camera)?.latestPicture() != nil }, timeout: 3) { [self] in
             let grid = stage.grid
+            // parity: fisheye-circle
             // The circle is measured from the first pictures, on the clock.
             stage.setFisheyeMode(.panorama, at: path)
             for _ in 0..<FisheyeCircleTracker.maxTries where stage.fisheyeDewarp(of: path) == nil {
@@ -764,13 +802,16 @@ final class SelfTest {
             if abs(c.cx - 0.49) > 0.01 || abs(c.cy - 0.505) > 0.01 || abs(c.r - 0.46) > 0.01 {
                 problems.append("the fisheye circle is more than 1% off the fixture's")
             }
+            // parity: fisheye-view-pixels
             for mode in FisheyeViewMode.allCases where mode.dewarps {
                 stage.setFisheyeMode(mode, at: path)
                 checkFisheyePixels(path, mode)
             }
+            // parity: fisheye-ptz-drag
             // Virtual PTZ: a drag turns it, a wheel step zooms it (eased).
             let size = window.state.tree.frames(in: stage.bounds).leaf(path)?.rect.size ?? .zero
             stage.turnFisheye(path, by: CGVector(dx: size.width / 4, dy: 0), size: size)
+            // parity: fisheye-ptz-zoom
             stage.zoomFisheye(path, by: 2, eased: true)
             advance(0.03)
             let midway = window.state.tree[path]?.fisheye.aim?.fov ?? 0
@@ -783,8 +824,10 @@ final class SelfTest {
                 problems.append("the virtual camera did not ease its zoom to 45°")
             }
             checkFisheyePixels(path, .ptz)
+            // parity: fisheye-reset-key
             stage.resetZoom(at: path)
             if window.state.tree[path]?.fisheye.aim != nil { problems.append("0 did not reset the virtual camera") }
+            // parity: fisheye-original
             stage.setFisheyeMode(.original, at: path)
             grid.prepare?(grid.renderer, grid.drawableSize)
             if stage.fisheyeDewarp(of: path) != nil { problems.append("Original still dewarps") }
@@ -853,6 +896,7 @@ final class SelfTest {
         let form = model.deviceForm
         // The add form is what Settings shows with no device selected; its
         // list searches when it appears.
+        // parity: discovery-list
         form.startNew()
         when({ model.discovery.devices.count == FakeDiscoverable.samples.count }, timeout: 5) { [self] in
             let list = model.discovery
@@ -872,6 +916,7 @@ final class SelfTest {
             if fresh.channels != 16 || fresh.kind != .nvr || battery.batteryPercent != 80 {
                 problems.append("device details did not arrive")
             }
+            // parity: discovery-choose
             // A click on a row.
             model.chooseDiscovered(fresh)
             if form.draft.host != "192.0.2.12" || form.port != "9000" || form.draft.name != "NVR 3" {
@@ -895,6 +940,7 @@ final class SelfTest {
                 if model.discovery.devices.count != FakeDiscoverable.samples.count || model.discovery.foundNothing {
                     problems.append("the list changed when the search ended")
                 }
+                // parity: discovery-search-again
                 // Search Again twice in a row: the list shows each device once.
                 model.startDiscovery()
                 model.startDiscovery()
@@ -904,6 +950,7 @@ final class SelfTest {
                     let n = model.discovery.devices.count
                     print("discovery after Search Again twice: \(n) devices")
                     if n != FakeDiscoverable.samples.count { problems.append("a restarted search listed \(n) devices") }
+                    // parity: discovery-stop-on-close
                     // Closing the window stops the search.
                     settings.window?.close()
                     if fake.isDiscovering || model.discovery.isSearching {
@@ -933,6 +980,7 @@ final class SelfTest {
         else { return checkLog() }
         let stage = window.stage
         let path = leaf.path
+        // parity: tile-retry
         fake.emitForTest(#"{"type":"device_state","device":\#(id),"state":"backoff","attempt":2,"retry_ms":60000}"#)
         when({ model.devices.first { $0.key == camera.device }?.link.state == .backoff(attempt: 2, retryMilliseconds: 60000) },
             timeout: 2
@@ -962,6 +1010,7 @@ final class SelfTest {
     }
 
     private func checkLogNow() {
+        // parity: appkit-warnings
         if let watch = app.logWatch {
             for p in watch.patterns {
                 let n = watch.count(p)

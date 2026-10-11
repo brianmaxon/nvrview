@@ -60,6 +60,10 @@
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
+// Every step carries a parity marker (a comment naming a kebab-case ID) above its code, shared with
+// the macOS self-test where it checks the same thing (docs/PARITY.md;
+// scripts/check-parity.py compares them).
+//
 // Writes what it measured and PASS or FAIL to the --log file and exits 0 or 1.
 
 using System.Diagnostics;
@@ -116,6 +120,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         StageRenderer r = app.Renderer!;
         Say($"GPU: {v.Host.Gpu.Describe()}");
 
+        // parity: credential-store
         if (options.CredentialTest)
         {
             string? problem = WindowsCredentials.RoundTrip();
@@ -137,6 +142,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         app.Windows[0].Show(new WindowContent.Scratch("Self-test", LayoutNode.Balanced(
             mockDevice.Channels.Keys.Order().Select(c => new CameraRef(mockDevice.Key, c)))));
 
+        // parity: grid-plays
         // 1. Tiles play.
         bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
             Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
@@ -150,6 +156,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.SelfTestSeconds * 0.2)));
         long memoryBefore = PrivateBytes();
         await CheckFrame("grid", Tiles);
+        // parity: third-party-channel
         if (options.MockChannels >= 2)
         {
             StageTile last = Tiles[^1];
@@ -160,6 +167,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
         }
 
+        // parity: render-no-alloc
         // Steady state: the render thread allocates nothing per frame.
         long bytes = r.AllocatedBytes, framesBefore = r.Frames;
         await Task.Delay(1000);
@@ -170,6 +178,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add($"the render thread allocated {allocated} bytes in steady state");
         }
 
+        // parity: wrong-password
         // A wrong password: login_failed, said in words, no retry.
         if (app.MockAddress is { } mock)
         {
@@ -182,6 +191,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
             v.Disconnect(wrong);
 
+            // parity: settings-save-remove
             // What the Settings dialog does on Save and Remove (in memory in
             // this mode): a second device connects, then goes away.
             var saved = new DeviceConfig { Name = "second", Host = mock.Host, Port = mock.Port, User = "example-user" };
@@ -195,6 +205,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 _problems.Add("saving and removing a device did not connect and remove it");
             }
 
+            // parity: settings-dialog-opens
             // The dialog itself opens and closes. Its device search is real but
             // limited to loopback (nothing answers there); the answers are made up
             // and fed in as the core's events.
@@ -210,6 +221,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 _problems.Add("the Settings dialog did not open");
             }
             await FindDevices(v, hooks, mock);
+            // parity: discovery-stop-on-close
             dialog.Hide();
             bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
             Say($"find devices: search stopped when the dialog closed: {stopped}");
@@ -220,9 +232,11 @@ internal sealed class SelfTest(App app, AppOptions options)
             v.DiscoveryRequest = null;
         }
 
+        // parity: resize
         // 2. Live resize.
         await Resize(r);
 
+        // parity: key-selection-right
         // 3. Spatial selection.
         StageTile first = Tiles[0];
         if (Tiles.Length >= 2)
@@ -235,6 +249,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
         }
 
+        // parity: focus-main-stream
         // 4. Focus: animation, then the main stream after the aligned switch.
         int tierEventsBefore = v.TierEvents.Count;
         stage.FocusOn(first);
@@ -254,6 +269,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         CheckTierEvents(v, first.Id, tierEventsBefore, 1);
         await CheckFrame("focused", [first]);
 
+        // parity: audio-level-muted
         // 5. Listening.
         float muted = await MaxLevel(v, first, 0.5);
         Say($"muted level {muted:0.00}");
@@ -262,6 +278,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("no audio level while muted");
         }
         long rendered = app.Audio?.FramesRendered ?? 0;
+        // parity: audio-listen
         v.ToggleListening(first.Camera, additive: false);
         var heard = Stopwatch.StartNew();
         float listening = 0;
@@ -272,6 +289,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Say($"listening: first level after {heard.Elapsed.TotalSeconds:0.00} s");
         // The core starts playout once its delay target is known; then the
         // WASAPI stream carries the tile (audio_stats: starts, no underruns).
+        // parity: audio-output-renders
         bool started = app.Audio is not { Problem: null } || await Until(() => AudioStarted(first.AudioStats), 8);
         Say($"playout started after {heard.Elapsed.TotalSeconds:0.00} s: {started}");
         if (!started)
@@ -298,6 +316,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         v.SetListening(first.Camera, false);
 
+        // parity: unfocus-sub-stream
         // 6. Leave focus.
         tierEventsBefore = v.TierEvents.Count;
         stage.Unfocus();
@@ -309,6 +328,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         CheckTierEvents(v, first.Id, tierEventsBefore, 2);
 
+        // parity: zoom-digital
         // 7. Digital zoom.
         StageTile zoomed = Tiles[^1];
         StageView.ZoomAround(zoomed, 0.25, 0.25, 2);
@@ -320,6 +340,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         StageView.ResetZoom(zoomed);
 
+        // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
         Say($"decode failures before the device loss: {failuresBefore}");
         if (failuresBefore > 0)
@@ -328,6 +349,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         long memoryAfter = PrivateBytes();
 
+        // parity: device-loss
         // 8. Device loss.
         long[] decodedBefore = [.. Tiles.Select(t => (t.Video?.Counters.Decoded ?? 0))];
         r.SimulateDeviceLoss();
@@ -351,6 +373,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await LayoutsAndWindows(v);
         await Calls(v, stage);
 
+        // parity: detection-events
         // Detections from the mock (camera AI) reached the tiles.
         Say($"detection events: {v.DetectionEvents}, shown now: " +
             string.Join(", ", Tiles.SelectMany(t => v.Board.Items(t.Camera).Select(i => i.Description)).Distinct()));
@@ -359,12 +382,14 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("no detection events arrived");
         }
 
+        // parity: tile-retry
         // The device goes away: tiles say they reconnect, with a countdown. The viewer clock is
         // held from here, at the system clock's reading, so the Retry delay below is measured on
         // one clock from the moment the messages appear.
         var retryClock = new ManualViewerClock(new SystemViewerClock().Now);
         v.UseClock(retryClock);
         app.StopMock();
+        // parity: tile-reconnect-text
         bool reconnecting = await Until(() => Tiles.All(t => app.Stage!.StatusText(t) is { } s && s.Contains("onnect", StringComparison.Ordinal)), 15);
         Say($"mock-nvr stopped: {app.Stage!.StatusText(Tiles[0]) ?? "playing"}");
         if (!reconnecting)
@@ -396,6 +421,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         v.UseClock(new SystemViewerClock());
 
+        // parity: core-contract
         // 9. Contract and summary.
         if (v.Core.CallbackExceptionCount > 0)
         {
@@ -443,6 +469,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.SetAudible([]);
         int leasesBefore = v.Leases.LeaseCount(camera);
 
+        // parity: call-tile-menu
         // The tile menu offers the conversation and the permission.
         var menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
         stage.AddConversationItems(menu, camera);
@@ -451,6 +478,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Say($"calls: tile menu {string.Join(" / ", items)}, allow checked {allowChecked}");
         Expect(items.SequenceEqual(["Start conversation", "Allow talk-back"]) && !allowChecked, "the tile menu does not offer Start conversation and an unchecked Allow talk-back");
 
+        // parity: call-conversation-start
         // 1. A conversation opens with no press and sends nothing by itself.
         v.Calls.StartConversation(camera);
         Call? call = v.Calls.CallFor(camera);
@@ -462,6 +490,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         CallCard? card = stage.CallCards.Cards.FirstOrDefault();
         Say($"calls: conversation card \"{card?.TitleText}\", {stage.CallCards.Cards.Count} shown");
         Expect(stage.CallCards.Cards.Count == 1 && card?.TitleText.StartsWith("Conversation", StringComparison.Ordinal) == true, "no conversation card over the stage");
+        // parity: call-camera-audio-recognized
         Expect(engines.Count == 1 && engines[0].Source == TranscriptSource.Visitor, "the camera's audio has no recognizer");
         bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);
         Say($"calls: camera audio fed to the recognizer: {engines.FirstOrDefault()?.SamplesFed ?? 0} samples");
@@ -470,12 +499,14 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.AddConversationItems(menu, camera);
         Expect(menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().First().Text == "End conversation", "the tile menu does not offer End conversation during a call");
 
+        // parity: call-talk-refused
         // 2. Talk is refused until talk-back is allowed for the camera.
         v.Calls.StartTalking(camera);
         bool refused = await Until(() => call!.Talk is { Current: TalkState.Phase.Refused, Outstanding: 0 }, 5);
         Say($"calls: talk without permission: {call!.Talk.Text}");
         Expect(refused && call.Talk.Reason == "not_permitted" && mic.Starts == 0, "Talk without the permission was not refused (or the microphone opened)");
 
+        // parity: call-talk-allowed
         // 3. Allowed, Talk really talks: the core reports the audio it sent.
         v.SetTalkAllowed(camera, true);
         Expect(v.Settings.TalkAllowed(camera), "the permission was not kept");
@@ -494,6 +525,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(stopped && !mic.Running && call.Talk.SentMs >= 500, "Talk did not send the microphone's audio");
         Expect(youListening, "the microphone had no recognizer while talking");
 
+        // parity: call-typed-reply
         // 4. A typed reply: rendered by the voice (never played here), pushed in one go, ended by a draining stop.
         await v.Calls.SendReplyAsync("Hello, one moment please", camera);
         bool replied = await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
@@ -501,6 +533,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(voice.Rendered.SequenceEqual(["Hello, one moment please"]), "the voice did not render exactly the typed text");
         Expect(replied && call.Talk.SentMs >= 300, "the typed reply was not sent and finished");
 
+        // parity: call-captions
         // 5. Captions reach the call and its card.
         engines[0].Say("hello th", "Hello there.");
         bool captioned = await Until(() => call.Transcript.Finals.Count == 1, 5);
@@ -508,6 +541,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Say($"calls: captions \"{card?.CaptionText}\"");
         Expect(captioned && card?.CaptionText.Contains("Visitor: Hello there.", StringComparison.Ordinal) == true, "captions did not reach the card");
 
+        // parity: call-press-joins-conversation
         // 6. A doorbell press joins the call.
         v.Apply(Alarm(device, 0, "visitor", true));
         Expect(call.Presses == 1, "a press during the conversation did not join it");
@@ -515,6 +549,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(card?.TitleText.StartsWith("Doorbell", StringComparison.Ordinal) == true, "the card does not say Doorbell after a press");
         v.Apply(Alarm(device, 0, "visitor", false));
 
+        // parity: call-auto-close
         // 7. A call ends a minute after its last activity and gives the audio back.
         clock.Advance(59);
         v.Tick();
@@ -527,17 +562,21 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(!v.IsAudible(camera) && v.Leases.LeaseCount(camera) == leasesBefore, "ending the call left the camera audible or its lease held");
         Expect(engines.All(e => e.Finished), "ending the call left a recognizer running");
 
+        // parity: call-press-opens-call
         // 8. A press alone opens a silent call with Unmute; Unmute plays it; closing gives it back.
         v.Apply(Alarm(device, 0, "visitor", true));
         Call? ring = v.Calls.CallFor(camera);
         stage.CallCards.Sync();
         Expect(ring is { Origin: CallOrigin.Press, Presses: 1, ShowsUnmute: true, Audible: false } && !v.IsAudible(camera), "a press did not open a silent call with Unmute");
         Expect(stage.CallCards.Cards.FirstOrDefault()?.UnmuteShown == true, "the card does not show Unmute for a silent call");
+        // parity: call-unmute
         v.Calls.Unmute(camera);
         Expect(v.IsAudible(camera) && ring is { ShowsUnmute: false }, "Unmute did not play the camera");
+        // parity: call-close-ends
         v.Calls.End(camera, "closed");
         Expect(v.Calls.CallFor(camera) is null && !v.IsAudible(camera), "closing the call did not end it and mute the camera");
 
+        // parity: call-permission-revoke
         // Revoking the permission is the user's too.
         v.SetTalkAllowed(camera, false);
         Expect(!v.Settings.TalkAllowed(camera), "the permission was not withdrawn");
@@ -550,12 +589,14 @@ internal sealed class SelfTest(App app, AppOptions options)
     // reported, and failing only when something claims to work and does not.
     private async Task RealCallEngines()
     {
+        // parity: call-system-voice
         (float[] samples, uint rate) = await new WindowsSpeech().RenderAsync("Hello, one moment please.");
         Say($"calls: system voice rendered {samples.Length} samples at {rate} Hz ({(rate == 0 ? 0 : samples.Length / (double)rate):0.0} s)");
         Expect(rate >= 8000 && samples.Length > rate / 2, "the system voice rendered nothing usable");
 
         if (samples.Length > 0)
         {
+            // parity: call-desktop-recognizer
             using var sapi = new SapiTranscriber();
             var statuses = new List<string>();
             var texts = new List<string>();
@@ -587,6 +628,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 "the desktop recognizer is available but did not hear the system voice's sentence");
         }
 
+        // parity: call-microphone
         if (options.MicrophoneTest)
         {
             var mic = new WasapiMicrophone();
@@ -639,6 +681,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         static string Found(ulong search, string key, string rest) =>
             $$"""{"type":"discovered","search":{{search}},"key":"{{key}}",{{rest}}}""";
 
+        // parity: discovery-list
         hooks.NewDevice();
         bool started = await Until(() => v.Discovery.IsSearching && v.Discovery.CurrentSearch is not null, 5);
         if (!started)
@@ -671,6 +714,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"rows enabled {string.Join(",", panel.Rows.Select(r => r.Enabled))}, expected True,False,True,False");
         }
+        // parity: discovery-choose
         // Clicks.
         hooks.Choose(v.Discovery.Devices[0]);
         var form = hooks.Form();
@@ -697,6 +741,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add("the list changed when the search ended");
         }
+        // parity: discovery-search-again
         // Search again twice in a row: the list empties and shows only the last search.
         hooks.SearchAgain();
         hooks.SearchAgain();
@@ -710,6 +755,7 @@ internal sealed class SelfTest(App app, AppOptions options)
 
     private async Task TileFeatures(Viewer v, StageView stage)
     {
+        // parity: corner-indicators
         // Camera AI detections from the mock reach the corner indicators.
         bool shown = await Until(() => Tiles.Any(t => stage.ChromeFor(t) is { Indicators.Count: > 0 }), 15);
         StageTile? withSymbols = Tiles.FirstOrDefault(t => stage.ChromeFor(t) is { Indicators.Count: > 0 });
@@ -719,11 +765,13 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(v.Settings.IndicatorCorner == ChromeCorner.TopRight, "the indicator corner is not top right by default");
         if (withSymbols is not null)
         {
+            // parity: corner-setting
             v.Settings.IndicatorCorner = ChromeCorner.BottomLeft;
             stage.SyncOverlays();
             Expect(stage.ChromeFor(withSymbols)!.Corner == ChromeCorner.BottomLeft, "the indicator corner setting did not move the symbols");
             v.Settings.IndicatorCorner = ChromeCorner.TopRight;
         }
+        // parity: indicator-strip-render
         await RenderStrip(stage);
 
         // Alerts, auto-hide, and the hold, on a clock that moves only when told to.
@@ -731,6 +779,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.UseClock(clock);
         StageTile lens0 = Tiles.First(t => t.Channel == 1 && t.Lens == 0);
         DeviceEntry? device = lens0.Device;
+        // parity: second-lens
         StageTile? lens1 = AddCamera(stage, new CameraRef(device!.Key, 1, 1));
         Expect(lens1 is not null, "the second-lens tile did not open");
         if (lens1 is null)
@@ -745,6 +794,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         StageTile other = Tiles.First(t => t.Channel == 0);
         TileChrome cOther = stage.ChromeFor(other)!;
 
+        // parity: alert-raise
         v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
         stage.Tick();
         bool both = c0.AlertShown && c1.AlertShown && !cOther.AlertShown;
@@ -752,6 +802,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             $"border {(c0.AlertBlinking ? "blinking" : "steady")} (animations {(v.AnimationsEnabled() ? "on" : "off")}); " +
             $"\"{c0.AlertText.Replace('\n', '|')}\"");
         Expect(both, "a sound alarm did not raise the alert on both lens tiles of its camera only");
+        // parity: alert-reduce-motion
         Expect(c0.AlertBlinking == v.AnimationsEnabled(), "the alert border does not follow the animation setting");
         Expect(c0.AlertText.Contains("Smoke alarm (sound)", StringComparison.Ordinal) && c0.AlertText.Contains("Detected 1 time", StringComparison.Ordinal) &&
             c0.AlertText.Contains("Sounding now", StringComparison.Ordinal), "the alert header lacks the reason, count, or state");
@@ -759,6 +810,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             "the sound alarm is not an indicator on both lenses");
         Expect(!cOther.Indicators.Any(i => i.Kind == IndicatorKind.SmokeAlarm), "the sound alarm showed on another camera");
 
+        // parity: fullscreen-chrome-autohide
         // Full screen: the chrome and pointer hide after 3 s idle; the alert and indicators stay.
         stage.FullScreenOverride = true;
         stage.Interact();
@@ -784,6 +836,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(!stage.CursorHidden, "the pointer hid outside full screen");
         stage.FullScreenOverride = null;
 
+        // parity: alert-survives-stop
+        // parity: indicator-hold
         // A stop does not clear the alert; the symbol is held 2 s.
         v.Apply(Detect(lens0, "smoke_alarm", "local_audio", false));
         stage.Tick();
@@ -798,6 +852,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Say($"indicator hold: after 1.9 s {(held ? "held" : "gone")}, after 2.1 s {(gone ? "gone" : "held")}");
         Expect(held && gone, "the symbol was not held for 2 s and then removed");
 
+        // parity: alert-dismiss-enter
         // Again counts; Enter dismisses for every tile of the camera; a new one starts fresh.
         v.Apply(Detect(lens0, "smoke_alarm", "local_audio", true));
         stage.Tick();
@@ -818,15 +873,18 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // Quality: Clear, Balanced, and Auto switch the stream; zoom moves Auto.
         StageTile q = other;
+        // parity: quality-menu-choices
         Expect(v.OffersBalanced(q), "Balanced is not offered for a single-lens channel that lists extern");
         Expect(!v.OffersBalanced(lens0), "Balanced is offered for a two-lens camera");
         Expect(QualityMenu.Choices(true).SequenceEqual(["Auto", "Clear", "Fluent", "Balanced"]) && QualityMenu.Choices(false).SequenceEqual(["Auto", "Clear", "Fluent"]),
             "the Quality menu lists the wrong choices");
+        // parity: quality-clear-auto
         v.SetQuality(q, TileQuality.Clear);
         bool main = await Until(() => q.ShownTier == "main" && q.PictureWidth > 0, 10);
         Say($"quality Clear: showing {q.ShownTier} {q.PictureWidth}x{q.PictureHeight}, header \"{StageView.TitleOf(q)}\"");
         Expect(main, "Clear did not switch the tile to the main stream");
         Expect(StageView.TitleOf(q).Contains("Clear", StringComparison.Ordinal), "the header does not name the quality");
+        // parity: quality-balanced
         v.SetQuality(q, TileQuality.Balanced);
         bool mid = await Until(() => q.ShownTier == "extern" && q.PictureWidth > 0, 10);
         Say($"quality Balanced: showing {q.ShownTier}");
@@ -835,6 +893,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool sub = await Until(() => q.ShownTier == "sub", 10);
         Say($"quality Auto: showing {q.ShownTier}");
         Expect(sub, "Auto did not return the tile to the sub stream");
+        // parity: zoom-auto-quality
         q.Zoom = 2.5f;
         v.Tick();
         bool zoomedMain = await Until(() => q.ShownTier == "main", 10);
@@ -851,6 +910,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.Tick();
         await Until(() => q.ShownTier == "sub", 10);
 
+        // parity: second-lens-refused
         // A camera whose device refuses the second lens's mobile stream: reopened on extern. The core ends
         // a refused start with tile_error start_rejected only after its 60 s wait (docs/FFI.md), so the event is
         // injected, as a fake core would.
@@ -886,6 +946,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             Say("fisheye: skipped (needs 3 mock channels)");
             return;
         }
+        // parity: fisheye-detected
         bool known = await Until(() => v.IsFisheye(f.Camera), 10);
         Expect(known, "the mock's fisheye channel was not reported as a fisheye camera");
         Expect(!v.IsFisheye(Tiles.First(t => t.Channel == 0).Camera), "an ordinary channel was reported as a fisheye camera");
@@ -894,6 +955,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             return;
         }
         stage.SetFisheyeMode(f, FisheyeViewMode.Panorama);
+        // parity: fisheye-circle
         bool found = await Until(() => v.Circles.Circle(f.Camera) is not null, 10);
         FisheyeCircle circle = v.Circles.Circle(f.Camera) ?? FisheyeCircle.Inscribed(384, 384);
         Say($"fisheye circle: ({circle.Cx:F4}, {circle.Cy:F4}) r {circle.R:F4} (synthetic: 0.49, 0.505, 0.46), fell back {v.Circles.FellBack(f.Camera)}");
@@ -901,6 +963,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(Math.Abs(circle.Cx - 0.49) < 0.01 && Math.Abs(circle.Cy - 0.505) < 0.01 && Math.Abs(circle.R - 0.46) < 0.01,
             "the fisheye circle is more than 1% off the synthetic one");
 
+        // parity: fisheye-view-pixels
         foreach (FisheyeViewMode mode in new[] { FisheyeViewMode.Panorama, FisheyeViewMode.DoublePanorama, FisheyeViewMode.Quad, FisheyeViewMode.Ptz })
         {
             stage.SetFisheyeMode(f, mode);
@@ -908,11 +971,13 @@ internal sealed class SelfTest(App app, AppOptions options)
             bool drawn = await Until(() => r.DewarpDraws > before + 3, 5);
             Expect(drawn, $"fisheye {mode.Title()}: the dewarp shader did not draw");
             Expect(StageView.TitleOf(f).Contains(mode.Title(), StringComparison.Ordinal), $"fisheye {mode.Title()}: the header does not name the view");
+            // parity: fisheye-view-saved
             string? member = stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member);
             Expect(FisheyeTileSetting.FromJson(member).Mode == mode, $"fisheye {mode.Title()}: the view was not kept in the layout leaf ({member})");
             await CheckColors(mode.Title(), f, r, circle);
         }
 
+        // parity: fisheye-ptz-zoom
         // Virtual PTZ zoom: eased on the viewer's clock, ends on the target, saved; 0 resets.
         var clock = new ManualViewerClock(2000);
         v.UseClock(clock);
@@ -930,10 +995,12 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(mid < fov && mid > fov / 2 && Math.Abs(end - fov / 2) < 1e-9 && !stage.IsEasingFisheyeZoom, "the Virtual PTZ zoom did not ease to its target");
         Expect(saved.Aim is { } a && Math.Abs(a.Fov - fov / 2) < 1e-9, "the Virtual PTZ zoom was not saved with the layout");
         await CheckColors("Virtual PTZ zoomed", f, r, circle);
+        // parity: fisheye-reset-key
         stage.Select(f.Path);
         stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
         Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera");
 
+        // parity: fisheye-mount-settings
         // Settings > fisheye mount (the picker, not the menu), then a synthetic pinch on the Virtual PTZ view.
         var mountHooks = new SettingsDialogHooks();
         var mountDialog = SettingsDialog.Create(stage.XamlRoot, v, development: true, mountHooks);
@@ -946,6 +1013,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(v.Settings.Mount(f.Camera) == FisheyeMount.Wall, "choosing Wall in Settings did not set the mount");
         Expect(f.Fisheye is { Mount: FisheyeMount.Wall } onWall && onWall.Aim == FisheyeAim.Default(FisheyeMount.Wall), "the tile did not follow the mount chosen in Settings");
         Expect(mountHooks.Mounts().Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Wall), "the picker does not show the saved mount");
+        // parity: fisheye-pinch
         var pinchClock = new ManualViewerClock(3000);
         v.UseClock(pinchClock);
         double pinchFrom = f.Fisheye?.Aim.Fov ?? 0;
@@ -974,6 +1042,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
         Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera after the pinch");
 
+        // parity: fisheye-original
         // Back to the camera's own picture.
         stage.SetFisheyeMode(f, FisheyeViewMode.Original);
         Expect(f.Fisheye is null && stage.State.Tree.Member(f.Path, FisheyeTileSetting.Member) is null, "Original did not remove the leaf member");
@@ -1053,6 +1122,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         StageView stage = w1.Stage;
         StageRenderer r = w1.Renderer;
 
+        // parity: layout-save
         // Save the arrangement as a stored layout; the window now shows it.
         int leaves = stage.Tiles.Length;
         string? id = w1.SaveAsLayout(v.UniqueLayoutName("Self-test layout"));
@@ -1067,6 +1137,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             "the layout does not name cameras by the core's device key");
         try
         {
+            // parity: layout-designer-edits
             // Split the first tile, put a camera in the new tile, swap two tiles: each edit is stored.
             stage.SetEditing(true);
             NodePath first = stage.Tiles[0].Path;
@@ -1083,6 +1154,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             LayoutNode? after = v.Layout(id)?.Root;
             Say($"designer: split to {after?.LeafCount} tiles, swapped {ca} and {cb}: stored {after?[a]?.Camera} and {after?[b]?.Camera}");
             Expect(after?[a]?.Camera == cb && after?[b]?.Camera == ca, "swapping two tiles was not stored");
+            // parity: layout-quality-saved
             // A tile's quality is saved in its leaf ("quality"), and Auto removes it.
             stage.SetQuality(stage.Tiles[0], TileQuality.Fluent);
             string? member = v.Layout(id)?.Root.Member(stage.Tiles[0].Path, "quality");
@@ -1090,12 +1162,14 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(member == "\"fluent\"" && v.Layout(id)?.Root.Member(stage.Tiles[0].Path, "quality") is null,
                 "a tile's quality was not kept in its layout leaf");
             stage.SetEditing(false);
+            // parity: layout-roundtrip
             // The stored JSON reads back to the same layout.
             Expect(SavedLayout.Parse(v.Layout(id)!.ToJson()) == v.Layout(id), "the stored layout does not round-trip");
 
             bool playing = await Until(() => Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 3 && t.PictureWidth > 0), 15);
             Expect(playing, $"tiles did not play after the edits: {string.Join("; ", Tiles.Select(Describe))}");
 
+            // parity: focus-content-change
             // Changing the content while a tile is focused ends the focus only: the renderer keeps presenting.
             StageTile focusTile = Tiles[0];
             stage.FocusOn(focusTile);
@@ -1109,6 +1183,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(r.SwapChains == chains && r.Frames - frames > 10, "changing the content while focused disturbed the renderer");
             await CheckFrame("after a content change while focused", Tiles);
 
+            // parity: second-window
             // The same layout in a second window: its own render thread, shared core tiles.
             ViewerWindow w2 = app.OpenWindow(new WindowContent.Layout(id));
             bool drawn = await Until(() => w2.Renderer.Frames > 30 && w2.Stage.Tiles.Where(t => !t.IsEmpty).All(t => t.PictureWidth > 0), 15);
@@ -1124,12 +1199,14 @@ internal sealed class SelfTest(App app, AppOptions options)
                 await CheckFrame("second window", t2, w2.Renderer);
             }
 
+            // parity: second-window-follows
             // An edit in one window reaches the other (layouts_changed), not during a drag.
             stage.Edit(t => t.SettingRatio(0.3, NodePath.Root));
             bool followed = await Until(() => w2.State.Tree == w1.State.Tree, 5);
             Say($"second window followed the edit: {followed}");
             Expect(followed, "the second window did not follow the stored layout");
 
+            // parity: second-window-close
             // Closing it gives its leases back; the first window keeps playing.
             int before = v.Leases.LeaseCount(sample);
             w2.Window.Close();
@@ -1137,6 +1214,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             Say($"second window closed: windows {app.Windows.Count}, leases of {sample} {before} -> {v.Leases.LeaseCount(sample)}");
             Expect(app.Windows.Count == 1 && v.Leases.LeaseCount(sample) == before - t2.Count(t => t.Camera == sample), "closing a window did not give its leases back");
 
+            // parity: sidebar-reveal
             // The sidebar: collapse it (the stage grows), then reveal it at the
             // edge on a manual clock: the overlay slides over the stage, whose
             // buffers are not resized.
@@ -1166,6 +1244,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             clock.Advance(0.02);
             w1.TickReveal();
             Expect(stays && !w1.RevealShown, "the overlay did not leave half a second after the pointer");
+            // parity: window-restore
             // The window remembers the collapsed sidebar (window restore).
             List<SavedWindow> saved = WindowStore.FromJson(System.Text.Json.Nodes.JsonNode.Parse(WindowStore.ToJson(app.Windows.Select(w => w.ToSaved()))));
             Say($"window restore: {saved.Count} window(s), content {saved.FirstOrDefault()?.Content}, sidebar collapsed {saved.FirstOrDefault()?.SidebarCollapsed}, frame {saved.FirstOrDefault()?.Frame}");
