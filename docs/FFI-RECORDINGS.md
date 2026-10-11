@@ -302,8 +302,12 @@ counting allocator), so it needs no queue or thread of its own.
   seconds, anchored at the wall clock when the stream's first record
   arrived (re-anchored after a discontinuity or a gap). Rust reads it with
   `Core::tile_loudness`.
-- **Not done yet**: recordings, `nv_sound_watch`, `nv_sound_labels_put`,
-  storing anything in the index, and the C functions below.
+- **Recordings (C12, Rust only)**: live seconds and alarm episodes are also
+  stored per device (loudness envelope store, sound labels in the index),
+  the "always listen" list and `nv_sound_labels_put` exist on `Core`
+  (`sound_watch`, `sound_labels_put`), and recorded days can be analyzed on
+  request; see "Clarifications from the implementation (C12)" at the end.
+- **Not done yet**: the C functions below.
 
 Why a pull API for the live envelope and not a `sound_level` event: the
 app needs the envelope only while it draws a lane (a tile's level meter
@@ -1592,3 +1596,59 @@ above are updated; the rest is stated here.
 12. **Without `data_dir`** the index and thumbnails live in a scratch
     directory for the run (removed when the core stops); edits and groups
     live in memory.
+
+## Clarifications from the implementation (C12, 2026-10-11)
+
+What building sound for recordings (MILESTONE-P.md, C12) settled where
+section 2a was silent. The Rust calls are `Core::sound_configure`,
+`sound_watch`, `recordings_loudness`, `sound_labels_put`, `sound_analyze_day`,
+`sound_analyze_cancel`, and `set_sound_day_source`; the C functions are F1 and
+F3.
+
+1. **Time is the device's local seconds**, like every other query: the live
+   meter's Unix seconds are converted with the `utc_offset_s` given to
+   `nv_recordings_enable`. Loudness is recorded only for enabled devices (the
+   offset and limits are theirs) and belongs to the camera's first lens, since
+   a microphone is not tied to a lens.
+2. **Storage and bounds.** One file per camera and day under
+   `data_dir/recordings/sound/<device>/` (`c<channel>l<lens>-YYYY-MM-DD.env`),
+   written atomically every 30 seconds and at shutdown, holding only the
+   stretches that have audio (a full day is 172.8 KB plus a header). The
+   limits are the index's `max_age_days` and `max_bytes`, per device; today is
+   never dropped to make room. Without `data_dir` it lives in memory under the
+   same limits.
+3. **`nv_recordings_loudness`**: `bucket_s` defaults to 60, `cameras` left out
+   means every camera with loudness, a camera of a device that is not enabled
+   gets a lane of `null`s, and at most 100000 buckets per lane
+   (`NV_ERR_LIMIT`). The answer's `revision` counts stored seconds, not index
+   changes. Peak is the loudest second of a bucket; RMS is the power mean of
+   its seconds that have audio.
+4. **Events with source `local_audio`** carry extra members in
+   `nv_recordings_events`: `analyzer`, and when known `label` and
+   `confidence` (0 to 1). They are stored beside the device's events of a
+   camera-day, so a device search never replaces them. In incidents, an
+   event's `source` says `local_audio` for them.
+5. **Alarm labels (`pattern-v1`)** are written when an episode starts (zero
+   length) and extended when it ends. When a tile takes over a channel from a
+   headless listener (or the reverse), the episode ends and a new one starts,
+   as it does between tiles, so one long alarm can be several labels.
+6. **`nv_sound_labels_put`** also returns how many days of the index changed
+   (Rust: `Ok(n)`); `pattern-v1` is reserved for the core; `kind` is lowercase
+   letters, digits, and underscores; the camera's device must be enabled for
+   recordings; at most 20000 labels and a 31-day range per call.
+7. **`nv_sound_watch`**: at most 64 cameras; the list is not stored by the core
+   (the app sends it at each launch); the device may be added later. `refused`
+   reasons are `no_audio` (30 s of video without audio), `device_closed`, and
+   `sound_off`. There is no stream limit counted yet.
+8. **Analyzing a recorded day (not in 2a's C list).** `sound_analyze_day`
+   `{"camera", "day"}` returns `{"request": N, "state": "queued"}` and
+   `sound_analyze` events follow (`{"type", "request", "camera", "day",
+   "state": "queued" | "running" | "done" | "failed" | "canceled"}`; `done` has
+   `seconds` and `labels`, `failed` a `reason`: `no_source`, `no_audio`,
+   `source_unavailable`, `not_enabled`, `index`, `internal`). At most 32
+   requests, one running per device; asking again for a queued camera-day
+   returns its request. The audio comes from a `DayAudioSource` the app or
+   the downloads set; none exists yet, so requests fail with `no_source` until
+   C10 or the downloads provide one. Proposed C surface for F3:
+   `nv_sound_analyze_day(core, json, out, cap, len)` and
+   `nv_sound_analyze_cancel(core, request)`.
