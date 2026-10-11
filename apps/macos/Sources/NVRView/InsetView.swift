@@ -70,13 +70,33 @@ protocol CallControlsDelegate: AnyObject {
 ///
 /// It takes clicks (a click swaps it with the stage) but never the keyboard
 /// focus, except its reply field when the user clicks into it.
+///
+/// The same view hosts a call in its own window (`Host.window`, docs/UX.md
+/// "A call in its own window"): it fills the window, a click does not swap,
+/// and its header has Pop In and the pin (on top) instead of Pop Out and
+/// the close control (the window's own close button ends the call).
 @MainActor
 final class InsetView: NSView, CallControlsDelegate {
     static let callHeight: CGFloat = 118
 
+    /// Where the view lives.
+    enum Host {
+        /// Over a viewer window's stage.
+        case stage
+        /// Filling a call window.
+        case window
+    }
+
+    let host: Host
     var onSwap: () -> Void = {}
     var onClose: () -> Void = {}
     var onHover: (Bool) -> Void = { _ in }
+    /// Pop Out (stage) for a call's inset; nil hides the button and item.
+    var onPopOut: (() -> Void)?
+    /// Pop In (window).
+    var onPopIn: () -> Void = {}
+    /// The pin turned on or off (window).
+    var onPin: (Bool) -> Void = { _ in }
     /// Holds the target strongly (it refers to the stage weakly).
     var callDelegate: CallControlsDelegate?
 
@@ -85,6 +105,10 @@ final class InsetView: NSView, CallControlsDelegate {
     private let title = NSTextField(labelWithString: "")
     private let name = NSTextField(labelWithString: "")
     private let close = NSButton()
+    /// Pop Out (stage) or Pop In (window).
+    private let pop = NSButton()
+    /// Keep the call window on top (window).
+    private let pin = NSButton()
     private let unmute = NSButton()
     let callPanel = CallPanelView()
     private var content: InsetContent?
@@ -95,12 +119,13 @@ final class InsetView: NSView, CallControlsDelegate {
     override var acceptsFirstResponder: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    init() {
+    init(host: Host = .stage) {
+        self.host = host
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = host == .stage ? 8 : 0
         layer?.masksToBounds = true
-        border.borderWidth = 3
+        border.borderWidth = host == .stage ? 3 : 0
         border.cornerRadius = 8
         header.wantsLayer = true
         header.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.72).cgColor
@@ -119,8 +144,31 @@ final class InsetView: NSView, CallControlsDelegate {
         close.action = #selector(closeClicked)
         close.toolTip = "Close (Esc)"
         close.refusesFirstResponder = true
+        close.isHidden = host == .window
+        let popSymbol = host == .stage ? "arrow.up.forward.app" : "arrow.down.backward.square"
+        let popTitle = host == .stage ? "Pop Out Call" : "Pop In Call"
+        pop.image = NSImage(systemSymbolName: popSymbol, accessibilityDescription: popTitle)
+        pop.isBordered = false
+        pop.imagePosition = .imageOnly
+        pop.contentTintColor = NSColor.white.withAlphaComponent(0.85)
+        pop.target = self
+        pop.action = #selector(popClicked)
+        pop.toolTip = host == .stage ? "Pop Out Call: open it in its own window" : "Pop In Call: back to the viewer windows"
+        pop.refusesFirstResponder = true
+        pop.isHidden = host == .stage
+        pin.isBordered = false
+        pin.imagePosition = .imageOnly
+        pin.setButtonType(.toggle)
+        pin.contentTintColor = NSColor.white.withAlphaComponent(0.85)
+        pin.target = self
+        pin.action = #selector(pinClicked)
+        pin.refusesFirstResponder = true
+        pin.isHidden = host == .stage
+        setPinned(true)
         header.addSubview(title)
         header.addSubview(name)
+        header.addSubview(pin)
+        header.addSubview(pop)
         header.addSubview(close)
         addSubview(header)
 
@@ -172,17 +220,34 @@ final class InsetView: NSView, CallControlsDelegate {
             callPanel.isHidden = true
             unmute.isHidden = true
         }
+        if host == .stage { pop.isHidden = c.call == nil || onPopOut == nil }
         needsLayout = true
     }
+
+    /// The pin's state (window): on top of other windows.
+    func setPinned(_ on: Bool) {
+        pin.state = on ? .on : .off
+        pin.image = NSImage(
+            systemSymbolName: on ? "pin.fill" : "pin.slash", accessibilityDescription: on ? "Keep on top: on" : "Keep on top: off")
+        pin.toolTip = on ? "On top of other windows (click to let it go behind)" : "Not on top (click to keep it on top)"
+    }
+
+    var isPinned: Bool { pin.state == .on }
 
     override func layout() {
         super.layout()
         let h = CGFloat(InsetGeometry.headerHeight)
         header.frame = CGRect(x: 0, y: 0, width: bounds.width, height: h)
-        close.frame = CGRect(x: bounds.width - 22, y: 3, width: 16, height: 16)
+        // The header's buttons from the right: close (stage) or the pin
+        // (window), then Pop Out or Pop In.
+        var right = bounds.width - 6
+        for button in [close, pin, pop] where !button.isHidden {
+            button.frame = CGRect(x: right - 16, y: 3, width: 16, height: 16)
+            right -= 22
+        }
         let nameWidth = min(ceil(name.intrinsicContentSize.width) + 8, bounds.width * 0.35)
-        name.frame = CGRect(x: bounds.width - 26 - nameWidth, y: 4, width: nameWidth, height: 14)
-        title.frame = CGRect(x: 8, y: 3, width: max(bounds.width - 40 - nameWidth, 0), height: 16)
+        name.frame = CGRect(x: right - nameWidth, y: 4, width: nameWidth, height: 14)
+        title.frame = CGRect(x: 8, y: 3, width: max(right - nameWidth - 12, 0), height: 16)
         unmute.frame = videoRect
         callPanel.frame = CGRect(x: 0, y: bounds.height - Self.callHeight, width: bounds.width, height: Self.callHeight)
         CATransaction.begin()
@@ -197,8 +262,22 @@ final class InsetView: NSView, CallControlsDelegate {
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         defer { downAt = nil }
-        guard let d = downAt, hypot(p.x - d.x, p.y - d.y) < 6, bounds.contains(p) else { return }
+        guard host == .stage, let d = downAt, hypot(p.x - d.x, p.y - d.y) < 6, bounds.contains(p) else { return }
         onSwap()
+    }
+
+    /// The inset's menu: Pop Out Call for a call's inset, Pop In Call in a
+    /// call window.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        switch host {
+        case .stage:
+            guard content?.call != nil, let popOut = onPopOut else { return nil }
+            menu.addItem(ClosureMenuItem(title: "Pop Out Call", action: popOut))
+        case .window:
+            menu.addItem(ClosureMenuItem(title: "Pop In Call") { [weak self] in self?.onPopIn() })
+        }
+        return menu
     }
 
     override func updateTrackingAreas() {
@@ -215,8 +294,22 @@ final class InsetView: NSView, CallControlsDelegate {
     @objc private func closeClicked() { onClose() }
     @objc private func unmuteClicked() { callDelegate?.callUnmute() }
 
+    @objc private func popClicked() {
+        switch host {
+        case .stage: onPopOut?()
+        case .window: onPopIn()
+        }
+    }
+
+    @objc private func pinClicked() {
+        setPinned(pin.state == .on)
+        onPin(pin.state == .on)
+    }
+
     /// The self-test clicks the Unmute control.
     var unmuteShown: Bool { !unmute.isHidden }
+    /// The self-test reads whether the header offers Pop Out or Pop In.
+    var popShown: Bool { !pop.isHidden }
 
     func callUnmute() { callDelegate?.callUnmute() }
     func callTalk(_ down: Bool) { callDelegate?.callTalk(down) }
@@ -300,6 +393,14 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ obj: Notification) { delegate?.callDraft(reply.stringValue) }
+
+    /// "Keep talking" shows on (self-test).
+    var keepTalkingShown: Bool { keep.state == .on }
+    /// What the reply field shows (self-test).
+    var replyText: String { reply.stringValue }
+    /// The reply field is being edited (Esc leaves it rather than ending
+    /// the call).
+    var isEditingReply: Bool { reply.currentEditor() != nil }
 
     override func layout() {
         super.layout()

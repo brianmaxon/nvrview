@@ -60,6 +60,15 @@ import VideoKit
 /// 14b. with `--fake`, "Start Conversation" opens the doorbell's call with no
 ///    press (audible, nothing sent by itself, Talk refused without the
 ///    permission) and ends through the close path;
+/// 14c. with `--fake`, a call popped out of two viewer windows' insets into
+///    its own window (behind the others, never key): the insets go from
+///    both, the window draws exactly the doorbell's tile, the call, its tap,
+///    a running "Keep talking" talk and its draft survive popping out and in
+///    (no talk stop or start), the leases and the stream demand follow, Pop
+///    In brings the insets back on top with a fresh minute; closing the
+///    window, Esc in it and a minute without activity end the call; the
+///    remembered frame is reused, and one off every screen falls back to the
+///    top right of the active screen;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -768,6 +777,246 @@ final class SelfTest {
         print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
         if !ended { problems.append("ending a conversation left its call or inset open") }
         if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
+        popOutStep(doorbell)
+    }
+
+    // MARK: Calls in their own windows (docs/UX.md "A call in its own window")
+
+    /// A press shown in two viewer windows' insets pops out into a call
+    /// window: the insets go from both, the window draws exactly the
+    /// doorbell's shared tile, and the call (tap, talk, leases) is untouched.
+    private func popOutStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake, let calls = app.callWindows,
+            let id = model.runtime(doorbell.device)?.deviceID,
+            let otherCamera = window.state.tree.cameras.first(where: { $0.firstLens != doorbell })
+        else { return smokeStep() }
+        // A second viewer window that does not show the doorbell either.
+        guard let second = app.openWindow(.scratch(name: "Second", root: .leaf(otherCamera))) else {
+            problems.append("could not open a second viewer window")
+            return smokeStep()
+        }
+        let stages = [window.stage, second.stage]
+        let baseline = model.leases.leaseCount(doorbell)
+        // parity: call-popout-open
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+        when({ model.calls.call(for: doorbell) != nil && stages.allSatisfy { !$0.shownInsetViews.isEmpty } }, timeout: 3) { [self] in
+            guard let before = model.calls.call(for: doorbell), let tile = model.leases.tile(for: doorbell) else {
+                problems.append("a press did not open the call in both viewer windows")
+                return finishPopOut(second)
+            }
+            let insetsBefore = stages.map { $0.shownInsetViews.count }
+            let leasesBefore = model.leases.leaseCount(doorbell)
+            let starts = fake.talkStarts
+            let popButtons = stages.allSatisfy { $0.shownInsetViews.first?.popShown == true }
+            model.popOutCall(doorbell)
+            guard let c = calls.controller(for: doorbell) else {
+                problems.append("Pop Out opened no call window")
+                return finishPopOut(second)
+            }
+            let gone = stages.allSatisfy { stage in
+                stage.shownInsetViews.isEmpty && stage.insetBoard.detachedCameras == [doorbell]
+                    && !stage.insetBoard.shown.contains { $0.camera == doorbell }
+            }
+            draw(c)
+            let drawn = c.grid.renderer.tiles
+            let exact = drawn.count == 1 && drawn.first.map { ObjectIdentifier($0.picture as AnyObject) } == ObjectIdentifier(tile)
+            let after = model.calls.call(for: doorbell)
+            let same = after?.startedAt == before.startedAt && after?.presses == before.presses
+                && after?.transcript == before.transcript && after?.presentation == .window
+            let tapped = model.calls.isTapped(doorbell) && fake.pumpAudio(tile: tile.id, count: 1) == 1
+            let leases = model.leases.leaseCount(doorbell)
+            let wantedLeases = leasesBefore - insetsBefore.reduce(0, +) + 1
+            let tier = model.leases.wantedTier(doorbell)
+            let tiers = model.leases.tiers(for: doorbell)
+            print(
+                "pop out: insets \(insetsBefore) -> gone \(gone), window draws the doorbell tile \(exact), same call \(same), "
+                    + "tapped \(tapped), leases \(leasesBefore) -> \(leases), main \(c.asksForMainStream) (wants \(tier.name))")
+            if !popButtons { problems.append("a call's inset did not offer Pop Out in its header") }
+            if !gone { problems.append("Pop Out left the call's inset in a viewer window") }
+            if !exact { problems.append("the call window does not draw exactly the doorbell's tile (\(drawn.count) tiles)") }
+            if !same { problems.append("Pop Out changed the call") }
+            if !tapped { problems.append("Pop Out stopped the doorbell's audio tap") }
+            if fake.talkStarts != starts { problems.append("Pop Out started talk-back") }
+            if leases != wantedLeases || model.leases.tile(for: doorbell) !== tile {
+                problems.append("Pop Out leases: \(leases), expected \(wantedLeases) on the same tile")
+            }
+            if tier != (c.asksForMainStream ? tiers.focus : tiers.grid) {
+                problems.append("the call window's stream demand did not reach the leases (\(tier.name))")
+            }
+            if c.window?.isKeyWindow == true || NSApp.isActive { problems.append("the call window took the focus in the self-test") }
+            popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
+        }
+    }
+
+    /// Lays out a call window and runs one display refresh's preparation
+    /// (a window behind the others gets few refreshes).
+    private func draw(_ c: CallWindowController) {
+        c.window?.contentView?.layoutSubtreeIfNeeded()
+        let scale = c.window?.backingScaleFactor ?? 1
+        let b = c.grid.bounds
+        c.grid.prepare?(c.grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
+    }
+
+    /// Talk with "Keep talking" and a typed draft survives popping in and
+    /// out again: no stop, no new start, the latch and the draft shown.
+    private func popOutTalkStep(
+        _ doorbell: CameraRef, tile: CoreTile, stages: [StageView], second: ViewerWindowController, baseline: Int
+    ) {
+        guard let model = app.model, let fake = model.fake, let calls = app.callWindows else { return finishPopOut(second) }
+        // parity: call-popout-talk
+        model.setAllowTalk(doorbell, true)
+        model.calls.setLatched(doorbell, true)
+        model.calls.setDraft(doorbell, "Be right there")
+        when({ model.calls.call(for: doorbell)?.talk.isActive == true }, timeout: 2) { [self] in
+            let starts = fake.talkStarts
+            model.popInCall(doorbell)
+            let insetsShow = stages.allSatisfy { stage in
+                stage.shownInsetViews.first.map { $0.callPanel.keepTalkingShown && $0.callPanel.replyText == "Be right there" } == true
+            }
+            model.popOutCall(doorbell)
+            let panel = calls.controller(for: doorbell)?.inset.callPanel
+            let windowShows = panel?.keepTalkingShown == true && panel?.replyText == "Be right there"
+            // Any stop or start would arrive as an event: give them a moment.
+            after(0.3) { [self] in
+                let call = model.calls.call(for: doorbell)
+                let kept = call?.talk.isActive == true && fake.isTalking(tile: tile.id) && fake.talkStarts == starts
+                print(
+                    "pop in and out while talking: talk kept \(kept), latch \(call?.latched == true), draft \(call?.draft ?? "-"), "
+                        + "insets show them \(insetsShow), window shows them \(windowShows)")
+                if !kept { problems.append("popping in and out stopped or restarted talk-back") }
+                if call?.latched != true || call?.draft != "Be right there" { problems.append("popping lost Keep talking or the draft") }
+                if !insetsShow { problems.append("the insets did not show Keep talking and the draft after Pop In") }
+                if !windowShows { problems.append("the call window did not show Keep talking and the draft") }
+                model.calls.setLatched(doorbell, false)
+                when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
+                    model.setAllowTalk(doorbell, false)
+                    model.calls.setDraft(doorbell, "")
+                    popInStep(doorbell, stages: stages, second: second, baseline: baseline)
+                }
+            }
+        }
+    }
+
+    /// Pop In: the window closes, every viewer window shows the inset again
+    /// on top with a fresh minute, and the leases follow.
+    private func popInStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
+        guard let model = app.model, let calls = app.callWindows else { return finishPopOut(second) }
+        // parity: call-popin
+        let panel = calls.controller(for: doorbell)?.window
+        let leasesBefore = model.leases.leaseCount(doorbell)
+        model.popInCall(doorbell)
+        let now = model.clock.now
+        let back = stages.allSatisfy { stage in
+            stage.insetBoard.shown.first?.camera == doorbell && stage.insetBoard.detachedCameras.isEmpty
+                && stage.shownInsetViews.first?.callPanel.isHidden == false
+                && stage.insetBoard.item(for: doorbell).flatMap(InsetBoard.closesAt).map { $0 >= now + InsetBoard.autoCloseDelay } == true
+        }
+        let leases = model.leases.leaseCount(doorbell)
+        let tiers = model.leases.tiers(for: doorbell)
+        let closed = calls.controller(for: doorbell) == nil && panel?.isVisible != true
+        print(
+            "pop in: window closed \(closed), insets back on top \(back), "
+                + "leases \(leasesBefore) -> \(leases), wants \(model.leases.wantedTier(doorbell).name)")
+        if !closed { problems.append("Pop In left the call window open") }
+        if !back { problems.append("Pop In did not bring the inset back on top, with a fresh minute, in every viewer window") }
+        if leases != leasesBefore - 1 + stages.count {
+            problems.append("Pop In leases: \(leases), expected \(leasesBefore - 1 + stages.count)")
+        }
+        if model.leases.wantedTier(doorbell) != tiers.grid { problems.append("the closed call window's stream demand stayed") }
+        popOutEndStep(doorbell, stages: stages, second: second, baseline: baseline)
+    }
+
+    /// Closing the call window, Esc in it, and a minute without activity
+    /// end the call and close the window; the viewer windows keep nothing.
+    private func popOutEndStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
+        guard let model = app.model, let calls = app.callWindows, let window else { return finishPopOut(second) }
+        // parity: call-popout-end
+        func ended(_ how: String) {
+            let clean = model.calls.call(for: doorbell) == nil && calls.controller(for: doorbell) == nil
+                && stages.allSatisfy { $0.insetBoard.items.isEmpty } && model.leases.leaseCount(doorbell) == baseline
+            print("call window \(how): call ended and window closed \(clean), leases \(model.leases.leaseCount(doorbell))")
+            if !clean { problems.append("\(how) did not end the call, close its window and let its insets and leases go") }
+        }
+        // The close button (and Cmd-W): performClose.
+        model.popOutCall(doorbell)
+        let first = calls.controller(for: doorbell)?.window
+        first?.performClose(nil)
+        if first?.isVisible == true { problems.append("the closed call window is still visible") }
+        ended("closed")
+        // Esc while the reply field is not being edited.
+        window.stage.startConversation(doorbell)
+        model.popOutCall(doorbell)
+        if let panel = calls.controller(for: doorbell)?.window,
+            let esc = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+                isARepeat: false, keyCode: ViewerKeys.escape)
+        {
+            panel.sendEvent(esc)
+        }
+        ended("Esc")
+        // A minute without activity, on the manual clock.
+        window.stage.startConversation(doorbell)
+        model.popOutCall(doorbell)
+        advance(DoorbellCall.idleTimeout - 1)
+        let stayed = calls.controller(for: doorbell) != nil
+        advance(2)
+        if !stayed { problems.append("the call window closed before a minute without activity") }
+        ended("expiry")
+        callWindowFrameStep(doorbell, second: second)
+    }
+
+    /// The remembered frame is reused; one whose screen is gone falls back
+    /// to the top right of the active viewer window's screen.
+    private func callWindowFrameStep(_ doorbell: CameraRef, second: ViewerWindowController) {
+        guard let model = app.model, let calls = app.callWindows, let window,
+            let screen = window.window?.screen ?? NSScreen.screens.first
+        else { return finishPopOut(second) }
+        // parity: call-window-frame
+        let visible = CallWindows.topLeft(screen.visibleFrame)
+        let remembered = WindowRect(x: visible.x + 40, y: visible.y + 60, width: 400, height: 360)
+        calls.placementMode = .remembered
+        calls.rememberedFrame = remembered
+        window.stage.startConversation(doorbell)
+        model.popOutCall(doorbell)
+        let reused = calls.controller(for: doorbell)?.window.map { CallWindows.topLeft($0.frame) }
+        // The user moves it: that frame is remembered.
+        if let panel = calls.controller(for: doorbell)?.window {
+            panel.setFrameOrigin(NSPoint(x: panel.frame.minX + 30, y: panel.frame.minY - 20))
+        }
+        let moved = calls.rememberedFrame
+        model.calls.end(doorbell, reason: "closed")
+        // A frame on a screen that is gone.
+        calls.rememberedFrame = WindowRect(x: -100_000, y: -100_000, width: 400, height: 360)
+        window.stage.startConversation(doorbell)
+        model.popOutCall(doorbell)
+        let fallback = calls.controller(for: doorbell)?.window.map { CallWindows.topLeft($0.frame) }
+        let m = CallWindowPlacement.margin
+        let topRight = WindowRect(x: visible.maxX - m - 400, y: visible.minY + m, width: 400, height: 360)
+        model.calls.end(doorbell, reason: "closed")
+        func near(_ a: WindowRect?, _ b: WindowRect) -> Bool {
+            guard let a else { return false }
+            return abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5 && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
+        }
+        let movedTo = WindowRect(x: remembered.x + 30, y: remembered.y + 20, width: 400, height: 360)
+        print(
+            "call window frame: remembered reused \(near(reused, remembered)), move remembered \(near(moved, movedTo)), "
+                + "gone screen -> top right of the active screen \(near(fallback, topRight))")
+        if !near(reused, remembered) {
+            problems.append("the call window did not open at the remembered frame: \(String(describing: reused))")
+        }
+        if !near(moved, movedTo) { problems.append("moving the call window did not remember its frame: \(String(describing: moved))") }
+        if !near(fallback, topRight) {
+            problems.append("a remembered frame off every screen did not fall back to the top right: \(String(describing: fallback))")
+        }
+        finishPopOut(second)
+    }
+
+    private func finishPopOut(_ second: ViewerWindowController) {
+        app.model?.calls.endAll()
+        // The throwaway suite with the frame and pin goes.
+        app.callWindows?.defaults.removePersistentDomain(forName: AppDelegate.selfTestDefaults)
+        second.close()
         smokeStep()
     }
 

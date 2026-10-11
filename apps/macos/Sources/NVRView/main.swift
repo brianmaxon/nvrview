@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let options: Options
     private(set) var model: AppModel?
     private(set) var windows: [ViewerWindowController] = []
+    /// Calls shown in their own windows (not viewer windows).
+    private(set) var callWindows: CallWindows?
     private var settings: SettingsWindowController?
     /// With `--selftest`: AppKit's warnings on standard error, counted.
     let logWatch: LogWatch?
@@ -47,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         self.model = model
         model.openWindow = { [weak self] content in self?.openWindow(content) }
+        startCallWindows(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         startUpdater(model)
         if options.fake { seedFakeLayouts(model) }
@@ -61,6 +64,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if model.devices.isEmpty { showSettings(nil) }
         }
         if let seconds = options.selfTestSeconds { SelfTest(app: self).start(seconds: seconds) }
+    }
+
+    // MARK: Call windows
+
+    /// Calls in their own windows (docs/UX.md "A call in its own window").
+    /// The self-test remembers their frame and pin in a throwaway suite.
+    private func startCallWindows(_ model: AppModel) {
+        let test = options.selfTestSeconds != nil
+        let defaults: UserDefaults
+        if test, let suite = UserDefaults(suiteName: Self.selfTestDefaults) {
+            suite.removePersistentDomain(forName: Self.selfTestDefaults)
+            defaults = suite
+        } else {
+            defaults = .standard
+        }
+        let calls = CallWindows(model: model, defaults: defaults, keepsBehind: test)
+        calls.activeScreen = { [weak self] in self?.activeViewerWindow?.window?.screen ?? NSScreen.screens.first }
+        model.popOutCall = { [weak calls] camera in calls?.popOut(camera) }
+        model.popInCall = { [weak calls] camera in calls?.popIn(camera) }
+        callWindows = calls
+    }
+
+    static let selfTestDefaults = "nvrview-selftest"
+
+    /// The key viewer window, else the main one, else the first.
+    var activeViewerWindow: ViewerWindowController? {
+        windows.first { $0.window?.isKeyWindow == true } ?? windows.first { $0.window?.isMainWindow == true } ?? windows.first
     }
 
     // MARK: Updates
@@ -211,6 +241,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let self else { return }
             windows.removeAll { $0 === c }
             if !terminating { saveWindows() }
+            // Call windows are not viewer windows: with the last viewer
+            // window their calls end (and their windows close), so the app
+            // quits as before.
+            if windows.isEmpty, !terminating { model.calls.endAll() }
         }
         controller.onChange = { [weak self] in self?.scheduleSaveWindows() }
         windows.append(controller)

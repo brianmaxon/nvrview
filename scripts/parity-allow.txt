@@ -58,6 +58,11 @@ alert-inset-smoke-stays     macos    gap: Windows has no alert insets, so a smok
 alert-inset-swap            macos    gap: Windows has no alert insets to swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
+call-popin                  macos    gap: Windows has no call window yet (docs/UX.md "A call in its own window")
+call-popout-end             macos    gap: Windows has no call window yet, so closing, Esc and expiry do not close one
+call-popout-open            macos    gap: Windows has no call window yet to pop a call out into
+call-popout-talk            macos    gap: Windows has no call window yet; talk, latch and draft across a pop are unchecked
+call-window-frame           macos    gap: Windows has no call window yet, so no remembered frame or top-right fallback
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
