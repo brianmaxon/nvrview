@@ -616,6 +616,7 @@ dependencies = [
  "mp4-remux",
  "serde",
  "serde_json",
+ "sound-events",
  "tempfile",
  "tokio",
  "tracing",
