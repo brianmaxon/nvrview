@@ -3,7 +3,7 @@
 // corner that holds the tiles' indicators, and whether the sidebar hides
 // offline channels, and the mount of each fisheye camera (docs/UX.md
 // "Fisheye cameras"; only those not on the default ceiling mount). Written
-// whole and atomically;
+// whole and atomically; the cameras the user allowed talk-back to (docs/UX.md "Doorbell calls");
 // unreadable or missing reads as the defaults. Memory only when file is null.
 
 using System.Text.Json;
@@ -24,6 +24,9 @@ internal sealed class ViewSettingsFile
 
     /// <summary>Fisheye mounts other than ceiling, by camera ("deviceKey:channel"): "wall" or "desk".</summary>
     public Dictionary<string, string>? FisheyeMounts { get; set; }
+
+    /// <summary>Cameras the user allowed talk-back to ("deviceKey:channel"); camera motion control, off unless listed.</summary>
+    public List<string>? TalkAllowed { get; set; }
 }
 
 [JsonSerializable(typeof(ViewSettingsFile))]
@@ -36,6 +39,7 @@ internal sealed class ViewSettings(string? file)
     private bool _hideOffline = true;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
+    private HashSet<string> _talkAllowed = [];
 
     private static string MountKey(CameraRef camera) => $"{camera.Device}:{camera.Channel}";
 
@@ -61,6 +65,25 @@ internal sealed class ViewSettings(string? file)
         else
         {
             _mounts[MountKey(camera)] = mount.Name();
+        }
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Talk-back to a camera (a channel's, whatever the lens) is allowed. Camera motion control: off unless the user turned it on.</summary>
+    public bool TalkAllowed(CameraRef camera)
+    {
+        Load();
+        return _talkAllowed.Contains(MountKey(camera));
+    }
+
+    /// <summary>Allows or forbids talk-back to a camera (saved).</summary>
+    public void SetTalkAllowed(CameraRef camera, bool allowed)
+    {
+        Load();
+        if (allowed ? !_talkAllowed.Add(MountKey(camera)) : !_talkAllowed.Remove(MountKey(camera)))
+        {
+            return;
         }
         Save();
         Changed?.Invoke();
@@ -128,6 +151,7 @@ internal sealed class ViewSettings(string? file)
             _corner = ChromeCorners.Parse(read?.IndicatorCorner);
             _hideOffline = read?.HideOfflineChannels ?? true;
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
+            _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
@@ -152,6 +176,7 @@ internal sealed class ViewSettings(string? file)
                     IndicatorCorner = _corner.Name(),
                     HideOfflineChannels = _hideOffline,
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
+                    TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
                 }, ViewSettingsJson.Default.ViewSettingsFile);
                 s.Flush(flushToDisk: true);
             }

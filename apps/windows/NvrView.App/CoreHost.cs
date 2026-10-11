@@ -37,6 +37,7 @@ internal sealed class CoreEvent
     public int Status;
     public int Attempt;
     public long RetryMs;
+    public long SentMs;
     public long Generation = -1;
     public long Ns;
     public long AtNs;
@@ -97,6 +98,7 @@ internal sealed class CoreEvent
                 case "status" when v.ValueKind == JsonValueKind.Number: e.Status = (int)Long(v); break;
                 case "attempt" when v.ValueKind == JsonValueKind.Number: e.Attempt = (int)Long(v); break;
                 case "retry_ms" when v.ValueKind == JsonValueKind.Number: e.RetryMs = Long(v); break;
+                case "sent_ms" when v.ValueKind == JsonValueKind.Number: e.SentMs = Long(v); break;
                 case "generation" when v.ValueKind == JsonValueKind.Number: e.Generation = Long(v); break;
                 case "at_ns" when v.ValueKind == JsonValueKind.Number: e.AtNs = Long(v); break;
                 case "ns" when v.ValueKind == JsonValueKind.Number: e.Ns = Long(v); break;
@@ -347,6 +349,14 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
             _gate.ExitReadLock();
         }
     }
+
+    /// <summary>Where the tapped audio of a call goes (its transcription), by tile.</summary>
+    public TapRouter Taps { get; } = new();
+
+    public override void OnAudioTap(NvCore core, ulong tile, in NvAudioBlock block) => Taps.Deliver(tile, in block);
+
+    /// <summary>Runs <paramref name="action"/> on the UI thread.</summary>
+    public void Post(Action action) => _ = _ui.TryEnqueue(() => action());
 
     public override void OnEvent(NvCore core, ReadOnlySpan<byte> json)
     {

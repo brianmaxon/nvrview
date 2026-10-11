@@ -85,6 +85,7 @@ internal sealed partial class StageView : UserControl
         MaxWidth = 520,
     };
     private readonly Border _help;
+    private readonly CallStack _calls;
     private readonly List<TileChrome> _chromes = [];
     private readonly List<Rectangle> _outlines = [];
     private readonly DispatcherQueueTimerHolder _timer;
@@ -162,6 +163,7 @@ internal sealed partial class StageView : UserControl
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
+                    "Right-click > Start conversation   captions, Talk, and a typed reply",
                     "Ctrl+E                       edit the layout (drag dividers and tiles)",
                     "Delete                       remove the selected tile while editing",
                     "Ctrl+N                       new window",
@@ -170,6 +172,8 @@ internal sealed partial class StageView : UserControl
                     "F1                           this list"),
             },
         };
+        _calls = new CallStack(viewer);
+        root.Children.Add(_calls);
         root.Children.Add(_help);
         Content = root;
 
@@ -181,6 +185,7 @@ internal sealed partial class StageView : UserControl
         };
         _panel.CompositionScaleChanged += (_, _) => PushSize();
         _viewer.Changed += RefreshAll;
+        _viewer.CallsChanged += _calls.Sync;
         _viewer.Leases.TileChanged += OnTileChanged;
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
@@ -194,6 +199,9 @@ internal sealed partial class StageView : UserControl
 
     /// <summary>The window's arrangement.</summary>
     public WindowState State { get; }
+
+    /// <summary>The call cards over the stage (self-test).</summary>
+    public CallStack CallCards => _calls;
 
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
@@ -904,6 +912,7 @@ internal sealed partial class StageView : UserControl
         {
             Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the grid" : "Focus", () => ToggleFocus(t), !State.Editing);
             Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
+            AddConversationItems(menu, camera);
             Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
             menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
             if (_viewer.IsFisheye(camera))
@@ -968,6 +977,37 @@ internal sealed partial class StageView : UserControl
         Item(menu.Items, "Settings…", () => SettingsRequested?.Invoke());
         menu.ShowAt(this, at);
         e.Handled = true;
+    }
+
+    // ---- conversations (docs/UX.md "Doorbell calls") ----
+
+    /// <summary>
+    /// Start (or end) a conversation with the camera: the call's captions, Talk, and typed reply with
+    /// no doorbell press. Offered on every camera, because the core learns whether a camera has a
+    /// speaker only when talk-back starts; the call then says so. Allow talk-back is the user's
+    /// permission for the camera's speaker (camera motion control, off by default).
+    /// </summary>
+    internal void AddConversationItems(MenuFlyout menu, CameraRef camera)
+    {
+        bool open = _viewer.Calls.CallFor(camera) is not null;
+        var conversation = new MenuFlyoutItem { Text = open ? "End conversation" : "Start conversation" };
+        conversation.Click += (_, _) =>
+        {
+            if (open)
+            {
+                _viewer.Calls.End(camera, "closed");
+            }
+            else
+            {
+                _viewer.Calls.StartConversation(camera);
+            }
+        };
+        ToolTipService.SetToolTip(conversation, "Captions of what the camera hears, Talk, and typed replies spoken through its speaker");
+        menu.Items.Add(conversation);
+        var allow = new ToggleMenuFlyoutItem { Text = "Allow talk-back", IsChecked = _viewer.Settings.TalkAllowed(camera) };
+        allow.Click += (_, _) => _viewer.SetTalkAllowed(camera, allow.IsChecked);
+        ToolTipService.SetToolTip(allow, "Lets Talk and typed replies play through this camera's speaker. Off until you allow it; every use is logged.");
+        menu.Items.Add(allow);
     }
 
     // ---- fisheye views (docs/UX.md "Fisheye cameras") ----
@@ -1578,6 +1618,7 @@ internal sealed partial class StageView : UserControl
         }
         _timer.Stop();
         _viewer.Changed -= RefreshAll;
+        _viewer.CallsChanged -= _calls.Sync;
         _viewer.IndicatorsChanged -= SyncOverlays;
         _viewer.Settings.Changed -= SyncOverlays;
         _viewer.Leases.TileChanged -= OnTileChanged;
