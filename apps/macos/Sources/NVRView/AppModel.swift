@@ -234,7 +234,7 @@ final class AppModel {
         self.groupFile = groupFile
         self.cameraFile = cameraFile
         target.model = self
-        calls = DoorbellCalls(model: self, services: callServices ?? .system(), taps: taps)
+        calls = DoorbellCalls(model: self, services: callServices ?? .system(player: { [weak self] in self?.player }), taps: taps)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
             return info.tiers.contains("extern") && !info.isMultiLens
