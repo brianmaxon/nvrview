@@ -717,6 +717,9 @@ internal sealed partial class StageView : UserControl
         Point p = e.GetCurrentPoint(this).Position;
         GestureKind gesture = _gesture;
         StageTile? turned = _panTile;
+        // Read before releasing: losing capture resets the gesture state.
+        bool dragged = _dragging;
+        NodePath dragFrom = _gesturePath;
         _gesture = GestureKind.None;
         _panTile = null;
         ReleasePointerCapture(e.Pointer);
@@ -728,11 +731,11 @@ internal sealed partial class StageView : UserControl
             case GestureKind.Divider:
                 Edited?.Invoke(State.Tree);
                 break;
-            case GestureKind.TileDrag when _dragging:
+            case GestureKind.TileDrag when dragged:
                 SetDropTarget(null);
-                if (_frames.LeafAt(p.X, p.Y)?.Path is { } to && to != _gesturePath)
+                if (_frames.LeafAt(p.X, p.Y)?.Path is { } to && to != dragFrom)
                 {
-                    Swap(_gesturePath, to);
+                    Swap(dragFrom, to);
                 }
                 break;
         }
