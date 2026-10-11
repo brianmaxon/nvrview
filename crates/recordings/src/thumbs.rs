@@ -435,27 +435,8 @@ pub async fn cover_thumbnail(
     if hit.is_some() {
         return Ok(hit);
     }
-    let image = session
-        .cover_image(&CoverRequest {
-            channel: key.channel,
-            uid,
-            stream: key.stream,
-            start: date_time(key.start),
-            end: date_time(key.end),
-        })
-        .await?;
-    let Some(image) = image else {
+    let Some(thumb) = fetch_cover(session, key, uid).await? else {
         return Ok(None);
-    };
-    let thumb = Thumbnail {
-        kind: match image.codec {
-            bc_protocol::media::Codec::H264 => ThumbKind::H264Keyframe,
-            bc_protocol::media::Codec::H265 => ThumbKind::H265Keyframe,
-        },
-        width: image.width,
-        height: image.height,
-        pts_us: image.pts_us,
-        data: image.keyframe,
     };
     if let Err(e) = cache
         .lock()
@@ -465,6 +446,34 @@ pub async fn cover_thumbnail(
         warn!(error = %e, "could not cache a cover thumbnail");
     }
     Ok(Some(thumb))
+}
+
+/// Fetches the cover image of `key` from the device (command 298), without
+/// the cache. `None` when the device has no recording in the range.
+pub async fn fetch_cover(
+    session: &DeviceSession,
+    key: &ThumbKey,
+    uid: Option<String>,
+) -> Result<Option<Thumbnail>, SearchError> {
+    let image = session
+        .cover_image(&CoverRequest {
+            channel: key.channel,
+            uid,
+            stream: key.stream,
+            start: date_time(key.start),
+            end: date_time(key.end),
+        })
+        .await?;
+    Ok(image.map(|image| Thumbnail {
+        kind: match image.codec {
+            bc_protocol::media::Codec::H264 => ThumbKind::H264Keyframe,
+            bc_protocol::media::Codec::H265 => ThumbKind::H265Keyframe,
+        },
+        width: image.width,
+        height: image.height,
+        pts_us: image.pts_us,
+        data: image.keyframe,
+    }))
 }
 
 #[cfg(test)]

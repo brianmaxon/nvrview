@@ -9,7 +9,11 @@
 //!   timeout; the download is stopped with 144), loses its connection, or
 //!   fails otherwise is retried after a growing delay, up to
 //!   [`SchedulerConfig::max_attempts`] times; then the camera job is marked
-//!   failed and can be retried with [`Scheduler::retry`].
+//!   failed with a [`FailReason`] and can be retried with
+//!   [`Scheduler::retry`] or [`Scheduler::retry_camera`]. While the device
+//!   is not connected, or not added ([`Scheduler::remove_device`]), or its
+//!   login was refused, camera jobs wait (`waiting_device` in the progress)
+//!   without spending attempts.
 //! - **Resume.** Chunk completion is recorded in the job file after every
 //!   chunk, so work always resumes at the first missing chunk; completed
 //!   chunks are never fetched again, after a failure, a pause, or an app
@@ -37,9 +41,11 @@ use crate::{Secs, date_time};
 use bc_protocol::archive::DownloadRequest;
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, Download, DownloadError, DownloadEvent, SearchError};
+use bc_session::{
+    ConnState, DeviceSession, Download, DownloadError, DownloadEvent, QueryError, SearchError,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -121,10 +127,95 @@ pub struct CameraSource {
     pub stream: StreamTier,
 }
 
+/// Why a camera job gave up (docs/FFI-RECORDINGS.md, "Downloads").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailReason {
+    /// Nothing arrived for the stall timeout, attempt after attempt.
+    Stalled,
+    /// The connection or the session ended during the download.
+    SessionClosed,
+    /// The device answered with an error.
+    Refused,
+    /// The range held no video.
+    NoRecording,
+    /// The chunks could not be written (disk full or not writable).
+    WriteFailed,
+    /// The chunks could not be joined into the output file (for example a
+    /// codec change inside the range).
+    JoinFailed,
+    /// The device refused the login.
+    LoginFailed,
+    /// Anything else (and failures recorded before reasons were kept).
+    Other,
+}
+
+impl FailReason {
+    /// The reason's name in the C interface.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FailReason::Stalled => "stalled",
+            FailReason::SessionClosed => "session_closed",
+            FailReason::Refused => "refused",
+            FailReason::NoRecording => "no_recording",
+            FailReason::WriteFailed => "write_failed",
+            FailReason::JoinFailed => "join_failed",
+            FailReason::LoginFailed => "login_failed",
+            FailReason::Other => "other",
+        }
+    }
+}
+
+/// A camera job's failure: the reason, and English detail for logs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "FailureRepr")]
+pub struct Failure {
+    /// Why.
+    pub reason: FailReason,
+    /// English detail, for logs and diagnostics, not for parsing.
+    pub detail: String,
+}
+
+impl Failure {
+    fn new(reason: FailReason, detail: impl Into<String>) -> Failure {
+        Failure {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.reason.name(), self.detail)
+    }
+}
+
+/// How a failure is read back: job files written before reasons were kept
+/// hold only the text.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FailureRepr {
+    Full { reason: FailReason, detail: String },
+    Text(String),
+}
+
+impl From<FailureRepr> for Failure {
+    fn from(r: FailureRepr) -> Failure {
+        match r {
+            FailureRepr::Full { reason, detail } => Failure { reason, detail },
+            FailureRepr::Text(detail) => Failure {
+                reason: FailReason::Other,
+                detail,
+            },
+        }
+    }
+}
+
 /// State of one camera job.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CameraState {
-    /// Waiting for a worker.
+    /// Waiting for a worker (or for its device).
     Queued,
     /// Downloading.
     Running,
@@ -132,8 +223,8 @@ pub enum CameraState {
     ChunksComplete,
     /// The final file is written.
     Done,
-    /// Gave up; the reason. [`Scheduler::retry`] queues it again.
-    Failed(String),
+    /// Gave up. [`Scheduler::retry`] queues it again.
+    Failed(Failure),
 }
 
 /// One chunk of a camera job.
@@ -149,6 +240,10 @@ pub struct ChunkState {
     pub bytes: u64,
     /// Attempts made.
     pub attempts: u32,
+    /// Video frames in the complete chunk (`None` when not recorded, as in
+    /// job files written before this was kept).
+    #[serde(default)]
+    pub video_frames: Option<u32>,
 }
 
 /// One camera's part of an incident download, as persisted.
@@ -174,6 +269,14 @@ pub struct CameraJob {
     pub chunks: Vec<ChunkState>,
     /// State.
     pub state: CameraState,
+    /// Paused by the user (this camera only).
+    #[serde(default)]
+    pub paused: bool,
+    /// When its first picture was taken, in ms on the keyframes' wall
+    /// clock ([`crate::recorded_time`]; whether that clock is local or UTC
+    /// is still open), once every chunk is on disk.
+    #[serde(default)]
+    pub first_picture_wall_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,8 +300,17 @@ pub struct CameraProgress {
     pub chunks_total: usize,
     /// Payload bytes written.
     pub bytes: u64,
+    /// `bytes` plus the device's size estimate of the chunk being
+    /// downloaded, when the device sent one.
+    pub bytes_estimate: Option<u64>,
     /// State.
     pub state: CameraState,
+    /// Paused by the user (this camera only; see also the incident's).
+    pub paused: bool,
+    /// Queued or running, but its device is not added or not connected.
+    pub waiting_device: bool,
+    /// See [`CameraJob::first_picture_wall_ms`].
+    pub first_picture_wall_ms: Option<i64>,
     /// The final file's path.
     pub output: PathBuf,
 }
@@ -256,11 +368,52 @@ impl fmt::Display for ChunkError {
     }
 }
 
+impl ChunkError {
+    /// The reason a camera job reports when this error ends it.
+    fn reason(&self) -> FailReason {
+        match self {
+            ChunkError::Download(DownloadError::Stalled) => FailReason::Stalled,
+            ChunkError::Download(
+                DownloadError::ConnectionLost | DownloadError::Closed | DownloadError::Cancelled,
+            ) => FailReason::SessionClosed,
+            ChunkError::Download(DownloadError::Refused(_) | DownloadError::NotAllowed) => {
+                FailReason::Refused
+            }
+            // The chunk writer fell behind the device.
+            ChunkError::Download(DownloadError::Overflow) => FailReason::WriteFailed,
+            ChunkError::Download(DownloadError::BadMedia | DownloadError::Busy) => {
+                FailReason::Other
+            }
+            ChunkError::Start(SearchError::Query(q)) => match q {
+                QueryError::Closed | QueryError::ConnectionLost => FailReason::SessionClosed,
+                QueryError::TimedOut => FailReason::Stalled,
+                QueryError::NotAllowed => FailReason::Refused,
+                QueryError::Busy => FailReason::Other,
+            },
+            ChunkError::Start(SearchError::Refused(_)) => FailReason::Refused,
+            ChunkError::Start(_) => FailReason::Other,
+            ChunkError::Io(_) => FailReason::WriteFailed,
+            ChunkError::Interrupted => FailReason::Other,
+        }
+    }
+}
+
+/// What a camera job is doing right now (not persisted).
+#[derive(Clone, Copy, Debug, Default)]
+struct Live {
+    /// A worker has it.
+    running: bool,
+    /// Its worker waits for the device to connect.
+    waiting: bool,
+    /// The device's size estimate of the chunk being downloaded.
+    estimate: Option<u64>,
+}
+
 struct Job {
     seq: u64,
     folder: PathBuf,
     file: JobFile,
-    running: Vec<bool>,
+    live: Vec<Live>,
     /// Bumped on every change to `file`; see [`JobSave`].
     version: u64,
     /// The version last written to disk.
@@ -272,11 +425,15 @@ impl Job {
         Job {
             seq,
             folder,
-            running: vec![false; file.cameras.len()],
+            live: vec![Live::default(); file.cameras.len()],
             file,
             version: 0,
             saved: Arc::new(Mutex::new(0)),
         }
+    }
+
+    fn any_running(&self) -> bool {
+        self.live.iter().any(|l| l.running)
     }
 
     fn parts_root(&self) -> PathBuf {
@@ -341,7 +498,14 @@ struct Inner {
     changed: Notify,
     progress: watch::Sender<Vec<IncidentProgress>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    /// Devices whose workers run (they stay, idle, after the device is
+    /// removed, and serve it again when it is added back).
+    staffed: Mutex<HashSet<String>>,
 }
+
+/// Most downloads the scheduler knows at once ([`Scheduler::forget`]
+/// finished ones).
+pub const MAX_DOWNLOADS: usize = 1000;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -380,8 +544,26 @@ pub fn chunk_windows(start: Secs, end: Secs, chunk: Secs) -> Vec<(Secs, Secs)> {
     out
 }
 
+/// Queues a failed camera job again with fresh attempts; true if it had
+/// failed.
+fn retry_failed(c: &mut CameraJob) -> bool {
+    if !matches!(c.state, CameraState::Failed(_)) {
+        return false;
+    }
+    c.state = CameraState::Queued;
+    for ch in &mut c.chunks {
+        ch.attempts = 0;
+    }
+    true
+}
+
 fn slug(c: &CameraId) -> String {
-    naming::sanitize(&format!("{}-ch{:02}", c.device, c.channel)).replace(' ', "_")
+    let base = if c.lens == 0 {
+        format!("{}-ch{:02}", c.device, c.channel)
+    } else {
+        format!("{}-ch{:02}-lens{}", c.device, c.channel, c.lens)
+    };
+    naming::sanitize(&base).replace(' ', "_")
 }
 
 impl Scheduler {
@@ -399,16 +581,18 @@ impl Scheduler {
                 changed: Notify::new(),
                 progress,
                 workers: Mutex::new(Vec::new()),
+                staffed: Mutex::new(HashSet::new()),
             }),
         }
     }
 
-    /// Makes a device's session available and starts its workers. Jobs of
-    /// devices that were never added wait.
+    /// Makes a device's session available (or replaces it, for example
+    /// after a refused login, with one that has new credentials) and starts
+    /// its workers. Jobs of devices that are not added wait
+    /// (`waiting_device`).
     pub fn add_device(&self, device: &str, session: Arc<DeviceSession>) {
-        let new = lock(&self.inner.devices)
-            .insert(device.to_owned(), session)
-            .is_none();
+        lock(&self.inner.devices).insert(device.to_owned(), session);
+        let new = lock(&self.inner.staffed).insert(device.to_owned());
         if new {
             let mut w = lock(&self.inner.workers);
             for _ in 0..self.inner.cfg.per_device.max(1) {
@@ -417,7 +601,19 @@ impl Scheduler {
                 w.push(tokio::spawn(device_worker(inner, dev)));
             }
         }
+        self.inner.publish();
         self.inner.changed.notify_waiters();
+    }
+
+    /// Takes a device's session away (the device was removed). Its running
+    /// chunks are stopped (144) and its camera jobs wait until the device
+    /// is added again; completed chunks are kept. The scheduler holds no
+    /// reference to the session once its running chunks have stopped.
+    pub fn remove_device(&self, device: &str) {
+        let removed = lock(&self.inner.devices).remove(device);
+        self.inner.publish();
+        self.inner.changed.notify_waiters();
+        drop(removed);
     }
 
     /// Progress of every known incident download, updated on every change.
@@ -444,6 +640,11 @@ impl Scheduler {
             let st = lock(&self.inner.state);
             if let Some(j) = st.jobs.get(&inc.id) {
                 return Ok(j.folder.clone());
+            }
+            if st.jobs.len() >= MAX_DOWNLOADS {
+                return Err(io::Error::other(
+                    "too many downloads known; forget finished ones",
+                ));
             }
         }
         let source = |c: &CameraId| req.cameras.iter().find(|s| &s.camera == c);
@@ -495,9 +696,12 @@ impl Scheduler {
                             done: false,
                             bytes: 0,
                             attempts: 0,
+                            video_frames: None,
                         })
                         .collect(),
                     state: CameraState::Queued,
+                    paused: false,
+                    first_picture_wall_ms: None,
                 })
             })
             .collect();
@@ -548,8 +752,15 @@ impl Scheduler {
         found.sort_by_key(|(_, j)| j.incident.start());
         let mut n = 0;
         for (folder, mut j) in found {
-            if lock(&self.inner.state).jobs.contains_key(&j.incident.id) {
-                continue;
+            {
+                let st = lock(&self.inner.state);
+                if st.jobs.contains_key(&j.incident.id) {
+                    continue;
+                }
+                if st.jobs.len() >= MAX_DOWNLOADS {
+                    warn!("too many unfinished downloads; the oldest are resumed first");
+                    break;
+                }
             }
             for cam in &mut j.cameras {
                 let dir = folder.join(PARTS_DIR).join(&cam.parts);
@@ -611,21 +822,41 @@ impl Scheduler {
         Ok(found)
     }
 
-    /// Queues an incident's failed camera jobs again with fresh attempts.
-    pub fn retry(&self, incident: &str) -> io::Result<bool> {
+    /// Pauses or resumes one camera of an incident download. A running
+    /// chunk is stopped (144) and fetched again on resume. `Ok(false)` if
+    /// the incident or the camera is unknown.
+    pub fn set_camera_paused(
+        &self,
+        incident: &str,
+        camera: &CameraId,
+        paused: bool,
+    ) -> io::Result<bool> {
+        self.edit_cameras(incident, |c| {
+            if &c.camera == camera {
+                c.paused = paused;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Applies `f` to every camera job of an incident and saves the job;
+    /// `Ok(false)` if the incident is unknown or `f` matched no camera.
+    fn edit_cameras(
+        &self,
+        incident: &str,
+        mut f: impl FnMut(&mut CameraJob) -> bool,
+    ) -> io::Result<bool> {
         let save = {
             let mut st = lock(&self.inner.state);
             match st.jobs.get_mut(incident) {
                 Some(j) => {
+                    let mut any = false;
                     for c in &mut j.file.cameras {
-                        if matches!(c.state, CameraState::Failed(_)) {
-                            c.state = CameraState::Queued;
-                            for ch in &mut c.chunks {
-                                ch.attempts = 0;
-                            }
-                        }
+                        any |= f(c);
                     }
-                    Some(j.snapshot()?)
+                    if any { Some(j.snapshot()?) } else { None }
                 }
                 None => None,
             }
@@ -639,21 +870,44 @@ impl Scheduler {
         Ok(found)
     }
 
-    /// Forgets a download that has no camera job running (its files stay
-    /// on disk). Apps call it for finished incidents the user dismissed, so
+    /// Queues an incident's failed camera jobs again with fresh attempts.
+    pub fn retry(&self, incident: &str) -> io::Result<bool> {
+        self.edit_cameras(incident, retry_failed)?;
+        Ok(lock(&self.inner.state).jobs.contains_key(incident))
+    }
+
+    /// Queues one failed camera job again with fresh attempts. `Ok(false)`
+    /// if the incident or camera is unknown, or the camera had not failed.
+    pub fn retry_camera(&self, incident: &str, camera: &CameraId) -> io::Result<bool> {
+        self.edit_cameras(incident, |c| &c.camera == camera && retry_failed(c))
+    }
+
+    /// Forgets a download that has no camera job running (pause it first);
+    /// `Ok(false)` if it is unknown or still running. Its finished files
+    /// and `incident.json` are the user's and stay; with `delete_partial`,
+    /// its parts folder (raw chunks and the job file) is removed, so it can
+    /// no longer resume. Apps call it for downloads the user dismissed, so
     /// the in-memory list stays bounded.
-    pub fn forget(&self, incident: &str) -> bool {
+    pub fn forget(&self, incident: &str, delete_partial: bool) -> io::Result<bool> {
         let removed = {
             let mut st = lock(&self.inner.state);
             match st.jobs.get(incident) {
-                Some(j) if !j.running.iter().any(|r| *r) => st.jobs.remove(incident).is_some(),
-                _ => false,
+                Some(j) if !j.any_running() => st.jobs.remove(incident),
+                _ => None,
             }
         };
-        if removed {
-            self.inner.publish();
+        let Some(job) = removed else {
+            return Ok(false);
+        };
+        self.inner.publish();
+        if delete_partial {
+            match fs::remove_dir_all(job.parts_root()) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
-        removed
+        Ok(true)
     }
 
     /// Waits until `f` holds for the progress list.
@@ -677,6 +931,12 @@ impl Scheduler {
 
 impl Inner {
     fn publish(&self) {
+        // Which devices can download now (taken before the state lock; the
+        // two locks are never held together).
+        let ready: HashMap<String, bool> = lock(&self.devices)
+            .iter()
+            .map(|(d, s)| (d.clone(), s.state() == ConnState::Connected))
+            .collect();
         let list = {
             let st = lock(&self.state);
             let mut jobs: Vec<&Job> = st.jobs.values().collect();
@@ -690,14 +950,26 @@ impl Inner {
                         .file
                         .cameras
                         .iter()
-                        .map(|c| CameraProgress {
-                            camera: c.camera.clone(),
-                            name: c.name.clone(),
-                            chunks_done: c.chunks.iter().filter(|x| x.done).count(),
-                            chunks_total: c.chunks.len(),
-                            bytes: c.chunks.iter().map(|x| x.bytes).sum(),
-                            state: c.state.clone(),
-                            output: j.folder.join(&c.file),
+                        .zip(&j.live)
+                        .map(|(c, live)| {
+                            let bytes = c.chunks.iter().map(|x| x.bytes).sum();
+                            let active =
+                                matches!(c.state, CameraState::Queued | CameraState::Running);
+                            let device_ready =
+                                ready.get(&c.camera.device).copied().unwrap_or(false);
+                            CameraProgress {
+                                camera: c.camera.clone(),
+                                name: c.name.clone(),
+                                chunks_done: c.chunks.iter().filter(|x| x.done).count(),
+                                chunks_total: c.chunks.len(),
+                                bytes,
+                                bytes_estimate: live.estimate.map(|e| bytes + e),
+                                state: c.state.clone(),
+                                paused: c.paused,
+                                waiting_device: active && (!device_ready || live.waiting),
+                                first_picture_wall_ms: c.first_picture_wall_ms,
+                                output: j.folder.join(&c.file),
+                            }
                         })
                         .collect(),
                 })
@@ -706,18 +978,30 @@ impl Inner {
         self.progress.send_replace(list);
     }
 
-    fn interrupted(&self, incident: &str) -> bool {
+    /// Whether a camera job must stop: shutting down, forgotten, paused
+    /// (the incident or the camera), or its device removed or given a new
+    /// session since the worker took `session`.
+    fn interrupted(&self, slot: &JobRef, session: &Arc<DeviceSession>) -> bool {
+        let current = lock(&self.devices).get(&slot.device).cloned();
+        if !current.is_some_and(|s| Arc::ptr_eq(&s, session)) {
+            return true;
+        }
         let st = lock(&self.state);
-        st.shutdown || st.jobs.get(incident).is_none_or(|j| j.file.paused)
+        st.shutdown
+            || st.jobs.get(&slot.incident).is_none_or(|j| {
+                j.file.paused || j.file.cameras.get(slot.cam).is_none_or(|c| c.paused)
+            })
     }
 
     /// Updates a camera job and saves the job file (on a blocking thread).
-    async fn update(&self, incident: &str, cam: usize, f: impl FnOnce(&mut CameraJob, &mut bool)) {
+    async fn update(&self, slot: &JobRef, f: impl FnOnce(&mut CameraJob, &mut Live)) {
         let save = {
             let mut st = lock(&self.state);
-            st.jobs.get_mut(incident).map(|j| {
-                if let (Some(c), Some(r)) = (j.file.cameras.get_mut(cam), j.running.get_mut(cam)) {
-                    f(c, r);
+            st.jobs.get_mut(&slot.incident).map(|j| {
+                if let (Some(c), Some(l)) =
+                    (j.file.cameras.get_mut(slot.cam), j.live.get_mut(slot.cam))
+                {
+                    f(c, l);
                 }
                 j.snapshot()
             })
@@ -733,12 +1017,33 @@ impl Inner {
         // Published once saved, so what the progress shows is on disk.
         self.publish();
     }
+
+    /// Changes what a camera job is doing right now (nothing to save).
+    fn set_live(&self, slot: &JobRef, f: impl FnOnce(&mut Live)) {
+        {
+            let mut st = lock(&self.state);
+            if let Some(l) = st
+                .jobs
+                .get_mut(&slot.incident)
+                .and_then(|j| j.live.get_mut(slot.cam))
+            {
+                f(l);
+            }
+        }
+        self.publish();
+    }
+}
+
+/// Which camera job a worker has.
+struct JobRef {
+    incident: String,
+    cam: usize,
+    device: String,
 }
 
 /// A camera job picked by a worker.
 struct Picked {
-    incident: String,
-    cam: usize,
+    slot: JobRef,
     job: CameraJob,
     parts_dir: PathBuf,
     output: PathBuf,
@@ -758,16 +1063,19 @@ fn pick(inner: &Inner, device: &str) -> Option<Picked> {
                 CameraState::ChunksComplete => inner.finalizer.is_some(),
                 _ => false,
             };
-            if !pickable || j.running[i] || c.camera.device != device {
+            if !pickable || c.paused || j.live[i].running || c.camera.device != device {
                 continue;
             }
-            j.running[i] = true;
+            j.live[i].running = true;
             if c.state == CameraState::Queued {
                 c.state = CameraState::Running;
             }
             return Some(Picked {
-                incident: j.file.incident.id.clone(),
-                cam: i,
+                slot: JobRef {
+                    incident: j.file.incident.id.clone(),
+                    cam: i,
+                    device: device.to_owned(),
+                },
                 job: c.clone(),
                 parts_dir: j.folder.join(PARTS_DIR).join(&c.parts),
                 output: j.folder.join(&c.file),
@@ -775,6 +1083,11 @@ fn pick(inner: &Inner, device: &str) -> Option<Picked> {
         }
     }
     None
+}
+
+/// Whether a session can still connect (not refused, not closed).
+fn usable(s: &DeviceSession) -> bool {
+    !matches!(s.state(), ConnState::LoginFailed { .. } | ConnState::Closed)
 }
 
 async fn device_worker(inner: Arc<Inner>, device: String) {
@@ -786,25 +1099,43 @@ async fn device_worker(inner: Arc<Inner>, device: String) {
             return;
         }
         let session = lock(&inner.devices).get(&device).cloned();
-        let picked = session.as_ref().and_then(|_| pick(&inner, &device));
+        let picked = session
+            .as_ref()
+            .filter(|s| usable(s))
+            .and_then(|_| pick(&inner, &device));
         match (session, picked) {
             (Some(session), Some(p)) => {
                 inner.publish();
                 run_camera(&inner, &session, p).await;
             }
-            _ => notified.await,
+            (Some(session), None) => {
+                // Connection changes show in `waiting_device`. (A new
+                // receiver would report the last change at once.)
+                let mut state = session.watch_state();
+                state.borrow_and_update();
+                tokio::select! {
+                    _ = &mut notified => {}
+                    _ = state.changed() => inner.publish(),
+                }
+            }
+            (None, _) => notified.await,
         }
     }
 }
 
 /// Sleeps `d`, returning early (true) when the job is interrupted.
-async fn sleep_or_interrupt(inner: &Inner, incident: &str, d: Duration) -> bool {
+async fn sleep_or_interrupt(
+    inner: &Inner,
+    slot: &JobRef,
+    session: &Arc<DeviceSession>,
+    d: Duration,
+) -> bool {
     let deadline = tokio::time::Instant::now() + d;
     loop {
         let notified = inner.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if inner.interrupted(incident) {
+        if inner.interrupted(slot, session) {
             return true;
         }
         tokio::select! {
@@ -814,25 +1145,77 @@ async fn sleep_or_interrupt(inner: &Inner, incident: &str, d: Duration) -> bool 
     }
 }
 
-async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
+/// How waiting for the device ended.
+enum Connection {
+    Up,
+    Interrupted,
+    /// Login refused or session closed: the device must be added again.
+    Ended,
+}
+
+/// Waits until the session is connected, without spending attempts, so a
+/// device that is offline for a while does not fail its downloads.
+async fn wait_connected(inner: &Inner, slot: &JobRef, session: &Arc<DeviceSession>) -> Connection {
+    let mut state = session.watch_state();
+    state.borrow_and_update();
+    let mut waiting = false;
+    let outcome = loop {
+        let notified = inner.changed.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if inner.interrupted(slot, session) {
+            break Connection::Interrupted;
+        }
+        match session.state() {
+            ConnState::Connected => break Connection::Up,
+            ConnState::LoginFailed { .. } | ConnState::Closed => break Connection::Ended,
+            ConnState::Connecting | ConnState::Backoff { .. } => {}
+        }
+        if !waiting {
+            waiting = true;
+            inner.set_live(slot, |l| l.waiting = true);
+        }
+        tokio::select! {
+            _ = state.changed() => {}
+            _ = notified => {}
+        }
+    };
+    if waiting {
+        inner.set_live(slot, |l| l.waiting = false);
+    }
+    outcome
+}
+
+/// Puts a camera job back in the queue (it is picked again when it can
+/// run).
+async fn requeue(inner: &Inner, slot: &JobRef) {
+    inner
+        .update(slot, |c, l| {
+            *l = Live::default();
+            if c.state == CameraState::Running {
+                c.state = CameraState::Queued;
+            }
+        })
+        .await;
+}
+
+async fn run_camera(inner: &Arc<Inner>, session: &Arc<DeviceSession>, p: Picked) {
+    let slot = &p.slot;
     let stream = StreamTier::from_name(&p.job.stream).unwrap_or(StreamTier::Main);
     let mut job = p.job.clone();
+    let max = inner.cfg.max_attempts;
     for i in 0..job.chunks.len() {
         if job.chunks[i].done {
             continue;
         }
         let mut delay = inner.cfg.retry_delay;
         loop {
-            if inner.interrupted(&p.incident) {
-                inner
-                    .update(&p.incident, p.cam, |c, r| {
-                        *r = false;
-                        if c.state == CameraState::Running {
-                            c.state = CameraState::Queued;
-                        }
-                    })
-                    .await;
-                return;
+            match wait_connected(inner, slot, session).await {
+                Connection::Up => {}
+                Connection::Interrupted | Connection::Ended => {
+                    requeue(inner, slot).await;
+                    return;
+                }
             }
             job.chunks[i].attempts += 1;
             let attempts = job.chunks[i].attempts;
@@ -844,27 +1227,20 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
                 start: date_time(ch.start),
                 end: date_time(ch.end),
             };
-            match fetch_chunk(
-                inner,
-                session,
-                &p.incident,
-                &req,
-                &p.parts_dir,
-                i as u32,
-                &ch,
-            )
-            .await
-            {
+            let result = fetch_chunk(inner, session, slot, &req, &p.parts_dir, i as u32, &ch).await;
+            inner.set_live(slot, |l| l.estimate = None);
+            match result {
                 Ok(idx) => {
-                    job.chunks[i].done = true;
-                    job.chunks[i].bytes = idx.bytes;
-                    let (bytes, attempts) = (idx.bytes, job.chunks[i].attempts);
+                    let frames = u32::try_from(idx.video.len()).unwrap_or(u32::MAX);
+                    let c = &mut job.chunks[i];
+                    c.done = true;
+                    c.bytes = idx.bytes;
+                    c.video_frames = Some(frames);
+                    let done = c.clone();
                     inner
-                        .update(&p.incident, p.cam, |c, _| {
+                        .update(slot, |c, _| {
                             if let Some(x) = c.chunks.get_mut(i) {
-                                x.done = true;
-                                x.bytes = bytes;
-                                x.attempts = attempts;
+                                *x = done;
                             }
                         })
                         .await;
@@ -877,37 +1253,66 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
                 Err(e) => {
                     debug!(chunk = i, attempts, error = %e, "chunk failed");
                     inner
-                        .update(&p.incident, p.cam, |c, _| {
+                        .update(slot, |c, _| {
                             if let Some(x) = c.chunks.get_mut(i) {
                                 x.attempts = attempts;
                             }
                         })
                         .await;
-                    if attempts >= inner.cfg.max_attempts {
+                    if attempts >= max {
                         warn!(chunk = i, attempts, error = %e, "camera download failed");
-                        let reason = format!("chunk {i}: {e}");
+                        let failure = Failure::new(
+                            e.reason(),
+                            format!("chunk {i}: {e} (attempt {attempts} of {max})"),
+                        );
                         inner
-                            .update(&p.incident, p.cam, |c, r| {
-                                *r = false;
-                                c.state = CameraState::Failed(reason);
+                            .update(slot, |c, l| {
+                                *l = Live::default();
+                                c.state = CameraState::Failed(failure);
                             })
                             .await;
                         return;
                     }
-                    sleep_or_interrupt(inner, &p.incident, delay).await;
+                    sleep_or_interrupt(inner, slot, session, delay).await;
                     delay = (delay * 2).min(inner.cfg.max_retry_delay);
                 }
             }
         }
     }
+    // Every window answered with no picture: nothing to join.
+    if job.chunks.iter().all(|c| c.video_frames == Some(0)) {
+        inner
+            .update(slot, |c, l| {
+                *l = Live::default();
+                c.state = CameraState::Failed(Failure::new(
+                    FailReason::NoRecording,
+                    "the device sent no video for the range",
+                ));
+            })
+            .await;
+        return;
+    }
+    let (dir, n) = (p.parts_dir.clone(), job.chunks.len() as u32);
+    let first =
+        tokio::task::spawn_blocking(move || crate::recorded_time::first_picture_wall_ms(&dir, n))
+            .await;
+    let first = match first {
+        Ok(Ok(t)) => t,
+        Ok(Err(e)) => {
+            warn!(error = %e, "cannot read the chunk indexes");
+            None
+        }
+        Err(_) => None,
+    };
     inner
-        .update(&p.incident, p.cam, |c, _| {
-            c.state = CameraState::ChunksComplete
+        .update(slot, |c, _| {
+            c.state = CameraState::ChunksComplete;
+            c.first_picture_wall_ms = first;
         })
         .await;
     // The final MP4 step, when a finalizer is installed.
     let Some(fin) = inner.finalizer.clone() else {
-        inner.update(&p.incident, p.cam, |_, r| *r = false).await;
+        inner.update(slot, |_, l| *l = Live::default()).await;
         return;
     };
     let (dir, out, n) = (
@@ -917,12 +1322,22 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
     );
     let result = tokio::task::spawn_blocking(move || fin.finalize(&dir, n, &out)).await;
     inner
-        .update(&p.incident, p.cam, |c, r| {
-            *r = false;
+        .update(slot, |c, l| {
+            *l = Live::default();
             c.state = match result {
                 Ok(Ok(())) => CameraState::Done,
-                Ok(Err(e)) => CameraState::Failed(format!("finalize: {e}")),
-                Err(e) => CameraState::Failed(format!("finalize: {e}")),
+                // The muxer reports content it cannot join as InvalidData;
+                // anything else is the disk.
+                Ok(Err(e)) if e.kind() == io::ErrorKind::InvalidData => CameraState::Failed(
+                    Failure::new(FailReason::JoinFailed, format!("finalize: {e}")),
+                ),
+                Ok(Err(e)) => CameraState::Failed(Failure::new(
+                    FailReason::WriteFailed,
+                    format!("finalize: {e}"),
+                )),
+                Err(e) => {
+                    CameraState::Failed(Failure::new(FailReason::Other, format!("finalize: {e}")))
+                }
             };
         })
         .await;
@@ -930,11 +1345,10 @@ async fn run_camera(inner: &Arc<Inner>, session: &DeviceSession, p: Picked) {
 
 /// Downloads one chunk into its files. Stops the download (144) when it
 /// stalls or the job is interrupted.
-#[allow(clippy::too_many_arguments)]
 async fn fetch_chunk(
     inner: &Inner,
-    session: &DeviceSession,
-    incident: &str,
+    session: &Arc<DeviceSession>,
+    slot: &JobRef,
     req: &DownloadRequest,
     dir: &Path,
     n: u32,
@@ -942,10 +1356,10 @@ async fn fetch_chunk(
 ) -> Result<ChunkIndex, ChunkError> {
     let dl = tokio::select! {
         r = session.download(req) => r.map_err(ChunkError::Start)?,
-        _ = wait_interrupted(inner, incident) => return Err(ChunkError::Interrupted),
+        _ = wait_interrupted(inner, slot, session) => return Err(ChunkError::Interrupted),
     };
     let mut w = BlockingChunk::start(dir, n, ch.start, ch.end);
-    match receive(inner, incident, dl, &mut w).await {
+    match receive(inner, slot, session, dl, &mut w).await {
         Ok(()) => w.finish().await.map_err(ChunkError::Io),
         Err(e) => {
             // Stopped (and its files removed) before returning, so the next
@@ -963,14 +1377,15 @@ async fn fetch_chunk(
 /// (`Ok`) or fails.
 async fn receive(
     inner: &Inner,
-    incident: &str,
+    slot: &JobRef,
+    session: &Arc<DeviceSession>,
     mut dl: Download,
     w: &mut BlockingChunk,
 ) -> Result<(), ChunkError> {
     loop {
         let next = tokio::select! {
             r = dl.next() => r,
-            _ = wait_interrupted(inner, incident) => {
+            _ = wait_interrupted(inner, slot, session) => {
                 dl.cancel(inner.cfg.cancel_timeout).await;
                 return Err(ChunkError::Interrupted);
             }
@@ -983,7 +1398,7 @@ async fn receive(
                     return Err(ChunkError::Io(io::Error::other("chunk writer stopped")));
                 }
             }
-            Ok(Some(DownloadEvent::Estimate(_))) => {}
+            Ok(Some(DownloadEvent::Estimate(n))) => inner.set_live(slot, |l| l.estimate = Some(n)),
             Ok(None) => return Ok(()),
             Err(DownloadError::Stalled) => {
                 dl.cancel(inner.cfg.cancel_timeout).await;
@@ -1108,12 +1523,12 @@ impl BlockingChunk {
 }
 
 /// Resolves once the job is paused, removed, or the scheduler shuts down.
-async fn wait_interrupted(inner: &Inner, incident: &str) {
+async fn wait_interrupted(inner: &Inner, slot: &JobRef, session: &Arc<DeviceSession>) {
     loop {
         let notified = inner.changed.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        if inner.interrupted(incident) {
+        if inner.interrupted(slot, session) {
             return;
         }
         notified.await;
@@ -1123,6 +1538,29 @@ async fn wait_interrupted(inner: &Inner, incident: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failures_round_trip_and_old_job_files_still_load() {
+        let old: CameraState =
+            serde_json::from_str(r#"{"Failed":"chunk 2: download stalled"}"#).unwrap();
+        assert_eq!(
+            old,
+            CameraState::Failed(Failure::new(FailReason::Other, "chunk 2: download stalled"))
+        );
+        let new = CameraState::Failed(Failure::new(FailReason::Stalled, "no data"));
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(
+            json,
+            r#"{"Failed":{"reason":"stalled","detail":"no data"}}"#
+        );
+        assert_eq!(serde_json::from_str::<CameraState>(&json).unwrap(), new);
+        // A chunk and a camera job written before video_frames and paused.
+        let c: ChunkState =
+            serde_json::from_str(r#"{"start":0,"end":10,"done":true,"bytes":5,"attempts":1}"#)
+                .unwrap();
+        assert_eq!(c.video_frames, None);
+        assert_eq!(FailReason::NoRecording.name(), "no_recording");
+    }
 
     #[test]
     fn windows_cover_the_range_and_touch() {

@@ -10,7 +10,7 @@ use crate::Shared;
 use crate::supervisor::{Build, DeviceSession, QueryError, Reply, Request, TransferReq};
 use bc_protocol::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DayRecords, DownloadRequest, Element,
-    EventRecord, EventSearch, FileSearch, RecordFile,
+    EventRecord, EventSearch, FileSearch, PlayRequest, RecordFile,
 };
 use bc_protocol::media::{Codec, Record};
 use bc_protocol::xml::XmlError;
@@ -47,6 +47,7 @@ pub(crate) fn parse_channel_uids(xml: &str) -> HashMap<u8, String> {
 pub(crate) enum TransferKind {
     Download,
     Cover,
+    Play,
 }
 
 /// What the supervisor hands a transfer's owner.
@@ -65,16 +66,16 @@ pub(crate) enum TransferItem {
 }
 
 #[derive(Default)]
-struct SinkState {
+pub(crate) struct SinkState {
     items: VecDeque<TransferItem>,
     bytes: usize,
     /// No more items will be accepted (ended, failed, or overflowed).
-    done: bool,
+    pub(crate) done: bool,
     /// The supervisor stopped the transfer (sent 144 for a download).
-    stopped: bool,
+    pub(crate) stopped: bool,
     /// Ended by an overflow or bad media: the supervisor will stop it.
-    stop_pending: bool,
-    id: Option<u32>,
+    pub(crate) stop_pending: bool,
+    pub(crate) id: Option<u32>,
 }
 
 /// The queue between the supervisor and a transfer's owner. Bounded in
@@ -82,7 +83,7 @@ struct SinkState {
 /// blocked (blocking would stall live view on the same connection).
 pub(crate) struct TransferSink {
     state: Mutex<SinkState>,
-    notify: Notify,
+    pub(crate) notify: Notify,
     cancelled: AtomicBool,
     max_bytes: usize,
 }
@@ -104,7 +105,7 @@ impl TransferSink {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, SinkState> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, SinkState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -112,7 +113,7 @@ impl TransferSink {
         self.cancelled.load(Ordering::SeqCst)
     }
 
-    fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 
@@ -175,7 +176,7 @@ impl TransferSink {
     }
 
     /// The next item, waiting until `deadline`; `None` on timeout.
-    async fn next(&self, deadline: Instant) -> Option<TransferItem> {
+    pub(crate) async fn next(&self, deadline: Instant) -> Option<TransferItem> {
         loop {
             let notified = self.notify.notified();
             if let Some(i) = self.pop() {
@@ -302,7 +303,7 @@ impl fmt::Display for DownloadError {
 
 impl std::error::Error for DownloadError {}
 
-fn item_error(i: &TransferItem) -> DownloadError {
+pub(crate) fn item_error(i: &TransferItem) -> DownloadError {
     match i {
         TransferItem::ConnectionLost => DownloadError::ConnectionLost,
         TransferItem::Closed => DownloadError::Closed,
@@ -580,15 +581,29 @@ impl DeviceSession {
         kind: TransferKind,
         build: Build,
     ) -> Result<Arc<TransferSink>, SearchError> {
+        self.transfer_with(kind, build, None, self.download_buffer_bytes)
+            .await
+    }
+
+    /// Like [`DeviceSession::transfer`], with what a play's stop needs and
+    /// a buffer size of its own.
+    pub(crate) async fn transfer_with(
+        &self,
+        kind: TransferKind,
+        build: Build,
+        play: Option<PlayRequest>,
+        buffer: usize,
+    ) -> Result<Arc<TransferSink>, SearchError> {
         if self.shared.is_closing() {
             return Err(SearchError::Query(QueryError::Closed));
         }
-        let sink = Arc::new(TransferSink::new(self.download_buffer_bytes));
+        let sink = Arc::new(TransferSink::new(buffer));
         self.cmd_tx
             .send(Request::Transfer(TransferReq {
                 kind,
                 build,
                 sink: sink.clone(),
+                play,
             }))
             .await
             .map_err(|_| SearchError::Query(QueryError::Closed))?;

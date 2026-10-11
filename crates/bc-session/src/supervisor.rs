@@ -6,7 +6,7 @@ use crate::config::{Jitter, SessionConfig};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::talk::{TalkControl, TalkLimits, TalkReq, Talks};
 use crate::transport::Connector;
-use bc_protocol::archive;
+use bc_protocol::archive::{self, PlayRequest};
 use bc_protocol::detection::{self, AlarmState};
 use bc_protocol::framer::Decoder;
 use bc_protocol::media::{Demuxer, Record};
@@ -163,6 +163,8 @@ pub(crate) struct TransferReq {
     pub(crate) kind: TransferKind,
     pub(crate) build: Build,
     pub(crate) sink: Arc<TransferSink>,
+    /// For a play: what its stop (7) names.
+    pub(crate) play: Option<PlayRequest>,
 }
 
 pub(crate) enum Request {
@@ -194,6 +196,12 @@ pub struct DeviceSession {
     pub(crate) download_permits: Arc<Semaphore>,
     pub(crate) download_stall_timeout: Duration,
     pub(crate) download_buffer_bytes: usize,
+    /// Plays in progress at once.
+    pub(crate) play_permits: Arc<Semaphore>,
+    pub(crate) play_stall_timeout: Duration,
+    pub(crate) play_buffer_bytes: usize,
+    /// The next play's replay `seq`.
+    pub(crate) play_seq: std::sync::atomic::AtomicU32,
     /// Talk-back permissions and rate limit.
     pub(crate) talk_control: Arc<TalkControl>,
     pub(crate) talk_starts_per_minute: u32,
@@ -220,6 +228,16 @@ impl DeviceSession {
         let download_permits = Arc::new(Semaphore::new(config.max_downloads.max(1)));
         let download_stall_timeout = config.download_stall_timeout;
         let download_buffer_bytes = config.download_buffer_bytes;
+        let play_permits = Arc::new(Semaphore::new(config.max_plays.max(1)));
+        let play_stall_timeout = config.play_stall_timeout;
+        let play_buffer_bytes = config.play_buffer_bytes;
+        // The official client chose increasing seq numbers close to the
+        // current Unix time (protocol.md, "Playback"); so does this.
+        let play_seq = std::sync::atomic::AtomicU32::new(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_secs() as u32),
+        );
         let talk_control = Arc::new(TalkControl::new());
         let talk_starts_per_minute = config.talk_starts_per_minute;
         let talk_buffer = config.talk_buffer;
@@ -262,6 +280,10 @@ impl DeviceSession {
             download_permits,
             download_stall_timeout,
             download_buffer_bytes,
+            play_permits,
+            play_stall_timeout,
+            play_buffer_bytes,
+            play_seq,
             talk_control,
             talk_starts_per_minute,
             talk_buffer,
@@ -618,6 +640,8 @@ impl Queries {
 struct ActiveTransfer {
     kind: TransferKind,
     sink: Arc<TransferSink>,
+    /// For a play: what its stop (7) names.
+    play: Option<PlayRequest>,
     demux: Demuxer,
     /// The sink refused data (overflow) or the media was corrupt: stop it.
     abort: bool,
@@ -984,17 +1008,27 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             break;
         }
     }
-    // Stop running downloads first (144), so the device stops sending.
-    let downloads: Vec<u32> = c.session.active_downloads().collect();
-    for id in downloads {
-        if let Ok(bytes) = c.session.stop_download(id)
-            && c.send(&bytes).await.is_err()
-        {
+    // Stop running downloads (144) and plays (7) first, so the device
+    // stops sending.
+    let running: Vec<u32> = ctx
+        .transfers
+        .active
+        .iter()
+        .filter(|(_, t)| matches!(t.kind, TransferKind::Download | TransferKind::Play))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in running {
+        let Some(t) = ctx.transfers.active.remove(&id) else {
+            continue;
+        };
+        let sent = match stop_bytes(&mut c.session, id, &t) {
+            Some(bytes) => c.send(&bytes).await.is_ok(),
+            None => true,
+        };
+        t.sink.mark_stopped();
+        t.sink.fail(TransferItem::Closed);
+        if !sent {
             break;
-        }
-        if let Some(t) = ctx.transfers.active.remove(&id) {
-            t.sink.mark_stopped();
-            t.sink.fail(TransferItem::Closed);
         }
     }
     let ids: Vec<u32> = c.session.active_previews().collect();
@@ -1170,14 +1204,9 @@ async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let Some(t) = ctx.transfers.active.remove(&id) else {
             continue;
         };
-        if t.kind == TransferKind::Download {
-            match c.session.stop_download(id) {
-                Ok(bytes) => {
-                    c.send(&bytes).await?;
-                    debug!(id, "download stopped");
-                }
-                Err(e) => debug!(%e, "stop_download failed"),
-            }
+        if let Some(bytes) = stop_bytes(&mut c.session, id, &t) {
+            c.send(&bytes).await?;
+            debug!(id, "transfer stopped");
         }
         t.sink.mark_stopped();
         t.sink.fail(TransferItem::Cancelled);
@@ -1195,6 +1224,7 @@ async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     ActiveTransfer {
                         kind: t.kind,
                         sink: t.sink,
+                        play: t.play,
                         demux: Demuxer::new(),
                         abort: false,
                     },
@@ -1208,6 +1238,23 @@ async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
     }
     Ok(())
+}
+
+/// The stop of a running transfer: 144 for a download, 7 for a play,
+/// nothing for a cover image (it ends by itself).
+fn stop_bytes(session: &mut Session, id: u32, t: &ActiveTransfer) -> Option<Vec<u8>> {
+    let r = match (t.kind, &t.play) {
+        (TransferKind::Download, _) => session.stop_download(id),
+        (TransferKind::Play, Some(q)) => session.stop_play(id, q),
+        _ => return None,
+    };
+    match r {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            debug!(%e, "transfer stop not built");
+            None
+        }
+    }
 }
 
 /// Opens, feeds, and closes talks (see [`Talks::poll`]).

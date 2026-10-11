@@ -13,25 +13,51 @@
 //! [`Incident::add_camera`], [`Incident::remove_camera`], and renaming
 //! through [`Incident::name`].
 
-use crate::Secs;
+use crate::{DeviceCamera, Secs};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A camera: a channel of a device.
+/// A camera: one lens of a channel of a device.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CameraId {
     /// The app's identifier of the device.
     pub device: String,
     /// Channel on that device.
     pub channel: u8,
+    /// Lens of a multi-lens camera: 0 for the first (and usually only)
+    /// lens, 1 for the second. Missing in files written before lenses were
+    /// tracked, which were all first lenses.
+    #[serde(default)]
+    pub lens: u8,
 }
 
 impl CameraId {
-    /// A camera.
+    /// The first lens of a channel.
     pub fn new(device: impl Into<String>, channel: u8) -> CameraId {
+        CameraId::with_lens(device, channel, 0)
+    }
+
+    /// One lens of a channel.
+    pub fn with_lens(device: impl Into<String>, channel: u8, lens: u8) -> CameraId {
         CameraId {
             device: device.into(),
             channel,
+            lens,
+        }
+    }
+
+    /// The camera as its device knows it.
+    pub fn local(&self) -> DeviceCamera {
+        DeviceCamera::new(self.channel, self.lens)
+    }
+
+    /// `device:channel`, plus `:lens` for a second lens only, so that
+    /// identifiers made before lenses were tracked stay the same.
+    pub(crate) fn tag(&self) -> String {
+        if self.lens == 0 {
+            format!("{}:{}", self.device, self.channel)
+        } else {
+            format!("{}:{}:{}", self.device, self.channel, self.lens)
         }
     }
 }
@@ -82,8 +108,10 @@ impl Default for GroupingConfig {
 /// An incident.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Incident {
-    /// Stable identifier, derived from the group, the cameras, and the
-    /// first start and last end (an incident still growing gets a new one).
+    /// Content identifier, derived from the group, the cameras, and the
+    /// first start and last end (an incident still growing gets a new one);
+    /// it names the download folder. [`Incident::key`] stays the same while
+    /// the incident grows.
     pub id: String,
     /// The user's name for it, if renamed.
     pub name: Option<String>,
@@ -138,18 +166,44 @@ impl Incident {
         inc
     }
 
-    fn compute_id(&self) -> String {
-        let cams: Vec<String> = self
-            .cameras()
-            .iter()
-            .map(|c| format!("{}:{}", c.device, c.channel))
-            .collect();
+    pub(crate) fn compute_id(&self) -> String {
+        let cams: Vec<String> = self.cameras().iter().map(CameraId::tag).collect();
         let mut parts: Vec<&str> = vec![self.group.as_deref().unwrap_or("")];
         parts.extend(cams.iter().map(String::as_str));
         let (start, end) = (self.start().to_string(), self.end().to_string());
         parts.push(&start);
         parts.push(&end);
         format!("{}-{:016x}", self.start(), fnv(&parts))
+    }
+
+    /// An identifier that stays the same while the incident grows: from its
+    /// group and its earliest event (start, then the lowest camera), so
+    /// later events joining it do not change it, unlike [`Incident::id`].
+    /// The user's edits refer to incidents by this key. Format:
+    /// `i-<start>-<device>-<channel>-<lens>`, plus `-<hash>` of the group's
+    /// name for an incident of a named group.
+    pub fn key(&self) -> String {
+        let first = self
+            .events
+            .iter()
+            .map(|e| (e.start, &e.camera))
+            .min()
+            .map(|(s, c)| (s, c.clone()))
+            .or_else(|| self.extra_cameras.first().map(|c| (0, c.clone())));
+        let mut key = match first {
+            Some((start, c)) => format!("i-{start}-{}-{}-{}", c.device, c.channel, c.lens),
+            None => "i-0".to_owned(),
+        };
+        if let Some(g) = &self.group {
+            key.push_str(&format!("-{:08x}", fnv(&[g]) as u32));
+        }
+        key
+    }
+
+    /// Whether more events may still join: its end is within `gap` seconds
+    /// of the device's `now` (the grouping gap), or after it.
+    pub fn is_growing(&self, now: Secs, gap: Secs) -> bool {
+        self.end().saturating_add(gap) >= now
     }
 
     /// Start of the first event (naive seconds; 0 without events).
@@ -233,7 +287,7 @@ fn group_of(cfg: &GroupingConfig, camera: &CameraId) -> (String, Option<String>)
     }
     match cfg.groups.iter().find(|g| g.cameras.contains(camera)) {
         Some(g) => (format!("g:{}", g.name), Some(g.name.clone())),
-        None => (format!("c:{}:{}", camera.device, camera.channel), None),
+        None => (format!("c:{}", camera.tag()), None),
     }
 }
 
@@ -400,6 +454,64 @@ mod tests {
         assert_eq!(front.cameras().len(), 3);
         assert!(incidents.iter().any(|i| i.group.is_none()
             && i.cameras().into_iter().collect::<Vec<_>>() == vec![CameraId::new("nvr-b", 3)]));
+    }
+
+    #[test]
+    fn lenses_are_cameras_of_their_own_and_old_files_still_load() {
+        // Written before lenses were tracked.
+        let old: CameraId = serde_json::from_str(r#"{"device":"nvr-a","channel":3}"#).unwrap();
+        assert_eq!(old, CameraId::new("nvr-a", 3));
+        assert_eq!(old.local(), DeviceCamera::first(3));
+        // A first lens keeps the identifier format of before (job folders
+        // and edits made then still match), a second lens differs.
+        assert_eq!(old.tag(), "nvr-a:3");
+        let tele = CameraId::with_lens("nvr-a", 3, 1);
+        assert_eq!(tele.tag(), "nvr-a:3:1");
+        let evs = vec![
+            ev("nvr-a", 3, "md", 100, 110),
+            CameraEvent {
+                camera: tele.clone(),
+                ..ev("nvr-a", 3, "people", 105, 115)
+            },
+        ];
+        let incs = group(&evs, &GroupingConfig::default());
+        assert_eq!(incs.len(), 1);
+        assert_eq!(incs[0].cameras().len(), 2);
+        let wide_only = group(&evs[..1], &GroupingConfig::default());
+        assert_ne!(incs[0].id, wide_only[0].id);
+    }
+
+    #[test]
+    fn key_stays_while_the_incident_grows() {
+        let cfg = GroupingConfig::default();
+        let mut evs = vec![ev("nvr-a", 1, "vehicle", 1000, 1015)];
+        let early = group(&evs, &cfg).remove(0);
+        assert_eq!(early.key(), "i-1000-nvr-a-1-0");
+        assert!(early.is_growing(1020, cfg.gap));
+        assert!(!early.is_growing(1026, cfg.gap));
+
+        // More events join, on later and on lower cameras: the ID changes,
+        // the key does not.
+        evs.push(ev("nvr-a", 0, "vehicle", 1010, 1030));
+        evs.push(ev("nvr-b", 2, "md", 1035, 1040));
+        let grown = group(&evs, &cfg).remove(0);
+        assert_ne!(grown.id, early.id);
+        assert_eq!(grown.key(), early.key());
+
+        // A tie on the start goes to the lowest camera, whatever the ends.
+        evs.push(ev("nvr-a", 0, "md", 1000, 1001));
+        assert_eq!(group(&evs, &cfg)[0].key(), "i-1000-nvr-a-0-0");
+
+        // A named group adds a hash of its name.
+        let cfg = GroupingConfig {
+            groups: vec![CameraGroup {
+                name: "front".into(),
+                cameras: vec![CameraId::new("nvr-a", 1)],
+            }],
+            ..GroupingConfig::default()
+        };
+        let k = group(&evs[..1], &cfg)[0].key();
+        assert!(k.starts_with("i-1000-nvr-a-1-0-") && k.len() == "i-1000-nvr-a-1-0-".len() + 8);
     }
 
     #[test]

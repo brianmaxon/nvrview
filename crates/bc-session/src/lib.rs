@@ -59,6 +59,7 @@
 mod archive;
 mod config;
 mod lens;
+mod play;
 mod queue;
 mod supervisor;
 mod talk;
@@ -67,6 +68,7 @@ mod transport;
 pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
 pub use config::{BackoffConfig, SessionConfig};
 pub use lens::LensProbe;
+pub use play::{Play, PlayStart};
 pub use queue::{Item, Subscription};
 pub use supervisor::{AlarmPush, ConnState, DeviceSession, QueryError, QueryReply, SessionClosed};
 pub use talk::{Refusal, StopReason, Talk, TalkState, TalkStats};

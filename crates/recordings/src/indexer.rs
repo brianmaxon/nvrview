@@ -10,9 +10,10 @@
 //! live view running.
 
 use crate::index::{DeviceIndex, IndexedEvent, IndexedFile};
-use crate::{Clock, Secs, date_time, day_start, secs};
-use bc_protocol::archive::{DateTime, DayRecordChannel, EventSearch, FileSearch, days_in_month};
-use bc_protocol::stream::StreamTier;
+use crate::{Clock, DeviceCamera, Secs, Tier, date_time, day_start, secs};
+use bc_protocol::archive::{
+    DateTime, DayRecordChannel, DayRecords, EventSearch, FileSearch, days_in_month,
+};
 use bc_session::{DeviceSession, SearchError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -20,17 +21,25 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-/// A channel to index.
+/// A camera to index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexedChannel {
-    /// Channel number.
-    pub channel: u8,
+    /// Channel and lens. A second lens is searched on its own stream
+    /// (`externStream`), the first on `mainStream`.
+    pub camera: DeviceCamera,
     /// The camera's device ID; when `None`, the session's channel list is
     /// used.
     pub uid: Option<String>,
-    /// Stream (lens) to search: `Main` for a camera's first lens, `Extern`
-    /// for a second lens.
-    pub stream: StreamTier,
+}
+
+impl IndexedChannel {
+    /// A channel's first lens, with the device ID from the session.
+    pub fn first(channel: u8) -> IndexedChannel {
+        IndexedChannel {
+            camera: DeviceCamera::first(channel),
+            uid: None,
+        }
+    }
 }
 
 /// Indexer settings.
@@ -77,8 +86,8 @@ impl std::fmt::Debug for IndexerConfig {
 pub struct PassReport {
     /// Months asked with 142.
     pub months: usize,
-    /// Channel-days searched (files and events) and stored, newest first.
-    pub days: Vec<(u8, Secs)>,
+    /// Camera-days searched (files and events) and stored, newest first.
+    pub days: Vec<(DeviceCamera, Secs)>,
     /// Searches that failed (retried next pass).
     pub errors: usize,
 }
@@ -88,13 +97,78 @@ fn lock(index: &Mutex<DeviceIndex>) -> std::sync::MutexGuard<'_, DeviceIndex> {
 }
 
 /// Start of the month containing `s`, and its last second.
-fn month_bounds(s: Secs) -> (DateTime, DateTime) {
+pub(crate) fn month_bounds(s: Secs) -> (DateTime, DateTime) {
     let t = date_time(s);
     let first = DateTime::date(t.year, t.month, 1).unwrap_or(t);
     let last = DateTime::date(t.year, t.month, days_in_month(t.year, t.month))
         .unwrap_or(t)
         .end_of_day();
     (first, last)
+}
+
+/// Whether a month's calendar (142) must be asked again: never asked; or
+/// the current month, asked more than `refresh` seconds ago (it gains
+/// days); or a past month asked before it was over.
+pub(crate) fn month_stale(
+    fetched: Option<Secs>,
+    month_end: Secs,
+    now: Secs,
+    refresh: Secs,
+) -> bool {
+    match fetched {
+        None => true,
+        Some(at) if month_end >= day_start(now) => now - at >= refresh,
+        Some(at) => at <= month_end,
+    }
+}
+
+/// Whether a camera's day must be searched (14–16, 272–274): it has
+/// recordings and was never searched, or was searched before it was over
+/// (today: more than `refresh` seconds ago).
+pub(crate) fn day_needed(
+    idx: &DeviceIndex,
+    camera: DeviceCamera,
+    day: Secs,
+    now: Secs,
+    refresh: Secs,
+) -> bool {
+    if !idx.recorded_days(camera).contains(&day) {
+        return false;
+    }
+    match idx.camera_day(day, camera) {
+        None => true,
+        Some(cd) if day == day_start(now) => now - cd.fetched_at >= refresh,
+        Some(cd) => cd.fetched_at < day + 86_400,
+    }
+}
+
+/// The 142 request for some cameras: one entry per channel (the answer is
+/// per channel; every lens of a channel gets it).
+pub(crate) fn day_record_request<'a>(
+    cams: impl IntoIterator<Item = (DeviceCamera, Option<String>)> + 'a,
+) -> Vec<DayRecordChannel> {
+    let mut req: Vec<DayRecordChannel> = Vec::new();
+    for (c, uid) in cams {
+        if !req.iter().any(|r| r.channel == c.channel) {
+            req.push(DayRecordChannel {
+                channel: c.channel,
+                uid,
+            });
+        }
+    }
+    req
+}
+
+/// The days with recordings of `channel` in a 142 reply for the month that
+/// starts at `m_start`.
+pub(crate) fn recorded_days_of(list: &[DayRecords], channel: u8, m_start: DateTime) -> Vec<Secs> {
+    list.iter()
+        .filter(|d| d.channel == channel)
+        .flat_map(|d| d.days.iter())
+        .filter(|t| t.has_recordings())
+        .filter_map(|t| DateTime::date(m_start.year, m_start.month, t.day_of_month() as u8))
+        .map(secs)
+        .collect()
 }
 
 /// Runs one indexing pass.
@@ -108,9 +182,14 @@ pub async fn run_pass(
     let today = day_start(now);
     let first = today - i64::from(cfg.days_back) * 86_400;
     let uids = session.channel_uids();
-    let uid_of = |c: &IndexedChannel| c.uid.clone().or_else(|| uids.get(&c.channel).cloned());
+    let uid_of = |c: &IndexedChannel| {
+        c.uid
+            .clone()
+            .or_else(|| uids.get(&c.camera.channel).cloned())
+    };
 
-    // 1. Days with recordings, one 142 per month for all channels.
+    // 1. Days with recordings, one 142 per month for all channels. The
+    // answer is per channel; every lens of a channel gets it.
     let mut month = month_bounds(first).0;
     loop {
         let (m_start, m_end) = month_bounds(secs(month));
@@ -118,44 +197,29 @@ pub async fn run_pass(
             break;
         }
         let (ms, me) = (secs(m_start), secs(m_end));
-        let stale = |fetched: Option<Secs>| match fetched {
-            None => true,
-            // The current month gains days; a past month is final once it
-            // was read after it ended.
-            Some(at) if me >= today => now - at >= cfg.refresh_today,
-            Some(at) => at <= me,
-        };
         let wanted: Vec<&IndexedChannel> = {
             let idx = lock(index);
             cfg.channels
                 .iter()
-                .filter(|c| stale(idx.month_fetched_at(c.channel, ms)))
+                .filter(|c| {
+                    month_stale(
+                        idx.month_fetched_at(c.camera, ms),
+                        me,
+                        now,
+                        cfg.refresh_today,
+                    )
+                })
                 .collect()
         };
         if !wanted.is_empty() {
-            let req: Vec<DayRecordChannel> = wanted
-                .iter()
-                .map(|c| DayRecordChannel {
-                    channel: c.channel,
-                    uid: uid_of(c),
-                })
-                .collect();
+            let req = day_record_request(wanted.iter().map(|c| (c.camera, uid_of(c))));
             match session.day_records(m_start, m_end, &req).await {
                 Ok(list) => {
                     report.months += 1;
                     let mut idx = lock(index);
                     for c in &wanted {
-                        let days: Vec<Secs> = list
-                            .iter()
-                            .filter(|d| d.channel == c.channel)
-                            .flat_map(|d| d.days.iter())
-                            .filter(|t| t.has_recordings())
-                            .filter_map(|t| {
-                                DateTime::date(m_start.year, m_start.month, t.day_of_month() as u8)
-                            })
-                            .map(secs)
-                            .collect();
-                        if let Err(e) = idx.set_month(c.channel, ms, me, days, now) {
+                        let days = recorded_days_of(&list, c.camera.channel, m_start);
+                        if let Err(e) = idx.set_month(c.camera, ms, me, days, now) {
                             warn!(error = %e, "cannot store the recording calendar");
                         }
                     }
@@ -174,35 +238,23 @@ pub async fn run_pass(
     let mut day = today;
     while day >= first {
         for c in &cfg.channels {
-            let needed = {
-                let idx = lock(index);
-                if !idx.recorded_days(c.channel).contains(&day) {
-                    false
-                } else {
-                    match idx.channel_day(day, c.channel) {
-                        None => true,
-                        Some(cd) if day == today => now - cd.fetched_at >= cfg.refresh_today,
-                        // Fetched before the day was over: once more.
-                        Some(cd) => cd.fetched_at < day + 86_400,
-                    }
-                }
-            };
+            let needed = day_needed(&lock(index), c.camera, day, now, cfg.refresh_today);
             if !needed {
                 continue;
             }
             match index_day(session, c, uid_of(c), day).await {
                 Ok((files, events)) => {
                     let mut idx = lock(index);
-                    if let Err(e) = idx.put_day(day, c.channel, files, events, (cfg.clock)()) {
+                    if let Err(e) = idx.put_day(day, c.camera, files, events, (cfg.clock)()) {
                         warn!(error = %e, "cannot store the index");
                         report.errors += 1;
                     } else {
-                        report.days.push((c.channel, day));
+                        report.days.push((c.camera, day));
                     }
                 }
                 Err(e) => {
                     report.errors += 1;
-                    debug!(error = %e, channel = c.channel, "day search failed");
+                    debug!(error = %e, channel = c.camera.channel, "day search failed");
                 }
             }
         }
@@ -215,7 +267,8 @@ pub async fn run_pass(
     report
 }
 
-async fn index_day(
+/// Searches one camera's files and events of one day.
+pub(crate) async fn index_day(
     session: &DeviceSession,
     c: &IndexedChannel,
     uid: Option<String>,
@@ -223,27 +276,31 @@ async fn index_day(
 ) -> Result<(Vec<IndexedFile>, Vec<IndexedEvent>), SearchError> {
     let start = date_time(day);
     let end = start.end_of_day();
+    let stream = c.camera.stream(Tier::Main);
     let files = session
         .search_files(&FileSearch {
-            channel: c.channel,
+            channel: c.camera.channel,
             uid: uid.clone(),
-            stream: c.stream,
+            stream,
             start,
             end,
         })
         .await?;
     let events = session
         .search_events(&EventSearch {
-            channel: c.channel,
+            channel: c.camera.channel,
             uid,
-            stream: c.stream,
+            stream,
             start,
             end,
         })
         .await?;
     Ok((
-        files.iter().map(IndexedFile::from).collect(),
-        events.iter().map(IndexedEvent::from).collect(),
+        files.iter().map(|f| IndexedFile::of(c.camera, f)).collect(),
+        events
+            .iter()
+            .map(|e| IndexedEvent::of(c.camera, e))
+            .collect(),
     ))
 }
 
