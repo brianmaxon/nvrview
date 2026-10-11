@@ -62,6 +62,7 @@ public partial class App : Application
         AppOptions o = Program.Options;
         string dataDir = o.ResolvedDataDir;
         AppLog.Open(Path.Combine(dataDir, "logs"));
+        AppLog.Info($"NvrView {typeof(App).Assembly.GetName().Version?.ToString(3)}");
         try
         {
             Start(o, dataDir);

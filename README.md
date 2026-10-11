@@ -117,6 +117,14 @@ Environment variables skip the slow or optional steps:
 `NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
 every push) and `NVRVIEW_BROWSER_TESTS=1` the browser playback check. `scripts/clean-docker.sh` removes what the Docker steps leave behind.
 
+## Versions
+
+The apps share one version, the `VERSION` file at the repository root. The
+macOS bundle (`scripts/package-macos.sh`) and the Windows app (its file and
+product version, and the first line of its log) both read it, so a build of
+either shows the same number. Change it there only. Tags and releases need the
+maintainer's approval.
+
 ## Contributing
 
 This repository is public and the software talks to private security

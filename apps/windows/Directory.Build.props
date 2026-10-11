@@ -12,5 +12,8 @@
     <!-- Keep the build machine's paths out of the binaries. -->
     <PathMap>$(MSBuildThisFileDirectory)=apps/windows/</PathMap>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- One version for every app (and the macOS bundle): the VERSION file at the repository root. -->
+    <Version>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)../../VERSION').Trim())</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 </Project>

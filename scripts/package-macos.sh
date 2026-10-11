@@ -22,7 +22,7 @@ case "${1:-}" in
 esac
 
 pack=apps/macos/Packaging
-version=$(tr -d '[:space:]' <"$pack/VERSION")
+version=$(tr -d "[:space:]" <VERSION)
 app=build/NVRView.app
 work=build/package-work
 
