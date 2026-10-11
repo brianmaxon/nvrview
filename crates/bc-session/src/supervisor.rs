@@ -1695,8 +1695,20 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             }
         }
         Event::TransferEnd {
-            message_id, status, ..
+            message_id,
+            status,
+            foreign,
+            ..
         } => {
+            if let Some(f) = foreign {
+                warn!(
+                    message_id,
+                    bytes_16_19 = format_args!("{:#010x}", f.bytes_16_19),
+                    expected_seq = ?f.expected_seq.map(|s| format!("{s:#010x}")),
+                    body_len = f.body_len,
+                    "a play ended on a message without its seq"
+                );
+            }
             if let Some(t) = ctx.transfers.active.remove(&message_id)
                 && !t.abort
             {

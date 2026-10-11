@@ -227,6 +227,19 @@ impl From<EncodeError> for SessionError {
     }
 }
 
+/// The message that ended a play without the play's `seq` (see
+/// [`Event::TransferEnd`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForeignEnd {
+    /// Header bytes 16 to 19, little-endian: a status and class on most
+    /// messages, a replay `seq` on replay media.
+    pub bytes_16_19: u32,
+    /// The `seq` the play's media carry.
+    pub expected_seq: Option<u32>,
+    /// Body length of that message.
+    pub body_len: usize,
+}
+
 /// A typed result of handling one received message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -277,6 +290,11 @@ pub enum Event {
         message_id: u32,
         /// Status of the end message.
         status: u16,
+        /// For a play (5) that ended on a message without its `seq`: that
+        /// message's raw header bytes 16 to 19 and body length, kept for
+        /// diagnosis (how a device ends or refuses a play is not
+        /// established, docs/MILESTONE-P.md, B6).
+        foreign: Option<ForeignEnd>,
     },
     /// A message that was deliberately skipped (e.g. media for a stopped
     /// preview).
@@ -1015,10 +1033,16 @@ impl Session {
             });
         };
         let media_header = t.seq.is_some() && h.replay_seq == t.seq;
+        let foreign = (!media_header).then(|| ForeignEnd {
+            bytes_16_19: h.replay_seq.unwrap_or(u32::from(h.status)),
+            expected_seq: t.seq,
+            body_len: msg.body.len(),
+        });
         let end = |status: u16| Event::TransferEnd {
             command: h.command,
             message_id: h.message_id,
             status,
+            foreign,
         };
         if msg.body.is_empty() {
             if !media_header && h.status == 200 && !t.saw_media {
@@ -1073,6 +1097,7 @@ impl Session {
                 command: h.command,
                 message_id: h.message_id,
                 status: h.status,
+                foreign: None,
             });
         }
         let ext = msg.extension();
@@ -1763,6 +1788,7 @@ mod tests {
                     command: 143,
                     message_id,
                     status,
+                    ..
                 } if message_id == id => {
                     ended = Some(status);
                 }
@@ -1873,7 +1899,17 @@ mod tests {
         let refused = encode_message_with_status(5, pid, 400, Class::Device, &[], b"x").unwrap();
         assert!(matches!(
             s.handle(&decode_one(&refused)).unwrap(),
-            Event::TransferEnd { status: 400, .. }
+            Event::TransferEnd { status: 400, foreign: Some(f), .. }
+                if f.bytes_16_19 & 0xffff == 400 && f.expected_seq == Some(seq + 1) && f.body_len == 1
+        ));
+        // Replay media of another seq ends it too, and the end keeps that
+        // message's seq for diagnosis.
+        let (pid, _) = s.start_play(&q, seq + 3).unwrap();
+        let other = crate::framer::encode_replay_media(pid, seq + 9, &e, &video).unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&other)).unwrap(),
+            Event::TransferEnd { foreign: Some(f), .. }
+                if f.bytes_16_19 == seq + 9 && f.expected_seq == Some(seq + 3)
         ));
         let (pid, _) = s.start_play(&q, seq + 2).unwrap();
         let stop = decode_one(&s.stop_play(pid, &q).unwrap());
@@ -1971,7 +2007,8 @@ mod tests {
             Event::TransferEnd {
                 command: 298,
                 message_id: id,
-                status: 300
+                status: 300,
+                foreign: None,
             }
         );
     }
