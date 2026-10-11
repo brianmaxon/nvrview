@@ -649,6 +649,12 @@ example to keep it beside other work. Both apps follow these rules.
   viewer window, detached: not drawn, not counted in "+N more", not leased,
   not swapped or closed by Tab, Esc or the clock, until it pops in or the
   call ends.
+- **Every viewer window has the call:** a viewer window opened while a call
+  is open records it too (detached while the call is in its own window, else
+  as its inset, or the controls over the stage when the doorbell fills it),
+  and so does a window that had no item when the call pops in, so Pop In
+  shows the inset in every viewer window. A conversation started in one
+  window therefore shows in the others too, as a press does.
 - **Where it opens:** a setting "Open call windows" with "Where I left it"
   (the default) and "Top right of the active screen". Where I left it: the
   frame the user last left a call window at (one frame for the app, its size

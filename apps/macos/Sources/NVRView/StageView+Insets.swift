@@ -52,6 +52,13 @@ extension StageView {
         detectionToken = model.subscribeDetections { [weak self] event, camera, date in
             self?.detected(event, camera: camera, at: date)
         }
+        // A window opened while calls are open shows them too (detached for
+        // a call in its own window, so Pop In shows it here as well).
+        seenCallPresentations = currentCallPresentations
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.adoptOpenCalls(Set(self.model.calls.cameras)) else { return }
+            self.syncInsets()
+        }
     }
 
     func tearDownInsets() {
@@ -178,7 +185,65 @@ extension StageView {
                 continue
             }
             let detached = call.presentation == .window
-            if item.detached != detached { changed = insetBoard.setDetached(item.camera, detached, now: now) || changed }
+            guard item.detached != detached else { continue }
+            if !detached, stageFillingCamera?.firstLens == item.camera {
+                // Popped in while the doorbell fills this stage: its
+                // controls show over the stage, as for a press then.
+                insetBoard.remove { $0.camera == item.camera && !$0.isReturn }
+                changed = true
+            } else {
+                changed = insetBoard.setDetached(item.camera, detached, now: now) || changed
+            }
+        }
+        // Calls this window has no item for: one that popped in gets its
+        // inset now; one seen for the first time gets one after the event
+        // that opened it had its turn (a press or Start Conversation records
+        // its own item, with its count, right after the call opens).
+        let current = currentCallPresentations
+        var poppedIn: Set<CameraRef> = []
+        var fresh: Set<CameraRef> = []
+        for (camera, presentation) in current {
+            switch seenCallPresentations[camera] {
+            case nil: fresh.insert(camera)
+            case .window? where presentation == .inset: poppedIn.insert(camera)
+            default: break
+            }
+        }
+        seenCallPresentations = current
+        changed = adoptOpenCalls(poppedIn) || changed
+        if !fresh.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.adoptOpenCalls(fresh) else { return }
+                self.syncInsets()
+            }
+        }
+        return changed
+    }
+
+    /// Every open call's presentation now.
+    private var currentCallPresentations: [CameraRef: CallPresentation] {
+        var out: [CameraRef: CallPresentation] = [:]
+        for camera in model.calls.cameras { out[camera] = model.calls.call(for: camera)?.presentation }
+        return out
+    }
+
+    /// Gives each of `cameras`' open calls an item on this window's board if
+    /// it has none: detached for a call in its own window, an inset for one
+    /// in the insets (none when the doorbell fills the stage: its controls
+    /// show there). The item counts as ended, so it closes a minute after
+    /// the call's last activity like a conversation's. Returns whether the
+    /// board changed.
+    @discardableResult
+    func adoptOpenCalls(_ cameras: Set<CameraRef>) -> Bool {
+        var changed = false
+        let now = clock.now
+        for camera in cameras {
+            guard let call = model.calls.call(for: camera), insetBoard.item(for: camera) == nil else { continue }
+            let detached = call.presentation == .window
+            if !detached, stageFillingCamera?.firstLens == camera { continue }
+            let kind: InsetKind = call.origin == .press ? .doorbell : .conversation
+            changed = insetBoard.started(kind, camera: camera, visible: false, now: now, at: call.startedAt, detached: detached) || changed
+            insetBoard.stopped(kind, camera: camera, now: now)
         }
         return changed
     }

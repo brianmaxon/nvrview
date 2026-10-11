@@ -64,8 +64,10 @@ import VideoKit
 ///    its own window (behind the others, never key): the insets go from
 ///    both, the window draws exactly the doorbell's tile, the call, its tap,
 ///    a running "Keep talking" talk and its draft survive popping out and in
-///    (no talk stop or start), the leases and the stream demand follow, Pop
-///    In brings the insets back on top with a fresh minute; closing the
+///    (no talk stop or start), the leases and the stream demand follow, a
+///    viewer window opened meanwhile records the call detached, Pop In
+///    brings the insets back on top with a fresh minute in every viewer
+///    window (that one too); closing the
 ///    window, Esc in it and a minute without activity end the call; the
 ///    remembered frame is reused, and one off every screen falls back to the
 ///    top right of the active screen;
@@ -86,6 +88,8 @@ import VideoKit
 final class SelfTest {
     private unowned let app: AppDelegate
     private var problems: [String] = []
+    /// Viewer windows a step opened besides the second (closed with it).
+    private var extraWindows: [ViewerWindowController] = []
     private let began = CACurrentMediaTime()
 
     init(app: AppDelegate) { self.app = app }
@@ -891,9 +895,29 @@ final class SelfTest {
                 when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
                     model.setAllowTalk(doorbell, false)
                     model.calls.setDraft(doorbell, "")
-                    popInStep(doorbell, stages: stages, second: second, baseline: baseline)
+                    newWindowStep(doorbell, stages: stages, second: second, baseline: baseline)
                 }
             }
+        }
+    }
+
+    /// A viewer window opened while the call is popped out records the
+    /// call's item, detached, so Pop In shows the inset there too.
+    private func newWindowStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
+        guard let model = app.model, let window,
+            let otherCamera = window.state.tree.cameras.first(where: { $0.firstLens != doorbell })
+        else { return finishPopOut(second) }
+        // parity: call-popin-new-window
+        guard let third = app.openWindow(.scratch(name: "Third", root: .leaf(otherCamera))) else {
+            problems.append("could not open a third viewer window")
+            return popInStep(doorbell, stages: stages, second: second, baseline: baseline)
+        }
+        extraWindows.append(third)
+        when({ third.stage.insetBoard.detachedCameras == [doorbell] }, timeout: 1) { [self] in
+            let recorded = third.stage.insetBoard.detachedCameras == [doorbell] && third.stage.shownInsetViews.isEmpty
+            print("new window while popped out: call recorded detached \(recorded), leases \(model.leases.leaseCount(doorbell))")
+            if !recorded { problems.append("a viewer window opened while the call was popped out has no detached item for it") }
+            popInStep(doorbell, stages: stages + [third.stage], second: second, baseline: baseline)
         }
     }
 
@@ -1014,6 +1038,8 @@ final class SelfTest {
 
     private func finishPopOut(_ second: ViewerWindowController) {
         app.model?.calls.endAll()
+        for w in extraWindows { w.close() }
+        extraWindows = []
         // The throwaway suite with the frame and pin goes.
         app.callWindows?.defaults.removePersistentDomain(forName: AppDelegate.selfTestDefaults)
         second.close()

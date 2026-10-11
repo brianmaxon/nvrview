@@ -127,6 +127,9 @@ final class StageView: NSView {
     var detectionToken: UUID?
     /// The swapped-in camera, as the leases know its demand (main stream).
     var takeoverCamera: CameraRef?
+    /// Each open call's presentation as this window last saw it (a call
+    /// that pops in gets its inset here even if the window had no item).
+    var seenCallPresentations: [CameraRef: CallPresentation] = [:]
 
     private enum Gesture {
         case divider(NodePath)
