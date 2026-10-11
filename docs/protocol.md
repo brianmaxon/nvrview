@@ -976,7 +976,9 @@ every exit path, naming the file. `seq` numbers increase
 from the current Unix time, as the client's did; 123's `channelId` is 0, as
 the client sent it. With no observation of how a play ends or is refused,
 `bc-session` takes an empty message as the end and a non-200 reply without
-the play's `seq` as a refusal; at most four plays run per device by default
+the play's `seq` as a refusal (the probe's one reported refusal turned out to
+be a misread media header, see "Live view and plays on one session"; the
+device refused nothing); at most four plays run per device by default
 (four were observed on one session). Not sent: 150, 381–383 (not observed in
 use), and any other `playSpeed` (so far).
 
@@ -1025,23 +1027,35 @@ recorded at 25 frames per second with a 2.0 s GOP (one keyframe in 50 frames).
 
 Measured with nvrview's own read-only client (`bc-cli replay-probe`) on one
 NVR with recent firmware: one session, one live preview of a camera's
-sub-stream, then one play at `playSpeed` 1 of a finished sub-stream recording
-of the same camera, beside it. Only the file search (14–16), preview (3, 4),
-seek (123), play (5) and stop (7) were sent. A first run stopped after one
-play because the probe's stall threshold was too strict for the burst below
-(since fixed); a second run on the same NVR completed the stages: one play,
-then a second play of the same file on the same camera, all beside the live
-preview. All observed.
+sub-stream, then plays at `playSpeed` 1 of finished sub-stream recordings
+beside it. Only the file search (14–16), preview (3, 4), seek (123), play (5)
+and stop (7) were sent. A first run stopped after one play because the
+probe's stall threshold was too strict for the burst below (since fixed). Three
+further runs each did two stages: one play beside live view, then a second
+stage with a second play; in the first of them the second play was the same
+file on the same camera, in the other two it was another camera's recording.
+All observed.
+
+**Correction.** An earlier version of this section said the second play of
+the same file was "refused with status 52092". That was our own probe
+misreading a message, not a device refusal. In every run, the play that the
+probe reported as failed was the **restart of the file it had stopped moments
+earlier** (stage 2 stops stage 1's play and starts it again), while the
+concurrent play (the same file in one run, another camera's file in the other
+two) was accepted and delivered media. The reported "status" varied from run
+to run (52092, 58201, 58472) and matched the low 16 bits of a number near the
+session's replay `seq` base, that is, bytes 16–17 of a replay media header
+(see "Replay media headers"), not a device status. What that message actually
+was has not been determined. (The interpretation is ours; the measurements
+below are observed.)
 
 | Fact | Provenance |
 | --- | --- |
 | **One session carried live view and a play at once.** With the live preview running, the 123 seek and the 5 play were accepted and the play's media arrived beside the live media on the same connection, told apart by message ID; nothing was refused and the connection stayed up. | observed |
-| **Live view kept its rate.** The live sub-stream ran at 9.8 frames per second alone and 10.0 while the play ran; one second during the play's burst carried half the usual frames and the next made up for it (5 then 15), with no gap of a whole second. | observed |
-| **The burst can be long.** The play's first picture came 0.37 s after the request, and within the first second the device sent 8 s of video (80 frames at 10 frames per second, about 235 KB of sub-stream). Then nothing came for the 4 s the probe waited, consistent with the play running 8 s ahead of real time; whether it resumed at real time was not observed. The client capture's 1× bursts held 2 to 4.4 s of video. | observed |
-| **Keyframe wall clock in UTC, recording times local.** The live keyframes' wall-clock seconds matched the host's UTC clock within a second, and the play's first keyframe read `seekTime` (device local, like every search time) plus the device's UTC offset, less 1 s: the play started at the keyframe at or before `seekTime` on the local timeline, and the seconds in the extra header are UTC on this device. | observed |
-| **A second simultaneous play of the same file on the same camera was refused.** The first play ran normally (live 10.1 frames per second against 10.0 alone; 11.9 s of video in 7.7 s; first picture 289 ms after the request). With it still running, the second 5 (play) was answered with status **52092** instead of 200, and the second play delivered no media; the seek before it was accepted. The refusal did not disturb live view or the first play, and the connection stayed up. | observed |
-| **Which limit this is was not determined.** Both plays used the same camera and the same recording file, and the earlier client capture had four synchronized plays accepted on one session (different cameras). So the limit may be per file, per camera, or a total of one while live view runs; plays of different cameras beside live view were not measured, and neither were downloads beside live view. | open |
-| **The first keyframe of each play read the device's UTC offset after `seekTime`** (about +14400 s on a device four hours behind UTC), as in the row above. | observed |
+| **At least two simultaneous plays beside live view delivered media**, in all three later runs (in one run both on the same camera, the same file as the restarted play; in two runs a second camera). The device refused nothing: no non-200 answer to a 123 or 5 was seen. The restarted play of the stopped file delivered no media within the probe's window in those stages; why is unknown (its first message may be the unidentified one above). More than two plays beside live view, and downloads beside live view, were not measured. | observed; the restart's silence unexplained |
+| **Live view kept its rate** in all runs: the live sub-stream ran at 9.8 to 10.0 frames per second alone and 10.0 to 10.1 while one play ran, with no gap of a whole second; one second during a play's burst carried about half the usual frames and a neighboring second made up for it (for example 5 then 15). In the two-play stages it ran at 11 to 13 frames per second over a window of about a second, which is within the second-to-second spread. | observed |
+| **The burst can be long.** A play's first picture came 0.29 to 0.36 s after the request, and within the first second the device sent 8 s of video (80 frames at 10 frames per second, about 235 KB of sub-stream; 11.9 s of video in 7.7 s over the stage). Then nothing came for the 4 s the probe waited, consistent with the play running 8 s ahead of real time; whether it resumed at real time was not observed. The client capture's 1× bursts held 2 to 4.4 s of video (about 4 s on a main stream in the later one). | observed |
+| **Keyframe wall clock in UTC, recording times local.** The live keyframes' wall-clock seconds matched the host's UTC clock within a second, and in every run the first play's first keyframe read `seekTime` (device local, like every search time) plus the device's UTC offset, less 1 s (the second play in the same runs read plus 1 s): the seconds in the extra header are UTC on this device, and the keyframe is within about a second of the seek time. The official client's decrypted capture agrees (see "Rates, keyframes, and how a play ends"). | observed |
 
 ### Cover images: command 298
 
@@ -1292,9 +1306,11 @@ port as `N`). Nothing else was sent.
 - Behavior at the device's limits: how many concurrent streams per session and
   per device. The statuses are reported (409, 410 at login; 430 at stream
   start); the numbers are not. Four simultaneous replay plays on one session
-  were seen with no refusal (observed (client capture)), and live media and
-  replay media together were *not* seen (the client stops live view when the
-  playback tab opens), so whether a session carries both at once is still open.
+  were seen with no refusal (observed (client capture)), and nvrview's probe
+  saw live view beside two simultaneous plays (one of them another camera)
+  with nothing refused. Still open: live view beside more than two plays,
+  beside a download, and what the message was that the probe once took for
+  a "status 52092" refusal (see "Live view and plays on one session").
 - LAN discovery: what record bytes 51, 52 and 57 mean; whether devices on
   other firmware send a different record size; why the battery camera did
   not answer the official client's UDP 2015 probes (asleep at the time, or

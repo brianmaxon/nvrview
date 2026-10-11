@@ -311,19 +311,20 @@ compositor and encoder.
 
 ## Open questions
 
-- Device AI search (above): the wire format, how soon a hit appears after
-  an event, the device's cost and limits for repeated searches, and whether
-  text search can work without the vendor's encoder.
-- Animal event type names from the device (needs a capture with an animal
-  event). The live state push already reports `dog_cat`; the event-search
-  reply names were not decryptable in the latest capture.
+- Device AI search (above): the wire format is now observed (516 to 518,
+  plain-text search matched by the NVR). Still open: how soon a hit appears
+  after an event, the device's cost and limits for repeated searches, and why
+  a 517 page is sometimes answered with status 442.
+- (Settled.) The animal event type name is `dog_cat` in the live push and in
+  event-search replies.
 - Whether live view and 143 downloads can share a session, the device's
   limits on concurrent downloads, and how many plays it allows beside live
   view. A capture showed four synchronized replay plays on one session with
   no refusal (with live view stopped by the client), and nvrview's own probe
-  showed one play beside live view on one session, accepted with the live
-  frame rate unchanged (B5 in docs/MILESTONE-P.md); several plays beside live
-  view and live-plus-download are still unconfirmed.
+  showed two simultaneous plays (one of them another camera) beside live view
+  on one session, accepted with the live frame rate unchanged (B5 in
+  docs/MILESTONE-P.md); more than two plays beside live view and
+  live-plus-download are still unconfirmed.
 - How 143 reports errors, and how a play ends at the end of a file. A play is
   now observed to continue across a file boundary with no wire event; the end
   of the last file was not reached, and no seek or play ever returned an error
