@@ -1276,9 +1276,13 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                         break;
                     }
                     failed.Waiting = null;
-                    failed.Error = e.Reason == "start_rejected"
-                        ? $"The device refused this stream (status {e.Status})"
-                        : $"Stream error: {e.Reason}";
+                    failed.Error = e.Reason switch
+                    {
+                        // Status 0: the start was accepted but only a 0x0 stream info came (docs/FFI.md).
+                        "start_rejected" when e.Status == 0 => "The device sent no video for this stream",
+                        "start_rejected" => $"The device refused this stream (status {e.Status})",
+                        _ => $"Stream error: {e.Reason}",
+                    };
                     Problems.Add($"tile_error tile {e.Tile}: {e.Reason} {e.Status}");
                 }
                 break;
