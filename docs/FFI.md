@@ -264,8 +264,8 @@ change.
   absence of this event as "no alarm": a camera microphone is not an alarm
   sensor. On by default; Rust callers turn it off with
   `CoreConfig::sound.alarms`. The C interface has no switch in ABI 3 (it
-  always uses the defaults); ABI 4 proposes one (docs/FFI-RECORDINGS.md,
-  section 13).
+  always uses the defaults); the recordings minor (ABI 3, minor 4)
+  proposes one (docs/FFI-RECORDINGS.md, section 13).
 - `detects` in `channels` lists the detection kinds a channel's camera
   advertises (199 `aitype` bits), once known; `[]` for a camera without
   AI. For a multi-lens camera it is every kind of the camera (the
