@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.model = model
         model.openWindow = { [weak self] content in self?.openWindow(content) }
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
+        startUpdater(model)
         if options.fake { seedFakeLayouts(model) }
 
         if options.selfTestSeconds == nil { buildMenu() }
@@ -60,6 +61,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if model.devices.isEmpty { showSettings(nil) }
         }
         if let seconds = options.selfTestSeconds { SelfTest(app: self).start(seconds: seconds) }
+    }
+
+    // MARK: Updates
+
+    /// Self-update (docs/UPDATES.md). Its settings live with the others; in
+    /// a self-test or with `--fake` (unless given a `--data-dir`) they are
+    /// kept in memory, and automatic checks are off either way there.
+    private func startUpdater(_ model: AppModel) {
+        let test = options.fake || options.selfTestSeconds != nil
+        let file: URL? =
+            options.dataDirectory?.appendingPathComponent("update-settings.json")
+            ?? (test ? nil : JSONFileStore<UpdateSettings>.appSupport("update-settings.json"))
+        let updater = Updater(bridge: model.bridge, store: JSONFileStore(file: file), automaticAllowed: !test)
+        updater.present = { [weak self] prompt in self?.presentUpdate(prompt) }
+        model.updater = updater
+        updater.start()
+    }
+
+    @objc func checkForUpdates(_ sender: Any?) { model?.updater?.menuAction() }
+
+    /// Asks or tells the user; a sheet on the front window when there is
+    /// one, so live view keeps playing behind it.
+    private func presentUpdate(_ prompt: Updater.Prompt) {
+        guard options.selfTestSeconds == nil, let updater = model?.updater else { return }
+        let alert = NSAlert()
+        var respond: (NSApplication.ModalResponse) -> Void = { _ in }
+        switch prompt {
+        case .available(let v, let notes):
+            alert.messageText = "NVRView \(v) is available"
+            alert.informativeText = (notes.isEmpty ? "" : notes + "\n\n") + "You have \(updater.current)."
+            alert.addButton(withTitle: "Download")
+            alert.addButton(withTitle: "Not Now")
+            respond = { if $0 == .alertFirstButtonReturn { updater.download(v) } }
+        case .ready(let v):
+            alert.messageText = "Update to \(v)?"
+            alert.informativeText = "NVRView quits, installs \(v), and opens again. With Later, it installs when you next quit."
+            alert.addButton(withTitle: "Restart Now")
+            alert.addButton(withTitle: "Later")
+            respond = { $0 == .alertFirstButtonReturn ? updater.restartNow() : updater.later() }
+        case .upToDate(let v):
+            alert.messageText = "NVRView is up to date"
+            alert.informativeText = "Version \(v) is the newest at your update source."
+        case .failed(let message):
+            alert.messageText = "Update check"
+            alert.informativeText = message
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window) { respond($0) }
+        } else {
+            respond(alert.runModal())
+        }
     }
 
     // MARK: Core
@@ -266,6 +318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func toggleHideOffline(_ sender: Any?) { model?.hideOfflineChannels.toggle() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(checkForUpdates(_:)) {
+            item.title = model?.updater?.menuTitle ?? "Check for Updates…"
+            return model?.updater != nil
+        }
         if item.action == #selector(toggleFrameRates(_:)) { item.state = model?.showFrameRates == true ? .on : .off }
         if item.action == #selector(toggleHideOffline(_:)) { item.state = model?.hideOfflineChannels == true ? .on : .off }
         if item.action == #selector(setIndicatorCorner(_:)) {
@@ -306,6 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         submenu("NVRView", [
             item("Settings…", #selector(showSettings(_:)), ","),
+            item("Check for Updates…", #selector(checkForUpdates(_:))),
             .separator(),
             item("Hide NVRView", #selector(NSApplication.hide(_:)), "h"),
             item("Quit NVRView", #selector(NSApplication.terminate(_:)), "q"),
@@ -404,6 +461,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Before the core stops: the helper installs a waiting update once
+        // this process has exited.
+        model?.updater?.appWillTerminate()
         model?.shutdown()
     }
 }
@@ -422,4 +482,8 @@ func runApp() {
     withExtendedLifetime(delegate) { app.run() }
 }
 
+// `--apply-update`: the update helper (no window, no core); see UpdateHelper.
+if CommandLine.arguments.dropFirst().first == "--apply-update" {
+    exit(UpdateHelper.run(Array(CommandLine.arguments.dropFirst())))
+}
 MainActor.assumeIsolated { runApp() }

@@ -77,5 +77,13 @@ codesign --verify --deep --strict --verbose=2 "$app"
 # Expected to be rejected here: the app is not notarized.
 spctl --assess --type execute --verbose=2 "$app" || echo "spctl: rejected, as expected without notarization"
 
+# The update package (docs/UPDATES.md): the bundle with Unix permissions and
+# links, without extended attributes (unpacked, AppleDouble files would break
+# the signature).
+zip="build/NVRView-$version-macos-arm64.zip"
+rm -f "$zip"
+ditto -c -k --norsrc --noextattr --keepParent "$app" "$zip"
+
 echo "$(pwd)/$app"
 du -sh "$app" | awk '{print "size: " $1}'
+echo "update package: $(pwd)/$zip"

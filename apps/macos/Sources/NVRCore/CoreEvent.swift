@@ -114,6 +114,8 @@ public enum CoreEvent: Sendable, Equatable {
     case discovered(DiscoveredDevice)
     /// Minor 1: a search ended.
     case discoveryDone(DiscoveryEnd)
+    /// Minor 2: an update check or download progressed or ended.
+    case update(UpdateEvent)
 
     /// The `discovered` event's own shape (its `channels` is a number, unlike
     /// the `channels` event's list).
@@ -203,6 +205,9 @@ public enum CoreEvent: Sendable, Equatable {
     public static func parse(_ json: Data) -> CoreEvent? {
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
         switch w.type {
+        case "update":
+            guard let u = try? JSONDecoder().decode(UpdateEvent.self, from: json) else { return nil }
+            return .update(u)
         case "discovery_started":
             guard let search = (try? JSONDecoder().decode(DoneWire.self, from: json))?.search else { return nil }
             return .discoveryStarted(search: search)

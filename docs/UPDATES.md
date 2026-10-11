@@ -333,9 +333,8 @@ public key line where users can find it (release notes, the project page).
 For each release:
 
 ```sh
-scripts/package-macos.sh                  # build/NVRView.app
-ditto -c -k --norsrc --noextattr --keepParent build/NVRView.app \
-  "dist/NVRView-$(cat VERSION)-macos-arm64.zip"
+scripts/package-macos.sh     # build/NVRView.app and build/NVRView-<version>-macos-arm64.zip
+cp build/NVRView-"$(cat VERSION)"-macos-arm64.zip dist/
 # on Windows: zip the contents of the app folder as
 #   dist/NvrView-<version>-win-x64.zip
 
@@ -404,11 +403,47 @@ own):
   password ("NVRView wants to use your confidential information...");
   Always Allow fixes it until the next update. Hosts that serve updates to
   others should sign with a stable identity.
-- **Local Network.** Measured results are below. Without a measurement,
-  assume that the same holds as for the Keychain: a stable signing identity
-  keeps the permission, an ad hoc signature may ask again.
+- **Local Network.** Not measured yet (it needs a person to see the system
+  prompt; "Testing by hand", step 4). Until then, assume the same as for the
+  Keychain: a stable signing identity keeps the permission, an ad hoc
+  signature may ask again.
 
 ### Measured on macOS
 
-(Filled in from the end-to-end test of the apply helper; see
-`scripts/test-update-macos.sh`.)
+`scripts/test-update-macos.sh` (macOS 26, Apple silicon) builds a throwaway
+app bundle (a small Mach-O, signed ad hoc) in a temporary folder, publishes
+version 0.4.0 of it in a folder source whose manifest, signature, and zip
+carry a browser-style `com.apple.quarantine` attribute, stages it with the
+core's own code, and installs it with the real `NVRView --apply-update`
+helper while the old version runs. Measured:
+
+- the staged and the installed bundle carry **no quarantine attribute**,
+  although every source file did;
+- `codesign --verify --deep --strict` accepts the staged bundle (permissions
+  and the ad hoc signature survive `ditto --norsrc --noextattr`, the zip, and
+  the unpacking);
+- the helper waited for the running process to exit, swapped the bundles,
+  kept the previous one in `.NVRView-update/previous`, and `open` started
+  the new version **from its own path, not translocated**;
+- `spctl --assess` rejects the ad hoc bundle, as it rejects any bundle that
+  is not notarized; that assessment only gates quarantined apps, so it did
+  not stop the launch.
+
+Not measured: a real SMB or AFP share as the source (a local folder with
+quarantined files stood in for it; the core reads bytes either way and
+writes new files), and the real NVRView.app (never replaced by the tests).
+Local Network permission after an update needs a person to watch for the
+system prompt; see "Testing by hand".
+
+### Testing by hand
+
+1. Package two versions of the real app (`scripts/package-macos.sh` writes
+   `build/NVRView-<version>-macos-arm64.zip`; bump `VERSION` for the second).
+2. Publish the newer one in a folder with `sign-update` and a test key; put
+   the older `NVRView.app` in a folder you own (not the copy you use daily).
+3. In its Settings, Updates: set the folder, add the key, Check Now, accept,
+   Restart Now. Expected: the newer version opens with the same devices,
+   layouts, and passwords. With an Apple Development signature, no Keychain
+   prompt; with an ad hoc signature, one prompt per saved password.
+4. Watch whether macOS asks for Local Network access again after the update,
+   for each kind of signature, and record the answer here.

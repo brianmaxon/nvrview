@@ -26,7 +26,7 @@ public struct ConnectionStatus: Sendable, Equatable {
         case .audioStats(_, let stats):
             audio = stats
         case .channels, .tileStats, .tileTier, .tileError, .detection, .layoutsChanged, .timing, .talk,
-            .discoveryStarted, .discovered, .discoveryDone:
+            .discoveryStarted, .discovered, .discoveryDone, .update:
             break
         }
     }

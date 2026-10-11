@@ -66,6 +66,9 @@ final class AppModel {
     @ObservationIgnored private var transient: [String: String] = [:]
     /// Opens a window (set by the app delegate).
     @ObservationIgnored var openWindow: (WindowContent) -> Void = { _ in }
+    /// Self-update (set by the app delegate); receives the core's `update`
+    /// events.
+    @ObservationIgnored var updater: Updater?
 
     private(set) var devices: [DeviceRuntime] = []
     /// The "find devices" list (docs/UX.md "Finding devices"). The core
@@ -798,6 +801,8 @@ final class AppModel {
             calls.talkEvent(t)
         case .discoveryStarted, .discovered, .discoveryDone:
             discovery.apply(event)
+        case .update(let u):
+            updater?.handle(u)
         case .tileTier, .audioStats, .tileStats:
             break
         }

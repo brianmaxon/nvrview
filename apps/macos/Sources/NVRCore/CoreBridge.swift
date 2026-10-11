@@ -233,6 +233,26 @@ public final class CoreBridge: Sendable {
         try? c.discoverStop()
     }
 
+    // MARK: Updates (minor 2)
+
+    /// `nv_update_check` with the request JSON (`UpdateRequest`).
+    public func updateCheck(json: String) throws(CoreStatus) { try live().updateCheck(json: json) }
+
+    /// `nv_update_download` with the request JSON.
+    public func updateDownload(json: String) throws(CoreStatus) { try live().updateDownload(json: json) }
+
+    /// `nv_update_cancel`; nothing running is fine.
+    public func updateCancel() {
+        guard let c = core.withLock({ $0 }) else { return }
+        try? c.updateCancel()
+    }
+
+    /// `nv_update_parse_key`: `{"key":...,"id":...}` or nil.
+    public func updateParseKey(_ text: String) -> String? { core.withLock({ $0 })?.updateParseKey(text) }
+
+    /// `nv_update_parse_source`.
+    public func updateParseSource(_ text: String) -> String? { core.withLock({ $0 })?.updateParseSource(text) }
+
     // MARK: Audio
 
     /// A player that renders this core's audio (`AudioPlayer`); it is stopped

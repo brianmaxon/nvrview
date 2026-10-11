@@ -11,6 +11,9 @@ struct SettingsView: View {
             DeviceSettingsView(model: model).tabItem { Label("Devices", systemImage: "server.rack") }
             CameraSettingsView(model: model).tabItem { Label("Cameras", systemImage: "video") }
             AlertSettingsView(model: model).tabItem { Label("Alerts", systemImage: "bell") }
+            if let updater = model.updater {
+                UpdateSettingsView(updater: updater).tabItem { Label("Updates", systemImage: "arrow.down.circle") }
+            }
         }
         .frame(minWidth: 640, minHeight: 400)
     }
