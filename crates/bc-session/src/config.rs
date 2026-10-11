@@ -137,7 +137,10 @@ pub struct SessionConfig {
     pub preview_escalate_after: u32,
     /// Most talk-back starts per channel in any minute
     /// ([`crate::DeviceSession::talk`]); more are refused
-    /// ([`crate::Refusal::RateLimited`]). Default 6.
+    /// ([`crate::Refusal::RateLimited`]). Starts on a channel the caller
+    /// marked as in a conversation
+    /// ([`crate::DeviceSession::set_talk_conversation`]) are exempt.
+    /// Default 20.
     pub talk_starts_per_minute: u32,
     /// Talk-back samples (16 kHz) a caller may push ahead of real time;
     /// beyond this they are dropped. Default 10 s worth.
@@ -190,7 +193,7 @@ impl SessionConfig {
             preview_restart_cap: Duration::from_secs(60),
             preview_slow_retry: Duration::from_secs(60),
             preview_escalate_after: 3,
-            talk_starts_per_minute: 6,
+            talk_starts_per_minute: 20,
             talk_buffer: 16_000 * 10,
             talk_idle_timeout: Duration::from_secs(10),
             talk_max_duration: Duration::from_secs(300),

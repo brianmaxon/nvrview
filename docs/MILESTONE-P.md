@@ -9,9 +9,10 @@ reported there leaves a documented seam instead of guessing.
 
 **Versioning.** FFI-RECORDINGS.md was first written as ABI 4. Its decision
 1 replaced that with a minor version; discovery (minor 1), updates (minor
-2), and `nv_tile_retry` (minor 3) have taken the first ones, so recordings
-arrive as **ABI 3, minor 4** (`NV_ABI_MINOR` 4), with no existing
-declaration changed, and the document now says so throughout.
+2), `nv_tile_retry` (minor 3), and `nv_talk_set_conversation` (minor 4)
+have taken the first ones, so recordings arrive as **ABI 3, minor 5**
+(`NV_ABI_MINOR` 5), with no existing declaration changed, and the document
+now says so throughout.
 
 ## Where the core stands
 
@@ -80,8 +81,8 @@ fact the slice needs is observed or reported; seams for the rest are named.
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| F1 | Minor 4, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | contract reviewed (decisions of 2026-10-11); unblocked once C11, C13, and C15 land | Opus for the contract, Sonnet for shaping JSON |
-| F2 | Minor 4, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
+| F1 | Minor 5, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | contract reviewed (decisions of 2026-10-11); unblocked once C11, C13, and C15 land | Opus for the contract, Sonnet for shaping JSON |
+| F2 | Minor 5, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
 | F3 | Edit lists (section 7) and sound (section 2a) | C8, C12, F1 | unblocked | Sonnet |
 | F4 | Export (section 7a): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` in `nv_edit_compute`, `dest` and `share_safe` on every export request | C14, F1, F3 (F2 for stills from a playback) | unblocked except stills from a playback | Sonnet |
 

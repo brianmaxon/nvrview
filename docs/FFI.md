@@ -264,7 +264,7 @@ change.
   absence of this event as "no alarm": a camera microphone is not an alarm
   sensor. On by default; Rust callers turn it off with
   `CoreConfig::sound.alarms`. The C interface has no switch in ABI 3 (it
-  always uses the defaults); the recordings minor (ABI 3, minor 4)
+  always uses the defaults); the recordings minor (ABI 3, minor 5)
   proposes one (docs/FFI-RECORDINGS.md, section 13).
 - `detects` in `channels` lists the detection kinds a channel's camera
   advertises (199 `aitype` bits), once known; `[]` for a camera without
@@ -399,6 +399,7 @@ NvStatus nv_talk_start(NvCore *core, uint64_t tile);
 NvStatus nv_talk_push(NvCore *core, uint64_t tile, const float *samples, size_t count,
                       uint32_t sample_rate);
 NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
+NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open); /* minor 4 */
 ```
 
 1. **Permission.** `nv_talk_set_permission(core, device, channel, true)`
@@ -412,8 +413,8 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
    nothing goes to the device. Otherwise the device session (no extra
    login) checks that the channel supports talk-back (its 199 item has
    `ipcAudioTalk` 1, and its ability offers the observed configuration),
-   applies the rate limit (at most 6 starts per channel per minute), and
-   opens the talk. Progress arrives as `talk` events. Starting a tile whose
+   applies the rate limit (at most 20 starts per channel per minute,
+   none during a conversation, item 5), and opens the talk. Progress arrives as `talk` events. Starting a tile whose
    talk is starting or active changes nothing.
 3. **Audio.** `nv_talk_push(core, tile, samples, count, sample_rate)`
    queues mono float samples (-1..1) at the app's rate (8 to 192 kHz;
@@ -439,6 +440,17 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
    device error, 10 s without pushed audio, and 5 minutes of talk also
    stop it. Every stop sends the device's close (command 11) unless the
    connection is already gone.
+5. **Conversation** (minor 4). `nv_talk_set_conversation(core, tile, true)`
+   tells the core the user has a call open on the tile's camera (a doorbell
+   press or Start Conversation in the app); `false` when the call ends.
+   While a camera has a tile marked, its talk starts are not limited per
+   minute and do not count against the limit later; they still need the
+   permission, and every start is still logged (with `conversation=true`).
+   The mark also ends when the tile closes, when the camera's permission is
+   withdrawn (allowing it again does not restore it: the app marks the call
+   again before its next start), and when the core is freed.
+   `NV_ERR_UNKNOWN_ID` for an unknown tile. Calls exist only in the apps,
+   which is why the app says when one is open.
 
 ```json
 {"type":"talk","tile":7,"device":1,"channel":3,"state":"starting"}
@@ -735,6 +747,7 @@ symbol at all, so a bound app checks first):
 | 1 | `nv_abi_minor`, device discovery (`nv_discover_start`, `nv_discover_stop`, the `discovered` and `discovery_done` events) |
 | 2 | updates (`nv_update_check`, `nv_update_download`, `nv_update_cancel`, `nv_update_parse_key`, `nv_update_parse_source`, the `update` event) |
 | 3 | `nv_tile_retry` (the Retry button of a tile without a picture) |
+| 4 | `nv_talk_set_conversation` (no per-minute talk-back limit while the user has a call open; see "Talk-back") |
 
 ## Builds
 

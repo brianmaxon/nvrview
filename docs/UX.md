@@ -527,7 +527,11 @@ the same call themselves without a press ("Start Conversation", below):
   speaker. This is camera motion control (CLAUDE.md, docs/ARCHITECTURE.md
   "Device commands"): available only on a doorbell where the user enabled
   it, rate-limited, every use logged; the talk-back protocol facts go into
-  docs/protocol.md before any code sends them.
+  docs/protocol.md before any code sends them. The limit is 20 talk starts
+  per camera per minute outside a call; while a call (a press or Start
+  Conversation) is open on the camera there is none, so pressing Talk again
+  and again in a conversation is never refused: each app tells the core
+  when a call opens and ends (FFI.md, "Talk-back", item 5).
 - **Live transcript:** from the press, both sides are transcribed on this
   computer (a local speech recognition model on both macOS and Windows,
   possibly a different engine on each; nothing leaves the house): the

@@ -391,9 +391,13 @@ impl fmt::Debug for Talk {
 }
 
 /// Per-device talk-back control shared by the handle and the supervisor:
-/// the channels the caller allowed, and the start rate limit.
+/// the channels the caller allowed, the channels in a conversation, and
+/// the start rate limit.
 pub(crate) struct TalkControl {
     allowed: Mutex<HashSet<u8>>,
+    /// Channels whose talk the caller marked as part of an open
+    /// conversation: their starts skip the rate limit.
+    conversations: Mutex<HashSet<u8>>,
     starts: Mutex<HashMap<u8, VecDeque<Instant>>>,
     refusal_log: Mutex<Option<Instant>>,
 }
@@ -402,6 +406,7 @@ impl TalkControl {
     pub(crate) fn new() -> TalkControl {
         TalkControl {
             allowed: Mutex::new(HashSet::new()),
+            conversations: Mutex::new(HashSet::new()),
             starts: Mutex::new(HashMap::new()),
             refusal_log: Mutex::new(None),
         }
@@ -412,8 +417,23 @@ impl TalkControl {
         if allowed {
             a.insert(channel)
         } else {
+            // Withdrawing the permission ends the conversation's exemption.
+            lock(&self.conversations).remove(&channel);
             a.remove(&channel)
         }
+    }
+
+    pub(crate) fn set_conversation(&self, channel: u8, open: bool) -> bool {
+        let mut c = lock(&self.conversations);
+        if open {
+            c.insert(channel)
+        } else {
+            c.remove(&channel)
+        }
+    }
+
+    pub(crate) fn in_conversation(&self, channel: u8) -> bool {
+        lock(&self.conversations).contains(&channel)
     }
 
     pub(crate) fn is_allowed(&self, channel: u8) -> bool {
@@ -425,8 +445,12 @@ impl TalkControl {
     }
 
     /// Counts a start against the channel's limit of `per_minute`, or says
-    /// how long until one is allowed.
-    pub(crate) fn take_start(&self, channel: u8, per_minute: u32) -> Result<(), Duration> {
+    /// how long until one is allowed. A channel in a conversation is not
+    /// limited, and its starts are not counted (`Ok(true)`).
+    pub(crate) fn take_start(&self, channel: u8, per_minute: u32) -> Result<bool, Duration> {
+        if self.in_conversation(channel) {
+            return Ok(true);
+        }
         let now = Instant::now();
         let window = Duration::from_secs(60);
         let mut s = lock(&self.starts);
@@ -439,7 +463,7 @@ impl TalkControl {
             return Err(window.saturating_sub(now.duration_since(oldest)));
         }
         q.push_back(now);
-        Ok(())
+        Ok(false)
     }
 
     /// Logs a refusal, at most one line every few seconds.
@@ -956,10 +980,28 @@ impl DeviceSession {
         self.talk_control.is_allowed(channel)
     }
 
+    /// Marks `channel`'s talk-back as part of a conversation the user has
+    /// open (a doorbell call in the app), or no longer. While marked, talk
+    /// starts on it skip [`crate::SessionConfig::talk_starts_per_minute`]
+    /// (and do not count against it later); they still need the permission
+    /// and are logged. Withdrawing the permission clears the mark.
+    pub fn set_talk_conversation(&self, channel: u8, open: bool) {
+        if self.talk_control.set_conversation(channel, open) {
+            info!(channel, open, "talk-back conversation changed");
+        }
+    }
+
+    /// Whether `channel` is marked as in a conversation.
+    pub fn talk_conversation(&self, channel: u8) -> bool {
+        self.talk_control.in_conversation(channel)
+    }
+
     /// Starts talk-back on `channel` and returns once the device has
     /// accepted it. Refused without the channel's permission
     /// ([`DeviceSession::set_motion_allowed`]), beyond
-    /// [`crate::SessionConfig::talk_starts_per_minute`], on a channel whose
+    /// [`crate::SessionConfig::talk_starts_per_minute`] (unless the channel
+    /// is in a conversation, [`DeviceSession::set_talk_conversation`]), on
+    /// a channel whose
     /// capabilities (199) lack `ipcAudioTalk` 1 or whose ability (10)
     /// offers no supported configuration, while another talk runs on the
     /// channel, or when the device refuses. Runs on the session's one
@@ -975,12 +1017,13 @@ impl DeviceSession {
         if !self.talk_control.is_allowed(channel) {
             return refuse(Refusal::NotPermitted);
         }
-        if let Err(retry_after) = self
+        let conversation = match self
             .talk_control
             .take_start(channel, self.talk_starts_per_minute)
         {
-            return refuse(Refusal::RateLimited { retry_after });
-        }
+            Ok(c) => c,
+            Err(retry_after) => return refuse(Refusal::RateLimited { retry_after }),
+        };
         let support = match self.query(Command::Support, None).await {
             Ok(r) => r,
             Err(e) => return refuse(query_refusal(e)),
@@ -1003,7 +1046,7 @@ impl DeviceSession {
             Ok(None) => return refuse(Refusal::UnsupportedAbility),
             Err(_) => return refuse(Refusal::QueryFailed),
         };
-        info!(channel, "talk-back starting");
+        info!(channel, conversation, "talk-back starting");
         let (mut talk, req) = new_talk(channel, config, self.talk_buffer, self.shared.clone());
         if self.cmd_tx.send(Request::Talk(req)).await.is_err() {
             return refuse(Refusal::SessionClosed);

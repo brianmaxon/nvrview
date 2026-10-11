@@ -463,3 +463,54 @@ async fn stopping_closes_at_once_without_a_tail() {
     assert_eq!(silent_records(log), 0);
     s.close().await;
 }
+
+#[test]
+fn the_default_limit_is_twenty_starts_a_minute() {
+    let cfg = SessionConfig::new("example-user", "example-password");
+    assert_eq!(cfg.talk_starts_per_minute, 20);
+    assert_eq!(cfg.talk_tail, Duration::from_millis(1500));
+}
+
+async fn talk_once(s: &DeviceSession) -> Result<(), Refusal> {
+    let mut t = s.talk(BELL).await?;
+    t.stop();
+    ended(&mut t).await;
+    Ok(())
+}
+
+fn limited(r: Result<(), Refusal>) -> bool {
+    matches!(r, Err(Refusal::RateLimited { .. }))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conversation_lifts_the_limit_until_it_ends() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |c| c.talk_starts_per_minute = 2);
+    s.set_motion_allowed(BELL, true);
+    // Outside a conversation: two, then refused.
+    talk_once(&s).await.unwrap();
+    talk_once(&s).await.unwrap();
+    assert!(limited(talk_once(&s).await));
+    // In a conversation: as many as the user wants.
+    s.set_talk_conversation(BELL, true);
+    assert!(s.talk_conversation(BELL));
+    for _ in 0..5 {
+        talk_once(&s).await.unwrap();
+    }
+    assert_eq!(nvr.command_count(201), 7);
+    // Ended: the limit applies again (the exempt starts did not count, and
+    // the first two are still within the minute).
+    s.set_talk_conversation(BELL, false);
+    assert!(limited(talk_once(&s).await));
+    // A minute later the window is clear again.
+    tokio::time::sleep(Duration::from_secs(61)).await;
+    talk_once(&s).await.unwrap();
+    talk_once(&s).await.unwrap();
+    // Withdrawing the permission clears the mark.
+    s.set_talk_conversation(BELL, true);
+    s.set_motion_allowed(BELL, false);
+    assert!(!s.talk_conversation(BELL));
+    s.set_motion_allowed(BELL, true);
+    assert!(limited(talk_once(&s).await));
+    s.close().await;
+}
