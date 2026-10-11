@@ -119,6 +119,25 @@ final class DoorbellCalls {
         sessions[camera.firstLens]?.call.edited(draft: text, now: model.clock.now)
     }
 
+    /// Pop Out (`.window`) or Pop In (`.inset`): one state for the whole app
+    /// (docs/UX.md "A call in its own window"). Nothing else about the call
+    /// changes (lease, tap, transcript, talk, latch, draft); the pop counts
+    /// as activity, so the call gets a fresh minute.
+    func setPresentation(_ camera: CameraRef, _ presentation: CallPresentation) {
+        guard let s = sessions[camera.firstLens], s.call.presentation != presentation else { return }
+        s.call.presentation = presentation
+        s.call.activity(now: model.clock.now)
+        model.changed()
+    }
+
+    /// The doorbell's audio is tapped for the visitor's transcript (self-test).
+    func isTapped(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.tapped != nil }
+
+    /// A device was removed: its calls end.
+    func endCalls(device key: String) {
+        for camera in Array(sessions.keys) where camera.device == key { end(camera, reason: "device removed") }
+    }
+
     /// Opens the call: lease, audio, and the visitor's transcript.
     private func open(_ camera: CameraRef, at date: Date, audio: CallAudio.Decision, origin: DoorbellCall.Origin) {
         let s = Session(call: DoorbellCall(camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin))

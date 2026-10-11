@@ -68,6 +68,10 @@ final class AppModel {
     @ObservationIgnored private var transient: [String: String] = [:]
     /// Opens a window (set by the app delegate).
     @ObservationIgnored var openWindow: (WindowContent) -> Void = { _ in }
+    /// Pop a call out into its own window, or back into the insets (set by
+    /// the app delegate; docs/UX.md "A call in its own window").
+    @ObservationIgnored var popOutCall: (CameraRef) -> Void = { _ in }
+    @ObservationIgnored var popInCall: (CameraRef) -> Void = { _ in }
     /// Self-update (set by the app delegate); receives the core's `update`
     /// events.
     @ObservationIgnored var updater: Updater?
@@ -506,6 +510,8 @@ final class AppModel {
     /// Removes a device, its password, and its cameras from every group.
     func removeDevice(_ key: String) {
         guard let d = runtime(key) else { return }
+        // Its calls end (and their windows close) before it goes.
+        calls.endCalls(device: d.key)
         disconnect(key)
         devices.removeAll { $0.config.key == d.config.key }
         if transient.removeValue(forKey: d.config.key) == nil { credentials.deletePassword(for: d.config.key) }

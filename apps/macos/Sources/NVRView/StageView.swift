@@ -1213,6 +1213,11 @@ final class StageView: NSView {
                 menu.addItem(c)
             } else {
                 item("End Conversation") { [weak self] in self?.endConversation(camera) }
+                if isPoppedOut(camera) {
+                    item("Pop In Call") { [weak self] in self?.model.popInCall(camera.firstLens) }
+                } else {
+                    item("Pop Out Call") { [weak self] in self?.model.popOutCall(camera.firstLens) }
+                }
             }
             menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
             if model.isFisheye(camera) {

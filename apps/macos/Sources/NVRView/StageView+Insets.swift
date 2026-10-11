@@ -104,7 +104,9 @@ extension StageView {
             case .soundAlarm: visible = showsChannel(target)
             default: visible = showsCamera(target)
             }
-            insetBoard.started(kind, camera: target, visible: visible, now: now, at: date)
+            // A call shown in its own window keeps its item here detached.
+            insetBoard.started(
+                kind, camera: target, visible: visible, now: now, at: date, detached: kind.isCall && isPoppedOut(target))
         } else {
             insetBoard.stopped(kind, camera: target, now: now)
         }
@@ -147,10 +149,38 @@ extension StageView {
         model.calls.startConversation(target, at: date)
         guard model.calls.call(for: target) != nil else { return }
         let visible = stageFillingCamera?.firstLens == target
-        insetBoard.started(.conversation, camera: target, visible: visible, now: now, at: date)
+        insetBoard.started(.conversation, camera: target, visible: visible, now: now, at: date, detached: isPoppedOut(target))
         insetBoard.stopped(.conversation, camera: target, now: now)
         syncInsets()
         refreshChrome()
+    }
+
+    /// The camera's call is shown in its own window.
+    func isPoppedOut(_ camera: CameraRef) -> Bool { model.calls.call(for: camera)?.presentation == .window }
+
+    /// Follows each call's presentation (one state for the whole app): a
+    /// call popped out detaches its item here (ending a swap that shows
+    /// it), one popped in comes back on top with a fresh minute, and the
+    /// detached item of a call that ended goes. Returns whether the board
+    /// changed.
+    func followCallPresentations() -> Bool {
+        var changed = false
+        let now = clock.now
+        if let s = insetBoard.swap, s.item.kind.isCall, isPoppedOut(s.shown) {
+            changed = insetBoard.setDetached(s.shown, true, now: now) || changed
+        }
+        for item in insetBoard.items where item.kind.isCall && !item.isReturn {
+            guard let call = model.calls.call(for: item.camera) else {
+                if item.detached {
+                    insetBoard.remove { $0.camera == item.camera && $0.detached }
+                    changed = true
+                }
+                continue
+            }
+            let detached = call.presentation == .window
+            if item.detached != detached { changed = insetBoard.setDetached(item.camera, detached, now: now) || changed }
+        }
+        return changed
     }
 
     /// Ends a camera's call whichever way it is shown (its inset, or over
@@ -274,6 +304,7 @@ extension StageView {
                 self.model.calls.use(camera)
             }
             view.callDelegate = CallTarget(stage: self, camera: camera)
+            view.onPopOut = { [weak self] in self?.model.popOutCall(camera) }
             insetLayer.addSubview(view)
             alertInsetViews[camera] = view
         }
@@ -287,7 +318,7 @@ extension StageView {
     func refreshInsets() {
         let before = insetBoard
         insetBoard.dropSoundAlarms { [alertActive] in !alertActive($0) }
-        if insetBoard != before {
+        if followCallPresentations() || insetBoard != before {
             syncInsets()
             return
         }
@@ -296,8 +327,9 @@ extension StageView {
         if alertInsetViews.mapValues({ $0.callPanel.isHidden }) != hadCall { layoutInsetViews() }
     }
 
+    /// A call's controls; none for a call shown in its own window.
     private func callContent(_ camera: CameraRef) -> CallContent? {
-        model.calls.call(for: camera).map {
+        model.calls.call(for: camera).flatMap { $0.presentation == .window ? nil : $0 }.map {
             CallContent(
                 call: $0, microphoneOn: model.calls.isTalkingWithMicrophone(camera), note: model.calls.note(for: camera))
         }
@@ -322,6 +354,7 @@ extension StageView {
         }
         stageCall.apply(banner: banner, call: call)
         stageCall.callTarget = stageFillingCamera.map { CallTarget(stage: self, camera: $0.firstLens) }
+        stageCall.onPopOut = stageFillingCamera.map { camera in { [weak self] in self?.model.popOutCall(camera.firstLens) } }
     }
 
     /// Places the insets in their corner, newest nearest it, and notes where
@@ -393,10 +426,13 @@ class PassThroughView: NSView {
 @MainActor
 final class StageCallView: PassThroughView, CallControlsDelegate {
     var onClose: () -> Void = {}
+    /// Pop Out for the call over the stage.
+    var onPopOut: (() -> Void)?
     /// Holds the target strongly (it refers to the stage weakly).
     var callTarget: CallControlsDelegate?
 
     private let banner = NSView()
+    private let popOut = NSButton()
     private let bannerText = NSTextField(labelWithString: "")
     private let close = NSButton()
     private let unmute = NSButton()
@@ -437,6 +473,18 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
         panel.wantsLayer = true
         panel.layer?.cornerRadius = 8
         addSubview(panel)
+        popOut.image = NSImage(systemSymbolName: "arrow.up.forward.app", accessibilityDescription: "Pop Out Call")
+        popOut.isBordered = false
+        popOut.imagePosition = .imageOnly
+        popOut.contentTintColor = .white
+        popOut.wantsLayer = true
+        popOut.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.6).cgColor
+        popOut.layer?.cornerRadius = 4
+        popOut.target = self
+        popOut.action = #selector(popOutClicked)
+        popOut.toolTip = "Pop Out Call: open it in its own window"
+        popOut.refusesFirstResponder = true
+        addSubview(popOut)
     }
 
     @available(*, unavailable)
@@ -452,6 +500,7 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
         bannerText.stringValue = text ?? ""
         unmute.isHidden = call?.showsUnmute != true
         panel.isHidden = call == nil
+        popOut.isHidden = call == nil
         if let call { panel.apply(call) }
         isHidden = text == nil && call == nil
         needsLayout = true
@@ -475,11 +524,13 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
             x = min(max(x, 12), max(b.width - 12 - panelWidth, 12))
         }
         panel.frame = CGRect(x: x, y: y, width: panelWidth, height: InsetView.callHeight)
+        popOut.frame = CGRect(x: panel.frame.maxX - 26, y: y - 26, width: 22, height: 22)
         unmute.frame = CGRect(x: 0, y: 0, width: b.width, height: max(panel.frame.minY - 8, 0))
     }
 
     @objc private func closeClicked() { onClose() }
     @objc private func unmuteClicked() { callTarget?.callUnmute() }
+    @objc private func popOutClicked() { onPopOut?() }
 
     func callUnmute() { callTarget?.callUnmute() }
     func callTalk(_ down: Bool) { callTarget?.callTalk(down) }
