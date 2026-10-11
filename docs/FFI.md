@@ -217,6 +217,16 @@ change.
   tile's stream (`status`: the reply status); the tile stays open and shows
   nothing until the device session reconnects or the app reopens the tile
   (once no other tile shows that stream).
+- `tile_error` `start_rejected` with `status` 0 means the device accepted the
+  start but sent no video: a camera without a second lens answers a lens
+  tier (`extern` or `mobile`) with one stream-info
+  record of size 0x0 and nothing more (docs/protocol.md, "Second lenses",
+  observed). A 0x0 record alone is normal (a real second lens sends one
+  too), so the rule is: a 0x0 record and no video within the core's
+  info-only limit (`CoreConfig.info_only_limit`, 15 s) fails the start. It is
+  sent once per tile, the tile stays open, and a later picture clears it
+  like any other `start_rejected`. Apps treat it as a refused start, which
+  is what moves a second lens from `mobile` to `extern`.
 - `tile_stats` arrives about once a second per tile while it is open, for
   diagnostics overlays; apps may ignore it. It describes the shown
   generation.

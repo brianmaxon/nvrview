@@ -179,6 +179,11 @@ pub struct CoreConfig {
     /// How long after the first 400 the session keeps waiting before the
     /// tile reports `tile_error` `start_rejected`; zero makes a 400 final.
     pub preview_wait_limit: Duration,
+    /// How long a started stream may deliver only a stream-info record of
+    /// size 0x0 and no video before the tile reports `tile_error`
+    /// `start_rejected` with status 0 (docs/FFI.md). A multi-lens camera's
+    /// second lens has a 0x0 record too, but video follows within seconds.
+    pub info_only_limit: Duration,
     /// How long a second-lens probe (docs/FFI.md, `lenses`) waits for the
     /// first picture of a channel's `extern` stream before deciding the
     /// channel has one lens.
@@ -234,6 +239,7 @@ impl Default for CoreConfig {
             tier_switch_align_cap: Duration::from_millis(300),
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
+            info_only_limit: Duration::from_secs(15),
             lens_probe_window: lens::ProbeTiming::default().window,
             sound: sound::SoundSettings::default(),
             test_runtime: None,
@@ -391,6 +397,7 @@ impl Core {
             stats_interval: config.stats_interval.max(Duration::from_millis(10)),
             tier_switch_timeout: config.tier_switch_timeout,
             tier_switch_align_cap: config.tier_switch_align_cap,
+            info_only_limit: config.info_only_limit,
             audio,
             sound,
         };

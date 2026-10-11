@@ -94,6 +94,7 @@ pub(crate) struct TileContext {
     pub(crate) stats_interval: Duration,
     pub(crate) tier_switch_timeout: Duration,
     pub(crate) tier_switch_align_cap: Duration,
+    pub(crate) info_only_limit: Duration,
     pub(crate) audio: Arc<AudioHub>,
     pub(crate) sound: Arc<SoundHub>,
 }
@@ -323,6 +324,12 @@ struct Generation {
     /// The device answered the start with 400 and the session is waiting
     /// for its stream (`tile_waiting` `waiting` was sent).
     waiting: bool,
+    /// Video has arrived on this stream.
+    video_seen: bool,
+    /// When a 0x0 stream-info record arrived while no video had.
+    info_only_since: Option<Instant>,
+    /// `tile_error` was sent for a stream that stayed info-only.
+    info_only_reported: bool,
 }
 
 impl Generation {
@@ -334,7 +341,52 @@ impl Generation {
             p,
             last_decoded_pts: None,
             waiting: false,
+            video_seen: false,
+            info_only_since: None,
+            info_only_reported: false,
         }
+    }
+
+    /// Notes the stream-info and video records for the info-only rule: a
+    /// 0x0 info record starts a clock that the first video record stops.
+    fn track_info_only(&mut self, record: &Record) {
+        match record {
+            Record::Video { .. } => {
+                self.video_seen = true;
+                self.info_only_since = None;
+            }
+            Record::Info { width, height, .. }
+                if (*width == 0 || *height == 0) && !self.video_seen =>
+            {
+                self.info_only_since.get_or_insert_with(Instant::now);
+            }
+            _ => {}
+        }
+    }
+
+    /// Reports (once) a stream that answered with a 0x0 info record and
+    /// sent no video within `limit`, as a refused start with status 0.
+    fn check_info_only(&mut self, tile: u64, limit: Duration, events: &EventSink) {
+        let Some(since) = self.info_only_since else {
+            return;
+        };
+        if self.info_only_reported || Instant::now() < since + limit {
+            return;
+        }
+        self.info_only_reported = true;
+        warn!(
+            tile,
+            generation = self.generation,
+            "the device sent a 0x0 stream info and no video"
+        );
+        events.send(
+            Object::event("tile_error")
+                .u64("tile", tile)
+                .str("reason", "start_rejected")
+                .u64("status", 0)
+                .finish(),
+            Priority::State,
+        );
     }
 
     /// Notes a subscription item for the `tile_waiting` event: the start of
@@ -682,6 +734,8 @@ impl TileThread {
                 snd.tick(now_us.saturating_mul(1000));
             }
             s.current.p.tick(now_us);
+            s.current
+                .check_info_only(self.id, self.ctx.info_only_limit, &self.ctx.events);
             if let Some(st) = s.starting.as_mut() {
                 st.g.p.tick(now_us);
                 if st.failed.is_none() && Instant::now() >= st.deadline {
@@ -892,6 +946,9 @@ impl TileThread {
 
     fn item(&mut self, g: &mut Generation, item: Item) {
         g.track_waiting(self.id, &item, &self.ctx.events);
+        if let Item::Media(r) = &item {
+            g.track_info_only(r);
+        }
         let p = &mut g.p;
         if matches!(item, Item::Media(_)) {
             self.sequence += 1;
