@@ -911,6 +911,20 @@ observed (client capture); the rest are reported (client) and did not appear.
    a new `seq` and `seekTime`, then a new 5. Seven plays were made this way;
    none ran to the end of a file, so how a play ends is unknown.
 
+**How nvrview plays (ours, from the facts above).** 123, 5 and 7 are on the
+allowlist, viewing tier: they position and stream a replay on our own
+session and stop it, and change nothing on the device (the observed
+client's playback used exactly these three). A play is the observed
+sequence: 123 with a `seq` and the start time, its empty status-200 reply,
+then 5 naming the file by `Id`, at `playSpeed` 1 only (the one value seen
+decrypted); 7 on every exit path, naming the file. `seq` numbers increase
+from the current Unix time, as the client's did; 123's `channelId` is 0, as
+the client sent it. With no observation of how a play ends or is refused,
+`bc-session` takes an empty message as the end and a non-200 reply without
+the play's `seq` as a refusal; at most four plays run per device by default
+(four were observed on one session). Not sent: 150, 381–383 (not observed in
+use), and any other `playSpeed`.
+
 #### Speed, file boundaries, and concurrent plays
 
 A second capture of the official client's playback tab added the facts below.

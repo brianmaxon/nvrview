@@ -95,6 +95,26 @@ pub struct ArchiveConfig {
     /// Throttle for download media in bytes per second (unpaced if `None`,
     /// as devices send downloads).
     pub download_rate: Option<u64>,
+    /// Seconds of video a play (command 5) sends at once before pacing to
+    /// real time (observed: 2 to 4.4 s within the first quarter second).
+    pub play_burst_secs: u32,
+}
+
+/// One play (command 5) the fake served, for test assertions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayLog {
+    /// Channel.
+    pub channel: u8,
+    /// The file `Id` it named.
+    pub file_id: String,
+    /// The preceding seek's time.
+    pub at: DateTime,
+    /// The preceding seek's `seq`.
+    pub seq: u32,
+    /// `playSpeed` as sent.
+    pub speed: Option<u32>,
+    /// Stream requested.
+    pub stream: Option<StreamTier>,
 }
 
 impl ArchiveConfig {
@@ -113,7 +133,13 @@ impl ArchiveConfig {
             gop_secs: 2,
             audio: None,
             download_rate: None,
+            play_burst_secs: 3,
         }
+    }
+
+    /// One past the last recorded second (naive seconds).
+    pub(crate) fn recorded_end(&self) -> i64 {
+        self.sorted_days().last().map_or(0, |d| ts(*d) + 86_400)
     }
 
     fn has_day(&self, t: DateTime) -> bool {
@@ -144,11 +170,11 @@ impl FileEntry {
     }
 }
 
-fn ts(t: DateTime) -> i64 {
+pub(crate) fn ts(t: DateTime) -> i64 {
     t.to_naive_secs()
 }
 
-fn dt(s: i64) -> DateTime {
+pub(crate) fn dt(s: i64) -> DateTime {
     DateTime::from_naive_secs(s).unwrap_or(DateTime {
         year: 1970,
         month: 1,
@@ -234,7 +260,7 @@ pub(crate) fn events(
     out
 }
 
-fn time_of(el: &Element, name: &str) -> Option<DateTime> {
+pub(crate) fn time_of(el: &Element, name: &str) -> Option<DateTime> {
     let t = el.child(name)?;
     let n = |k: &'static str| t.num::<u32>(k).ok().flatten();
     DateTime::new(

@@ -851,12 +851,11 @@ or a counted drop, never growth):
 
 ## 11. Existing code that conflicts or is missing
 
-1. **Allowlist.** `bc-protocol`'s allowlist test lists 5, 7, and 123 as
-   never sent ("not needed yet"). Playback needs them moved to the viewing
-   tier, with request builders for 123 (`ReplaySeek`), 5 (`FileInfo` by
-   file `Id`), and 7, and `bc-session` support for a play stream (start,
-   media routed by message ID with the replay `seq`, stop on drop). The
-   framer already reads `seq`.
+1. **Allowlist.** Done: 123, 5 and 7 are on the viewing tier, with request
+   builders (`Session::replay_seek`, `start_play`, `stop_play`) and a play
+   stream in `bc-session` (`DeviceSession::play`, `Play`: media routed by
+   message ID and the replay `seq`, bounded, stop on drop and on close, at
+   most `max_plays` per device). Rates other than 1× wait for B1.
 2. **No lens in the index or incidents.** `IndexedEvent`, `IndexedFile`,
    and `DeviceIndex::put_day` are keyed by channel only, and
    `CameraId` is `(device, channel)`. Indexing both lenses of a channel
@@ -882,9 +881,9 @@ or a counted drop, never growth):
 7. **Thumbnails share the search permit** with the indexer (a FIFO
    semaphore), so a long indexing pass delays every thumbnail. Needs a
    priority (thumbnails and user refreshes before background passes).
-8. **`viewer-core` does not use `recordings` yet**, and mock-nvr has no
-   playback (123/5/7). Both are needed before playback can be tested
-   without hardware.
+8. **`viewer-core` does not use `recordings` yet** (MILESTONE-P.md, C11).
+   mock-nvr now serves playback (123/5/7) at 1× with the observed
+   burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
    everything new; open question 7.

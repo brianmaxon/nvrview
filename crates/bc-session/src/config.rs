@@ -91,6 +91,18 @@ pub struct SessionConfig {
     /// session cannot slow one down without stalling live view. Default
     /// 64 MiB.
     pub download_buffer_bytes: usize,
+    /// Plays of recordings (command 5) running at once on this device;
+    /// more are refused at once. Default 4: four plays on one session were
+    /// observed with no refusal; the device's limit is not known.
+    pub max_plays: usize,
+    /// A play that delivers nothing for this long has stalled. Plays are
+    /// paced (media about every 2 s, every 4 s on a low-rate sub-stream),
+    /// so this is longer than a download's. Default 10 s.
+    pub play_stall_timeout: Duration,
+    /// Received play data a consumer may leave unread before the play is
+    /// stopped as overflowed (a play starts with a burst of a few MB).
+    /// Default 32 MiB.
+    pub play_buffer_bytes: usize,
     /// Subscribe to the device's detection pushes (command 192) after every
     /// login, delivered by [`crate::DeviceSession::alarms`]. Default on.
     pub alarm_report: bool,
@@ -143,6 +155,9 @@ impl SessionConfig {
             max_downloads: 1,
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
+            max_plays: 4,
+            play_stall_timeout: Duration::from_secs(10),
+            play_buffer_bytes: 32 * 1024 * 1024,
             alarm_report: true,
             preview_retry_interval: Duration::from_secs(6),
             preview_wait_limit: Duration::from_secs(60),
