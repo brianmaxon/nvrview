@@ -3,8 +3,11 @@
 //!
 //! - [`index`]: a local, bounded index per device of the days with
 //!   recordings, the recording files, and the motion and detection events.
-//! - [`indexer`]: fills and refreshes that index in the background (recent
-//!   days first, today periodically).
+//! - [`lane`]: one search lane per device: fills that index with the days
+//!   views ask for, keeps a shown today fresh, and fetches cover thumbnails
+//!   first, one search at a time.
+//! - [`indexer`]: whole-range index passes (recent days first, today
+//!   periodically), for an optional background fill.
 //! - [`incident`]: groups events from all cameras into incidents, with the
 //!   user's merge, split, add, remove, and rename operations.
 //! - [`edits`]: the user's edits to incidents, stored and replayed over
@@ -36,6 +39,7 @@ pub mod groups;
 pub mod incident;
 pub mod index;
 pub mod indexer;
+pub mod lane;
 pub mod naming;
 pub mod scheduler;
 mod store;

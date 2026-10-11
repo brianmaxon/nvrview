@@ -11,7 +11,9 @@
 
 use crate::index::{DeviceIndex, IndexedEvent, IndexedFile};
 use crate::{Clock, DeviceCamera, Secs, Tier, date_time, day_start, secs};
-use bc_protocol::archive::{DateTime, DayRecordChannel, EventSearch, FileSearch, days_in_month};
+use bc_protocol::archive::{
+    DateTime, DayRecordChannel, DayRecords, EventSearch, FileSearch, days_in_month,
+};
 use bc_session::{DeviceSession, SearchError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -95,13 +97,78 @@ fn lock(index: &Mutex<DeviceIndex>) -> std::sync::MutexGuard<'_, DeviceIndex> {
 }
 
 /// Start of the month containing `s`, and its last second.
-fn month_bounds(s: Secs) -> (DateTime, DateTime) {
+pub(crate) fn month_bounds(s: Secs) -> (DateTime, DateTime) {
     let t = date_time(s);
     let first = DateTime::date(t.year, t.month, 1).unwrap_or(t);
     let last = DateTime::date(t.year, t.month, days_in_month(t.year, t.month))
         .unwrap_or(t)
         .end_of_day();
     (first, last)
+}
+
+/// Whether a month's calendar (142) must be asked again: never asked; or
+/// the current month, asked more than `refresh` seconds ago (it gains
+/// days); or a past month asked before it was over.
+pub(crate) fn month_stale(
+    fetched: Option<Secs>,
+    month_end: Secs,
+    now: Secs,
+    refresh: Secs,
+) -> bool {
+    match fetched {
+        None => true,
+        Some(at) if month_end >= day_start(now) => now - at >= refresh,
+        Some(at) => at <= month_end,
+    }
+}
+
+/// Whether a camera's day must be searched (14–16, 272–274): it has
+/// recordings and was never searched, or was searched before it was over
+/// (today: more than `refresh` seconds ago).
+pub(crate) fn day_needed(
+    idx: &DeviceIndex,
+    camera: DeviceCamera,
+    day: Secs,
+    now: Secs,
+    refresh: Secs,
+) -> bool {
+    if !idx.recorded_days(camera).contains(&day) {
+        return false;
+    }
+    match idx.camera_day(day, camera) {
+        None => true,
+        Some(cd) if day == day_start(now) => now - cd.fetched_at >= refresh,
+        Some(cd) => cd.fetched_at < day + 86_400,
+    }
+}
+
+/// The 142 request for some cameras: one entry per channel (the answer is
+/// per channel; every lens of a channel gets it).
+pub(crate) fn day_record_request<'a>(
+    cams: impl IntoIterator<Item = (DeviceCamera, Option<String>)> + 'a,
+) -> Vec<DayRecordChannel> {
+    let mut req: Vec<DayRecordChannel> = Vec::new();
+    for (c, uid) in cams {
+        if !req.iter().any(|r| r.channel == c.channel) {
+            req.push(DayRecordChannel {
+                channel: c.channel,
+                uid,
+            });
+        }
+    }
+    req
+}
+
+/// The days with recordings of `channel` in a 142 reply for the month that
+/// starts at `m_start`.
+pub(crate) fn recorded_days_of(list: &[DayRecords], channel: u8, m_start: DateTime) -> Vec<Secs> {
+    list.iter()
+        .filter(|d| d.channel == channel)
+        .flat_map(|d| d.days.iter())
+        .filter(|t| t.has_recordings())
+        .filter_map(|t| DateTime::date(m_start.year, m_start.month, t.day_of_month() as u8))
+        .map(secs)
+        .collect()
 }
 
 /// Runs one indexing pass.
@@ -130,45 +197,28 @@ pub async fn run_pass(
             break;
         }
         let (ms, me) = (secs(m_start), secs(m_end));
-        let stale = |fetched: Option<Secs>| match fetched {
-            None => true,
-            // The current month gains days; a past month is final once it
-            // was read after it ended.
-            Some(at) if me >= today => now - at >= cfg.refresh_today,
-            Some(at) => at <= me,
-        };
         let wanted: Vec<&IndexedChannel> = {
             let idx = lock(index);
             cfg.channels
                 .iter()
-                .filter(|c| stale(idx.month_fetched_at(c.camera, ms)))
+                .filter(|c| {
+                    month_stale(
+                        idx.month_fetched_at(c.camera, ms),
+                        me,
+                        now,
+                        cfg.refresh_today,
+                    )
+                })
                 .collect()
         };
         if !wanted.is_empty() {
-            let mut req: Vec<DayRecordChannel> = Vec::new();
-            for c in &wanted {
-                if !req.iter().any(|r| r.channel == c.camera.channel) {
-                    req.push(DayRecordChannel {
-                        channel: c.camera.channel,
-                        uid: uid_of(c),
-                    });
-                }
-            }
+            let req = day_record_request(wanted.iter().map(|c| (c.camera, uid_of(c))));
             match session.day_records(m_start, m_end, &req).await {
                 Ok(list) => {
                     report.months += 1;
                     let mut idx = lock(index);
                     for c in &wanted {
-                        let days: Vec<Secs> = list
-                            .iter()
-                            .filter(|d| d.channel == c.camera.channel)
-                            .flat_map(|d| d.days.iter())
-                            .filter(|t| t.has_recordings())
-                            .filter_map(|t| {
-                                DateTime::date(m_start.year, m_start.month, t.day_of_month() as u8)
-                            })
-                            .map(secs)
-                            .collect();
+                        let days = recorded_days_of(&list, c.camera.channel, m_start);
                         if let Err(e) = idx.set_month(c.camera, ms, me, days, now) {
                             warn!(error = %e, "cannot store the recording calendar");
                         }
@@ -188,19 +238,7 @@ pub async fn run_pass(
     let mut day = today;
     while day >= first {
         for c in &cfg.channels {
-            let needed = {
-                let idx = lock(index);
-                if !idx.recorded_days(c.camera).contains(&day) {
-                    false
-                } else {
-                    match idx.camera_day(day, c.camera) {
-                        None => true,
-                        Some(cd) if day == today => now - cd.fetched_at >= cfg.refresh_today,
-                        // Fetched before the day was over: once more.
-                        Some(cd) => cd.fetched_at < day + 86_400,
-                    }
-                }
-            };
+            let needed = day_needed(&lock(index), c.camera, day, now, cfg.refresh_today);
             if !needed {
                 continue;
             }
@@ -229,7 +267,8 @@ pub async fn run_pass(
     report
 }
 
-async fn index_day(
+/// Searches one camera's files and events of one day.
+pub(crate) async fn index_day(
     session: &DeviceSession,
     c: &IndexedChannel,
     uid: Option<String>,
