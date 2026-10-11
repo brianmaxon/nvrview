@@ -125,31 +125,15 @@ final class AppleSpeechRenderer: SpeechRenderer {
     func render(_ text: String) async -> [Float] {
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.language.languageCode?.identifier ?? "en")
-        let collected = BufferList()
+        let collected = SpeechBufferCollector()
         return await withCheckedContinuation { (done: CheckedContinuation<[Float], Never>) in
             synthesizer.write(utterance) { buffer in
                 guard let pcm = buffer as? AVAudioPCMBuffer else { return }
-                // A zero-length buffer marks the end.
-                if pcm.frameLength == 0 {
-                    done.resume(returning: collected.finish())
-                } else {
-                    collected.add(pcm)
+                // Resumes once, at the first end (a zero-length buffer).
+                if let samples = collected.take(pcm) {
+                    done.resume(returning: samples)
                 }
             }
-        }
-    }
-}
-
-private final class BufferList: @unchecked Sendable {
-    private let lock = NSLock()
-    private var buffers: [AVAudioPCMBuffer] = []
-    private var finished = false
-    func add(_ b: AVAudioPCMBuffer) { lock.withLock { buffers.append(b) } }
-    func finish() -> [Float] {
-        lock.withLock {
-            guard !finished else { return [] }
-            finished = true
-            return TalkAudioConverter.convertAll(buffers)
         }
     }
 }

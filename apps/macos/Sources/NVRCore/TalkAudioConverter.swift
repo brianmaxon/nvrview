@@ -83,3 +83,31 @@ public final class TalkAudioConverter {
         return samples + c.flush()
     }
 }
+
+/// Collects the buffers `AVSpeechSynthesizer.write(_:toBufferCallback:)`
+/// renders, from whatever thread it calls back on. The synthesizer marks the
+/// end with a zero-length buffer and was seen sending that more than once, so
+/// only the first end yields the samples: a continuation resumed twice is a
+/// fatal error.
+public final class SpeechBufferCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffers: [AVAudioPCMBuffer] = []
+    private var finished = false
+
+    public init() {}
+
+    /// Takes one rendered buffer. Returns the 16 kHz mono samples of all of
+    /// them at the first end (a zero-length buffer), and nil otherwise:
+    /// before the end, and at any end after the first.
+    public func take(_ buffer: AVAudioPCMBuffer) -> [Float]? {
+        lock.withLock {
+            guard !finished else { return nil }
+            guard buffer.frameLength == 0 else {
+                buffers.append(buffer)
+                return nil
+            }
+            finished = true
+            return TalkAudioConverter.convertAll(buffers)
+        }
+    }
+}
