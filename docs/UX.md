@@ -149,7 +149,8 @@ be at the door without pressing anything, or the user may want to speak to
 someone through a camera's speaker.
 
 - **Where.** A camera tile's context menu has "Start Conversation" (and "End
-  Conversation" while its call is open). It is offered on every camera tile,
+  Conversation" while its call is open); on Windows, "Start conversation" and
+  "End conversation", next to "Allow talk-back" (see below). It is offered on every camera tile,
   not only doorbells: the core learns whether a camera has a speaker only when
   talk-back starts (`not_supported`, docs/FFI.md "Talk-back"), so the call
   says "this camera has no talk-back" when Talk is pressed, and the captions
@@ -512,6 +513,38 @@ Details settled while building it (macOS):
   length, not their text) and the call's end in the session's event log; the
   transcript goes there only with "Save call transcripts" (Settings >
   Alerts), never to the system log.
+
+Details settled while building it (Windows):
+
+- The same call, a press or Start conversation: a card per call in the
+  stage's bottom right corner of every window, with the live captions, an
+  Unmute control when the call opened silent, Talk (hold the button, or
+  "Keep talking"), the typed reply box with Send, and a close control that
+  ends the call. Windows has no alert insets yet, so a press does not bring
+  the doorbell's video onto the screen: the card opens, and the picture shows
+  only if a tile shows the doorbell.
+- Talk-back needs the camera's permission, which on Windows is the tile
+  menu's "Allow talk-back" (a checked item, off by default, kept in
+  `view-settings.json` and passed to the core before every start and when it
+  changes; withdrawing it stops a running talk). The call says where to turn
+  it on when the core refuses with `not_permitted`.
+- The microphone is WASAPI capture (no permission prompt for desktop apps; if
+  Windows blocks it the call says so). A typed reply is rendered by the
+  system voice (`Windows.Media.SpeechSynthesis`) into memory, never played on
+  the computer, and pushed to the camera at the voice's own rate; the core
+  resamples it. The echo gate is the Mac's: the microphone is not
+  transcribed while the camera plays through the speakers, and 0.4 s after.
+- Captions use the desktop speech recognizer of Windows (`System.Speech`,
+  local, no model to ship), one session per source, fed the same 16 kHz audio
+  as on the Mac. It is a stand-in for the engine docs/ARCHITECTURE.md plans
+  (Moonshine, measured on doorbell-quality speech before it replaces this):
+  where Windows has no recognizer for the language, the call says "No
+  transcript" and goes on. Partial results show with an ellipsis until the
+  recognizer settles on a phrase, and a phrase it is not sure of stays a
+  partial.
+- Not on Windows yet: the setting that saves call transcripts into the event
+  log (a call is logged without its text) and a per-doorbell "unmute on ring"
+  (a press unmutes only if the user was already listening, else Unmute shows).
 
 ## Finding devices
 
