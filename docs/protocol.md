@@ -1045,14 +1045,22 @@ concurrent play (the same file in one run, another camera's file in the other
 two) was accepted and delivered media. The reported "status" varied from run
 to run (52092, 58201, 58472) and matched the low 16 bits of a number near the
 session's replay `seq` base, that is, bytes 16–17 of a replay media header
-(see "Replay media headers"), not a device status. What that message actually
-was has not been determined. (The interpretation is ours; the measurements
-below are observed.)
+(see "Replay media headers"), not a device status. A fifth run logged the
+whole message: it was **media** (a 663-byte message with a media extension)
+on the first play's message ID whose header carried the `seq` of the
+**second** play's seek, sent just after the first play started. So the
+device tagged the running play's media with the latest seek's `seq`, and the
+probe, which then accepted only the play's own `seq`, took it for a
+refusal. (Every seek carried `channelId` 0, as the official client sends it;
+whether a seek with the play's own channel would keep the tags apart was not
+tried.) nvrview now routes a play's media by message ID and accepts the
+`seq` of any recent seek. The measurements below are observed.
 
 | Fact | Provenance |
 | --- | --- |
 | **One session carried live view and a play at once.** With the live preview running, the 123 seek and the 5 play were accepted and the play's media arrived beside the live media on the same connection, told apart by message ID; nothing was refused and the connection stayed up. | observed |
-| **At least two simultaneous plays beside live view delivered media**, in all three later runs (in one run both on the same camera, the same file as the restarted play; in two runs a second camera). The device refused nothing: no non-200 answer to a 123 or 5 was seen. The restarted play of the stopped file delivered no media within the probe's window in those stages; why is unknown (its first message may be the unidentified one above). More than two plays beside live view, and downloads beside live view, were not measured. | observed; the restart's silence unexplained |
+| **At least two simultaneous plays beside live view delivered media**, in all three later runs (in one run both on the same camera, the same file as the restarted play; in two runs a second camera). The device refused nothing: no non-200 answer to a 123 or 5 was seen. The first play of each such stage was cut short by the probe on its first media message, which carried the second seek's `seq` (above), so its delivery was not measured. More than two plays beside live view, and downloads beside live view, were not measured. | observed |
+| **A running play's media can carry a later seek's `seq`.** With two plays started back to back on one session (seek, play, seek, play, every seek with `channelId` 0), the first play's media arrived on its own message ID tagged with the second seek's `seq`. | observed |
 | **Live view kept its rate** in all runs: the live sub-stream ran at 9.8 to 10.0 frames per second alone and 10.0 to 10.1 while one play ran, with no gap of a whole second; one second during a play's burst carried about half the usual frames and a neighboring second made up for it (for example 5 then 15). In the two-play stages it ran at 11 to 13 frames per second over a window of about a second, which is within the second-to-second spread. | observed |
 | **The burst can be long.** A play's first picture came 0.29 to 0.36 s after the request, and within the first second the device sent 8 s of video (80 frames at 10 frames per second, about 235 KB of sub-stream; 11.9 s of video in 7.7 s over the stage). Then nothing came for the 4 s the probe waited, consistent with the play running 8 s ahead of real time; whether it resumed at real time was not observed. The client capture's 1× bursts held 2 to 4.4 s of video (about 4 s on a main stream in the later one). | observed |
 | **Keyframe wall clock in UTC, recording times local.** The live keyframes' wall-clock seconds matched the host's UTC clock within a second, and in every run the first play's first keyframe read `seekTime` (device local, like every search time) plus the device's UTC offset, less 1 s (the second play in the same runs read plus 1 s): the seconds in the extra header are UTC on this device, and the keyframe is within about a second of the seek time. The official client's decrypted capture agrees (see "Rates, keyframes, and how a play ends"). | observed |
