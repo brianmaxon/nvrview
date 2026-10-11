@@ -12,7 +12,7 @@ use crate::events::{EventSink, Priority};
 use crate::json;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -117,7 +117,10 @@ pub fn source_info(text: &str) -> String {
 /// finishes, or by `cancel` when the worker is still blocked.
 #[derive(Clone)]
 struct Final {
-    sent: Arc<AtomicBool>,
+    /// Whether the final event went out. Held while an event of the
+    /// operation is queued, so a progress event can never follow the final
+    /// one (the worker's progress and `cancel` run on different threads).
+    sent: Arc<Mutex<bool>>,
     events: EventSink,
     op: u64,
     action: &'static str,
@@ -127,11 +130,21 @@ impl Final {
     /// Sends `o` unless a final event was already sent; returns whether it
     /// was sent.
     fn send(&self, o: json::Object) -> bool {
-        if self.sent.swap(true, Ordering::SeqCst) {
+        let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        if *sent {
             return false;
         }
+        *sent = true;
         self.events.send(o.finish(), Priority::State);
         true
+    }
+
+    /// Sends a progress event unless the final event was already sent.
+    fn progress(&self, o: json::Object) {
+        let sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
+        if !*sent {
+            self.events.send(o.finish(), Priority::State);
+        }
     }
 
     fn canceled(&self) -> bool {
@@ -188,7 +201,7 @@ impl UpdateHub {
         self.events
             .send(event(op, action, "started").finish(), Priority::State);
         let last = Final {
-            sent: Arc::new(AtomicBool::new(false)),
+            sent: Arc::new(Mutex::new(false)),
             events: self.events.clone(),
             op,
             action,
@@ -196,7 +209,6 @@ impl UpdateHub {
         let worker = Worker {
             op,
             action,
-            events: self.events.clone(),
             last: last.clone(),
             cancel: cancel.clone(),
         };
@@ -256,7 +268,6 @@ fn event(op: u64, action: &str, state: &str) -> json::Object {
 struct Worker {
     op: u64,
     action: &'static str,
-    events: EventSink,
     last: Final,
     cancel: Cancel,
 }
@@ -335,14 +346,12 @@ impl Worker {
                 .saturating_mul(100)
                 .checked_div(total)
                 .unwrap_or(100);
-            if last_percent != Some(percent) && !self.last.sent.load(Ordering::SeqCst) {
+            if last_percent != Some(percent) {
                 last_percent = Some(percent);
-                self.events.send(
+                self.last.progress(
                     event(op, self.action, "downloading")
                         .u64("received", received)
-                        .u64("total", total)
-                        .finish(),
-                    Priority::State,
+                        .u64("total", total),
                 );
             }
         };
@@ -412,6 +421,40 @@ mod tests {
         assert!(parse_request(&check_only, true).is_err());
         // No keys is a valid request; the operation reports it.
         assert!(parse_request(r#"{"source":"/s","keys":[],"current":"0.3.0"}"#, false).is_ok());
+    }
+
+    #[test]
+    fn no_progress_after_the_final_event() {
+        struct Collect(Mutex<Vec<String>>);
+        impl crate::Callbacks for Collect {
+            fn on_action(&self, _: u64, _: u32, _: &crate::Action<'_>) {}
+            fn on_event(&self, json: &str) {
+                self.0.lock().unwrap().push(json.to_string());
+            }
+        }
+        let seen = Arc::new(Collect(Mutex::new(Vec::new())));
+        let mut thread = crate::events::EventThread::spawn(seen.clone()).unwrap();
+        let last = Final {
+            sent: Arc::new(Mutex::new(false)),
+            events: thread.sink(),
+            op: 7,
+            action: "download",
+        };
+        let progress = || event(7, "download", "downloading").u64("received", 1);
+        last.progress(progress());
+        assert!(last.canceled());
+        // What a worker still running after `cancel` would send.
+        last.progress(progress());
+        assert!(!last.send(event(7, "download", "ready")));
+        thread.stop();
+        let states: Vec<String> = seen
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|j| serde_json::from_str::<Value>(j).unwrap()["state"].to_string())
+            .collect();
+        assert_eq!(states, [r#""downloading""#, r#""canceled""#]);
     }
 
     #[test]
