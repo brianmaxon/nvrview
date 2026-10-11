@@ -6,6 +6,8 @@
 // stage its controls show over the stage instead. Pure: the app measures the
 // cards and draws the pictures.
 
+using System.Text.Json.Nodes;
+
 namespace NvrView.Tiles;
 
 /// <summary>One inset's frame on the stage, top-left origin, in DIPs.</summary>
@@ -18,6 +20,96 @@ public readonly record struct InsetFrame(double X, double Y, double Width, doubl
     public double MidX => X + Width / 2;
 
     public bool Intersects(InsetFrame o) => X < o.Right && o.X < Right && Y < o.Bottom && o.Y < Bottom;
+}
+
+/// <summary>
+/// Where a window's inset column sits: its position as a fraction of the free space inside the
+/// stage's margins, each in 0..1. (0, 0) is the top left corner and (1, 1) the bottom right.
+/// Resizing the window or going full screen keeps the fractions, so a column in a corner stays in it.
+/// </summary>
+public readonly record struct InsetAnchor
+{
+    /// <summary>Clamped to 0..1 (anything not finite counts as 0).</summary>
+    public InsetAnchor(double x, double y)
+    {
+        X = double.IsFinite(x) ? Math.Min(Math.Max(x, 0), 1) : 0;
+        Y = double.IsFinite(y) ? Math.Min(Math.Max(y, 0), 1) : 0;
+    }
+
+    public double X { get; }
+
+    public double Y { get; }
+
+    /// <summary>A corner's anchor (the default placement).</summary>
+    public static InsetAnchor FromCorner(ChromeCorner corner) => corner switch
+    {
+        ChromeCorner.TopLeft => new(0, 0),
+        ChromeCorner.TopRight => new(1, 0),
+        ChromeCorner.BottomLeft => new(0, 1),
+        _ => new(1, 1),
+    };
+
+    /// <summary>The column grows upward from its bottom edge (it sits nearer the bottom); at the exact middle it grows downward.</summary>
+    public bool GrowsUpward => Y > 0.5;
+
+    /// <summary>The saved form: <c>{"x":..,"y":..}</c>.</summary>
+    public string ToJson() => new JsonObject { ["x"] = X, ["y"] = Y }.ToJsonString();
+
+    /// <summary>A saved value, through the clamping constructor; null when it is not an object with numeric x and y.</summary>
+    public static InsetAnchor? FromJson(string? json)
+    {
+        try
+        {
+            if (json is not null && JsonNode.Parse(json) is JsonObject o && o["x"] is JsonValue x && o["y"] is JsonValue y
+                && x.TryGetValue(out double dx) && y.TryGetValue(out double dy))
+            {
+                return new InsetAnchor(dx, dy);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        return null;
+    }
+}
+
+/// <summary>Dragging the inset column: where it lands as an anchor, each axis snapping to its edge within <see cref="SnapDistance"/>.</summary>
+public static class InsetPlacement
+{
+    /// <summary>Distance from an edge (inside the margins) within which an axis snaps to that edge.</summary>
+    public const double SnapDistance = 24;
+
+    /// <summary>The anchor for a column whose top left corner was dragged to (<paramref name="x"/>, <paramref name="y"/>) in a stage (top-left origin).</summary>
+    public static InsetAnchor Anchor(double x, double y, double columnWidth, double columnHeight, double stageWidth, double stageHeight) =>
+        new(Fraction(x, columnWidth, stageWidth), Fraction(y, columnHeight, stageHeight));
+
+    /// <summary>
+    /// One axis: the offset from the near margin over the free space; 0 or 1 within the snap
+    /// distance of either end (the nearer end when both are, the start on a tie); 0 when there is
+    /// no free space.
+    /// </summary>
+    public static double Fraction(double position, double size, double stage)
+    {
+        double free = stage - 2 * InsetGeometry.Margin - size;
+        if (free <= 0)
+        {
+            return 0;
+        }
+        double fromStart = position - InsetGeometry.Margin;
+        double fromEnd = free - fromStart;
+        if (Math.Min(fromStart, fromEnd) <= SnapDistance)
+        {
+            return fromStart <= fromEnd ? 0 : 1;
+        }
+        return fromStart / free;
+    }
+
+    /// <summary>The column's top left corner for an anchor (the inverse of <see cref="Anchor"/> away from the edges).</summary>
+    public static (double X, double Y) Origin(InsetAnchor anchor, double columnWidth, double columnHeight, double stageWidth, double stageHeight)
+    {
+        double m = InsetGeometry.Margin;
+        return (m + anchor.X * (stageWidth - 2 * m - columnWidth), m + anchor.Y * (stageHeight - 2 * m - columnHeight));
+    }
 }
 
 /// <summary>The insets' geometry on a stage: about 30% of its width, stacked from a corner, newest nearest it.</summary>
@@ -50,23 +142,47 @@ public static class InsetGeometry
 
     /// <summary>
     /// The frames of the first <paramref name="count"/> insets of the given heights (header,
-    /// picture and any call controls), newest first, in a stage of the given size. Insets that do
-    /// not fit are left out (the caller counts them in "+N more"); the first always gets a frame.
+    /// picture and any call controls), newest first, in a stage of the given size, stacked from
+    /// <paramref name="corner"/>. Insets that do not fit are left out (the caller counts them in
+    /// "+N more"); the first always gets a frame.
     /// </summary>
-    public static IReadOnlyList<InsetFrame> Frames(int count, double width, IReadOnlyList<double> heights, ChromeCorner corner, double stageWidth, double stageHeight)
+    public static IReadOnlyList<InsetFrame> Frames(int count, double width, IReadOnlyList<double> heights, ChromeCorner corner, double stageWidth, double stageHeight) =>
+        Frames(count, width, heights, InsetAnchor.FromCorner(corner), stageWidth, stageHeight);
+
+    /// <summary>
+    /// The same for a column placed anywhere: <paramref name="anchor"/> is the column's position
+    /// as a fraction of the free space inside the margins. Below the middle (<c>Y &gt; 0.5</c>)
+    /// the newest inset is at the column's bottom and the others stack upward; otherwise the
+    /// newest is at its top. Insets that do not fit the stage's height (inside the margins) are
+    /// left out; the newest is always drawn, even when it alone is taller.
+    /// </summary>
+    public static IReadOnlyList<InsetFrame> Frames(int count, double width, IReadOnlyList<double> heights, InsetAnchor anchor, double stageWidth, double stageHeight)
     {
-        var frames = new List<InsetFrame>();
-        double x = corner.IsLeft() ? Margin : stageWidth - Margin - width;
+        var fitting = new List<double>();
         double used = Margin;
         foreach (double h in heights.Take(count))
         {
-            if (used + h + Margin > stageHeight && frames.Count > 0)
+            if (used + h + Margin > stageHeight && fitting.Count > 0)
             {
                 break;
             }
-            double y = corner.IsTop() ? used : stageHeight - used - h;
-            frames.Add(new InsetFrame(x, y, width, h));
+            fitting.Add(h);
             used += h + Gap;
+        }
+        var frames = new List<InsetFrame>();
+        if (fitting.Count == 0)
+        {
+            return frames;
+        }
+        double column = fitting.Sum() + Gap * (fitting.Count - 1);
+        double x = Margin + anchor.X * (stageWidth - 2 * Margin - width);
+        double top = Margin + anchor.Y * (stageHeight - 2 * Margin - column);
+        double offset = 0;
+        foreach (double h in fitting)
+        {
+            double y = anchor.GrowsUpward ? top + column - offset - h : top + offset;
+            frames.Add(new InsetFrame(x, y, width, h));
+            offset += h + Gap;
         }
         return frames;
     }
