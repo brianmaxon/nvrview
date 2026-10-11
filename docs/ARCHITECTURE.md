@@ -276,6 +276,10 @@ Rules the core guarantees:
 
 ## Platform apps
 
+The two apps stay at feature parity: a user-visible feature lands on both, or
+[PARITY.md](PARITY.md) says why not, and its table (checked against the
+self-tests by `scripts/check-parity.py`) is updated in the same change.
+
 **macOS** (minimum macOS 26, Apple Silicon only, Swift 6 strict concurrency):
 SwiftUI shell, one `AVSampleBufferDisplayLayer` per visible tile (hardware
 decode through VideoToolbox), sub-streams in the grid and the main stream for

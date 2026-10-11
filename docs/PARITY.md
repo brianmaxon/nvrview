@@ -1,0 +1,156 @@
+# Feature parity
+
+The macOS app (`apps/macos`) and the Windows app (`apps/windows`) show the same
+product. [UX.md](UX.md) is the requirement; this page says which app has what
+today. The rule (CLAUDE.md, "Engineering habits"): a user-visible feature lands
+on both apps, or this table says why not, and the table is updated in the same
+change.
+
+Values: `yes`, `no`, `partial (what is missing)`, `n/a (why)`. Each cell was
+read from the code on 2026-10-11 (menus, settings, gesture handlers, the call
+and alert code), not only from the docs; "Notes" says where a cell rests on
+less than that. Nothing here was run on a Windows machine.
+
+## Features
+
+### Layouts, windows, and the sidebar
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Split-pane layouts: split, drag dividers, drag a tile to swap, remove | yes | yes | Windows: Edit Layout (Ctrl+E) or the right-click menu; macOS: Layout menu and right-click menu. |
+| Layout presets ("Start From" shapes) in Edit Layout | yes | yes | macOS: the edit bar's Start From pop-up; Windows: the edit bar and a "Layout preset" submenu in the tile menu. Unsure whether the two preset lists are identical. |
+| Saved layouts, edits saved as they are made | yes | yes | Same JSON documents on both. |
+| Layout rename, duplicate, delete | yes | yes | Sidebar context menu. |
+| Groups (named sets of cameras shown as an even grid) | yes | yes | |
+| All Cameras (unsaved grid following the devices) | yes | yes | |
+| New Layout from Template (shapes with icons) | yes | yes | |
+| Layout icons | yes | yes | |
+| Several windows, any camera in any window, streamed once | yes | yes | |
+| Open a layout, group, device, or camera in a new window | yes | yes | |
+| Window restore (frame, content, sidebar state) | yes | yes | Windows self-test step `window-restore`; macOS covered by unit tests only. |
+| Sidebar: devices, channels, detection symbols per camera | yes | yes | |
+| Sidebar collapse and edge reveal with pin | yes | yes | Same timing (`SidebarReveal` on both). |
+| Hide offline channels | yes | yes | macOS: View menu; Windows: checkbox in the sidebar. |
+| Fill Tiles (picture fills the tile instead of fitting) | yes | no | macOS Layout menu, `state.fill`. Windows has no equivalent. |
+| Menu bar | yes | n/a (Windows uses the right-click menu and a help overlay) | UX.md "Windows notes". |
+| Keyboard shortcut help | yes | yes | macOS lists keys in the menus; Windows has the F1 overlay. |
+
+### Stage, focus, and listening
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Focus a tile (animated), main stream after the aligned switch | yes | yes | |
+| Full screen | yes | yes | System transition on macOS; the window's full-screen presenter on Windows. |
+| Full screen chrome and pointer auto-hide after 3 s | yes | yes | Alert headers and indicators stay. |
+| Keys: F, S, arrows, Space, 0, M | yes | yes | |
+| Enter dismisses an alert, else focuses | yes | yes | |
+| Listen from any tile (speaker button, M, menu) | yes | yes | Windows: Ctrl+click listens to several; macOS: a modifier. |
+| Level meter on the audible tile, mono meter on hover | yes | yes | UX.md also describes an optional edge meter column; neither app's code has one (a doc item that was never built, or not found). |
+| Retry button after 30 s without a picture | yes | yes | Both on the viewer clock. |
+| Tile status in words (connecting, reconnecting with countdown, waiting) | yes | yes | |
+| Frame rate display | yes | partial (diagnostics overlay, Ctrl+D) | macOS: View > Show Frame Rates; the Windows overlay is a different readout. |
+| Digital zoom: mouse wheel, drag to pan | yes | yes | |
+| Trackpad or touchpad pinch zooms | yes | partial (touchpad pinch arrives as Ctrl+wheel and works; a touch screen's two-finger pinch does not zoom digital zoom) | UX.md "Windows notes". |
+| Zoom map (outline of the visible region) | yes | no | `ZoomInsetView` exists on macOS only. |
+| Reset zoom control in the tile header | yes | partial (0 key and the right-click "Reset zoom" item only) | |
+| Quality per tile: Auto, Clear, Fluent, Balanced; saved in the layout | yes | yes | Auto follows zoom past 2x on both. |
+| Second lens of a multi-lens camera as its own tile | yes | yes | |
+
+### Fisheye
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Views: Original, Panorama, Double panorama, Quad, Virtual PTZ | yes | yes | Saved in the layout leaf on both. |
+| Image circle found automatically | yes | yes | Both self-tests check it within 1% of the synthetic fixture. |
+| Mount (ceiling, wall, desk) in the tile menu | yes | yes | |
+| Mount picker in Settings | yes | yes | macOS: Settings > Cameras; Windows: Settings dialog, "Fisheye cameras". |
+| Drag aims or turns the view | yes | yes | |
+| Wheel or pinch zooms the Virtual PTZ view | yes | yes | Windows also pinches with two fingers on a touch screen. |
+| Trackpad two-finger scroll turns the view | yes | n/a (no precise-scroll gesture on Windows) | |
+| 0 resets the virtual camera | yes | yes | |
+
+### Alerts, indicators, and detections
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Corner indicators per tile, with 2 s hold | yes | yes | |
+| Indicator corner setting | yes | yes | macOS: Detection Indicators menu; Windows: Settings and right-click menu. |
+| Indicator symbols on sidebar rows | yes | yes | |
+| Device detections (motion, person, vehicle, animal, face, package, visitor) | yes | yes | From the core. |
+| Local sound detection (smoke and CO alarm) badge | yes | yes | Sound analysis is in the core (`viewer-core`); Windows shows a slate badge at the bottom left as well. |
+| Tile alert: red border (steady with reduced motion), header with reason, count, times, Dismiss | yes | yes | |
+| Alert survives the stop; Enter or Dismiss clears it on every lens | yes | yes | |
+| Session event log of alerts | yes | yes | Not verified where each app shows it. |
+| Alert insets for cameras not on screen (doorbell, smoke, entrance people) | yes | no | Windows has no alert insets (UX.md, apps/windows/README.md "Calls"). |
+| Inset corner setting, Entrance option per camera | yes | no | Depends on alert insets. |
+
+### Calls, talk-back, and captions
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Doorbell press opens a call | yes | partial (a card opens; the doorbell's video appears only if a tile shows it) | Needs alert insets. |
+| Start Conversation / End Conversation without a press | yes | yes | Tile menu on both. |
+| Unmute control for a silent call | yes | yes | |
+| Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. |
+| Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu. |
+| Typed reply spoken by the system voice | yes | yes | |
+| Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
+| Call ends after 60 s of inactivity, gives audio back | yes | yes | |
+| Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
+| Save call transcripts in the event log | yes | no | Windows README "Not yet on Windows". |
+| Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
+
+### Devices, settings, and updates
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Add, edit, remove devices; password in the OS store | yes | yes | Keychain on macOS, Credential Manager on Windows. |
+| Reconnect a device | yes | yes | |
+| Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
+| Settings: Devices | yes | yes | |
+| Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
+| Settings: Alerts (inset corner, save transcripts) | yes | no | Depends on alert insets and transcript saving. |
+| Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
+| Check for Updates in a menu | yes | yes | |
+| Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
+| Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
+| Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
+| Recorded-video playback | no | no | Out of scope for now (ARCHITECTURE.md); [PLAYBACK.md](PLAYBACK.md) is the design. |
+
+## Open gaps
+
+What the table shows that is not just a platform difference:
+
+- Windows has no alert insets, which also leaves the press-opens-video call
+  flow, the inset corner, the Entrance option, and the Alerts settings
+  missing.
+- Windows lacks "unmute on ring" and saving call transcripts.
+- Windows has no zoom map, no header reset-zoom control, no Fill Tiles, and
+  digital zoom does not follow a touch screen's pinch.
+- The layout preset lists on the two apps were not compared.
+- Windows' captions use an older engine than the Mac's.
+
+## The self-test comparison
+
+Both apps have a `--selftest` built from numbered steps
+(`apps/macos/Sources/NVRView/SelfTest.swift`,
+`apps/windows/NvrView.App/SelfTest.cs`). Each step carries a stable ID in a
+comment directly above its code:
+
+```text
+// parity: fisheye-circle
+```
+
+An ID is a short kebab-case string; the steps that check the same thing on the
+two apps share one. `python3 -I scripts/check-parity.py` (part of
+`scripts/check.sh`, right after the sanitization step) collects the IDs and
+fails on an ID present in one app only unless `scripts/parity-allow.txt` lists
+it as `id  platform  reason`, with the platform that has the step and a reason
+starting `n/a:` (it makes no sense on the other platform) or `gap:` (the other
+app should get it). A stale allowlist entry fails too. `--list` prints the
+matrix.
+
+A new self-test step gets an ID in the same change, a new user-visible feature
+gets a row above, and a gap that is closed loses its allowlist line. The
+headless demos (`NvrViewDemo`, `NvrView.Demo`) test the renderers, not the
+apps, and are not compared.

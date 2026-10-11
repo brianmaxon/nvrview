@@ -4,6 +4,7 @@ What the macOS app must feel like, written from the official app's pain
 points. Each item is a requirement for milestone M3 and later, not a
 suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 [PLAYBACK.md](PLAYBACK.md) the playback screens.
+[PARITY.md](PARITY.md) lists which of these each app has today.
 
 ## Layouts
 

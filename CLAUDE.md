@@ -63,6 +63,7 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
   capped by count and size are requirements, not polish.
 - Keep the Rust core free of platform frameworks; Apple and Windows APIs live in
   the apps. The core must build and test on Linux and Windows.
+- A user-visible feature lands on both apps (or [docs/PARITY.md](docs/PARITY.md) says why not), and its table is updated in the same change; a new self-test step gets a `// parity: id` marker.
 - American English spelling everywhere.
 
 ## Checking your work
