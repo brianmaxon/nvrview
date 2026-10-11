@@ -44,3 +44,32 @@ import Testing
         try? await Task.sleep(for: .milliseconds(300))
     }
 }
+
+/// The microphone tap's block runs on an audio thread: built outside any
+/// actor, it must run there without stopping the app.
+@Suite struct MicrophoneTapTests {
+    @Test func theTapBlockRunsOnABackgroundThread() async {
+        let got = SampleCount()
+        let block = TalkAudioConverter.tapBlock { got.add($0.count) }
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInteractive).async {
+                for _ in 0..<10 {
+                    let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4_800)!
+                    b.frameLength = 4_800
+                    block(b, AVAudioTime(hostTime: 0))
+                }
+                done.resume()
+            }
+        }
+        // 1 s at 48 kHz is about 16000 samples at 16 kHz (less the resampler's tail).
+        #expect((15_000...16_100).contains(got.total))
+    }
+}
+
+private final class SampleCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0
+    func add(_ k: Int) { lock.withLock { n += k } }
+    var total: Int { lock.withLock { n } }
+}

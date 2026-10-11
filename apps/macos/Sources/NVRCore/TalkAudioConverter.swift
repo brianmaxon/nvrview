@@ -110,4 +110,40 @@ public final class SpeechBufferCollector: @unchecked Sendable {
             return TalkAudioConverter.convertAll(buffers)
         }
     }
+
+    /// The synthesizer's buffer callback, built outside any actor (it may be
+    /// called on any thread): `done` runs once, with the samples, at the
+    /// first end.
+    public nonisolated func callback(
+        _ done: @escaping @Sendable ([Float]) -> Void
+    ) -> @Sendable (AVAudioBuffer) -> Void {
+        { [self] buffer in
+            guard let pcm = buffer as? AVAudioPCMBuffer, let samples = take(pcm) else { return }
+            done(samples)
+        }
+    }
+}
+
+extension TalkAudioConverter {
+    /// The microphone tap's block: converts each buffer to 16 kHz mono and
+    /// passes non-empty blocks to `onSamples`. AVAudioEngine calls a tap on
+    /// an audio thread, so the block is built here, outside any actor: a
+    /// block made inside main-actor code would be main-actor isolated, and
+    /// Swift 6 stops the app when it runs on another thread.
+    public nonisolated static func tapBlock(
+        _ onSamples: @escaping @Sendable ([Float]) -> Void
+    ) -> @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        let converter = LockedTalkConverter()
+        return { buffer, _ in
+            let samples = converter.convert(buffer)
+            if !samples.isEmpty { onSamples(samples) }
+        }
+    }
+}
+
+/// A converter used from one audio thread at a time.
+final class LockedTalkConverter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let converter = TalkAudioConverter()
+    func convert(_ b: AVAudioPCMBuffer) -> [Float] { lock.withLock { converter.convert(b) } }
 }

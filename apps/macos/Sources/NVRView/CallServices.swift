@@ -71,7 +71,9 @@ final class AppleMicrophone: MicrophoneInput {
         case .authorized: done(true, nil)
         case .denied, .restricted: done(false, "microphone access is off (System Settings > Privacy)")
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
+            // Called on a system queue: not main-actor code (Swift 6 would
+            // stop the app), it only hops to the main queue.
+            AVCaptureDevice.requestAccess(for: .audio) { @Sendable granted in
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated { done(granted, granted ? nil : "microphone access was refused") }
                 }
@@ -88,13 +90,10 @@ final class AppleMicrophone: MicrophoneInput {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw CocoaError(.featureUnsupported)
         }
-        let converter = ConverterBox()
         // The tap's block runs on an audio thread that is not the real-time
-        // one, so converting and pushing to the core there is allowed.
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            let samples = converter.convert(buffer)
-            if !samples.isEmpty { onSamples(samples) }
-        }
+        // one, so converting and pushing to the core there is allowed. It is
+        // built outside this main-actor type (TalkAudioConverter.tapBlock).
+        input.installTap(onBus: 0, bufferSize: 1024, format: format, block: TalkAudioConverter.tapBlock(onSamples))
         engine.prepare()
         try engine.start()
         self.engine = engine
@@ -105,13 +104,6 @@ final class AppleMicrophone: MicrophoneInput {
         engine?.stop()
         engine = nil
     }
-}
-
-/// A converter used from one audio thread at a time.
-private final class ConverterBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private let converter = TalkAudioConverter()
-    func convert(_ b: AVAudioPCMBuffer) -> [Float] { lock.withLock { converter.convert(b) } }
 }
 
 // MARK: Text-to-speech
@@ -127,13 +119,10 @@ final class AppleSpeechRenderer: SpeechRenderer {
         utterance.voice = AVSpeechSynthesisVoice(language: Locale.current.language.languageCode?.identifier ?? "en")
         let collected = SpeechBufferCollector()
         return await withCheckedContinuation { (done: CheckedContinuation<[Float], Never>) in
-            synthesizer.write(utterance) { buffer in
-                guard let pcm = buffer as? AVAudioPCMBuffer else { return }
-                // Resumes once, at the first end (a zero-length buffer).
-                if let samples = collected.take(pcm) {
-                    done.resume(returning: samples)
-                }
-            }
+            // Resumes once, at the first end (a zero-length buffer); the
+            // callback is built outside this main-actor type, since it may
+            // run on any thread.
+            synthesizer.write(utterance, toBufferCallback: collected.callback { done.resume(returning: $0) })
         }
     }
 }
