@@ -42,7 +42,7 @@ usage:
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
-         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...]
+         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -84,7 +84,8 @@ can be UTC), then runs stages of
 at normal speed (--plays instead names each play's recording: N for channel
 N's latest finished one, N~K for the K-th before it, K at most 3; stage k
 runs the first k, so 11,3,11~1 tells a per-file, per-camera and total limit
-apart), each for at most 10 s, counting live and play frames per
+apart), each for at most 10 s, with --gap seconds (default 1, at most 10)
+of live view alone between stages, counting live and play frames per
 second. It stops at the first refusal, error, stall, or live disruption;
 every play is stopped (7) and the session closed on every path, Ctrl-C
 included; the whole run is capped at 90 s. Only the file search, live
@@ -174,6 +175,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
     let (mut allow_probe, mut max_plays, mut now) = (false, None, None);
     let mut plays = None;
+    let mut gap = None;
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -225,6 +227,16 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 plays = Some(
                     replay_probe::parse_plays(&value("--plays")?)
                         .ok_or("bad --plays (1 to 4 of N or N~K, K at most 3)")?,
+                );
+            }
+            "--gap" => {
+                gap = Some(
+                    value("--gap")?
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|g| *g <= 10)
+                        .map(Duration::from_secs)
+                        .ok_or("bad --gap (0 to 10 s)")?,
                 );
             }
             "--now" => {
@@ -333,6 +345,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             cfg.max_plays = max_plays.unwrap_or(MAX_PLAYS);
             cfg.plays = plays.unwrap_or_default();
+            cfg.gap = gap.unwrap_or(cfg.gap);
             cfg.now = Some(now.ok_or("replay-probe needs --now (the device's local time)")?);
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
@@ -912,6 +925,19 @@ mod tests {
         assert!(with(&v).is_err());
         let mut v = base.to_vec();
         v.extend_from_slice(&["--plays", "1~9"]);
+        assert!(with(&v).is_err());
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--gap", "5"]);
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&v)
+        else {
+            panic!("--gap not parsed");
+        };
+        assert_eq!(cfg.gap, Duration::from_secs(5));
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--gap", "11"]);
         assert!(with(&v).is_err());
         assert!(with(&["replay-probe", "--allow-replay-probe"]).is_err());
         assert!(with(&["--password", "x", "replay-probe"]).is_err());
