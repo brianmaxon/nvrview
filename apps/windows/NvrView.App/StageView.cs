@@ -58,9 +58,6 @@ internal sealed class WindowState(WindowContent content, string name, LayoutNode
 
 internal sealed partial class StageView : UserControl
 {
-    // ISwapChainPanelNative of WinUI 3 (microsoft.ui.xaml.media.dxinterop.h).
-    private static readonly Guid SwapChainPanelNativeId = new("63aad0b8-7c24-40ff-85a8-640d944cc325");
-
     private static readonly SolidColorBrush EditOutline = new(Windows.UI.Color.FromArgb(0x90, 0x9A, 0xA4, 0xB0));
     private static readonly SolidColorBrush DropBrush = new(Windows.UI.Color.FromArgb(0x50, 0x3A, 0x96, 0xDD));
     private static readonly SolidColorBrush DropOutline = new(Windows.UI.Color.FromArgb(0xF0, 0x3A, 0x96, 0xDD));
@@ -265,29 +262,7 @@ internal sealed partial class StageView : UserControl
         Renderer?.SetPanelSize(_panel.ActualWidth, _panel.ActualHeight, _panel.CompositionScaleX, _panel.CompositionScaleY);
 
     /// <summary>Hands the panel a swap chain (UI thread); releases the reference the render thread added.</summary>
-    public unsafe void AttachSwapChain(nint swapChain)
-    {
-        nint unknown = ((WinRT.IWinRTObject)_panel).NativeObject.ThisPtr;
-        Guid iid = SwapChainPanelNativeId;
-        if (Marshal.QueryInterface(unknown, in iid, out nint native) >= 0)
-        {
-            var setSwapChain = (delegate* unmanaged[Stdcall]<nint, nint, int>)(*(void***)native)[3];
-            int hr = setSwapChain(native, swapChain);
-            Marshal.Release(native);
-            if (hr < 0)
-            {
-                AppLog.Warn($"SetSwapChain failed (0x{hr:X8})");
-            }
-        }
-        else
-        {
-            AppLog.Warn("the panel has no ISwapChainPanelNative");
-        }
-        if (swapChain != 0)
-        {
-            Marshal.Release(swapChain);
-        }
-    }
+    public void AttachSwapChain(nint swapChain) => SwapChainAttach.To(_panel, swapChain);
 
     // ---- tiles and layout ----
 
@@ -1045,6 +1020,34 @@ internal sealed partial class StageView : UserControl
         };
         ToolTipService.SetToolTip(conversation, "Captions of what the camera hears, Talk, and typed replies spoken through its speaker");
         menu.Items.Add(conversation);
+        if (_viewer.Calls.CallFor(camera) is { } call)
+        {
+            bool popped = call.Presentation == CallPresentation.Window;
+            var pop = new MenuFlyoutItem { Text = popped ? "Pop In Call" : "Pop Out Call" };
+            pop.Click += (_, _) =>
+            {
+                if (popped)
+                {
+                    _viewer.CallWindows?.PopIn(camera);
+                }
+                else
+                {
+                    _viewer.CallWindows?.PopOut(camera);
+                }
+            };
+            menu.Items.Add(pop);
+        }
+        // Where this camera's calls open (a doorbell's own choice beats "Open calls in their own window").
+        var opens = new MenuFlyoutSubItem { Text = "Calls open in" };
+        CallPresentation? chosen = _viewer.Settings.CallPresentationFor(camera);
+        foreach ((string title, CallPresentation? value) in CallPresentationMenu.Choices(_viewer.Settings.CallsOpenInWindow))
+        {
+            CallPresentation? choice = value;
+            var item = new RadioMenuFlyoutItem { Text = title, GroupName = "call-opens-in", IsChecked = chosen == choice };
+            item.Click += (_, _) => _viewer.Settings.SetCallPresentation(camera, choice);
+            opens.Items.Add(item);
+        }
+        menu.Items.Add(opens);
         var allow = new ToggleMenuFlyoutItem { Text = "Allow talk-back", IsChecked = _viewer.Settings.TalkAllowed(camera) };
         allow.Click += (_, _) => _viewer.SetTalkAllowed(camera, allow.IsChecked);
         ToolTipService.SetToolTip(allow, "Lets Talk and typed replies play through this camera's speaker. Off until you allow it; every use is logged.");
@@ -1734,4 +1737,36 @@ internal sealed class DispatcherQueueTimerHolder
     }
 
     public void Stop() => _timer.Stop();
+}
+
+/// <summary>Hands a SwapChainPanel its swap chain (ISwapChainPanelNative); every window's panel, the viewer windows' and the call windows', goes through here.</summary>
+internal static class SwapChainAttach
+{
+    // ISwapChainPanelNative of WinUI 3 (microsoft.ui.xaml.media.dxinterop.h).
+    private static readonly Guid SwapChainPanelNativeId = new("63aad0b8-7c24-40ff-85a8-640d944cc325");
+
+    /// <summary>Sets the panel's swap chain (UI thread; 0 detaches) and releases the reference the render thread added.</summary>
+    public static unsafe void To(SwapChainPanel panel, nint swapChain)
+    {
+        nint unknown = ((WinRT.IWinRTObject)panel).NativeObject.ThisPtr;
+        Guid iid = SwapChainPanelNativeId;
+        if (Marshal.QueryInterface(unknown, in iid, out nint native) >= 0)
+        {
+            var setSwapChain = (delegate* unmanaged[Stdcall]<nint, nint, int>)(*(void***)native)[3];
+            int hr = setSwapChain(native, swapChain);
+            Marshal.Release(native);
+            if (hr < 0)
+            {
+                AppLog.Warn($"SetSwapChain failed (0x{hr:X8})");
+            }
+        }
+        else
+        {
+            AppLog.Warn("the panel has no ISwapChainPanelNative");
+        }
+        if (swapChain != 0)
+        {
+            Marshal.Release(swapChain);
+        }
+    }
 }

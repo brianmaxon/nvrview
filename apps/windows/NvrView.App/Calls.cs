@@ -122,7 +122,14 @@ internal sealed class ViewerCalls
     /// <summary>The cameras with a call open, oldest first.</summary>
     public IReadOnlyList<CameraRef> Cameras => [.. _sessions.Values.OrderBy(s => s.Call.StartedAt).Select(s => s.Call.Camera)];
 
+    /// <summary>The cameras whose call shows in the viewer windows' insets (not in a call window), oldest first.</summary>
+    public IReadOnlyList<CameraRef> InsetCameras => [.. _sessions.Values.Where(s => s.Call.Presentation == CallPresentation.Inset).OrderBy(s => s.Call.StartedAt).Select(s => s.Call.Camera)];
+
     public bool IsEmpty => _sessions.Count == 0;
+
+    // Where a call opening now shows: the doorbell's own choice, else the app's setting.
+    private CallPresentation Resolve(CameraRef camera) =>
+        CallPresentations.Resolve(_viewer.Settings.CallsOpenInWindow, _viewer.Settings.CallPresentationFor(camera));
 
     /// <summary>The call for a camera (any lens of its channel), if one is open.</summary>
     public Call? CallFor(CameraRef camera) => _sessions.GetValueOrDefault(camera.ChannelKey)?.Call;
@@ -147,6 +154,68 @@ internal sealed class ViewerCalls
 
     private double Now => _viewer.Clock.Now;
 
+    // ---- presentation, "Keep talking", the reply field ----
+
+    /// <summary>
+    /// Where the call shows (the viewer windows' insets, or a call window of its own). Back in the
+    /// insets it gets a fresh minute. Opening and closing the window, and the order of the leases
+    /// around it, is <see cref="CallWindows"/>'s job (the new holder first).
+    /// </summary>
+    public void SetPresentation(CameraRef camera, CallPresentation presentation)
+    {
+        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) || s.Call.Presentation == presentation)
+        {
+            return;
+        }
+        s.Call.Presentation = presentation;
+        if (presentation == CallPresentation.Inset)
+        {
+            s.Call.Activity(Now);
+        }
+        _viewer.RaiseCallsChanged();
+    }
+
+    /// <summary>The user used the call's window or inset (hover, click, keys): the call stays open.</summary>
+    public void Use(CameraRef camera)
+    {
+        if (_sessions.TryGetValue(camera.ChannelKey, out CallSession? s))
+        {
+            s.Call.Activity(Now);
+        }
+    }
+
+    /// <summary>
+    /// "Keep talking" on or off, kept with the call so any view built for it shows it. On starts the
+    /// talk; off ends it unless Talk is held (<paramref name="holding"/>).
+    /// </summary>
+    public void SetLatched(CameraRef camera, bool on, bool holding = false)
+    {
+        if (!_sessions.TryGetValue(camera.ChannelKey, out CallSession? s))
+        {
+            return;
+        }
+        s.Call.SetLatched(on, Now);
+        if (on)
+        {
+            StartTalking(camera);
+        }
+        else if (!holding)
+        {
+            StopTalking(camera);
+        }
+        _viewer.RaiseCallsChanged();
+    }
+
+    /// <summary>The reply field's text, kept with the call (typing is activity).</summary>
+    public void SetDraft(CameraRef camera, string text)
+    {
+        if (_sessions.TryGetValue(camera.ChannelKey, out CallSession? s) && s.Call.Draft != text)
+        {
+            s.Call.Edited(text, Now);
+            _viewer.RaiseCallsChanged();
+        }
+    }
+
     private static string Channel(Call call) => (call.Camera.Channel + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     // ---- opening ----
@@ -163,7 +232,7 @@ internal sealed class ViewerCalls
             return;
         }
         CallAudioDecision decision = CallAudio.Press(camera, _viewer.AudibleCameras);
-        Open(camera, at, decision, CallOrigin.Press);
+        Open(camera, at, decision, CallOrigin.Press, Resolve(camera));
         AppLog.Info($"Doorbell call: channel {camera.Channel + 1}, {(decision.Audible ? "audible" : "muted (Unmute shown)")}");
         _viewer.RaiseCallsChanged();
     }
@@ -183,15 +252,15 @@ internal sealed class ViewerCalls
             _viewer.RaiseCallsChanged();
             return;
         }
-        Open(camera, _viewer.WallClock(), CallAudio.Conversation(camera, _viewer.AudibleCameras), CallOrigin.Conversation);
+        Open(camera, _viewer.WallClock(), CallAudio.Conversation(camera, _viewer.AudibleCameras), CallOrigin.Conversation, Resolve(camera));
         AppLog.Info($"Conversation started: channel {camera.Channel + 1}");
         _viewer.RaiseCallsChanged();
     }
 
     // Opens the call: lease, audio, and the visitor's transcript.
-    private void Open(CameraRef camera, DateTime at, CallAudioDecision audio, CallOrigin origin)
+    private void Open(CameraRef camera, DateTime at, CallAudioDecision audio, CallOrigin origin, CallPresentation presentation)
     {
-        var session = new CallSession(new Call(camera, at, Now, audio, origin));
+        var session = new CallSession(new Call(camera, at, Now, audio, origin, presentation));
         _sessions[camera] = session;
         _ = _viewer.Leases.Acquire(camera);
         if (audio.Audible)
@@ -408,6 +477,9 @@ internal sealed class ViewerCalls
         s.LastAction = TalkAction.Microphone;
         if (TalkPermission.Gate(_viewer.Settings.TalkAllowed(s.Call.Camera)) == TalkGate.Ask && !await AskToAllowAsync(s, TalkAction.Microphone))
         {
+            // Canceled: "Keep talking" goes off with it.
+            s.Call.MicrophoneStopped();
+            _viewer.RaiseCallsChanged();
             return;
         }
         BeginMicrophoneTalk(s);
@@ -424,6 +496,7 @@ internal sealed class ViewerCalls
         if (!BeginTalk(s))
         {
             s.MicTalk = false;
+            s.Call.MicrophoneStopped();
         }
         else
         {
@@ -522,6 +595,7 @@ internal sealed class ViewerCalls
         if (problem is not null)
         {
             s.Note = $"Talk-back: {problem}";
+            s.Call.MicrophoneStopped();
             StopTalking(s.Call.Camera);
             return;
         }
@@ -555,6 +629,9 @@ internal sealed class ViewerCalls
         }
         accepted?.Invoke();
         s.Call.ReplySpoken(typed, Now);
+        // The field empties (in every view) unless the user typed something else meanwhile.
+        s.Call.Sent(text);
+        _viewer.RaiseCallsChanged();
         AppLog.Info($"Typed reply sent: {_viewer.CameraName(s.Call.Camera)}, {typed.Length} characters");
         (float[] samples, uint rate) = await Services.Speech.RenderAsync(typed);
         if (!_sessions.TryGetValue(camera.ChannelKey, out s) || samples.Length == 0)
@@ -666,6 +743,7 @@ internal sealed class ViewerCalls
                 if (s.MicTalk)
                 {
                     s.MicTalk = false;
+                    s.Call.MicrophoneStopped();
                     Services.Microphone.Stop();
                     s.EchoState = null;
                     Retire(s.You);

@@ -65,6 +65,9 @@ public sealed unsafe class GpuDevice : IDisposable
     /// <summary>The device manager for D3D11-aware decoders; null without video support.</summary>
     public IMFDXGIDeviceManager* Manager => _manager;
 
+    /// <summary>True once <see cref="Dispose"/> ran: the lock and the context are gone (a swap chain made on it is released without them).</summary>
+    public bool IsDisposed => _device == null;
+
     /// <summary>The adapter's name as DXGI reports it.</summary>
     public string AdapterName { get; private set; } = "";
 

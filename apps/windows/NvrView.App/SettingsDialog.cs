@@ -335,8 +335,107 @@ internal static class SettingsDialog
             MaxWidth = 560,
             Opacity = 0.7,
         };
+        // Calls in their own window (docs/UX.md "A call in its own window"): the default for every
+        // doorbell, where call windows open, and each camera's own choice.
+        var callsInWindow = new CheckBox { Content = "Open calls in their own window", IsChecked = viewer.Settings.CallsOpenInWindow };
+        var windowPlacement = new ComboBox { Header = "Open call windows", MinWidth = 200 };
+        foreach (CallWindowPlacement.Mode m in Enum.GetValues<CallWindowPlacement.Mode>())
+        {
+            windowPlacement.Items.Add(new ComboBoxItem { Content = m.Title(), Tag = m });
+        }
+        windowPlacement.SelectedIndex = (int)viewer.Settings.CallWindowPlacementMode;
+        windowPlacement.SelectionChanged += (_, _) =>
+        {
+            if (windowPlacement.SelectedItem is ComboBoxItem { Tag: CallWindowPlacement.Mode chosen })
+            {
+                viewer.Settings.CallWindowPlacementMode = chosen;
+            }
+        };
+        var callRows = new StackPanel { Spacing = 6 };
+        var callExpander = new Expander
+        {
+            Header = "Calls open in, per camera",
+            Content = callRows,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+        };
+        var callPickers = new List<(CameraRef Camera, string Label, ComboBox Picker)>();
+        bool buildingCalls = false;
+        bool lastCallsGlobal = viewer.Settings.CallsOpenInWindow;
+        bool firstCallBuild = true;
+
+        void RefreshCallChoices()
+        {
+            var cameras = new List<(CameraRef Camera, string Label)>();
+            foreach (DeviceEntry d in viewer.Devices)
+            {
+                foreach (ChannelInfo ch in d.Channels.Values.OrderBy(x => x.Channel))
+                {
+                    var camera = new CameraRef(d.Key, ch.Channel);
+                    cameras.Add((camera, viewer.Devices.Count > 1 ? $"{d.DisplayName} \u00B7 {viewer.ChannelName(camera)}" : viewer.ChannelName(camera)));
+                }
+            }
+            buildingCalls = true;
+            bool global = viewer.Settings.CallsOpenInWindow;
+            if (callPickers.Count != cameras.Count || !callPickers.Select(r => (r.Camera, r.Label)).SequenceEqual(cameras))
+            {
+                callPickers.Clear();
+                callRows.Children.Clear();
+                foreach ((CameraRef camera, string label) in cameras)
+                {
+                    var picker = new ComboBox { Header = label, MinWidth = 200 };
+                    CameraRef cam = camera;
+                    picker.SelectionChanged += (_, _) =>
+                    {
+                        if (!buildingCalls && picker.SelectedItem is ComboBoxItem { Tag: CallPresentationChoice choice })
+                        {
+                            viewer.Settings.SetCallPresentation(cam, choice.Value);
+                        }
+                    };
+                    callPickers.Add((camera, label, picker));
+                    callRows.Children.Add(picker);
+                }
+            }
+            bool rebuild = firstCallBuild || global != lastCallsGlobal;
+            firstCallBuild = false;
+            lastCallsGlobal = global;
+            foreach ((CameraRef camera, _, ComboBox picker) in callPickers)
+            {
+                // Default names what the setting gives now.
+                if (rebuild || picker.Items.Count != 3)
+                {
+                    picker.Items.Clear();
+                    foreach ((string title, CallPresentation? value) in CallPresentationMenu.Choices(global))
+                    {
+                        picker.Items.Add(new ComboBoxItem { Content = title, Tag = new CallPresentationChoice(value) });
+                    }
+                }
+                int index = viewer.Settings.CallPresentationFor(camera) switch { null => 0, CallPresentation.Window => 1, _ => 2 };
+                if (picker.SelectedIndex != index)
+                {
+                    picker.SelectedIndex = index;
+                }
+            }
+            callExpander.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            buildingCalls = false;
+        }
+
+        RefreshCallChoices();
+        callsInWindow.Click += (_, _) =>
+        {
+            viewer.Settings.CallsOpenInWindow = callsInWindow.IsChecked == true;
+            RefreshCallChoices();
+        };
+        Action refreshCalls = RefreshCallChoices;
+        viewer.Changed += refreshCalls;
+        var windowRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
+        windowRow.Children.Add(callsInWindow);
+        windowRow.Children.Add(windowPlacement);
+
         var callSettings = new StackPanel { Spacing = 8 };
         callSettings.Children.Add(corners);
+        callSettings.Children.Add(windowRow);
+        callSettings.Children.Add(callExpander);
         callSettings.Children.Add(transcriptRow);
         callSettings.Children.Add(transcriptNote);
 
@@ -451,6 +550,7 @@ internal static class SettingsDialog
             opened = false;
             viewer.Changed -= refresh;
             viewer.Changed -= refreshMounts;
+            viewer.Changed -= refreshCalls;
             StopFinding();
         };
         if (hooks is not null)
@@ -478,3 +578,6 @@ internal static class SettingsDialog
         return dialog;
     }
 }
+
+/// <summary>A "Calls open in" choice as an item's tag (<see cref="Value"/> null is Default).</summary>
+internal sealed record CallPresentationChoice(CallPresentation? Value);

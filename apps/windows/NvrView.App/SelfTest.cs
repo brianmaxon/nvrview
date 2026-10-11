@@ -54,7 +54,11 @@
 //    by the voice, pushed in one go and ended with a draining stop; captions reach the card; a
 //    doorbell press (an injected alarm) joins the call or opens one with the Unmute control;
 //    a call ends a minute after its last activity (manual clock) and gives the audio back; the
-//    tile menu offers the conversation and the permission. Then, on the real computer: the
+//    tile menu offers the conversation and the permission. A call pops out into a call window of
+//    its own (its own swap chain and renderer drawing the doorbell's shared tile) and back, with
+//    talk, "Keep talking", and the unsent reply untouched and the leases following; the window's
+//    close and Esc end the call, it never expires while popped out, and its frame, pin, and the
+//    "Open calls in their own window" routing are remembered. Then, on the real computer: the
 //    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
 //    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
 // 12. with --credential-test, a throwaway credential is written, read back,
@@ -677,6 +681,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         v.Transcripts.Folder = transcriptsBefore;
 
+        await CallWindowSteps(v, stage, camera, device, clock, mic);
+
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.
         v.SetTalkAllowed(camera, false);
@@ -684,6 +690,335 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.UseClock(new SystemViewerClock());
 
         await RealCallEngines();
+    }
+
+    private static bool NearFrame(WindowRect a, WindowRect b) =>
+        Math.Abs(a.X - b.X) <= 3 && Math.Abs(a.Y - b.Y) <= 3 && Math.Abs(a.Width - b.Width) <= 3 && Math.Abs(a.Height - b.Height) <= 3;
+
+    // Calls in their own windows (docs/UX.md "A call in its own window"), against the doorbell channel:
+    // a press shown as a card in two viewer windows pops out into a call window that draws exactly the
+    // doorbell's shared tile; talk, "Keep talking", and the unsent reply survive popping in and out; a
+    // viewer window opened meanwhile gets its card back on Pop In; closing the window or Esc ends the
+    // call, and it never ends by inactivity while popped out; the window's frame is remembered or falls
+    // back to the top right; the setting and the doorbell's own choice route a ring and a conversation.
+    // The windows stay behind the others and never float or take the focus in a test run.
+    private async Task CallWindowSteps(Viewer v, StageView stage, CameraRef camera, DeviceEntry device, ManualViewerClock clock, FakeMicrophone mic)
+    {
+        CallWindows cws = v.CallWindows!;
+        CameraRef other = new(device.Key, 1);
+        ViewerWindow second = app.OpenWindow(new WindowContent.Scratch("Second", LayoutNode.Leaf(other)));
+        var opened = new List<ViewerWindow> { second };
+        StageView[] stages = [stage, second.Stage];
+        int baseline = v.Leases.LeaseCount(camera);
+        StreamTier baselineTier = v.Planner.WantedTier(camera);
+        WindowRect? frameBefore = cws.RememberedFrame;
+        CallWindowPlacement.Mode modeBefore = cws.PlacementMode;
+        bool pinBefore = cws.Pinned;
+        try
+        {
+            // parity: call-popout-open
+            v.Apply(Alarm(device, 0, "visitor", true));
+            v.Apply(Alarm(device, 0, "visitor", false));
+            Call? call = v.Calls.CallFor(camera);
+            bool bothShow = await Until(() => stages.All(s => s.CallCards.Cards.Count == 1 && s.CallCards.LeasesHeld == 1), 3);
+            if (call is null || !bothShow || v.Leases.Tile(camera) is not { } tile)
+            {
+                _problems.Add("a press did not open the call's card in both viewer windows");
+                return;
+            }
+            int insetsBefore = stages.Sum(s => s.CallCards.Cards.Count);
+            int leasesBefore = v.Leases.LeaseCount(camera);
+            bool popButtons = stages.All(s => s.CallCards.Cards[0] is { PopShown: true, PopTip: "Pop Out Call" });
+            long starts = mic.Starts;
+            int presses = call.Presses, finals = call.Transcript.Finals.Count;
+            cws.PopOut(camera);
+            if (cws.WindowFor(camera) is not { } cw)
+            {
+                _problems.Add($"Pop Out opened no call window: {cws.LastError}");
+                return;
+            }
+            bool gone = stages.All(s => s.CallCards.Cards.Count == 0 && s.CallCards.LeasesHeld == 0);
+            bool drawn = await Until(() => cw.Renderer.Overlays.Length == 1 && cw.Renderer.Overlays[0].Tile == cw.Card.Tile && cw.Card.Tile.Shown > 2 && cw.Card.Tile.PictureWidth > 0, 15);
+            bool exact = drawn && cw.Renderer.Layout.Tiles.Length == 0 && cw.Card.Tile.Shared == tile && v.Tiles.Length == v.Leases.Cameras.Count;
+            bool undrawn = await Until(() => stages.All(s => s.CallCards.Overlays.Count == 0 && s.Renderer.Overlays.Length == 0), 3);
+            var engine = v.Calls.VisitorEngine(camera) as FakeTranscriber;
+            long fed = engine?.SamplesFed ?? 0;
+            bool tapped = engine is not null && await Until(() => engine.SamplesFed > fed + 8000, 8);
+            bool same = v.Calls.CallFor(camera) == call && call.Presentation == CallPresentation.Window && call.Presses == presses && call.Transcript.Finals.Count == finals;
+            int leases = v.Leases.LeaseCount(camera);
+            int wantedLeases = leasesBefore - insetsBefore + 1;
+            Say($"calls: pop out: cards {insetsBefore} -> gone {gone} (picture undrawn {undrawn}), window draws the doorbell tile {exact} ({cw.Card.Tile.Shown} pictures), " +
+                $"same call {same}, tapped {tapped}, leases {leasesBefore} -> {leases}, main stream {cw.AsksForMainStream}");
+            Expect(popButtons, "a call's card did not offer Pop Out Call in its header");
+            Expect(gone && undrawn, "Pop Out left the call's card (or its picture or lease) in a viewer window");
+            Expect(exact, "the call window does not draw exactly the doorbell's shared tile");
+            Expect(same, "Pop Out changed the call");
+            Expect(tapped, "Pop Out stopped the doorbell's audio tap");
+            Expect(mic.Starts == starts && call.Talk.Outstanding == 0, "Pop Out started talk-back");
+            Expect(leases == wantedLeases && v.Leases.Tile(camera) == tile, $"Pop Out leases: {leases}, expected {wantedLeases} on the same tile");
+            Expect(cws.LastOpenActivated == true, "an explicit Pop Out did not ask for the focus");
+            if (drawn)
+            {
+                await CheckCardFrame("call window", cw.Card, cw.Renderer);
+                // The window joins the device-loss recovery with the viewer windows: its swap chain and picture come back.
+                int recoveries = cw.Renderer.Recoveries;
+                long shown = cw.Card.Tile.Shown;
+                cw.Renderer.SimulateDeviceLoss();
+                bool recovered = await Until(() => cw.Renderer.Recoveries > recoveries, 10);
+                bool back = recovered && await Until(() => cw.Card.Tile.Shown > shown + 5 && cw.Card.Tile.PictureWidth > 0, 15);
+                Say($"calls: call window after a device loss: recovered {recovered}, pictures {shown} -> {cw.Card.Tile.Shown}");
+                Expect(back, "the call window's picture did not come back after a device loss");
+                if (back)
+                {
+                    await CheckCardFrame("call window after device loss", cw.Card, cw.Renderer);
+                }
+            }
+
+            // parity: call-popout-talk
+            // "Keep talking" and an unsent reply belong to the call: popping in and out stops nothing and starts nothing, and any card built for it shows them.
+            v.SetTalkAllowed(camera, true);
+            v.Calls.SetLatched(camera, true);
+            v.Calls.SetDraft(camera, "Be right there");
+            bool talking = await Until(() => call.Talk.IsActive && mic.Running, 10);
+            long talkStarts = mic.Starts;
+            cws.PopIn(camera);
+            bool insetsShow = stages.All(s => s.CallCards.Cards.FirstOrDefault() is { KeepTalkingShown: true } c && c.ReplyText == "Be right there");
+            cws.PopOut(camera);
+            CallWindow? cw2 = cws.WindowFor(camera);
+            bool windowShows = cw2 is { Card: { KeepTalkingShown: true } card2 } && card2.ReplyText == "Be right there";
+            await Task.Delay(300);
+            bool kept = call.Talk.IsActive && mic.Running && mic.Starts == talkStarts;
+            Say($"calls: pop in and out while talking: talking {talking}, talk kept {kept}, latch {call.Latched}, draft \"{call.Draft}\", cards show them {insetsShow}, window shows them {windowShows}");
+            Expect(talking, "Keep talking did not start the talk before the pop");
+            Expect(kept, "popping in and out stopped or restarted talk-back");
+            Expect(call.Latched && call.Draft == "Be right there", "popping lost Keep talking or the draft");
+            Expect(insetsShow, "the cards did not show Keep talking and the draft after Pop In");
+            Expect(windowShows, "the call window did not show Keep talking and the draft");
+            v.Calls.SetLatched(camera, false);
+            Expect(await Until(() => !call.Talk.IsTalking, 10), "turning Keep talking off did not end the talk");
+            v.SetTalkAllowed(camera, false);
+            v.Calls.SetDraft(camera, "");
+            if (cw2 is null)
+            {
+                return;
+            }
+
+            // parity: call-popin-new-window
+            // A viewer window opened while the call is popped out has no card for it, and shows it after Pop In like the others.
+            ViewerWindow third = app.OpenWindow(new WindowContent.Scratch("Third", LayoutNode.Leaf(other)));
+            opened.Add(third);
+            await Task.Delay(300);
+            bool hidden = third.Stage.CallCards.Cards.Count == 0 && third.Stage.CallCards.LeasesHeld == 0 && cws.WindowFor(camera) is not null;
+            Say($"calls: new window while popped out: no card {hidden}, leases {v.Leases.LeaseCount(camera)}");
+            Expect(hidden, "a viewer window opened while the call was popped out shows its card");
+            stages = [.. stages, third.Stage];
+
+            // parity: call-popin
+            // Pop In: the window closes, every viewer window shows the card again with a fresh minute, and the leases follow.
+            CallWindow popped = cws.WindowFor(camera)!;
+            WindowRect size = popped.CurrentFrame;
+            popped.Place(new WindowRect(size.X, size.Y, 1100, 800));
+            bool wantsMain = await Until(() => popped.AsksForMainStream && v.Planner.WantedTier(camera) == StreamTier.Main, 8);
+            int leasesPopped = v.Leases.LeaseCount(camera);
+            clock.Advance(30);
+            double popInAt = clock.Now;
+            cws.PopIn(camera);
+            bool back2 = stages.All(s => s.CallCards.Cards.Count == 1 && s.CallCards.Cards[0].Mode == CallCardMode.Inset && s.CallCards.Cards[0].PopTip == "Pop Out Call");
+            bool minute = call.LastActivity >= popInAt;
+            bool closed = cws.WindowFor(camera) is null && popped.IsReleased;
+            int leasesIn = v.Leases.LeaseCount(camera);
+            StreamTier demand = v.Planner.WantedTier(camera);
+            Say($"calls: pop in: window closed {closed}, cards back {back2}, fresh minute {minute}, leases {leasesPopped} -> {leasesIn}, window asked for main {wantsMain}, now wants {demand}");
+            Expect(wantsMain, "a large call window did not ask for the main stream");
+            Expect(closed, "Pop In left the call window open");
+            Expect(back2, "Pop In did not bring the card back in every viewer window");
+            Expect(minute, "Pop In did not give the call a fresh minute");
+            Expect(leasesIn == leasesPopped - 1 + stages.Length && call.Presentation == CallPresentation.Inset, $"Pop In leases: {leasesIn}, expected {leasesPopped - 1 + stages.Length}");
+            Expect(demand == baselineTier, "the closed call window's stream demand stayed");
+
+            // parity: call-popout-end
+            // Closing the call window and Esc end the call, and the window and the viewer windows' cards go with it; a call in its own window never ends by inactivity.
+            void Ended(string how)
+            {
+                bool clean = v.Calls.CallFor(camera) is null && cws.WindowFor(camera) is null && stages.All(s => s.CallCards.Cards.Count == 0)
+                    && v.Leases.LeaseCount(camera) == baseline;
+                Say($"calls: call window {how}: call ended and window closed {clean}, leases {v.Leases.LeaseCount(camera)} (baseline {baseline})");
+                Expect(clean, $"{how} did not end the call, close its window and let its cards and leases go");
+            }
+            cws.PopOut(camera);
+            CallWindow? closing = cws.WindowFor(camera);
+            closing?.Window.Close();
+            await Until(() => v.Calls.CallFor(camera) is null, 5);
+            Ended("closed");
+            // Esc while the reply field is not being edited.
+            v.Calls.StartConversation(camera);
+            cws.PopOut(camera);
+            bool escHandled = cws.WindowFor(camera)?.HandleKey(Windows.System.VirtualKey.Escape) == true;
+            await Until(() => v.Calls.CallFor(camera) is null, 5);
+            Expect(escHandled, "Esc in the call window was not handled");
+            Ended("Esc");
+            // Ten minutes without activity leave a popped-out call open.
+            v.Calls.StartConversation(camera);
+            cws.PopOut(camera);
+            clock.Advance(10 * Call.IdleTimeout);
+            v.Tick();
+            bool stayed = cws.WindowFor(camera) is not null && v.Calls.CallFor(camera) is not null;
+            Say($"calls: call window after 10 min without activity: still open {stayed}");
+            Expect(stayed, "a call in its own window ended by itself without activity");
+            // Pop In restarts the minute.
+            cws.PopIn(camera);
+            clock.Advance(Call.IdleTimeout - 1);
+            v.Tick();
+            bool fresh = v.Calls.CallFor(camera) is not null;
+            clock.Advance(2);
+            v.Tick();
+            Say($"calls: popped in: open after 59 s {fresh}, ended after 61 s {v.Calls.CallFor(camera) is null}");
+            Expect(fresh, "Pop In did not give the call a fresh minute");
+            Ended("expiry after Pop In");
+
+            // parity: call-window-frame
+            // The remembered frame is reused and follows the user's moves; one whose screen is gone falls back to the top right of
+            // the active viewer window's screen; "Top right of the active screen" ignores it; the pin is remembered.
+            WindowRect visible = cws.ActiveWorkArea() is { } active ? active : new WindowRect(0, 0, 1024, 728);
+            const double W = 520, H = 440;
+            WindowRect rememberedFrame = new(visible.X + 40, visible.Y + 60, W, H);
+            cws.PlacementMode = CallWindowPlacement.Mode.Remembered;
+            cws.RememberedFrame = rememberedFrame;
+            v.Calls.StartConversation(camera);
+            cws.PopOut(camera);
+            WindowRect? reused = cws.WindowFor(camera)?.CurrentFrame;
+            if (cws.WindowFor(camera) is { } mover)
+            {
+                mover.AppWindow.Move(new Windows.Graphics.PointInt32((int)rememberedFrame.X + 30, (int)rememberedFrame.Y + 20));
+            }
+            var movedTo = new WindowRect(rememberedFrame.X + 30, rememberedFrame.Y + 20, W, H);
+            bool follows = await Until(() => cws.RememberedFrame is { } f && NearFrame(f, movedTo), 5);
+            v.Calls.End(camera, "closed");
+            // A frame on a screen that is gone.
+            cws.RememberedFrame = new WindowRect(-100_000, -100_000, W, H);
+            v.Calls.StartConversation(camera);
+            cws.PopOut(camera);
+            WindowRect? fallback = cws.WindowFor(camera)?.CurrentFrame;
+            v.Calls.End(camera, "closed");
+            var topRight = new WindowRect(visible.X + visible.Width - CallWindowPlacement.Margin - W, visible.Y + CallWindowPlacement.Margin, W, H);
+            // The other setting ignores a frame that is still on a screen.
+            cws.RememberedFrame = rememberedFrame;
+            cws.PlacementMode = CallWindowPlacement.Mode.ActiveScreen;
+            v.Calls.StartConversation(camera);
+            cws.PopOut(camera);
+            WindowRect? atTopRight = cws.WindowFor(camera)?.CurrentFrame;
+            v.Calls.End(camera, "closed");
+            cws.PlacementMode = CallWindowPlacement.Mode.Remembered;
+            // The pin is remembered (a test run never floats the window, so the native flag is not read).
+            cws.Pinned = false;
+            bool pinSaved = !v.Settings.CallWindowOnTop;
+            cws.Pinned = true;
+            pinSaved &= v.Settings.CallWindowOnTop;
+            // The frame, the placement, and the pin are kept in view-settings.json.
+            string settingsFile = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-settings-{Guid.NewGuid():N}.json");
+            try
+            {
+                var written = new ViewSettings(settingsFile) { CallWindowFrame = rememberedFrame, CallWindowPlacementMode = CallWindowPlacement.Mode.ActiveScreen, CallWindowOnTop = false };
+                var read = new ViewSettings(settingsFile);
+                bool persisted = read.CallWindowFrame == rememberedFrame && read.CallWindowPlacementMode == CallWindowPlacement.Mode.ActiveScreen && !read.CallWindowOnTop && written.CallWindowOnTop == false;
+                bool reusedOk = reused is { } r1 && NearFrame(r1, rememberedFrame);
+                bool fallbackOk = fallback is { } r2 && NearFrame(r2, topRight);
+                bool settingOk = atTopRight is { } r3 && NearFrame(r3, topRight);
+                Say($"calls: call window frame: remembered reused {reusedOk}, move remembered {follows}, gone screen -> top right {fallbackOk}, " +
+                    $"top right setting {settingOk}, pin saved {pinSaved}, settings file reads back {persisted}");
+                Expect(reusedOk, $"the call window did not open at the remembered frame: {reused}");
+                Expect(follows, $"moving the call window did not remember its frame: {cws.RememberedFrame}");
+                Expect(fallbackOk, $"a remembered frame off every screen did not fall back to the top right: {fallback} (wanted {topRight})");
+                Expect(settingOk, $"Top right of the active screen did not ignore the remembered frame: {atTopRight} (wanted {topRight})");
+                Expect(pinSaved, "the pin was not remembered");
+                Expect(persisted, "the call window's frame, placement, and pin did not read back from view-settings.json");
+            }
+            finally
+            {
+                File.Delete(settingsFile);
+            }
+
+            // parity: call-default-ring
+            // "Open calls in their own window": a ring opens the call in a call window that is not brought forward, the viewer windows keep no
+            // card for it, a press that joins keeps it there, and the doorbell's own choice (Inset) beats the setting.
+            v.Settings.CallsOpenInWindow = true;
+            v.Apply(Alarm(device, 0, "visitor", true));
+            v.Apply(Alarm(device, 0, "visitor", false));
+            bool ringWindow = await Until(() => cws.WindowFor(camera) is not null, 5);
+            Call? ringCall = v.Calls.CallFor(camera);
+            CallWindow? ringWin = cws.WindowFor(camera);
+            bool quiet = cws.LastOpenActivated == false;
+            bool noCards = stages.All(s => s.CallCards.Cards.Count == 0 && s.CallCards.LeasesHeld == 0);
+            v.Settings.CallsOpenInWindow = false;
+            v.Apply(Alarm(device, 0, "visitor", true));
+            v.Apply(Alarm(device, 0, "visitor", false));
+            bool joined = ringCall?.Presses == 2 && ringCall.Presentation == CallPresentation.Window && cws.WindowFor(camera) == ringWin && stages.All(s => s.CallCards.Cards.Count == 0);
+            v.Calls.End(camera, "closed");
+            v.Settings.CallsOpenInWindow = true;
+            v.Settings.SetCallPresentation(camera, CallPresentation.Inset);
+            v.Apply(Alarm(device, 0, "visitor", true));
+            v.Apply(Alarm(device, 0, "visitor", false));
+            bool inset = await Until(() => stages.All(s => s.CallCards.Cards.Count == 1), 3) && v.Calls.CallFor(camera)?.Presentation == CallPresentation.Inset && cws.WindowFor(camera) is null;
+            v.Calls.End(camera, "closed");
+            v.Settings.CallsOpenInWindow = false;
+            v.Settings.SetCallPresentation(camera, null);
+            Say($"calls: ring with calls in windows: window {ringWindow && ringCall?.Presentation == CallPresentation.Window}, opened without focus {quiet}, no cards {noCards}, " +
+                $"a joining press kept it {joined}; the doorbell set to Inset: cards in every window {inset}");
+            Expect(ringWindow && ringCall?.Presentation == CallPresentation.Window, "with the setting on, a ring did not open a call window");
+            Expect(quiet, "a call window opened by a ring asked for the focus");
+            Expect(noCards, "a ring into a call window left a card in a viewer window");
+            Expect(joined, "a press joining a call in its window moved it");
+            Expect(inset, "the doorbell's Inset choice did not win over Open calls in their own window");
+
+            // parity: call-default-conversation
+            // The doorbell's Window choice opens Start Conversation in a call window (brought forward: the user asked for it) with the
+            // setting off; Default again leaves the choice out of the file.
+            v.Settings.SetCallPresentation(camera, CallPresentation.Window);
+            v.Calls.StartConversation(camera);
+            Call? conversation = v.Calls.CallFor(camera);
+            bool conversationWindow = conversation is { Presentation: CallPresentation.Window, Origin: CallOrigin.Conversation } && cws.WindowFor(camera) is not null;
+            bool activates = cws.LastOpenActivated == true;
+            bool noCard = stages.All(s => s.CallCards.Cards.Count == 0);
+            v.Calls.End(camera, "closed");
+            v.Settings.SetCallPresentation(camera, null);
+            bool cleared = v.Settings.CallPresentationFor(camera) is null;
+            string choiceFile = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-settings-{Guid.NewGuid():N}.json");
+            bool readsBack;
+            try
+            {
+                var choices = new ViewSettings(choiceFile) { CallsOpenInWindow = true };
+                choices.SetCallPresentation(camera, CallPresentation.Window);
+                var reread = new ViewSettings(choiceFile);
+                readsBack = reread.CallsOpenInWindow && reread.CallPresentationFor(camera) == CallPresentation.Window;
+                choices.SetCallPresentation(camera, null);
+                readsBack &= new ViewSettings(choiceFile).CallPresentationFor(camera) is null;
+            }
+            finally
+            {
+                File.Delete(choiceFile);
+            }
+            Say($"calls: conversation with the doorbell set to Window: call window {conversationWindow}, brought forward {activates}, no card {noCard}, Default clears the choice {cleared}, saved choices read back {readsBack}");
+            Expect(conversationWindow, "the doorbell's Window choice did not open Start Conversation in a call window");
+            Expect(activates, "a call window opened by Start Conversation was not brought forward");
+            Expect(noCard, "Start Conversation into a call window left a card in a viewer window");
+            Expect(cleared, "choosing Default did not clear the doorbell's call choice");
+            Expect(readsBack, "the setting and the doorbell's call choice did not save and read back");
+        }
+        finally
+        {
+            v.Calls.End(camera, "closed");
+            v.Settings.CallsOpenInWindow = false;
+            v.Settings.SetCallPresentation(camera, null);
+            v.SetTalkAllowed(camera, false);
+            cws.RememberedFrame = frameBefore;
+            cws.PlacementMode = modeBefore;
+            cws.Pinned = pinBefore;
+            foreach (ViewerWindow w in opened)
+            {
+                w.Window.Close();
+            }
+            await Until(() => app.Windows.Count == 1, 5);
+        }
     }
 
     // The call card's picture: one more tile of this window's grid, drawn last from the camera's

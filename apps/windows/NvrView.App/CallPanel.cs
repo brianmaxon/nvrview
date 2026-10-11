@@ -5,7 +5,10 @@
 // call opened silent, Talk (hold the button, or turn on "Keep talking"), a text box whose reply is
 // spoken through the camera with the system voice. When the camera fills the stage (its tile is
 // focused, or is the only one) there is no card: the same controls show along the bottom of the
-// stage instead, without a picture of their own.
+// stage instead, without a picture of their own. A call popped out into a call window
+// (CallWindows.cs) has no card in the viewer windows; the window shows the same card in its
+// Window mode, the picture filling the middle. "Keep talking" and the unsent reply text belong
+// to the call (Call.Latched, Call.Draft), so a card built later shows them.
 //
 // The picture is not drawn here: the card's middle is a transparent hole, and the window's own
 // render thread draws the camera's shared tile into it, last, as one more tile of its grid
@@ -38,6 +41,9 @@ internal enum CallCardMode
 
     /// <summary>The camera fills the stage: the controls along its bottom, no picture.</summary>
     Stage,
+
+    /// <summary>The call window's content: the picture fills the middle, Pop In and the pin in the header.</summary>
+    Window,
 }
 
 /// <summary>One call's card.</summary>
@@ -60,6 +66,9 @@ internal sealed class CallCard : UserControl
     private readonly Border _hole = new() { Background = new SolidColorBrush(Colors.Transparent) };
     private readonly TextBlock _title = new() { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = new SolidColorBrush(Colors.White), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _close = new() { Content = "✕", Padding = new Thickness(8, 2, 8, 2), MinWidth = 0, MinHeight = 0 };
+    private readonly Button _pop = new() { Content = new FontIcon { Glyph = "\uE8A7", FontSize = 14 }, Padding = new Thickness(8, 2, 8, 2), MinWidth = 0, MinHeight = 0 };
+    private readonly ToggleButton _pin = new() { Content = new FontIcon { Glyph = "\uE718", FontSize = 14 }, Padding = new Thickness(8, 2, 8, 2), MinWidth = 0, MinHeight = 0, Visibility = Visibility.Collapsed };
+    private readonly RowDefinition _pictureRow = new() { Height = GridLength.Auto };
     private readonly Button _unmute = new() { Content = "Unmute", FontSize = 20, HorizontalAlignment = HorizontalAlignment.Stretch, Padding = new Thickness(0, 10, 0, 10) };
     private readonly TextBlock _captions = new() { Foreground = new SolidColorBrush(Colors.White), TextWrapping = TextWrapping.Wrap, MaxLines = 6, IsTextSelectionEnabled = false };
     private readonly TextBlock _captionNote = new() { Foreground = Dim, FontStyle = Windows.UI.Text.FontStyle.Italic, TextWrapping = TextWrapping.Wrap };
@@ -69,6 +78,7 @@ internal sealed class CallCard : UserControl
     private readonly TextBox _reply = new() { PlaceholderText = "Type a reply to speak", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly Button _send = new() { Content = "Send" };
     private bool _holding;
+    private bool _unmuteInPicture;
     private bool _updating;
     private CallCardMode _mode = CallCardMode.Stage;
 
@@ -83,12 +93,24 @@ internal sealed class CallCard : UserControl
         var header = new Grid { ColumnSpacing = 8 };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.Children.Add(_title);
-        Grid.SetColumn(_close, 1);
+        Grid.SetColumn(_pop, 1);
+        header.Children.Add(_pop);
+        Grid.SetColumn(_pin, 2);
+        header.Children.Add(_pin);
+        Grid.SetColumn(_close, 3);
         header.Children.Add(_close);
         AutomationProperties.SetName(_close, "End the call");
         ToolTipService.SetToolTip(_close, "End the call");
         _close.Click += (_, _) => _viewer.Calls.End(Camera, "closed");
+        _pop.Click += (_, _) => TogglePresentation();
+        _pin.Click += (_, _) => PinChanged?.Invoke(_pin.IsChecked == true);
+        AutomationProperties.SetName(_pin, "Keep the call window on top");
+        ToolTipService.SetToolTip(_pin, "Keep the call window on top of other windows");
+        // The card's menu (right-click on the header, the picture, or the controls).
+        ContextFlyout = BuildMenu();
 
         _unmute.Click += (_, _) => _viewer.Calls.Unmute(Camera);
         AutomationProperties.SetName(_unmute, "Unmute the camera");
@@ -111,18 +133,25 @@ internal sealed class CallCard : UserControl
         {
             if (!_updating)
             {
-                _viewer.Calls.StartTalking(Camera);
+                _viewer.Calls.SetLatched(Camera, true);
             }
         };
         _keep.Unchecked += (_, _) =>
         {
-            if (!_updating && !_holding)
+            if (!_updating)
             {
-                _viewer.Calls.StopTalking(Camera);
+                _viewer.Calls.SetLatched(Camera, false, holding: _holding);
             }
         };
         ToolTipService.SetToolTip(_keep, "Keep the microphone open without holding Talk");
 
+        _reply.TextChanged += (_, _) =>
+        {
+            if (!_updating)
+            {
+                _viewer.Calls.SetDraft(Camera, _reply.Text);
+            }
+        };
         _reply.KeyDown += (_, e) =>
         {
             if (e.Key == VirtualKey.Enter)
@@ -158,7 +187,7 @@ internal sealed class CallCard : UserControl
         _body = new Border { Background = Slate, Padding = new Thickness(12), Child = _controls };
         var rows = new Grid();
         rows.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        rows.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        rows.RowDefinitions.Add(_pictureRow);
         rows.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         rows.Children.Add(_header);
         Grid.SetRow(_picture, 1);
@@ -169,8 +198,14 @@ internal sealed class CallCard : UserControl
         Content = _frame;
         Mode = CallCardMode.Inset;
 
-        // The stage underneath is not to see the card's pointer input (selecting, panning, focusing).
-        PointerPressed += (_, e) => e.Handled = true;
+        // Using the card is using the call (it stays open); the stage underneath is not to see the
+        // card's pointer input (selecting, panning, focusing).
+        PointerEntered += (_, _) => _viewer.Calls.Use(Camera);
+        PointerPressed += (_, e) =>
+        {
+            _viewer.Calls.Use(Camera);
+            e.Handled = true;
+        };
         PointerReleased += (_, e) => e.Handled = true;
         DoubleTapped += (_, e) => e.Handled = true;
         RightTapped += (_, e) => e.Handled = true;
@@ -194,29 +229,44 @@ internal sealed class CallCard : UserControl
                 return;
             }
             _mode = value;
-            bool inset = value == CallCardMode.Inset;
+            bool inset = value != CallCardMode.Stage;
+            bool window = value == CallCardMode.Window;
+            _pictureRow.Height = window ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+            _pin.Visibility = window ? Visibility.Visible : Visibility.Collapsed;
+            _close.Visibility = window ? Visibility.Collapsed : Visibility.Visible;
+            ApplyPresentationButton();
             // The Unmute control covers the picture, or (over the stage) leads the controls.
-            if (_unmute.Parent is Panel parent)
-            {
-                parent.Children.Remove(_unmute);
-            }
             if (inset)
             {
+                if (!_unmuteInPicture)
+                {
+                    if (_unmute.Parent is Panel parent)
+                    {
+                        parent.Children.Remove(_unmute);
+                    }
+                    _picture.Children.Add(_unmute);
+                    _unmuteInPicture = true;
+                }
                 _unmute.VerticalAlignment = VerticalAlignment.Stretch;
                 _unmute.Background = UnmuteCover;
-                _picture.Children.Add(_unmute);
             }
             else
             {
+                if (_unmute.Parent is Panel parent)
+                {
+                    parent.Children.Remove(_unmute);
+                }
+                _unmuteInPicture = false;
                 _unmute.VerticalAlignment = VerticalAlignment.Top;
                 _unmute.ClearValue(Control.BackgroundProperty);
                 _controls.Children.Insert(0, _unmute);
             }
             _picture.Visibility = inset ? Visibility.Visible : Visibility.Collapsed;
-            _frame.BorderBrush = inset ? Accent : null;
-            _frame.BorderThickness = new Thickness(inset ? BorderWidth : 0);
-            _header.CornerRadius = new CornerRadius(inset ? 6 : 8, inset ? 6 : 8, 0, 0);
-            _body.CornerRadius = new CornerRadius(0, 0, inset ? 6 : 8, inset ? 6 : 8);
+            _frame.BorderBrush = inset && !window ? Accent : null;
+            _frame.BorderThickness = new Thickness(inset && !window ? BorderWidth : 0);
+            _frame.CornerRadius = new CornerRadius(window ? 0 : 8);
+            _header.CornerRadius = window ? new CornerRadius(0) : new CornerRadius(inset ? 6 : 8, inset ? 6 : 8, 0, 0);
+            _body.CornerRadius = window ? new CornerRadius(0) : new CornerRadius(0, 0, inset ? 6 : 8, inset ? 6 : 8);
         }
     }
 
@@ -225,6 +275,61 @@ internal sealed class CallCard : UserControl
 
     /// <summary>Where the stack put the card, in stage DIPs (self-test).</summary>
     public InsetFrame Frame { get; set; }
+
+    /// <summary>The pin toggle was clicked (the call window's header): keep the window on top.</summary>
+    public event Action<bool>? PinChanged;
+
+    /// <summary>Shows the pin's state without raising <see cref="PinChanged"/>.</summary>
+    public void SetPinned(bool on) => _pin.IsChecked = on;
+
+    /// <summary>Whether the header offers Pop Out (in the insets) or Pop In (in the call window), self-test.</summary>
+    public string PopTip => _mode == CallCardMode.Window ? "Pop In Call" : "Pop Out Call";
+
+    /// <summary>The header's Pop Out / Pop In button is shown (self-test).</summary>
+    public bool PopShown => _pop.Visibility == Visibility.Visible;
+
+    /// <summary>The Keep talking toggle shows on (self-test).</summary>
+    public bool KeepTalkingShown => _keep.IsChecked == true;
+
+    /// <summary>The reply field's text (self-test).</summary>
+    public string ReplyText => _reply.Text;
+
+    /// <summary>The reply field has the keyboard focus (so Esc leaves it instead of ending the call).</summary>
+    public bool IsEditingReply => _reply.FocusState != FocusState.Unfocused;
+
+    /// <summary>Pop Out from the insets, Pop In from the call window.</summary>
+    private void TogglePresentation()
+    {
+        if (_mode == CallCardMode.Window)
+        {
+            _viewer.CallWindows?.PopIn(Camera);
+        }
+        else
+        {
+            _viewer.CallWindows?.PopOut(Camera);
+        }
+    }
+
+    private void ApplyPresentationButton()
+    {
+        string tip = PopTip;
+        _pop.Content = new FontIcon { Glyph = _mode == CallCardMode.Window ? "\uE73F" : "\uE8A7", FontSize = 14 };
+        ToolTipService.SetToolTip(_pop, tip);
+        AutomationProperties.SetName(_pop, tip);
+    }
+
+    private MenuFlyout BuildMenu()
+    {
+        var menu = new MenuFlyout();
+        var pop = new MenuFlyoutItem();
+        pop.Click += (_, _) => TogglePresentation();
+        var end = new MenuFlyoutItem { Text = "End the call" };
+        end.Click += (_, _) => _viewer.Calls.End(Camera, "closed");
+        menu.Items.Add(pop);
+        menu.Items.Add(end);
+        menu.Opening += (_, _) => pop.Text = PopTip;
+        return menu;
+    }
 
     /// <summary>The picture size the hole was last sized for.</summary>
     public (int Width, int Height) SizedFor { get; private set; }
@@ -239,7 +344,7 @@ internal sealed class CallCard : UserControl
     /// <summary>The hole's rectangle in <paramref name="stage"/>'s DIPs, null while it is not laid out.</summary>
     public Rect? HoleIn(UIElement stage)
     {
-        if (_mode != CallCardMode.Inset || !Placed || _hole.ActualWidth < 1 || _hole.ActualHeight < 1)
+        if (_mode == CallCardMode.Stage || !Placed || _hole.ActualWidth < 1 || _hole.ActualHeight < 1)
         {
             return null;
         }
@@ -272,20 +377,14 @@ internal sealed class CallCard : UserControl
 
     private void SendReply()
     {
-        string text = _reply.Text.Trim();
-        if (text.Length == 0)
+        string text = _reply.Text;
+        if (text.Trim().Length == 0)
         {
             return;
         }
-        // The box is cleared once the reply is on its way; if the user declines the talk-back
-        // prompt it keeps what was typed.
-        _ = _viewer.Calls.SendReplyAsync(text, Camera, accepted: () =>
-        {
-            if (_reply.Text.Trim() == text)
-            {
-                _reply.Text = "";
-            }
-        });
+        // The call empties the box once the reply is on its way; if the user declines the
+        // talk-back prompt it keeps what was typed.
+        _ = _viewer.Calls.SendReplyAsync(text, Camera);
     }
 
     /// <summary>Shows the call's state.</summary>
@@ -309,10 +408,15 @@ internal sealed class CallCard : UserControl
             _captionNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
             string extra = _viewer.Calls.NoteFor(Camera) is { } n ? "\n" + n : "";
             _status.Text = call.Talk.Text + extra;
-            // The toggle is the user's choice; it goes off when the core ended the talk.
-            if (!_viewer.Calls.IsTalkingWithMicrophone(Camera) && _keep.IsChecked == true)
+            // The toggle is the call's "Keep talking"; it goes off when the core ended the talk.
+            if (_keep.IsChecked != call.Latched)
             {
-                _keep.IsChecked = false;
+                _keep.IsChecked = call.Latched;
+            }
+            // The unsent reply belongs to the call: every card shows the same text.
+            if (_reply.Text != call.Draft)
+            {
+                _reply.Text = call.Draft;
             }
         }
         finally
@@ -350,7 +454,7 @@ internal sealed class CallStack : Panel
     }
 
     /// <summary>The cards, oldest call first.</summary>
-    public IReadOnlyList<CallCard> Cards => [.. _viewer.Calls.Cameras.Where(_cards.ContainsKey).Select(c => _cards[c])];
+    public IReadOnlyList<CallCard> Cards => [.. _viewer.Calls.InsetCameras.Where(_cards.ContainsKey).Select(c => _cards[c])];
 
     /// <summary>The leases the cards hold, per camera (self-test).</summary>
     public int LeasesHeld => _held.Values.Sum();
@@ -365,7 +469,8 @@ internal sealed class CallStack : Panel
         {
             return;
         }
-        IReadOnlyList<CameraRef> cameras = _viewer.Calls.Cameras;
+        // A call popped out into its own window has no card here (and its picture and lease go).
+        IReadOnlyList<CameraRef> cameras = _viewer.Calls.InsetCameras;
         CameraRef? over = CallInsets.OverStage(cameras, _filling());
         bool changed = false;
         foreach (CameraRef gone in _cards.Keys.Where(c => !cameras.Contains(c)).ToArray())
@@ -495,7 +600,7 @@ internal sealed class CallStack : Panel
         double w = finalSize.Width, h = finalSize.Height;
         double width = CardWidth(w);
         // Newest first: the newest call sits nearest the corner.
-        CallCard[] insets = [.. _viewer.Calls.Cameras.Reverse().Where(_cards.ContainsKey).Select(c => _cards[c]).Where(c => c.Mode == CallCardMode.Inset)];
+        CallCard[] insets = [.. _viewer.Calls.InsetCameras.Reverse().Where(_cards.ContainsKey).Select(c => _cards[c]).Where(c => c.Mode == CallCardMode.Inset)];
         IReadOnlyList<InsetFrame> frames = InsetGeometry.Frames(insets.Length, width, [.. insets.Select(c => c.DesiredSize.Height)], _viewer.Settings.InsetCorner, w, h);
         for (int i = 0; i < insets.Length; i++)
         {

@@ -258,20 +258,35 @@ public sealed unsafe class SwapChainTarget : IDisposable
         }
     }
 
+    private void ReleaseStaging()
+    {
+        if (_staging != null)
+        {
+            _staging->Release();
+            _staging = null;
+        }
+    }
+
     /// <summary>Releases the swap chain (detach it from its panel first).</summary>
     public void Dispose()
     {
-        using (_gpu.Lock())
+        if (_gpu.IsDisposed)
         {
-            if (_gpu.Context != null)
-            {
-                _gpu.Context->OMSetRenderTargets(0, null, null);
-            }
+            // Another window's render thread replaced a lost device and disposed it: there is no lock or
+            // context to use any more, and the buffers are plain references to release.
             ReleaseBuffers();
-            if (_staging != null)
+            ReleaseStaging();
+        }
+        else
+        {
+            using (_gpu.Lock())
             {
-                _staging->Release();
-                _staging = null;
+                if (_gpu.Context != null)
+                {
+                    _gpu.Context->OMSetRenderTargets(0, null, null);
+                }
+                ReleaseBuffers();
+                ReleaseStaging();
             }
         }
         if (_waitable != HANDLE.NULL)
