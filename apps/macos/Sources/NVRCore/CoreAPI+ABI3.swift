@@ -41,6 +41,12 @@ extension CoreAPI {
     public func discoverStop() throws(CoreStatus) {}
 }
 
+// Retry (minor 3). A core without it cannot retry by hand; the automatic
+// recovery of a newer core is not there either.
+extension CoreAPI {
+    public func tileRetry(_ tile: UInt64) throws(CoreStatus) { throw .invalidArgument }
+}
+
 // Updates (minor 2). A core without them checks nothing, and the app's
 // update settings say so.
 extension CoreAPI {

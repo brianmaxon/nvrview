@@ -45,6 +45,12 @@ public protocol CoreAPI: Sendable {
     /// switch is announced by a `tile_tier` event. Returns at once.
     func tileSetTier(_ tile: UInt64, tier: StreamTier) throws(CoreStatus)
 
+    /// ABI 3, minor 3 `nv_tile_retry`: restart this tile's stream now (and,
+    /// when its device waits before a reconnect, connect now). The core
+    /// keeps a 2 s floor and does nothing for a refused login. Returns at
+    /// once.
+    func tileRetry(_ tile: UInt64) throws(CoreStatus)
+
     /// ABI 3 `nv_tile_audio_level`: the latest peak and RMS (0...1) of the
     /// tile's audio, measured by the audio render before the tile's volume;
     /// 0 for a tile that is not audible or not known. Callable at display
