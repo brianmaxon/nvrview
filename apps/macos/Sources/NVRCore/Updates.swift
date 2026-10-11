@@ -321,7 +321,9 @@ public enum BundleInstaller {
     }
 
     /// Removes staging leftovers (an interrupted download, an update that
-    /// was never applied); keeps `previous` and the log.
+    /// was never applied): only `staging-*` folders, which never hold a
+    /// rollback copy (`install` keeps that in `previous`); `previous`, the
+    /// log, and anything else stay.
     public static func removeLeftovers(in folder: URL, fileManager: FileManager = .default) {
         let items = (try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? []
         for name in items where name.hasPrefix("staging-") {
@@ -344,6 +346,8 @@ public enum BundleInstaller {
         case signerMismatch
         /// The installed app's signing requirement could not be read.
         case signerUnknown
+        /// No rollback copy could be kept, so nothing was replaced.
+        case rollbackUnavailable
         case swapFailed(Int32)
 
         /// One sentence for the next start's status line.
@@ -355,6 +359,7 @@ public enum BundleInstaller {
             case .signatureInvalid: return "the downloaded app's code signature is not intact."
             case .signerMismatch: return "the downloaded app is not code signed by the developer of this copy."
             case .signerUnknown: return "this copy's code signing requirement could not be read."
+            case .rollbackUnavailable: return "the previous version could not be kept for going back, so nothing was replaced."
             case .swapFailed(let e): return "the apps could not be swapped (error \(e))."
             }
         }
@@ -369,8 +374,11 @@ public enum BundleInstaller {
     ///    bundle's `signerRule` (its designated requirement when it has a
     ///    developer identity; nothing more when it is ad hoc);
     /// 3. swaps the two in one atomic rename (`renamex_np`, `RENAME_SWAP`);
-    /// 4. moves the old bundle to `<update folder>/previous/<name>.app`,
-    ///    replacing an older one there.
+    /// 4. keeps the old bundle as `<update folder>/previous/<name>.app`,
+    ///    replacing an older one there: the staged bundle is moved into that
+    ///    slot and swapped from there, so the old one lands in it directly;
+    ///    when the slot cannot be prepared nothing is replaced
+    ///    (`rollbackUnavailable`).
     /// Nothing is changed unless steps 1 and 2 pass. Returns the installed
     /// bundle's location (`target`).
     @discardableResult
@@ -417,27 +425,53 @@ public enum BundleInstaller {
             log("the installed app's signing requirement could not be read; nothing changed")
             throw .signerUnknown
         }
-        let swapped = new.withUnsafeFileSystemRepresentation { a in
+        // The rollback slot first: the staged bundle moves into
+        // `previous/<name>.app` and is swapped from there, so the old bundle
+        // lands directly in its rollback place (never inside a `staging-`
+        // folder, which the next launch deletes). If the slot cannot be
+        // prepared, nothing is replaced.
+        let previousFolder = updateFolder.appendingPathComponent("previous", isDirectory: true)
+        let previous = previousFolder.appendingPathComponent(target.lastPathComponent)
+        let older = previousFolder.appendingPathComponent(target.lastPathComponent + ".older")
+        do {
+            try fileManager.createDirectory(at: previousFolder, withIntermediateDirectories: true)
+        } catch {
+            log("the rollback folder \(previousFolder.path) cannot be made; nothing changed")
+            throw .rollbackUnavailable
+        }
+        try? fileManager.removeItem(at: older)
+        let hadOlder = fileManager.fileExists(atPath: previous.path)
+        if hadOlder, (try? fileManager.moveItem(at: previous, to: older)) == nil {
+            log("the earlier rollback copy cannot be moved aside; nothing changed")
+            throw .rollbackUnavailable
+        }
+        func restoreOlder() {
+            if hadOlder { try? fileManager.moveItem(at: older, to: previous) }
+        }
+        do {
+            try fileManager.moveItem(at: new, to: previous)
+        } catch {
+            restoreOlder()
+            log("the update cannot be moved next to the rollback copy; nothing changed")
+            throw .rollbackUnavailable
+        }
+        let swapped = previous.withUnsafeFileSystemRepresentation { a in
             target.withUnsafeFileSystemRepresentation { b in
                 renamex_np(a!, b!, UInt32(RENAME_SWAP))
             }
         }
         guard swapped == 0 else {
             let e = errno
+            // Put the staged bundle back and the earlier rollback copy too.
+            try? fileManager.moveItem(at: previous, to: new)
+            restoreOlder()
             log("swapping the bundles failed (errno \(e)); nothing changed")
             throw .swapFailed(e)
         }
-        // `new` now holds the old bundle.
-        let previousFolder = updateFolder.appendingPathComponent("previous", isDirectory: true)
-        let previous = previousFolder.appendingPathComponent(target.lastPathComponent)
-        try? fileManager.createDirectory(at: previousFolder, withIntermediateDirectories: true)
-        try? fileManager.removeItem(at: previous)
-        if (try? fileManager.moveItem(at: new, to: previous)) == nil {
-            log("installed; the previous version stays at \(new.path)")
-        } else {
-            log("installed \(expectedVersion); the previous version is in \(previousFolder.path)")
-            try? fileManager.removeItem(at: staged.deletingLastPathComponent())
-        }
+        // `previous` now holds the old bundle.
+        try? fileManager.removeItem(at: older)
+        log("installed \(expectedVersion); the previous version is in \(previousFolder.path)")
+        try? fileManager.removeItem(at: staged.deletingLastPathComponent())
         return target
     }
 }

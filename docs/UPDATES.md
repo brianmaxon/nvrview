@@ -273,8 +273,12 @@ session). The helper:
    same developer as the installed app (below);
 3. swaps the staged bundle and the installed one in a single atomic rename
    (`renamex_np` with `RENAME_SWAP`), so `NVRView.app` is never missing;
-4. moves the old bundle to `.NVRView-update/previous/NVRView.app` (replacing
-   an older one kept there);
+4. keeps the old bundle as `.NVRView-update/previous/NVRView.app`
+   (replacing an older one kept there): the staged bundle is first moved
+   into that slot and swapped from there, so the old bundle lands in it
+   directly and never sits in a `staging-` folder, which the next launch
+   deletes. If the slot cannot be prepared, the update is refused and
+   nothing is replaced;
 5. with Restart Now, opens the new `NVRView.app` with `open`.
 
 **Who may sign the new bundle.** The helper reads the installed app's

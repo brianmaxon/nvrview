@@ -157,6 +157,8 @@ struct UpdateTests {
         defer { try? FileManager.default.removeItem(at: s.root) }
         #expect(s.folder.lastPathComponent == ".NVRView-update")
         try makeBundle(at: s.staged.appendingPathComponent("UpdateTest.app"), version: "0.4.0")
+        // An older rollback copy is replaced.
+        try makeBundle(at: s.folder.appendingPathComponent("previous/UpdateTest.app"), version: "0.2.0")
         var waited = false
         try BundleInstaller.install(
             staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
@@ -167,6 +169,7 @@ struct UpdateTests {
         #expect(waited)
         #expect(version(s.target) == "0.4.0")
         #expect(version(s.folder.appendingPathComponent("previous/UpdateTest.app")) == "0.3.0")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: s.folder.appendingPathComponent("previous").path) == ["UpdateTest.app"])
         #expect(!FileManager.default.fileExists(atPath: s.staged.path))
     }
 
@@ -196,6 +199,37 @@ struct UpdateTests {
         #expect(attempt("0.4.0") == .missingBundle)
         // The installed bundle was never touched.
         #expect(version(s.target) == "0.3.0")
+    }
+
+    /// The bundle that was installed before an update must survive the next
+    /// launch's leftover cleanup, even when `previous` cannot be used: the
+    /// update is refused before anything is replaced, or the old bundle is
+    /// kept outside the staging folders.
+    @Test func theRollbackCopyIsNeverLostToCleanup() throws {
+        let s = try scene()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        let fm = FileManager.default
+        try makeBundle(at: s.staged.appendingPathComponent("UpdateTest.app"), version: "0.4.0")
+        // `previous` is taken by a file, so no folder can be made there.
+        try "not a folder".write(to: s.folder.appendingPathComponent("previous"), atomically: true, encoding: .utf8)
+        let result = Result { () throws(BundleInstaller.Failure) in
+            try BundleInstaller.install(
+                staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
+                waitForExit: { true }, verifySignature: { _, _ in true }, signerRule: { _ in .anyValidSignature })
+        }
+        BundleInstaller.removeLeftovers(in: s.folder)
+        // Where is 0.3.0 now?
+        var kept: [String] = []
+        if version(s.target) == "0.3.0" { kept.append("installed") }
+        let walker = fm.enumerator(at: s.folder, includingPropertiesForKeys: nil)
+        while let url = walker?.nextObject() as? URL {
+            if url.pathExtension == "app", version(url) == "0.3.0" { kept.append(url.path) }
+        }
+        #expect(!kept.isEmpty, "the previous version was deleted (install result: \(result))")
+        if case .failure(let f) = result {
+            #expect(f == .rollbackUnavailable)
+            #expect(version(s.target) == "0.3.0", "nothing replaced when refused")
+        }
     }
 
     @Test func blockedLocations() throws {
