@@ -1,10 +1,12 @@
-# C interface for recordings, ABI 4 (proposal for milestone P)
+# C interface for recordings, ABI 3 minor 4 (proposal for milestone P)
 
 > **Proposal, not implemented.** This is the contract for review before
 > the core and the apps are built in parallel, as [FFI-ABI3.md](FFI-ABI3.md)
 > was for M3. Everything in [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h)
-> still holds; on implementation this moves into FFI.md and the header, and
-> `NV_ABI_VERSION` becomes 4. Requirements come from
+> still holds; on implementation this moves into FFI.md and the header as
+> **ABI 3, minor 4**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` becomes 4
+> (minors 1 to 3 are discovery, updates, and `nv_tile_retry`; FFI.md,
+> "Versioning"). Requirements come from
 > [PLAYBACK.md](PLAYBACK.md), [UX.md](UX.md), and
 > [ARCHITECTURE.md](ARCHITECTURE.md); protocol facts from
 > [protocol.md](protocol.md) ("Recordings: search and download",
@@ -35,7 +37,7 @@
 
 | | Decision | Why |
 | --- | --- | --- |
-| Version | **ABI 4**: every ABI 3 declaration unchanged, plus the functions, types, status codes, and events below | Apps compare `nv_abi_version()` for equality and refuse a mismatch; there is no minor version, so the only honest signal for "this core has recordings" is a new number. New `NvStatus` values also reach every function's return. The macOS app moves to ABI 4 by bumping the constant; nothing it calls today changes. (A minor version was considered; see open question 1.) |
+| Version | **ABI 3, minor 4**: every ABI 3 declaration unchanged, plus the functions, types, status codes, and events below | Decision 1: the major number changes only for incompatible changes, and recordings are additions, so they take the next minor (`NV_ABI_MINOR` 4; minors 1 to 3 are taken). An app checks `nv_abi_minor() >= 4` before calling any function here. New `NvStatus` values can reach an older app only through these new functions, and no existing struct changes size (section 13) |
 | Objects | One new object, the **playback** (an ID like devices and tiles). Everything else (index, incidents, downloads, thumbnails) is core-wide state addressed by JSON keys | Recordings are shared by every window (one index per device, one download queue), so they are not owned by a handle an app could leak |
 | Cameras | `{"device": "<device key>", "channel": 3, "lens": 0}` everywhere in JSON | Incidents, edits, downloads, and groups persist across runs, so they use the stable device key (FFI.md, "Layouts"), never per-run device IDs. `lens` (0 or 1) replaces the Baichuan stream names for a second lens of a multi-lens camera; it defaults to 0 and may be omitted |
 | Tiers | `"main"` or `"sub"` in JSON; `NV_TIER_MAIN`/`NV_TIER_SUB` in C | The core maps lens and tier to the device's stream (lens 1 main is `externStream` on Baichuan). `NV_TIER_MOBILE`/`NV_TIER_EXTERN` are refused for playback tiles |
@@ -82,7 +84,7 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
   channel the `channels` event lists, first lens only.
 - `utc_offset_s` is the device's offset from UTC, used only to know which
   day is "today" on the device (`recordings::system_clock`); default: the
-  computer's current offset, which the app passes. See open question 6.
+  computer's current offset, which the app passes (Decision 6).
 - `device_info` gains `"recordings": {"search": true, "playback": true,
   "download": true, "thumbnails": true}` so an app can hide what a backend
   cannot do.
@@ -177,9 +179,9 @@ Sources of audio:
    of one camera"). Video of a watched-only stream is not decoded.
 2. **Recordings**: when a download finishes, or while a camera plays back,
    its audio goes through the same envelope, detector, and (in the app)
-   classifier. An optional background pass over the index fetches older
-   audio, newest day first, at most one stream per device and only while
-   the device is otherwise idle; it is off by default (open question 13).
+   classifier. Older recordings are analyzed only on request, for a day or
+   camera the user picks, one stream per device; there is no background
+   pass (Decision 13).
 
 ```c
 /* Keeps a camera's sub-stream open for sound analysis while enabled, with
@@ -270,8 +272,7 @@ already has `nv_tile_audio_level`), so an event per tile per second would
 mostly be thrown away, and with many tiles it would crowd the event queue
 that carries state changes. A pull answers from memory when the lane is
 drawn, in the same byte form as `nv_recordings_loudness`, and costs nothing
-while nobody asks. Adding it to ABI 3 would change the header, so it is
-proposed here for ABI 4:
+while nobody asks. It is proposed here as an addition in minor 4:
 
 ```c
 /* A live tile's recent loudness, oldest first, one byte per second and
@@ -313,7 +314,7 @@ NvStatus nv_camera_groups_put(NvCore *core, const char *json);
 
 ```json
 {"revision": 12, "incidents": [
- {"key": "i-1791618125-d-3f9a0c1b7e2d4a65-3-0", "id": "1791618125-9c1e5a2b7d40f316",
+ {"key": "i-1791618125-d-3f9a0c1b7e2d4a65-3-0-5d2e8a41", "id": "1791618125-9c1e5a2b7d40f316",
   "name": null, "group": "Group 1", "start": 1791618125, "end": 1791618160,
   "margin_s": 5, "kinds": ["vehicle"], "growing": false, "edited": false,
   "cameras": [
@@ -326,9 +327,10 @@ NvStatus nv_camera_groups_put(NvCore *core, const char *json);
 
 - **Two identifiers.** `id` is the existing content hash
   (`Incident::id`: group, cameras, first start, last end); it changes while
-  an incident grows and names its download folder. `key` is new and
-  **stable while the incident grows**: its group and its earliest event
-  (camera and start). Edits refer to keys, so a rename survives an incident
+  an incident grows. `key` is **stable while the incident grows**: it is
+  made from the incident's earliest event (start, then the lowest camera)
+  and, for an incident of a named camera group, a hash of the group's name
+  (`Incident::key`). Edits refer to keys, so a rename survives an incident
   that is still getting events.
 - `growing` is true while the incident's end is within `gap_s` of the
   device's "now" (more events may join). `edited` is true when a stored
@@ -356,7 +358,8 @@ Edits:
   every regroup (new events, new groups, new settings) the core replays the
   edits; an edit whose key matches no incident stays stored (its events may
   not be indexed yet) until its time is older than the index's
-  `max_age_days`, then it is dropped. At most 10000 edits.
+  `max_age_days`, then it is dropped. At most 10000 edits; a `merge` takes
+  at most 1000 incidents (`NV_ERR_LIMIT` beyond either).
 - An edit that cannot apply (a `split` that would leave a part empty, a
   `remove_camera` of the last camera) returns `NV_ERR_INVALID_ARGUMENT` and
   stores nothing; an unknown key returns `NV_ERR_UNKNOWN_ID`.
@@ -372,10 +375,13 @@ Camera groups:
 ```
 
 - A camera in no group is a group of its own; with no groups at all, every
-  camera is one group (existing `group_of`). At most 64 groups of 64
-  cameras; names up to 256 bytes; stored in `recordings/groups.json`.
+  camera is one group (existing `group_of`). A camera listed in several
+  groups belongs to the first. At most 64 groups of 64 cameras; names up to
+  256 bytes; stored in `recordings/groups.json`.
 - `camera_names` overrides channel names in incidents and output names
-  (optional).
+  (optional; at most 4096 entries, names up to 256 bytes).
+- Beyond any of these caps `nv_camera_groups_put` returns `NV_ERR_LIMIT`
+  and stores nothing.
 
 ## 4. Cover thumbnails
 
@@ -413,13 +419,18 @@ NvStatus nv_thumbnail_put(NvCore *core, const char *key, const NvThumbnail *info
 NvStatus nv_thumbnail_cancel(NvCore *core, const char *key);
 ```
 
+The `key` argument of all three functions is this JSON object (a
+NUL-terminated string):
+
 ```json
 {"camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0},
  "tier": "sub", "start": 1791618125, "end": 1791618141}
 ```
 
-- The key is exactly `recordings::thumbs::ThumbKey` (device, channel, lens
-  and tier as the stream, range); an entry matches only the same key.
+- The core maps it onto `recordings::thumbs::ThumbKey` (device, channel,
+  stream, range): lens and tier become the device's stream
+  (`DeviceCamera::stream`), so `ThumbKey` has no lens or tier of its own.
+  An entry matches only the same camera, tier, and range.
   Apps ask for an event's range (incident rows) or a slice of a span
   (timeline strip). `tier` defaults to `sub` (smaller keyframes).
 - Fetches run through the device's search permit, one at a time per device
@@ -435,21 +446,28 @@ NvStatus nv_thumbnail_cancel(NvCore *core, const char *key);
 
 ## 5. Downloads
 
-`recordings::scheduler::Scheduler`, unchanged in behavior: one camera job
-per camera, 60 s chunks with retries and resume, one download at a time
-per device by default, devices in parallel, and `recordings::finalize::
-Mp4Finalizer` joining each camera's chunks into a standard MP4.
+`recordings::scheduler::Scheduler`: one camera job per camera, 60 s chunks
+with retries and resume, one download at a time per device by default,
+devices in parallel, per-camera pause and retry, failure reason codes, and
+device removal (jobs wait without spending attempts), with
+`recordings::finalize::Mp4Finalizer` joining each camera's chunks into a
+standard MP4.
 
 ```c
 /* Queues an incident's download (JSON below) and returns
  * {"download":"<id>","folder":"<absolute path>"}. Queuing the same incident
  * again returns the existing download. NV_ERR_NOT_CONFIGURED without
- * downloads_dir; NV_ERR_UNKNOWN_ID if the key matches no incident. */
+ * downloads_dir; NV_ERR_UNKNOWN_ID if the key matches no incident;
+ * NV_ERR_LIMIT if 1000 downloads are already known. */
 NvStatus nv_download_incident(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
-/* Pauses or resumes a whole download (camera NULL) or one camera of it. A
- * running chunk is stopped and fetched again on resume. Persisted. */
+/* Pauses or resumes a whole download (camera NULL) or one camera of it;
+ * `camera` is a JSON camera object, {"device","channel","lens"} as
+ * everywhere (lens optional). A running chunk is stopped and fetched again
+ * on resume. Persisted. NV_ERR_UNKNOWN_ID for an unknown download or a
+ * camera not in it. */
 NvStatus nv_download_pause(NvCore *core, const char *download, const char *camera, bool paused);
-/* Queues failed camera jobs again with fresh attempts. */
+/* Queues failed camera jobs again with fresh attempts: every failed
+ * camera (camera NULL) or one, given as a JSON camera object. */
 NvStatus nv_download_retry(NvCore *core, const char *download, const char *camera);
 /* Forgets a download with no camera job running (pause first). With
  * delete_partial, removes its .parts folder; finished MP4 files and
@@ -494,6 +512,11 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
   `failed` (some camera failed and none is still working), derived from the
   cameras. Camera `state`: `waiting_device` (its device is not added or
   not connected), `queued`, `running`, `finalizing`, `done`, `failed`.
+  Both are derived by the recordings owner, not stored: the scheduler's
+  camera states are `Queued`, `Running`, `ChunksComplete` (shown as
+  `finalizing`), `Done`, `Failed`, and `waiting_device` is its separate
+  `CameraProgress::waiting_device` flag, shown in place of `queued` or
+  `running` while set.
 - `reason` (with `failed`): `stalled`, `session_closed`, `refused` (the
   device answered with an error), `no_recording` (the range held no
   video), `write_failed` (disk full or not writable), `join_failed` (for
@@ -581,7 +604,7 @@ tracked per tile), so a renderer that shows the newest decoded picture, as
 both platforms do (RENDERING.md), shows each picture on time. The app does
 no pacing. A picture's recorded time comes from the stream: the device's
 wall-clock seconds at each keyframe plus the stream timestamps after it
-(see "Existing code", item 5, and open question 4).
+(see "Existing code", item 5, and Decision 4).
 
 **Generations for seeks.** Every seek starts a new generation of every
 tile of the playback, exactly as a tier switch does (FFI.md, "Switching a
@@ -626,7 +649,8 @@ The session never waits for a tile, so each playback tile buffers at most
 buffer is full the core stops that play and starts it again later from the
 end of what it holds; frames are never dropped silently ahead of the clock.
 Whether the device paces itself after the burst decides how often this
-happens (open question 3).
+happens; observed: after the burst it sends at roughly real time
+(protocol.md, "Playback"; Decision 3).
 
 **Audio.** A playback tile's audio follows its shown generation through the
 existing audio path (AUDIO.md) at rate 1 while playing; it is silent while
@@ -749,8 +773,12 @@ fields must be ignored.
 - `recordings_index` `state`: `idle` (up to date), `filling`,
   `refreshing`, `waiting_device`, `failed` (`reason`; retried next pass).
   Sent on state changes and at most once a second while filling.
-- `recordings_changed` names the range of days that changed;
-  `incidents_changed` follows when incidents in it changed.
+- `recordings_changed` names one device and the range of days that
+  changed (`start` of the first day, `end` of the last). The lane reports
+  one camera-day at a time; the owner coalesces those into one event per
+  device (at most one a second while filling), so a range may cover days
+  that did not change. `incidents_changed` follows when incidents in it
+  changed.
 - `thumbnail` `state`: `ready` (call `nv_thumbnail_get`), `empty`,
   `failed` (`reason`), `dropped`.
 
@@ -791,15 +819,18 @@ or a counted drop, never growth):
 | --- | --- |
 | Open playbacks | 8 |
 | Cameras per playback | 16 |
-| Concurrent plays per device | 4 (`max_plays_per_device`; see open question 2) |
+| Concurrent plays per device | 4 (`max_plays_per_device`; Decision 2) |
 | Playback buffer per tile | 8 s or 32 MiB (`buffer_s`, `buffer_bytes`) |
 | Queued thumbnail fetches per device | 256, newest first, oldest dropped |
 | Thumbnail cache | 4096 entries, 64 MiB (`thumbnails`) |
 | Index per device | 90 days, 64 MiB of day files (`index`) |
 | Query result | `limit` up to 100000 items, 16 MiB of JSON |
-| Stored incident edits | 10000 |
-| Camera groups | 64 groups of 64 cameras |
-| Known downloads | 1000 (forget finished ones) |
+| Stored incident edits | 10000; at most 1000 incidents per `merge` |
+| Camera groups | 64 groups of 64 cameras; names up to 256 bytes |
+| Camera name overrides | 4096 |
+| Days per index request | 31 (`NV_ERR_LIMIT` beyond) |
+| Camera-days waiting to be searched, per device | 4096 (a request that would exceed it is refused whole with `NV_ERR_LIMIT`) |
+| Known downloads | 1000 (`NV_ERR_LIMIT`; forget finished ones) |
 | Download events | 4 per second per download, coalesced |
 | Event queue | FFI.md's (1024; diagnostics only while short) |
 
@@ -836,14 +867,14 @@ or a counted drop, never growth):
 
 | Function or event | Existing Rust | New |
 | --- | --- | --- |
-| `nv_recordings_configure`, `nv_recordings_enable` | `IndexConfig`, `IndexerConfig`, `GroupingConfig`, `ThumbCacheConfig`, `SchedulerConfig`, `NamePattern`, `system_clock` | a `recordings` owner in `viewer-core` holding one `DeviceIndex` + `Indexer` per device key, the `Scheduler`, the `ThumbnailCache`; config parsing; `device_info.recordings` |
-| `nv_recordings_calendar`, `_spans`, `_events` | `DeviceIndex::recorded_days`, `files`, `events` | JSON shaping, `revision`, `limit`, `md` → `motion`, lens in keys |
-| `nv_recordings_refresh`, `_status`, `recordings_index`, `recordings_changed` | `run_pass`, `PassReport`, `Indexer` reports | a forced-day request into the indexer; progress counts |
-| `nv_incidents_get`, `nv_incident_get` | `group`, `Incident::{intervals, download_ranges, kinds}` | stable `key`, `growing`, regroup on index change |
-| `nv_incident_edit` | `merge`, `split`, `add_camera`, `remove_camera`, `name` | the edit log (store, replay, expiry), `revert` |
-| `nv_camera_groups_get`/`_put` | `CameraGroup` | store like layouts, camera name overrides |
-| `nv_thumbnail_get`/`_put`/`_cancel` | `ThumbnailCache::{get, put}`, `cover_thumbnail` | a per-device newest-first fetch queue with cancel; thumbnail priority over index searches |
-| `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, retry, forget, resume_all, progress}`, `Mp4Finalizer` | per-camera pause and retry, failure reason codes, coalesced events, `delete_partial`, `waiting_device`, device removal |
+| `nv_recordings_configure`, `nv_recordings_enable` | `IndexConfig`, `IndexerConfig`, `LaneConfig`, `GroupingConfig`, `ThumbCacheConfig`, `SchedulerConfig`, `NamePattern`, `system_clock` | the `recordings` owner in `viewer-core` (C11) holding one `DeviceIndex` and `DeviceLane` per device key, the `Scheduler`, the `ThumbnailCache`, the `EditLog`, the `GroupStore`; config parsing; `device_info.recordings` |
+| `nv_recordings_calendar`, `_spans`, `_events` | `DeviceIndex::recorded_days`, `files`, `events` (lens in keys) | JSON shaping, `revision`, `limit`, `md` → `motion` |
+| `nv_recordings_refresh`, `_status`, `recordings_index`, `recordings_changed` | `LaneHandle::{request_days, hold_today, pending}`, `LaneEvent`, `LaneState` | owner-side aggregation into per-device events |
+| `nv_incidents_get`, `nv_incident_get` | `group`, `Incident::{key, is_growing, intervals, download_ranges, kinds}` | regroup on index change, JSON shaping |
+| `nv_incident_edit` | `EditLog` (store, replay, expiry, `revert`), `merge`, `split`, `add_camera`, `remove_camera` | JSON shaping |
+| `nv_camera_groups_get`/`_put` | `GroupStore`, `CameraGroups` (bounded, stored like layouts, name overrides) | JSON shaping |
+| `nv_thumbnail_get`/`_put`/`_cancel` | `ThumbnailCache::{get, put}`, `LaneHandle::{request_thumbnail, cancel_thumbnails}` (newest first, 256, thumbnails before index work) | key mapping, `NV_PENDING` |
+| `nv_download_*`, `download` | `Scheduler::{enqueue, set_paused, set_camera_paused, retry, retry_camera, forget, remove_device, resume_all, progress}`, `FailReason`, `Mp4Finalizer` | coalesced events (4 per second), derived `state` |
 | `nv_playback_*`, playback events | tiles, `TilePipeline`, generations (`tile.rs`), audio hub, `Subscription`-style bounded queue, replay framing (`encode_replay_media`, `replay_seq`) | playback commands in `bc-protocol` and `bc-session`, play streams routed by message ID and seq, file-boundary handling, the shared clock and paced release, buffering policy, mock-nvr playback |
 | `nv_sound_watch`, `sound_watch` | `Subscription`, audio decoding in `TileAudio` | a tile-less subscription that decodes audio only; stream-limit accounting |
 | `nv_recordings_loudness`, `nv_sound_labels_put` | the level meter (`audio-pipeline`), `DeviceIndex` day files | the 1-second envelope store, the T3/T4 pattern detector, label merge and caps, sound kinds in incidents and search |
@@ -856,19 +887,14 @@ or a counted drop, never growth):
    stream in `bc-session` (`DeviceSession::play`, `Play`: media routed by
    message ID and the replay `seq`, bounded, stop on drop and on close, at
    most `max_plays` per device). Rates other than 1× wait for B1.
-2. **No lens in the index or incidents.** `IndexedEvent`, `IndexedFile`,
-   and `DeviceIndex::put_day` are keyed by channel only, and
-   `CameraId` is `(device, channel)`. Indexing both lenses of a channel
-   (`IndexedChannel { stream: Extern }` beside `Main`) would overwrite one
-   with the other in the same day file. Needs a lens in the keys (index
-   format version 2; the index is a cache and can be refetched) and in
-   `CameraId` (persisted in job files: version the job file).
-3. **Incident IDs are not stable while growing** (`compute_id` includes
-   the last end), so edits cannot refer to them; the new `key` is needed.
-4. **Scheduler granularity.** Pause and retry exist per incident only;
-   `CameraState::Failed` carries free text; there is no `remove_device`
-   (a removed device's workers keep its old session). Needs per-camera
-   pause, reason codes, and device removal.
+2. **Lens in the index and incidents.** Done (MILESTONE-P.md, C1): the
+   index is keyed by channel and lens (index format 2) and `CameraId` has a
+   `lens` (old job files load with lens 0).
+3. **Stable incident key.** Done (C2): `Incident::key` and `is_growing`;
+   `id` still changes while an incident grows.
+4. **Scheduler granularity.** Done (C6): per-camera pause and retry,
+   `FailReason` codes beside the English detail, `remove_device`, and the
+   device's size estimate.
 5. **Recorded time on frames.** The demuxer keeps the video extra header
    (`Record::Video::extra_header`, `wall_clock_secs`), and download chunks
    now record each keyframe's seconds (`recordings::recorded_time`). Still
@@ -878,15 +904,17 @@ or a counted drop, never growth):
 6. **First picture time of downloads.** Each camera job records its first
    picture's time on the keyframes' clock (`first_picture_wall_ms`);
    `file_start_ms` in device-local time follows once B7 is settled.
-7. **Thumbnails share the search permit** with the indexer (a FIFO
-   semaphore), so a long indexing pass delays every thumbnail. Needs a
-   priority (thumbnails and user refreshes before background passes).
-8. **`viewer-core` does not use `recordings` yet** (MILESTONE-P.md, C11).
-   mock-nvr now serves playback (123/5/7) at 1× with the observed
-   burst-then-pace, across files.
+7. **Thumbnail priority.** Done (C4, C5): one search lane per device
+   (`recordings::lane`) serves thumbnails first, then requested days, then
+   a held today; the whole-range `indexer` remains for the optional
+   background block only.
+8. **`viewer-core` does not use `recordings` yet** (MILESTONE-P.md, C11):
+   every function in this document waits for that owner. mock-nvr serves
+   playback (123/5/7) at 1× with the observed burst-then-pace, across
+   files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
-   everything new; open question 7.
+   everything new (Decision 7).
 
 ## 12. A Windows app
 
@@ -917,10 +945,11 @@ or a counted drop, never growth):
   component, so paths stay well below the long-path limit in ordinary
   folders.
 
-## 13. Header additions (ABI 4)
+## 13. Header additions (ABI 3, minor 4)
 
 ```c
-#define NV_ABI_VERSION 4
+#define NV_ABI_VERSION 3   /* unchanged */
+#define NV_ABI_MINOR 4     /* was 3 (nv_tile_retry) */
 
 /* NvStatus gains: */
 NV_PENDING = 1,                /* accepted; the answer arrives as an event (thumbnails) */
@@ -931,14 +960,22 @@ NV_ERR_NOT_CONFIGURED = -8,    /* nv_recordings_configure not called, or no down
  * (sections 4 and 6). New functions: the nv_recordings_*, nv_incident*,
  * nv_camera_groups_*, nv_thumbnail_*, nv_download*, nv_playback_*,
  * nv_sound_*, nv_tile_loudness, and nv_edit_compute declarations above.
- * NvConfig gains, at its end (zero keeps the default):
- *   bool sound_alarms_off;        -- no smoke and CO alarm detection
- *   uint32_t loudness_history_s;  -- live loudness kept per tile; 0: 600 s
- * No existing function changes. */
+ * No existing function or struct changes. */
+
+/* Live sound settings, JSON (unknown members ignored):
+ * {"alarms": true, "loudness_history_s": 600}. Any thread outside
+ * callbacks; applies to tiles opened afterwards. */
+NvStatus nv_sound_configure(NvCore *core, const char *json);
 ```
 
 `NV_PENDING` is the first positive status: apps that test `== NV_OK` treat
 it as "not yet", and only `nv_thumbnail_get` returns it.
+
+An earlier draft added two members at the end of `NvConfig`
+(`sound_alarms_off`, `loudness_history_s`). That changes the struct's size,
+which an addition under a minor version may not do (an app built against
+minor 3 passes the shorter struct), so the two settings are a JSON call
+instead.
 
 ## Decisions (2026-10-10)
 

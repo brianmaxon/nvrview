@@ -7,11 +7,11 @@ run as parallel agents. Protocol facts come only from
 [protocol.md](protocol.md); a slice that needs a fact not marked observed or
 reported there leaves a documented seam instead of guessing.
 
-**Versioning.** FFI-RECORDINGS.md was written as ABI 4. Its decision 1
-replaced that with a minor version, and discovery (minor 1) and updates
-(minor 2) have since taken the first ones, and `nv_tile_retry` has taken minor 3, so recordings arrive as **ABI 3,
-minor 4** (`NV_ABI_MINOR` 4), with no existing declaration changed. "ABI
-4" in that document reads as "the recordings minor".
+**Versioning.** FFI-RECORDINGS.md was first written as ABI 4. Its decision
+1 replaced that with a minor version; discovery (minor 1), updates (minor
+2), and `nv_tile_retry` (minor 3) have taken the first ones, so recordings
+arrive as **ABI 3, minor 4** (`NV_ABI_MINOR` 4), with no existing
+declaration changed, and the document now says so throughout.
 
 ## Where the core stands
 
@@ -75,8 +75,8 @@ fact the slice needs is observed or reported; seams for the rest are named.
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| F1 | Minor 3, part 1: configuration, index and search, incidents and edits, camera groups, thumbnails, downloads (sections 1–5, 8, 9) with the C smoke test and cbindgen header | C11 | unblocked once C11 lands; the user reviews the contract first | Opus for the contract, Sonnet for shaping JSON |
-| F2 | Minor 3, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
+| F1 | Minor 4, part 1: configuration, index and search, incidents and edits, camera groups, thumbnails, downloads (sections 1–5, 8, 9) with the C smoke test and cbindgen header | C11 | unblocked once C11 lands; the user reviews the contract first | Opus for the contract, Sonnet for shaping JSON |
+| F2 | Minor 4, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
 | F3 | Edit lists (section 7) and sound (section 2a) | C8, C12, F1 | unblocked | Sonnet |
 
 F1 and F2 ship in one minor if they land together; otherwise F2 takes the
