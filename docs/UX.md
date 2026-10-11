@@ -142,6 +142,37 @@ Selection is visible as a thin outline that fades with the other chrome, and
 follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
 
+### Start Conversation (no press)
+
+Captions, Talk, and the typed reply must not wait for a ring: a visitor may
+be at the door without pressing anything, or the user may want to speak to
+someone through a camera's speaker.
+
+- **Where.** A camera tile's context menu has "Start Conversation" (and "End
+  Conversation" while its call is open). It is offered on every camera tile,
+  not only doorbells: the core learns whether a camera has a speaker only when
+  talk-back starts (`not_supported`, docs/FFI.md "Talk-back"), so the call
+  says "this camera has no talk-back" when Talk is pressed, and the captions
+  still work without a speaker.
+- **What opens.** The same call as a press: the camera's inset (or the
+  controls over the stage when the camera fills it) with captions, Talk (hold
+  or "Keep talking") and the typed reply, the same lease, audio tap and
+  transcription. It differs only in what a press decides: the camera is made
+  audible at once (the user asked for it; whatever else was playing is muted
+  for the call and plays again afterward), so no Unmute control is needed, and
+  the log says "Conversation" instead of counting presses. A press during a
+  conversation joins it.
+- **Nothing is sent by itself.** Starting a conversation opens no talk-back.
+  Talk-back still starts only when the user presses Talk or sends a reply,
+  needs the camera's "Allow talk-back" setting, and is rate-limited and
+  logged like any other (camera motion control, CLAUDE.md).
+- **Ending.** The inset's close control or Esc, "End Conversation", or about
+  60 s after the last activity (speech, Talk, a reply, using the inset), as for
+  a press. When the camera fills the stage there is no inset to close, so a
+  header with a close control sits over the stage. Every path ends the call
+  the same way: talk-back stops, the tap and transcription end, the lease is
+  released, and the call is logged.
+
 Details settled while building it (macOS):
 
 - The window takes these keys before the focused view and the menus, except
@@ -416,7 +447,8 @@ Details settled while building it (macOS):
 
 ## Doorbell calls
 
-A doorbell press opens the doorbell's inset as a call:
+A doorbell press opens the doorbell's inset as a call, and the user can open
+the same call themselves without a press ("Start Conversation", below):
 
 - **Audio:** the doorbell becomes audible if the user was already listening
   to a camera (that camera is muted meanwhile); a per-doorbell setting makes

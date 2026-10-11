@@ -40,8 +40,12 @@ extension StageView {
         moreChip.isHidden = true
         insetLayer.addSubview(moreChip)
         stageCall.onClose = { [weak self] in
-            guard let self, let shown = self.insetBoard.swap?.shown else { return }
-            self.dismissInset(shown)
+            guard let self else { return }
+            if let shown = self.insetBoard.swap?.shown {
+                self.dismissInset(shown)
+            } else if let filling = self.stageFillingCamera {
+                self.endConversation(filling)
+            }
         }
         detectionToken = model.subscribeDetections { [weak self] event, camera, date in
             self?.detected(event, camera: camera, at: date)
@@ -88,13 +92,13 @@ extension StageView {
     private func detected(_ event: DetectionEvent, camera: CameraRef, at date: Date) {
         guard let kind = InsetTrigger.kind(for: event, entrance: model.cameraOptions(camera).entrance) else { return }
         let now = clock.now
-        let target = kind == .doorbell ? camera.firstLens : camera
+        let target = kind.isCall ? camera.firstLens : camera
         if event.active {
             let visible: Bool
             switch kind {
             // A press opens the call inset unless the doorbell fills the
             // stage (its controls then show over the stage).
-            case .doorbell: visible = stageFillingCamera?.firstLens == target
+            case .doorbell, .conversation: visible = stageFillingCamera?.firstLens == target
             case .soundAlarm: visible = showsChannel(target)
             default: visible = showsCamera(target)
             }
@@ -122,8 +126,34 @@ extension StageView {
     func dismissInset(_ camera: CameraRef) {
         if let item = insetBoard.dismiss(camera) {
             if item.kind.isCritical { dismissAlert(item.camera) }
-            if item.kind == .doorbell { model.calls.end(item.camera, reason: "closed") }
+            if item.kind.isCall { model.calls.end(item.camera, reason: "closed") }
         }
+        syncInsets()
+        refreshChrome()
+    }
+
+    /// "Start Conversation" on a camera's tile: opens the call (captions,
+    /// Talk, typed reply) in the camera's inset, or over the stage when the
+    /// camera fills it, as a press does, but with no press. The inset behaves
+    /// like a doorbell's that ended: it closes a minute after its last use.
+    func startConversation(_ camera: CameraRef) {
+        let target = camera.firstLens
+        let now = clock.now
+        let date = Date()
+        model.calls.startConversation(target, at: date)
+        guard model.calls.call(for: target) != nil else { return }
+        let visible = stageFillingCamera?.firstLens == target
+        insetBoard.started(.conversation, camera: target, visible: visible, now: now, at: date)
+        insetBoard.stopped(.conversation, camera: target, now: now)
+        syncInsets()
+        refreshChrome()
+    }
+
+    /// Ends a camera's call whichever way it is shown (its inset, or over
+    /// the stage).
+    func endConversation(_ camera: CameraRef) {
+        if insetBoard.item(for: camera.firstLens) != nil { dismissInset(camera.firstLens) }
+        model.calls.end(camera, reason: "closed")
         syncInsets()
         refreshChrome()
     }
@@ -263,12 +293,16 @@ extension StageView {
             view.apply(
                 InsetContent(
                     header: item.header(now: now), cameraName: model.name(of: item.camera), critical: item.kind.isCritical,
-                    isReturn: item.isReturn, call: item.kind == .doorbell ? callContent(item.camera) : nil))
+                    isReturn: item.isReturn, call: item.kind.isCall ? callContent(item.camera) : nil))
         }
         // Over the stage: the swapped-in camera's header, and the call of a
         // doorbell that fills the stage.
-        let banner = insetBoard.swap.map { "\($0.item.header(now: now)) · \(model.name(of: $0.shown)) · click the inset or Tab to swap back" }
+        var banner = insetBoard.swap.map { "\($0.item.header(now: now)) · \(model.name(of: $0.shown)) · click the inset or Tab to swap back" }
         let call = stageFillingCamera.flatMap { callContent($0) }
+        if banner == nil, let filling = stageFillingCamera, call?.isConversation == true {
+            // A conversation over the stage has no inset to close: a header with a close control.
+            banner = "Conversation · \(model.name(of: filling)) · close to end"
+        }
         stageCall.apply(banner: banner, call: call)
         stageCall.callTarget = stageFillingCamera.map { CallTarget(stage: self, camera: $0.firstLens) }
     }

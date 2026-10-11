@@ -17,6 +17,8 @@ struct InsetContent: Equatable {
 /// fills it).
 struct CallContent: Equatable {
     var showsUnmute: Bool
+    /// Opened by Start Conversation rather than a press.
+    var isConversation: Bool
     var talkText: String
     var talking: Bool
     /// Talk is held or toggled on (the microphone runs).
@@ -28,6 +30,7 @@ struct CallContent: Equatable {
 
     init(call: DoorbellCall, microphoneOn: Bool, note: String?) {
         showsUnmute = call.showsUnmute
+        isConversation = call.origin == .conversation
         talkText = call.talk.text
         talking = call.talk.isTalking
         self.microphoneOn = microphoneOn

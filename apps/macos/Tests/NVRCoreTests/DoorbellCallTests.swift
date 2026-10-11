@@ -161,6 +161,31 @@ import Testing
         #expect(call.logText(endedAt: Date(timeIntervalSince1970: 95), saveTranscript: true).hasSuffix("\nVisitor: Hello."))
     }
 
+    // MARK: Conversation without a press
+
+    @Test func aConversationIsAudibleAndMutesWhatElsePlayed() {
+        #expect(CallAudio.decideConversation(doorbell: door, listening: []) == .audible(muted: []))
+        #expect(CallAudio.decideConversation(doorbell: door, listening: [yard, door]) == .audible(muted: [yard]))
+    }
+
+    @Test func aConversationIsTheSameCallWithNoPress() {
+        var call = DoorbellCall(camera: door, startedAt: Date(timeIntervalSince1970: 0), now: 0, audio: .audible(muted: []), origin: .conversation)
+        #expect(call.origin == .conversation && call.presses == 0)
+        #expect(call.audible && !call.showsUnmute)
+        // Idle for a minute ends it; talking keeps it open, as for a press.
+        #expect(!call.expired(now: 59) && call.expired(now: 60))
+        _ = call.talk.requestStart()
+        #expect(!call.expired(now: 500))
+        call.talk.stopRequested()
+        call.transcript.final("Hello.", source: .visitor)
+        let text = call.logText(endedAt: Date(timeIntervalSince1970: 42), saveTranscript: false)
+        #expect(text == "Conversation ended: channel 4, 42 s")
+        #expect(call.logText(endedAt: Date(timeIntervalSince1970: 42), saveTranscript: true).hasSuffix("\nVisitor: Hello."))
+        // A press during the conversation counts, and the log says so.
+        call.pressed(now: 5)
+        #expect(call.logText(endedAt: Date(timeIntervalSince1970: 42), saveTranscript: false) == "Doorbell call ended: channel 4, 1 press, 42 s")
+    }
+
     // MARK: 16 kHz conversion
 
     private func sine(rate: Double, channels: AVAudioChannelCount, seconds: Double, hz: Double) -> AVAudioPCMBuffer {
