@@ -64,11 +64,24 @@ import VideoKit
 ///    its own window (behind the others, never key): the insets go from
 ///    both, the window draws exactly the doorbell's tile, the call, its tap,
 ///    a running "Keep talking" talk and its draft survive popping out and in
-///    (no talk stop or start), the leases and the stream demand follow, Pop
-///    In brings the insets back on top with a fresh minute; closing the
+///    (no talk stop or start), the leases and the stream demand follow, a
+///    viewer window opened meanwhile records the call detached, Pop In
+///    brings the insets back on top with a fresh minute in every viewer
+///    window (that one too); closing the
 ///    window, Esc in it and a minute without activity end the call; the
 ///    remembered frame is reused, and one off every screen falls back to the
-///    top right of the active screen;
+///    top right of the active screen; with "Open calls in their own window"
+///    on, a ring opens a call window without the focus (the insets kept
+///    detached, a joining press keeping it there), a doorbell's Inset
+///    choice wins over the setting, and its Window choice opens Start
+///    Conversation in a window;
+/// 14d. with `--fake`, the inset column dragged through the window's own
+///    mouse events: a small move on the picture still swaps, the header
+///    drag snaps an axis within 24 pt of an edge, the picture drags past
+///    6 pt, the window is saved with the position, resizing keeps the
+///    fraction, a restored window puts the column there, Reset Position
+///    returns it to the corner, and two insets move as one column that
+///    grows away from the nearer horizontal edge;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -86,6 +99,8 @@ import VideoKit
 final class SelfTest {
     private unowned let app: AppDelegate
     private var problems: [String] = []
+    /// Viewer windows a step opened besides the second (closed with it).
+    private var extraWindows: [ViewerWindowController] = []
     private let began = CACurrentMediaTime()
 
     init(app: AppDelegate) { self.app = app }
@@ -891,9 +906,29 @@ final class SelfTest {
                 when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
                     model.setAllowTalk(doorbell, false)
                     model.calls.setDraft(doorbell, "")
-                    popInStep(doorbell, stages: stages, second: second, baseline: baseline)
+                    newWindowStep(doorbell, stages: stages, second: second, baseline: baseline)
                 }
             }
+        }
+    }
+
+    /// A viewer window opened while the call is popped out records the
+    /// call's item, detached, so Pop In shows the inset there too.
+    private func newWindowStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
+        guard let model = app.model, let window,
+            let otherCamera = window.state.tree.cameras.first(where: { $0.firstLens != doorbell })
+        else { return finishPopOut(second) }
+        // parity: call-popin-new-window
+        guard let third = app.openWindow(.scratch(name: "Third", root: .leaf(otherCamera))) else {
+            problems.append("could not open a third viewer window")
+            return popInStep(doorbell, stages: stages, second: second, baseline: baseline)
+        }
+        extraWindows.append(third)
+        when({ third.stage.insetBoard.detachedCameras == [doorbell] }, timeout: 1) { [self] in
+            let recorded = third.stage.insetBoard.detachedCameras == [doorbell] && third.stage.shownInsetViews.isEmpty
+            print("new window while popped out: call recorded detached \(recorded), leases \(model.leases.leaseCount(doorbell))")
+            if !recorded { problems.append("a viewer window opened while the call was popped out has no detached item for it") }
+            popInStep(doorbell, stages: stages + [third.stage], second: second, baseline: baseline)
         }
     }
 
@@ -1009,14 +1044,324 @@ final class SelfTest {
         if !near(fallback, topRight) {
             problems.append("a remembered frame off every screen did not fall back to the top right: \(String(describing: fallback))")
         }
+        callDefaultRingStep(doorbell, second: second)
+    }
+
+    /// "Open calls in their own window": a ring opens the call in a call
+    /// window that does not take the focus, the viewer windows keep its
+    /// item detached, a press that joins keeps the presentation, and the
+    /// doorbell's own choice (Inset) wins over the setting.
+    private func callDefaultRingStep(_ doorbell: CameraRef, second: ViewerWindowController) {
+        guard let model = app.model, let window, let fake = model.fake, let calls = app.callWindows,
+            let id = model.runtime(doorbell.device)?.deviceID
+        else { return finishPopOut(second) }
+        let stages = [window.stage, second.stage]
+        // parity: call-default-ring
+        model.callsOpenInWindow = true
+        let saved = calls.defaults.bool(forKey: AppModel.callsOpenInWindowKey)
+        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+        when({ calls.controller(for: doorbell) != nil && stages.allSatisfy { !$0.insetBoard.detachedCameras.isEmpty } }, timeout: 3) {
+            [self] in
+            let call = model.calls.call(for: doorbell)
+            let c = calls.controller(for: doorbell)
+            let detached = stages.allSatisfy { $0.insetBoard.detachedCameras == [doorbell] && $0.shownInsetViews.isEmpty }
+            let quiet = calls.lastOpenActivated == false && c?.window?.isKeyWindow != true && !NSApp.isActive
+            // A press that joins keeps the call where it is, whatever the setting says now.
+            model.callsOpenInWindow = false
+            fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+            when({ model.calls.call(for: doorbell)?.presses == 2 }, timeout: 3) { [self] in
+                let joined = model.calls.call(for: doorbell)
+                let kept = joined?.presentation == .window && calls.controller(for: doorbell) === c
+                    && stages.allSatisfy { $0.shownInsetViews.isEmpty }
+                model.calls.end(doorbell, reason: "closed")
+                print(
+                    "ring with calls in windows: saved \(saved), window \(call?.presentation == .window && c != nil), "
+                        + "opened without focus \(quiet), insets detached \(detached), a joining press kept it \(kept)")
+                if !saved { problems.append("Open calls in their own window was not saved") }
+                if call?.presentation != .window || c == nil { problems.append("with the setting on, a ring did not open a call window") }
+                if !quiet { problems.append("a call window opened by a ring took the focus (or asked to)") }
+                if !detached { problems.append("a ring into a call window left an inset or no detached item in a viewer window") }
+                if !kept { problems.append("a press joining a call in its window moved it") }
+                // The doorbell's own choice wins: Inset with the setting on.
+                model.callsOpenInWindow = true
+                model.setCallPresentation(doorbell, .inset)
+                fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
+                when({ stages.allSatisfy { !$0.shownInsetViews.isEmpty } }, timeout: 3) { [self] in
+                    let inset = model.calls.call(for: doorbell)?.presentation == .inset && calls.controller(for: doorbell) == nil
+                    print("ring with the doorbell set to Inset: insets in both windows \(inset)")
+                    if !inset { problems.append("the doorbell's Inset choice did not win over Open calls in their own window") }
+                    for stage in stages { stage.dismissInset(doorbell) }
+                    model.callsOpenInWindow = false
+                    callDefaultConversationStep(doorbell, second: second)
+                }
+            }
+        }
+    }
+
+    /// The doorbell's Window choice opens Start Conversation in a call
+    /// window (brought forward: the user asked for it) with the setting off;
+    /// Default again leaves the camera's options empty.
+    private func callDefaultConversationStep(_ doorbell: CameraRef, second: ViewerWindowController) {
+        guard let model = app.model, let window, let calls = app.callWindows else { return finishPopOut(second) }
+        // parity: call-default-conversation
+        model.setCallPresentation(doorbell, .window)
+        let stored = model.cameraOptions(doorbell)
+        window.stage.startConversation(doorbell)
+        let call = model.calls.call(for: doorbell)
+        let opened = call?.presentation == .window && call?.origin == .conversation && calls.controller(for: doorbell) != nil
+        let activates = calls.lastOpenActivated == true
+        let detached = window.stage.insetBoard.detachedCameras == [doorbell] && window.stage.shownInsetViews.isEmpty
+        model.calls.end(doorbell, reason: "closed")
+        model.setCallPresentation(doorbell, nil)
+        let cleared = model.cameraOptions(doorbell).callWindow == nil && model.cameraOptions(doorbell).isDefault
+        // The saved choice reads back; a file without it reads as Default.
+        let encoder = JSONEncoder()
+        let roundTrip = (try? encoder.encode(stored)).flatMap { try? JSONDecoder().decode(CameraOptions.self, from: $0) }
+        let plain = (try? encoder.encode(CameraOptions(camera: doorbell))).flatMap { String(data: $0, encoding: .utf8) }
+        let readsBack = roundTrip?.callPresentation == .window && plain?.contains("callWindow") == false
+        print(
+            "conversation with the doorbell set to Window: call window \(opened), brought forward \(activates), "
+                + "inset detached \(detached), Default clears the option \(cleared), saved choice reads back \(readsBack)")
+        if !opened { problems.append("the doorbell's Window choice did not open Start Conversation in a call window") }
+        if !activates { problems.append("a call window opened by Start Conversation was not brought forward") }
+        if !detached { problems.append("Start Conversation into a call window left an inset in the viewer window") }
+        if !cleared { problems.append("choosing Default did not clear the camera's call option") }
+        if !readsBack { problems.append("the camera's call choice did not save and read back") }
         finishPopOut(second)
     }
 
     private func finishPopOut(_ second: ViewerWindowController) {
         app.model?.calls.endAll()
+        for w in extraWindows { w.close() }
+        extraWindows = []
         // The throwaway suite with the frame and pin goes.
         app.callWindows?.defaults.removePersistentDomain(forName: AppDelegate.selfTestDefaults)
         second.close()
+        insetDragSnapStep()
+    }
+
+    // MARK: Moving the insets (docs/UX.md "Alert insets", "Moving them")
+
+    /// A mouse event as AppKit delivers it to a viewer window (behind the
+    /// others, the app inactive), at a point in the stage's inset layer.
+    private func mouse(_ type: NSEvent.EventType, _ p: CGPoint, in controller: ViewerWindowController) {
+        guard let nsWindow = controller.window else { return }
+        let at = controller.stage.insetLayer.convert(p, to: nil)
+        guard
+            let e = NSEvent.mouseEvent(
+                with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: nsWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1)
+        else { return }
+        nsWindow.sendEvent(e)
+    }
+
+    /// Presses at `from`, moves to `to` in a few steps, and lets go.
+    private func drag(from: CGPoint, to: CGPoint, in controller: ViewerWindowController, steps: Int = 5) {
+        mouse(.leftMouseDown, from, in: controller)
+        for i in 1...steps {
+            let t = CGFloat(i) / CGFloat(steps)
+            mouse(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t), in: controller)
+        }
+        mouse(.leftMouseUp, to, in: controller)
+    }
+
+    /// The anchor the column's frame measures as now (unsnapped).
+    private static func measuredAnchor(_ column: CGRect, stage: CGRect) -> (x: Double, y: Double) {
+        let m = InsetGeometry.margin
+        let fx = Double(stage.width) - 2 * m - Double(column.width)
+        let fy = Double(stage.height) - 2 * m - Double(column.height)
+        return (fx > 0 ? (Double(column.minX) - m) / fx : 0, fy > 0 ? (Double(column.minY) - m) / fy : 0)
+    }
+
+    /// A conversation's inset (no press needed) dragged by its header lands
+    /// where it was dropped, snapping each axis within 24 pt of an edge; a
+    /// small move on the picture is still a click (it swaps); a longer one
+    /// drags. The window is saved with the new position.
+    private func insetDragSnapStep() {
+        guard let model = app.model, let window, let device = model.runtime("fake-1") else { return smokeStep() }
+        let stage = window.stage
+        let doorbell = CameraRef(device: device.key, channel: 3)
+        // parity: inset-drag-snap
+        stage.startConversation(doorbell)
+        guard let view = stage.shownInsetViews.first, let column = stage.insetColumn else {
+            problems.append("no inset to drag")
+            return smokeStep()
+        }
+        let b = stage.insetLayer.bounds
+        let atDefault = stage.insetAnchor == nil
+            && Self.near(Self.measuredAnchor(column, stage: b), InsetAnchor(corner: model.insetCorner))
+        // A small move on the picture: a click, which swaps.
+        let picture = view.videoRect.offsetBy(dx: view.frame.minX, dy: view.frame.minY)
+        let p = CGPoint(x: picture.midX, y: picture.midY)
+        drag(from: p, to: CGPoint(x: p.x + 3, y: p.y + 2), in: window, steps: 2)
+        let clickSwapped = stage.insetBoard.swap?.shown == doorbell && stage.insetAnchor == nil
+        press("\t", keyCode: ViewerKeys.tab)
+        guard let header = stage.shownInsetViews.first?.frame, let start = stage.insetColumn else {
+            problems.append("the inset did not come back after swapping back")
+            return smokeStep()
+        }
+        // The header, to 10 pt from the right edge (snaps) and 40% down (does not).
+        let m = InsetGeometry.margin
+        let freeX = Double(b.width) - 2 * m - Double(start.width)
+        let freeY = Double(b.height) - 2 * m - Double(start.height)
+        let target = CGPoint(x: m + freeX - 10, y: m + 0.4 * freeY)
+        let grab = CGPoint(x: header.minX + 40, y: header.minY + 8)
+        let saves = savesCount
+        drag(from: grab, to: CGPoint(x: grab.x + target.x - start.minX, y: grab.y + target.y - start.minY), in: window)
+        let anchor = stage.insetAnchor
+        let snapped = anchor.map { $0.x == 1 && abs($0.y - 0.4) < 0.01 } == true
+        let placed = stage.insetColumn.map { abs(Double($0.maxX) - (Double(b.width) - m)) < 0.5 } == true
+        let saved = window.savedWindow?.insetAnchor == anchor && anchor != nil
+        let noSwap = stage.insetBoard.swap == nil
+        // The picture past the click's slop drags too (40 pt left: off the snap).
+        guard let moved = stage.shownInsetViews.first else { return smokeStep() }
+        let pic = moved.videoRect.offsetBy(dx: moved.frame.minX, dy: moved.frame.minY)
+        drag(from: CGPoint(x: pic.midX, y: pic.midY), to: CGPoint(x: pic.midX - 40, y: pic.midY), in: window)
+        let pictureDrag = stage.insetAnchor.map { abs($0.x - (freeX - 40) / freeX) < 0.01 && abs($0.y - 0.4) < 0.01 } == true
+            && stage.insetBoard.swap == nil
+        print(
+            "inset drag: default corner \(atDefault) at \(Int(column.minX)),\(Int(column.minY)), small move on the picture swaps "
+                + "\(clickSwapped), header drag snaps x \(snapped) (anchor \(anchor.map { "\($0.x), \($0.y)" } ?? "-"), right edge "
+                + "\(placed)), no swap \(noSwap), saved with the window \(saved), picture drag past the slop \(pictureDrag)")
+        if window.window?.isKeyWindow == true || NSApp.isActive { problems.append("the self-test's mouse events took the focus") }
+        if !atDefault { problems.append("the inset column did not start in the default corner") }
+        if !clickSwapped { problems.append("a click with a small move on the inset's picture did not swap") }
+        if !snapped || !placed { problems.append("dragging the inset's header did not snap to the right edge and keep 40% down") }
+        if !noSwap { problems.append("dragging an inset swapped it") }
+        if !saved || savesCount == saves { problems.append("the moved column was not saved with the window") }
+        if !pictureDrag { problems.append("dragging the inset's picture past 6 pt did not move the column") }
+        insetDragResizeStep(doorbell)
+    }
+
+    /// How often the windows asked to be saved (they save after a delay).
+    private var savesCount: Int { app.windowSaveRequests }
+
+    private static func near(_ a: (x: Double, y: Double), _ b: InsetAnchor) -> Bool {
+        abs(a.x - b.x) < 0.01 && abs(a.y - b.y) < 0.01
+    }
+
+    /// Resizing the window keeps the column at the same fraction of the
+    /// free space (full screen is a resize too; the self-test never enters
+    /// it).
+    private func insetDragResizeStep(_ doorbell: CameraRef) {
+        guard let window, let nsWindow = window.window, let anchor = window.stage.insetAnchor else { return insetDragRestoreStep(doorbell) }
+        let stage = window.stage
+        // parity: inset-drag-resize
+        let frame = nsWindow.frame
+        var results: [Bool] = []
+        for grow in [CGSize(width: 220, height: 120), CGSize(width: -120, height: -60)] {
+            nsWindow.setFrame(
+                NSRect(x: frame.minX, y: frame.minY, width: frame.width + grow.width, height: frame.height + grow.height),
+                display: false)
+            nsWindow.contentView?.layoutSubtreeIfNeeded()
+            stage.layoutInsetViews()
+            let kept = stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: stage.insetLayer.bounds), anchor) } == true
+            results.append(kept && stage.insetAnchor == anchor)
+        }
+        nsWindow.setFrame(frame, display: false)
+        nsWindow.contentView?.layoutSubtreeIfNeeded()
+        print("inset drag: the column keeps its place when the window grows \(results[0]) and shrinks \(results[1])")
+        if results.contains(false) { problems.append("resizing the window moved the inset column off its fraction") }
+        insetDragRestoreStep(doorbell)
+    }
+
+    /// The position is saved with the window: windows.json's record reads
+    /// back, a window restored from it puts its column there, and "Reset
+    /// Position" in the inset's menu returns it to the default corner.
+    private func insetDragRestoreStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let saved = window.savedWindow, let anchor = window.stage.insetAnchor else {
+            return insetDragMultiStep(doorbell)
+        }
+        // parity: inset-drag-restore
+        let record = (try? JSONEncoder().encode([saved])).flatMap { try? JSONDecoder().decode([SavedWindow].self, from: $0) }
+        let readsBack = record?.first?.insetAnchor == anchor
+        guard let restored = app.openWindow(window.state.content) else {
+            problems.append("could not open a window to restore into")
+            return insetDragMultiStep(doorbell)
+        }
+        restored.restoreInsetAnchor(record?.first?.insetAnchor)
+        // The new window adopts the open conversation (after a turn of the main queue).
+        when({ !restored.stage.shownInsetViews.isEmpty }, timeout: 2) { [self] in
+            restored.window?.contentView?.layoutSubtreeIfNeeded()
+            restored.stage.layoutInsetViews()
+            let there = restored.stage.insetAnchor == anchor
+                && restored.stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: restored.stage.insetLayer.bounds), anchor) } == true
+            restored.close()
+            // Reset Position, from the inset's own menu.
+            let stage = window.stage
+            var reset = false
+            if let view = stage.shownInsetViews.first, let nsWindow = window.window,
+                let e = NSEvent.mouseEvent(
+                    with: .rightMouseDown, location: view.convert(CGPoint(x: 20, y: 8), to: nil), modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: nsWindow.windowNumber, context: nil,
+                    eventNumber: 0, clickCount: 1, pressure: 1),
+                let menu = view.menu(for: e), let item = menu.items.firstIndex(where: { $0.title == "Reset Position" })
+            {
+                menu.performActionForItem(at: item)
+                reset = stage.insetAnchor == nil
+                    && stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: stage.insetLayer.bounds), InsetAnchor(corner: model.insetCorner)) } == true
+                    && window.savedWindow?.insetAnchor == nil
+            }
+            print("inset drag: saved record reads back \(readsBack), a restored window puts the column there \(there), Reset Position \(reset)")
+            if !readsBack { problems.append("the window's saved record lost the inset position") }
+            if !there { problems.append("a window restored from the record did not put its insets there") }
+            if !reset { problems.append("Reset Position did not return the column to the default corner") }
+            insetDragMultiStep(doorbell)
+        }
+    }
+
+    /// Several insets move as one column; at the bottom the newest is at
+    /// the bottom and the others stack upward, at the top the reverse.
+    private func insetDragMultiStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake, let device = model.runtime("fake-1"),
+            let id = device.deviceID
+        else { return smokeStep() }
+        let stage = window.stage
+        let hall = CameraRef(device: device.key, channel: 4)
+        // parity: inset-drag-multi
+        // A smoke alarm's inset (it stays after the stop) beside the conversation's.
+        fake.emitSoundDetection(device: id, channel: 4, start: true)
+        fake.emitSoundDetection(device: id, channel: 4, start: false)
+        when({ stage.shownInsetViews.count == 2 }, timeout: 3) { [self] in
+            guard let header = stage.shownInsetViews.first?.frame, let start = stage.insetColumn else {
+                problems.append("a second inset did not open")
+                return finishInsetDrag(doorbell, hall)
+            }
+            let b = stage.insetLayer.bounds
+            @MainActor func column() -> [CGRect] { stage.shownInsetViews.map { $0.frame } }
+            // To the bottom left (both axes snap).
+            let grab = CGPoint(x: header.minX + 40, y: header.minY + 8)
+            let bottomLeft = CGPoint(x: 15, y: b.height - start.height - 15)
+            drag(from: grab, to: CGPoint(x: grab.x + bottomLeft.x - start.minX, y: grab.y + bottomLeft.y - start.minY), in: window)
+            let low = column()
+            let m = CGFloat(InsetGeometry.margin), gap = CGFloat(InsetGeometry.gap)
+            let upward = stage.insetAnchor == InsetAnchor(x: 0, y: 1) && low.count == 2
+                && low.allSatisfy { $0.minX == m } && abs(low[0].maxY - (b.height - m)) < 0.5
+                && abs(low[1].maxY - (low[0].minY - gap)) < 0.5
+            // To the top, a third of the way across (x does not snap).
+            guard let newest = stage.shownInsetViews.first?.frame, let now = stage.insetColumn else {
+                return finishInsetDrag(doorbell, hall)
+            }
+            let grab2 = CGPoint(x: newest.minX + 40, y: newest.minY + 8)
+            let topThird = CGPoint(x: m + (b.width - 2 * m - now.width) / 3, y: 20)
+            drag(from: grab2, to: CGPoint(x: grab2.x + topThird.x - now.minX, y: grab2.y + topThird.y - now.minY), in: window)
+            let high = column()
+            let downward = stage.insetAnchor.map { $0.y == 0 && abs($0.x - 1.0 / 3) < 0.01 } == true && high.count == 2
+                && high[0].minX == high[1].minX && abs(high[0].minY - m) < 0.5 && abs(high[1].minY - (high[0].maxY + gap)) < 0.5
+            print("inset drag with two insets: one column, bottom grows upward \(upward), top grows downward \(downward)")
+            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low)") }
+            if !downward { problems.append("two insets at the top did not stack downward from it in one column: \(high)") }
+            finishInsetDrag(doorbell, hall)
+        }
+    }
+
+    private func finishInsetDrag(_ doorbell: CameraRef, _ hall: CameraRef) {
+        guard let window else { return smokeStep() }
+        let stage = window.stage
+        stage.dismissInset(hall)
+        stage.endConversation(doorbell)
+        stage.resetInsetPosition()
         smokeStep()
     }
 

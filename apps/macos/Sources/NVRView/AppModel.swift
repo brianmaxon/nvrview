@@ -158,6 +158,39 @@ final class AppModel {
         }
     }
     static let insetCornerKey = "insetCorner"
+    /// Where the call settings below are kept: the standard defaults, a
+    /// throwaway suite in the self-test (`useCallDefaults`).
+    @ObservationIgnored private(set) var callDefaults = UserDefaults.standard
+    /// "Open calls in their own window" (docs/UX.md "A call in its own
+    /// window"): a ring or Start Conversation opens the call in a call
+    /// window unless the doorbell's own choice says otherwise. Off by default.
+    var callsOpenInWindow = UserDefaults.standard.bool(forKey: AppModel.callsOpenInWindowKey) {
+        didSet {
+            callDefaults.set(callsOpenInWindow, forKey: Self.callsOpenInWindowKey)
+            notify()
+        }
+    }
+    static let callsOpenInWindowKey = "callsOpenInWindow"
+    /// "Open call windows": where I left it (the default) or the top right
+    /// of the active screen.
+    var callWindowPlacement = AppModel.placement(in: .standard) {
+        didSet {
+            callDefaults.set(callWindowPlacement.rawValue, forKey: Self.callWindowPlacementKey)
+            notify()
+        }
+    }
+    static let callWindowPlacementKey = "callWindowPlacement"
+
+    private static func placement(in defaults: UserDefaults) -> CallWindowPlacement.Mode {
+        defaults.string(forKey: callWindowPlacementKey).flatMap(CallWindowPlacement.Mode.init(rawValue:)) ?? .remembered
+    }
+
+    /// Keeps the call settings in `defaults` from now on (read from there).
+    func useCallDefaults(_ defaults: UserDefaults) {
+        callDefaults = defaults
+        callsOpenInWindow = defaults.bool(forKey: Self.callsOpenInWindowKey)
+        callWindowPlacement = Self.placement(in: defaults)
+    }
     /// Where the insets go now.
     var insetCorner: ChromeCorner { insetCornerChoice ?? indicatorCorner.opposite }
 
@@ -372,6 +405,17 @@ final class AppModel {
             Double(CVPixelBufferGetWidth($0.pixelBuffer)) / Double(max(CVPixelBufferGetHeight($0.pixelBuffer), 1))
         } ?? 1
         return FisheyeLens(circle: circle, aspect: aspect)
+    }
+
+    /// Where a camera's calls open, overriding "Open calls in their own
+    /// window" (nil: that setting decides).
+    func setCallPresentation(_ camera: CameraRef, _ presentation: CallPresentation?) {
+        updateOptions(camera.firstLens) { $0.callWindow = presentation.map { $0 == .window } }
+    }
+
+    /// Where a call on `camera` opens now (a ring or Start Conversation).
+    func callPresentation(for camera: CameraRef) -> CallPresentation {
+        CallPresentation.resolve(global: callsOpenInWindow, override: cameraOptions(camera.firstLens).callPresentation)
     }
 
     /// A doorbell plays when it rings even if nothing was playing.
@@ -959,6 +1003,12 @@ struct CameraOptions: Codable, Equatable, Sendable {
     var allowTalk = false
     /// A fisheye camera: how it is mounted (docs/UX.md "Fisheye cameras").
     var fisheyeMount = FisheyeMount.ceiling
+    /// Where its calls open: true in their own window, false in the insets,
+    /// nil as "Open calls in their own window" says (the default).
+    var callWindow: Bool?
+
+    /// The override for `CallPresentation.resolve`.
+    var callPresentation: CallPresentation? { callWindow.map { $0 ? .window : .inset } }
 
     init(
         camera: CameraRef, entrance: Bool = false, unmuteOnRing: Bool = false, allowTalk: Bool = false,
@@ -971,7 +1021,7 @@ struct CameraOptions: Codable, Equatable, Sendable {
         self.fisheyeMount = fisheyeMount
     }
 
-    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount }
+    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount, callWindow }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -980,7 +1030,8 @@ struct CameraOptions: Codable, Equatable, Sendable {
         unmuteOnRing = try c.decodeIfPresent(Bool.self, forKey: .unmuteOnRing) ?? false
         allowTalk = try c.decodeIfPresent(Bool.self, forKey: .allowTalk) ?? false
         fisheyeMount = (try? c.decodeIfPresent(FisheyeMount.self, forKey: .fisheyeMount)) ?? .ceiling
+        callWindow = try c.decodeIfPresent(Bool.self, forKey: .callWindow)
     }
 
-    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling }
+    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling && callWindow == nil }
 }

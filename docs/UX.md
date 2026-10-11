@@ -473,6 +473,16 @@ Details settled while building it (macOS):
 - The insets stack from their corner, newest nearest it; those that do not
   fit the stage's height count in "+N more". The corner is a setting
   (Settings > Alerts), opposite the corner indicators by default.
+- Moving the column: a press on the header (its labels included) becomes a
+  drag after 2 pt, one on the picture after the 6 pt click threshold;
+  releasing after a drag never swaps. The column follows the pointer with
+  the snap applied as it moves, and the position is stored when the button
+  is released, in the window's record in `windows.json` (`insetAnchor`, left
+  out while the column is in its default corner). "Reset Position" is in
+  the menu of every inset over the stage. Moving the column counts as using
+  its insets (their minute starts again). The 12 pt margin keeps the column
+  clear of the sidebar's 6 pt edge-reveal strip and of the top edge that
+  reveals the toolbar in full screen.
 - Swapping with a layout that is not focused puts the selected (or first)
   tile's camera into the return inset ("Back to the view"); clicking it, its
   close control, or Tab swaps back. Clicking another inset while swapped puts
@@ -632,7 +642,8 @@ example to keep it beside other work. Both apps follow these rules.
   being edited, the 60 s without activity, and the device going away.
   Activity in the call window counts like activity in an inset.
 - **Focus:** a call window opened by a ring never takes the keyboard focus
-  from what the user is doing; an explicit Pop Out activates it. Inside it,
+  from what the user is doing; an explicit Pop Out activates it, and so does
+  Start Conversation opening one (the user asked for the call). Inside it,
   Tab moves between the controls and Return sends the reply.
 - **On top:** the window floats above other windows by default, also over
   full-screen apps, with a pin toggle in its header whose state is
@@ -649,6 +660,17 @@ example to keep it beside other work. Both apps follow these rules.
   viewer window, detached: not drawn, not counted in "+N more", not leased,
   not swapped or closed by Tab, Esc or the clock, until it pops in or the
   call ends.
+- **Every viewer window has the call:** a viewer window opened while a call
+  is open records it too (detached while the call is in its own window, else
+  as its inset, or the controls over the stage when the doorbell fills it),
+  and so does a window that had no item when the call pops in, so Pop In
+  shows the inset in every viewer window. A conversation started in one
+  window therefore shows in the others too, as a press does.
+- **Settings (macOS):** Settings > Alerts > Doorbell calls has "Open calls
+  in their own window" and "Open call windows"; Settings > Cameras has "Calls
+  open in" per camera (Default, which names what the setting gives now;
+  Window; Inset), saved with the camera's other options and left out of the
+  file while it is Default.
 - **Where it opens:** a setting "Open call windows" with "Where I left it"
   (the default) and "Top right of the active screen". Where I left it: the
   frame the user last left a call window at (one frame for the app, its size

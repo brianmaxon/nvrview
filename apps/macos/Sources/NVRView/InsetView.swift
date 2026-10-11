@@ -97,6 +97,16 @@ final class InsetView: NSView, CallControlsDelegate {
     var onPopIn: () -> Void = {}
     /// The pin turned on or off (window).
     var onPin: (Bool) -> Void = { _ in }
+    /// A drag of the inset (stage): the whole column moves. The point is in
+    /// the superview's coordinates; `.began` carries where the button went
+    /// down.
+    var onDrag: ((DragPhase, CGPoint) -> Void)?
+    /// "Reset Position" in the inset's menu (stage).
+    var onResetPosition: (() -> Void)?
+
+    enum DragPhase {
+        case began, moved, ended
+    }
     /// Holds the target strongly (it refers to the stage weakly).
     var callDelegate: CallControlsDelegate?
 
@@ -113,6 +123,10 @@ final class InsetView: NSView, CallControlsDelegate {
     let callPanel = CallPanelView()
     private var content: InsetContent?
     private var downAt: CGPoint?
+    /// Where the button went down, in the superview's coordinates.
+    private var downInSuperview: CGPoint?
+    private var downOnHeader = false
+    private var dragging = false
     private var tracking: NSTrackingArea?
 
     override var isFlipped: Bool { true }
@@ -256,24 +270,70 @@ final class InsetView: NSView, CallControlsDelegate {
         CATransaction.commit()
     }
 
-    // A click anywhere but the controls swaps the inset with the stage.
-    override func mouseDown(with event: NSEvent) { downAt = convert(event.locationInWindow, from: nil) }
+    /// The header's labels take no clicks of their own: a press on them is
+    /// a press on the inset (a click swaps, a drag moves the column).
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        return hit === header || hit === title || hit === name ? self : hit
+    }
+
+    /// Moving this far from where the button went down makes a press on the
+    /// picture a drag instead of a click; on the header a drag starts sooner.
+    static let clickSlop: CGFloat = 6
+    static let headerSlop: CGFloat = 2
+
+    // A click anywhere but the controls swaps the inset with the stage; a
+    // drag on the header, or on the picture past the click's slop, moves
+    // the column.
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        downAt = p
+        downInSuperview = superview?.convert(event.locationInWindow, from: nil)
+        downOnHeader = p.y < CGFloat(InsetGeometry.headerHeight)
+        dragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard host == .stage, let onDrag, let d = downAt, let start = downInSuperview,
+            let p = superview?.convert(event.locationInWindow, from: nil)
+        else { return }
+        if !dragging {
+            let here = convert(event.locationInWindow, from: nil)
+            guard hypot(here.x - d.x, here.y - d.y) >= (downOnHeader ? Self.headerSlop : Self.clickSlop) else { return }
+            dragging = true
+            onDrag(.began, start)
+        }
+        onDrag(.moved, p)
+    }
 
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        defer { downAt = nil }
-        guard host == .stage, let d = downAt, hypot(p.x - d.x, p.y - d.y) < 6, bounds.contains(p) else { return }
+        defer {
+            downAt = nil
+            downInSuperview = nil
+            dragging = false
+        }
+        if dragging {
+            if let q = superview?.convert(event.locationInWindow, from: nil) { onDrag?(.ended, q) }
+            return
+        }
+        guard host == .stage, let d = downAt, hypot(p.x - d.x, p.y - d.y) < Self.clickSlop, bounds.contains(p) else { return }
         onSwap()
     }
 
-    /// The inset's menu: Pop Out Call for a call's inset, Pop In Call in a
-    /// call window.
+    /// The inset's menu: Pop Out Call for a call's inset and Reset Position
+    /// over the stage, Pop In Call in a call window.
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
         switch host {
         case .stage:
-            guard content?.call != nil, let popOut = onPopOut else { return nil }
-            menu.addItem(ClosureMenuItem(title: "Pop Out Call", action: popOut))
+            if content?.call != nil, let popOut = onPopOut {
+                menu.addItem(ClosureMenuItem(title: "Pop Out Call", action: popOut))
+            }
+            if let reset = onResetPosition {
+                menu.addItem(ClosureMenuItem(title: "Reset Position", action: reset))
+            }
+            guard !menu.items.isEmpty else { return nil }
         case .window:
             menu.addItem(ClosureMenuItem(title: "Pop In Call") { [weak self] in self?.onPopIn() })
         }

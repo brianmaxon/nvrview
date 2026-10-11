@@ -127,6 +127,22 @@ final class StageView: NSView {
     var detectionToken: UUID?
     /// The swapped-in camera, as the leases know its demand (main stream).
     var takeoverCamera: CameraRef?
+    /// Each open call's presentation as this window last saw it (a call
+    /// that pops in gets its inset here even if the window had no item).
+    var seenCallPresentations: [CameraRef: CallPresentation] = [:]
+    /// Where the user moved this window's inset column (saved with the
+    /// window); nil: the default corner.
+    var insetAnchor: InsetAnchor? {
+        didSet { if insetAnchor != oldValue { layoutInsetViews() } }
+    }
+    /// The column's position while it is being dragged.
+    var insetDragAnchor: InsetAnchor?
+    /// Where a column drag started: the pointer and the column's frame.
+    var insetDragStart: (pointer: CGPoint, column: CGRect)?
+    /// The inset column's frame as last laid out (nil: no inset drawn).
+    var insetColumn: CGRect?
+    /// The user moved the column or reset its position (save the window).
+    var onInsetAnchorChange: () -> Void = {}
 
     private enum Gesture {
         case divider(NodePath)

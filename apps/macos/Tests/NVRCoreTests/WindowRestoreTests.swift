@@ -39,6 +39,27 @@ import Testing
         #expect(loaded.count == 1 && !loaded[0].sidebarCollapsed)
     }
 
+    @Test func insetAnchorRoundTripsAndIsOptional() throws {
+        let w = SavedWindow(
+            content: .layout(id: "layout-1"), frame: CGRect(x: 1, y: 2, width: 900, height: 600),
+            insetAnchor: InsetAnchor(x: 0.25, y: 1))
+        let back = try JSONDecoder().decode([SavedWindow].self, from: JSONEncoder().encode([w]))
+        #expect(back == [w])
+        #expect(back[0].insetAnchor == InsetAnchor(x: 0.25, y: 1))
+        // Nil is left out of the file; old files and unreadable values load as nil.
+        let plain = try JSONEncoder().encode([SavedWindow(content: .layout(id: "layout-1"), frame: .zero)])
+        #expect(!String(decoding: plain, as: UTF8.self).contains("insetAnchor"))
+        #expect(try JSONDecoder().decode([SavedWindow].self, from: plain)[0].insetAnchor == nil)
+        var obj = try #require(JSONSerialization.jsonObject(with: plain) as? [[String: Any]])
+        obj[0]["insetAnchor"] = "top"
+        let bad = try JSONSerialization.data(withJSONObject: obj)
+        #expect(try JSONDecoder().decode([SavedWindow].self, from: bad)[0].insetAnchor == nil)
+        // Out of range values are clamped.
+        obj[0]["insetAnchor"] = ["x": 3.0, "y": -1.0]
+        let wide = try JSONSerialization.data(withJSONObject: obj)
+        #expect(try JSONDecoder().decode([SavedWindow].self, from: wide)[0].insetAnchor == InsetAnchor(x: 1, y: 0))
+    }
+
     @Test func keepsAFrameWhoseTitleBarIsOnAScreen() {
         let f = CGRect(x: 100, y: 100, width: 900, height: 600)
         #expect(SavedWindow.placement(of: f, screens: [screen], minSize: min) == f)

@@ -332,6 +332,16 @@ struct CameraSettingsView: View {
             Toggle(
                 "Doorbell: allow talk-back",
                 isOn: Binding(get: { o.allowTalk }, set: { model.setAllowTalk(camera, $0) }))
+            Picker(
+                "Calls open in",
+                selection: Binding(
+                    get: { o.callPresentation?.rawValue ?? "" },
+                    set: { model.setCallPresentation(camera, CallPresentation(rawValue: $0)) })
+            ) {
+                Text("Default (\(model.callsOpenInWindow ? "window" : "inset"))").tag("")
+                Text("Window").tag(CallPresentation.window.rawValue)
+                Text("Inset").tag(CallPresentation.inset.rawValue)
+            }
             if model.isFisheye(camera) {
                 Picker(
                     "Fisheye mount",
@@ -368,6 +378,20 @@ struct AlertSettingsView: View {
                 .foregroundStyle(.secondary)
             }
             Section("Doorbell calls") {
+                Toggle(
+                    "Open calls in their own window",
+                    isOn: Binding(get: { model.callsOpenInWindow }, set: { model.callsOpenInWindow = $0 }))
+                Picker(
+                    "Open call windows",
+                    selection: Binding(get: { model.callWindowPlacement }, set: { model.callWindowPlacement = $0 })
+                ) {
+                    ForEach(CallWindowPlacement.Mode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Text(
+                    "A ring or Start Conversation opens the call in a small window of its own instead of the viewer windows' insets (each camera can choose otherwise in Settings > Cameras). A call window opened by a ring never takes the keyboard from what you are doing."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Toggle(
                     "Save call transcripts in the event log",
                     isOn: Binding(get: { model.saveCallTranscripts }, set: { model.saveCallTranscripts = $0 }))
