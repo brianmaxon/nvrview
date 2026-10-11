@@ -485,12 +485,17 @@ internal sealed class SelfTest(App app, AppOptions options)
         Call? call = v.Calls.CallFor(camera);
         Expect(call is { Origin: CallOrigin.Conversation, Presses: 0 }, "Start conversation did not open a call with no press");
         Expect(v.IsAudible(camera) && call is { Audible: true, ShowsUnmute: false }, "a conversation did not make the camera audible");
-        Expect(v.Leases.LeaseCount(camera) == leasesBefore + 1, "the call did not hold a lease on the camera");
+        // The call holds a lease, and so does its card in this window (for the picture).
+        Expect(v.Leases.LeaseCount(camera) == leasesBefore + 2 && stage.CallCards.LeasesHeld == 1, "the call and its card did not each hold a lease on the camera");
         Expect(call?.Talk.Current == TalkState.Phase.Idle && call.Talk.Outstanding == 0, "a conversation started talk-back by itself");
         stage.CallCards.Sync();
         CallCard? card = stage.CallCards.Cards.FirstOrDefault();
         Say($"calls: conversation card \"{card?.TitleText}\", {stage.CallCards.Cards.Count} shown");
         Expect(stage.CallCards.Cards.Count == 1 && card?.TitleText.StartsWith("Conversation", StringComparison.Ordinal) == true, "no conversation card over the stage");
+        if (card is not null)
+        {
+            await CallCardPicture(v, stage, card, camera);
+        }
         // parity: call-camera-audio-recognized
         Expect(engines.Count == 1 && engines[0].Source == TranscriptSource.Visitor, "the camera's audio has no recognizer");
         bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);
@@ -550,6 +555,11 @@ internal sealed class SelfTest(App app, AppOptions options)
         Say($"calls: captions \"{card?.CaptionText}\"");
         Expect(captioned && card?.CaptionText.Contains("Visitor: Hello there.", StringComparison.Ordinal) == true, "captions did not reach the card");
 
+        if (card is not null)
+        {
+            await CallOverTheStage(v, stage, card, camera, leasesBefore);
+        }
+
         // parity: call-press-joins-conversation
         // 6. A doorbell press joins the call.
         v.Apply(Alarm(device, 0, "visitor", true));
@@ -568,7 +578,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.CallCards.Sync();
         Say($"calls: after a minute: call open {v.Calls.CallFor(camera) is not null}, cards {stage.CallCards.Cards.Count}, audible {v.IsAudible(camera)}, leases {v.Leases.LeaseCount(camera)} (were {leasesBefore})");
         Expect(v.Calls.CallFor(camera) is null && stage.CallCards.Cards.Count == 0, "the call did not end a minute after its last activity");
-        Expect(!v.IsAudible(camera) && v.Leases.LeaseCount(camera) == leasesBefore, "ending the call left the camera audible or its lease held");
+        Expect(!v.IsAudible(camera) && v.Leases.LeaseCount(camera) == leasesBefore && stage.CallCards.LeasesHeld == 0, "ending the call left the camera audible or a lease held");
+        bool undrawn = await Until(() => app.Renderer!.Overlays.Length == 0 && stage.CallCards.Overlays.Count == 0, 2);
+        Expect(undrawn, "the ended call's picture is still drawn over the grid");
         Expect(engines.All(e => e.Finished), "ending the call left a recognizer running");
 
         // parity: call-press-opens-call
@@ -592,6 +604,101 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.UseClock(new SystemViewerClock());
 
         await RealCallEngines();
+    }
+
+    // The call card's picture: one more tile of this window's grid, drawn last from the camera's
+    // shared tile (no second decoder), in the card's hole; it comes back after a device loss; the
+    // cards stack from the Settings corner, else opposite the indicators.
+    private async Task CallCardPicture(Viewer v, StageView stage, CallCard card, CameraRef camera)
+    {
+        StageRenderer r = app.Renderer!;
+        // parity: alert-inset-in-grid
+        bool drawn = await Until(() => card.Placed && stage.CallCards.Overlays.Any(o => o.Tile == card.Tile) && card.Tile.Shown > 2 && card.Tile.PictureWidth > 0, 15);
+        StageTile? grid = Tiles.FirstOrDefault(t => t.Camera == camera);
+        Say($"calls: card picture drawn {drawn}, {card.Tile.Shown} pictures, tile {card.Tile.Id} (grid tile {grid?.Id}), frame {card.Frame}, " +
+            $"hole {stage.CallCards.Overlays.FirstOrDefault()?.Rect}, core tiles {v.Tiles.Length} for {v.Leases.Cameras.Count} cameras");
+        Expect(drawn, "the call card's picture was not drawn");
+        Expect(card.Tile.Id != 0 && (grid is null || grid.Id == card.Tile.Id) && v.Tiles.Length == v.Leases.Cameras.Count, "the call card does not draw the camera's shared tile");
+        await CheckCardFrame("call card", card, r);
+
+        // parity: call-inset-device-loss
+        long shown = card.Tile.Shown;
+        int recoveries = r.Recoveries;
+        r.SimulateDeviceLoss();
+        bool recovered = await Until(() => r.Recoveries > recoveries, 10);
+        bool back = recovered && await Until(() => card.Tile.Shown > shown + 5 && card.Tile.PictureWidth > 0, 15);
+        Say($"calls: card picture after a device loss: recovered {recovered}, pictures {shown} -> {card.Tile.Shown}");
+        Expect(back, "the call card's picture did not come back after a device loss");
+        if (back)
+        {
+            await CheckCardFrame("call card after device loss", card, r);
+        }
+
+        // parity: call-inset-corner
+        double w = stage.ActualWidth, h = stage.ActualHeight;
+        ChromeCorner? choice = v.Settings.InsetCornerChoice;
+        v.Settings.InsetCornerChoice = ChromeCorner.TopLeft;
+        stage.CallCards.UpdateLayout();
+        InsetFrame topLeft = card.Frame;
+        bool holeMoved = await Until(() => stage.CallCards.Overlays.FirstOrDefault()?.Rect is { } hole && hole.Y < topLeft.Bottom && hole.X < topLeft.Right, 3);
+        v.Settings.InsetCornerChoice = null;
+        stage.CallCards.UpdateLayout();
+        InsetFrame opposite = card.Frame;
+        ChromeCorner expected = v.Settings.IndicatorCorner.Opposite();
+        Say($"calls: card at {topLeft} with the top left corner chosen (hole followed {holeMoved}); at {opposite} opposite the indicators ({expected}) in {w:0}x{h:0}");
+        Expect(Near(topLeft.X, InsetGeometry.Margin) && Near(topLeft.Y, InsetGeometry.Margin), "the call card did not move to the corner chosen in Settings");
+        Expect(holeMoved, "the card's picture did not follow the card to its corner");
+        Expect(Near(expected.IsLeft() ? opposite.X : w - opposite.Right, InsetGeometry.Margin) &&
+            Near(expected.IsTop() ? opposite.Y : h - opposite.Bottom, InsetGeometry.Margin), "the call card is not opposite the indicators by default");
+        v.Settings.InsetCornerChoice = choice;
+    }
+
+    private static bool Near(double a, double b) => Math.Abs(a - b) < 1.5;
+
+    // A frame read back: the card's picture is the last tile drawn and is not flat.
+    private async Task CheckCardFrame(string what, CallCard card, StageRenderer r)
+    {
+        Task<StageCapture> task = r.CaptureAsync();
+        if (await Task.WhenAny(task, Task.Delay(5000)) != task)
+        {
+            _problems.Add($"no {what} frame was drawn");
+            return;
+        }
+        StageCapture c = await task;
+        (StageTile last, float x, float y, float cw, float ch) = c.Rects.Length > 0 ? c.Rects[^1] : default;
+        double spread = Spread(c.Image, x, y, cw, ch);
+        Say($"{what} frame {c.Image.Width}x{c.Image.Height}: drawn last {last == card.Tile}, {cw:0}x{ch:0} px at {x:0},{y:0}, spread {spread:0.0}");
+        Expect(last == card.Tile, $"the {what} picture is not drawn last (on top)");
+        Expect(spread >= 8, $"the {what} picture is flat (spread {spread:0.0})");
+    }
+
+    // The doorbell fills the stage (focused): its controls show over the stage instead of a card,
+    // and the card's lease and picture go; back in the grid, the card returns.
+    private async Task CallOverTheStage(Viewer v, StageView stage, CallCard card, CameraRef camera, int leasesBefore)
+    {
+        StageRenderer r = app.Renderer!;
+        // parity: call-stage-controls
+        if (Tiles.FirstOrDefault(t => t.Camera == camera) is not { } tile)
+        {
+            _problems.Add("no tile shows the call's camera to focus");
+            return;
+        }
+        stage.FocusOn(tile);
+        stage.CallCards.UpdateLayout();
+        bool overStage = card.Mode == CallCardMode.Stage;
+        bool undrawn = await Until(() => r.Overlays.Length == 0, 3);
+        InsetFrame f = card.Frame;
+        double w = stage.ActualWidth, h = stage.ActualHeight;
+        Say($"calls: doorbell focused: controls over the stage {overStage} at {f} of {w:0}x{h:0}, picture drawn {!undrawn}, leases {v.Leases.LeaseCount(camera)} (were {leasesBefore})");
+        Expect(overStage && Near(f.Bottom, h - InsetGeometry.Margin) && Near(f.MidX, w / 2), "the call's controls did not move over the stage when the doorbell filled it");
+        Expect(undrawn && stage.CallCards.LeasesHeld == 0 && v.Leases.LeaseCount(camera) == leasesBefore + 1, "the card kept its picture or lease while the doorbell filled the stage");
+        long shown = card.Tile.Shown;
+        stage.Unfocus();
+        bool unfocused = await Until(() => r.Focus is null, FocusAnimation.Seconds + 2);
+        stage.CallCards.UpdateLayout();
+        bool returned = await Until(() => card.Mode == CallCardMode.Inset && r.Overlays.Any(o => o.Tile == card.Tile) && card.Tile.Shown > shown + 2, 10);
+        Say($"calls: back in the grid: card {card.Mode}, picture drawn {returned}, leases {v.Leases.LeaseCount(camera)}");
+        Expect(unfocused && returned && v.Leases.LeaseCount(camera) == leasesBefore + 2, "the card did not come back with its picture after the focus ended");
     }
 
     // The computer's own voice, recognizer, and microphone, which depend on what Windows has installed:

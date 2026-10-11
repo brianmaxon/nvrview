@@ -2,7 +2,8 @@
 // list and the form share one dialog; saving reconnects that device. The
 // password goes straight to the credential store and is never shown again:
 // leaving the box empty when editing keeps the saved one. The corner of the
-// tiles' detection symbols is chosen here too. The new-device form opens
+// tiles' detection symbols, and the corner doorbell call cards stack from,
+// are chosen here too. The new-device form opens
 // with "Find Devices on This Network": a search of the local network starts
 // when the form is shown and stops when it goes away (docs/UX.md, "Finding
 // devices"); choosing a row fills the form's address and port.
@@ -299,6 +300,26 @@ internal static class SettingsDialog
             }
         };
 
+        // Where doorbell call cards stack over the stage (docs/UX.md "Alert insets"): the user's
+        // corner, else opposite the detection symbols; kept in view-settings.json.
+        var insetCorner = new ComboBox { Header = "Doorbell call cards", MinWidth = 200 };
+        insetCorner.Items.Add(new ComboBoxItem { Content = "Opposite the detection symbols" });
+        foreach (ChromeCorner c in Enum.GetValues<ChromeCorner>())
+        {
+            insetCorner.Items.Add(new ComboBoxItem { Content = c.Title(), Tag = c });
+        }
+        insetCorner.SelectedIndex = viewer.Settings.InsetCornerChoice is { } chosenInset ? (int)chosenInset + 1 : 0;
+        insetCorner.SelectionChanged += (_, _) =>
+        {
+            if (insetCorner.SelectedItem is ComboBoxItem item)
+            {
+                viewer.Settings.InsetCornerChoice = item.Tag is ChromeCorner chosen ? chosen : null;
+            }
+        };
+        var corners = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
+        corners.Children.Add(corner);
+        corners.Children.Add(insetCorner);
+
         // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
         // like the menu's choice; shown only when a connected camera reports a fisheye lens.
         var mounts = new StackPanel { Spacing = 6, Visibility = Visibility.Collapsed };
@@ -367,9 +388,9 @@ internal static class SettingsDialog
         layout.Children.Add(left);
         Grid.SetColumn(form, 1);
         layout.Children.Add(form);
-        Grid.SetRow(corner, 1);
-        Grid.SetColumnSpan(corner, 2);
-        layout.Children.Add(corner);
+        Grid.SetRow(corners, 1);
+        Grid.SetColumnSpan(corners, 2);
+        layout.Children.Add(corners);
         Grid.SetRow(mounts, 2);
         Grid.SetColumnSpan(mounts, 2);
         layout.Children.Add(mounts);

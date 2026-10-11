@@ -21,8 +21,11 @@ alert-dismiss-enter         windows  gap: the macOS self-test never raises a til
 alert-raise                 windows  gap: no tile alert step in the macOS self-test (red border on every lens, header text, count)
 alert-reduce-motion         windows  gap: the macOS self-test does not check the border against Reduce Motion
 alert-survives-stop         windows  gap: no macOS step for an alert outliving the detection that raised it
+call-inset-corner           windows  gap: the macOS self-test does not change the Settings inset corner and check where the inset goes
+call-inset-device-loss      windows  gap: no macOS step simulating a lost GPU device (see device-loss), so none for the inset's picture either
 call-permission-revoke      windows  gap: the macOS self-test turns the permission off again without asserting it
 call-press-joins-conversation windows gap: the macOS self-test does not press the doorbell during a conversation
+call-stage-controls         windows  gap: the macOS self-test does not focus the doorbell to check that its call moves over the stage
 call-tile-menu              windows  gap: the macOS self-test does not check the tile menu's Start/End Conversation item
 corner-indicators           windows  gap: no macOS step for detections reaching a tile's corner symbols
 corner-setting              windows  gap: no macOS step for the indicator corner setting moving the symbols
@@ -53,9 +56,8 @@ window-restore              windows  gap: the restore record is unit-tested on m
 wrong-password              windows  gap: the macOS self-test does not log in with a wrong password (StatusTests covers the wording)
 
 # ---- on macOS only ----------------------------------------------------------
-alert-inset-in-grid         macos    gap: Windows has no alert insets (docs/UX.md "Alert insets")
-alert-inset-smoke-stays     macos    gap: Windows has no alert insets, so a smoke alarm does not open one
-alert-inset-swap            macos    gap: Windows has no alert insets to swap with the stage
+alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one
+alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
