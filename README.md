@@ -9,9 +9,9 @@ one shared Rust core.
 Status: in development. Both apps play live video from real NVRs and cameras
 (split-pane layouts and groups, several windows, focus with the main stream,
 listening, detections, digital zoom, fisheye dewarping, finding devices on
-the network); the macOS app also has doorbell calls with talk-back. Recordings
-and playback are designed but not built yet, and the Windows app does not
-have the doorbell call screens yet. See
+the network) and doorbell calls with captions and talk-back, by voice or typed
+reply, that can also be started without a ring. Recordings and playback are
+designed but not built yet. See
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and milestones.
 
 nvrview is an independent project. It is not affiliated with, endorsed by, or
@@ -142,6 +142,13 @@ macOS bundle (`scripts/package-macos.sh`) and the Windows app (its file and
 product version, and the first line of its log) both read it, so a build of
 either shows the same number. Change it there only. Tags and releases need the
 maintainer's approval.
+
+## Updates
+
+Both apps can update themselves from a folder or web server you host, with
+packages signed by your own Ed25519 key; it is off until you set a source and
+trust a key, and nothing is installed without your say. See
+[docs/UPDATES.md](docs/UPDATES.md).
 
 ## Contributing
 

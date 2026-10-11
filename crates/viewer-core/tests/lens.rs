@@ -196,3 +196,49 @@ fn a_tile_starting_on_the_channel_holds_the_probe_back() {
     assert!(rec.decodes(t) > 20);
     sim.run_free(|| core.shutdown());
 }
+
+#[test]
+fn a_tier_that_sends_only_a_0x0_info_record_ends_as_a_rejected_start() {
+    let sim = SimRuntime::new();
+    let dir = tempfile::tempdir().unwrap();
+    let nvr = lens_mock(&sim, None, "UID-EXAMPLE-1", ExternMode::Hidden);
+    let (core, rec) = start(on_sim(
+        &sim,
+        CoreConfig {
+            data_dir: Some(dir.path().to_owned()),
+            info_only_limit: Duration::from_secs(5),
+            ..fast_config()
+        },
+    ));
+    let dev = add(&core, &nvr);
+    sim_until(&sim, &core, "slot list", 10, || {
+        !rec.events_of("channels").is_empty()
+    });
+    // Channel 2 answers its extern preview with a 0x0 info record only;
+    // channel 1's extern tier is a second lens with video.
+    let info_only = core.open_tile(dev, 2, StreamTier::Extern).unwrap();
+    let lens = core.open_tile(dev, 1, StreamTier::Extern).unwrap();
+    let t0 = sim.now();
+    let rejected = |tile: u64| {
+        rec.events_of("tile_error")
+            .iter()
+            .any(|e| e["tile"] == tile && e["reason"] == "start_rejected" && e["status"] == 0)
+    };
+    sim_until(&sim, &core, "the failed start", 30, || rejected(info_only));
+    let waited = sim.now() - t0;
+    assert!(waited >= Duration::from_secs(5), "failed after {waited:?}");
+    assert!(waited < Duration::from_secs(7), "failed after {waited:?}");
+    assert_eq!(rec.decodes(info_only), 0);
+    // Reported once, and never for the tier that has video.
+    sim.advance(Duration::from_secs(10));
+    core.flush_events();
+    let errors = rec
+        .events_of("tile_error")
+        .iter()
+        .filter(|e| e["tile"] == info_only)
+        .count();
+    assert_eq!(errors, 1);
+    assert!(rec.decodes(lens) > 0);
+    assert!(!rejected(lens));
+    sim.run_free(|| core.shutdown());
+}
