@@ -27,8 +27,10 @@ pub enum Item {
         /// Reply status of the start request (400).
         status: u16,
     },
-    /// The device refused to start this preview (reply status). Final for
-    /// this subscription until the connection is reestablished.
+    /// The device refused to start this preview (reply status). A refused
+    /// 400 is still tried again slowly (media then follows, and the
+    /// refusal is over); other statuses are final until the connection is
+    /// reestablished or the user retries by hand.
     StartRejected {
         /// Reply status of the start request.
         status: u16,

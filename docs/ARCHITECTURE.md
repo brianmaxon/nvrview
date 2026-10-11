@@ -158,6 +158,41 @@ clients such as the official app or home-automation integrations. So:
 - sessions are closed on every exit path, including errors and app shutdown;
 - reconnects back off exponentially and never stack.
 
+### Previews that deliver nothing
+
+A preview can be accepted and still never send a picture (after a
+reconnect, behind an NVR, a camera that went quiet). The session never
+leaves that state unattended; it works on the same login and never adds
+one:
+
+- **Media-silence watchdog.** A started preview with subscribers that has
+  delivered no media for `preview_silence_timeout` (15 s: several keyframe
+  intervals of a slow sub-stream, short enough to be seen) is stopped and
+  started again with a new message ID. Each further silent restart waits
+  twice as long, up to `preview_restart_cap` (60 s), and a picture resets it.
+  The same covers a stream that stops mid-stream.
+- **Refused starts are retried.** A start answered 400 is still waited out
+  for `preview_wait_limit` (60 s) with restarts every 6 s. After that the
+  subscribers get `StartRejected` (the app keeps saying so), and one more
+  start is tried every `preview_slow_retry` (60 s) with a short look each
+  time; media clears the refusal. Other refusal statuses, and a wait limit of
+  zero, stay final until the connection is reestablished.
+- **Escalation.** When every started preview has been restarted
+  `preview_escalate_after` (3) times in a row and another is due, the
+  connection is failed once, and the supervisor reconnects through its
+  normal backoff. At most once per ten minutes, and never while any started
+  preview is still getting media (a camera that is simply off cannot make
+  the session log in over and over).
+- **Diagnostic.** About once a minute, and only when something is wrong, one
+  warning lists the tiles (channel and tier) without a picture for over a
+  minute and why: not started, waiting on 400, rejected, silent after
+  start, or restarting.
+- **Manual retry** (`DeviceSession::retry_stream`, `nv_tile_retry`): the
+  user's Retry button restarts one stream now, or, when the device is in
+  backoff, makes the next connection attempt now. Never faster than
+  `MANUAL_RETRY_FLOOR` (2 s) per stream or per early connection attempt, and
+  never after the device refused the login (that state stays terminal).
+
 ## Device commands
 
 Commands come in three tiers. The session layer's allowlist names the tier of

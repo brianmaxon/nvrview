@@ -40,6 +40,20 @@ enum Mode {
     Live,
     /// Refuse every preview start with status 400.
     RefuseStart,
+    /// Answer preview starts as [`Fake::set_start`] says (default: with
+    /// media), so a test can change the device's behavior mid-run.
+    Scripted,
+}
+
+/// How a [`Mode::Scripted`] device answers a preview start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Start {
+    /// Accept, send the stream info, a keyframe, and a frame.
+    Media,
+    /// Accept (status 200) and never send any media.
+    Silent,
+    /// Answer 400.
+    Refuse,
 }
 
 /// Frames the test asks the fake to send on a running preview.
@@ -52,6 +66,7 @@ struct LiveFrames {
 
 #[derive(Clone, Debug)]
 struct Seen {
+    at: Instant,
     conn: usize,
     command: u32,
     text: String,
@@ -65,6 +80,11 @@ struct Fake {
     max_active: Arc<AtomicUsize>,
     accept_times: Arc<Mutex<Vec<Instant>>>,
     live: tokio::sync::broadcast::Sender<LiveFrames>,
+    script: Arc<Mutex<Start>>,
+    /// Closes every open connection when sent to.
+    kill: tokio::sync::broadcast::Sender<()>,
+    /// New connections fail while set.
+    refuse_connect: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Fake {
@@ -77,7 +97,25 @@ impl Fake {
             max_active: Arc::default(),
             accept_times: Arc::default(),
             live: tokio::sync::broadcast::channel(64).0,
+            script: Arc::new(Mutex::new(Start::Media)),
+            kill: tokio::sync::broadcast::channel(4).0,
+            refuse_connect: Arc::default(),
         }
+    }
+
+    /// How later preview starts are answered ([`Mode::Scripted`]).
+    fn set_start(&self, s: Start) {
+        *self.script.lock().unwrap() = s;
+    }
+
+    /// Closes every open connection (the device dropped us).
+    fn drop_connections(&self) {
+        let _ = self.kill.send(());
+    }
+
+    /// Refuses (or allows again) new connections.
+    fn set_refuse_connect(&self, on: bool) {
+        self.refuse_connect.store(on, Ordering::SeqCst);
     }
 
     /// Connects to the fake through in-memory pipes, each served by a task
@@ -85,6 +123,11 @@ impl Fake {
     fn connector(&self) -> impl Connector + use<> {
         let mode = self.mode;
         let live = self.live.clone();
+        let (script, kill, refuse) = (
+            self.script.clone(),
+            self.kill.clone(),
+            self.refuse_connect.clone(),
+        );
         let (seen, accepted, active, max_active, times) = (
             self.seen.clone(),
             self.accepted.clone(),
@@ -93,6 +136,9 @@ impl Fake {
             self.accept_times.clone(),
         );
         FnConnector(move || {
+            if refuse.load(Ordering::SeqCst) {
+                return Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused));
+            }
             let (client, sock) = tokio::io::duplex(64 * 1024);
             let conn = accepted.fetch_add(1, Ordering::SeqCst);
             times.lock().unwrap().push(Instant::now());
@@ -100,8 +146,9 @@ impl Fake {
             max_active.fetch_max(now, Ordering::SeqCst);
             let (seen, active) = (seen.clone(), active.clone());
             let live_rx = live.subscribe();
+            let (script, kill_rx) = (script.clone(), kill.subscribe());
             tokio::spawn(async move {
-                serve(sock, conn, mode, seen, live_rx).await;
+                serve(sock, conn, mode, seen, live_rx, script, kill_rx).await;
                 active.fetch_sub(1, Ordering::SeqCst);
             });
             Ok(client)
@@ -166,6 +213,8 @@ async fn serve(
     mode: Mode,
     seen: Arc<Mutex<Vec<Seen>>>,
     mut live_rx: tokio::sync::broadcast::Receiver<LiveFrames>,
+    script: Arc<Mutex<Start>>,
+    mut kill_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
     let key = SessionKey::derive(NONCE, PASSWORD);
     let mut dec = Decoder::new();
@@ -174,6 +223,7 @@ async fn serve(
     let mut starts: std::collections::HashMap<String, u32> = Default::default();
     loop {
         let n = tokio::select! {
+            _ = kill_rx.recv() => return,
             r = sock.read(&mut buf) => match r {
                 Ok(0) | Err(_) => return,
                 Ok(n) => n,
@@ -194,7 +244,7 @@ async fn serve(
         };
         dec.push(&buf[..n]);
         while let Some(m) = dec.next_message().unwrap() {
-            let out = handle(&m, &key, conn, mode, &seen);
+            let out = handle(&m, &key, conn, mode, &seen, *script.lock().unwrap());
             if let Some(h) = out.started.clone() {
                 starts.insert(h, m.header.message_id);
             }
@@ -223,6 +273,7 @@ fn handle(
     conn: usize,
     mode: Mode,
     seen: &Mutex<Vec<Seen>>,
+    start: Start,
 ) -> Out {
     let h = &m.header;
     let mut out = Out {
@@ -274,6 +325,7 @@ fn handle(
     }
     let text = String::from_utf8(body).unwrap_or_default();
     seen.lock().unwrap().push(Seen {
+        at: Instant::now(),
         conn,
         command: h.command,
         text: text.clone(),
@@ -299,13 +351,16 @@ fn handle(
                 .unwrap()
                 .parse()
                 .unwrap();
-            if mode == Mode::RefuseStart {
+            if mode == Mode::RefuseStart || (mode == Mode::Scripted && start == Start::Refuse) {
                 out.bytes
                     .push(reply(3, h.message_id, 400, Class::Device, &[]));
                 return out;
             }
             out.bytes
                 .push(reply(3, h.message_id, 200, Class::Device, &[]));
+            if mode == Mode::Scripted && start == Start::Silent {
+                return out;
+            }
             if mode == Mode::Live {
                 out.started = find_text(&text, "handle").unwrap();
                 out.bytes.push(media_message(
@@ -868,7 +923,7 @@ async fn a_400_is_waited_out_with_restarts_then_refused() {
     let starts = seq.len() / 2;
     // One start, then a restart about every 150 ms for 1 s.
     assert!((4..=8).contains(&starts), "{starts} starts");
-    // Refused for good: no more starts.
+    // Not started again before the slow retry (60 s by default).
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(starts_and_stops(&fake, 2), seq);
     s.close().await;
@@ -924,4 +979,282 @@ async fn closing_the_session_during_the_wait_stops_the_preview() {
     assert_alternating(&seq);
     assert_eq!(seq.len() % 2, 0, "{seq:?}");
     assert_eq!(fake.count(2), 1, "logged out");
+}
+
+// ---- Silent and refused previews (the watchdog) ----
+
+/// Short windows for the media-silence watchdog and the slow retry.
+fn wd_config() -> SessionConfig {
+    let mut c = waiting_config(150, 1000);
+    c.preview_silence_timeout = Duration::from_millis(500);
+    c.preview_restart_cap = Duration::from_secs(2);
+    c.preview_slow_retry = Duration::from_secs(2);
+    c.preview_escalate_after = 0;
+    c
+}
+
+/// The next video record, skipping everything else.
+async fn next_video(sub: &mut bc_session::Subscription) -> (bool, u64) {
+    loop {
+        if let Some(v) = video_pts(&recv(sub).await) {
+            return v;
+        }
+    }
+}
+
+/// When each start (3) of `channel` reached the fake.
+fn start_times(fake: &Fake, channel: u8) -> Vec<Instant> {
+    let ch = channel.to_string();
+    fake.seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| {
+            s.command == 3
+                && find_text(&s.text, "channelId").unwrap().as_deref() == Some(ch.as_str())
+        })
+        .map(|s| s.at)
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_whose_start_is_accepted_but_silent_is_restarted() {
+    let fake = Fake::start(Mode::Scripted).await;
+    let s = DeviceSession::spawn(fake.connector(), wd_config());
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    next_video(&mut a).await;
+    // The connection drops; the device accepts the new start and sends nothing.
+    fake.set_start(Start::Silent);
+    fake.drop_connections();
+    wait_until("the start on the new connection", || {
+        starts_for(&fake, 2) >= 2
+    })
+    .await;
+    // Silence for a while: the session must not just sit there.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(starts_for(&fake, 2) >= 3, "{} starts", starts_for(&fake, 2));
+    // The device recovers: the next restart delivers video.
+    fake.set_start(Start::Media);
+    next_video(&mut a).await;
+    // One reconnect, no extra logins.
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stream_that_stops_mid_stream_is_restarted() {
+    // The fake sends two frames per start and then nothing.
+    let fake = Fake::start(Mode::Scripted).await;
+    let s = DeviceSession::spawn(fake.connector(), wd_config());
+    let mut a = s.subscribe(1, StreamTier::Main).await.unwrap();
+    assert_eq!(next_video(&mut a).await, (true, 1000));
+    // Frames only come with a start: a second keyframe means the preview
+    // was restarted after the silence.
+    loop {
+        if next_video(&mut a).await == (true, 1000) {
+            break;
+        }
+    }
+    assert!(starts_for(&fake, 1) >= 2);
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn silent_restarts_back_off_up_to_the_cap() {
+    let fake = Fake::start(Mode::Scripted).await;
+    fake.set_start(Start::Silent);
+    let s = DeviceSession::spawn(fake.connector(), wd_config());
+    let _a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let t = start_times(&fake, 2);
+    assert!(t.len() >= 6, "{} starts", t.len());
+    let gaps: Vec<Duration> = t.windows(2).map(|w| w[1] - w[0]).collect();
+    // 500 ms, then doubling, never below the first and never above the cap.
+    assert!(gaps[0] >= Duration::from_millis(500), "{gaps:?}");
+    for w in gaps.windows(2) {
+        assert!(w[1] >= w[0], "{gaps:?}");
+    }
+    for g in &gaps {
+        assert!(*g <= Duration::from_millis(2100), "{gaps:?}");
+    }
+    assert!(
+        gaps.last().unwrap() >= &Duration::from_millis(1900),
+        "{gaps:?}"
+    );
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1, "no new login");
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_channel_beside_a_working_one_does_not_reconnect() {
+    let fake = Fake::start(Mode::Live).await;
+    let mut cfg = wd_config();
+    cfg.preview_escalate_after = 2;
+    let s = DeviceSession::spawn(fake.connector(), cfg);
+    let mut working = s.subscribe(1, StreamTier::Sub).await.unwrap();
+    let _silent = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    wait_until("both starts", || {
+        starts_for(&fake, 1) >= 1 && starts_for(&fake, 2) >= 1
+    })
+    .await;
+    for i in 0..300u64 {
+        fake.send_live(1, StreamTier::Sub, &[(i % 20 == 0, i)]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    next_video(&mut working).await;
+    assert!(starts_for(&fake, 2) >= 3);
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1, "no reconnect");
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn all_streams_silent_escalates_to_one_clean_reconnect() {
+    let fake = Fake::start(Mode::Scripted).await;
+    fake.set_start(Start::Silent);
+    let mut cfg = wd_config();
+    cfg.preview_escalate_after = 3;
+    let s = DeviceSession::spawn(fake.connector(), cfg);
+    let _a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2, "one reconnect");
+    // Not again (at most one forced reconnect in ten minutes).
+    tokio::time::sleep(Duration::from_secs(120)).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_start_refused_longer_than_the_wait_is_retried_slowly_and_recovers() {
+    let fake = Fake::start(Mode::Scripted).await;
+    fake.set_start(Start::Refuse);
+    let s = DeviceSession::spawn(fake.connector(), wd_config());
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    assert_eq!(recv(&mut a).await, Item::StartRejected { status: 400 });
+    // Rejected stays visible to a late subscriber meanwhile.
+    let mut late = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut late).await, Item::StartRejected { status: 400 });
+    // Over 10 s only the slow retry (every 2 s) starts the preview again.
+    let before = starts_for(&fake, 2);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let during = starts_for(&fake, 2) - before;
+    assert!((2..=8).contains(&during), "{during} starts in 10 s");
+    // The device becomes available: video arrives without a reconnect.
+    fake.set_start(Start::Media);
+    next_video(&mut a).await;
+    next_video(&mut late).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscriber_added_while_the_connection_is_down_gets_video() {
+    let fake = Fake::start(Mode::Scripted).await;
+    let s = DeviceSession::spawn(fake.connector(), wd_config());
+    let mut a = s.subscribe(3, StreamTier::Main).await.unwrap();
+    next_video(&mut a).await;
+    fake.set_refuse_connect(true);
+    fake.drop_connections();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut b = s.subscribe(4, StreamTier::Sub).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    fake.set_refuse_connect(false);
+    next_video(&mut b).await;
+    next_video(&mut a).await;
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manual_retry_restarts_a_silent_stream_at_once_within_the_floor() {
+    let fake = Fake::start(Mode::Scripted).await;
+    fake.set_start(Start::Silent);
+    let mut cfg = wd_config();
+    cfg.preview_silence_timeout = Duration::from_secs(30);
+    cfg.preview_restart_cap = Duration::from_secs(60);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    wait_until("the start", || starts_for(&fake, 2) == 1).await;
+    s.retry_stream(2, StreamTier::Sub);
+    wait_until("the manual restart", || starts_for(&fake, 2) == 2).await;
+    // Clicking again and again: nothing more until the floor has passed.
+    for _ in 0..20 {
+        s.retry_stream(2, StreamTier::Sub);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(starts_for(&fake, 2), 2);
+    tokio::time::sleep(bc_session::MANUAL_RETRY_FLOOR).await;
+    fake.set_start(Start::Media);
+    s.retry_stream(2, StreamTier::Sub);
+    next_video(&mut a).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1, "same login");
+    // A stream nobody subscribed to is ignored.
+    s.retry_stream(9, StreamTier::Main);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(starts_for(&fake, 9), 0);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manual_retry_cuts_the_reconnect_backoff_short() {
+    let fake = Fake::start(Mode::Scripted).await;
+    let mut cfg = wd_config();
+    cfg.backoff = BackoffConfig {
+        initial: Duration::from_secs(30),
+        max: Duration::from_secs(30),
+        jitter: 0.0,
+        stable_after: Duration::from_secs(60),
+    };
+    let s = DeviceSession::spawn(fake.connector(), cfg);
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    next_video(&mut a).await;
+    fake.drop_connections();
+    wait_until("the backoff", || {
+        matches!(s.state(), ConnState::Backoff { .. })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1, "still waiting");
+    s.retry_stream(2, StreamTier::Sub);
+    next_video(&mut a).await;
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2);
+    // Retry storms add no logins: the stream is up.
+    for _ in 0..20 {
+        s.retry_stream(2, StreamTier::Sub);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 2);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manual_retry_never_retries_a_refused_login() {
+    let fake = Fake::start(Mode::RejectLogin).await;
+    let s = DeviceSession::spawn(fake.connector(), config());
+    let _a = s.subscribe(2, StreamTier::Sub).await;
+    wait_until("the refusal", || {
+        matches!(s.state(), ConnState::LoginFailed { .. })
+    })
+    .await;
+    for _ in 0..5 {
+        s.retry_stream(2, StreamTier::Sub);
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_manual_retry_revives_a_refused_stream() {
+    let fake = Fake::start(Mode::Scripted).await;
+    fake.set_start(Start::Refuse);
+    let mut cfg = wd_config();
+    cfg.preview_slow_retry = Duration::from_secs(600);
+    let s = DeviceSession::spawn(fake.connector(), cfg);
+    let mut a = s.subscribe(2, StreamTier::Sub).await.unwrap();
+    assert_eq!(recv(&mut a).await, Item::WaitingForDevice { status: 400 });
+    assert_eq!(recv(&mut a).await, Item::StartRejected { status: 400 });
+    fake.set_start(Start::Media);
+    s.retry_stream(2, StreamTier::Sub);
+    next_video(&mut a).await;
+    s.close().await;
 }
