@@ -441,6 +441,22 @@ not in a separate system window.
   dismissed, and dismissing one also dismisses its alert (see "Alerts").
 - Insets never take the keyboard focus or change what the user is listening
   to, except for the doorbell rules below.
+- **Moving them:** the insets can be dragged anywhere on the stage by their
+  header (or by the picture once the pointer moves past the 6 pt click
+  threshold; a click still swaps). All of a window's insets move together as
+  one column, which grows away from the nearer horizontal edge: in the top
+  half the newest inset is at the column's top and the others stack
+  downward; in the bottom half the newest is at the bottom and they stack
+  upward. Within 24 pt of an edge (inside the 12 pt margin), each axis snaps
+  to that edge. The position is kept as a fraction of the free space,
+  `(left - margin) / (stage width - 2 margin - column width)` and the same
+  for the height, each between 0 and 1, so resizing the window or going
+  full screen keeps a column in its corner or in the same relative place.
+  The position belongs to each viewer window and is saved with it; until
+  the user moves the column it sits in the default corner (the Settings
+  corner, else opposite the corner indicators), and "Reset Position" in an
+  inset's menu returns it there. A column never sits over the sidebar's
+  edge-reveal zone or the full-screen toolbar's reveal area.
 
 Details settled while building it (macOS):
 
@@ -508,8 +524,9 @@ the same call themselves without a press ("Start Conversation", below):
   from their own templates, never from the transcript, detected text, or any
   other untrusted source (see docs/ARCHITECTURE.md "Doorbell text-to-speech").
 - The call ends when the user closes it or about 60 s after the last activity
-  (press, speech, talk-back), and is listed in the event log with its times
-  and, if saved, its transcript.
+  (press, speech, talk-back, typing a reply, hovering or clicking its inset),
+  and is listed in the event log with its times and, if saved, its
+  transcript.
 
 Details settled while building it (macOS):
 
@@ -582,6 +599,57 @@ Details settled while building it (Windows):
 - Not on Windows yet: the setting that saves call transcripts into the event
   log (a call is logged without its text) and a per-doorbell "unmute on ring"
   (a press unmutes only if the user was already listening, else Unmute shows).
+
+### A call in its own window
+
+A call can leave the viewer windows and live in a small call window of its
+own (the doorbell's live picture, the header, and the call's controls), for
+example to keep it beside other work. Both apps follow these rules.
+
+- **One presentation per call, for the whole app:** in the insets, or in a
+  window. "Pop Out Call" (a header button, and an item in the inset's and the
+  doorbell tile's menus) removes the call's inset from every viewer window,
+  hides the call controls over the stage when the doorbell fills it, ends a
+  swap that shows the doorbell, and opens one call window. "Pop In Call" (a
+  header button in the call window, and the same menus) closes the window,
+  and every viewer window shows the inset again, on top, with a fresh
+  minute.
+- **The call is never interrupted by a pop:** the same call, lease (the new
+  holder acquires the doorbell before the old one releases it), audio tap,
+  transcript, running talk-back, "Keep talking", and unsent reply text.
+  "Keep talking" and the reply text belong to the call, not to a view, so
+  any view built for it shows them.
+- **Ending:** closing the call window (its close button, ⌘W, Alt+F4) ends the
+  call, as closing its inset does; so do Esc while the reply field is not
+  being edited, the 60 s without activity, and the device going away.
+  Activity in the call window counts like activity in an inset.
+- **Focus:** a call window opened by a ring never takes the keyboard focus
+  from what the user is doing; an explicit Pop Out activates it. Inside it,
+  Tab moves between the controls and Return sends the reply.
+- **On top:** the window floats above other windows by default, also over
+  full-screen apps, with a pin toggle in its header whose state is
+  remembered.
+- **Several calls** each get a window; extra windows cascade by 24 pt.
+- Call windows are not viewer windows: they are not restored at launch, not
+  counted as viewer windows, and close with the app's other calls at quit.
+  The picture's stream follows its size (Auto: the main stream when large).
+- **Default:** a setting "Open calls in their own window" (Settings > Alerts >
+  Doorbell calls, off by default) and a per-doorbell choice (Default, Window,
+  Inset) that overrides it. It is decided when the call opens, for a ring and
+  for Start Conversation; a press that joins an open call keeps the call
+  where it is. A call opened in a window still records its inset in each
+  viewer window, detached: not drawn, not counted in "+N more", not leased,
+  not swapped or closed by Tab, Esc or the clock, until it pops in or the
+  call ends.
+- **Where it opens:** a setting "Open call windows" with "Where I left it"
+  (the default) and "Top right of the active screen". Where I left it: the
+  frame the user last left a call window at (one frame for the app, its size
+  kept), as long as some screen's visible area still holds the middle of its
+  top edge; each further window moves 24 pt right and down, kept on that
+  screen. Otherwise, and always with the other choice: the top right corner
+  of the visible area of the screen holding the active viewer window, 12 pt
+  in, 480 pt wide by default (the remembered size when there is one, limited
+  to the screen), each further window 24 pt left and down.
 
 ## Finding devices
 

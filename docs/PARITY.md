@@ -83,6 +83,7 @@ less than that. Nothing here was run on a Windows machine.
 | Session event log of alerts | yes | yes | Not verified where each app shows it. |
 | Alert insets for cameras not on screen (doorbell, smoke, entrance people) | yes | no | Windows has no alert insets (UX.md, apps/windows/README.md "Calls"). |
 | Inset corner setting, Entrance option per camera | yes | no | Depends on alert insets. |
+| Movable insets: drag the column, 24 pt edge snap, position per window, Reset Position | no (planned) | no (planned) | UX.md "Alert insets". macOS has the pure placement rule (`InsetPlacement`, unit tests), no drag yet. |
 
 ### Calls, talk-back, and captions
 
@@ -100,6 +101,9 @@ less than that. Nothing here was run on a Windows machine.
 | Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
 | Save call transcripts in the event log | yes | no | Windows README "Not yet on Windows". |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
+| Call pop-out window (Pop Out / Pop In, the call kept whole) | no (planned) | no (planned) | UX.md "A call in its own window". macOS keeps "Keep talking" and the unsent reply with the call already. |
+| Open calls in their own window: global setting and per-doorbell choice | no (planned) | no (planned) | macOS has the pure rule (`CallPresentation.resolve`, unit tests). |
+| Call window placement (where I left it, or top right of the active screen) | no (planned) | no (planned) | macOS has the pure rule (`CallWindowPlacement`, unit tests). |
 
 ### Devices, settings, and updates
 
