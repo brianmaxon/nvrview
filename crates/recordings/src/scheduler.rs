@@ -381,7 +381,12 @@ pub fn chunk_windows(start: Secs, end: Secs, chunk: Secs) -> Vec<(Secs, Secs)> {
 }
 
 fn slug(c: &CameraId) -> String {
-    naming::sanitize(&format!("{}-ch{:02}", c.device, c.channel)).replace(' ', "_")
+    let base = if c.lens == 0 {
+        format!("{}-ch{:02}", c.device, c.channel)
+    } else {
+        format!("{}-ch{:02}-lens{}", c.device, c.channel, c.lens)
+    };
+    naming::sanitize(&base).replace(' ', "_")
 }
 
 impl Scheduler {

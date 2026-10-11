@@ -108,6 +108,10 @@ pub fn json_time(t: Secs) -> String {
     date_time(t).to_string()
 }
 
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
 /// One camera in `incident.json`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IncidentCamera {
@@ -115,6 +119,9 @@ pub struct IncidentCamera {
     pub device: String,
     /// Channel.
     pub channel: u8,
+    /// Lens of a multi-lens camera (written only for a second lens).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lens: u8,
     /// The user's name for the camera.
     pub name: String,
     /// Start of the downloaded range.
@@ -132,6 +139,9 @@ pub struct IncidentEventJson {
     pub device: String,
     /// Channel.
     pub channel: u8,
+    /// Lens of a multi-lens camera (written only for a second lens).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub lens: u8,
     /// Type as the device names it.
     #[serde(rename = "type")]
     pub kind: String,
@@ -190,6 +200,7 @@ pub fn incident_json(
                 IncidentCamera {
                     device: c.device.clone(),
                     channel: c.channel,
+                    lens: c.lens,
                     file: camera_file_name(*s, &name, pattern),
                     name,
                     start: json_time(*s),
@@ -203,6 +214,7 @@ pub fn incident_json(
             .map(|e| IncidentEventJson {
                 device: e.camera.device.clone(),
                 channel: e.camera.channel,
+                lens: e.camera.lens,
                 kind: e.kind.clone(),
                 start: json_time(e.start),
                 end: json_time(e.end),

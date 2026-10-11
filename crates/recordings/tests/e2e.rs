@@ -19,7 +19,7 @@ use recordings::scheduler::{
     CameraSource, CameraState, IncidentDownload, IncidentProgress, PARTS_DIR, Scheduler,
     SchedulerConfig,
 };
-use recordings::{Clock, Secs, secs};
+use recordings::{Clock, DeviceCamera, Secs, secs};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -109,13 +109,11 @@ fn fixed_clock(t: Arc<AtomicI64>) -> Clock {
 }
 
 fn channels() -> Vec<IndexedChannel> {
-    (0..2)
-        .map(|c| IndexedChannel {
-            channel: c,
-            uid: None,
-            stream: StreamTier::Main,
-        })
-        .collect()
+    (0..2).map(IndexedChannel::first).collect()
+}
+
+fn cam(channel: u8) -> DeviceCamera {
+    DeviceCamera::first(channel)
 }
 
 /// Indexes a device and returns its events as camera events.
@@ -162,18 +160,18 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     assert_eq!(
         r.days,
         vec![
-            (0, day(10)),
-            (1, day(10)),
-            (0, day(9)),
-            (1, day(9)),
-            (0, day(8)),
-            (1, day(8)),
+            (cam(0), day(10)),
+            (cam(1), day(10)),
+            (cam(0), day(9)),
+            (cam(1), day(9)),
+            (cam(0), day(8)),
+            (cam(1), day(8)),
         ]
     );
     {
         let i = idx.lock().unwrap();
-        assert_eq!(i.recorded_days(1), vec![day(8), day(9), day(10)]);
-        assert_eq!(i.files(0, day(10), day(10) + 86_399).len(), 24);
+        assert_eq!(i.recorded_days(cam(1)), vec![day(8), day(9), day(10)]);
+        assert_eq!(i.files(cam(0), day(10), day(10) + 86_399).len(), 24);
         let vehicles = i.events(&EventQuery {
             kinds: vec!["vehicle".into()],
             start: day(10),
@@ -184,7 +182,7 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
         assert!(vehicles.iter().all(|e| !e.file_id.is_empty()));
         let people = i.events(&EventQuery {
             kinds: vec!["people".into()],
-            channels: vec![1],
+            cameras: vec![cam(1)],
             start: day(8),
             end: day(10) + 86_399,
         });
@@ -201,7 +199,7 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
     // Two minutes later only today (and the current month) is refreshed.
     now.fetch_add(120, Ordering::SeqCst);
     let r = run_pass(&s, &idx, &cfg).await;
-    assert_eq!(r.days, vec![(0, day(10)), (1, day(10))]);
+    assert_eq!(r.days, vec![(cam(0), day(10)), (cam(1), day(10))]);
     assert_eq!(r.months, 1);
 
     // The index survives a restart.
@@ -220,7 +218,7 @@ async fn index_fills_newest_first_refreshes_today_and_searches_by_type() {
         .unwrap()
         .clone()
         .unwrap();
-    assert_eq!(report.days, vec![(0, day(10)), (1, day(10))]);
+    assert_eq!(report.days, vec![(cam(0), day(10)), (cam(1), day(10))]);
     indexer.stop().await;
     s.close_shared().await;
 }

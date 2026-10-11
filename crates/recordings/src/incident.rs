@@ -13,25 +13,51 @@
 //! [`Incident::add_camera`], [`Incident::remove_camera`], and renaming
 //! through [`Incident::name`].
 
-use crate::Secs;
+use crate::{DeviceCamera, Secs};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A camera: a channel of a device.
+/// A camera: one lens of a channel of a device.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CameraId {
     /// The app's identifier of the device.
     pub device: String,
     /// Channel on that device.
     pub channel: u8,
+    /// Lens of a multi-lens camera: 0 for the first (and usually only)
+    /// lens, 1 for the second. Missing in files written before lenses were
+    /// tracked, which were all first lenses.
+    #[serde(default)]
+    pub lens: u8,
 }
 
 impl CameraId {
-    /// A camera.
+    /// The first lens of a channel.
     pub fn new(device: impl Into<String>, channel: u8) -> CameraId {
+        CameraId::with_lens(device, channel, 0)
+    }
+
+    /// One lens of a channel.
+    pub fn with_lens(device: impl Into<String>, channel: u8, lens: u8) -> CameraId {
         CameraId {
             device: device.into(),
             channel,
+            lens,
+        }
+    }
+
+    /// The camera as its device knows it.
+    pub fn local(&self) -> DeviceCamera {
+        DeviceCamera::new(self.channel, self.lens)
+    }
+
+    /// `device:channel`, plus `:lens` for a second lens only, so that
+    /// identifiers made before lenses were tracked stay the same.
+    pub(crate) fn tag(&self) -> String {
+        if self.lens == 0 {
+            format!("{}:{}", self.device, self.channel)
+        } else {
+            format!("{}:{}:{}", self.device, self.channel, self.lens)
         }
     }
 }
@@ -139,11 +165,7 @@ impl Incident {
     }
 
     fn compute_id(&self) -> String {
-        let cams: Vec<String> = self
-            .cameras()
-            .iter()
-            .map(|c| format!("{}:{}", c.device, c.channel))
-            .collect();
+        let cams: Vec<String> = self.cameras().iter().map(CameraId::tag).collect();
         let mut parts: Vec<&str> = vec![self.group.as_deref().unwrap_or("")];
         parts.extend(cams.iter().map(String::as_str));
         let (start, end) = (self.start().to_string(), self.end().to_string());
@@ -233,7 +255,7 @@ fn group_of(cfg: &GroupingConfig, camera: &CameraId) -> (String, Option<String>)
     }
     match cfg.groups.iter().find(|g| g.cameras.contains(camera)) {
         Some(g) => (format!("g:{}", g.name), Some(g.name.clone())),
-        None => (format!("c:{}:{}", camera.device, camera.channel), None),
+        None => (format!("c:{}", camera.tag()), None),
     }
 }
 
@@ -400,6 +422,31 @@ mod tests {
         assert_eq!(front.cameras().len(), 3);
         assert!(incidents.iter().any(|i| i.group.is_none()
             && i.cameras().into_iter().collect::<Vec<_>>() == vec![CameraId::new("nvr-b", 3)]));
+    }
+
+    #[test]
+    fn lenses_are_cameras_of_their_own_and_old_files_still_load() {
+        // Written before lenses were tracked.
+        let old: CameraId = serde_json::from_str(r#"{"device":"nvr-a","channel":3}"#).unwrap();
+        assert_eq!(old, CameraId::new("nvr-a", 3));
+        assert_eq!(old.local(), DeviceCamera::first(3));
+        // A first lens keeps the identifier format of before (job folders
+        // and edits made then still match), a second lens differs.
+        assert_eq!(old.tag(), "nvr-a:3");
+        let tele = CameraId::with_lens("nvr-a", 3, 1);
+        assert_eq!(tele.tag(), "nvr-a:3:1");
+        let evs = vec![
+            ev("nvr-a", 3, "md", 100, 110),
+            CameraEvent {
+                camera: tele.clone(),
+                ..ev("nvr-a", 3, "people", 105, 115)
+            },
+        ];
+        let incs = group(&evs, &GroupingConfig::default());
+        assert_eq!(incs.len(), 1);
+        assert_eq!(incs[0].cameras().len(), 2);
+        let wide_only = group(&evs[..1], &GroupingConfig::default());
+        assert_ne!(incs[0].id, wide_only[0].id);
     }
 
     #[test]
