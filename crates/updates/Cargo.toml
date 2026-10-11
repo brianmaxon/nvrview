@@ -1,0 +1,37 @@
+[package]
+name = "updates"
+version = "0.1.0"
+description = "Self-update from a folder or server the user hosts: signed manifest, version check, verified download, and safe unpacking (docs/UPDATES.md)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Manifest signatures (BSD-3-Clause; pure Rust).
+ed25519-dalek = "3"
+# Package and key hashes (MIT OR Apache-2.0).
+sha2 = "0.11"
+# Inflating package zips; the zip structure itself is read by src/zip.rs
+# (MIT OR Zlib OR Apache-2.0; pure Rust).
+miniz_oxide = "0.9"
+# The manifest is JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Blocking HTTP client (MIT OR Apache-2.0) on rustls, without its default
+# crypto provider (ring, which needs a C cross compiler for the macOS-side
+# Windows and Linux checks).
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+# rustls's crypto from graviola: pure Rust and assembly (Apache-2.0 OR ISC
+# OR MIT-0).
+rustls-graviola = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+# Tests make their own TLS certificate authority at run time (no key is
+# ever committed) and serve HTTPS with rustls.
+graviola = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+
+[lints]
+workspace = true
