@@ -187,3 +187,125 @@ async fn a_play_ends_at_the_end_of_the_recordings_and_bad_files_are_refused() {
     assert!(p.next().await.is_err());
     s.close().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_group_seeks_together_pauses_then_plays_together() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |c| c.max_plays = 3);
+    let at = d(8, 7, 41, 41);
+    let starts = [start(0, at), start(1, at), start(2, at)];
+    let t0 = Instant::now();
+    let mut plays = s.play_group(&starts, Some(at)).await.unwrap();
+    // The seeks, the pause (500 ms by default), then the plays.
+    assert!(
+        t0.elapsed() >= Duration::from_millis(500),
+        "{:?}",
+        t0.elapsed()
+    );
+    assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+    assert_eq!(plays.len(), 3);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(nvr.command_count(123), 3);
+    assert_eq!(nvr.command_count(5), 3);
+    // Consecutive seq numbers, one message ID per play.
+    let seq0 = plays[0].seq();
+    assert!(
+        plays
+            .iter()
+            .enumerate()
+            .all(|(i, p)| p.seq() == seq0 + i as u32)
+    );
+    let ids: Vec<_> = plays.iter().map(|p| p.message_id().unwrap()).collect();
+    assert!(
+        ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
+        "{ids:?}"
+    );
+    // Every play started at the one seek time and was sent as a sub-stream
+    // play; the device saw the last seek when each 5 arrived.
+    let log = nvr.play_log();
+    assert_eq!(log.len(), 3);
+    let last = plays[2].seq();
+    for (i, l) in log.iter().enumerate() {
+        assert_eq!((l.channel, l.at, l.seq), (i as u8, at, last));
+        assert_eq!(l.support_sub, Some(1));
+    }
+    // The media of every play carries the last seek's seq; each is routed
+    // by its message ID and delivers.
+    for p in &mut plays {
+        let (wall, ..) = read_video(p, 3).await;
+        assert_eq!(wall, Some(at.to_naive_secs() as u32 - 1));
+    }
+    // Dropping the plays stops them all.
+    drop(plays);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(nvr.command_count(7), 3);
+    assert_eq!(nvr.active_plays(), 0);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_pause_between_seeks_and_plays_is_configurable() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |c| {
+        c.max_plays = 2;
+        c.play_group_delay = Duration::from_secs(3);
+    });
+    let at = d(8, 9, 0, 0);
+    let t0 = Instant::now();
+    let plays = s
+        .play_group(&[start(0, at), start(1, at)], Some(at))
+        .await
+        .unwrap();
+    assert!(t0.elapsed() >= Duration::from_secs(3), "{:?}", t0.elapsed());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop(plays);
+    s.close().await;
+    assert_eq!(nvr.command_count(7), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_group_respects_max_plays_and_sends_nothing_when_it_does_not_fit() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |c| c.max_plays = 3);
+    let at = d(8, 7, 0, 0);
+    let one = s.play(&start(0, at)).await.unwrap();
+    // Two more fit; three do not, and nothing goes out for them.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let seeks = nvr.command_count(123);
+    assert!(matches!(
+        s.play_group(&[start(0, at), start(1, at), start(2, at)], Some(at))
+            .await,
+        Err(SearchError::Query(QueryError::Busy))
+    ));
+    assert_eq!(nvr.command_count(123), seeks);
+    assert_eq!(nvr.command_count(5), 1);
+    // The refused group released its permits: two still fit.
+    let two = s
+        .play_group(&[start(1, at), start(2, at)], Some(at))
+        .await
+        .unwrap();
+    assert_eq!(two.len(), 2);
+    assert!(s.play_group(&[], Some(at)).await.unwrap().is_empty());
+    drop((one, two));
+    s.close().await;
+    assert_eq!(nvr.active_plays(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_group_without_a_shared_time_sends_each_starts_own_seek() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr, |c| c.max_plays = 2);
+    let (a, b) = (d(8, 7, 0, 0), d(8, 9, 30, 0));
+    let plays = s
+        .play_group(&[start(0, a), start(1, b)], None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(nvr.command_count(123), 2);
+    // The device keeps one seek position: both plays start from the last.
+    let log = nvr.play_log();
+    assert_eq!((log[0].at, log[1].at), (b, b));
+    assert_eq!(plays[1].seq(), plays[0].seq() + 1);
+    drop(plays);
+    s.close().await;
+}

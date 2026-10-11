@@ -98,6 +98,10 @@ pub struct SessionConfig {
     /// view and plays on one session"). The official client ran four only
     /// with live view stopped.
     pub max_plays: usize,
+    /// How long [`crate::DeviceSession::play_group`] waits between its
+    /// seeks (123) and its plays (5): the official client waited about
+    /// 0.5 s (docs/protocol.md, "Four plays at once"). Default 500 ms.
+    pub play_group_delay: Duration,
     /// A play that delivers nothing for this long has stalled. Plays are
     /// paced (media about every 2 s, every 4 s on a low-rate sub-stream),
     /// so this is longer than a download's. Default 10 s.
@@ -174,6 +178,7 @@ impl SessionConfig {
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
             max_plays: 2,
+            play_group_delay: Duration::from_millis(500),
             play_stall_timeout: Duration::from_secs(10),
             play_buffer_bytes: 32 * 1024 * 1024,
             alarm_report: true,

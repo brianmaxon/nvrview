@@ -216,6 +216,7 @@ pub struct DeviceSession {
     pub(crate) play_permits: Arc<Semaphore>,
     pub(crate) play_stall_timeout: Duration,
     pub(crate) play_buffer_bytes: usize,
+    pub(crate) play_group_delay: Duration,
     /// The next play's replay `seq`.
     pub(crate) play_seq: std::sync::atomic::AtomicU32,
     /// Talk-back permissions and rate limit.
@@ -248,6 +249,7 @@ impl DeviceSession {
         let play_permits = Arc::new(Semaphore::new(config.max_plays.max(1)));
         let play_stall_timeout = config.play_stall_timeout;
         let play_buffer_bytes = config.play_buffer_bytes;
+        let play_group_delay = config.play_group_delay;
         // The official client chose increasing seq numbers close to the
         // current Unix time (protocol.md, "Playback"); so does this.
         let play_seq = std::sync::atomic::AtomicU32::new(
@@ -304,6 +306,7 @@ impl DeviceSession {
             play_permits,
             play_stall_timeout,
             play_buffer_bytes,
+            play_group_delay,
             play_seq,
             talk_control,
             talk_starts_per_minute,

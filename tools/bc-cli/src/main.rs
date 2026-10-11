@@ -42,7 +42,7 @@ usage:
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
-         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10] [--no-live]
+         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10] [--no-live] [--batched]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -90,7 +90,12 @@ second. It stops at the first refusal, error, stall, or live disruption;
 every play is stopped (7) and the session closed on every path, Ctrl-C
 included; the whole run is capped at 90 s. --no-live leaves out the live
 preview and every live measurement and check (the plays alone; --now is then
-the only source of the device's time). Only the file search, live
+the only source of the device's time). --batched starts each stage's plays the way the
+official client does (docs/protocol.md, \"Four plays at once\"): all seeks back
+to back at one time (5 s after the latest start of the stage's recordings;
+when they share no such time, each at its own recording's start + 5 s), a
+0.5 s pause, then all plays back to back, instead of seek, play, seek, play
+at each play's own time. Only the file search, live
 preview, seek (123), play (5) and stop (7) are sent. Keep its output in the
 ignored captures/ directory.
 analyze prints a Markdown timing report of a recording (aggregates only).";
@@ -176,7 +181,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut number = None;
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
     let (mut allow_probe, mut max_plays, mut now) = (false, None, None);
-    let mut no_live = false;
+    let (mut no_live, mut batched) = (false, false);
     let mut plays = None;
     let mut gap = None;
     let mut it = args;
@@ -249,6 +254,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 );
             }
             "--no-live" => no_live = true,
+            "--batched" => batched = true,
             "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
             "--tone" => {
                 tone = value("--tone")?
@@ -352,6 +358,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             cfg.gap = gap.unwrap_or(cfg.gap);
             cfg.now = Some(now.ok_or("replay-probe needs --now (the device's local time)")?);
             cfg.no_live = no_live;
+            cfg.batched = batched;
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
         }
@@ -980,6 +987,25 @@ mod tests {
         let mut v = base.to_vec();
         v.extend_from_slice(&["--gap", "11"]);
         assert!(with(&v).is_err());
+        // --batched is a plain flag, off by default.
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&base)
+        else {
+            panic!("base not parsed");
+        };
+        assert!(!cfg.batched);
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--batched", "--plays", "0,1,2,0~1"]);
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&v)
+        else {
+            panic!("--batched not parsed");
+        };
+        assert!(cfg.batched && cfg.plays.len() == 4);
         assert!(with(&["replay-probe", "--allow-replay-probe"]).is_err());
         assert!(with(&["--password", "x", "replay-probe"]).is_err());
     }

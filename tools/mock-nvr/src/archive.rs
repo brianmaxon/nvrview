@@ -115,14 +115,16 @@ pub struct PlayLog {
     pub channel: u8,
     /// The file `Id` it named.
     pub file_id: String,
-    /// The preceding seek's time.
+    /// The latest seek's time when the play arrived.
     pub at: DateTime,
-    /// The preceding seek's `seq`.
+    /// The latest seek's `seq` when the play arrived.
     pub seq: u32,
     /// `playSpeed` as sent.
     pub speed: Option<u32>,
     /// Stream requested.
     pub stream: Option<StreamTier>,
+    /// `supportSub` as sent.
+    pub support_sub: Option<u8>,
 }
 
 impl ArchiveConfig {

@@ -14,6 +14,12 @@
 //! with its reader task sends its stop too), and the caller closes the
 //! session.
 //!
+//! By default a stage starts its plays one at a time (seek, play, seek,
+//! play, each at its own time). With [`ProbeConfig::batched`] it starts them
+//! as the official client does ([`bc_session::DeviceSession::play_group`]):
+//! every seek back to back at one shared time, a pause, then every play
+//! back to back.
+//!
 //! Only commands the session's viewing tier allows are sent: the file
 //! search (14, 15, 16), live preview (3, 4), seek (123), play (5) at
 //! `playSpeed` 1, and stop (7).
@@ -109,6 +115,14 @@ pub struct ProbeConfig {
     /// No live preview at all: no baseline or tail, no live checks, and
     /// `now` is required. Measures the plays alone.
     pub no_live: bool,
+    /// Start each stage's plays as a group ([`bc_session::DeviceSession::play_group`],
+    /// the official client's recipe: every seek back to back at one
+    /// `seekTime`, a pause, then every play back to back) instead of one at
+    /// a time (seek, play, seek, play, each at its own time). The shared
+    /// time is 5 s after the latest start of the stage's files
+    /// ([`batched_seek`]); when no common time exists, each seek goes to its
+    /// own file's start + 5 s.
+    pub batched: bool,
     /// Waiting for the login.
     pub login_limit: Duration,
     /// The whole run, login included (at most [`RUN_LIMIT`]).
@@ -130,6 +144,7 @@ impl ProbeConfig {
             tail: Duration::from_secs(3),
             now: None,
             no_live: false,
+            batched: false,
             login_limit: Duration::from_secs(20),
             run_limit: RUN_LIMIT,
         }
@@ -417,6 +432,44 @@ fn mean(rows: &[u32]) -> f64 {
 
 fn add_secs(t: DateTime, secs: i64) -> DateTime {
     DateTime::from_naive_secs(t.to_naive_secs() + secs).unwrap_or(t)
+}
+
+/// The one seek time of a batched stage: 5 s after the latest start of the
+/// stage's files, when every file holds it (it lies before the earliest
+/// end); `None` when the files share no such time, and each seek then goes
+/// to its own file's start + 5 s (the device is likely to start every play
+/// from the last seek, so such a stage is an experiment, not the client's
+/// recipe).
+pub fn batched_seek(files: &[&RecordFile]) -> Option<DateTime> {
+    let latest = files.iter().map(|f| f.start.to_naive_secs()).max()?;
+    let earliest_end = files.iter().map(|f| f.end.to_naive_secs()).min()?;
+    let t = latest + 5;
+    (t < earliest_end)
+        .then(|| DateTime::from_naive_secs(t))
+        .flatten()
+}
+
+/// What a failed start means: a refused seek, the play limit, or another
+/// failure (of play number `play`, 1-based, when one by one).
+fn start_error(stage: usize, e: SearchError, play: Option<usize>) -> Outcome {
+    match e {
+        SearchError::Refused(status) => Outcome::Refused {
+            stage,
+            command: 123,
+            status,
+        },
+        SearchError::Query(QueryError::Busy) => Outcome::Error {
+            stage,
+            what: "the session's play limit".into(),
+        },
+        other => Outcome::Error {
+            stage,
+            what: match play {
+                Some(n) => format!("play {n}: {other}"),
+                None => format!("batched start: {other}"),
+            },
+        },
+    }
 }
 
 /// The recording to play: of the recordings of at least [`MIN_FILE_SECS`]
@@ -775,9 +828,19 @@ async fn probe<W: Write>(
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let mut first_start = None;
         let mut refused = None;
-        for (j, (src, uid, file)) in found.iter().take(stage).enumerate() {
-            let seek = add_secs(file.start, 5 + 10 * j as i64);
-            let start = PlayStart {
+        let stage_files: Vec<&(PlaySource, Option<String>, RecordFile)> =
+            found.iter().take(stage).collect();
+        // Batched: one seek time for the stage when every file holds it.
+        let shared = if cfg.batched {
+            let files: Vec<&RecordFile> = stage_files.iter().map(|(_, _, f)| f).collect();
+            batched_seek(&files)
+        } else {
+            None
+        };
+        let starts: Vec<PlayStart> = stage_files
+            .iter()
+            .enumerate()
+            .map(|(j, (src, uid, file))| PlayStart {
                 request: PlayRequest {
                     channel: src.channel,
                     uid: uid.clone(),
@@ -785,38 +848,58 @@ async fn probe<W: Write>(
                     file_id: file.id.clone(),
                     file_name: file.name.clone(),
                 },
-                at: seek,
-            };
-            report.plays_started += 1;
-            let requested = Instant::now();
-            let r = run.bounded(session.play(&start)).await?;
-            first_start.get_or_insert_with(Instant::now);
-            match r {
-                Ok(p) => {
-                    let state = Arc::new(PlayState::default());
-                    tasks.0.push(Running {
-                        task: spawn_play(p, requested, Arc::clone(&state), cancel_rx.clone()),
-                        state,
-                        seek,
-                    });
+                at: if cfg.batched {
+                    shared.unwrap_or_else(|| add_secs(file.start, 5))
+                } else {
+                    add_secs(file.start, 5 + 10 * j as i64)
+                },
+            })
+            .collect();
+        if cfg.batched {
+            match shared {
+                Some(t) => run.line(&format!(
+                    "batched start: {stage} seek(s) at {t}, all plays after the pause"
+                )),
+                None => run.line(&format!(
+                    "batched start: the files hold no common time, {stage} seek(s) at each \
+                     file's start + 5 s, all plays after the pause"
+                )),
+            }
+            report.plays_started += stage;
+            match run.bounded(session.play_group(&starts, shared)).await? {
+                Ok(plays) => {
+                    let requested = Instant::now();
+                    first_start = Some(requested);
+                    for (p, start) in plays.into_iter().zip(&starts) {
+                        let state = Arc::new(PlayState::default());
+                        tasks.0.push(Running {
+                            task: spawn_play(p, requested, Arc::clone(&state), cancel_rx.clone()),
+                            state,
+                            seek: start.at,
+                        });
+                    }
                 }
-                Err(e) => {
-                    refused = Some(match e {
-                        SearchError::Refused(status) => Outcome::Refused {
-                            stage,
-                            command: 123,
-                            status,
-                        },
-                        SearchError::Query(QueryError::Busy) => Outcome::Error {
-                            stage,
-                            what: "the session's play limit".into(),
-                        },
-                        other => Outcome::Error {
-                            stage,
-                            what: format!("play {}: {other}", j + 1),
-                        },
-                    });
-                    break;
+                Err(e) => refused = Some(start_error(stage, e, None)),
+            }
+        } else {
+            for (j, start) in starts.iter().enumerate() {
+                report.plays_started += 1;
+                let requested = Instant::now();
+                let r = run.bounded(session.play(start)).await?;
+                first_start.get_or_insert_with(Instant::now);
+                match r {
+                    Ok(p) => {
+                        let state = Arc::new(PlayState::default());
+                        tasks.0.push(Running {
+                            task: spawn_play(p, requested, Arc::clone(&state), cancel_rx.clone()),
+                            state,
+                            seek: start.at,
+                        });
+                    }
+                    Err(e) => {
+                        refused = Some(start_error(stage, e, Some(j + 1)));
+                        break;
+                    }
                 }
             }
         }
@@ -979,6 +1062,22 @@ mod tests {
             start,
             end,
         }
+    }
+
+    #[test]
+    fn a_batched_stage_seeks_five_seconds_after_the_latest_start() {
+        let a = file(t(9, 0, 0), t(9, 5, 0));
+        let b = file(t(9, 2, 0), t(9, 8, 0));
+        // Both hold 09:02:05.
+        assert_eq!(batched_seek(&[&a, &b]), Some(t(9, 2, 5)));
+        assert_eq!(batched_seek(&[&a]), Some(t(9, 0, 5)));
+        // Files that do not overlap share no time.
+        let c = file(t(9, 10, 0), t(9, 15, 0));
+        assert_eq!(batched_seek(&[&a, &c]), None);
+        // The shared time must lie inside the shortest file.
+        let short = file(t(9, 3, 0), t(9, 3, 4));
+        assert_eq!(batched_seek(&[&a, &short]), None);
+        assert_eq!(batched_seek(&[]), None);
     }
 
     #[test]

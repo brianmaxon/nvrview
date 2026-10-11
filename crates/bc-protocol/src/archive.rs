@@ -840,15 +840,27 @@ pub fn replay_seek_body(seq: u32, at: DateTime) -> String {
     ))
 }
 
+/// The `supportSub` value of a play: 1 when the play's stream is the
+/// sub-stream, 0 otherwise (docs/protocol.md, "Four plays at once"). The
+/// client was observed sending 1 only for sub-stream plays and 0 for main
+/// stream ones; the second lens's tiers were not observed.
+pub const fn play_support_sub(stream: StreamTier) -> u8 {
+    match stream {
+        StreamTier::Sub => 1,
+        StreamTier::Main | StreamTier::Mobile | StreamTier::Extern => 0,
+    }
+}
+
 /// Body of a play (command 5) at normal speed.
 pub fn play_body(q: &PlayRequest) -> String {
     wrap(&format!(
         "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<Id>{}</Id>\n{}\
-         <supportSub>0</supportSub>\n<playSpeed>{PLAY_SPEED_NORMAL}</playSpeed>\n\
+         <supportSub>{}</supportSub>\n<playSpeed>{PLAY_SPEED_NORMAL}</playSpeed>\n\
          <streamType>{}</streamType>\n</FileInfo>\n</FileInfoList>\n",
         q.channel,
         escape(&q.file_id),
         opt_uid(q.uid.as_deref()),
+        play_support_sub(q.stream),
         q.stream.name(),
     ))
 }
@@ -871,6 +883,29 @@ mod tests {
 
     fn t(y: u16, mo: u8, d: u8, h: u8, mi: u8, s: u8) -> DateTime {
         DateTime::new(y, mo, d, h, mi, s).unwrap()
+    }
+
+    #[test]
+    fn play_body_sets_support_sub_by_stream() {
+        let mut q = PlayRequest {
+            channel: 3,
+            uid: None,
+            stream: StreamTier::Sub,
+            file_id: "1-3-0-example".into(),
+            file_name: "example".into(),
+        };
+        let b = play_body(&q);
+        let root = Element::parse(&b).unwrap();
+        let fi = root.find("FileInfo").unwrap();
+        assert_eq!(fi.text_of("supportSub"), Some("1"));
+        assert_eq!(fi.text_of("streamType"), Some("subStream"));
+        assert_eq!(fi.text_of("playSpeed"), Some("1"));
+        q.stream = StreamTier::Main;
+        let b = play_body(&q);
+        let root = Element::parse(&b).unwrap();
+        let fi = root.find("FileInfo").unwrap();
+        assert_eq!(fi.text_of("supportSub"), Some("0"));
+        assert_eq!(fi.text_of("streamType"), Some("mainStream"));
     }
 
     #[test]

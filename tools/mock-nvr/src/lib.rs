@@ -798,8 +798,14 @@ struct Conn {
     key: Option<SessionKey>,
     holds_login: bool,
     streams: HashMap<u32, Stream>,
-    /// The latest seek (123): its `seq` and time, taken by the next play.
+    /// The latest seek (123): its `seq` and time. Every play starts from
+    /// the seek that is current when its 5 arrives (the seek is not used
+    /// up), as a batch of seeks followed by a batch of plays needs.
     seek: Option<(u32, bc_protocol::archive::DateTime)>,
+    /// The `seq` of the latest seek, which every running play's media
+    /// carry from then on (observed: the device tags all plays of a session
+    /// with the latest seek's `seq`, not their own).
+    latest_seq: Arc<AtomicU32>,
     /// Running plays by message ID, with their channel.
     plays: HashMap<u32, (u8, Stream)>,
     /// Running downloads by message ID.
@@ -832,6 +838,7 @@ where
         streams: HashMap::new(),
         downloads: HashMap::new(),
         seek: None,
+        latest_seq: Arc::new(AtomicU32::new(0)),
         plays: HashMap::new(),
         file_searches: HashMap::new(),
         event_searches: HashMap::new(),
@@ -1678,6 +1685,7 @@ impl Conn {
                 match (seq, at) {
                     (Some(seq), Some(at)) => {
                         self.seek = Some((seq, at));
+                        self.latest_seq.store(seq, Ordering::SeqCst);
                         self.reply_xml(123, id, 200, "").await
                     }
                     _ => self.reply_xml(123, id, 400, "").await,
@@ -1828,9 +1836,10 @@ impl Conn {
     /// 5: plays the file from the latest seek (123) of this connection (the
     /// play itself names no `seq`). A first reply with status 200 and the
     /// stream-info record, then the media from the keyframe at or before
-    /// the seek, GOP by GOP, each message with the seek's `seq` in place of
-    /// status and class; a burst of [`ArchiveConfig::play_burst_secs`],
-    /// then real time. The play goes on across files, as observed, up to
+    /// the seek, GOP by GOP, each message with the `seq` of the latest seek
+    /// of the connection at the moment it is sent, in place of status and
+    /// class (so a later seek re-tags running plays, as observed); a burst
+    /// of [`ArchiveConfig::play_burst_secs`], then real time. The play goes on across files, as observed, up to
     /// the end of the recordings, where it sends an empty message (the
     /// mock's choice: how a device ends a play is not known).
     async fn start_play(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
@@ -1841,11 +1850,12 @@ impl Conn {
         let ch = el.num::<u8>("channelId").ok().flatten();
         let file_id = el.text_of("Id").unwrap_or_default().to_owned();
         let speed = el.num::<u32>("playSpeed").ok().flatten();
+        let support_sub = el.num::<u8>("supportSub").ok().flatten();
         let stream = el.text_of("streamType").and_then(StreamTier::from_name);
         let Some(ch) = ch.filter(|c| *c < self.shared.config.channels) else {
             return self.reply_xml(5, id, 400, "").await;
         };
-        let Some((seq, at)) = self.seek.take() else {
+        let Some((seq, at)) = self.seek else {
             return self.reply_xml(5, id, 400, "").await;
         };
         if !file_id.starts_with(&format!("mock-file-{ch}-")) || self.plays.contains_key(&id) {
@@ -1867,15 +1877,17 @@ impl Conn {
                 seq,
                 speed,
                 stream,
+                support_sub,
             });
         }
         let key = self.key.clone().expect("logged in");
         let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
         let (shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
+        let latest = Arc::clone(&self.latest_seq);
         shared.active_plays.fetch_add(1, Ordering::SeqCst);
         let task = self.shared.runtime.spawn(async move {
             let _count = PlayCount(Arc::clone(&shared));
-            let _ = serve_play(&shared, &writer, &key, id, seq, &cfg, at, &stop2).await;
+            let _ = serve_play(&shared, &writer, &key, id, &latest, &cfg, at, &stop2).await;
         });
         self.plays.retain(|_, (_, s)| !s.is_finished());
         self.plays.insert(
@@ -1909,7 +1921,7 @@ async fn serve_play(
     writer: &Writer,
     key: &SessionKey,
     id: u32,
-    seq: u32,
+    latest_seq: &AtomicU32,
     cfg: &ArchiveConfig,
     at: bc_protocol::archive::DateTime,
     stop: &AtomicBool,
@@ -1969,6 +1981,7 @@ async fn serve_play(
             if *kind == archive::Kind::Info || !seen_key {
                 continue;
             }
+            let seq = latest_seq.load(Ordering::SeqCst);
             transfer_message(key, 5, id, *kind, rec, false, Some(seq), &mut out)?;
         }
         let mut w = writer.lock().await;
@@ -1983,7 +1996,7 @@ async fn serve_play(
     }
     write_locked(
         &mut w,
-        &encode_replay_media(id, seq, &[], &[]).map_err(enc_err)?,
+        &encode_replay_media(id, latest_seq.load(Ordering::SeqCst), &[], &[]).map_err(enc_err)?,
     )
     .await
 }
