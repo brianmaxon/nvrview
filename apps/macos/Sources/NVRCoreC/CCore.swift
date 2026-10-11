@@ -257,6 +257,11 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    public func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus) {
+        let status = CoreStatus(nv_talk_set_conversation(try core(), tile, open))
+        if !status.isOK { throw status }
+    }
+
     /// `nv_audio_render` with the core handle as its context. Players stop
     /// rendering before `free` (CoreBridge.shutdown sees to it).
     public var audioRenderHook: AudioRenderHook {

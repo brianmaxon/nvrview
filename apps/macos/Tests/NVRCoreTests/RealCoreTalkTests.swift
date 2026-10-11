@@ -57,6 +57,8 @@ import Testing
         #expect(talk().first?.reason == "not_permitted")
 
         try bridge.setTalkPermission(device: device, channel: 0, allowed: true)
+        // Minor 4: a call is open on the camera (no per-minute limit).
+        try bridge.setTalkConversation(tile, open: true)
         try bridge.startTalk(tile)
         wait(10) { talk().contains { $0.state == .active || $0.state == .refused && talk().count > 1 } }
         let samples = (0..<16_000).map { Float(0.3 * sin(Double($0) * 2 * Double.pi * 440 / 16_000)) }

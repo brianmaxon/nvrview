@@ -334,7 +334,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 3;
+    public const uint AbiMinor = 4;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -448,10 +448,15 @@ public static unsafe partial class NvNative
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_talk_push(nint core, ulong tile, float* samples, nuint count, uint sampleRate);
 
-    /// <summary>Stops talk-back, after sending what is queued when drain is true.</summary>
+    /// <summary>Stops talk-back, after sending what is queued and a short silent tail when drain is true.</summary>
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_talk_stop(nint core, ulong tile, [MarshalAs(UnmanagedType.U1)] bool drain);
+
+    /// <summary>Marks the tile's camera as in an open call, or no longer (minor 4): no per-minute talk-back limit while marked.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_talk_set_conversation(nint core, ulong tile, [MarshalAs(UnmanagedType.U1)] bool open);
 
     /// <summary>The device's stable key into a buffer.</summary>
     [LibraryImport(Library)]

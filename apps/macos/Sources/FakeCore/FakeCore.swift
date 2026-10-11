@@ -526,6 +526,8 @@ public final class FakeCore: CoreAPI {
         /// Talking tiles: active once started, samples pushed (at 16 kHz).
         var talks: [UInt64: (active: Bool, samples16k: Double)] = [:]
         var starts = 0
+        /// Tiles marked as in an open conversation (`talkSetConversation`).
+        var conversations: Set<UInt64> = []
     }
     private let talkWorld = Mutex(TalkWorld())
 
@@ -549,6 +551,8 @@ public final class FakeCore: CoreAPI {
                 return []
             }
             t.permitted.remove(key)
+            // Withdrawing the permission ends the conversations' exemption.
+            for tile in tiles { t.conversations.remove(tile.id) }
             return tiles.compactMap { tile in t.talks.removeValue(forKey: tile.id).map { (tile, $0.samples16k) } }
         }
         for (tile, samples) in stopped {
@@ -611,6 +615,17 @@ public final class FakeCore: CoreAPI {
         emitEvent(talkJSON(t, #""state":"stopped","reason":"\#(reason)","sent_ms":\#(Int(talk.samples16k / 16)),"dropped_ms":0"#))
     }
 
+    public func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus) {
+        requireOutsideCallback("nv_talk_set_conversation")
+        guard world.withLock({ $0.tiles[tile] }) != nil else { throw .unknownID }
+        talkWorld.withLock { w in
+            if open { w.conversations.insert(tile) } else { w.conversations.remove(tile) }
+        }
+    }
+
+    /// Whether a tile is marked as in an open conversation.
+    public func inConversation(tile: UInt64) -> Bool { talkWorld.withLock { $0.conversations.contains(tile) } }
+
     /// Whether a tile is talking (starting or active).
     public func isTalking(tile: UInt64) -> Bool { talkWorld.withLock { $0.talks[tile] != nil } }
 
@@ -629,6 +644,7 @@ public final class FakeCore: CoreAPI {
 
     /// A tile ends: its talk stops first (`tile_closed` reason).
     private func endTalk(_ t: FakeTile) {
+        talkWorld.withLock { _ = $0.conversations.remove(t.id) }
         guard let talk = talkWorld.withLock({ $0.talks.removeValue(forKey: t.id) }) else { return }
         emitEvent(talkJSON(t, #""state":"stopped","reason":"tile_closed","sent_ms":\#(Int(talk.samples16k / 16)),"dropped_ms":0"#))
     }

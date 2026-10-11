@@ -88,6 +88,26 @@ import Testing
         #expect(talkStates(rig).map(\.reason) == ["not_supported"])
     }
 
+    @Test func conversationMarksFollowTheCallAndEndWithTheTileOrPermission() throws {
+        let rig = try rig()
+        defer { rig.bridge.shutdown() }
+        let tile = try rig.open(channel: 2)
+        try rig.bridge.setTalkConversation(tile, open: true)
+        #expect(rig.fake.inConversation(tile: tile.id))
+        try rig.bridge.setTalkConversation(tile, open: false)
+        #expect(!rig.fake.inConversation(tile: tile.id))
+        // Withdrawing the permission clears the mark.
+        try rig.bridge.setTalkPermission(device: rig.device, channel: 2, allowed: true)
+        try rig.bridge.setTalkConversation(tile, open: true)
+        try rig.bridge.setTalkPermission(device: rig.device, channel: 2, allowed: false)
+        #expect(!rig.fake.inConversation(tile: tile.id))
+        // So does closing the tile; then the tile is unknown.
+        try rig.bridge.setTalkConversation(tile, open: true)
+        rig.bridge.closeTile(tile)
+        #expect(!rig.fake.inConversation(tile: tile.id))
+        #expect(throws: CoreStatus.unknownID) { try rig.bridge.setTalkConversation(tile, open: true) }
+    }
+
     @Test func closingTheTileStopsItsTalk() throws {
         let rig = try rig()
         defer { rig.bridge.shutdown() }

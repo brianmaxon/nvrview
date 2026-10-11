@@ -812,6 +812,15 @@ final class SelfTest {
         }
         if !model.audible.contains(doorbell) { problems.append("a conversation did not make the camera audible") }
         if fake.talkStarts != startsBefore { problems.append("a conversation sent talk-back by itself") }
+        // parity: call-talk-conversation
+        // The core is told the call is open on the doorbell's tile (its talk
+        // starts skip the per-minute limit), and told again when it ends.
+        let markedTile = model.leases.tile(for: doorbell)
+        let marked = markedTile.map { fake.inConversation(tile: $0.id) } ?? false
+        print("conversation: core told the call is open \(marked)")
+        if !marked || model.calls.conversationTile(doorbell) !== markedTile {
+            problems.append("opening a conversation did not tell the core (no talk-back limit during a call)")
+        }
         model.calls.startTalking(doorbell)
         if model.calls.fakePrompter?.asked.count != 5 || model.calls.call(for: doorbell)?.talk.phase != .idle {
             problems.append("Talk in a conversation did not ask first (and send nothing on Cancel)")
@@ -823,6 +832,9 @@ final class SelfTest {
         let ended = model.calls.call(for: doorbell) == nil && stage.insetBoard.item(for: doorbell) == nil
         print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
         if !ended { problems.append("ending a conversation left its call or inset open") }
+        if let markedTile, fake.inConversation(tile: markedTile.id) {
+            problems.append("ending a conversation did not tell the core it ended")
+        }
         if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
         popOutStep(doorbell)
     }

@@ -321,6 +321,12 @@ public final class CoreBridge: Sendable {
     /// `nv_talk_stop`: at once, or once what was pushed has been sent.
     public func stopTalk(_ tile: CoreTile, drain: Bool) throws(CoreStatus) { try live().talkStop(tile.id, drain: drain) }
 
+    /// Minor 4 `nv_talk_set_conversation`: a call is open on the tile's
+    /// camera (or no longer), so its talk starts skip the per-minute limit.
+    public func setTalkConversation(_ tile: CoreTile, open: Bool) throws(CoreStatus) {
+        try live().talkSetConversation(tile.id, open: open)
+    }
+
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 

@@ -497,6 +497,12 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             await CallCardPicture(v, stage, card, camera);
         }
+        // parity: call-talk-conversation
+        // The core is told the call is open on the camera's tile (its talk starts skip the per-minute limit).
+        CameraTile? conversationTile = v.Calls.ConversationTileFor(camera);
+        Say($"calls: core told the call is open on tile {conversationTile?.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none"}");
+        Expect(conversationTile is not null && conversationTile == v.Leases.Tile(camera), "opening a conversation did not tell the core (no talk-back limit during a call)");
+
         // parity: call-camera-audio-recognized
         Expect(engines.Count == 1 && engines[0].Source == TranscriptSource.Visitor, "the camera's audio has no recognizer");
         bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);

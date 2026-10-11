@@ -554,13 +554,31 @@ public sealed unsafe class NvCore : IDisposable
         }
     }
 
-    /// <summary>Stops the tile's talk at once, or after the audio already pushed when <paramref name="drain"/> is true.</summary>
+    /// <summary>
+    /// Stops the tile's talk at once, or, when <paramref name="drain"/> is true, after the audio
+    /// already pushed and the core's 1.5 s silent tail (audio pushed before the close continues it).
+    /// </summary>
     public void TalkStop(ulong tile, bool drain)
     {
         NotInCallback();
         using (AcquireLease(out nint core))
         {
             Check(NvNative.nv_talk_stop(core, tile, drain), nameof(NvNative.nv_talk_stop));
+        }
+    }
+
+    /// <summary>
+    /// Tells the core a call is open on the tile's camera (<paramref name="open"/>), or no longer
+    /// (minor 4). While it is, talk starts on that camera are not limited per minute; they still need
+    /// the permission and are logged. The core also ends the mark when the tile closes or the
+    /// permission is withdrawn.
+    /// </summary>
+    public void TalkSetConversation(ulong tile, bool open)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_talk_set_conversation(core, tile, open), nameof(NvNative.nv_talk_set_conversation));
         }
     }
 

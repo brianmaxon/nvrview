@@ -128,8 +128,16 @@ public protocol CoreAPI: Sendable {
     /// tile's talk. Not from a real-time audio callback.
     func talkPush(_ tile: UInt64, samples: UnsafeBufferPointer<Float>, sampleRate: UInt32) throws(CoreStatus)
 
-    /// `nv_talk_stop`: at once, or after the audio already pushed (`drain`).
+    /// `nv_talk_stop`: at once, or after the audio already pushed (`drain`)
+    /// and the core's 1.5 s silent tail; a push before the close continues
+    /// the talk.
     func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus)
+
+    /// ABI 3, minor 4 `nv_talk_set_conversation`: the tile's camera is in a
+    /// call the user has open (`open`), or no longer. While it is, talk
+    /// starts on it are not limited per minute; they still need the
+    /// permission and are logged.
+    func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus)
 
     /// `nv_audio_render` and its context, for the real-time callback. Valid
     /// until `free`; stop rendering before that.

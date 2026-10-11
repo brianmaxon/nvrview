@@ -72,3 +72,9 @@ extension CoreAPI {
     }
     public func talkStop(_ tile: UInt64, drain: Bool) throws(CoreStatus) { throw .invalidArgument }
 }
+
+// Conversations (minor 4). A core without it keeps its per-minute limit
+// during calls too.
+extension CoreAPI {
+    public func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus) { throw .invalidArgument }
+}

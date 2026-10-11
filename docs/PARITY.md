@@ -96,7 +96,8 @@ less than that. Nothing here was run on a Windows machine.
 | Call controls over the stage when the doorbell fills it (focused or only tile) | yes | yes | Windows step `call-stage-controls`. |
 | Start Conversation / End Conversation without a press | yes | yes | Tile menu on both. |
 | Unmute control for a silent call | yes | yes | |
-| Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. |
+| Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. Letting go drains: the core sends a 1.5 s silent tail before closing, so the last words play. |
+| No talk-back limit while a call is open (20 starts a minute otherwise) | yes | yes | Both apps call `nv_talk_set_conversation` when the call opens (and on each start) and when it ends. Self-test step `call-talk-conversation`. |
 | Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu. |
 | "Allow talk-back for <camera>?" prompt on Talk or Send when it is off (Allow saves and continues, Cancel sends nothing and keeps the typed text) | yes | yes | Self-test step `call-talk-permission-prompt`. macOS: alert sheet; Windows: ContentDialog. |
 | Typed reply spoken by the system voice | yes | yes | |
