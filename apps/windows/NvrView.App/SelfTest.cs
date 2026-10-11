@@ -359,7 +359,11 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("no detection events arrived");
         }
 
-        // The device goes away: tiles say they reconnect, with a countdown.
+        // The device goes away: tiles say they reconnect, with a countdown. The viewer clock is
+        // held from here, at the system clock's reading, so the Retry delay below is measured on
+        // one clock from the moment the messages appear.
+        var retryClock = new ManualViewerClock(new SystemViewerClock().Now);
+        v.UseClock(retryClock);
         app.StopMock();
         bool reconnecting = await Until(() => Tiles.All(t => app.Stage!.StatusText(t) is { } s && s.Contains("onnect", StringComparison.Ordinal)), 15);
         Say($"mock-nvr stopped: {app.Stage!.StatusText(Tiles[0]) ?? "playing"}");
@@ -370,10 +374,13 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // After 30 s of that on the viewer clock, a Retry button shows under the message; pressing it
         // reaches the core and takes the button away until another 30 s have passed.
-        var retryClock = new ManualViewerClock(7000);
-        v.UseClock(retryClock);
         stage.Tick();
         bool early = Tiles.Any(t => stage.ChromeFor(t)?.RetryShown == true);
+        if (early)
+        {
+            Say("retry button early on: " + string.Join("; ", Tiles.Where(t => stage.ChromeFor(t)?.RetryShown == true)
+                .Select(t => $"tile {t.Id} {stage.StatusOf(t).Kind} \"{stage.StatusOf(t).Text}\"")));
+        }
         retryClock.Advance(TileRetryRule.OfferAfter + 1);
         stage.Tick();
         bool offered = Tiles.All(t => stage.ChromeFor(t)?.RetryShown == true);
