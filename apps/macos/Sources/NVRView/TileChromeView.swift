@@ -14,6 +14,8 @@ struct TileChromeContent: Equatable {
     /// The camera's raised alert, as the header's lines (docs/UX.md "Alerts").
     var alertLines: [String]?
     var veil: TileVeil?
+    /// The veil offers a Retry button (it has been up for a while).
+    var retry = false
     var hasCamera: Bool
     var audible: Bool
     var selected: Bool
@@ -40,6 +42,8 @@ final class TileChromeView: NSView {
     var onDismissAlert: () -> Void = {}
     /// The header's reset-zoom control (shown while the tile is zoomed).
     var onResetZoom: () -> Void = {}
+    /// The veil's Retry button.
+    var onRetry: () -> Void = {}
 
     private let header = NSView()
     private let headerGradient = CAGradientLayer()
@@ -59,6 +63,8 @@ final class TileChromeView: NSView {
     private let veil = NSView()
     private let veilTitle = NSTextField(labelWithString: "")
     private let veilDetail = NSTextField(labelWithString: "")
+    /// Under the message of a tile that has had none for a long time.
+    private let retryButton = NSButton(title: "Retry", target: nil, action: nil)
     /// The audible meter (green, on the tile, stays when the header fades).
     private let meter = CALayer()
     private let meterTrack = CALayer()
@@ -150,6 +156,17 @@ final class TileChromeView: NSView {
         veilDetail.alignment = .center
         veil.addSubview(veilTitle)
         veil.addSubview(veilDetail)
+        retryButton.bezelStyle = .rounded
+        retryButton.controlSize = .small
+        retryButton.font = .systemFont(ofSize: 11)
+        retryButton.target = self
+        retryButton.action = #selector(retryClicked(_:))
+        retryButton.refusesFirstResponder = false
+        retryButton.toolTip = "Try this camera again now"
+        retryButton.setAccessibilityLabel("Retry")
+        retryButton.setAccessibilityHelp("Tries this camera's stream again now")
+        retryButton.isHidden = true
+        veil.addSubview(retryButton)
         veil.isHidden = true
         addSubview(veil, positioned: .below, relativeTo: header)
 
@@ -214,8 +231,12 @@ final class TileChromeView: NSView {
 
     // Clicks reach the stage, except on the header's buttons.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard header.alphaValue > 0.05, !header.isHidden else { return nil }
         let p = convert(point, from: superview)
+        // The veil's Retry button takes clicks whether or not the header shows.
+        if !retryButton.isHidden, !veil.isHidden, retryButton.convert(retryButton.bounds, to: self).contains(p) {
+            return retryButton
+        }
+        guard header.alphaValue > 0.05, !header.isHidden else { return nil }
         for button in [speaker, resetZoom, alertDismiss] where !button.isHidden && (button !== alertDismiss || !alertStrip.isHidden) {
             if button.convert(button.bounds, to: self).contains(p) { return button }
         }
@@ -248,6 +269,8 @@ final class TileChromeView: NSView {
         veilTitle.stringValue = c.veil?.title ?? ""
         veilDetail.stringValue = c.veil?.detail ?? ""
         veilDetail.isHidden = c.veil?.detail == nil
+        retryButton.isHidden = !(c.retry && c.veil != nil && c.hasCamera)
+        needsLayout = true
         emptyHint.isHidden = c.hasCamera
         emptyHint.stringValue = c.editing ? "Drag a camera here" : "No camera"
         drop.isHidden = !c.dropTarget
@@ -335,6 +358,9 @@ final class TileChromeView: NSView {
         }
         veilTitle.frame = CGRect(x: 8, y: h / 2 - 18, width: max(w - 16, 0), height: 18)
         veilDetail.frame = CGRect(x: 8, y: h / 2 + 2, width: max(w - 16, 0), height: 16)
+        let retryWidth: CGFloat = 64
+        retryButton.frame = CGRect(
+            x: (w - retryWidth) / 2, y: h / 2 + (veilDetail.isHidden ? 6 : 24), width: retryWidth, height: 22)
         emptyHint.frame = CGRect(x: 8, y: h / 2 - 8, width: max(w - 16, 0), height: 16)
         drop.frame = bounds
     }
@@ -477,6 +503,15 @@ final class TileChromeView: NSView {
             alertBorder.add(blink, forKey: "blink")
         }
     }
+
+    @objc private func retryClicked(_ sender: NSButton) { onRetry() }
+
+    /// Whether the veil's Retry button is showing (for the self-test).
+    var isRetryShown: Bool { !retryButton.isHidden }
+
+    /// Clicks the veil's Retry button, as the pointer or keyboard would (for
+    /// the self-test).
+    func pressRetry() { if !retryButton.isHidden { retryButton.performClick(nil) } }
 
     @objc private func dismissAlertClicked(_ sender: NSButton) { onDismissAlert() }
 

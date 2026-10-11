@@ -207,6 +207,11 @@ final class StageView: NSView {
                 self.refreshChrome()
             }
             view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
+            view.onRetry = { [weak self] in
+                guard let self, let camera = self.frames.leaves.first(where: { $0.path == path })?.camera else { return }
+                self.model.retry(camera)
+                self.refreshChrome()
+            }
             view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
             chromes[leaf.path] = view
@@ -317,7 +322,7 @@ final class StageView: NSView {
             rates: model.showFrameRates ? rateText(leaf.path, camera) : nil,
             indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
             alertLines: alertLines(for: camera),
-            veil: model.veil(for: camera), hasCamera: true, audible: model.audible.contains(camera),
+            veil: model.veil(for: camera), retry: model.retryOffered(for: camera), hasCamera: true, audible: model.audible.contains(camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }
 
@@ -624,6 +629,12 @@ final class StageView: NSView {
 
     /// Whether a tile's header is shown (self-test).
     func headerShown(_ path: NodePath) -> Bool? { chromes[path]?.isHeaderShown }
+
+    /// Whether a tile's veil shows its Retry button (self-test).
+    func retryShown(_ path: NodePath) -> Bool? { chromes[path]?.isRetryShown }
+
+    /// Presses a tile's Retry button, as a click would (self-test).
+    func pressRetry(_ path: NodePath) { chromes[path]?.pressRetry() }
 
     /// Whether a tile's zoom map is shown (self-test).
     func zoomMapShown(_ path: NodePath) -> Bool? { insets[path]?.isShown }

@@ -49,6 +49,8 @@ final class AppModel {
     /// Set with `--fake`, for the self-test's contract checks.
     @ObservationIgnored let fake: FakeCore?
     @ObservationIgnored let leases: TileLeases
+    /// Since when each tile has had a message a retry could help.
+    @ObservationIgnored private var retryWatch = TileRetry.Watch()
     @ObservationIgnored private let credentials: any CredentialStore
     @ObservationIgnored private let deviceFile: JSONFileStore<DeviceConfig>
     @ObservationIgnored private let groupFile: JSONFileStore<CameraGroup>
@@ -586,6 +588,33 @@ final class AppModel {
         }
         return TileVeil.make(
             link: d.link, status: tile?.snapshot.status, hasPicture: tile?.latestPicture() != nil, now: Self.now)
+    }
+
+    /// Whether the tile showing `camera` offers a Retry button: it has been
+    /// without a picture, with a message a retry can help, for
+    /// `TileRetry.offerAfter` (on the viewer clock, so a test sets the time).
+    func retryOffered(for camera: CameraRef) -> Bool {
+        guard let d = runtime(camera.device) else { return false }
+        if d.link.state == .connected, !d.channels.isEmpty, channelInfo(camera)?.connected == false {
+            _ = retryWatch.offered(camera, applies: false, now: clock.now)
+            return false
+        }
+        let tile = leases.tile(for: camera)
+        let applies = TileRetry.applies(
+            link: d.link, status: tile?.snapshot.status, hasPicture: tile?.latestPicture() != nil)
+        return retryWatch.offered(camera, applies: applies, now: clock.now)
+    }
+
+    /// The Retry button: the core restarts the camera's stream now (or
+    /// connects now, when its device is waiting to), within its own floor.
+    func retry(_ camera: CameraRef) {
+        retryWatch.restart(camera, now: clock.now)
+        guard let tile = leases.tile(for: camera) else { return }
+        do throws(CoreStatus) {
+            try bridge.retryTile(tile)
+        } catch {
+            NSLog("retry for a tile was not accepted: %@", String(describing: error))
+        }
     }
 
     // MARK: Layouts

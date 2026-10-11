@@ -831,8 +831,13 @@ final class SelfTest {
     }
 
     private var discoveryChecked = false
+    private var retryChecked = false
 
     private func checkLog() {
+        if !retryChecked, app.model?.fake != nil {
+            retryChecked = true
+            return retryStep()
+        }
         guard !discoveryChecked, app.model?.fake != nil else { return checkLogNow() }
         discoveryChecked = true
         discoveryStep()
@@ -915,6 +920,45 @@ final class SelfTest {
         app.model?.stopDiscovery()
         if let fake = app.model?.fake { problems += fake.violations.map { "core contract: \($0)" } }
         checkLogNow()
+    }
+
+    /// The Retry button (docs/UX.md, "Tiles without a picture"): a device that
+    /// has been reconnecting for a long time offers it under the message, a
+    /// click reaches the core, and reconnecting takes it away.
+    private func retryStep() {
+        guard let model = app.model, let window, let fake = model.fake,
+            let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera,
+            let id = model.devices.first(where: { $0.key == camera.device })?.deviceID,
+            let tile = model.leases.tile(for: camera)
+        else { return checkLog() }
+        let stage = window.stage
+        let path = leaf.path
+        fake.emitForTest(#"{"type":"device_state","device":\#(id),"state":"backoff","attempt":2,"retry_ms":60000}"#)
+        when({ model.devices.first { $0.key == camera.device }?.link.state == .backoff(attempt: 2, retryMilliseconds: 60000) },
+            timeout: 2
+        ) { [self] in
+            stage.refreshChrome()
+            if stage.retryShown(path) != false { problems.append("Retry showed as soon as the device was reconnecting") }
+            advance(TileRetry.offerAfter - 1)
+            stage.refreshChrome()
+            if stage.retryShown(path) != false { problems.append("Retry showed before the delay") }
+            advance(2)
+            stage.refreshChrome()
+            let shown = stage.retryShown(path)
+            print("retry: shown after the delay \(shown.map { "\($0)" } ?? "n/a")")
+            if shown != true { problems.append("Retry did not show after the delay") }
+            stage.pressRetry(path)
+            if !fake.retriedTiles.contains(tile.id) { problems.append("the Retry click did not reach the core") }
+            stage.refreshChrome()
+            if stage.retryShown(path) == true { problems.append("Retry stayed after it was pressed") }
+            fake.emitForTest(#"{"type":"device_state","device":\#(id),"state":"connected"}"#)
+            when({ model.devices.first { $0.key == camera.device }?.link.state == .connected }, timeout: 2) { [self] in
+                advance(TileRetry.offerAfter + 1)
+                stage.refreshChrome()
+                if stage.retryShown(path) == true { problems.append("Retry showed for a tile with a picture") }
+                checkLog()
+            }
+        }
     }
 
     private func checkLogNow() {

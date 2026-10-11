@@ -123,6 +123,28 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 - Measured against the budgets in ARCHITECTURE.md: the interface must never
   cost frames. Overlays are lightweight layers above the Metal surface.
 
+## Tiles without a picture
+
+A tile that has no picture says why in words over the tile: "Connecting",
+"Reconnecting" with its countdown, "Waiting for video", "Recovering". The
+core works on its own to bring the picture back (a silent stream is
+restarted, a refused one is tried again every minute; docs/ARCHITECTURE.md,
+"Previews that deliver nothing"). When the same kind of message has been up
+for about 30 seconds, a small bordered **Retry** button appears under it.
+
+- It asks the core to restart that camera's stream now (`nv_tile_retry`,
+  docs/FFI.md "Retrying a tile"); when the device is waiting to reconnect, it
+  connects now instead. The core keeps its own floor of 2 s, so clicking
+  again and again does not hammer the device; after a click the button goes
+  away and returns only after another 30 seconds without a picture.
+- It is never offered for "Login failed" (that state is final, to protect the
+  account), "Disconnected", "Device removed", "Camera offline", or a stream
+  the app cannot decode, and never over a tile that shows a picture.
+- It is reachable with the keyboard like any button, and its accessibility
+  label is "Retry". The delay is counted on the viewer's clock, so the
+  self-test and unit tests step it by hand (`TileRetry` on macOS,
+  `TileRetryRule` in `NvrView.Tiles` on Windows).
+
 ## Keyboard
 
 Single-key shortcuts act on the window with the keyboard focus and never fire
