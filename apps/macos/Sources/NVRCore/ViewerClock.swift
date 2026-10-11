@@ -90,17 +90,17 @@ public struct FocusAnimation: Sendable, Equatable {
 // MARK: Zoom easing
 
 /// Mouse-wheel zoom easing toward a target scale, per key (a camera), around
-/// a unit point of the shown picture. Time-based: a step after a long gap
+/// a unit point of the tile. Time-based: a step after a long gap
 /// (a window behind others gets few display refreshes) moves as far as the
 /// time that passed, so the easing always finishes, and it ends exactly on
-/// the target. The 1x frame is asked for at every step, so a picture whose
-/// size or shape changes mid-ease (the switch between the sub-stream and the
-/// main stream) is followed.
+/// the target. How the picture sits in its tile at 1x (`ZoomBase`) is asked
+/// for at every step, so a picture whose size or shape changes mid-ease
+/// (the switch between the sub-stream and the main stream) is followed.
 public struct ZoomEasing<Key: Hashable & Sendable>: Sendable {
     public struct Target: Sendable, Equatable {
         public var scale: Double
         public var unit: CGPoint
-        /// The tile it was asked in, if any (its 1x frame is used).
+        /// The tile it was asked in, if any (its shape is used).
         public var tile: NodePath?
 
         public init(scale: Double, unit: CGPoint, tile: NodePath? = nil) {
@@ -132,10 +132,11 @@ public struct ZoomEasing<Key: Hashable & Sendable>: Sendable {
     }
 
     /// One step at `now`: the new zoom of every key being eased, from its
-    /// zoom now (`current`) and its 1x frame now (`frame`). A key that
+    /// zoom now (`current`) and how its picture sits in the tile now
+    /// (`base`). A key that
     /// reaches its target stops easing.
     public mutating func tick(
-        now: Double, current: (Key) -> TileZoom, frame: (Key, Target) -> CGRect
+        now: Double, current: (Key) -> TileZoom, base: (Key, Target) -> ZoomBase
     ) -> [(key: Key, zoom: TileZoom)] {
         guard !targets.isEmpty else {
             last = nil
@@ -146,7 +147,7 @@ public struct ZoomEasing<Key: Hashable & Sendable>: Sendable {
         var out: [(key: Key, zoom: TileZoom)] = []
         for (key, t) in targets {
             let z = current(key)
-            let f = frame(key, t)
+            let f = base(key, t)
             let scale = TileZoom.eased(from: z.scale, to: t.scale, dt: dt, timeConstant: timeConstant)
             let next =
                 scale <= 1.0001

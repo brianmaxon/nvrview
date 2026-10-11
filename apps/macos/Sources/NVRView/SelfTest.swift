@@ -444,6 +444,12 @@ final class SelfTest {
         // a window behind others may not have had a refresh yet).
         stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
         let before = stage.renderedSource(of: path)
+        // The tile's letterbox bar at 1x, for the zoom-fills-tile check.
+        let pixelScale = stage.grid.drawableSize.width / max(stage.bounds.width, 1)
+        zoomBar = stage.renderedDestination(of: path).flatMap {
+            Self.bar(cell: leaf.rect.pixels(scale: pixelScale), picture: $0)
+        }
+        let barLitBefore = zoomBar.flatMap { litShare($0) }
         // parity: zoom-digital
         // One mouse-wheel step's worth, eased over the next refreshes.
         stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
@@ -462,15 +468,33 @@ final class SelfTest {
             print(String(format: "zoom: %.2fx, source %@ (was %@)", z.scale, "\(source.map { "\($0)" } ?? "none")",
                 "\(before.map { "\($0)" } ?? "none")"))
             if abs(z.scale - 2) > 0.01 { problems.append("the zoom did not ease to 2x") }
-            if let before, let source {
-                let want = z.source(fit: before, picture: before.size)
-                if abs(source.width - want.width) > 0.5 || abs(source.minX - want.minX) > 0.5
-                    || abs(source.height - before.height / 2) > 0.5
+            if let before, let source, let picture = stage.pictureSizes[camera] {
+                // The part of the picture under the zoomed destination
+                // (TileZoom), whatever the tile's shape; `before` carries
+                // the buffer's offset.
+                let scale = grid.drawableSize.width / max(stage.bounds.width, 1)
+                let cell = leaf.rect.pixels(scale: scale)
+                let v = z.visible(in: ZoomBase(picture: picture, tile: cell.size, fill: window.state.fill))
+                let want = CGRect(
+                    x: before.minX + v.minX * picture.width, y: before.minY + v.minY * picture.height,
+                    width: v.width * picture.width, height: v.height * picture.height)
+                if abs(source.width - want.width) > 1 || abs(source.minX - want.minX) > 1
+                    || abs(source.height - want.height) > 1
                 {
                     problems.append("the renderer's source \(source) is not the zoomed region \(want)")
                 }
             } else {
                 problems.append("no source rectangle for the zoomed tile")
+            }
+            // parity: zoom-fills-tile
+            // Past the point where the picture fills the tile's height (or
+            // width), the former bar shows picture.
+            if let bar = zoomBar, let lit = litShare(bar), let was = barLitBefore {
+                print(String(format: "zoom fills the tile: bar lit %.2f at 1x, %.2f at 2x", was, lit))
+                if was > 0.02 { problems.append("the letterbox bar was not black at 1x") }
+                if lit < 0.5 { problems.append("zoomed to 2x, the letterbox bar still shows no picture") }
+            } else {
+                problems.append("the zoomed tile has no letterbox bar to check")
             }
             chromeStep(path, camera)
         }
@@ -518,6 +542,11 @@ final class SelfTest {
                 print("key 0: zoom \(String(format: "%.4f", z.scale))x, chrome back \(back)")
                 if z != .none || stage.isEasingZoom { problems.append("0 did not reset the zoom") }
                 if !back { problems.append("a key press did not bring the chrome back") }
+                // The zoom-fills-tile check, back at 1x: the bar is black again.
+                if let bar = zoomBar, let lit = litShare(bar) {
+                    print(String(format: "zoom back at 1x: bar lit %.2f", lit))
+                    if lit > 0.02 { problems.append("back at 1x, the letterbox bar is not black") }
+                }
                 if model.leases.wantedTier(camera) != .sub {
                     problems.append("Auto back at 1x did not ask for the sub stream")
                 }
@@ -918,6 +947,45 @@ final class SelfTest {
         if checked < 20 || Double(matched) < 0.9 * Double(checked) {
             problems.append("\(mode.title): \(matched) of \(checked) pixels match the fixture")
         }
+    }
+
+    /// The zoomed tile's letterbox bar at 1x, in drawable pixels (the
+    /// zoom-fills-tile check reads it at 2x and back at 1x).
+    private var zoomBar: CGRect?
+
+    /// One of the tile's bars at 1x (drawable pixels, a pixel in from its
+    /// edges), or nil if the picture fills the tile.
+    private static func bar(cell: CGRect, picture: CGRect) -> CGRect? {
+        if picture.minY - cell.minY >= 4 {
+            return CGRect(x: cell.minX + 2, y: cell.minY + 1, width: cell.width - 4, height: picture.minY - cell.minY - 2)
+        }
+        if picture.minX - cell.minX >= 4 {
+            return CGRect(x: cell.minX + 1, y: cell.minY + 2, width: picture.minX - cell.minX - 2, height: cell.height - 4)
+        }
+        return nil
+    }
+
+    /// The share of `rect`'s pixels (sampled) that are not black, drawn
+    /// offscreen now.
+    private func litShare(_ rect: CGRect) -> Double? {
+        guard let window else { return nil }
+        let grid = window.stage.grid
+        grid.prepare?(grid.renderer, grid.drawableSize)
+        guard
+            let image = grid.renderer.renderOffscreen(
+                width: Int(grid.drawableSize.width), height: Int(grid.drawableSize.height))
+        else { return nil }
+        var lit = 0, n = 0
+        let step = max(min(rect.width, rect.height) / 8, 1)
+        for y in stride(from: rect.minY, to: rect.maxY, by: step) {
+            for x in stride(from: rect.minX, to: rect.maxX, by: step) {
+                let xi = Int(x), yi = Int(y)
+                guard xi >= 0, yi >= 0, xi < image.width, yi < image.height else { continue }
+                n += 1
+                if image.rgb(x: xi, y: yi).wrappedSum() > 24 { lit += 1 }
+            }
+        }
+        return n > 0 ? Double(lit) / Double(n) : nil
     }
 
     private var discoveryChecked = false

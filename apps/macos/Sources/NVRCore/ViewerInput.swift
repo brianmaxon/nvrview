@@ -200,16 +200,57 @@ public struct ChromeIdle: Sendable, Equatable {
 
 // MARK: Digital zoom
 
-/// A tile's digital zoom, in picture coordinates: `scale` (1 shows the whole
-/// fitted picture) and the `center` of the visible region as a fraction of
+/// How a picture sits in its tile at 1x, for the digital zoom: the picture's
+/// size as a multiple of the tile's on each axis. Fitted (letterboxed) one
+/// axis is 1 and the other at most 1; filled (cropped) one axis is 1 and the
+/// other at least 1. `whole` is a picture exactly the tile's shape.
+public struct ZoomBase: Sendable, Equatable {
+    public var width: CGFloat
+    public var height: CGFloat
+
+    public static let whole = ZoomBase(width: 1, height: 1)
+
+    public init(width: CGFloat, height: CGFloat) {
+        self.width = width
+        self.height = height
+    }
+
+    /// A `picture` (any unit; only its shape counts) fitted, or filled, in a
+    /// `tile`.
+    public init(picture: CGSize, tile: CGSize, fill: Bool) {
+        guard picture.width > 0, picture.height > 0, tile.width > 0, tile.height > 0 else {
+            self = .whole
+            return
+        }
+        let sx = tile.width / picture.width, sy = tile.height / picture.height
+        let k = fill ? max(sx, sy) : min(sx, sy)
+        // The axis that touches the tile's edges is exactly 1.
+        width = sx == k ? 1 : picture.width * k / tile.width
+        height = sy == k ? 1 : picture.height * k / tile.height
+    }
+}
+
+/// A tile's digital zoom (docs/UX.md "Digital zoom"): `scale` times the
+/// picture's 1x size (1 shows the tile as it is unzoomed, fitted or filled),
+/// and the `center`, the picture point at the tile's center as a fraction of
 /// the full picture (0...1 on both axes, origin top left). Independent of
 /// the picture's resolution, so the sub-stream and the main stream show the
 /// same region.
 ///
-/// `frame` arguments are the part of the picture shown at 1x, as a fraction
-/// of the full picture: the whole picture when letterboxed, the centered
-/// crop when filling the tile. Unit points are positions inside the shown
-/// picture's rectangle on screen (0...1, origin top left).
+/// The rule, per axis, with `b` the picture's 1x size as a fraction of the
+/// tile (`ZoomBase`), `s` the scale and `c` the center: the picture is drawn
+/// `L = s * b` tiles long, starting at `u0` (in tile units, 0...1):
+///
+/// - `L <= 1` (still smaller than the tile): centered, `u0 = (1 - L) / 2`;
+///   the rest of the axis is bars.
+/// - `L > 1`: `u0 = 0.5 - c * L`, clamped to `1 - L ... 0` so the picture
+///   always covers the tile on that axis (panning stops at its edges).
+///
+/// The destination is the picture's span `u0 ... u0 + L` intersected with
+/// the tile (`0 ... 1`), and the source the matching part of the picture,
+/// `(d - u0) / L`. So zooming in grows the picture over the bars until it
+/// fills each axis, then crops; at 1x the tile looks as it does unzoomed.
+/// Unit points are positions in the tile (0...1, origin top left).
 public struct TileZoom: Sendable, Equatable {
     public static let maxScale = 8.0
     public static let none = TileZoom(scale: 1, center: CGPoint(x: 0.5, y: 0.5))
@@ -224,74 +265,89 @@ public struct TileZoom: Sendable, Equatable {
 
     public var isZoomed: Bool { scale > 1.0001 }
 
-    public static let wholeFrame = CGRect(x: 0, y: 0, width: 1, height: 1)
+    /// One axis: where the picture starts (tile units) and how long it is
+    /// (tiles), for scale `s`, 1x size `b` and center `c`.
+    private static func span(scale s: CGFloat, base b: CGFloat, center c: CGFloat) -> (
+        start: CGFloat, length: CGFloat
+    ) {
+        let length = s * b
+        guard length > 1 else { return ((1 - length) / 2, length) }
+        return (min(max(0.5 - c * length, 1 - length), 0), length)
+    }
 
-    /// The region shown, as a fraction of the full picture, inside `frame`.
-    public func visible(in frame: CGRect = wholeFrame) -> CGRect {
+    private func spans(_ base: ZoomBase) -> (
+        x: (start: CGFloat, length: CGFloat), y: (start: CGFloat, length: CGFloat)
+    ) {
         let s = CGFloat(min(max(scale, 1), Self.maxScale))
-        let w = frame.width / s, h = frame.height / s
-        let x = min(max(center.x - w / 2, frame.minX), frame.maxX - w)
-        let y = min(max(center.y - h / 2, frame.minY), frame.maxY - h)
-        return CGRect(x: x, y: y, width: w, height: h)
+        return (
+            Self.span(scale: s, base: base.width, center: center.x),
+            Self.span(scale: s, base: base.height, center: center.y)
+        )
     }
 
-    /// The scale clamped to 1...maxScale and the region kept inside `frame`.
-    public func clamped(in frame: CGRect = wholeFrame) -> TileZoom {
+    /// Where the picture is drawn, as a fraction of the tile: the zoomed
+    /// picture intersected with the tile.
+    public func destination(in base: ZoomBase = .whole) -> CGRect {
+        let (x, y) = spans(base)
+        let x0 = max(x.start, 0), x1 = min(x.start + x.length, 1)
+        let y0 = max(y.start, 0), y1 = min(y.start + y.length, 1)
+        return CGRect(x: x0, y: y0, width: max(x1 - x0, 0), height: max(y1 - y0, 0))
+    }
+
+    /// The region of the picture shown (fraction of the full picture): the
+    /// part under `destination`.
+    public func visible(in base: ZoomBase = .whole) -> CGRect {
+        let (x, y) = spans(base)
+        guard x.length > 0, y.length > 0 else { return CGRect(x: 0, y: 0, width: 1, height: 1) }
+        let d = destination(in: base)
+        return CGRect(
+            x: (d.minX - x.start) / x.length, y: (d.minY - y.start) / y.length,
+            width: d.width / x.length, height: d.height / y.length)
+    }
+
+    /// The scale clamped to 1...maxScale and the center to where the
+    /// picture covers the tile (centered on an axis it does not fill).
+    public func clamped(in base: ZoomBase = .whole) -> TileZoom {
         let s = min(max(scale, 1), Self.maxScale)
-        guard s > 1.0001 else { return .none }
-        let v = TileZoom(scale: s, center: center).visible(in: frame)
-        return TileZoom(scale: s, center: CGPoint(x: v.midX, y: v.midY))
+        guard s > 1.0001, base.width > 0, base.height > 0 else { return .none }
+        let (x, y) = TileZoom(scale: s, center: center).spans(base)
+        return TileZoom(scale: s, center: CGPoint(x: (0.5 - x.start) / x.length, y: (0.5 - y.start) / y.length))
     }
 
-    /// The picture point (fraction of the full picture) under unit point `u`.
-    public func picturePoint(atUnit u: CGPoint, in frame: CGRect = wholeFrame) -> CGPoint {
-        let v = visible(in: frame)
-        return CGPoint(x: v.minX + u.x * v.width, y: v.minY + u.y * v.height)
+    /// The picture point (fraction of the full picture) under tile unit
+    /// point `u`; outside 0...1 over a bar.
+    public func picturePoint(atUnit u: CGPoint, in base: ZoomBase = .whole) -> CGPoint {
+        let (x, y) = spans(base)
+        guard x.length > 0, y.length > 0 else { return u }
+        return CGPoint(x: (u.x - x.start) / x.length, y: (u.y - y.start) / y.length)
     }
 
-    /// Zoomed to `newScale`, keeping picture point `q` under unit point `u`
-    /// (zooming around the pointer), then clamped.
-    public func zoomed(to newScale: Double, keeping q: CGPoint, atUnit u: CGPoint, in frame: CGRect = wholeFrame)
+    /// Zoomed to `newScale`, keeping picture point `q` under tile unit point
+    /// `u` (zooming around the pointer), then clamped: on an axis the
+    /// picture does not fill yet it stays centered instead.
+    public func zoomed(to newScale: Double, keeping q: CGPoint, atUnit u: CGPoint, in base: ZoomBase = .whole)
         -> TileZoom
     {
         let s = min(max(newScale, 1), Self.maxScale)
-        guard s > 1.0001 else { return .none }
-        let w = frame.width / CGFloat(s), h = frame.height / CGFloat(s)
-        let origin = CGPoint(x: q.x - u.x * w, y: q.y - u.y * h)
-        return TileZoom(scale: s, center: CGPoint(x: origin.x + w / 2, y: origin.y + h / 2)).clamped(in: frame)
+        guard s > 1.0001, base.width > 0, base.height > 0 else { return .none }
+        let lx = CGFloat(s) * base.width, ly = CGFloat(s) * base.height
+        let c = CGPoint(x: q.x - (u.x - 0.5) / lx, y: q.y - (u.y - 0.5) / ly)
+        return TileZoom(scale: s, center: c).clamped(in: base)
     }
 
-    /// Zoomed by `factor` around unit point `u`.
-    public func zoomed(by factor: Double, atUnit u: CGPoint, in frame: CGRect = wholeFrame) -> TileZoom {
-        zoomed(to: scale * factor, keeping: picturePoint(atUnit: u, in: frame), atUnit: u, in: frame)
+    /// Zoomed by `factor` around tile unit point `u`.
+    public func zoomed(by factor: Double, atUnit u: CGPoint, in base: ZoomBase = .whole) -> TileZoom {
+        zoomed(to: scale * factor, keeping: picturePoint(atUnit: u, in: base), atUnit: u, in: base)
     }
 
-    /// Panned so the picture follows a drag of `delta` units of the shown
-    /// rectangle (a drag to the right moves the picture right), clamped.
-    public func panned(byUnit delta: CGVector, in frame: CGRect = wholeFrame) -> TileZoom {
-        guard isZoomed else { return self }
-        let v = visible(in: frame)
-        let c = CGPoint(x: v.midX - delta.dx * v.width, y: v.midY - delta.dy * v.height)
-        return TileZoom(scale: scale, center: c).clamped(in: frame)
-    }
-
-    /// The source rectangle to sample, in pixels of a `picture`-sized
-    /// picture, for the 1x source `fit` (also in pixels): `fit` itself at 1x,
-    /// else the visible region of it.
-    public func source(fit: CGRect, picture: CGSize) -> CGRect {
-        guard isZoomed, picture.width > 0, picture.height > 0 else { return fit }
-        let v = visible(in: Self.normalized(fit, picture: picture))
-        return CGRect(
-            x: v.minX * picture.width, y: v.minY * picture.height,
-            width: v.width * picture.width, height: v.height * picture.height)
-    }
-
-    /// `rect` (pixels) as a fraction of `picture`.
-    public static func normalized(_ rect: CGRect, picture: CGSize) -> CGRect {
-        guard picture.width > 0, picture.height > 0 else { return wholeFrame }
-        return CGRect(
-            x: rect.minX / picture.width, y: rect.minY / picture.height,
-            width: rect.width / picture.width, height: rect.height / picture.height)
+    /// Panned so the picture follows a drag of `delta` tile units (a drag to
+    /// the right moves the picture right), clamped.
+    public func panned(byUnit delta: CGVector, in base: ZoomBase = .whole) -> TileZoom {
+        guard isZoomed, base.width > 0, base.height > 0 else { return self }
+        let z = clamped(in: base)
+        let s = CGFloat(z.scale)
+        let c = CGPoint(x: z.center.x - delta.dx / (s * base.width), y: z.center.y - delta.dy / (s * base.height))
+        return TileZoom(scale: z.scale, center: c).clamped(in: base)
     }
 
     /// The scale reached after one step of `dt` seconds of easing from
@@ -309,9 +365,9 @@ public struct TileZoom: Sendable, Equatable {
 }
 
 /// Where one tile's picture is drawn and what part of it is sampled, in
-/// pixels of the drawable: the layout's rectangle fitted (or filled), then
-/// the zoom applied to the source only. The destination never changes with
-/// the zoom.
+/// pixels of the drawable: at 1x the layout's rectangle fitted (or filled);
+/// zoomed, the picture grows over the bars until it fills the tile, then
+/// crops (`TileZoom`).
 public enum TilePlacement {
     /// - Parameters:
     ///   - rect: the tile in points.
@@ -325,34 +381,54 @@ public enum TilePlacement {
     ) -> (destination: CGRect, source: CGRect?) {
         let cell = rect.pixels(scaleX: scaleX, scaleY: scaleY)
         guard picture.width > 0, picture.height > 0 else { return (cell, nil) }
-        // Fitted where the picture appears (even scale), then mapped into
+        // Placed where the picture appears (even scale), then mapped into
         // the possibly stretched drawable, so the picture keeps its shape
         // while the drawable catches up with a resize.
         let stretch = scaleY / scaleX
         let shown = abs(stretch - 1) < 0.001 ? cell : rect.pixels(scale: scaleX)
-        let fit = PictureFit.fit(picture: picture, in: shown, fill: fill)
-        let destination =
-            shown == cell
-            ? fit.destination
-            : CGRect(
-                x: fit.destination.minX, y: fit.destination.minY * stretch,
-                width: fit.destination.width, height: fit.destination.height * stretch)
-        let source = zoom.source(fit: fit.source, picture: picture).offsetBy(dx: offset.x, dy: offset.y)
-        return (destination, source)
+        var destination: CGRect
+        let source: CGRect
+        if zoom.isZoomed {
+            let base = ZoomBase(picture: picture, tile: shown.size, fill: fill)
+            let d = zoom.destination(in: base), v = zoom.visible(in: base)
+            destination = CGRect(
+                x: shown.minX + d.minX * shown.width, y: shown.minY + d.minY * shown.height,
+                width: d.width * shown.width, height: d.height * shown.height)
+            source = CGRect(
+                x: v.minX * picture.width, y: v.minY * picture.height,
+                width: v.width * picture.width, height: v.height * picture.height)
+        } else {
+            let fit = PictureFit.fit(picture: picture, in: shown, fill: fill)
+            destination = fit.destination
+            source = fit.source
+        }
+        if shown != cell {
+            destination = CGRect(
+                x: destination.minX, y: destination.minY * stretch,
+                width: destination.width, height: destination.height * stretch)
+        }
+        return (destination, source.offsetBy(dx: offset.x, dy: offset.y))
     }
 
-    /// The shown picture's rectangle in points (for pointer positions).
-    public static func shownRect(rect: CGRect, picture: CGSize, fill: Bool) -> CGRect {
+    /// Where the picture is drawn in the tile `rect`, in points, with
+    /// `zoom` (the zoom map sits in it).
+    public static func shownRect(rect: CGRect, picture: CGSize, fill: Bool, zoom: TileZoom = .none) -> CGRect {
         guard picture.width > 0, picture.height > 0 else { return rect }
-        // The fit rounds to whole units; in points that is close enough.
-        return PictureFit.fit(picture: picture, in: rect, fill: fill).destination
+        guard zoom.isZoomed else {
+            // The fit rounds to whole units; in points that is close enough.
+            return PictureFit.fit(picture: picture, in: rect, fill: fill).destination
+        }
+        let d = zoom.destination(in: ZoomBase(picture: picture, tile: rect.size, fill: fill))
+        return CGRect(
+            x: rect.minX + d.minX * rect.width, y: rect.minY + d.minY * rect.height,
+            width: d.width * rect.width, height: d.height * rect.height)
     }
 
-    /// The unit point of `point` in `shown`, clamped to the rectangle.
-    public static func unit(_ point: CGPoint, in shown: CGRect) -> CGPoint {
-        guard shown.width > 0, shown.height > 0 else { return CGPoint(x: 0.5, y: 0.5) }
+    /// The unit point of `point` in `rect` (a tile), clamped to it.
+    public static func unit(_ point: CGPoint, in rect: CGRect) -> CGPoint {
+        guard rect.width > 0, rect.height > 0 else { return CGPoint(x: 0.5, y: 0.5) }
         return CGPoint(
-            x: min(max((point.x - shown.minX) / shown.width, 0), 1),
-            y: min(max((point.y - shown.minY) / shown.height, 0), 1))
+            x: min(max((point.x - rect.minX) / rect.width, 0), 1),
+            y: min(max((point.y - rect.minY) / rect.height, 0), 1))
     }
 }
