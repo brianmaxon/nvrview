@@ -21,7 +21,7 @@ Already in `crates/recordings` (with end-to-end tests against
 | Piece | Module | State |
 | --- | --- | --- |
 | Per-device index: calendar (142), files (14–16), events (272–274), day files, age and size bounds | `index` | done; keyed by channel only (no lens) |
-| Background index passes, newest day first | `indexer` | done; decision 8 asks for on-demand filling instead |
+| Background index passes, newest day first | `indexer` | done; kept only for the optional per-device `background` block (decisions of 2026-10-11); the default is on demand (`lane`, C4) |
 | Incident grouping, camera groups, merge, split, add or remove a camera | `incident` | done; IDs change while an incident grows; no stored edits |
 | Download scheduler: chunks, retries, stall detection, resume across restarts, per-device workers, blocking-thread disk writes | `scheduler` | done; per-incident pause and retry only, failures as free text, no device removal |
 | Raw chunks, crash-safe join into MP4 | `chunk`, `finalize` | done |
@@ -70,26 +70,31 @@ fact the slice needs is observed or reported; seams for the rest are named.
 | C10 | **Playback engine** in `viewer-core`: playback tiles on the existing tile pipeline and generations, the shared clock, paced release less decode latency, `wait`/`free` sync, buffer bounds with stop and restart, per-camera anchor refinement and offsets, rates 0.25× to 2× by pacing | C7, C9 | unblocked except B1, B5 | Opus |
 | C11 | **Recordings owner in `viewer-core`**: one per core, holding the per-device indexes, the search lanes, the scheduler, the thumbnail cache, the edit log and groups; follows device add, remove, login failure; produces the events of FFI-RECORDINGS.md section 8 | C1–C6 | unblocked | Opus |
 | C12 | **Sound for recordings** (section 2a): loudness envelope store per camera and day, labels as events of `source` `local_audio` | C1, C11 | unblocked | Sonnet |
+| C13 | **Locked incidents** (FFI-RECORDINGS.md section 3, "Locked incidents"): a lock store (atomic, survives restarts, at most 1000 locks, `NV_ERR_LIMIT` at the cap, never dropped by the core); matching after every regroup and edit replay by key or by overlap with a lock's extent (merge joins locks, split parts share one, unlock removes only that part's ranges, extent at most 31 days); exemptions: edits of locked incidents never expire, locked index days are kept past the age limit and evicted last by size, at most 16 pinned thumbnails per lock; stored edit keys rewritten when a regroup changes a locked incident's key; the download queued on lock (or when a growing incident settles) | C3, C11, C15 | unblocked | Opus (stores and eviction rules) |
+| C14 | **Export planners** (section 7a): range jobs in the scheduler (ID from cameras, tiers, and range; folder naming; `incident.json` of kind `range`; at most 16 cameras and 24 hours), a downloads registry under `data_dir` for downloads outside `downloads_dir`, the `trim` planner (keyframe in point from sync samples or exact) and `in_ms`/`out_ms` on follow and grid, the still planner (a playback tile's newest answered picture of its shown generation, or a file position at or before a time), share-safe naming (`Camera A`, ...), no `incident.json`, zero MP4 times and generic handler names in share-safe finalized files | C8, C10 (stills from a playback), C11 | unblocked except stills from a playback (C10) | Sonnet (planners), Opus for the registry |
+| C15 | **Scheduler follow-ups for F1**: dedupe by incident key while a download is unfinished (a finished one with the same `id` is returned, a grown one makes a ` (2)` folder); trash (stop the camera jobs, forget, report removal only once nothing writes into the folder) | C6 | unblocked | Sonnet |
 
 ### C interface
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| F1 | Minor 4, part 1: configuration, index and search, incidents and edits, camera groups, thumbnails, downloads (sections 1–5, 8, 9) with the C smoke test and cbindgen header | C11 | unblocked once C11 lands; the user reviews the contract first | Opus for the contract, Sonnet for shaping JSON |
+| F1 | Minor 4, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | contract reviewed (decisions of 2026-10-11); unblocked once C11, C13, and C15 land | Opus for the contract, Sonnet for shaping JSON |
 | F2 | Minor 4, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
 | F3 | Edit lists (section 7) and sound (section 2a) | C8, C12, F1 | unblocked | Sonnet |
+| F4 | Export (section 7a): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` in `nv_edit_compute`, `dest` and `share_safe` on every export request | C14, F1, F3 (F2 for stills from a playback) | unblocked except stills from a playback | Sonnet |
 
 F1 and F2 ship in one minor if they land together; otherwise F2 takes the
-next minor.
+next minor, and F3 and F4 likewise.
 
 ### Apps
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| M1 | macOS: incident list, timeline lanes, calendar, filters (an "animal" filter matches every animal kind), thumbnails (decode, shrink, put back), download panel; first against `FakeCore`, then the real core | contract frozen (FakeCore); F1 (real) | unblocked after review | Sonnet |
+| M1 | macOS: incident list, timeline lanes, calendar, filters (an "animal" filter matches every animal kind), thumbnails (decode, shrink, put back), download panel; views ask for their days and hold today; lock and unlock an incident (and say when its video is not being kept); move a download to the Trash; first against `FakeCore`, then the real core | contract frozen (FakeCore); F1 (real) | unblocked | Sonnet |
 | M2 | macOS: playback tiles, scrubber, step, offsets | F2 | unblocked at 1× | Sonnet |
 | M3 | macOS: follow cut and 2-up/4-up rendering with Metal and VideoToolbox | F3 | unblocked | Opus (first platform renderer) |
-| W1–W3 | Windows: the same three, WinUI 3, Media Foundation, Direct3D 11 (FFI-RECORDINGS.md section 12) | as M1–M3 | unblocked after review | Sonnet (ports of M1–M3) |
+| M4 | macOS: export. In and out points on the scrubber and in the incident view, trim as a keyframe copy (passthrough remux) or exact (VideoToolbox), range download of chosen cameras, still images of the current picture or one per camera (ImageIO, PNG or JPEG), a save panel per export with a security-scoped bookmark, a share-safe switch that writes no metadata of the app's own | F4, M2, M3 | after F4 | Sonnet |
+| W1–W4 | Windows: the same four, WinUI 3, Media Foundation, Direct3D 11, WIC, the Recycle Bin through `IFileOperation` (FFI-RECORDINGS.md section 12) | as M1–M4 | unblocked | Sonnet (ports of M1–M4) |
 
 ### Blocked on the re-capture or on a measurement
 
@@ -107,12 +112,13 @@ next minor.
 
 ```
 C1 ─┬─ C2 ── C3 ─┐
-    ├─ C4 ───────┼─ C11 ── F1 ── M1, W1
-    └─ C5 ───────┘           │
-C6 ──────────────────────────┘
+    ├─ C4 ───────┼─ C11 ── C13 ── F1 ── M1, W1
+    └─ C5 ───────┘                │
+C6 ── C15 ────────────────────────┘
 C7 ─┬─ C8 ─────────────── F3 ── M3, W3
 C9 ─┴─ C10 ─────────────── F2 ── M2, W2
 C12 (after C11) ─────────── F3
+C14 (after C8, C11; C10 for stills) ── F4 (after F1, F3) ── M4, W4
 ```
 
 - **Wave 1, in parallel** (separate worktrees; they touch different files):
@@ -129,7 +135,10 @@ C12 (after C11) ─────────── F3
   for B7.
 - **Wave 3**: F1, then M1 and W1 in parallel; F2 then M2 and W2; F3 then M3
   and W3. The apps can start against `FakeCore` as soon as the contract is
-  frozen.
+  frozen. C15 can run beside C11 (scheduler only); C13 follows C11 (it
+  touches the owner's regroup and the index and thumbnail eviction).
+- **Wave 4**: C14 once C8 and C11 are in (stills from a playback once C10
+  is), then F4, then M4 and W4.
 - Merging: branches that both touched `Cargo.lock` get it regenerated, not
   merged textually.
 

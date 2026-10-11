@@ -284,6 +284,23 @@ One folder per incident, named so it sorts and reads well, for example:
 
 Camera names are the user's own channel names; the pattern is configurable.
 
+- **Locking an incident** keeps it: its edits, its index days, and its
+  thumbnails no longer expire with age, and its video is downloaded, since
+  the NVR overwrites old recordings. Unlocking makes it ordinary again and
+  never deletes downloaded files.
+- **Deleting** moves an incident's folder to the Trash (Recycle Bin on
+  Windows); nothing is deleted permanently.
+- **Export**: trim to in and out points inside an incident or while
+  scrubbing (a fast keyframe copy, or exact with a re-encode); download any
+  time range of chosen cameras, not only detected incidents; save the
+  current picture, or one per camera, as PNG or JPEG; choose the
+  destination of each export; and a **share-safe** option that leaves
+  camera and device names out of file names and overlays, writes no
+  `incident.json` or device details, and no metadata the core would
+  otherwise write into MP4 files. The core plans ranges, cuts, and names;
+  the app encodes and writes with the platform's APIs
+  ([FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 7a).
+
 ## Ready-made edits
 
 Built from the downloaded files, on the GPU, with the hardware encoder:
