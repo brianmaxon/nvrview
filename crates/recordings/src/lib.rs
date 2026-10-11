@@ -24,6 +24,9 @@
 //! - [`thumbs`]: cover thumbnails (one keyframe per time range) in a
 //!   bounded on-disk cache, capped by count and bytes.
 //! - [`naming`]: the output folder and file names and `incident.json`.
+//! - [`edl`]: edit decision lists (follow cut, 2-up, 4-up): pure planners
+//!   over an incident and its finished files.
+//! - [`sync_samples`]: the keyframe times of a finished MP4, for the planners.
 //! - [`recorded_time`]: when a recorded picture was taken, from the
 //!   wall-clock seconds keyframes carry.
 //!
@@ -36,6 +39,7 @@
 
 pub mod chunk;
 pub mod edits;
+pub mod edl;
 pub mod finalize;
 pub mod groups;
 pub mod incident;
@@ -46,6 +50,7 @@ pub mod naming;
 pub mod recorded_time;
 pub mod scheduler;
 mod store;
+pub mod sync_samples;
 pub mod thumbs;
 
 pub use bc_protocol::archive::DateTime;
