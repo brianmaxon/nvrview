@@ -316,6 +316,28 @@ Edit decisions (which camera when, layout, offsets) are computed in the shared
 core as an edit list, so the Windows app renders the same edits with its own
 compositor and encoder.
 
+## Review mode: live view during playback
+
+Live view and recorded playback share the device's one session. Measured
+beside live view, a device served two plays fully and degraded a third
+silently (no refusal; protocol.md, "Live view and plays on one session").
+The official client, which stops live view when its playback tab opens,
+ran four plays on the same device.
+
+- **One or two cameras of a device:** live view keeps running.
+- **Three or four cameras of one device** (a 4-up review, or a follow cut
+  over several angles): that device's live tiles pause while the playback
+  holds them, labeled "Live paused while reviewing", and resume as soon as
+  the playback ends or drops to two cameras. Other devices are untouched.
+- **Alerts keep working:** detection and alarm events do not depend on the
+  video, so they keep arriving. A doorbell ring resumes that camera's live
+  tile for the call; if that leaves the playback one play short, the
+  camera added last is shown as unavailable until the call ends.
+- **Setting:** "Pause live view while reviewing: when needed (default) /
+  always".
+- **To measure first:** that the device serves four plays with our live
+  view paused (one `bc-cli replay-probe` run with live view off).
+
 ## Measured goals
 
 | Measure | Target |

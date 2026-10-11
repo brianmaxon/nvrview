@@ -1473,6 +1473,26 @@ and what changed above.
     core decides ranges, edit lists, and names; the apps decode, encode,
     and write with platform APIs, as for the follow cut. They are not part
     of F1; they ship as their own slices (MILESTONE-P.md).
+12. **Review mode: live view pauses only when a playback needs the room.**
+    Beside live view a device served two plays and degraded a third
+    silently, while the official client, which stops live view for
+    playback, ran four (protocol.md, "Live view and plays on one session").
+    So a playback of one or two cameras of a device keeps that device's live
+    tiles running; a playback of three or four cameras of one device pauses
+    that device's live tiles for as long as the playback holds them, and
+    resumes them when it ends or drops to two. Only that device is affected.
+    Detection and alarm events keep arriving while live is paused (they do
+    not depend on the video); a doorbell ring resumes that one camera's live
+    tile for the call (the playback then gives up a play if needed, the
+    newest-added camera first, and shows it as unavailable). An optional
+    setting, `"playback": {"pause_live": "auto" | "always"}` (default
+    `auto`), pauses live for every playback of that device. Paused live
+    tiles report it so the apps can label them "Live paused while
+    reviewing"; the event's exact shape is settled with section 6 (F2).
+    Why: the user asked for it; it frees the device for 4-up review without
+    giving up live view when it is not needed. To measure before relying
+    on it: that the device serves four plays with our live view paused
+    (one replay-probe run).
 
 Also corrected in this review, without a decision: ABI 3 minor 4
 throughout; `NvConfig` no longer grows (the two sound settings became
