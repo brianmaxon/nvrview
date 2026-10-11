@@ -25,6 +25,12 @@ public enum CallAudio {
         if !listening.isEmpty { return .audible(muted: others) }
         return unmuteOnRing ? .audible(muted: []) : .overlay
     }
+
+    /// The user started the conversation themselves (no ring): the doorbell
+    /// plays, and whatever else was playing is muted for the call.
+    public static func decideConversation(doorbell: CameraRef, listening: Set<CameraRef>) -> Decision {
+        .audible(muted: listening.subtracting([doorbell]))
+    }
 }
 
 // MARK: Talk-back
@@ -265,16 +271,27 @@ public enum TranscriptionStatus: Sendable, Equatable {
 
 // MARK: The call
 
-/// One doorbell call: from the press to the close or about a minute after the
+/// One doorbell call: from the press (or the user's Start Conversation) to the close or about a minute after the
 /// last activity (a press, speech, talk-back).
 public struct DoorbellCall: Sendable, Equatable {
     public static let idleTimeout = 60.0
+
+    /// How the call opened.
+    public enum Origin: Sendable, Equatable {
+        /// A doorbell press.
+        case press
+        /// The user chose "Start Conversation" on the camera's tile: the same
+        /// call (captions, Talk, typed reply) with no press.
+        case conversation
+    }
+
+    public var origin: Origin
 
     public var camera: CameraRef
     public var startedAt: Date
     /// When the last press, speech or talk happened, on the viewer clock.
     public var lastActivity: Double
-    public var presses = 1
+    public var presses: Int
     /// The doorbell plays through the speakers.
     public var audible: Bool
     /// The Unmute control covers the video.
@@ -286,7 +303,11 @@ public struct DoorbellCall: Sendable, Equatable {
     public var transcript = Transcript()
     public var transcription: TranscriptionStatus = .preparing
 
-    public init(camera: CameraRef, startedAt: Date, now: Double, audio: CallAudio.Decision) {
+    public init(
+        camera: CameraRef, startedAt: Date, now: Double, audio: CallAudio.Decision, origin: Origin = .press
+    ) {
+        self.origin = origin
+        presses = origin == .press ? 1 : 0
         self.camera = camera
         self.startedAt = startedAt
         lastActivity = now
@@ -326,7 +347,10 @@ public struct DoorbellCall: Sendable, Equatable {
     /// on.
     public func logText(endedAt: Date, saveTranscript: Bool) -> String {
         let seconds = Int(endedAt.timeIntervalSince(startedAt).rounded())
-        var text = "Doorbell call ended: channel \(camera.channel + 1), \(presses) press\(presses == 1 ? "" : "es"), \(seconds) s"
+        var text =
+            presses == 0
+            ? "Conversation ended: channel \(camera.channel + 1), \(seconds) s"
+            : "Doorbell call ended: channel \(camera.channel + 1), \(presses) press\(presses == 1 ? "" : "es"), \(seconds) s"
         if saveTranscript, !transcript.finals.isEmpty { text += "\n" + transcript.savedText }
         return text
     }

@@ -106,7 +106,7 @@ if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
   scripts/windows-app.sh startup
 
   step "Windows app self-test (interactive session)"
-  scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test
+  scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --mic-test
 
   step "Windows side-by-side update, end to end (interactive session)"
   scripts/windows-app.sh update

@@ -501,6 +501,55 @@ public sealed unsafe class NvCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// Allows or forbids talk-back to one channel of a device for this run of the core (camera
+    /// motion control: off until the user allows it); withdrawing stops a running talk.
+    /// </summary>
+    public void TalkSetPermission(ulong device, byte channel, bool allowed)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_talk_set_permission(core, device, channel, allowed), nameof(NvNative.nv_talk_set_permission));
+        }
+    }
+
+    /// <summary>
+    /// Asks to talk to the tile's camera; progress arrives as <c>talk</c> events. Without the
+    /// permission this throws <see cref="NvStatus.NotPermitted"/> and a <c>refused</c> event follows.
+    /// </summary>
+    public void TalkStart(ulong tile)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_talk_start(core, tile), nameof(NvNative.nv_talk_start));
+        }
+    }
+
+    /// <summary>Queues mono samples (-1..1) at <paramref name="sampleRate"/> for the tile's talk. Not from a real-time audio thread.</summary>
+    public void TalkPush(ulong tile, ReadOnlySpan<float> samples, uint sampleRate)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            fixed (float* p = samples)
+            {
+                Check(NvNative.nv_talk_push(core, tile, p, (nuint)samples.Length, sampleRate), nameof(NvNative.nv_talk_push));
+            }
+        }
+    }
+
+    /// <summary>Stops the tile's talk at once, or after the audio already pushed when <paramref name="drain"/> is true.</summary>
+    public void TalkStop(ulong tile, bool drain)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_talk_stop(core, tile, drain), nameof(NvNative.nv_talk_stop));
+        }
+    }
+
     /// <summary>The device's stable key, for layouts.</summary>
     /// <param name="device">The device ID.</param>
     /// <param name="initialCapacity">First buffer size; grown on NV_ERR_BUFFER_TOO_SMALL.</param>

@@ -46,7 +46,8 @@
 //! - optionally, a fake recording store ([`archive`]): day records (142),
 //!   file search (14–16), event search (272–274), cover images (298), and
 //!   download by time range (143, stopped by 144), with injectable download
-//!   stalls and disconnects.
+//!   stalls and disconnects; and playback (seek 123, play 5, stop 7) at
+//!   normal speed, a burst and then real time, across files.
 //!
 //! - optionally, doorbell talk-back ([`talk`]): `ipcAudioTalk` 1 in the
 //!   199 reply for [`Config::talk_channels`], the talk ability (10), and a
@@ -70,10 +71,12 @@ pub mod fixture;
 pub mod replay;
 pub mod talk;
 
-use archive::{ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent};
+use archive::{
+    ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent, PlayLog,
+};
 use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
-use bc_protocol::framer::{Decoder, RawMessage, encode_message_with_status};
+use bc_protocol::framer::{Decoder, RawMessage, encode_message_with_status, encode_replay_media};
 use bc_protocol::header::Class;
 use bc_protocol::media::{encode_audio, encode_info, encode_video};
 use bc_protocol::stream::StreamTier;
@@ -304,6 +307,8 @@ struct Shared {
     nonce_counter: AtomicU32,
     faults: Mutex<Vec<DownloadFault>>,
     download_log: Mutex<VecDeque<DownloadLog>>,
+    play_log: Mutex<VecDeque<PlayLog>>,
+    active_plays: AtomicUsize,
     command_counts: Mutex<HashMap<u32, u64>>,
     alarms: alarms::Board,
     next_conn: AtomicU64,
@@ -444,6 +449,8 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         nonce_counter: AtomicU32::new(0),
         faults: Mutex::new(Vec::new()),
         download_log: Mutex::new(VecDeque::new()),
+        play_log: Mutex::new(VecDeque::new()),
+        active_plays: AtomicUsize::new(0),
         command_counts: Mutex::new(HashMap::new()),
         alarms,
         next_conn: AtomicU64::new(1),
@@ -548,6 +555,17 @@ impl MockNvr {
     /// 10,000).
     pub fn download_log(&self) -> Vec<DownloadLog> {
         lock(&self.shared.download_log).iter().cloned().collect()
+    }
+
+    /// Plays (5) the server has started, oldest first (the most recent
+    /// 10,000).
+    pub fn play_log(&self) -> Vec<PlayLog> {
+        lock(&self.shared.play_log).iter().cloned().collect()
+    }
+
+    /// Plays running now, on every connection.
+    pub fn active_plays(&self) -> usize {
+        self.shared.active_plays.load(Ordering::SeqCst)
     }
 
     /// How many messages with this command number logged-in clients sent.
@@ -752,6 +770,10 @@ struct Conn {
     key: Option<SessionKey>,
     holds_login: bool,
     streams: HashMap<u32, Stream>,
+    /// The latest seek (123): its `seq` and time, taken by the next play.
+    seek: Option<(u32, bc_protocol::archive::DateTime)>,
+    /// Running plays by message ID, with their channel.
+    plays: HashMap<u32, (u8, Stream)>,
     /// Running downloads by message ID.
     downloads: HashMap<u32, Stream>,
     /// Open file searches: handle to (files, next index).
@@ -781,6 +803,8 @@ where
         holds_login: false,
         streams: HashMap::new(),
         downloads: HashMap::new(),
+        seek: None,
+        plays: HashMap::new(),
         file_searches: HashMap::new(),
         event_searches: HashMap::new(),
         next_event_handle: 1,
@@ -836,6 +860,7 @@ impl Conn {
             .streams
             .drain()
             .chain(self.downloads.drain())
+            .chain(self.plays.drain().map(|(id, (_, s))| (id, s)))
             .map(|(_, s)| s)
             .collect();
         for s in streams {
@@ -985,7 +1010,7 @@ impl Conn {
             .or_insert(0) += 1;
         if matches!(
             m.header.command,
-            14 | 15 | 16 | 142 | 143 | 144 | 272 | 273 | 274 | 298
+            5 | 7 | 14 | 15 | 16 | 123 | 142 | 143 | 144 | 272 | 273 | 274 | 298
         ) {
             return self.archive_command(m).await;
         }
@@ -1607,6 +1632,44 @@ impl Conn {
                 }
             }
             298 => self.cover(m, &cfg).await,
+            123 => {
+                let root =
+                    bc_protocol::archive::Element::parse(&self.request_text(m)).unwrap_or_default();
+                let el = root.find("ReplaySeek").unwrap_or(&root);
+                let seq = el.num::<u32>("seq").ok().flatten();
+                let at = archive::time_of(el, "seekTime");
+                match (seq, at) {
+                    (Some(seq), Some(at)) => {
+                        self.seek = Some((seq, at));
+                        self.reply_xml(123, id, 200, "").await
+                    }
+                    _ => self.reply_xml(123, id, 400, "").await,
+                }
+            }
+            5 => self.start_play(m, cfg).await,
+            7 => {
+                // The stop names the file's channel and stream, not the
+                // play's message ID: stop that channel's plays.
+                let r = archive::read_req(&self.request_text(m), "FileInfo");
+                let ids: Vec<u32> = self
+                    .plays
+                    .iter()
+                    .filter(|(_, (ch, _))| Some(*ch) == r.channel)
+                    .map(|(id, _)| *id)
+                    .collect();
+                let mut stopped = Vec::new();
+                for i in ids {
+                    if let Some((_, s)) = self.plays.remove(&i) {
+                        s.stop.store(true, Ordering::SeqCst);
+                        stopped.push(s);
+                    }
+                }
+                let written = self.reply_xml(7, id, 200, "").await;
+                for s in stopped {
+                    s.end().await;
+                }
+                written
+            }
             143 => self.start_download(m, cfg).await,
             144 => {
                 // Stop the download this ID names; if none, any running one.
@@ -1656,7 +1719,7 @@ impl Conn {
         let mut out = encode_message_with_status(298, id, 200, Class::Device, &[], &[])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         for (kind, rec) in &picked {
-            transfer_message(&key, 298, id, *kind, rec, true, &mut out)?;
+            transfer_message(&key, 298, id, *kind, rec, true, None, &mut out)?;
         }
         out.extend(
             encode_message_with_status(298, id, 300, Class::Device, &[], &[])
@@ -1724,11 +1787,172 @@ impl Conn {
     }
 }
 
+impl Conn {
+    /// 5: plays the file from the latest seek (123) of this connection (the
+    /// play itself names no `seq`). A first reply with status 200 and the
+    /// stream-info record, then the media from the keyframe at or before
+    /// the seek, GOP by GOP, each message with the seek's `seq` in place of
+    /// status and class; a burst of [`ArchiveConfig::play_burst_secs`],
+    /// then real time. The play goes on across files, as observed, up to
+    /// the end of the recordings, where it sends an empty message (the
+    /// mock's choice: how a device ends a play is not known).
+    async fn start_play(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
+        let id = m.header.message_id;
+        let text = self.request_text(m);
+        let root = bc_protocol::archive::Element::parse(&text).unwrap_or_default();
+        let el = root.find("FileInfo").unwrap_or(&root);
+        let ch = el.num::<u8>("channelId").ok().flatten();
+        let file_id = el.text_of("Id").unwrap_or_default().to_owned();
+        let speed = el.num::<u32>("playSpeed").ok().flatten();
+        let stream = el.text_of("streamType").and_then(StreamTier::from_name);
+        let Some(ch) = ch.filter(|c| *c < self.shared.config.channels) else {
+            return self.reply_xml(5, id, 400, "").await;
+        };
+        let Some((seq, at)) = self.seek.take() else {
+            return self.reply_xml(5, id, 400, "").await;
+        };
+        if !file_id.starts_with(&format!("mock-file-{ch}-")) || self.plays.contains_key(&id) {
+            return self.reply_xml(5, id, 400, "").await;
+        }
+        {
+            let mut log = lock(&self.shared.play_log);
+            if log.len() >= DOWNLOAD_LOG_LEN {
+                log.pop_front();
+            }
+            log.push_back(PlayLog {
+                channel: ch,
+                file_id,
+                at,
+                seq,
+                speed,
+                stream,
+            });
+        }
+        let key = self.key.clone().expect("logged in");
+        let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
+        let (shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
+        shared.active_plays.fetch_add(1, Ordering::SeqCst);
+        let task = self.shared.runtime.spawn(async move {
+            let _count = PlayCount(Arc::clone(&shared));
+            let _ = serve_play(&shared, &writer, &key, id, seq, &cfg, at, &stop2).await;
+        });
+        self.plays.retain(|_, (_, s)| !s.is_finished());
+        self.plays.insert(
+            id,
+            (
+                ch,
+                Stream {
+                    stop,
+                    task: Some(task),
+                },
+            ),
+        );
+        Ok(())
+    }
+}
+
+/// Counts a running play until dropped (also when its task is aborted).
+struct PlayCount(Arc<Shared>);
+
+impl Drop for PlayCount {
+    fn drop(&mut self) {
+        self.0.active_plays.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Sends a play (see [`Conn::start_play`]); stops silently once `stop` is
+/// set (a 7 arrived).
+#[allow(clippy::too_many_arguments)]
+async fn serve_play(
+    shared: &Shared,
+    writer: &Writer,
+    key: &SessionKey,
+    id: u32,
+    seq: u32,
+    cfg: &ArchiveConfig,
+    at: bc_protocol::archive::DateTime,
+    stop: &AtomicBool,
+) -> io::Result<()> {
+    let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
+    let stopped = || stop.load(Ordering::SeqCst) || shared.is_shutdown();
+    let c = &shared.config;
+    let mut out = Vec::new();
+    let info = encode_info(c.width, c.height, cfg.fps.min(255) as u8);
+    transfer_message(
+        key,
+        5,
+        id,
+        archive::Kind::Info,
+        &info,
+        false,
+        None,
+        &mut out,
+    )?;
+    {
+        let mut w = writer.lock().await;
+        if stopped() {
+            return Ok(());
+        }
+        write_locked(&mut w, &out).await?;
+    }
+    let gop = i64::from(cfg.gop_secs.max(1));
+    let mut window = archive::ts(at).div_euclid(gop) * gop;
+    let end = cfg.recorded_end();
+    let start = Instant::now();
+    let burst = i64::from(cfg.play_burst_secs);
+    // Seconds of video sent; gaps without recording are skipped, not
+    // waited out.
+    let mut played: i64 = 0;
+    while window < end {
+        let recs = archive::media(
+            cfg,
+            &c.fixture,
+            c.width,
+            c.height,
+            archive::dt(window),
+            archive::dt(window + gop - 1),
+        );
+        window += gop;
+        if recs.is_empty() {
+            continue;
+        }
+        let due = (played - burst).max(0);
+        sleep_until(start + Duration::from_secs(due as u64)).await;
+        played += gop;
+        out.clear();
+        let mut seen_key = false;
+        for (kind, rec) in &recs {
+            seen_key |= *kind == archive::Kind::Key;
+            // Each window repeats the stream info and leading audio of a
+            // fresh cut; a play has them once, at its start.
+            if *kind == archive::Kind::Info || !seen_key {
+                continue;
+            }
+            transfer_message(key, 5, id, *kind, rec, false, Some(seq), &mut out)?;
+        }
+        let mut w = writer.lock().await;
+        if stopped() {
+            return Ok(());
+        }
+        write_locked(&mut w, &out).await?;
+    }
+    let mut w = writer.lock().await;
+    if stopped() {
+        return Ok(());
+    }
+    write_locked(
+        &mut w,
+        &encode_replay_media(id, seq, &[], &[]).map_err(enc_err)?,
+    )
+    .await
+}
+
 /// Encodes one record of a download or cover reply: the first message has
 /// an extension with `binaryData` and the encrypted length (the whole
 /// record for info and audio, 1024 bytes of a keyframe, 32 of a predicted
 /// frame, as the official client received them); continuation messages have
 /// a `binaryData`-only extension and a plain payload.
+#[allow(clippy::too_many_arguments)]
 fn transfer_message(
     key: &SessionKey,
     cmd: u32,
@@ -1736,6 +1960,7 @@ fn transfer_message(
     kind: archive::Kind,
     record: &[u8],
     capital: bool,
+    replay_seq: Option<u32>,
     out: &mut Vec<u8>,
 ) -> io::Result<()> {
     let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
@@ -1762,8 +1987,11 @@ fn transfer_message(
         .into_bytes();
         key.encrypt(&mut ext);
         out.extend(
-            encode_message_with_status(cmd, id, 200, Class::Device, &ext, &payload)
-                .map_err(enc_err)?,
+            match replay_seq {
+                Some(seq) => encode_replay_media(id, seq, &ext, &payload),
+                None => encode_message_with_status(cmd, id, 200, Class::Device, &ext, &payload),
+            }
+            .map_err(enc_err)?,
         );
     }
     Ok(())
@@ -1824,7 +2052,7 @@ async fn serve_download(
             }
         }
         out.clear();
-        transfer_message(key, 143, id, *kind, rec, false, &mut out)?;
+        transfer_message(key, 143, id, *kind, rec, false, None, &mut out)?;
         {
             let mut w = writer.lock().await;
             if stopped() {

@@ -98,6 +98,7 @@ public partial class App : Application
             LogMaxFiles = 4,
             LogMaxTotalBytes = 16 << 20,
             DataDir = Path.Combine(dataDir, "core"),
+            AudioTap = true,
         }, o.Gpu, !o.Software);
         // Development modes (--host, --mock-nvr) keep nothing but the core's own store.
         bool memoryOnly = o.Development;
@@ -146,6 +147,11 @@ public partial class App : Application
                 // Channel 2 is also a fisheye camera streaming the synthetic circular picture
                 // (docs/UX.md "Fisheye cameras"); its first lens is all the dewarp step uses.
                 mockArgs.AddRange(["--fisheye", "2", "--fisheye-fixture", Path.Combine(root, "fixtures", "synthetic", "fisheye", "h264-fisheye.h264"), "--fisheye-size", "384"]);
+            }
+            if (o.SelfTest)
+            {
+                // Channel 0 has a speaker (doorbell talk-back); the call steps talk to it, never to real hardware.
+                mockArgs.AddRange(["--talk", "0"]);
             }
             if (o.SelfTest && o.MockChannels >= 2)
             {

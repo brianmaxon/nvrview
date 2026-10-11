@@ -60,26 +60,48 @@ final class DoorbellCalls {
     /// A doorbell press (`visitor` alarm start).
     func ring(_ doorbell: CameraRef, at date: Date) {
         let camera = doorbell.firstLens
-        let now = model.clock.now
         if let s = sessions[camera] {
-            s.call.pressed(now: now)
+            s.call.pressed(now: model.clock.now)
             model.logEvent("Doorbell pressed again: channel \(camera.channel + 1)")
             model.changed()
             return
         }
         let decision = CallAudio.decide(
             doorbell: camera, listening: model.audible, unmuteOnRing: model.cameraOptions(camera).unmuteOnRing)
-        let s = Session(call: DoorbellCall(camera: camera, startedAt: date, now: now, audio: decision))
+        open(camera, at: date, audio: decision, origin: .press)
+        model.logEvent("Doorbell call: channel \(camera.channel + 1), \(decision == .overlay ? "muted (Unmute shown)" : "audible")")
+        model.changed()
+    }
+
+    /// "Start Conversation" on a camera's tile: the same call with no press,
+    /// for captions, Talk and typed replies. Talk-back is still camera motion
+    /// control: nothing is sent until the user presses Talk or sends a reply,
+    /// and the core refuses without the camera's permission. A call already
+    /// open on the camera is kept as it is.
+    func startConversation(_ camera: CameraRef, at date: Date) {
+        let camera = camera.firstLens
+        if let s = sessions[camera] {
+            s.call.activity(now: model.clock.now)
+            model.changed()
+            return
+        }
+        let decision = CallAudio.decideConversation(doorbell: camera, listening: model.audible)
+        open(camera, at: date, audio: decision, origin: .conversation)
+        model.logEvent("Conversation started: channel \(camera.channel + 1)")
+        model.changed()
+    }
+
+    /// Opens the call: lease, audio, and the visitor's transcript.
+    private func open(_ camera: CameraRef, at date: Date, audio: CallAudio.Decision, origin: DoorbellCall.Origin) {
+        let s = Session(call: DoorbellCall(camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin))
         sessions[camera] = s
         model.leases.acquire(camera)
-        if case .audible = decision {
+        if case .audible = audio {
             // Audible at once: the cameras that were playing are muted for the call.
             model.setAudible([camera])
         }
         startVisitorTranscript(s)
         tileChanged(camera)
-        model.logEvent("Doorbell call: channel \(camera.channel + 1), \(decision == .overlay ? "muted (Unmute shown)" : "audible")")
-        model.changed()
     }
 
     /// The doorbell's tile opened or closed: its tap follows.

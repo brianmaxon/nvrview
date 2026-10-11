@@ -81,6 +81,9 @@ internal sealed class AppOptions
     /// <summary>Started by an update: wait for the previous version (this process ID) to exit first.</summary>
     public int? WaitForPid { get; private set; }
 
+    /// <summary>The self-test also opens the microphone for a moment (the audio is measured and dropped).</summary>
+    public bool MicrophoneTest { get; private set; }
+
     public bool SelfTest => SelfTestSeconds > 0;
 
     public bool StartupTest => StartupTestSeconds > 0;
@@ -142,6 +145,7 @@ internal sealed class AppOptions
                 case "--no-audio": o.NoAudio = true; break;
                 case "--credential-test": o.CredentialTest = true; break;
                 case "--wait-for-pid": o.WaitForPid = Int(1, int.MaxValue); break;
+                case "--mic-test": o.MicrophoneTest = true; break;
                 case "--decoder-samples": DecoderSettings.OutputSamples = Int(0, 32); break;
                 case "--limit-coded-size": DecoderSettings.LimitCodedSize = true; break;
                 default: throw new ArgumentException($"unknown option {a}");

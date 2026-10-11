@@ -9,6 +9,9 @@ import Foundation
 public enum InsetKind: Sendable, Hashable {
     /// A doorbell press (the device's `visitor` alarm).
     case doorbell
+    /// A conversation the user started on a camera's tile (no press): the
+    /// same call as a doorbell's.
+    case conversation
     /// A smoke or CO alarm heard in the camera's audio (`smoke_alarm`,
     /// `co_alarm` from `local_audio`).
     case soundAlarm(String)
@@ -21,6 +24,9 @@ public enum InsetKind: Sendable, Hashable {
     /// Red for smoke and CO, a calmer accent for the rest.
     public var isCritical: Bool { if case .soundAlarm = self { true } else { false } }
 
+    /// The inset carries a call (captions, Talk, typed reply).
+    public var isCall: Bool { self == .doorbell || self == .conversation }
+
     /// Doorbell and detection insets close by themselves after the event;
     /// sound alarms stay until dismissed.
     public var closesByItself: Bool { !isCritical && self != .view }
@@ -29,6 +35,7 @@ public enum InsetKind: Sendable, Hashable {
     public var reason: String {
         switch self {
         case .doorbell: "Doorbell"
+        case .conversation: "Conversation"
         case .soundAlarm(let kind): "\(DetectionTracker.label(kind)) (sound)"
         case .detection(let kind): DetectionTracker.label(kind)
         case .view: "Back"

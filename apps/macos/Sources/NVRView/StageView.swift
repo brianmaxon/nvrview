@@ -1196,6 +1196,13 @@ final class StageView: NSView {
                 self?.model.toggleListening(camera, additive: false)
             }
             item("Focus") { [weak self] in self?.focus(leaf.path) }
+            if model.calls.call(for: camera) == nil {
+                let c = ClosureMenuItem(title: "Start Conversation") { [weak self] in self?.startConversation(camera) }
+                c.toolTip = "Open the call: captions of what the camera hears, Talk, and typed replies spoken through its speaker"
+                menu.addItem(c)
+            } else {
+                item("End Conversation") { [weak self] in self?.endConversation(camera) }
+            }
             menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
             if model.isFisheye(camera) {
                 menu.addItem(fisheyeMenuItem(path: leaf.path))

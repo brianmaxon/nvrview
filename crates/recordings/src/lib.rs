@@ -3,10 +3,16 @@
 //!
 //! - [`index`]: a local, bounded index per device of the days with
 //!   recordings, the recording files, and the motion and detection events.
-//! - [`indexer`]: fills and refreshes that index in the background (recent
-//!   days first, today periodically).
+//! - [`lane`]: one search lane per device: fills that index with the days
+//!   views ask for, keeps a shown today fresh, and fetches cover thumbnails
+//!   first, one search at a time.
+//! - [`indexer`]: whole-range index passes (recent days first, today
+//!   periodically), for an optional background fill.
 //! - [`incident`]: groups events from all cameras into incidents, with the
 //!   user's merge, split, add, remove, and rename operations.
+//! - [`edits`]: the user's edits to incidents, stored and replayed over
+//!   every fresh grouping, keyed by the incidents' stable keys.
+//! - [`groups`]: the user's camera groups and camera names, stored.
 //! - [`scheduler`]: downloads incidents in the background: one job per
 //!   camera, fetched in chunks with command 143, retried on stalls and
 //!   disconnects, resumed from the first missing chunk after any failure or
@@ -18,6 +24,8 @@
 //! - [`thumbs`]: cover thumbnails (one keyframe per time range) in a
 //!   bounded on-disk cache, capped by count and bytes.
 //! - [`naming`]: the output folder and file names and `incident.json`.
+//! - [`recorded_time`]: when a recorded picture was taken, from the
+//!   wall-clock seconds keyframes carry.
 //!
 //! Times are the device's local wall-clock time as "naive seconds" (see
 //! [`bc_protocol::archive::DateTime::to_naive_secs`]): the device reports no
@@ -27,19 +35,80 @@
 //! APIs; it builds and tests on Linux, macOS, and Windows.
 
 pub mod chunk;
+pub mod edits;
 pub mod finalize;
+pub mod groups;
 pub mod incident;
 pub mod index;
 pub mod indexer;
+pub mod lane;
 pub mod naming;
+pub mod recorded_time;
 pub mod scheduler;
 mod store;
 pub mod thumbs;
 
 pub use bc_protocol::archive::DateTime;
+use bc_protocol::stream::StreamTier;
+use serde::{Deserialize, Serialize};
 
 /// Device-local wall-clock seconds (see the crate documentation).
 pub type Secs = i64;
+
+/// A camera as its device knows it: a channel and, for a multi-lens
+/// camera, which lens (0 first, 1 second). The index, searches, and
+/// downloads of one device are keyed by this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DeviceCamera {
+    /// Channel.
+    pub channel: u8,
+    /// Lens (0 or 1).
+    #[serde(default)]
+    pub lens: u8,
+}
+
+impl DeviceCamera {
+    /// A channel's lens.
+    pub const fn new(channel: u8, lens: u8) -> DeviceCamera {
+        DeviceCamera { channel, lens }
+    }
+
+    /// A channel's first lens.
+    pub const fn first(channel: u8) -> DeviceCamera {
+        DeviceCamera { channel, lens: 0 }
+    }
+
+    /// The stream that carries this lens at `tier` (protocol.md, "Download
+    /// by time range": `streamType` alone selects lens and tier).
+    pub const fn stream(self, tier: Tier) -> StreamTier {
+        match (self.lens, tier) {
+            (0, Tier::Main) => StreamTier::Main,
+            (0, Tier::Sub) => StreamTier::Sub,
+            (_, Tier::Main) => StreamTier::Extern,
+            (_, Tier::Sub) => StreamTier::Mobile,
+        }
+    }
+}
+
+/// Quality tier of a lens, independent of the protocol's stream names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    /// The high-quality stream.
+    Main,
+    /// The low-quality stream.
+    Sub,
+}
+
+/// Lens and tier of a stream: the inverse of [`DeviceCamera::stream`].
+pub const fn lens_and_tier(stream: StreamTier) -> (u8, Tier) {
+    match stream {
+        StreamTier::Main => (0, Tier::Main),
+        StreamTier::Sub => (0, Tier::Sub),
+        StreamTier::Extern => (1, Tier::Main),
+        StreamTier::Mobile => (1, Tier::Sub),
+    }
+}
 
 /// Naive seconds of a [`DateTime`].
 pub fn secs(t: DateTime) -> Secs {
@@ -91,5 +160,20 @@ mod tests {
         assert_eq!(day_start(-1), -86_400);
         let c = system_clock(3600);
         assert!(c() > 1_700_000_000);
+    }
+
+    #[test]
+    fn lens_and_tier_map_to_streams_and_back() {
+        for lens in [0, 1] {
+            for tier in [Tier::Main, Tier::Sub] {
+                let s = DeviceCamera::new(3, lens).stream(tier);
+                assert_eq!(lens_and_tier(s), (lens, tier));
+            }
+        }
+        assert_eq!(
+            DeviceCamera::new(0, 1).stream(Tier::Main),
+            StreamTier::Extern
+        );
+        assert_eq!(DeviceCamera::first(0).stream(Tier::Sub), StreamTier::Sub);
     }
 }

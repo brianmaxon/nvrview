@@ -497,7 +497,8 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 - `reason` (with `failed`): `stalled`, `session_closed`, `refused` (the
   device answered with an error), `no_recording` (the range held no
   video), `write_failed` (disk full or not writable), `join_failed` (for
-  example a codec change inside the range), `login_failed`. `detail` is
+  example a codec change inside the range), `login_failed`, `other`
+  (anything else, and failures recorded by older versions). `detail` is
   English for logs and diagnostics, not for parsing.
 - `bytes_estimate` is the device's own size estimate for the running
   chunk added to the bytes done, when known.
@@ -850,12 +851,11 @@ or a counted drop, never growth):
 
 ## 11. Existing code that conflicts or is missing
 
-1. **Allowlist.** `bc-protocol`'s allowlist test lists 5, 7, and 123 as
-   never sent ("not needed yet"). Playback needs them moved to the viewing
-   tier, with request builders for 123 (`ReplaySeek`), 5 (`FileInfo` by
-   file `Id`), and 7, and `bc-session` support for a play stream (start,
-   media routed by message ID with the replay `seq`, stop on drop). The
-   framer already reads `seq`.
+1. **Allowlist.** Done: 123, 5 and 7 are on the viewing tier, with request
+   builders (`Session::replay_seek`, `start_play`, `stop_play`) and a play
+   stream in `bc-session` (`DeviceSession::play`, `Play`: media routed by
+   message ID and the replay `seq`, bounded, stop on drop and on close, at
+   most `max_plays` per device). Rates other than 1× wait for B1.
 2. **No lens in the index or incidents.** `IndexedEvent`, `IndexedFile`,
    and `DeviceIndex::put_day` are keyed by channel only, and
    `CameraId` is `(device, channel)`. Indexing both lenses of a channel
@@ -869,20 +869,21 @@ or a counted drop, never growth):
    `CameraState::Failed` carries free text; there is no `remove_device`
    (a removed device's workers keep its old session). Needs per-camera
    pause, reason codes, and device removal.
-5. **No recorded time on frames.** `bc_protocol::media::Demuxer` drops the
-   video extra header, which carries the keyframe's wall-clock seconds the
-   shared clock needs (protocol.md, "Records as the official client reads
-   them": reported; the first keyframe's seconds matching `seekTime` is
-   observed). Needs the first 4 bytes kept on video records.
-6. **Downloads do not record their first picture's time.** A file starts
-   at the keyframe at or before the range start; `incident.json` stores the
-   requested range only. The edit list needs `file_start_ms` per file.
+5. **Recorded time on frames.** The demuxer keeps the video extra header
+   (`Record::Video::extra_header`, `wall_clock_secs`), and download chunks
+   now record each keyframe's seconds (`recordings::recorded_time`). Still
+   open: whether those seconds are device-local or UTC (MILESTONE-P.md,
+   B7), which the shared clock needs to place pictures on the index's
+   timeline.
+6. **First picture time of downloads.** Each camera job records its first
+   picture's time on the keyframes' clock (`first_picture_wall_ms`);
+   `file_start_ms` in device-local time follows once B7 is settled.
 7. **Thumbnails share the search permit** with the indexer (a FIFO
    semaphore), so a long indexing pass delays every thumbnail. Needs a
    priority (thumbnails and user refreshes before background passes).
-8. **`viewer-core` does not use `recordings` yet**, and mock-nvr has no
-   playback (123/5/7). Both are needed before playback can be tested
-   without hardware.
+8. **`viewer-core` does not use `recordings` yet** (MILESTONE-P.md, C11).
+   mock-nvr now serves playback (123/5/7) at 1× with the observed
+   burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
    everything new; open question 7.

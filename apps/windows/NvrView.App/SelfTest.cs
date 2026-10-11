@@ -46,6 +46,17 @@
 //    edge (on a manual clock) does not resize the stage's buffers; the
 //    window's restore record says what it shows and that the sidebar is
 //    collapsed;
+// 11b. calls (docs/UX.md "Doorbell calls"), against the mock's talk-capable channel and
+//    fake microphone, voice, and recognizer (never real hardware): Start conversation opens a
+//    call with no press (audible, a card over the stage, the camera's tapped audio reaching the
+//    recognizer, nothing sent by itself); Talk is refused until talk-back is allowed for the
+//    camera and then really talks (the core reports the audio it sent); a typed reply is rendered
+//    by the voice, pushed in one go and ended with a draining stop; captions reach the card; a
+//    doorbell press (an injected alarm) joins the call or opens one with the Unmute control;
+//    a call ends a minute after its last activity (manual clock) and gives the audio back; the
+//    tile menu offers the conversation and the permission. Then, on the real computer: the
+//    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
+//    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
@@ -338,6 +349,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await TileFeatures(v, stage);
         await FisheyeViews(v, stage, r);
         await LayoutsAndWindows(v);
+        await Calls(v, stage);
 
         // Detections from the mock (camera AI) reached the tiles.
         Say($"detection events: {v.DetectionEvents}, shown now: " +
@@ -372,6 +384,199 @@ internal sealed class SelfTest(App app, AppOptions options)
         foreach ((string what, long ns) in v.Timings.OrderBy(x => x.Key))
         {
             Say($"timing {what}: {Ms(ns)}");
+        }
+    }
+
+    private static CoreEvent Alarm(DeviceEntry device, int channel, string kind, bool start) => new()
+    {
+        Type = "alarm",
+        Device = device.Id,
+        Channel = channel,
+        Kind = kind,
+        State = start ? "start" : "stop",
+    };
+
+    // 11b. Calls.
+    private async Task Calls(Viewer v, StageView stage)
+    {
+        DeviceEntry device = v.Devices[0];
+        var camera = new CameraRef(device.Key, 0);
+        var mic = new FakeMicrophone();
+        var voice = new FakeSpeech { Rate = 22_050 };
+        var engines = new List<FakeTranscriber>();
+        v.Calls.Services = new CallServices(mic, voice, () =>
+        {
+            var engine = new FakeTranscriber();
+            engines.Add(engine);
+            return engine;
+        });
+        var clock = new ManualViewerClock(3000);
+        v.UseClock(clock);
+        v.SetAudible([]);
+        int leasesBefore = v.Leases.LeaseCount(camera);
+
+        // The tile menu offers the conversation and the permission.
+        var menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
+        stage.AddConversationItems(menu, camera);
+        string[] items = [.. menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Select(i => i.Text)];
+        bool allowChecked = menu.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault()?.IsChecked == true;
+        Say($"calls: tile menu {string.Join(" / ", items)}, allow checked {allowChecked}");
+        Expect(items.SequenceEqual(["Start conversation", "Allow talk-back"]) && !allowChecked, "the tile menu does not offer Start conversation and an unchecked Allow talk-back");
+
+        // 1. A conversation opens with no press and sends nothing by itself.
+        v.Calls.StartConversation(camera);
+        Call? call = v.Calls.CallFor(camera);
+        Expect(call is { Origin: CallOrigin.Conversation, Presses: 0 }, "Start conversation did not open a call with no press");
+        Expect(v.IsAudible(camera) && call is { Audible: true, ShowsUnmute: false }, "a conversation did not make the camera audible");
+        Expect(v.Leases.LeaseCount(camera) == leasesBefore + 1, "the call did not hold a lease on the camera");
+        Expect(call?.Talk.Current == TalkState.Phase.Idle && call.Talk.Outstanding == 0, "a conversation started talk-back by itself");
+        stage.CallCards.Sync();
+        CallCard? card = stage.CallCards.Cards.FirstOrDefault();
+        Say($"calls: conversation card \"{card?.TitleText}\", {stage.CallCards.Cards.Count} shown");
+        Expect(stage.CallCards.Cards.Count == 1 && card?.TitleText.StartsWith("Conversation", StringComparison.Ordinal) == true, "no conversation card over the stage");
+        Expect(engines.Count == 1 && engines[0].Source == TranscriptSource.Visitor, "the camera's audio has no recognizer");
+        bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);
+        Say($"calls: camera audio fed to the recognizer: {engines.FirstOrDefault()?.SamplesFed ?? 0} samples");
+        Expect(tapped, "the camera's tapped audio did not reach the recognizer");
+        menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
+        stage.AddConversationItems(menu, camera);
+        Expect(menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().First().Text == "End conversation", "the tile menu does not offer End conversation during a call");
+
+        // 2. Talk is refused until talk-back is allowed for the camera.
+        v.Calls.StartTalking(camera);
+        bool refused = await Until(() => call!.Talk is { Current: TalkState.Phase.Refused, Outstanding: 0 }, 5);
+        Say($"calls: talk without permission: {call!.Talk.Text}");
+        Expect(refused && call.Talk.Reason == "not_permitted" && mic.Starts == 0, "Talk without the permission was not refused (or the microphone opened)");
+
+        // 3. Allowed, Talk really talks: the core reports the audio it sent.
+        v.SetTalkAllowed(camera, true);
+        Expect(v.Settings.TalkAllowed(camera), "the permission was not kept");
+        v.Calls.StartTalking(camera);
+        bool active = await Until(() => call.Talk.IsActive, 10);
+        Expect(active && mic.Running, "Talk did not become active with the microphone running");
+        for (int i = 0; i < 10; i++)
+        {
+            mic.Speak(1600);
+            await Task.Delay(100);
+        }
+        bool youListening = engines.Count > 1 && engines[1].Source == TranscriptSource.You;
+        v.Calls.StopTalking(camera);
+        bool stopped = await Until(() => call.Talk.Current == TalkState.Phase.Stopped, 10);
+        Say($"calls: talk with permission: active {active}, then {call.Talk.Text}, {call.Talk.SentMs} ms sent");
+        Expect(stopped && !mic.Running && call.Talk.SentMs >= 500, "Talk did not send the microphone's audio");
+        Expect(youListening, "the microphone had no recognizer while talking");
+
+        // 4. A typed reply: rendered by the voice (never played here), pushed in one go, ended by a draining stop.
+        await v.Calls.SendReplyAsync("Hello, one moment please", camera);
+        bool replied = await Until(() => call.Talk is { Current: TalkState.Phase.Stopped, Reason: "finished" }, 15);
+        Say($"calls: typed reply: voice rendered {string.Join("|", voice.Rendered)}, talk ended \"{call.Talk.Reason}\", {call.Talk.SentMs} ms sent");
+        Expect(voice.Rendered.SequenceEqual(["Hello, one moment please"]), "the voice did not render exactly the typed text");
+        Expect(replied && call.Talk.SentMs >= 300, "the typed reply was not sent and finished");
+
+        // 5. Captions reach the call and its card.
+        engines[0].Say("hello th", "Hello there.");
+        bool captioned = await Until(() => call.Transcript.Finals.Count == 1, 5);
+        stage.CallCards.Sync();
+        Say($"calls: captions \"{card?.CaptionText}\"");
+        Expect(captioned && card?.CaptionText.Contains("Visitor: Hello there.", StringComparison.Ordinal) == true, "captions did not reach the card");
+
+        // 6. A doorbell press joins the call.
+        v.Apply(Alarm(device, 0, "visitor", true));
+        Expect(call.Presses == 1, "a press during the conversation did not join it");
+        stage.CallCards.Sync();
+        Expect(card?.TitleText.StartsWith("Doorbell", StringComparison.Ordinal) == true, "the card does not say Doorbell after a press");
+        v.Apply(Alarm(device, 0, "visitor", false));
+
+        // 7. A call ends a minute after its last activity and gives the audio back.
+        clock.Advance(59);
+        v.Tick();
+        Expect(v.Calls.CallFor(camera) is not null, "the call ended before a minute of silence");
+        clock.Advance(2);
+        v.Tick();
+        stage.CallCards.Sync();
+        Say($"calls: after a minute: call open {v.Calls.CallFor(camera) is not null}, cards {stage.CallCards.Cards.Count}, audible {v.IsAudible(camera)}, leases {v.Leases.LeaseCount(camera)} (were {leasesBefore})");
+        Expect(v.Calls.CallFor(camera) is null && stage.CallCards.Cards.Count == 0, "the call did not end a minute after its last activity");
+        Expect(!v.IsAudible(camera) && v.Leases.LeaseCount(camera) == leasesBefore, "ending the call left the camera audible or its lease held");
+        Expect(engines.All(e => e.Finished), "ending the call left a recognizer running");
+
+        // 8. A press alone opens a silent call with Unmute; Unmute plays it; closing gives it back.
+        v.Apply(Alarm(device, 0, "visitor", true));
+        Call? ring = v.Calls.CallFor(camera);
+        stage.CallCards.Sync();
+        Expect(ring is { Origin: CallOrigin.Press, Presses: 1, ShowsUnmute: true, Audible: false } && !v.IsAudible(camera), "a press did not open a silent call with Unmute");
+        Expect(stage.CallCards.Cards.FirstOrDefault()?.UnmuteShown == true, "the card does not show Unmute for a silent call");
+        v.Calls.Unmute(camera);
+        Expect(v.IsAudible(camera) && ring is { ShowsUnmute: false }, "Unmute did not play the camera");
+        v.Calls.End(camera, "closed");
+        Expect(v.Calls.CallFor(camera) is null && !v.IsAudible(camera), "closing the call did not end it and mute the camera");
+
+        // Revoking the permission is the user's too.
+        v.SetTalkAllowed(camera, false);
+        Expect(!v.Settings.TalkAllowed(camera), "the permission was not withdrawn");
+        v.UseClock(new SystemViewerClock());
+
+        await RealCallEngines();
+    }
+
+    // The computer's own voice, recognizer, and microphone, which depend on what Windows has installed:
+    // reported, and failing only when something claims to work and does not.
+    private async Task RealCallEngines()
+    {
+        (float[] samples, uint rate) = await new WindowsSpeech().RenderAsync("Hello, one moment please.");
+        Say($"calls: system voice rendered {samples.Length} samples at {rate} Hz ({(rate == 0 ? 0 : samples.Length / (double)rate):0.0} s)");
+        Expect(rate >= 8000 && samples.Length > rate / 2, "the system voice rendered nothing usable");
+
+        if (samples.Length > 0)
+        {
+            using var sapi = new SapiTranscriber();
+            var statuses = new List<string>();
+            var texts = new List<string>();
+            var guesses = new List<string>();
+            sapi.OnStatus = s => statuses.Add(s.Phase + (s.Why is null ? "" : $" ({s.Why})"));
+            sapi.OnFinal = t => texts.Add(t);
+            sapi.OnPartial = t => guesses.Add(t);
+            sapi.Start(TranscriptSource.Visitor);
+            // 16 kHz by linear interpolation (the voice's own rate is higher), fed in 100 ms blocks.
+            float[] pcm = new float[(int)(samples.Length * 16_000L / rate)];
+            for (int i = 0; i < pcm.Length; i++)
+            {
+                double at = i * (double)rate / 16_000;
+                int j = (int)at;
+                double f = at - j;
+                pcm[i] = (float)(samples[j] * (1 - f) + samples[Math.Min(j + 1, samples.Length - 1)] * f);
+            }
+            for (int at = 0; at < pcm.Length; at += 1600)
+            {
+                sapi.Feed(pcm.AsSpan(at, Math.Min(1600, pcm.Length - at)));
+            }
+            sapi.Feed(new float[16_000]);
+            await Until(() => texts.Count > 0 || statuses.Any(s => s.StartsWith("Unavailable", StringComparison.Ordinal)), 10);
+            sapi.Finish();
+            await Task.Delay(1500);
+            Say($"calls: desktop recognizer: {string.Join(", ", statuses)}; heard \"{string.Join(" ", texts)}\", guesses \"{string.Join(" | ", guesses.TakeLast(3))}\"; {sapi.Counts}");
+            Expect(statuses.Any(x => x.StartsWith("Unavailable", StringComparison.Ordinal)) ||
+                string.Join(" ", texts).Contains("moment", StringComparison.OrdinalIgnoreCase),
+                "the desktop recognizer is available but did not hear the system voice's sentence");
+        }
+
+        if (options.MicrophoneTest)
+        {
+            var mic = new WasapiMicrophone();
+            int blocks = 0, samplesSeen = 0;
+            float peak = 0;
+            string? problem = mic.Start(block =>
+            {
+                Interlocked.Increment(ref blocks);
+                Interlocked.Add(ref samplesSeen, block.Length);
+                foreach (float x in block)
+                {
+                    peak = Math.Max(peak, Math.Abs(x));
+                }
+            });
+            await Task.Delay(700);
+            mic.Stop();
+            Say($"calls: microphone {(problem is null ? $"opened: {blocks} blocks, {samplesSeen} samples at 16 kHz, peak {peak:0.000}" : $"not available: {problem}")}");
+            Expect(problem is not null || blocks > 10, "the microphone opened but delivered no audio");
         }
     }
 

@@ -41,6 +41,11 @@ pub struct VideoEntry {
     pub offset: u64,
     /// Length in bytes.
     pub len: u32,
+    /// For a keyframe, the device's wall-clock seconds from the record's
+    /// extra header ([`bc_protocol::media::wall_clock_secs`]); see
+    /// [`crate::recorded_time`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_secs: Option<u32>,
 }
 
 /// One audio frame in a chunk.
@@ -194,7 +199,7 @@ impl ChunkWriter {
                 keyframe,
                 pts_us,
                 data,
-                ..
+                extra_header,
             } => {
                 if !self.seen_key && !keyframe {
                     self.idx.dropped_before_keyframe += 1;
@@ -215,6 +220,9 @@ impl ChunkWriter {
                     key: *keyframe,
                     offset: self.video_len,
                     len: data.len() as u32,
+                    wall_secs: keyframe
+                        .then(|| bc_protocol::media::wall_clock_secs(extra_header))
+                        .flatten(),
                 });
                 self.video_len += data.len() as u64;
                 self.idx.bytes += data.len() as u64;

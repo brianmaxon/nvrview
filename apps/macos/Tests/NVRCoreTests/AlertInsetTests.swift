@@ -218,6 +218,29 @@ import Testing
         #expect(board.items.isEmpty)
     }
 
+    @Test func aConversationInsetIsACallThatClosesAMinuteAfterItsLastUse() {
+        #expect(InsetKind.conversation.isCall && InsetKind.doorbell.isCall && !InsetKind.view.isCall)
+        #expect(InsetKind.conversation.closesByItself && !InsetKind.conversation.isCritical)
+        #expect(InsetKind.conversation.reason == "Conversation")
+        var board = InsetBoard()
+        // Started by the user, not an event: opened and "ended" at once.
+        board.started(.conversation, camera: door, visible: false, now: 0, at: t0)
+        board.stopped(.conversation, camera: door, now: 0)
+        board.use(door, now: 30)
+        let early = board.tick(now: 89)
+        #expect(early.isEmpty)
+        let due = board.tick(now: 90)
+        #expect(due.map(\.camera) == [door])
+    }
+
+    @Test func aPressDuringAConversationTurnsItIntoTheDoorbellInset() {
+        var board = InsetBoard()
+        board.started(.conversation, camera: door, visible: false, now: 0, at: t0)
+        board.stopped(.conversation, camera: door, now: 0)
+        board.started(.doorbell, camera: door, visible: false, now: 5, at: t0 + 5)
+        #expect(board.item(for: door)?.kind == .doorbell && board.item(for: door)?.count == 2)
+    }
+
     // MARK: Smoke and CO
 
     @Test func soundAlarmInsetsStayUntilDismissed() {

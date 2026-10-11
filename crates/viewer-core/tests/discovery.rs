@@ -35,8 +35,8 @@ fn record() -> SearchRecord {
 
 type Reply = Box<dyn Fn(&[u8], SocketAddr) -> Vec<(Vec<u8>, SocketAddr)> + Send + Sync>;
 
-/// A mock device on loopback; returns its address.
-fn mock_device(rt: &tokio::runtime::Runtime, reply: Reply) -> SocketAddrV4 {
+/// A mock device on loopback that answers after `delay`; returns its address.
+fn mock_device(rt: &tokio::runtime::Runtime, delay: Duration, reply: Reply) -> SocketAddrV4 {
     rt.block_on(async {
         let socket = UdpSocket::bind((LO, 0)).await.unwrap();
         let SocketAddr::V4(addr) = socket.local_addr().unwrap() else {
@@ -46,6 +46,7 @@ fn mock_device(rt: &tokio::runtime::Runtime, reply: Reply) -> SocketAddrV4 {
             let mut buf = vec![0u8; 65536];
             while let Ok((n, from)) = socket.recv_from(&mut buf).await {
                 for (bytes, to) in reply(&buf[..n], from) {
+                    tokio::time::sleep(delay).await;
                     let _ = socket.send_to(&bytes, to).await;
                 }
             }
@@ -66,12 +67,24 @@ fn free_port(rt: &tokio::runtime::Runtime) -> u16 {
 }
 
 /// A native search device and an ONVIF device, both at 127.0.0.1, so their
-/// answers merge into one found device.
+/// answers merge into one found device. The two exchanges are independent, so
+/// which answer arrives first is not defined; `mock_options_ordered` makes it so.
 fn mock_options(rt: &tokio::runtime::Runtime, millis: u64) -> Options {
+    mock_options_ordered(rt, millis, Duration::ZERO, Duration::ZERO)
+}
+
+/// As `mock_options`, with each device answering after its own delay.
+fn mock_options_ordered(
+    rt: &tokio::runtime::Runtime,
+    millis: u64,
+    search_delay: Duration,
+    onvif_delay: Duration,
+) -> Options {
     let reply_port = free_port(rt);
     let rec = native::encode_search_record(&record());
     let search = mock_device(
         rt,
+        search_delay,
         Box::new(move |d, _from| {
             if native::is_search_request(d) {
                 vec![(rec.clone(), SocketAddr::from((LO, reply_port)))]
@@ -82,6 +95,7 @@ fn mock_options(rt: &tokio::runtime::Runtime, millis: u64) -> Options {
     );
     let onvif_dev = mock_device(
         rt,
+        onvif_delay,
         Box::new(|d, from| {
             onvif::probe_message_id(d)
                 .map(|id| {
@@ -117,9 +131,20 @@ fn dones(rec: &Recorder) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn answers_arrive_as_events_and_merge_by_key() {
+fn answers_arrive_as_events_and_merge_by_key_search_first() {
+    answers_merge(Duration::ZERO, Duration::from_millis(300));
+}
+
+#[test]
+fn answers_arrive_as_events_and_merge_by_key_onvif_first() {
+    answers_merge(Duration::from_millis(300), Duration::ZERO);
+}
+
+/// Runs one search whose two answers arrive in the order the delays give, and
+/// checks the events: one device, whichever answer came first.
+fn answers_merge(search_delay: Duration, onvif_delay: Duration) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let options = mock_options(&rt, 500);
+    let options = mock_options_ordered(&rt, 1_000, search_delay, onvif_delay);
     let (core, rec) = start(CoreConfig::default());
     let search = core.discover_start(options).unwrap();
     wait_until("the search to end", 10, || !dones(&rec).is_empty());
@@ -129,24 +154,26 @@ fn answers_arrive_as_events_and_merge_by_key() {
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["search"], search);
     let found = rec.events_of("discovered");
-    // The search answer, then the ONVIF answer with the model: the same key.
+    // Each answer is an event for the same key; the last one is the merge.
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(found.iter().all(|e| e["search"] == search));
     assert_eq!(found[0]["key"], found[1]["key"]);
-    assert_eq!(found[0]["kind"], "nvr");
-    assert_eq!(found[0]["name"], "NVR 1");
-    assert_eq!(found[0]["address"], "127.0.0.1");
-    assert_eq!(found[0]["port"], 9000);
-    assert_eq!(found[0]["channels"], 8);
-    assert!(found[0].get("model").is_none());
-    assert_eq!(found[1]["model"], "Model-Y");
-    let kinds: Vec<_> = found[1]["services"]
+    let merged = &found[1];
+    assert_eq!(merged["kind"], "nvr");
+    assert_eq!(merged["name"], "NVR 1");
+    assert_eq!(merged["address"], "127.0.0.1");
+    assert_eq!(merged["port"], 9000);
+    assert_eq!(merged["channels"], 8);
+    assert_eq!(merged["model"], "Model-Y");
+    let mut kinds: Vec<_> = merged["services"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["kind"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(kinds, [ServiceKind::Native.as_str(), "onvif"]);
+    kinds.sort();
+    assert_eq!(kinds, ["native", "onvif"]);
+    assert_eq!(ServiceKind::Native.as_str(), "native");
 
     let done = dones(&rec);
     assert_eq!(done.len(), 1);

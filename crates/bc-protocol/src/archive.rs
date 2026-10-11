@@ -802,6 +802,68 @@ pub fn parse_download_estimate(xml: &str) -> Result<Option<u64>, XmlError> {
     Ok(Some((hi & 0xffff_ffff) << 32 | (lo & 0xffff_ffff)))
 }
 
+// ---------------------------------------------------------------------------
+// 123, 5, 7: playback of a recording file (docs/protocol.md, "Playback")
+
+/// The only `playSpeed` value observed in a decryptable capture: normal
+/// speed. Other rates were seen only encrypted, so their values are not
+/// known and are never sent (docs/MILESTONE-P.md, B1).
+pub const PLAY_SPEED_NORMAL: u32 = 1;
+
+/// The `channelId` the official client put in its 123 (seek), observed as 0
+/// although the recording belonged to another channel; why is an open
+/// question in docs/protocol.md. Sent as observed.
+pub const SEEK_CHANNEL: u8 = 0;
+
+/// A play of one recording file (command 5), stopped with command 7.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayRequest {
+    /// Channel number.
+    pub channel: u8,
+    /// The camera's device ID, when known.
+    pub uid: Option<String>,
+    /// Stream (lens and tier).
+    pub stream: StreamTier,
+    /// The file's `Id` from the file search (command 15).
+    pub file_id: String,
+    /// The file's `name` from the file search (the stop names it).
+    pub file_name: String,
+}
+
+/// Body of a seek (command 123): where the next play starts, tagged with
+/// the `seq` its media will carry.
+pub fn replay_seek_body(seq: u32, at: DateTime) -> String {
+    wrap(&format!(
+        "<ReplaySeek version=\"1.1\">\n<channelId>{SEEK_CHANNEL}</channelId>\n<seq>{seq}</seq>\n\
+         {}</ReplaySeek>\n",
+        at.xml("seekTime"),
+    ))
+}
+
+/// Body of a play (command 5) at normal speed.
+pub fn play_body(q: &PlayRequest) -> String {
+    wrap(&format!(
+        "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<Id>{}</Id>\n{}\
+         <supportSub>0</supportSub>\n<playSpeed>{PLAY_SPEED_NORMAL}</playSpeed>\n\
+         <streamType>{}</streamType>\n</FileInfo>\n</FileInfoList>\n",
+        q.channel,
+        escape(&q.file_id),
+        opt_uid(q.uid.as_deref()),
+        q.stream.name(),
+    ))
+}
+
+/// Body of a play's stop (command 7).
+pub fn play_stop_body(q: &PlayRequest) -> String {
+    wrap(&format!(
+        "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<name>{}</name>\n\
+         <streamType>{}</streamType>\n</FileInfo>\n</FileInfoList>\n",
+        q.channel,
+        escape(&q.file_name),
+        q.stream.name(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

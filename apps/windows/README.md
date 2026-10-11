@@ -13,7 +13,7 @@ headless demo.
 | `layout/nvlayout.c` | prints struct sizes, field offsets, and constants as the C compiler sees `nvrview.h` |
 | `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer (Windows only) |
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
-| `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping) and its tests on simulated time; builds and runs on Windows and Linux |
+| `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping, the rules of calls) and its tests on simulated time; builds and runs on Windows and Linux |
 | `NvrView.Shell/`, `NvrView.Shell.Tests/` | the shell's logic without a window: split-pane layouts and their JSON (the macOS app's documents, byte for byte), layout geometry, tile leases, the sidebar's edge reveal, camera groups, window restore; and its tests; builds and runs on Windows and Linux |
 | `NvrView.App/` | the app: WinUI 3 windows with split-pane layouts, the sidebar, focus, listening, Settings, a `--selftest`, and a `--startup-test` (Windows only) |
 
@@ -339,7 +339,7 @@ Layouts and windows:
 ### The self-test
 
 ```sh
-scripts/windows-app.sh selftest 10 --credential-test
+scripts/windows-app.sh selftest 10 --credential-test --mic-test
 ```
 
 runs `NvrView.App.exe --mock-nvr ... --selftest 10 --log FILE` in the
@@ -420,7 +420,22 @@ that is refused once, then streams):
     and is saved, 0 resets the view, and Original removes the member;
 14. stopping the mock makes every tile say it is reconnecting;
 15. no callback threw, no tile reported an error or a failed tier switch;
-16. with `--credential-test`, a throwaway credential is written, read back,
+16. calls, against the mock's talk-capable channel (`--talk 0`) with a fake
+    microphone, voice and recognizer, never real hardware: Start
+    conversation (the tile menu offers it, with Allow talk-back) opens a
+    call with no press, audible, a card over the stage, the camera's tapped
+    audio reaching the recognizer, and nothing sent by itself; Talk is
+    refused until talk-back is allowed and then really talks (the core's
+    `sent_ms` is checked); a typed reply is rendered by the voice at its own
+    rate, pushed in one go and ended with a draining stop (`finished`);
+    captions reach the card; a press (an injected `alarm`) joins the call
+    or opens a silent one with Unmute; a call ends a minute after its last
+    activity on a manual clock and gives the audio and the lease back. Then
+    on the real computer: the system voice renders a sentence, the desktop
+    recognizer hears it ("moment" must be in the text where Windows has a
+    recognizer), and with `--mic-test` the microphone opens for 0.7 s (the
+    audio is measured and dropped);
+17. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
 
 It writes what it measured and `selftest: PASS` or `selftest: FAIL` to the
@@ -494,7 +509,53 @@ restored from NuGet at build time, never committed), but a published binary
 build of the Windows app would ship Microsoft's redistributables under
 those terms, and its release would need an end-user notice that carries
 them. The package's `NOTICE.txt` lists the open-source components inside
-it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
+it. `TerraFX.Interop.Windows` and `System.Speech` (both MIT) are the only other packages.
+
+### Calls
+
+[docs/UX.md](../../docs/UX.md) "Doorbell calls": captions, Talk, and a typed
+reply, opened by a doorbell press or by the user (right-click a camera tile
+> Start conversation), without a press.
+
+- **The rules** (`NvrView.Tiles/Calls.cs`, tested in `CallTests` on
+  simulated time): whether a call makes the camera audible, the talk-back
+  state machine from the core's `talk` events (including late events of an
+  earlier start), the transcript, the echo gate, the minute after the last
+  activity. They match the Mac app's `DoorbellCall`.
+- **The core.** `NvCore.TalkSetPermission/TalkStart/TalkPush/TalkStop` wrap
+  the talk functions (docs/FFI.md "Talk-back"); the core is created with
+  `AudioTap`, and a call taps its camera's tile (`TapRouter`, on the core's
+  tap thread) for the visitor's captions. The permission is the user's
+  per-camera "Allow talk-back" (the tile menu, kept in `view-settings.json`,
+  off by default) and is passed to the core before every start and whenever
+  it changes. A press is the core's `alarm` event of kind `visitor`
+  (`Viewer.ApplyDetection`).
+- **Microphone.** `WasapiMicrophone`: WASAPI shared mode, event driven, asked
+  for 16 kHz mono float with `AUTOCONVERTPCM` (the engine converts from the
+  device's format). The same blocks go to `TalkPush` and, unless the camera's
+  audio is playing through the speakers (the echo gate), to the recognizer.
+  Windows has no permission prompt for desktop apps: where the "Let desktop
+  apps access your microphone" setting is off, the call says so.
+- **Typed reply.** `WindowsSpeech`: `Windows.Media.SpeechSynthesis` renders
+  the text to a WAV in memory (never played on this computer), read as mono
+  float at the voice's own rate (`Pcm.TryReadWav`); the core resamples what
+  it sends. Pushed in one go and ended with a draining stop.
+- **Captions.** `SapiTranscriber`: the desktop recognizer of Windows
+  (`System.Speech`, SAPI) with the dictation grammar, fed 16 kHz PCM through a
+  blocking pipe; one session per source. It is local and needs no model to
+  ship, but it is the older engine: [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)
+  plans Moonshine on Windows, and nothing in the core transcribes. Where
+  Windows has no desktop recognizer for a language (`reg query
+  HKLM\SOFTWARE\Microsoft\Speech\Recognizers\Tokens`), or it cannot start,
+  the call says "No transcript: ..." and goes on. Because the app runs with
+  invariant globalization, `PredefinedCulturesOnly` is off in the project file
+  (System.Speech names its recognizers by culture, and without this it
+  finds none).
+- **Where it shows.** A card per call in the stage's bottom right corner of
+  every window (`CallPanel.cs`). Windows has no alert insets yet, so a press
+  opens the card but does not show the doorbell's video unless a tile does.
+- **Not yet on Windows:** saving transcripts into the event log (the call is
+  logged without them), a per-doorbell "unmute on ring" setting.
 
 ### How it works
 
@@ -508,6 +569,7 @@ it. `TerraFX.Interop.Windows` (MIT) remains the only other package.
 | `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator corner (`view-settings.json`) |
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
+| `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |
 | `WindowsCredentials`, `DeviceStore`, `SettingsDialog` | passwords in Credential Manager, the device list in `settings.json`, the Settings dialog |
 | `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
 

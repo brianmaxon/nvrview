@@ -57,6 +57,9 @@ import VideoKit
 ///    already added, and choosing a device fills the form's address, port
 ///    and name (but not for one the viewer cannot add); closing the window
 ///    stops the search;
+/// 14b. with `--fake`, "Start Conversation" opens the doorbell's call with no
+///    press (audible, nothing sent by itself, Talk refused without the
+///    permission) and ends through the close path;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -653,8 +656,37 @@ final class SelfTest {
             print("doorbell inset: open after 59 s \(stayed), closed after 61 s \(closed), call ended \(model.calls.call(for: doorbell) == nil)")
             if !stayed || !closed { problems.append("the doorbell inset did not close a minute after the press") }
             if model.calls.call(for: doorbell) != nil { problems.append("the call did not end a minute after the last activity") }
-            smokeStep()
+            conversationStep(doorbell)
         }
+    }
+
+    /// "Start Conversation" opens the call with no press, sends nothing by
+    /// itself, refuses Talk without the permission, and ends through the
+    /// same paths.
+    private func conversationStep(_ doorbell: CameraRef) {
+        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
+        let stage = window.stage
+        let startsBefore = fake.talkStarts
+        stage.startConversation(doorbell)
+        let call = model.calls.call(for: doorbell)
+        let opened = stage.insetBoard.item(for: doorbell)?.kind == .conversation
+        print("conversation: inset \(opened), presses \(call?.presses ?? -1), audible \(model.audible.contains(doorbell))")
+        if !opened || call == nil || call?.presses != 0 || call?.origin != .conversation {
+            problems.append("Start Conversation did not open the inset and a call with no press")
+        }
+        if !model.audible.contains(doorbell) { problems.append("a conversation did not make the camera audible") }
+        if fake.talkStarts != startsBefore { problems.append("a conversation sent talk-back by itself") }
+        model.calls.startTalking(doorbell)
+        if case .refused = model.calls.call(for: doorbell)?.talk.phase {} else {
+            problems.append("Talk in a conversation was not refused without the permission")
+        }
+        model.calls.stopTalking(doorbell)
+        stage.endConversation(doorbell)
+        let ended = model.calls.call(for: doorbell) == nil && stage.insetBoard.item(for: doorbell) == nil
+        print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
+        if !ended { problems.append("ending a conversation left its call or inset open") }
+        if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
+        smokeStep()
     }
 
     /// A smoke alarm's inset stays until dismissed; dismissing it dismisses

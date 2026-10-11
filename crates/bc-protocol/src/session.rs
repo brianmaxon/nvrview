@@ -14,6 +14,7 @@
 
 use crate::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
+    PlayRequest,
 };
 use crate::crypto::{SessionKey, credential_hash, xor_obfuscate};
 use crate::framer::{EncodeError, RawMessage, encode_message, encode_message_with_status};
@@ -70,6 +71,13 @@ pub enum Command {
     EventSearchClose = 274,
     /// 298: cover image (one keyframe) for a time range.
     Cover = 298,
+    /// 123: where the next play starts (viewing tier: positions a replay
+    /// on this session, changes nothing on the device).
+    ReplaySeek = 123,
+    /// 5: play a recording file (viewing tier).
+    PlayFile = 5,
+    /// 7: stop a play.
+    PlayStop = 7,
     /// 192: start alarm report: subscribes this session to the device's
     /// detection pushes (33). Viewing tier: it changes no settings.
     AlarmReport = 192,
@@ -123,6 +131,9 @@ impl Command {
             273 => Command::EventSearchNext,
             274 => Command::EventSearchClose,
             298 => Command::Cover,
+            123 => Command::ReplaySeek,
+            5 => Command::PlayFile,
+            7 => Command::PlayStop,
             192 => Command::AlarmReport,
             10 => Command::TalkAbility,
             201 => Command::TalkOpen,
@@ -299,11 +310,15 @@ struct Preview {
 enum TransferKind {
     Download,
     Cover,
+    /// A play (5); its media carry the 123 `seq`.
+    Play,
 }
 
 struct Transfer {
     kind: TransferKind,
     saw_media: bool,
+    /// For a play, the `seq` of the seek before it.
+    seq: Option<u32>,
 }
 
 /// One session with one device.
@@ -644,6 +659,7 @@ impl Session {
             Transfer {
                 kind: TransferKind::Cover,
                 saw_media: false,
+                seq: None,
             },
         );
         Ok((id, bytes))
@@ -660,6 +676,7 @@ impl Session {
             Transfer {
                 kind: TransferKind::Download,
                 saw_media: false,
+                seq: None,
             },
         );
         Ok((id, bytes))
@@ -679,6 +696,63 @@ impl Session {
         let bytes = self.send(Command::DownloadStop, start_id, &[], &[])?;
         self.transfers.remove(&start_id);
         Ok(bytes)
+    }
+
+    /// Builds a seek (command 123): the next play starts at the keyframe at
+    /// or before `at`, and its media carry `seq`. An ordinary control reply
+    /// (empty, status 200) answers it.
+    pub fn replay_seek(&mut self, seq: u32, at: DateTime) -> Result<(u32, Vec<u8>), SessionError> {
+        let id = self.alloc_id()?;
+        let body = archive::replay_seek_body(seq, at);
+        let bytes = self.send(Command::ReplaySeek, id, &[], body.as_bytes())?;
+        Ok((id, bytes))
+    }
+
+    /// Builds a play (command 5) of one recording file at normal speed,
+    /// after a [`Session::replay_seek`] with the same `seq`. Its replies
+    /// (a first reply with a stream-info record, then media whose headers
+    /// carry `seq`) come with the returned message ID.
+    pub fn start_play(
+        &mut self,
+        q: &PlayRequest,
+        seq: u32,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        let id = self.alloc_id()?;
+        let body = archive::play_body(q);
+        let bytes = self.send(Command::PlayFile, id, &[], body.as_bytes())?;
+        self.transfers.insert(
+            id,
+            Transfer {
+                kind: TransferKind::Play,
+                saw_media: false,
+                seq: Some(seq),
+            },
+        );
+        Ok((id, bytes))
+    }
+
+    /// Builds the stop (command 7) of the play started with `play_id`, and
+    /// forgets the play; later media for it is ignored. The stop names the
+    /// file in its body, so it goes with a message ID of its own (which ID
+    /// the official client used is not recorded).
+    pub fn stop_play(&mut self, play_id: u32, q: &PlayRequest) -> Result<Vec<u8>, SessionError> {
+        match self.transfers.get(&play_id) {
+            Some(t) if t.kind == TransferKind::Play => {}
+            _ => return Err(SessionError::UnknownStream(play_id)),
+        }
+        let id = self.alloc_id()?;
+        let body = archive::play_stop_body(q);
+        let bytes = self.send(Command::PlayStop, id, &[], body.as_bytes())?;
+        self.transfers.remove(&play_id);
+        Ok(bytes)
+    }
+
+    /// Message IDs of running plays.
+    pub fn active_plays(&self) -> impl Iterator<Item = u32> + '_ {
+        self.transfers
+            .iter()
+            .filter(|(_, t)| t.kind == TransferKind::Play)
+            .map(|(id, _)| *id)
     }
 
     /// Enables or disables motion-tier commands (talk-back) for a channel.
@@ -872,6 +946,9 @@ impl Session {
         if h.command == Command::Download.number() || h.command == Command::Cover.number() {
             return self.handle_transfer(msg);
         }
+        if h.command == Command::PlayFile.number() {
+            return self.handle_play(msg);
+        }
         if h.command == Command::PreviewStart.number() {
             let Some(preview) = self.previews.get_mut(&h.message_id) else {
                 return Ok(Event::Ignored {
@@ -918,6 +995,50 @@ impl Session {
         } else {
             Ok(control(self.decrypt_text(ext)?, payload.to_vec()))
         }
+    }
+
+    /// A message of a play (5). Media headers carry the play's `seq` where
+    /// other messages have a status and class (protocol.md, "Replay media
+    /// headers"), so a message is media when its `seq` matches; the first
+    /// reply (status 200, a stream-info record) is media too.
+    ///
+    /// How a device ends a play, or refuses one, has not been observed
+    /// (docs/MILESTONE-P.md, B6). Here: an empty body ends the play (status
+    /// 200 when it came with the play's `seq`, else its status), and a
+    /// non-media message with a status other than 200 is a refusal.
+    fn handle_play(&mut self, msg: &RawMessage) -> Result<Event, SessionError> {
+        let h = msg.header;
+        let Some(t) = self.transfers.get(&h.message_id) else {
+            return Ok(Event::Ignored {
+                command: h.command,
+                message_id: h.message_id,
+            });
+        };
+        let media_header = t.seq.is_some() && h.replay_seq == t.seq;
+        let end = |status: u16| Event::TransferEnd {
+            command: h.command,
+            message_id: h.message_id,
+            status,
+        };
+        if msg.body.is_empty() {
+            if !media_header && h.status == 200 && !t.saw_media {
+                // An empty acknowledgment before any media.
+                return Ok(Event::Control {
+                    command: h.command,
+                    message_id: h.message_id,
+                    status: h.status,
+                    xml: String::new(),
+                    payload: Vec::new(),
+                });
+            }
+            self.transfers.remove(&h.message_id);
+            return Ok(end(if media_header { 200 } else { h.status }));
+        }
+        if !media_header && h.status != 200 {
+            self.transfers.remove(&h.message_id);
+            return Ok(end(h.status));
+        }
+        self.handle_transfer(msg)
     }
 
     /// A message of a download (143) or cover-image (298) reply stream.
@@ -1220,8 +1341,8 @@ mod tests {
     #[test]
     fn allowlist() {
         for n in [
-            1, 2, 3, 4, 10, 11, 14, 15, 16, 80, 93, 142, 143, 144, 145, 146, 192, 199, 201, 202,
-            272, 273, 274, 298, 318,
+            1, 2, 3, 4, 5, 7, 10, 11, 14, 15, 16, 80, 93, 123, 142, 143, 144, 145, 146, 192, 199,
+            201, 202, 272, 273, 274, 298, 318,
         ] {
             assert!(Command::is_allowed(n));
             assert_eq!(Command::from_number(n).unwrap().number(), n);
@@ -1230,18 +1351,18 @@ mod tests {
         for n in [11, 201, 202] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Motion);
         }
-        for n in [1, 2, 3, 4, 10, 93, 143, 199] {
+        for n in [1, 2, 3, 4, 5, 7, 10, 93, 123, 143, 199] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Viewing);
         }
-        // Never: playback by file (5, 7, 123, 381–383, 8, 9: not needed yet),
+        // Never: playback commands not observed in use (381–383, 150, 8, 9),
         // 193 (stop alarm report: the session simply logs out), 300 (writes
         // the AI configuration) and, above all, 303 (delete recording files).
         // Not yet: the PTZ motion commands (18, 19, 295) and the talk
         // variants the client does not use (12, 203–205); 20 and 331 change
         // settings.
         for n in [
-            0, 5, 7, 8, 9, 12, 13, 18, 19, 20, 33, 44, 58, 76, 102, 123, 193, 203, 204, 205, 295,
-            300, 303, 331, 381, 511, 600,
+            0, 8, 9, 12, 13, 18, 19, 20, 33, 44, 58, 76, 102, 150, 193, 203, 204, 205, 295, 300,
+            303, 331, 381, 382, 383, 511, 600,
         ] {
             assert!(!Command::is_allowed(n), "{n}");
         }
@@ -1660,6 +1781,109 @@ mod tests {
             Event::Ignored { .. }
         ));
         assert_eq!(s.stop_download(id), Err(SessionError::UnknownStream(id)));
+    }
+
+    #[test]
+    fn play_seek_play_media_by_seq_end_and_stop() {
+        let (mut s, key) = logged_in();
+        let text = |key: &SessionKey, m: &RawMessage| {
+            let mut b = m.payload().to_vec();
+            key.decrypt(&mut b);
+            String::from_utf8(b).unwrap()
+        };
+        let seq = 0x6a00_1234;
+        let (sid, bytes) = s.replay_seek(seq, t(7, 42, 5)).unwrap();
+        let seek = decode_one(&bytes);
+        assert_eq!((seek.header.command, seek.header.message_id), (123, sid));
+        let x = text(&key, &seek);
+        assert_eq!(find_text(&x, "seq").unwrap().as_deref(), Some("1778389556"));
+        assert_eq!(find_text(&x, "channelId").unwrap().as_deref(), Some("0"));
+        assert!(x.contains("<seekTime>") && x.contains("<minute>42</minute>"));
+        // The seek's reply is an ordinary control reply.
+        let ok = encode_message_with_status(123, sid, 200, Class::Device, &[], &[]).unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&ok)).unwrap(),
+            Event::Control {
+                command: 123,
+                status: 200,
+                ..
+            }
+        ));
+
+        let q = PlayRequest {
+            channel: 3,
+            uid: Some("UID-EXAMPLE".into()),
+            stream: StreamTier::Sub,
+            file_id: "file-id-1".into(),
+            file_name: "file-name-1".into(),
+        };
+        let (pid, bytes) = s.start_play(&q, seq).unwrap();
+        let play = decode_one(&bytes);
+        assert_eq!(play.header.command, 5);
+        let x = text(&key, &play);
+        assert_eq!(find_text(&x, "Id").unwrap().as_deref(), Some("file-id-1"));
+        assert_eq!(find_text(&x, "playSpeed").unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            find_text(&x, "streamType").unwrap().as_deref(),
+            Some("subStream")
+        );
+        assert_eq!(s.active_plays().collect::<Vec<_>>(), vec![pid]);
+
+        // First reply: status 200, binaryData, a stream-info record. Then
+        // media whose headers carry the seq; one of another seq is not
+        // this play's media and is refused as such.
+        let ext_plain = "<Extension version=\"1.1\"><binaryData>1</binaryData></Extension>";
+        let mut wire = device_media(&key, 5, pid, ext_plain, &encode_info(640, 360, 15), 0);
+        let nal: Vec<u8> = (0..900u32).map(|i| (i * 7) as u8).collect();
+        let video = encode_video(0, true, Codec::H264, 5, &[], &nal);
+        let mut e = ext_plain.as_bytes().to_vec();
+        key.encrypt(&mut e);
+        wire.extend(crate::framer::encode_replay_media(pid, seq, &e, &video).unwrap());
+        // The end: an empty media message (how a device ends a play is not
+        // known; this is the decoder's rule).
+        wire.extend(crate::framer::encode_replay_media(pid, seq, &[], &[]).unwrap());
+        let mut dec = Decoder::new();
+        dec.push(&wire);
+        let mut demux = Demuxer::new();
+        let mut got = Vec::new();
+        let mut ended = None;
+        while let Some(m) = dec.next_message().unwrap() {
+            match s.handle(&m).unwrap() {
+                Event::Media { message_id, data } if message_id == pid => {
+                    demux.push(&data);
+                    while let Some(r) = demux.next_record().unwrap() {
+                        got.push(r);
+                    }
+                }
+                Event::TransferEnd {
+                    command: 5, status, ..
+                } => ended = Some(status),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(got.len(), 2);
+        assert!(matches!(&got[1], Record::Video { data, .. } if *data == nal));
+        assert_eq!(ended, Some(200));
+        assert_eq!(s.active_plays().count(), 0);
+        assert_eq!(s.stop_play(pid, &q), Err(SessionError::UnknownStream(pid)));
+
+        // A refused play: a non-200 reply without the seq ends it with that
+        // status. A running play is stopped with 7, naming the file.
+        let (pid, _) = s.start_play(&q, seq + 1).unwrap();
+        let refused = encode_message_with_status(5, pid, 400, Class::Device, &[], b"x").unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&refused)).unwrap(),
+            Event::TransferEnd { status: 400, .. }
+        ));
+        let (pid, _) = s.start_play(&q, seq + 2).unwrap();
+        let stop = decode_one(&s.stop_play(pid, &q).unwrap());
+        assert_eq!(stop.header.command, 7);
+        assert_ne!(stop.header.message_id, pid);
+        assert_eq!(
+            find_text(&text(&key, &stop), "name").unwrap().as_deref(),
+            Some("file-name-1")
+        );
+        assert_eq!(s.active_plays().count(), 0);
     }
 
     #[test]

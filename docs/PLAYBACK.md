@@ -3,7 +3,8 @@
 Milestone P: finding recorded events and getting them off the NVR, done the
 way people actually use recordings. Protocol facts are in
 [protocol.md](protocol.md) ("Recordings: search and download", "Playback",
-"Cover images"); this is the design.
+"Cover images"); this is the design. The work breakdown (slices, order,
+what is blocked on a capture) is [MILESTONE-P.md](MILESTONE-P.md).
 
 ## What goes wrong today (official desktop app)
 
@@ -57,9 +58,17 @@ files need no C library on any platform.
   keyed by device, channel, stream, and requested range; an empty answer (no
   recording in the range) is not cached.
 
-The index fills in the background (recent days first, then older ones),
-refreshes the current day periodically, and is shared by every window. All of
-this is read-only toward the device.
+The index is a cache of what views asked for, not a copy of the device's
+(FFI-RECORDINGS.md, decision 8). One search lane per device
+(`recordings::lane`) sends one search at a time over the device's session,
+choosing each time: cover thumbnails first (newest request first, at most
+256 waiting, cancelable), then the days a view asked for (newest day first,
+one month calendar or one camera-day at a time, never searching a finished
+day twice unless the user refreshes), then today again while a view shows
+it and its entry is older than a minute. So a long fill delays what is on
+screen by at most one search. Nothing is searched in the background
+otherwise. The index is shared by every window, keyed by camera (channel
+and lens). All of this is read-only toward the device.
 
 - **Sound** per channel: a loudness envelope (peak and RMS per second) and
   sound labels as events of our own (see "Sound" below).

@@ -316,7 +316,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     private CameraTile[] _tiles = [];
     private int _alertsLogged;
 
-    public Viewer(CoreHost host, ICredentialStore credentials, DeviceStore store, ViewSettings? settings = null, GroupStore? groups = null)
+    public Viewer(CoreHost host, ICredentialStore credentials, DeviceStore store, ViewSettings? settings = null, GroupStore? groups = null, CallServices? callServices = null)
     {
         _host = host;
         _credentials = credentials;
@@ -324,6 +324,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         _groupStore = groups ?? new GroupStore(null);
         Settings = settings ?? new ViewSettings(null);
         Leases = new TileLeases<CameraTile>(this);
+        Calls = new ViewerCalls(this, callServices ?? CallServices.Real());
         Groups = _groupStore.Load();
         host.SetSink(Apply);
         host.Tiers.HasMiddleTier = HasMiddleTier;
@@ -339,6 +340,39 @@ internal sealed class Viewer : ITileBackend<CameraTile>
 
     /// <summary>One core tile per camera any window shows.</summary>
     public TileLeases<CameraTile> Leases { get; }
+
+    /// <summary>The calls in progress: doorbell presses and the user's conversations (docs/UX.md "Doorbell calls").</summary>
+    public ViewerCalls Calls { get; }
+
+    /// <summary>Raised on the UI thread when a call opens, ends, or changes (captions, talk state).</summary>
+    public event Action? CallsChanged;
+
+    internal void RaiseCallsChanged() => CallsChanged?.Invoke();
+
+    /// <summary>Allows or forbids talk-back to a camera (camera motion control; off by default): saved, and passed to the core at once.</summary>
+    public void SetTalkAllowed(CameraRef camera, bool allowed)
+    {
+        Settings.SetTalkAllowed(camera, allowed);
+        AppLog.Info($"Talk-back {(allowed ? "allowed" : "turned off")}: channel {camera.Channel + 1}");
+        ApplyTalkPermission(camera);
+    }
+
+    /// <summary>Passes the user's talk-back setting for a camera to the core (it keeps it for this run only).</summary>
+    public void ApplyTalkPermission(CameraRef camera)
+    {
+        if (FindDevice(camera.Device) is not { Id: not 0 } device || camera.Channel is < 0 or > 255)
+        {
+            return;
+        }
+        try
+        {
+            Core.TalkSetPermission(device.Id, (byte)camera.Channel, Settings.TalkAllowed(camera));
+        }
+        catch (NvException e)
+        {
+            AppLog.Warn($"talk-back permission for channel {camera.Channel + 1} failed: {e.Status}");
+        }
+    }
 
     private readonly SwitchableClock _clock = new();
 
@@ -584,6 +618,10 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         // Only this entry's tiles: another entry may name the same device
         // (the same address added twice gets the same core key).
         bool twin = _devices.Any(o => o != device && o.Key == device.Key);
+        if (!twin)
+        {
+            Calls.EndDevice(device.Key);
+        }
         if (twin)
         {
             foreach (CameraTile t in _tiles.Where(t => t.Device == device).ToArray())
@@ -859,6 +897,23 @@ internal sealed class Viewer : ITileBackend<CameraTile>
 
     public bool IsAudible(CameraRef camera) => _audible.Contains(camera);
 
+    /// <summary>The cameras that play now.</summary>
+    public IReadOnlyCollection<CameraRef> AudibleCameras => _audible;
+
+    /// <summary>Makes exactly these cameras audible and mutes the rest.</summary>
+    public void SetAudible(IEnumerable<CameraRef> cameras)
+    {
+        CameraRef[] wanted = [.. cameras];
+        foreach (CameraRef other in _audible.Where(c => !wanted.Contains(c)).ToArray())
+        {
+            SetListening(other, false);
+        }
+        foreach (CameraRef camera in wanted)
+        {
+            SetListening(camera, true);
+        }
+    }
+
     /// <summary>Makes a camera audible or silent (cameras start silent); unmuting only routes audio the core already has.</summary>
     public void SetListening(CameraRef camera, bool audible)
     {
@@ -878,6 +933,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                 AppLog.Warn($"listening on tile {tile.Id} failed: {e.Status}");
             }
         }
+        Calls.AudibleChanged();
         Changed?.Invoke();
     }
 
@@ -911,6 +967,11 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         var detection = new DetectionEvent(
             device.Key, e.Channel, kind, e.State == "start", e.Source ?? DetectionSource.Device, e.AtNs, e.Lens, e.Type == "alarm");
         Detections.Apply(detection);
+        if (e.Type == "alarm" && kind == "visitor" && detection.Active)
+        {
+            // A doorbell press opens a call on the camera's first lens.
+            Calls.Ring(new CameraRef(device.Key, e.Channel), HeardAt(e.AtNs));
+        }
         if (Alerts.Apply(detection, HeardAt(e.AtNs)))
         {
             AlertChanges++;
@@ -955,7 +1016,11 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     }
 
     /// <summary>The slow tick (a few times a second, never per frame): ends held indicators. Each window reports its tiles' zoom changes (StageView.Tick).</summary>
-    public void Tick() => UpdateBoard();
+    public void Tick()
+    {
+        UpdateBoard();
+        Calls.Tick(Clock.Now);
+    }
 
     // ---- layouts (stored by the core) ----
 
@@ -1120,6 +1185,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                     {
                         AppLog.Warn($"device {d.Config.Key}: login failed (status {e.Status})");
                         // Terminal: the tiles end; new credentials in Settings add it again.
+                        Calls.EndDevice(d.Key);
                         Leases.CloseTiles(d.Key);
                     }
                     else if (d.State == "connected" && before != "connected")
@@ -1253,6 +1319,9 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                     UpdateReceived?.Invoke(update);
                 }
                 return;
+            case "talk":
+                Calls.OnTalkEvent(e);
+                return;
             case "discovery_started":
             case "discovered":
             case "discovery_done":
@@ -1287,6 +1356,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     /// <summary>Closes every tile and removes every device (shutdown).</summary>
     public void CloseAll()
     {
+        Calls.EndAll();
         Leases.CloseAll();
         foreach (DeviceEntry d in _devices)
         {
