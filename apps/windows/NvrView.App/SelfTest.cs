@@ -368,6 +368,27 @@ internal sealed class SelfTest(App app, AppOptions options)
             _problems.Add("tiles did not say they were reconnecting after the device went away");
         }
 
+        // After 30 s of that on the viewer clock, a Retry button shows under the message; pressing it
+        // reaches the core and takes the button away until another 30 s have passed.
+        var retryClock = new ManualViewerClock(7000);
+        v.UseClock(retryClock);
+        stage.Tick();
+        bool early = Tiles.Any(t => stage.ChromeFor(t)?.RetryShown == true);
+        retryClock.Advance(TileRetryRule.OfferAfter + 1);
+        stage.Tick();
+        bool offered = Tiles.All(t => stage.ChromeFor(t)?.RetryShown == true);
+        Say($"retry button: early {early}, after {TileRetryRule.OfferAfter:0} s {offered}");
+        if (early || !offered)
+        {
+            _problems.Add("the Retry button did not follow the 30 s delay");
+        }
+        stage.ChromeFor(Tiles[0])?.PressRetry();
+        if (stage.ChromeFor(Tiles[0])?.RetryShown == true)
+        {
+            _problems.Add("the Retry button stayed after it was pressed");
+        }
+        v.UseClock(new SystemViewerClock());
+
         // 9. Contract and summary.
         if (v.Core.CallbackExceptionCount > 0)
         {

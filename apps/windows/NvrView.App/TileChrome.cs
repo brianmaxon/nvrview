@@ -52,6 +52,7 @@ internal sealed class TileChrome
     private readonly Rectangle _track;
     private readonly Rectangle _bar;
     private readonly Border _statusBox;
+    private readonly Button _retry;
     private readonly TextBlock _status;
     private readonly StackPanel _badges;
     private readonly TextBlock _diagnostics;
@@ -201,12 +202,39 @@ internal sealed class TileChrome
             Padding = new Thickness(12, 6, 12, 6),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12),
+            Margin = new Thickness(12, 12, 12, 6),
             Child = _status,
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = false,
         };
-        Root.Children.Add(_statusBox);
+        // Under the message, after a long time without a picture: a small bordered text button.
+        _retry = new Button
+        {
+            Content = "Retry",
+            FontSize = 12,
+            Padding = new Thickness(12, 3, 12, 3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 12),
+            Background = StatusBrush,
+            Foreground = White,
+            BorderBrush = White,
+            BorderThickness = new Thickness(1),
+            Visibility = Visibility.Collapsed,
+        };
+        ToolTipService.SetToolTip(_retry, "Try this camera again now");
+        AutomationProperties.SetName(_retry, "Retry");
+        AutomationProperties.SetHelpText(_retry, "Tries this camera's stream again now");
+        _retry.Click += (_, _) => RetryClicked?.Invoke(Tile);
+        // The box has no background of its own: only the message and the button take clicks.
+        var statusStack = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        statusStack.Children.Add(_statusBox);
+        statusStack.Children.Add(_retry);
+        Root.Children.Add(statusStack);
 
         _badges = new StackPanel
         {
@@ -312,6 +340,31 @@ internal sealed class TileChrome
         if (Math.Abs(_bar.Width - width) > 0.5)
         {
             _bar.Width = width;
+        }
+    }
+
+    /// <summary>Called when the Retry button is pressed.</summary>
+    public Action<StageTile>? RetryClicked { get; set; }
+
+    /// <summary>Whether the Retry button shows under the status message.</summary>
+    public bool RetryShown => _retry.Visibility == Visibility.Visible;
+
+    /// <summary>Shows or hides the Retry button (it follows the status message's visibility).</summary>
+    public void SetRetry(bool shown)
+    {
+        Visibility v = shown && _statusBox.Visibility == Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
+        if (_retry.Visibility != v)
+        {
+            _retry.Visibility = v;
+        }
+    }
+
+    /// <summary>Presses the Retry button as a click or the keyboard would (the self-test).</summary>
+    public void PressRetry()
+    {
+        if (RetryShown)
+        {
+            RetryClicked?.Invoke(Tile);
         }
     }
 
