@@ -574,3 +574,23 @@ public enum CallWindowPlacement {
         return WindowRect(x: x, y: y, width: r.width, height: r.height)
     }
 }
+
+/// The call window's stream (docs/UX.md "A call in its own window"): Auto,
+/// the main stream while the picture is drawn wider than the sub-stream's
+/// pictures, the sub-stream otherwise.
+public enum CallWindowQuality {
+    /// The sub-stream's width in pixels assumed until one has been seen (the
+    /// tile showed the main stream from the start).
+    public static let assumedSubWidth = 640.0
+    /// Back to the sub-stream only below this share of its width, so a
+    /// window resized around the threshold does not switch back and forth.
+    public static let downShare = 0.8
+
+    /// Whether the window asks for the main stream, drawing its picture
+    /// `drawnWidth` pixels wide; `subWidth` is the sub-stream's picture
+    /// width when known, `wasMain` what it asked for last.
+    public static func wantsMain(drawnWidth: Double, subWidth: Double?, wasMain: Bool) -> Bool {
+        let sub = subWidth.flatMap { $0 > 0 ? $0 : nil } ?? assumedSubWidth
+        return wasMain ? drawnWidth >= sub * downShare : drawnWidth > sub
+    }
+}

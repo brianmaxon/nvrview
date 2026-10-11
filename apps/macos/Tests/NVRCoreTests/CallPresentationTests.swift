@@ -301,4 +301,29 @@ import Testing
         #expect(CallWindowPlacement.isOnScreen(WindowRect(x: 1200, y: 25, width: 480, height: 410), screens: [Self.screenA]))
         #expect(!CallWindowPlacement.isOnScreen(WindowRect(x: 1300, y: 25, width: 480, height: 410), screens: [Self.screenA]))
     }
+
+    // MARK: The call window's stream
+
+    /// (drawn width, sub-stream width, asked for main before) -> main.
+    static let qualityVectors: [(drawn: Double, sub: Double?, wasMain: Bool, main: Bool)] = [
+        (960, 640, false, true),
+        (640, 640, false, false),
+        (641, 640, false, true),
+        (600, 640, true, true),
+        (512, 640, true, true),
+        (511, 640, true, false),
+        (300, nil, false, false),
+        (700, nil, false, true),
+        (900, 0, false, true),
+        (320, 352, false, false),
+        (353, 352, false, true),
+    ]
+
+    @Test func callWindowsAskForTheMainStreamWhenWiderThanTheSubStream() {
+        for (i, v) in Self.qualityVectors.enumerated() {
+            #expect(
+                CallWindowQuality.wantsMain(drawnWidth: v.drawn, subWidth: v.sub, wasMain: v.wasMain) == v.main,
+                "vector \(i)")
+        }
+    }
 }
