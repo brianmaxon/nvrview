@@ -1,0 +1,22 @@
+[package]
+name = "sign-update"
+version = "0.1.0"
+description = "Update signing tool: make an Ed25519 key pair, build and sign updates.json, and check a hosted update source as the apps do (docs/UPDATES.md)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+updates = { path = "../../crates/updates" }
+# Key generation's 32 random bytes from the operating system (MIT OR
+# Apache-2.0; already in the dependency tree).
+getrandom = "0.3"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

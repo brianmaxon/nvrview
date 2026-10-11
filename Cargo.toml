@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/bc-cli", "tools/mock-nvr", "tools/simtime", "tools/soak"]
+members = ["crates/*", "tools/bc-cli", "tools/mock-nvr", "tools/sign-update", "tools/simtime", "tools/soak"]
 
 [workspace.package]
 edition = "2024"
