@@ -33,6 +33,7 @@
 //! [`mp4_metadata`] gives the metadata a writer may record. The plan echoes
 //! `share_safe` so the writer knows to add nothing of its own.
 
+pub mod range;
 pub mod trim;
 
 use serde::{Deserialize, Serialize};
