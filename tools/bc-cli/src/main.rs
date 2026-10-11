@@ -419,7 +419,6 @@ async fn run(args: Args) -> Result<(), String> {
     let mut cfg = SessionConfig::new(args.user, password);
     if matches!(args.action, Action::ReplayProbe(_)) {
         cfg.max_plays = MAX_PLAYS;
-        cfg.play_stall_timeout = Duration::from_secs(4);
         cfg.query_timeout = Duration::from_secs(10);
     }
     let session = DeviceSession::spawn(TcpConnector::new(addr), cfg);

@@ -33,7 +33,6 @@ fn session(nvr: &mock_nvr::MockNvr) -> DeviceSession {
     let addr = nvr.addr();
     let mut cfg = SessionConfig::new("example-user", "example-password");
     cfg.max_plays = 4;
-    cfg.play_stall_timeout = Duration::from_secs(4);
     cfg.query_timeout = Duration::from_secs(5);
     DeviceSession::spawn(FnConnector(move || mock_nvr::connect(addr)), cfg)
 }
@@ -103,6 +102,27 @@ async fn four_stages_beside_live_view() {
     assert!(r.stops_sent >= 10, "{}", r.stops_sent);
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("stage 4 summary"), "{text}");
+    closed_cleanly(&nvr, s).await;
+}
+
+/// A device that sends eight seconds at once and then nothing until real
+/// time catches up is keeping pace, not stalled.
+#[tokio::test(start_paused = true)]
+async fn a_long_burst_is_not_a_stall() {
+    let nvr = spawn_mock(|a| a.play_burst_secs = 8);
+    let s = session(&nvr);
+    let (_tx, rx) = watch::channel(false);
+    let mut out = Vec::new();
+    let r = replay_probe(&s, &probe_cfg(), &mut out, rx).await.unwrap();
+    assert_eq!(
+        r.outcome,
+        Outcome::Completed,
+        "{}",
+        String::from_utf8_lossy(&out)
+    );
+    for st in &r.stages {
+        assert!(st.video_secs.iter().all(|v| *v >= 7.0), "{st:?}");
+    }
     closed_cleanly(&nvr, s).await;
 }
 

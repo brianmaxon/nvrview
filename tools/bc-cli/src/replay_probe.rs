@@ -43,6 +43,8 @@ pub const RUN_LIMIT: Duration = Duration::from_secs(90);
 const MIN_FILE_SECS: i64 = 60;
 /// How far a recording must lie in the past (it is complete, not growing).
 const MIN_AGE_SECS: i64 = 120;
+/// How far a play's video may lag the time since its first frame.
+pub const BEHIND_LIMIT: f64 = 2.0;
 /// How long a stop may take before the probe moves on.
 const STOP_WAIT: Duration = Duration::from_secs(3);
 
@@ -106,7 +108,9 @@ pub enum Outcome {
         /// Reply status.
         status: u16,
     },
-    /// A play delivered nothing for the stall timeout.
+    /// A play delivered nothing, or its video fell more than
+    /// [`BEHIND_LIMIT`] behind real time (a play bursts ahead first, so
+    /// a pause after the burst is not a stall).
     Stalled {
         /// Stage.
         stage: usize,
@@ -188,6 +192,10 @@ pub struct Stage {
     pub first_frame: Vec<Option<Duration>>,
     /// Each play's first keyframe wall-clock seconds less its seek time.
     pub start_offset: Vec<Option<i64>>,
+    /// Each play's seconds of video delivered (timestamp span).
+    pub video_secs: Vec<f64>,
+    /// Each play's seconds since its first frame when the stage ended.
+    pub elapsed_secs: Vec<f64>,
 }
 
 /// What a run measured.
@@ -229,6 +237,8 @@ struct PlayState {
     counter: Counter,
     first_frame: Mutex<Option<Duration>>,
     first_wall: Mutex<Option<u32>>,
+    /// Arrival of the first video frame, and the first and last timestamps.
+    span: Mutex<Option<(Instant, u64, u64)>>,
 }
 
 enum PlayEnd {
@@ -406,8 +416,16 @@ fn spawn_play(
                     data,
                     keyframe,
                     extra_header,
+                    pts_us,
                     ..
                 })) => {
+                    {
+                        let mut sp = state.span.lock().unwrap();
+                        match sp.as_mut() {
+                            Some((_, first, last)) => *last = pts_us.max(*first),
+                            None => *sp = Some((Instant::now(), pts_us, pts_us)),
+                        }
+                    }
                     let mut ff = state.first_frame.lock().unwrap();
                     if ff.is_none() {
                         *ff = Some(requested.elapsed());
@@ -730,6 +748,7 @@ async fn probe<W: Write>(
                 Err(o) => result = Err(o),
             }
         }
+        let stage_end = Instant::now();
         let _ = cancel_tx.send(true);
         // Collect the stage's plays: how each ended, then its stop.
         for (j, r) in std::mem::take(&mut tasks.0).into_iter().enumerate() {
@@ -760,7 +779,18 @@ async fn probe<W: Write>(
                     .unwrap()
                     .map(|w| i64::from(w) - r.seek.to_naive_secs()),
             );
+            let (video, elapsed) = match *r.state.span.lock().unwrap() {
+                Some((at, first, last)) => (
+                    (last - first) as f64 / 1e6,
+                    stage_end.saturating_duration_since(at).as_secs_f64(),
+                ),
+                None => (0.0, 0.0),
+            };
+            st.video_secs.push(video);
+            st.elapsed_secs.push(elapsed);
+            let behind = delivered && elapsed - video > BEHIND_LIMIT;
             let o = match ended {
+                PlayEnd::Cancelled if behind => Some(Outcome::Stalled { stage, play: j + 1 }),
                 PlayEnd::Cancelled => None,
                 PlayEnd::Ended => Some(Outcome::EndedEarly { stage, play: j + 1 }),
                 PlayEnd::Failed(DownloadError::Stalled) => {
@@ -797,15 +827,22 @@ async fn probe<W: Write>(
             .iter()
             .map(|o| o.map_or("-".into(), |o| format!("{o:+} s")))
             .collect();
+        let pace: Vec<String> = st
+            .video_secs
+            .iter()
+            .zip(&st.elapsed_secs)
+            .map(|(v, e)| format!("{v:.1} s in {e:.1} s"))
+            .collect();
         run.line(&format!(
             "stage {stage} summary: live {:.1} fps (baseline {:.1}); plays fps [{}]; bytes {:?}; \
-             first frame [{}]; first keyframe vs seek [{}]",
+             first frame [{}]; first keyframe vs seek [{}]; video delivered [{}]",
             st.live_fps,
             report.baseline_live_fps,
             fps.join(", "),
             st.play_bytes,
             first.join(", "),
-            offs.join(", ")
+            offs.join(", "),
+            pace.join(", ")
         ));
         report.stages.push(st);
         result?;
