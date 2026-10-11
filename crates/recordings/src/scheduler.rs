@@ -416,8 +416,18 @@ struct Job {
     live: Vec<Live>,
     /// Bumped on every change to `file`; see [`JobSave`].
     version: u64,
-    /// The version last written to disk.
-    saved: Arc<Mutex<u64>>,
+    /// What was written to disk; held for the whole of every write.
+    saved: Arc<Mutex<Saved>>,
+}
+
+/// The job file's state on disk, shared by a job's saves.
+#[derive(Debug, Default)]
+struct Saved {
+    /// The version last written.
+    version: u64,
+    /// The job was forgotten: nothing may be written for it any more (its
+    /// parts folder may be gone).
+    closed: bool,
 }
 
 impl Job {
@@ -428,7 +438,7 @@ impl Job {
             live: vec![Live::default(); file.cameras.len()],
             file,
             version: 0,
-            saved: Arc::new(Mutex::new(0)),
+            saved: Arc::new(Mutex::new(Saved::default())),
         }
     }
 
@@ -460,18 +470,19 @@ struct JobSave {
     path: PathBuf,
     bytes: Vec<u8>,
     version: u64,
-    saved: Arc<Mutex<u64>>,
+    saved: Arc<Mutex<Saved>>,
 }
 
 impl JobSave {
-    /// Writes it; blocking.
+    /// Writes it; blocking. Skipped once the job was forgotten, so a save
+    /// taken before [`Scheduler::forget`] never recreates its folder.
     fn write(self) -> io::Result<()> {
         let mut saved = lock(&self.saved);
-        if self.version <= *saved {
+        if saved.closed || self.version <= saved.version {
             return Ok(());
         }
         write_atomic(&self.path, &self.bytes)?;
-        *saved = self.version;
+        saved.version = self.version;
         Ok(())
     }
 
@@ -900,6 +911,10 @@ impl Scheduler {
             return Ok(false);
         };
         self.inner.publish();
+        // A save taken before the job left the map (the one that cleared
+        // its last running flag, for example) may still be writing: wait
+        // for it, and make every later one a no-op.
+        lock(&job.saved).closed = true;
         if delete_partial {
             match fs::remove_dir_all(job.parts_root()) {
                 Ok(()) => {}
@@ -1538,6 +1553,54 @@ async fn wait_interrupted(inner: &Inner, slot: &JobRef, session: &Arc<DeviceSess
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker's last update clears its running flag under the state lock
+    /// and writes the job file after releasing it. A forget in between used
+    /// to delete the parts folder while (or before) that write ran, which
+    /// failed the delete or recreated the folder.
+    #[test]
+    fn a_save_taken_before_forget_never_writes_after_it() {
+        use crate::incident::{CameraEvent, GroupingConfig, group};
+        let root = tempfile::tempdir().unwrap();
+        let sched = Scheduler::new(SchedulerConfig::new(root.path()), None);
+        let camera = CameraId::new("nvr-a", 0);
+        let incident = group(
+            &[CameraEvent {
+                start: 1000,
+                end: 1020,
+                camera: camera.clone(),
+                kind: "md".into(),
+            }],
+            &GroupingConfig::default(),
+        )
+        .remove(0);
+        let folder = sched
+            .enqueue(&IncidentDownload {
+                incident: incident.clone(),
+                cameras: vec![CameraSource {
+                    camera,
+                    name: "Front".into(),
+                    uid: None,
+                    stream: StreamTier::Main,
+                }],
+            })
+            .unwrap();
+        // The worker's final update: snapshot taken, write still pending.
+        let late = lock(&sched.inner.state)
+            .jobs
+            .get_mut(&incident.id)
+            .unwrap()
+            .snapshot()
+            .unwrap();
+        assert!(sched.forget(&incident.id, true).unwrap());
+        assert!(!folder.join(PARTS_DIR).exists());
+        late.write().unwrap();
+        assert!(
+            !folder.join(PARTS_DIR).exists(),
+            "a forgotten job was saved"
+        );
+        assert!(folder.join("incident.json").exists());
+    }
 
     #[test]
     fn failures_round_trip_and_old_job_files_still_load() {
