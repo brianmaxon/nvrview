@@ -3,8 +3,10 @@
 //! serves beside live view (docs/MILESTONE-P.md, B5).
 //!
 //! One session, one live stream, then stages of 1, 2, ... up to
-//! [`MAX_PLAYS`] simultaneous plays of one recent recording on the live
-//! channel. Each stage starts its plays fresh, runs them for at most
+//! [`MAX_PLAYS`] simultaneous plays. By default every play is of one recent
+//! recording on the live channel; [`ProbeConfig::plays`] instead names a
+//! source per play (another channel, or an earlier recording of one), so a
+//! refusal can be told apart as per file, per camera, or in total. Each stage starts its plays fresh, runs them for at most
 //! [`PLAY_LIMIT`] each, and stops them (7) before the next stage. Live and
 //! play video frames are counted per second. The probe stops at the first
 //! refusal, error, stall, or live-stream disruption, and on the overall time
@@ -48,6 +50,35 @@ pub const BEHIND_LIMIT: f64 = 2.0;
 /// How long a stop may take before the probe moves on.
 const STOP_WAIT: Duration = Duration::from_secs(3);
 
+/// Where one play's recording comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaySource {
+    /// Channel of the recording.
+    pub channel: u8,
+    /// Which finished recording: 0 the latest, 1 the one before, ...
+    pub back: usize,
+}
+
+/// Parses a comma-separated list of play sources, `N` for channel N's latest
+/// finished recording and `N~K` for the K-th before it (K at most 3), with 1
+/// to [`MAX_PLAYS`] entries.
+pub fn parse_plays(s: &str) -> Option<Vec<PlaySource>> {
+    let v = s
+        .split(',')
+        .map(|p| {
+            let (ch, back) = match p.split_once('~') {
+                Some((c, b)) => (c, b.parse::<usize>().ok().filter(|b| *b <= 3)?),
+                None => (p, 0),
+            };
+            Some(PlaySource {
+                channel: ch.parse().ok()?,
+                back,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (1..=MAX_PLAYS).contains(&v.len()).then_some(v)
+}
+
 /// What to probe.
 #[derive(Clone, Debug)]
 pub struct ProbeConfig {
@@ -56,7 +87,11 @@ pub struct ProbeConfig {
     /// Stream tier of the live stream and of the plays.
     pub tier: StreamTier,
     /// Highest number of simultaneous plays to try (1 to [`MAX_PLAYS`]).
+    /// Ignored when [`plays`](Self::plays) is set.
     pub max_plays: usize,
+    /// One source per play: stage `k` runs the first `k`. Empty plays the
+    /// live channel's latest finished recording in every play.
+    pub plays: Vec<PlaySource>,
     /// Live view alone before the first stage.
     pub baseline: Duration,
     /// How long each stage runs after its last play started (each play is
@@ -85,6 +120,7 @@ impl ProbeConfig {
             channel,
             tier: StreamTier::Sub,
             max_plays: MAX_PLAYS,
+            plays: Vec::new(),
             baseline: Duration::from_secs(5),
             stage: Duration::from_secs(8),
             gap: Duration::from_secs(1),
@@ -374,17 +410,20 @@ fn add_secs(t: DateTime, secs: i64) -> DateTime {
     DateTime::from_naive_secs(t.to_naive_secs() + secs).unwrap_or(t)
 }
 
-/// The recording to play: the latest of at least [`MIN_FILE_SECS`] that
-/// ended at least [`MIN_AGE_SECS`] before `now`.
-pub fn pick_recording(files: &[RecordFile], now: DateTime) -> Option<&RecordFile> {
+/// The recording to play: of the recordings of at least [`MIN_FILE_SECS`]
+/// that ended at least [`MIN_AGE_SECS`] before `now`, the latest (`back` 0)
+/// or the `back`-th before it.
+pub fn pick_recording(files: &[RecordFile], now: DateTime, back: usize) -> Option<&RecordFile> {
     let now = now.to_naive_secs();
-    files
+    let mut fit: Vec<&RecordFile> = files
         .iter()
         .filter(|f| {
             let (s, e) = (f.start.to_naive_secs(), f.end.to_naive_secs());
             e - s >= MIN_FILE_SECS + 10 && e <= now - MIN_AGE_SECS
         })
-        .max_by_key(|f| f.end.to_naive_secs())
+        .collect();
+    fit.sort_by_key(|f| std::cmp::Reverse(f.end.to_naive_secs()));
+    fit.get(back).copied()
 }
 
 /// Parses `YYYY-MM-DDTHH:MM:SS` (or with a space).
@@ -507,7 +546,12 @@ pub async fn replay_probe<W: Write>(
     stop: watch::Receiver<bool>,
 ) -> Result<Report, CliError> {
     let deadline = Instant::now() + cfg.run_limit.min(RUN_LIMIT);
-    let max_plays = cfg.max_plays.clamp(1, MAX_PLAYS);
+    let max_plays = if cfg.plays.is_empty() {
+        cfg.max_plays
+    } else {
+        cfg.plays.len()
+    }
+    .clamp(1, MAX_PLAYS);
     let mut run = Run {
         session,
         cfg,
@@ -569,8 +613,8 @@ async fn probe<W: Write>(
     let cfg = run.cfg.clone();
     let session = run.session;
     let ch = cfg.channel;
-    // The camera's ID, when the device lists one, goes with the search and
-    // the plays, as the official client sends it.
+    // The channel list: each camera's ID, when the device lists one, goes
+    // with its search and plays, as the official client sends it.
     let mut channels = session.watch_channels();
     let _ = run
         .bounded(tokio::time::timeout(
@@ -578,7 +622,6 @@ async fn probe<W: Write>(
             channels.wait_for(Option::is_some),
         ))
         .await?;
-    let uid = session.channel_uids().get(&ch).cloned();
 
     let live_state = Arc::new(LiveState::default());
     let sub = run
@@ -636,44 +679,68 @@ async fn probe<W: Write>(
     let (base, _) = run.measure("baseline", 0, &live_state, &[], until).await?;
     report.baseline_live_fps = mean(&base);
 
-    // A recent recording: today's files, or yesterday's when today has none
-    // that fits (the live wall clock may be on another day than the index).
-    let mut file = None;
-    for back in [0, 1] {
-        let day = add_secs(now, -86_400 * back);
-        let q = FileSearch {
-            channel: ch,
-            uid: uid.clone(),
-            stream: cfg.tier,
-            start: DateTime::new(day.year, day.month, day.day, 0, 0, 0).expect("valid day"),
-            end: DateTime::new(day.year, day.month, day.day, 23, 59, 59).expect("valid day"),
-        };
-        let files = run
-            .bounded(session.search_files(&q))
-            .await?
-            .map_err(|e| match e {
-                SearchError::Refused(status) => Outcome::Refused {
-                    stage: 0,
-                    command: 14,
-                    status,
-                },
-                other => Outcome::Error {
-                    stage: 0,
-                    what: format!("file search: {other}"),
-                },
-            })?;
-        if let Some(f) = pick_recording(&files, now) {
-            file = Some(f.clone());
-            break;
+    // Each play's recording: today's files of its channel, or yesterday's
+    // when today has none that fits (the live wall clock may be on another
+    // day than the index).
+    let sources = if cfg.plays.is_empty() {
+        vec![
+            PlaySource {
+                channel: ch,
+                back: 0
+            };
+            max_plays
+        ]
+    } else {
+        cfg.plays.clone()
+    };
+    let mut found: Vec<(PlaySource, Option<String>, RecordFile)> = Vec::new();
+    for src in sources {
+        if let Some((_, uid, f)) = found.iter().find(|(s, _, _)| *s == src) {
+            let (uid, f) = (uid.clone(), f.clone());
+            found.push((src, uid, f));
+            continue;
         }
+        let uid = session.channel_uids().get(&src.channel).cloned();
+        let mut file = None;
+        for back in [0, 1] {
+            let day = add_secs(now, -86_400 * back);
+            let q = FileSearch {
+                channel: src.channel,
+                uid: uid.clone(),
+                stream: cfg.tier,
+                start: DateTime::new(day.year, day.month, day.day, 0, 0, 0).expect("valid day"),
+                end: DateTime::new(day.year, day.month, day.day, 23, 59, 59).expect("valid day"),
+            };
+            let files = run
+                .bounded(session.search_files(&q))
+                .await?
+                .map_err(|e| match e {
+                    SearchError::Refused(status) => Outcome::Refused {
+                        stage: 0,
+                        command: 14,
+                        status,
+                    },
+                    other => Outcome::Error {
+                        stage: 0,
+                        what: format!("file search: {other}"),
+                    },
+                })?;
+            if let Some(f) = pick_recording(&files, now, src.back) {
+                file = Some(f.clone());
+                break;
+            }
+        }
+        let file = file.ok_or(Outcome::NoRecording)?;
+        run.line(&format!(
+            "play {}: channel {}, a recording of {} s ({} to {})",
+            found.len() + 1,
+            src.channel,
+            file.end.to_naive_secs() - file.start.to_naive_secs(),
+            file.start,
+            file.end
+        ));
+        found.push((src, uid, file));
     }
-    let file = file.ok_or(Outcome::NoRecording)?;
-    run.line(&format!(
-        "playing a recording of {} s ({} to {})",
-        file.end.to_naive_secs() - file.start.to_naive_secs(),
-        file.start,
-        file.end
-    ));
 
     for stage in 1..=max_plays {
         run.line(&format!("stage {stage}: {stage} play(s) beside live view"));
@@ -684,11 +751,11 @@ async fn probe<W: Write>(
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let mut first_start = None;
         let mut refused = None;
-        for j in 0..stage {
+        for (j, (src, uid, file)) in found.iter().take(stage).enumerate() {
             let seek = add_secs(file.start, 5 + 10 * j as i64);
             let start = PlayStart {
                 request: PlayRequest {
-                    channel: ch,
+                    channel: src.channel,
                     uid: uid.clone(),
                     stream: cfg.tier,
                     file_id: file.id.clone(),
@@ -892,9 +959,24 @@ mod tests {
             file(t(9, 25, 0), t(9, 29, 30)),
         ];
         let now = t(9, 30, 0);
-        assert_eq!(pick_recording(&files, now).unwrap().start, t(9, 20, 0));
-        assert!(pick_recording(&files[..2], t(9, 1, 0)).is_none());
-        assert!(pick_recording(&[], now).is_none());
+        assert_eq!(pick_recording(&files, now, 0).unwrap().start, t(9, 20, 0));
+        assert_eq!(pick_recording(&files, now, 1).unwrap().start, t(9, 0, 0));
+        assert!(pick_recording(&files, now, 2).is_none());
+        assert!(pick_recording(&files[..2], t(9, 1, 0), 0).is_none());
+        assert!(pick_recording(&[], now, 0).is_none());
+    }
+
+    #[test]
+    fn parses_play_sources() {
+        let src = |channel, back| PlaySource { channel, back };
+        assert_eq!(
+            parse_plays("11,3,11~1,6"),
+            Some(vec![src(11, 0), src(3, 0), src(11, 1), src(6, 0)])
+        );
+        assert_eq!(parse_plays("2"), Some(vec![src(2, 0)]));
+        for bad in ["", "1,2,3,4,5", "x", "1~4", "1~", "~1", "256", "1,,2"] {
+            assert_eq!(parse_plays(bad), None, "{bad}");
+        }
     }
 
     #[test]

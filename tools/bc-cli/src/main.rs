@@ -42,7 +42,7 @@ usage:
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
-         [--tier main|sub] [--max-plays 1-4]
+         [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -81,7 +81,10 @@ channel at least 60 s long that ended at least 2 minutes before --now (the
 device's local time, which its recording times use; a keyframe's wall clock
 can be UTC), then runs stages of
 1, 2, ... up to --max-plays (default and at most 4) simultaneous plays of it
-at normal speed, each for at most 10 s, counting live and play frames per
+at normal speed (--plays instead names each play's recording: N for channel
+N's latest finished one, N~K for the K-th before it, K at most 3; stage k
+runs the first k, so 11,3,11~1 tells a per-file, per-camera and total limit
+apart), each for at most 10 s, counting live and play frames per
 second. It stops at the first refusal, error, stall, or live disruption;
 every play is stopped (7) and the session closed on every path, Ctrl-C
 included; the whole run is capped at 90 s. Only the file search, live
@@ -169,7 +172,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut file = None;
     let mut number = None;
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
-    let (mut allow_probe, mut max_plays, mut now) = (false, MAX_PLAYS, None);
+    let (mut allow_probe, mut max_plays, mut now) = (false, None, None);
+    let mut plays = None;
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -209,11 +213,19 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             "--allow-talk" => allow_talk = true,
             "--allow-replay-probe" => allow_probe = true,
             "--max-plays" => {
-                max_plays = value("--max-plays")?
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|n| (1..=MAX_PLAYS).contains(n))
-                    .ok_or("bad --max-plays (1 to 4)")?;
+                max_plays = Some(
+                    value("--max-plays")?
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| (1..=MAX_PLAYS).contains(n))
+                        .ok_or("bad --max-plays (1 to 4)")?,
+                );
+            }
+            "--plays" => {
+                plays = Some(
+                    replay_probe::parse_plays(&value("--plays")?)
+                        .ok_or("bad --plays (1 to 4 of N or N~K, K at most 3)")?,
+                );
             }
             "--now" => {
                 now = Some(
@@ -316,7 +328,11 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             let mut cfg = ProbeConfig::new(channel.ok_or("replay-probe needs --channel")?);
             cfg.tier = tier;
-            cfg.max_plays = max_plays;
+            if max_plays.is_some() && plays.is_some() {
+                return Err("--max-plays and --plays do not go together".into());
+            }
+            cfg.max_plays = max_plays.unwrap_or(MAX_PLAYS);
+            cfg.plays = plays.unwrap_or_default();
             cfg.now = Some(now.ok_or("replay-probe needs --now (the device's local time)")?);
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
@@ -873,6 +889,30 @@ mod tests {
             "extern",
         ]);
         assert!(r.is_err());
+        let base = [
+            "replay-probe",
+            "--channel",
+            "1",
+            "--allow-replay-probe",
+            "--now",
+            "2026-10-08T09:30:00",
+        ];
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--plays", "1,2,1~1"]);
+        let Ok(Parsed::Device(Args {
+            action: Action::ReplayProbe(cfg),
+            ..
+        })) = with(&v)
+        else {
+            panic!("--plays not parsed");
+        };
+        assert_eq!(cfg.plays.len(), 3);
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--plays", "1,2", "--max-plays", "2"]);
+        assert!(with(&v).is_err());
+        let mut v = base.to_vec();
+        v.extend_from_slice(&["--plays", "1~9"]);
+        assert!(with(&v).is_err());
         assert!(with(&["replay-probe", "--allow-replay-probe"]).is_err());
         assert!(with(&["--password", "x", "replay-probe"]).is_err());
     }
