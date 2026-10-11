@@ -102,6 +102,7 @@ less than that. Nothing here was run on a Windows machine.
 | "Allow talk-back for <camera>?" prompt on Talk or Send when it is off (Allow saves and continues, Cancel sends nothing and keeps the typed text) | yes | yes | Self-test step `call-talk-permission-prompt`. macOS: alert sheet; Windows: ContentDialog. |
 | Typed reply spoken by the system voice | yes | yes | |
 | Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
+| Caption echo filter: the visitor caption that repeats our own talk-back or typed reply (the doorbell hears its speaker) is hidden, not saved, not activity | yes | yes | UX.md "Captions and echo". Pure `CaptionEcho` (NVRCore) and `CaptionEcho` (NvrView.Tiles) with the same test vectors; self-test step `call-caption-echo`. |
 | Call ends after 60 s of inactivity, gives audio back | yes | yes | |
 | Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
 | Save call transcripts (event log and one text file per call, bounded folder, Open Transcripts Folder) | yes | yes | UX.md "Transcript files". macOS: Settings > Alerts; Windows: Settings. Pure naming, text and pruning in `CallTranscriptFile` (NVRCore) and `TranscriptFiles` (NvrView.Tiles) with the same test vectors. Self-test step `call-transcript-file`. |

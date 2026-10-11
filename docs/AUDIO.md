@@ -193,6 +193,14 @@ once: withdrawing the permission, closing the tile or call, shutdown, a
 device error, the idle and length limits. The `talk` event's `tail_ms`
 reports the silence sent; `sent_ms` counts audio only.
 
+**Echo in the captions.** What the device plays comes back through its own
+microphone about a second later, after the tail, so the visitor's audio
+(and its captions) can contain our own words. The apps filter those captions
+(docs/UX.md "Captions and echo"): for 3 s after the talk's `stopped` event,
+which already comes after the 1.5 s tail, and while talk-back runs, a visitor
+caption that closely matches what we said or typed is dropped. This is a text
+filter for the captions only; the audio itself is unchanged.
+
 ## Speech recognition (later)
 
 The core provides the tap; recognition runs outside it at first, in the app

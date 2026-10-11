@@ -621,6 +621,27 @@ Details settled while building it (macOS):
   the setting. Nothing is written with the setting off, or for a call with
   no finished caption.
 
+**Captions and echo.** The doorbell plays our talk-back about a second late and
+its own microphone hears its speaker, so the "Visitor" captions would repeat
+what the user just said or typed. A caption echo filter (`CaptionEcho`, the
+same rules on both apps) treats a visitor caption as echo while talk-back is
+asked for, starting, or playing (the core's `stopped` event, after its silent
+tail, ends it) and for 3 s after, when it closely matches text we recently
+sent: the "You" captions of the microphone (volatile ones too) and typed
+replies, remembered for 30 s. Matching: lowercase, no punctuation, digits 0-99
+as number words; words in order (longest common subsequence, a word one letter
+off counts for words of four or more letters); echo when at least 60% of the
+longer phrase matches, or when the visitor line is a fragment of what we
+sent (at least two words, 80% of its own words matching), since volatile
+captions arrive incrementally. Phrases sent in a row can come back as one
+caption and are also compared joined. Visitor text that does not resemble
+what we sent is never filtered, and outside the window nothing is. Echo is
+hidden: it is not shown on screen, not saved in the transcript file or the
+event log, and is not visitor activity (it does not keep the call open or
+reset its minute). Hiding, not dimming, so the call shows what was said to
+the user. A single shared word (such as "hello") of a longer sentence is not
+echo.
+
 Details settled while building it (Windows):
 
 - The same call, a press or Start conversation: a card per call in every
