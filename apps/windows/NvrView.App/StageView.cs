@@ -172,7 +172,7 @@ internal sealed partial class StageView : UserControl
                     "F1                           this list"),
             },
         };
-        _calls = new CallStack(viewer);
+        _calls = new CallStack(viewer, () => FillingCamera);
         root.Children.Add(_calls);
         root.Children.Add(_help);
         Content = root;
@@ -189,6 +189,8 @@ internal sealed partial class StageView : UserControl
         _viewer.Leases.TileChanged += OnTileChanged;
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
+        // The call cards' corner follows the setting (and the indicators', when it is opposite them).
+        _viewer.Settings.Changed += _calls.InvalidateArrange;
         // A mount chosen in Settings (or another window) reaches this window's tiles at once.
         _viewer.Settings.Changed += PublishAllFisheye;
         // A touch screen's two-finger pinch (a touchpad's arrives as Ctrl+wheel).
@@ -206,6 +208,13 @@ internal sealed partial class StageView : UserControl
 
     /// <summary>The call cards over the stage (self-test).</summary>
     public CallStack CallCards => _calls;
+
+    /// <summary>
+    /// The camera that fills the stage now, if one does (the focused tile's, else the only
+    /// tile's): its call shows its controls over the stage instead of a card.
+    /// </summary>
+    public CameraRef? FillingCamera =>
+        CallInsets.Filling(Renderer?.Focus is { Entering: true } f ? f.Tile.CameraOrNone : null, State.Tree.CameraList);
 
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
@@ -525,6 +534,7 @@ internal sealed partial class StageView : UserControl
     {
         Renderer.Focus = null;
         SetFocusDemand(null);
+        _calls.Sync();
     }
 
     // The focused tile asks the tier planner for the focus tier (Auto: main).
@@ -1406,6 +1416,8 @@ internal sealed partial class StageView : UserControl
             RefreshChrome(c);
         }
         SyncOverlays();
+        // A tile that fills the stage (focus, a one-tile layout) moves its call over the stage.
+        _calls.Sync();
         bool empty = _viewer.Devices.Count == 0 && State.Tree.Cameras.Count == 0;
         _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         if (empty)
@@ -1669,6 +1681,10 @@ internal sealed partial class StageView : UserControl
     {
         ChromeFrames++;
         StepFisheyeZoom(_viewer.Clock.Now);
+        if (Renderer is not null)
+        {
+            _calls.Publish(Renderer, _panel);
+        }
         NvCore core = _viewer.Core;
         foreach (TileChrome c in _chromes)
         {
@@ -1701,6 +1717,10 @@ internal sealed partial class StageView : UserControl
         _viewer.CallsChanged -= _calls.Sync;
         _viewer.IndicatorsChanged -= SyncOverlays;
         _viewer.Settings.Changed -= SyncOverlays;
+        _viewer.Settings.Changed -= _calls.InvalidateArrange;
+        // The cards give their leases back; nothing more is drawn over the grid.
+        _calls.Close();
+        Renderer.Overlays = [];
         _viewer.Leases.TileChanged -= OnTileChanged;
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
     }

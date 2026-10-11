@@ -1,6 +1,7 @@
 // View preferences kept between launches in view-settings.json in the app's
 // data directory (separate from the device list in settings.json): today the
-// corner that holds the tiles' indicators, and whether the sidebar hides
+// corner that holds the tiles' indicators, the corner call cards stack from,
+// and whether the sidebar hides
 // offline channels, and the mount of each fisheye camera (docs/UX.md
 // "Fisheye cameras"; only those not on the default ceiling mount). Written
 // whole and atomically; the cameras the user allowed talk-back to (docs/UX.md "Doorbell calls");
@@ -22,6 +23,9 @@ internal sealed class ViewSettingsFile
     /// <summary>The sidebar lists only connected channels (an NVR lists every slot it has).</summary>
     public bool HideOfflineChannels { get; set; } = true;
 
+    /// <summary>The corner call cards stack from (a corner name); absent: opposite the indicators.</summary>
+    public string? InsetCorner { get; set; }
+
     /// <summary>Fisheye mounts other than ceiling, by camera ("deviceKey:channel"): "wall" or "desk".</summary>
     public Dictionary<string, string>? FisheyeMounts { get; set; }
 
@@ -36,6 +40,7 @@ internal sealed partial class ViewSettingsJson : JsonSerializerContext;
 internal sealed class ViewSettings(string? file)
 {
     private ChromeCorner _corner = ChromeCorners.Default;
+    private ChromeCorner? _insetCorner;
     private bool _hideOffline = true;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
@@ -133,6 +138,30 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
+    /// <summary>The corner the user chose for call cards (Settings), null for opposite the indicators.</summary>
+    public ChromeCorner? InsetCornerChoice
+    {
+        get
+        {
+            Load();
+            return _insetCorner;
+        }
+        set
+        {
+            Load();
+            if (_insetCorner == value)
+            {
+                return;
+            }
+            _insetCorner = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>Where call cards stack from: the chosen corner, else opposite the indicators (the macOS rule).</summary>
+    public ChromeCorner InsetCorner => InsetGeometry.Corner(InsetCornerChoice, IndicatorCorner);
+
     private void Load()
     {
         if (_loaded)
@@ -150,6 +179,7 @@ internal sealed class ViewSettings(string? file)
             ViewSettingsFile? read = JsonSerializer.Deserialize(s, ViewSettingsJson.Default.ViewSettingsFile);
             _corner = ChromeCorners.Parse(read?.IndicatorCorner);
             _hideOffline = read?.HideOfflineChannels ?? true;
+            _insetCorner = read?.InsetCorner is { } ic ? ChromeCorners.Parse(ic) : null;
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
         }
@@ -175,6 +205,7 @@ internal sealed class ViewSettings(string? file)
                 {
                     IndicatorCorner = _corner.Name(),
                     HideOfflineChannels = _hideOffline,
+                    InsetCorner = _insetCorner?.Name(),
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
                 }, ViewSettingsJson.Default.ViewSettingsFile);

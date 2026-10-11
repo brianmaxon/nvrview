@@ -26,6 +26,12 @@
 //   here when its view, circle or size changes (docs/RENDERING.md "Fisheye
 //   dewarping"); until its camera's circle is found, this thread hands a
 //   copy of the luma plane to FisheyeCircles a few times.
+// - Overlays: the pictures of the window's call cards (docs/UX.md "Alert
+//   insets"), each one more tile of this grid drawn last, on top of
+//   everything (also over a focused tile), from the camera's shared tile:
+//   no second decoder. The UI thread publishes where each card's
+//   transparent hole is (DIPs, like the cells); a device loss brings them
+//   back with the rest, since they are part of every frame.
 
 using System.Diagnostics;
 using NvrView.Interop;
@@ -75,6 +81,9 @@ internal sealed class StageLayout(StageTile[] tiles, Rect[] cells, double width,
     public double Height { get; } = height;
 }
 
+/// <summary>A picture drawn over the grid into a rectangle of the stage in DIPs (a call card's hole).</summary>
+internal sealed record OverlayTile(StageTile Tile, Rect Rect);
+
 /// <summary>A swap chain frame read back for the self-test.</summary>
 internal sealed record StageCapture(RenderedImage Image, float ScaleX, float ScaleY, (StageTile Tile, float X, float Y, float W, float H)[] Rects);
 
@@ -95,6 +104,7 @@ internal sealed unsafe class StageRenderer : IDisposable
     private float _transformX, _transformY;
     private FocusAnimation? _focus;
     private StageLayout _layout = StageLayout.Empty;
+    private OverlayTile[] _overlays = [];
     private TaskCompletionSource<StageCapture>? _capture;
     private string? _recover;
 
@@ -165,6 +175,13 @@ internal sealed unsafe class StageRenderer : IDisposable
     {
         get => Volatile.Read(ref _layout);
         set => Volatile.Write(ref _layout, value);
+    }
+
+    /// <summary>The pictures drawn last, over the grid (set by the UI thread; replaced, never changed in place).</summary>
+    public OverlayTile[] Overlays
+    {
+        get => Volatile.Read(ref _overlays);
+        set => Volatile.Write(ref _overlays, value);
     }
 
     public void Start() => _thread.Start();
@@ -281,8 +298,8 @@ internal sealed unsafe class StageRenderer : IDisposable
         }
 
         StageLayout layout = Layout;
-        StageTile[] tiles = layout.Tiles;
-        int count = tiles.Length;
+        OverlayTile[] overlays = Overlays;
+        int count = layout.Tiles.Length + overlays.Length;
         if (_draws.Length < count)
         {
             _draws = new TileDraw[count];
@@ -290,7 +307,8 @@ internal sealed unsafe class StageRenderer : IDisposable
         }
         using (gpu.Lock())
         {
-            Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
+            int placed = Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
+            PlaceOverlays(overlays, placed, target.Width / dipW, target.Height / dipH);
             _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
         }
         for (int i = 0; i < count; i++)
@@ -391,7 +409,7 @@ internal sealed unsafe class StageRenderer : IDisposable
     // to the panel's. Under the device lock, so picture sizes match the
     // pictures drawn. The focused tile is drawn last, over the others,
     // which stop being drawn once it covers the stage.
-    private void Place(StageLayout layout, float dipW, float dipH, long now, float bx, float by)
+    private int Place(StageLayout layout, float dipW, float dipH, long now, float bx, float by)
     {
         StageTile[] tiles = layout.Tiles;
         Rect[] cells = layout.Cells;
@@ -440,6 +458,24 @@ internal sealed unsafe class StageRenderer : IDisposable
             {
                 Dewarp(ref _draws[n], t, fisheye, p!, pw, ph, now);
             }
+            n++;
+        }
+        return n;
+    }
+
+    // The call cards' pictures after the grid's draws (from index n), each
+    // fitted into its card's hole; never hidden by a focused tile.
+    private void PlaceOverlays(OverlayTile[] overlays, int n, float bx, float by)
+    {
+        foreach (OverlayTile o in overlays)
+        {
+            StageTile t = o.Tile;
+            TilePicture? p = t.Video?.ShownPicture;
+            int pw = p is { HasPicture: true } ? (int)p.PictureSize.Width : 0, ph = p is { HasPicture: true } ? (int)p.PictureSize.Height : 0;
+            t.PictureWidth = pw;
+            t.PictureHeight = ph;
+            Draw(ref _draws[n], t, LayoutGeometry.Fit(pw, ph, o.Rect), pw, ph, false, bx, by);
+            _draws[n].Dewarp = false;
             n++;
         }
     }

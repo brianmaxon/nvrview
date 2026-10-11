@@ -46,6 +46,15 @@ public static class ChromeCorners
 
     public static bool IsTop(this ChromeCorner c) => c is ChromeCorner.TopLeft or ChromeCorner.TopRight;
 
+    /// <summary>The diagonally opposite corner (where call cards go by default).</summary>
+    public static ChromeCorner Opposite(this ChromeCorner c) => c switch
+    {
+        ChromeCorner.TopLeft => ChromeCorner.BottomRight,
+        ChromeCorner.TopRight => ChromeCorner.BottomLeft,
+        ChromeCorner.BottomLeft => ChromeCorner.TopRight,
+        _ => ChromeCorner.TopLeft,
+    };
+
     /// <summary>
     /// Where a row of <paramref name="count"/> symbols of <paramref name="symbol"/> (with
     /// <paramref name="gap"/> between and <paramref name="inset"/> from the edges) starts in a

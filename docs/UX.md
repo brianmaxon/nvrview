@@ -570,13 +570,21 @@ Details settled while building it (macOS):
 
 Details settled while building it (Windows):
 
-- The same call, a press or Start conversation: a card per call in the
-  stage's bottom right corner of every window, with the live captions, an
-  Unmute control when the call opened silent, Talk (hold the button, or
-  "Keep talking"), the typed reply box with Send, and a close control that
-  ends the call. Windows has no alert insets yet, so a press does not bring
-  the doorbell's video onto the screen: the card opens, and the picture shows
-  only if a tile shows the doorbell.
+- The same call, a press or Start conversation: a card per call in every
+  window, the Windows form of the call inset: a header with a close control
+  that ends the call, the doorbell's live picture (the Unmute control covers
+  it when the call opened silent), then the live captions, Talk (hold the
+  button, or "Keep talking") and the typed reply box with Send. The picture
+  is one more tile of the window's own grid, drawn last from the doorbell's
+  shared tile, as on the Mac; the card holds its own lease while it shows it.
+  The cards stack from the inset corner, newest nearest it, sized like the
+  Mac's insets but at least 340 wide for the controls: the corner is a
+  setting (Settings, "Doorbell call cards"), opposite the corner indicators
+  by default, as on the Mac. When the doorbell fills the stage (focused, or
+  the only tile) the same controls show along the bottom of the stage
+  instead of a card, beside the other calls' cards. Calls are the only
+  insets on Windows: smoke, CO and entrance insets, and the swap, are not
+  there yet.
 - Talk-back needs the camera's permission, which on Windows is the tile
   menu's "Allow talk-back" (a checked item, off by default, kept in
   `view-settings.json` and passed to the core before every start and when it
