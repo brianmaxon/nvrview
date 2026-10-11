@@ -687,8 +687,7 @@ example to keep it beside other work. Both apps follow these rules.
   being edited, the device going away, and quitting the app. A call in its
   own window **never ends by inactivity**: the user put it there to keep
   it, so the 60 s rule applies only in the insets. Pop In restarts that
-  rule with a fresh minute. (Windows: the same rule for its call windows,
-  which are planned; its call model already applies it.)
+  rule with a fresh minute. (Both apps apply the same rule.)
 - **Focus:** a call window opened by a ring never takes the keyboard focus
   from what the user is doing; an explicit Pop Out activates it, and so does
   Start Conversation opening one (the user asked for the call). Inside it,
@@ -728,6 +727,24 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
+
+- **Windows:** the call window is a WinUI window of its own with its own
+  swap chain and renderer (a swap chain is never moved between windows),
+  drawing the doorbell's shared tile in the middle of the call card: header
+  with Pop In and a pin toggle, then the picture, captions, Talk, and the
+  reply field. Pop Out is the button in a card's header and an item in the
+  card's menu (right-click) and the doorbell tile's menu. A ring opens the
+  window without activating it (the user keeps typing where they are),
+  Pop Out and Start Conversation activate it. The pin is "always on top"
+  (remembered; whether it also floats over a full-screen app is not
+  measured). Closing the window, Alt+F4, Ctrl+W, and Esc (while the reply
+  field is not focused; Esc there only leaves the field) end the call.
+  Settings has "Open calls in their own window", "Open call windows"
+  (Where I left it, Top right of the active screen), and, under "Calls open
+  in, per camera", each channel's Default, Window, or Inset; the tile menu
+  has "Calls open in" too. The frame (physical pixels, a virtual-screen
+  origin), the placement, the pin, and the choices are kept in
+  `view-settings.json`; call windows are not in `windows.json`.
 
 ## Finding devices
 

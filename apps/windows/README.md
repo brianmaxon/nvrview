@@ -581,6 +581,38 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   picture holds its own lease on the camera besides the call's (acquired
   before any is released when the cards change, released when the card
   goes, moves over the stage, or the window closes).
+- **A call in its own window** (`CallWindows.cs`, docs/UX.md "A call in its
+  own window"). `Call.Presentation` says where a call shows: the viewer
+  windows' cards (`ViewerCalls.InsetCameras`) or a call window. `CallWindows`
+  follows `Viewer.CallsChanged`: it opens a `CallWindow` for each call shown
+  in a window and closes it when the call ends. A `CallWindow` is a WinUI
+  `Window` with its own `SwapChainPanel` and `StageRenderer` (no swap chain
+  is ever moved between windows; it recovers from a lost device like the
+  viewer windows' renderers) and the same `CallCard` in its Window mode:
+  the card's hole is published as the renderer's one overlay, so the window
+  draws exactly the doorbell's shared tile. Its stream demand is Auto
+  (`CallWindowQuality.WantsMain`: the main stream while the picture is drawn
+  wider than the sub-stream's). **Leases:** Pop Out opens the window (its
+  lease taken) before the call's presentation changes and the viewer windows
+  let their cards go; Pop In changes the presentation first (the viewer
+  windows take their leases in the same turn) and then closes the window.
+  "Keep talking" and the unsent reply are `Call.Latched` and `Call.Draft`,
+  so a card built later shows them; using a card (hover, click, keys)
+  counts as activity. A ring opens the window with `AppWindow.Show(false)`,
+  an explicit Pop Out or Start Conversation activates it; the pin is
+  `OverlappedPresenter.IsAlwaysOnTop` (never set in a test run, which keeps
+  the window behind the others). Closing the window, Alt+F4, Ctrl+W, and
+  Esc (unless the reply field is focused) end the call; a call in a window
+  never expires; device removal and app shutdown close the windows. Call
+  windows are not in `windows.json` and not counted as viewer windows.
+  **Settings** (`view-settings.json`): `callsOpenInWindow`, `callPresentation`
+  per camera, `callWindowPlacement`, `callWindowFrame` (physical pixels),
+  `callWindowOnTop`; the frame is written half a second after the last move.
+  The frame comes from `CallWindowPlacement.Frame` (the remembered frame,
+  else the top right of the active viewer window's work area; further
+  windows cascade). Self-test steps `call-popout-open`, `call-popout-talk`,
+  `call-popin-new-window`, `call-popin`, `call-popout-end`,
+  `call-window-frame`, `call-default-ring`, `call-default-conversation`.
 - **Saved transcripts:** "Save call transcripts" in Settings (off by
   default, kept in `view-settings.json`) writes each call's transcript into
   the app's log and as a text file in `%LOCALAPPDATA%\NvrView\Transcripts`
@@ -603,6 +635,7 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |
+| `CallWindows`, `CallWindow` | the call windows: one per call shown in its own window, with its own swap chain and renderer (see "Calls") |
 | `WindowsCredentials`, `DeviceStore`, `SettingsDialog` | passwords in Credential Manager, the device list in `settings.json`, the Settings dialog |
 | `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
 

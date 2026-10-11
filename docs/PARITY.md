@@ -106,9 +106,9 @@ less than that. Nothing here was run on a Windows machine.
 | Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
 | Save call transcripts (event log and one text file per call, bounded folder, Open Transcripts Folder) | yes | yes | UX.md "Transcript files". macOS: Settings > Alerts; Windows: Settings. Pure naming, text and pruning in `CallTranscriptFile` (NVRCore) and `TranscriptFiles` (NvrView.Tiles) with the same test vectors. Self-test step `call-transcript-file`. |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
-| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | no (planned) | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin; self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popout-end`. A call in its own window never ends by inactivity; Pop In restarts the minute (the Windows call model already has the rule). |
-| Open calls in their own window: global setting and per-doorbell choice | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"); `CallPresentation.resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
-| Call window placement (where I left it, or top right of the active screen) | yes | no (planned) | macOS: Settings > Alerts > Doorbell calls ("Open call windows"); `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. |
+| Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | yes | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin. Windows: a WinUI window with its own swap chain and `StageRenderer` (joins device-loss recovery; checked after a simulated loss), always on top while pinned, shown without activation for a ring. Self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popin-new-window`, `call-popout-end` on both. A call in its own window never ends by inactivity; Pop In restarts the minute. Unverified on Windows: real multi-monitor placement, focus behavior of a real ring, and always-on-top over a full-screen app. |
+| Open calls in their own window: global setting and per-doorbell choice | yes | yes | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"). Windows: Settings (the checkbox and an expander with a picker per channel) and the tile menu ("Calls open in"), kept in `view-settings.json`. `CallPresentation.resolve` / `CallPresentations.Resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
+| Call window placement (where I left it, or top right of the active screen) | yes | yes | Settings > "Open call windows" on both; `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. Windows keeps the frame in physical pixels. |
 
 ### Devices, settings, and updates
 
@@ -119,7 +119,7 @@ less than that. Nothing here was run on a Windows machine.
 | Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
 | Settings: Devices | yes | yes | |
 | Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
-| Settings: Alerts (inset corner, save transcripts, call windows) | yes | partial (the call cards' corner and saving transcripts, in Settings; no call windows) | |
+| Settings: Alerts (inset corner, save transcripts, call windows) | yes | yes (in the Devices dialog: the call cards' corner, saving transcripts, calls in their own window and where they open) | |
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
