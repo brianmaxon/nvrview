@@ -370,10 +370,20 @@ public struct DoorbellCall: Sendable, Equatable {
     public var talk = TalkState()
     public var transcript = Transcript()
     public var transcription: TranscriptionStatus = .preparing
+    /// In the viewer windows' insets or in its own window; one state for the
+    /// whole app, kept when another press joins the call.
+    public var presentation: CallPresentation
+    /// "Keep talking" is on: Talk stays on without holding the button. Kept
+    /// with the call, so a view built again (a pop-out) shows it.
+    public private(set) var latched = false
+    /// The typed reply not sent yet, kept with the call for the same reason.
+    public var draft = ""
 
     public init(
-        camera: CameraRef, startedAt: Date, now: Double, audio: CallAudio.Decision, origin: Origin = .press
+        camera: CameraRef, startedAt: Date, now: Double, audio: CallAudio.Decision, origin: Origin = .press,
+        presentation: CallPresentation = .inset
     ) {
+        self.presentation = presentation
         self.origin = origin
         presses = origin == .press ? 1 : 0
         self.camera = camera
@@ -400,6 +410,28 @@ public struct DoorbellCall: Sendable, Equatable {
         activity(now: now)
     }
 
+    /// "Keep talking" turned on or off by the user (activity).
+    public mutating func setLatched(_ on: Bool, now: Double) {
+        latched = on
+        activity(now: now)
+    }
+
+    /// The microphone stopped on its own (refused, the talk ended, no
+    /// microphone, the user answered Cancel): "Keep talking" turns off.
+    public mutating func microphoneStopped() { latched = false }
+
+    /// The user typed in the reply field (activity).
+    public mutating func edited(draft text: String, now: Double) {
+        draft = text
+        activity(now: now)
+    }
+
+    /// A reply was sent: the field empties unless the user typed something
+    /// else meanwhile.
+    public mutating func sent(_ text: String) {
+        if draft == text { draft = "" }
+    }
+
     /// The Unmute control was clicked.
     public mutating func unmuted() {
         audible = true
@@ -421,5 +453,124 @@ public struct DoorbellCall: Sendable, Equatable {
             : "Doorbell call ended: channel \(camera.channel + 1), \(presses) press\(presses == 1 ? "" : "es"), \(seconds) s"
         if saveTranscript, !transcript.finals.isEmpty { text += "\n" + transcript.savedText }
         return text
+    }
+}
+
+// MARK: Presentation
+
+/// Where a call is shown (docs/UX.md "Doorbell calls"): in the doorbell's
+/// inset in every viewer window, or in a call window of its own.
+public enum CallPresentation: String, Sendable, Codable, CaseIterable {
+    case inset
+    case window
+
+    /// Decided when the call opens (a ring or Start Conversation): the
+    /// doorbell's own choice if it has one, else the app's "Open calls in
+    /// their own window". A press that joins an open call keeps its
+    /// presentation.
+    public static func resolve(global openInWindow: Bool, override: CallPresentation?) -> CallPresentation {
+        override ?? (openInWindow ? .window : .inset)
+    }
+}
+
+/// A rectangle in screen points with a top-left origin and y growing
+/// downward (Windows' convention; macOS flips with `flipped(height:)`).
+public struct WindowRect: Sendable, Equatable, Hashable, Codable {
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    public var minX: Double { x }
+    public var minY: Double { y }
+    public var maxX: Double { x + width }
+    public var maxY: Double { y + height }
+    public var midX: Double { x + width / 2 }
+
+    /// Edges included.
+    public func contains(x px: Double, y py: Double) -> Bool { px >= minX && px <= maxX && py >= minY && py <= maxY }
+
+    /// The same rectangle with y measured from the other edge of a space
+    /// `height` tall (bottom-left origin to top-left and back; macOS uses
+    /// the primary screen's height).
+    public func flipped(height total: Double) -> WindowRect {
+        WindowRect(x: x, y: total - y - height, width: width, height: height)
+    }
+}
+
+/// Where a call window opens (docs/UX.md "Doorbell calls"). Pure, over the
+/// screens' visible frames (the area without menu bar, Dock or taskbar).
+public enum CallWindowPlacement {
+    /// The "Open call windows" setting.
+    public enum Mode: String, Sendable, Codable, CaseIterable {
+        /// Where the user last left a call window (the default).
+        case remembered
+        /// The top right of the screen holding the active viewer window.
+        case activeScreen
+
+        public var title: String {
+            switch self {
+            case .remembered: "Where I left it"
+            case .activeScreen: "Top right of the active screen"
+            }
+        }
+    }
+
+    public static let defaultWidth = 480.0
+    public static let defaultHeight = 410.0
+    /// From the visible frame's edges, for the top right placement.
+    public static let margin = 12.0
+    /// Each further call window open at once moves this far.
+    public static let cascade = 24.0
+
+    /// Whether a remembered frame can still be used: some screen's visible
+    /// frame holds the middle of its top edge (the title bar can be reached).
+    public static func isOnScreen(_ frame: WindowRect, screens: [WindowRect]) -> Bool {
+        screens.contains { $0.contains(x: frame.midX, y: frame.minY) }
+    }
+
+    /// The frame for a call window. `remembered`: the last frame the user
+    /// left a call window at (its size is kept in both modes); `active`: the
+    /// visible frame of the screen holding the key viewer window (nil: the
+    /// first screen); `index`: how many call windows are open already.
+    ///
+    /// "Where I left it" with a remembered frame still on a screen: that
+    /// frame; each further window moves 24 pt right and down, kept inside
+    /// that screen. Otherwise (the other mode, no frame yet, or its screen is
+    /// gone): the top right of the active screen, 12 pt in, each further
+    /// window 24 pt left and down, the size limited to the screen.
+    public static func frame(
+        mode: Mode, remembered: WindowRect?, screens: [WindowRect], active: WindowRect?, index: Int = 0
+    ) -> WindowRect {
+        let step = cascade * Double(max(index, 0))
+        if mode == .remembered, let r = remembered,
+            let screen = screens.first(where: { $0.contains(x: r.midX, y: r.minY) })
+        {
+            guard step > 0 else { return r }
+            return clamp(WindowRect(x: r.x + step, y: r.y + step, width: r.width, height: r.height), into: screen)
+        }
+        let width = remembered?.width ?? defaultWidth
+        let height = remembered?.height ?? defaultHeight
+        guard let screen = active ?? screens.first else {
+            return WindowRect(x: step, y: step, width: width, height: height)
+        }
+        let w = min(width, max(screen.width - 2 * margin, 0))
+        let h = min(height, max(screen.height - 2 * margin, 0))
+        let r = WindowRect(x: screen.maxX - margin - w - step, y: screen.minY + margin + step, width: w, height: h)
+        return clamp(r, into: screen)
+    }
+
+    /// Moved (not resized) to lie inside `screen` where it can.
+    static func clamp(_ r: WindowRect, into screen: WindowRect) -> WindowRect {
+        let x = max(screen.minX, min(r.x, screen.maxX - r.width))
+        let y = max(screen.minY, min(r.y, screen.maxY - r.height))
+        return WindowRect(x: x, y: y, width: r.width, height: r.height)
     }
 }
