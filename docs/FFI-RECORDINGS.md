@@ -72,7 +72,7 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
  "grouping": {"gap_s": 10, "margin_s": 5},
  "thumbnails": {"max_entries": 4096, "max_bytes": 67108864},
  "downloads": {"chunk_s": 60, "per_device": 1, "max_attempts": 8},
- "playback": {"max_plays_per_device": 2, "buffer_s": 8, "buffer_bytes": 33554432},
+ "playback": {"max_plays_per_device": 4, "buffer_s": 8, "buffer_bytes": 33554432},
  "naming": {"separator": " — ", "extension": "mp4"}}
 ```
 
@@ -1184,7 +1184,7 @@ or a counted drop, never growth):
 | --- | --- |
 | Open playbacks | 8 |
 | Cameras per playback | 16 |
-| Concurrent plays per device | 2 (`max_plays_per_device`; Decision 2; beside live view a third play was observed to degrade silently, docs/protocol.md) |
+| Concurrent plays per device | 4 (`max_plays_per_device`; Decision 2; four plays started together at one seek time were observed beside live view, docs/protocol.md) |
 | Playback buffer per tile | 8 s or 32 MiB (`buffer_s`, `buffer_bytes`) |
 | Queued thumbnail fetches per device | 256, newest first, oldest dropped |
 | Thumbnail cache | 4096 entries, 64 MiB (`thumbnails`) |

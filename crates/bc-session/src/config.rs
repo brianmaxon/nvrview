@@ -92,11 +92,12 @@ pub struct SessionConfig {
     /// 64 MiB.
     pub download_buffer_bytes: usize,
     /// Plays of recordings (command 5) running at once on this device;
-    /// more are refused at once. Default 2: beside live view, two plays
-    /// were observed to deliver fully and a third to degrade silently (one
-    /// play stalled, one got nothing, no refusal; docs/protocol.md, "Live
-    /// view and plays on one session"). The official client ran four only
-    /// with live view stopped.
+    /// more are refused at once. Default 4: four plays started as a group
+    /// at one seek time ([`crate::DeviceSession::play_group`]) were observed to
+    /// deliver fully beside live view. A play whose recording does not hold
+    /// the session's latest seek time gets no media, so plays meant to run
+    /// together must be started together (docs/protocol.md, "Live view and
+    /// plays on one session").
     pub max_plays: usize,
     /// How long [`crate::DeviceSession::play_group`] waits between its
     /// seeks (123) and its plays (5): the official client waited about
@@ -187,7 +188,7 @@ impl SessionConfig {
             max_downloads: 1,
             download_stall_timeout: Duration::from_secs(10),
             download_buffer_bytes: 64 * 1024 * 1024,
-            max_plays: 2,
+            max_plays: 4,
             play_group_delay: Duration::from_millis(500),
             play_stall_timeout: Duration::from_secs(10),
             play_buffer_bytes: 32 * 1024 * 1024,
