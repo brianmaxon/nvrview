@@ -16,13 +16,16 @@
 //! consumer starts it again from where it is.
 
 use crate::archive::{TransferItem, TransferKind, TransferSink};
-use crate::supervisor::DeviceSession;
+use crate::supervisor::{DeviceSession, Reply};
 use crate::{DownloadError, QueryError, SearchError, Shared};
 use bc_protocol::archive::{DateTime, PlayRequest};
 use bc_protocol::media::Record;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 use std::time::Duration;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, timeout_at};
@@ -138,6 +141,34 @@ impl fmt::Debug for Play {
     }
 }
 
+/// A boxed future, for a list of requests to drive together.
+type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+/// Drives the futures together and returns their outputs in order. Each
+/// round polls them in order, so requests that are ready to go out leave
+/// in the order given.
+async fn join_in_order<T>(mut futs: Vec<Boxed<'_, T>>) -> Vec<T> {
+    let mut out: Vec<Option<T>> = futs.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (f, slot) in futs.iter_mut().zip(out.iter_mut()) {
+            if slot.is_none() {
+                match f.as_mut().poll(cx) {
+                    Poll::Ready(v) => *slot = Some(v),
+                    Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    out.into_iter().flatten().collect()
+}
+
 impl DeviceSession {
     /// Starts a play: seeks (123), then plays (5) at normal speed. Refused
     /// at once with [`QueryError::Busy`] when
@@ -179,5 +210,84 @@ impl DeviceSession {
             seq,
             _permit: permit,
         })
+    }
+
+    /// Starts several plays together, as the official client did
+    /// (docs/protocol.md, "Four plays at once"): all seeks (123) back to
+    /// back with consecutive `seq` numbers and the one `seekTime` `at`
+    /// (each start's own [`PlayStart::at`] is ignored), then their replies,
+    /// then a pause of [`crate::SessionConfig::play_group_delay`] (about
+    /// 0.5 s), then all plays (5) back to back, each with a message ID of
+    /// its own. The returned plays are in the order of `starts`. The call
+    /// stops nothing itself: stop running plays first.
+    ///
+    /// All or nothing: refused at once with [`QueryError::Busy`] when the
+    /// group does not fit under [`crate::SessionConfig::max_plays`] beside
+    /// the plays that run; a refused or failed seek is an error, and when
+    /// anything fails after plays were sent, those plays are stopped
+    /// (dropped) before the error returns. The plays' own refusals arrive
+    /// later, from [`Play::next`].
+    pub async fn play_group(
+        &self,
+        starts: &[PlayStart],
+        at: DateTime,
+    ) -> Result<Vec<Play>, SearchError> {
+        if self.shared.is_closing() {
+            return Err(SearchError::Query(QueryError::Closed));
+        }
+        if starts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut permits = Vec::with_capacity(starts.len());
+        for _ in starts {
+            permits.push(
+                self.play_permits
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| SearchError::Query(QueryError::Busy))?,
+            );
+        }
+        let n = starts.len() as u32;
+        let base = self.play_seq.fetch_add(n, Ordering::Relaxed);
+        let seeks: Vec<Boxed<'_, Result<Reply, QueryError>>> = (0..n)
+            .map(|i| {
+                let seq = base.wrapping_add(i);
+                Box::pin(self.call(Box::new(move |s| s.replay_seek(seq, at)), None))
+                    as Boxed<'_, Result<Reply, QueryError>>
+            })
+            .collect();
+        for reply in join_in_order(seeks).await {
+            let reply = reply?;
+            if reply.status != 200 {
+                return Err(SearchError::Refused(reply.status));
+            }
+        }
+        tokio::time::sleep(self.play_group_delay).await;
+        let mut plays = Vec::with_capacity(starts.len());
+        for (i, (q, permit)) in starts.iter().zip(permits).enumerate() {
+            let seq = base.wrapping_add(i as u32);
+            let req = q.request.clone();
+            // On an error the plays already sent are dropped with `plays`,
+            // which stops them.
+            let sink = self
+                .transfer_with(
+                    TransferKind::Play,
+                    Box::new(move |s| s.start_play(&req, seq)),
+                    Some(q.request.clone()),
+                    self.play_buffer_bytes,
+                )
+                .await?;
+            plays.push(Play {
+                sink,
+                shared: self.shared.clone(),
+                stall: self.play_stall_timeout,
+                first_wait: self.query_timeout,
+                got_any: false,
+                finished: None,
+                seq,
+                _permit: permit,
+            });
+        }
+        Ok(plays)
     }
 }
