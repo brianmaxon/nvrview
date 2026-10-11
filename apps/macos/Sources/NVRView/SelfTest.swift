@@ -707,7 +707,22 @@ final class SelfTest {
                         problems.append("the typed reply was not rendered")
                     }
                     if phase != .stopped(reason: "finished") { problems.append("the typed reply's talk did not drain") }
-                    coreRefusalStep(doorbell, otherCamera, startsBefore: fake.talkStarts)
+                    // parity: call-caption-echo
+                    // The doorbell's microphone hears its speaker play the reply: the
+                    // visitor caption that repeats it is dropped; other speech is kept.
+                    guard let engine = model.calls.visitorEngine(doorbell) else { return checkLog() }
+                    engine.onPartial?("Hello, one moment")
+                    engine.onFinal?("Hello, one moment please.")
+                    engine.onFinal?("I have a delivery for the house")
+                    when({ model.calls.call(for: doorbell)?.transcript.finals.contains { $0.text.hasPrefix("I have a delivery") } == true }, timeout: 2) { [self] in
+                        let call = model.calls.call(for: doorbell)
+                        let texts = call?.transcript.finals.map(\.text) ?? []
+                        print("caption echo: \(texts), shown \(call?.transcript.lines.map(\.text) ?? [])")
+                        if texts.contains(where: { $0.hasPrefix("Hello, one moment") }) { problems.append("the reply came back as a visitor caption (echo not dropped)") }
+                        if call?.transcript.partials[.visitor] != nil { problems.append("the echo's volatile caption is still shown") }
+                        if call?.echo.dropped != 2 { problems.append("expected two dropped echo captions, saw \(call?.echo.dropped ?? -1)") }
+                        coreRefusalStep(doorbell, otherCamera, startsBefore: fake.talkStarts)
+                    }
                 }
             }
         }

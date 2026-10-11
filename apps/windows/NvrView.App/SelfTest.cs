@@ -556,10 +556,22 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(voice.Rendered.SequenceEqual(["Hello, one moment please"]), "the voice did not render exactly the typed text");
         Expect(replied && call.Talk.SentMs >= 300, "the typed reply was not sent and finished");
 
+        // parity: call-caption-echo
+        // The camera's microphone hears its speaker play the reply: the visitor caption that repeats it
+        // is dropped; other speech is kept.
+        engines[0].Say("Hello, one moment", "Hello, one moment please.");
+        engines[0].Say("I have a", "I have a delivery for the house");
+        bool echoChecked = await Until(() => call.Transcript.Finals.Any(l => l.Text.StartsWith("I have a delivery", StringComparison.Ordinal)), 5);
+        Say($"calls: caption echo: {string.Join("|", call.Transcript.Finals.Select(l => l.Text))}, dropped {call.Echo.Dropped}");
+        Expect(echoChecked, "other visitor speech was not captioned");
+        Expect(!call.Transcript.Finals.Any(l => l.Text.StartsWith("Hello, one moment", StringComparison.Ordinal)), "the reply came back as a visitor caption (echo not dropped)");
+        Expect(call.Echo.Dropped == 2, $"expected two dropped echo captions, saw {call.Echo.Dropped}");
+
         // parity: call-captions
         // 5. Captions reach the call and its card.
+        int finalsBefore = call.Transcript.Finals.Count;
         engines[0].Say("hello th", "Hello there.");
-        bool captioned = await Until(() => call.Transcript.Finals.Count == 1, 5);
+        bool captioned = await Until(() => call.Transcript.Finals.Count == finalsBefore + 1, 5);
         stage.CallCards.Sync();
         Say($"calls: captions \"{card?.CaptionText}\"");
         Expect(captioned && card?.CaptionText.Contains("Visitor: Hello there.", StringComparison.Ordinal) == true, "captions did not reach the card");

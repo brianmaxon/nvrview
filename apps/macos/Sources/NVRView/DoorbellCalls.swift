@@ -133,6 +133,9 @@ final class DoorbellCalls {
         model.changed()
     }
 
+    /// The visitor's transcription engine (self-test drives its callbacks).
+    func visitorEngine(_ camera: CameraRef) -> (any TranscriptionEngine)? { sessions[camera.firstLens]?.visitor }
+
     /// The doorbell's audio is tapped for the visitor's transcript (self-test).
     func isTapped(_ camera: CameraRef) -> Bool { sessions[camera.firstLens]?.tapped != nil }
 
@@ -236,13 +239,9 @@ final class DoorbellCalls {
 
     private func transcribed(_ camera: CameraRef, _ source: TranscriptSource, _ text: String, final: Bool) {
         guard let s = sessions[camera] else { return }
-        if final {
-            s.call.transcript.final(text, source: source, at: Date())
-        } else {
-            s.call.transcript.partial(text, source: source)
-        }
-        // Speech is activity: the call stays open.
-        s.call.activity(now: model.clock.now)
+        // Speech is activity (the call stays open), except the visitor
+        // caption that is our own talk-back heard again (echo): dropped.
+        s.call.caption(text, source: source, final: final, now: model.clock.now, at: final ? Date() : nil)
         model.changed()
     }
 
@@ -343,6 +342,7 @@ final class DoorbellCalls {
             try? model.bridge.stopTalk(tile, drain: true)
         }
         s.call.talk.stopRequested()
+        s.call.talkChanged(now: model.clock.now)
         model.changed()
     }
 
@@ -356,6 +356,7 @@ final class DoorbellCalls {
             return false
         }
         guard s.call.talk.requestStart() else { return true }
+        s.call.talkChanged(now: model.clock.now)
         // Again before each start: withdrawing and allowing the permission
         // during the call cleared the core's mark.
         markConversation(s)
@@ -366,6 +367,7 @@ final class DoorbellCalls {
             return true
         } catch {
             s.call.talk.startFailed(error)
+            s.call.talkChanged(now: model.clock.now)
             model.logEvent(TalkPermission.refusal(cameraName: model.name(of: s.call.camera), reason: error == .notPermitted ? "not_permitted" : "error"))
             return false
         }
@@ -423,6 +425,7 @@ final class DoorbellCalls {
 
     private func speakReply(_ typed: String, _ s: Session) {
         let camera = s.call.camera
+        s.call.replySpoken(typed, now: model.clock.now)
         model.logEvent("Typed reply sent: \(model.name(of: camera)), \(typed.count) characters")
         let speech = services.speech
         Task { @MainActor [weak self] in
@@ -452,6 +455,7 @@ final class DoorbellCalls {
         guard let camera = model.leases.camera(forTile: e.tile), let s = sessions[camera.firstLens] else { return }
         // The events of an earlier start that arrive late change nothing.
         guard s.call.talk.apply(e) else { return }
+        s.call.talkChanged(now: model.clock.now)
         s.call.activity(now: model.clock.now)
         switch e.state {
         case .active:
