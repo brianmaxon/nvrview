@@ -1583,6 +1583,9 @@ impl Conn {
                 None => self.reply_xml(142, id, 400, "").await,
             },
             14 => {
+                if let Some(d) = cfg.search_delay {
+                    tokio::time::sleep(d).await;
+                }
                 let r = archive::read_req(&self.request_text(m), "FileInfo");
                 let (Some(ch), Some(start), Some(end)) = (r.channel, r.start, r.end) else {
                     return self.reply_xml(14, id, 400, "").await;

@@ -285,6 +285,10 @@ struct JobFile {
     incident: Incident,
     paused: bool,
     cameras: Vec<CameraJob>,
+    /// Handed to the app for the Trash ([`Scheduler::trash`]): never
+    /// resumed or returned again, even if the folder stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    trashed: bool,
 }
 
 /// Progress of one camera.
@@ -309,6 +313,10 @@ pub struct CameraProgress {
     pub paused: bool,
     /// Queued or running, but its device is not added or not connected.
     pub waiting_device: bool,
+    /// A worker has the camera job right now (downloading, waiting for its
+    /// device, or joining its chunks): something may still write into the
+    /// download's folder.
+    pub working: bool,
     /// See [`CameraJob::first_picture_wall_ms`].
     pub first_picture_wall_ms: Option<i64>,
     /// The final file's path.
@@ -318,8 +326,10 @@ pub struct CameraProgress {
 /// Progress of one incident download.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IncidentProgress {
-    /// Incident ID.
+    /// Incident ID (the download's ID).
     pub id: String,
+    /// The incident's stable key ([`Incident::key`]) as queued.
+    pub key: String,
     /// Its folder.
     pub folder: PathBuf,
     /// Paused by the user.
@@ -334,6 +344,61 @@ impl IncidentProgress {
         self.cameras
             .iter()
             .all(|c| !matches!(c.state, CameraState::Queued | CameraState::Running))
+    }
+
+    /// Whether every camera job is done (the download is finished).
+    pub fn is_done(&self) -> bool {
+        self.cameras.iter().all(|c| c.state == CameraState::Done)
+    }
+
+    /// Whether a worker has any of its camera jobs.
+    pub fn is_working(&self) -> bool {
+        self.cameras.iter().any(|c| c.working)
+    }
+}
+
+/// What [`Scheduler::enqueue_incident`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Enqueued {
+    /// The download's ID (the incident's [`Incident::id`] when it was
+    /// first queued).
+    pub id: String,
+    /// Its folder.
+    pub folder: PathBuf,
+    /// An existing download was returned instead of queuing a new one.
+    pub existing: bool,
+}
+
+/// Why [`Scheduler::enqueue_incident`] queued nothing.
+#[derive(Debug)]
+pub enum EnqueueError {
+    /// [`MAX_DOWNLOADS`] downloads are known already.
+    Limit,
+    /// No camera of the incident has a source.
+    NoSource,
+    /// The folder or job file could not be written.
+    Io(io::Error),
+}
+
+impl fmt::Display for EnqueueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EnqueueError::Limit => f.write_str("too many downloads known; forget finished ones"),
+            EnqueueError::NoSource => f.write_str("no camera of the incident has a source"),
+            EnqueueError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for EnqueueError {}
+
+impl From<EnqueueError> for io::Error {
+    fn from(e: EnqueueError) -> io::Error {
+        match e {
+            EnqueueError::Io(e) => e,
+            EnqueueError::NoSource => io::Error::new(io::ErrorKind::InvalidInput, e.to_string()),
+            EnqueueError::Limit => io::Error::other(e.to_string()),
+        }
     }
 }
 
@@ -411,6 +476,8 @@ struct Live {
 
 struct Job {
     seq: u64,
+    /// The incident's [`Incident::key`] (derived from `file`, kept).
+    key: String,
     folder: PathBuf,
     file: JobFile,
     live: Vec<Live>,
@@ -434,12 +501,20 @@ impl Job {
     fn new(seq: u64, folder: PathBuf, file: JobFile) -> Job {
         Job {
             seq,
+            key: file.incident.key(),
             folder,
             live: vec![Live::default(); file.cameras.len()],
             file,
             version: 0,
             saved: Arc::new(Mutex::new(Saved::default())),
         }
+    }
+
+    fn is_done(&self) -> bool {
+        self.file
+            .cameras
+            .iter()
+            .all(|c| c.state == CameraState::Done)
     }
 
     fn any_running(&self) -> bool {
@@ -568,6 +643,30 @@ fn retry_failed(c: &mut CameraJob) -> bool {
     true
 }
 
+/// Brings a job file read back from disk up to date with its folder:
+/// chunks marked complete whose files are missing are fetched again, and a
+/// job that was running is queued.
+fn normalize(folder: &Path, j: &mut JobFile) {
+    for cam in &mut j.cameras {
+        let dir = folder.join(PARTS_DIR).join(&cam.parts);
+        for (i, c) in cam.chunks.iter_mut().enumerate() {
+            if c.done && !chunk::is_complete(&dir, i as u32) {
+                c.done = false;
+                c.bytes = 0;
+            }
+        }
+        match cam.state {
+            CameraState::Running => cam.state = CameraState::Queued,
+            CameraState::Done | CameraState::ChunksComplete
+                if cam.chunks.iter().any(|c| !c.done) =>
+            {
+                cam.state = CameraState::Queued;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn slug(c: &CameraId) -> String {
     let base = if c.lens == 0 {
         format!("{}-ch{:02}", c.device, c.channel)
@@ -633,8 +732,26 @@ impl Scheduler {
     }
 
     /// Queues an incident: creates its folder, `incident.json`, and job
-    /// file. Queuing the same incident again returns the existing folder.
+    /// file. Queuing the same incident again returns the existing folder;
+    /// see [`Scheduler::enqueue_incident`] for the rules.
     pub fn enqueue(&self, req: &IncidentDownload) -> io::Result<PathBuf> {
+        self.enqueue_incident(req)
+            .map(|e| e.folder)
+            .map_err(io::Error::from)
+    }
+
+    /// Queues an incident's download, unless one already covers it
+    /// (docs/FFI-RECORDINGS.md, "Download IDs"):
+    ///
+    /// 1. an **unfinished** download (any state but done, failed and paused
+    ///    included) of the same incident [`Incident::key`] is returned, even
+    ///    if the incident has grown since (its range stays as queued);
+    /// 2. otherwise a download with the same [`Incident::id`] (the incident
+    ///    has not changed) is returned, also a finished one from an earlier
+    ///    run whose folder is still there (it is known again from then on);
+    /// 3. otherwise a new download is queued, in a new folder: ` (2)`,
+    ///    ` (3)`, ... is appended when the name is taken.
+    pub fn enqueue_incident(&self, req: &IncidentDownload) -> Result<Enqueued, EnqueueError> {
         let inc = &req.incident;
         let ranges: BTreeMap<CameraId, (Secs, Secs)> = inc
             .download_ranges()
@@ -642,20 +759,25 @@ impl Scheduler {
             .filter(|(c, _)| req.cameras.iter().any(|s| &s.camera == c))
             .collect();
         if ranges.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no camera of the incident has a source",
-            ));
+            return Err(EnqueueError::NoSource);
         }
+        let key = inc.key();
         {
             let st = lock(&self.inner.state);
-            if let Some(j) = st.jobs.get(&inc.id) {
-                return Ok(j.folder.clone());
+            let unfinished = st
+                .jobs
+                .values()
+                .filter(|j| j.key == key && !j.is_done())
+                .min_by_key(|j| j.seq);
+            if let Some(j) = unfinished.or_else(|| st.jobs.get(&inc.id)) {
+                return Ok(Enqueued {
+                    id: j.file.incident.id.clone(),
+                    folder: j.folder.clone(),
+                    existing: true,
+                });
             }
             if st.jobs.len() >= MAX_DOWNLOADS {
-                return Err(io::Error::other(
-                    "too many downloads known; forget finished ones",
-                ));
+                return Err(EnqueueError::Limit);
             }
         }
         let source = |c: &CameraId| req.cameras.iter().find(|s| &s.camera == c);
@@ -675,7 +797,19 @@ impl Scheduler {
         let mut n = 2;
         loop {
             match read_json::<JobFile>(&folder.join(PARTS_DIR).join(JOB_FILE)) {
-                Ok(Some(j)) if j.incident.id == inc.id => break,
+                Ok(Some(mut j))
+                    if j.incident.id == inc.id && j.version == JOB_VERSION && !j.trashed =>
+                {
+                    // Queued in an earlier run (finished, or beyond the
+                    // resume cap): known again, as it is on disk.
+                    normalize(&folder, &mut j);
+                    self.insert(folder.clone(), j).map_err(EnqueueError::Io)?;
+                    return Ok(Enqueued {
+                        id: inc.id.clone(),
+                        folder,
+                        existing: true,
+                    });
+                }
                 Ok(None) if !folder.exists() => break,
                 _ => {
                     folder = self.inner.cfg.root.join(format!("{base} ({n})"));
@@ -683,9 +817,10 @@ impl Scheduler {
                 }
             }
         }
-        fs::create_dir_all(folder.join(PARTS_DIR))?;
+        let io = EnqueueError::Io;
+        fs::create_dir_all(folder.join(PARTS_DIR)).map_err(io)?;
         let json = naming::incident_json(inc, &ranges, &names, pattern);
-        write_json(&folder.join("incident.json"), &json)?;
+        write_json(&folder.join("incident.json"), &json).map_err(io)?;
         let cameras: Vec<CameraJob> = ranges
             .iter()
             .filter_map(|(c, (s, e))| {
@@ -721,10 +856,15 @@ impl Scheduler {
             incident: inc.clone(),
             paused: false,
             cameras,
+            trashed: false,
         };
-        self.insert(folder.clone(), file)?;
+        self.insert(folder.clone(), file).map_err(io)?;
         info!(cameras = ranges.len(), "incident download queued");
-        Ok(folder)
+        Ok(Enqueued {
+            id: inc.id.clone(),
+            folder,
+            existing: false,
+        })
     }
 
     fn insert(&self, folder: PathBuf, file: JobFile) -> io::Result<()> {
@@ -754,7 +894,9 @@ impl Scheduler {
                 let folder = entry?.path();
                 let path = folder.join(PARTS_DIR).join(JOB_FILE);
                 match read_json::<JobFile>(&path) {
-                    Ok(Some(j)) if j.version == JOB_VERSION => found.push((folder, j)),
+                    Ok(Some(j)) if j.version == JOB_VERSION && !j.trashed => {
+                        found.push((folder, j));
+                    }
                     Ok(_) => {}
                     Err(e) => warn!(error = %e, "unreadable download job skipped"),
                 }
@@ -773,24 +915,7 @@ impl Scheduler {
                     break;
                 }
             }
-            for cam in &mut j.cameras {
-                let dir = folder.join(PARTS_DIR).join(&cam.parts);
-                for (i, c) in cam.chunks.iter_mut().enumerate() {
-                    if c.done && !chunk::is_complete(&dir, i as u32) {
-                        c.done = false;
-                        c.bytes = 0;
-                    }
-                }
-                match cam.state {
-                    CameraState::Running => cam.state = CameraState::Queued,
-                    CameraState::Done | CameraState::ChunksComplete
-                        if cam.chunks.iter().any(|c| !c.done) =>
-                    {
-                        cam.state = CameraState::Queued;
-                    }
-                    _ => {}
-                }
-            }
+            normalize(&folder, &mut j);
             let unfinished = j.cameras.iter().any(|c| {
                 matches!(c.state, CameraState::Queued)
                     || (c.state == CameraState::ChunksComplete && self.inner.finalizer.is_some())
@@ -925,6 +1050,52 @@ impl Scheduler {
         Ok(true)
     }
 
+    /// Ends a download so its folder can go to the Trash
+    /// (docs/FFI-RECORDINGS.md, "Trash"): pauses it (a running chunk is
+    /// stopped with 144; a join already running completes), waits until no
+    /// worker has any of its camera jobs, then forgets it and keeps every
+    /// file. Returns its folder, or `None` if the download is unknown. Once
+    /// this returns, nothing writes into the folder.
+    pub async fn trash(&self, incident: &str) -> io::Result<Option<PathBuf>> {
+        let folder = lock(&self.inner.state)
+            .jobs
+            .get(incident)
+            .map(|j| j.folder.clone());
+        let Some(folder) = folder else {
+            return Ok(None);
+        };
+        // The pause saves the job file: a disk write, off the async worker.
+        let (me, id) = (self.clone(), incident.to_owned());
+        tokio::task::spawn_blocking(move || me.set_paused(&id, true))
+            .await
+            .map_err(io::Error::other)??;
+        let mut rx = self.progress();
+        let _ = rx
+            .wait_for(|p| {
+                p.iter()
+                    .find(|x| x.id == incident)
+                    .is_none_or(|x| !x.is_working())
+            })
+            .await;
+        // Marked in its job file, so it is not resumed after a restart if
+        // the folder stays (moving it to the Trash can fail).
+        let save = {
+            let mut st = lock(&self.inner.state);
+            match st.jobs.get_mut(incident) {
+                Some(j) => {
+                    j.file.trashed = true;
+                    Some(j.snapshot()?)
+                }
+                None => None,
+            }
+        };
+        if let Some(save) = save {
+            save.write_off_thread().await?;
+        }
+        self.forget(incident, false)?;
+        Ok(Some(folder))
+    }
+
     /// Waits until `f` holds for the progress list.
     pub async fn wait_for(&self, f: impl Fn(&[IncidentProgress]) -> bool) {
         let mut rx = self.progress();
@@ -959,6 +1130,7 @@ impl Inner {
             jobs.iter()
                 .map(|j| IncidentProgress {
                     id: j.file.incident.id.clone(),
+                    key: j.key.clone(),
                     folder: j.folder.clone(),
                     paused: j.file.paused,
                     cameras: j
@@ -982,6 +1154,7 @@ impl Inner {
                                 state: c.state.clone(),
                                 paused: c.paused,
                                 waiting_device: active && (!device_ready || live.waiting),
+                                working: live.running,
                                 first_picture_wall_ms: c.first_picture_wall_ms,
                                 output: j.folder.join(&c.file),
                             }

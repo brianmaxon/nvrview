@@ -102,6 +102,10 @@ pub struct ArchiveConfig {
     /// (the mock's choice: how a device refuses a play is not known). `None`:
     /// no limit.
     pub max_plays: Option<usize>,
+    /// How long a file search (14) takes to answer (the mock's choice, for
+    /// tests of what happens while a fill runs; devices take a fraction of a
+    /// second). `None`: at once.
+    pub search_delay: Option<std::time::Duration>,
 }
 
 /// One play (command 5) the fake served, for test assertions.
@@ -139,6 +143,7 @@ impl ArchiveConfig {
             download_rate: None,
             play_burst_secs: 3,
             max_plays: None,
+            search_delay: None,
         }
     }
 

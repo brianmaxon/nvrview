@@ -9,10 +9,11 @@ use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, FnConnector, SessionConfig};
 use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::fixture::Fixture;
+use recordings::finalize::Mp4Finalizer;
 use recordings::incident::{CameraEvent, CameraId, GroupingConfig, Incident, group};
 use recordings::scheduler::{
-    CameraProgress, CameraSource, CameraState, FailReason, IncidentDownload, IncidentProgress,
-    PARTS_DIR, Scheduler, SchedulerConfig,
+    CameraProgress, CameraSource, CameraState, FailReason, Finalizer, IncidentDownload,
+    IncidentProgress, PARTS_DIR, Scheduler, SchedulerConfig,
 };
 use recordings::secs;
 use std::path::{Path, PathBuf};
@@ -202,6 +203,86 @@ async fn a_range_without_recording_fails_as_no_recording() {
     let id = sched.progress().borrow()[0].id.clone();
     assert!(sched.retry_camera(&id, &CameraId::new("nvr-a", 0)).unwrap());
     assert!(!sched.retry_camera(&id, &CameraId::new("nvr-a", 5)).unwrap());
+    sched.shutdown().await;
+    drop(sched);
+    close(s).await;
+}
+
+/// [`incident`] with the cameras' events running until `end_s` past 7:42.
+fn incident_until(day: u8, end_s: u8) -> Incident {
+    let e = |ch: u8| CameraEvent {
+        start: secs(d(day, 7, 42, 5)),
+        end: secs(d(day, 7, 42, end_s)),
+        camera: CameraId::new("nvr-a", ch),
+        kind: "vehicle".into(),
+    };
+    group(&[e(0), e(1)], &GroupingConfig::default()).remove(0)
+}
+
+fn request(inc: &Incident) -> IncidentDownload {
+    IncidentDownload {
+        incident: inc.clone(),
+        cameras: sources(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn downloads_are_deduplicated_by_key_while_unfinished_and_trashed_whole() {
+    let nvr = spawn_mock(None);
+    let s = session(&nvr);
+    let root = tempfile::tempdir().unwrap();
+    let finalizer = || Some(Arc::new(Mp4Finalizer::default()) as Arc<dyn Finalizer>);
+    let sched = Scheduler::new(fast(root.path()), finalizer());
+    let first = incident_until(10, 25);
+    let grown = incident_until(10, 40);
+    assert_eq!(first.key(), grown.key());
+    assert_ne!(first.id, grown.id);
+
+    // Unfinished (its device is not added yet): the grown incident gets
+    // the same download, with the range it was queued with.
+    let a = sched.enqueue_incident(&request(&first)).unwrap();
+    assert!(!a.existing);
+    assert_eq!(a.id, first.id);
+    let b = sched.enqueue_incident(&request(&grown)).unwrap();
+    assert_eq!((b.id.as_str(), b.existing), (a.id.as_str(), true));
+    assert_eq!(sched.progress().borrow().len(), 1);
+    assert_eq!(sched.progress().borrow()[0].key, first.key());
+
+    sched.add_device("nvr-a", s.clone());
+    wait(&sched, |p| p.iter().all(IncidentProgress::is_done)).await;
+    // Finished and unchanged: the same download.
+    let c = sched.enqueue_incident(&request(&first)).unwrap();
+    assert_eq!((c.id.as_str(), c.existing), (a.id.as_str(), true));
+    // Finished, and the incident grew since: a new folder.
+    let g = sched.enqueue_incident(&request(&grown)).unwrap();
+    assert!(!g.existing);
+    assert_eq!(g.id, grown.id);
+    assert_eq!(
+        g.folder.file_name().unwrap().to_string_lossy(),
+        format!("{} (2)", a.folder.file_name().unwrap().to_string_lossy())
+    );
+
+    // Trash: stopped, forgotten, every file left in place.
+    assert_eq!(sched.trash("nope").await.unwrap(), None);
+    let folder = sched.trash(&g.id).await.unwrap().unwrap();
+    assert_eq!(folder, g.folder);
+    assert!(sched.progress().borrow().iter().all(|p| p.id != g.id));
+    assert!(folder.join("incident.json").is_file());
+    sched.shutdown().await;
+    drop(sched);
+
+    // After a restart, a finished download is not resumed, but queuing the
+    // unchanged incident again finds it on disk.
+    let sched = Scheduler::new(fast(root.path()), finalizer());
+    sched.resume_all().unwrap();
+    assert!(
+        sched.progress().borrow().is_empty(),
+        "finished and trashed downloads are not resumed"
+    );
+    let again = sched.enqueue_incident(&request(&first)).unwrap();
+    assert_eq!((again.folder, again.existing), (a.folder, true));
+    assert!(sched.progress().borrow()[0].is_done());
+    assert!(nvr.download_log().len() >= 2);
     sched.shutdown().await;
     drop(sched);
     close(s).await;

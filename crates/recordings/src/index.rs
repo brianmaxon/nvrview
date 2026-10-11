@@ -352,6 +352,15 @@ impl DeviceIndex {
         self.calendar.days.keys().copied().collect()
     }
 
+    /// Every camera with calendar entries or an indexed day.
+    pub fn indexed_cameras(&self) -> BTreeSet<DeviceCamera> {
+        let mut s: BTreeSet<DeviceCamera> = self.calendar.days.keys().copied().collect();
+        for d in self.days.values() {
+            s.extend(d.cameras.keys().copied());
+        }
+        s
+    }
+
     /// Stores one camera's files and events of the day that starts at
     /// `day`, replacing what was there, and writes the day file.
     pub fn put_day(
