@@ -1,0 +1,5 @@
+# The Windows core links the C runtime statically, so nvrview.dll needs no
+# Visual C++ Redistributable on the user's computer (self-update ships plain
+# zips, with no installer to add it).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
