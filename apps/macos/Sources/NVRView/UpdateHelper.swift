@@ -55,7 +55,7 @@ enum UpdateHelper {
                 target: URL(fileURLWithPath: target, isDirectory: true), expectedVersion: version,
                 updateFolder: folderURL,
                 waitForExit: { waitForExit(pid, seconds: wait) },
-                verifySignature: verifySignature, log: log)
+                verifySignature: CodeSign.verify, signerRule: CodeSign.rule(forInstalled:), log: log)
             result("installed \(version)")
             if relaunch {
                 let open = Process()
@@ -67,7 +67,7 @@ enum UpdateHelper {
             }
             return 0
         } catch {
-            result("failed \(error)")
+            result("failed \(error.message)")
             return 1
         }
     }
@@ -80,18 +80,5 @@ enum UpdateHelper {
             Thread.sleep(forTimeInterval: 0.1)
         }
         return false
-    }
-
-    /// `codesign --verify --deep --strict`: the bundle is intact and signed
-    /// (ad hoc or with an identity).
-    static func verifySignature(_ bundle: URL) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        p.arguments = ["--verify", "--deep", "--strict", bundle.path]
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return false }
-        p.waitUntilExit()
-        return p.terminationStatus == 0
     }
 }

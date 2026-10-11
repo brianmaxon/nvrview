@@ -47,7 +47,7 @@ struct UpdateSettingsView: View {
                 if let keyProblem {
                     Text(keyProblem).font(.callout).foregroundStyle(.red)
                 } else {
-                    Text("Updates are installed only when signed by one of these keys.")
+                    Text("Updates are installed only when signed by one of these keys. \(updater.signerSummary)")
                         .font(.callout).foregroundStyle(.secondary)
                 }
             } header: {

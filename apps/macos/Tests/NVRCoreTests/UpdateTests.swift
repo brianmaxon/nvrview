@@ -113,7 +113,9 @@ struct UpdateTests {
 
     /// A minimal bundle: Info.plist and an executable script, ad hoc signed
     /// when `sign` is true.
-    private func makeBundle(at url: URL, id: String = "io.example.UpdateTest", version: String, sign: Bool = false) throws {
+    private func makeBundle(
+        at url: URL, id: String = "io.example.UpdateTest", version: String, sign: Bool = false, identity: String = "-"
+    ) throws {
         let fm = FileManager.default
         try fm.createDirectory(at: url.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
         let plist: [String: Any] = [
@@ -128,7 +130,7 @@ struct UpdateTests {
         if sign {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-            p.arguments = ["--force", "--sign", "-", url.path]
+            p.arguments = ["--force", "--sign", identity, url.path]
             p.standardError = FileHandle.nullDevice
             try p.run()
             p.waitUntilExit()
@@ -161,7 +163,7 @@ struct UpdateTests {
             waitForExit: {
                 waited = true
                 return true
-            }, verifySignature: { _ in true })
+            }, verifySignature: { _, _ in true }, signerRule: { _ in .anyValidSignature })
         #expect(waited)
         #expect(version(s.target) == "0.4.0")
         #expect(version(s.folder.appendingPathComponent("previous/UpdateTest.app")) == "0.3.0")
@@ -177,7 +179,8 @@ struct UpdateTests {
             do {
                 try BundleInstaller.install(
                     staged: s.staged, target: s.target, expectedVersion: expected, updateFolder: s.folder,
-                    waitForExit: { wait }, verifySignature: { _ in verify })
+                    waitForExit: { wait }, verifySignature: { _, _ in verify },
+                    signerRule: { _ in .anyValidSignature })
                 return nil
             } catch {
                 return error
@@ -250,9 +253,135 @@ struct UpdateTests {
         #expect(throws: BundleInstaller.Failure.signatureInvalid) {
             try BundleInstaller.install(
                 staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
-                waitForExit: { true }, verifySignature: verify)
+                waitForExit: { true }, verifySignature: { url, _ in verify(url) },
+                signerRule: { _ in .anyValidSignature })
         }
         #expect(version(s.target) == "0.3.0")
+    }
+
+    // MARK: Who may sign the update
+
+    @Test func codesignOutputGivesTheRule() {
+        // Output shapes as `codesign -d -r- --verbose=2` prints them, with
+        // made-up identifiers.
+        let adHoc = """
+            Executable=/tmp/A.app/Contents/MacOS/A
+            Identifier=io.example.A
+            CodeDirectory v=20400 size=200 flags=0x2(adhoc) hashes=1+3 location=embedded
+            Signature=adhoc
+            TeamIdentifier=not set
+            # designated => cdhash H"00112233445566778899aabbccddeeff00112233"
+            """
+        let developer = """
+            Identifier=io.example.A
+            CodeDirectory v=20500 size=300 flags=0x10000(runtime) hashes=1+7 location=embedded
+            Signature size=4789
+            Authority=Apple Development: Example Developer (EXAMPLE123)
+            TeamIdentifier=EXAMPLE123
+            designated => identifier "io.example.A" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: Example Developer (EXAMPLE123)"
+            """
+        let teamOnly = "Signature size=4789\nTeamIdentifier=EXAMPLE123\n"
+        let unreadable = "Signature size=4789\nTeamIdentifier=not set\n"
+        #expect(CodeSigningInfo.parse(adHoc)?.rule == .anyValidSignature)
+        #expect(
+            CodeSigningInfo.parse(developer)?.rule
+                == .requirement(
+                    #"identifier "io.example.A" and anchor apple generic and certificate leaf[subject.CN] = "Apple Development: Example Developer (EXAMPLE123)""#
+                ))
+        #expect(
+            CodeSigningInfo.parse(teamOnly)?.rule
+                == .requirement(#"anchor apple generic and certificate leaf[subject.OU] = "EXAMPLE123""#))
+        #expect(CodeSigningInfo.parse(unreadable)?.rule == .unknown)
+        #expect(CodeSigningInfo.parse("/tmp/A.app: code object is not signed at all") == nil)
+    }
+
+    @Test func aDeveloperSignedAppNeedsItsDeveloper() throws {
+        let s = try scene()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        try makeBundle(at: s.staged.appendingPathComponent("UpdateTest.app"), version: "0.4.0")
+        func attempt(_ rule: SignerRule, meets: Bool) -> BundleInstaller.Failure? {
+            do {
+                try BundleInstaller.install(
+                    staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
+                    waitForExit: { true },
+                    verifySignature: { _, r in r == .anyValidSignature || meets },
+                    signerRule: { _ in rule })
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(attempt(.requirement("anchor apple generic"), meets: false) == .signerMismatch)
+        #expect(attempt(.unknown, meets: true) == .signerUnknown)
+        #expect(version(s.target) == "0.3.0", "nothing changed")
+        #expect(attempt(.requirement("anchor apple generic"), meets: true) == nil)
+        #expect(version(s.target) == "0.4.0")
+    }
+
+    /// Real `codesign`: an ad hoc installed app accepts any intact ad hoc
+    /// update.
+    @Test func adHocInstalledAcceptsAnIntactUpdate() throws {
+        let s = try scene()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        try FileManager.default.removeItem(at: s.target)
+        try makeBundle(at: s.target, version: "0.3.0", sign: true)
+        #expect(CodeSign.rule(forInstalled: s.target) == .anyValidSignature)
+        try makeBundle(at: s.staged.appendingPathComponent("UpdateTest.app"), version: "0.4.0", sign: true)
+        try BundleInstaller.install(
+            staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
+            waitForExit: { true })
+        #expect(version(s.target) == "0.4.0")
+    }
+
+    /// Real `codesign` with a developer identity from the login keychain,
+    /// when there is one (never printed): an app signed with it refuses an
+    /// ad hoc update and accepts one signed with the same identity.
+    @Test func developerInstalledRefusesAnAdHocUpdate() throws {
+        guard let identity = Self.developmentIdentity() else {
+            // No Apple Development identity on this Mac: the rule is covered
+            // with stubbed codesign output above.
+            return
+        }
+        let s = try scene()
+        defer { try? FileManager.default.removeItem(at: s.root) }
+        try FileManager.default.removeItem(at: s.target)
+        try makeBundle(at: s.target, version: "0.3.0", sign: true, identity: identity)
+        guard case .requirement = CodeSign.rule(forInstalled: s.target) else {
+            Issue.record("a developer-signed app must have a requirement")
+            return
+        }
+        let new = s.staged.appendingPathComponent("UpdateTest.app")
+        try makeBundle(at: new, version: "0.4.0", sign: true)
+        #expect(throws: BundleInstaller.Failure.signerMismatch) {
+            try BundleInstaller.install(
+                staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
+                waitForExit: { true })
+        }
+        #expect(version(s.target) == "0.3.0")
+        try FileManager.default.removeItem(at: new)
+        try makeBundle(at: new, version: "0.4.0", sign: true, identity: identity)
+        try BundleInstaller.install(
+            staged: s.staged, target: s.target, expectedVersion: "0.4.0", updateFolder: s.folder,
+            waitForExit: { true })
+        #expect(version(s.target) == "0.4.0")
+    }
+
+    /// The SHA-1 of the first valid Apple Development identity, if any.
+    private static func developmentIdentity() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-identity", "-v", "-p", "codesigning"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        for line in text.split(separator: "\n") where line.contains("\"Apple Development:") {
+            let parts = line.split(separator: " ")
+            if parts.count > 1, parts[1].count == 40 { return String(parts[1]) }
+        }
+        return nil
     }
 }
 

@@ -178,6 +178,121 @@ public enum UpdateInstallBlocker: Error, Equatable, Sendable {
     }
 }
 
+/// What the installed bundle's code signature says about who may sign its
+/// updates (docs/UPDATES.md, "Applying", macOS), read from `codesign -d
+/// -r- --verbose=2`.
+public struct CodeSigningInfo: Equatable, Sendable {
+    /// Signed ad hoc (no identity): the requirement is the build's own hash.
+    public var adHoc: Bool
+    /// The signing team, when signed with a developer identity.
+    public var teamID: String?
+    /// The explicit designated requirement, when it has one.
+    public var designated: String?
+
+    public init(adHoc: Bool, teamID: String?, designated: String?) {
+        self.adHoc = adHoc
+        self.teamID = teamID
+        self.designated = designated
+    }
+
+    /// Parses codesign's display output (standard output and error
+    /// together). Nil when it shows no signature at all.
+    public static func parse(_ text: String) -> CodeSigningInfo? {
+        var info = CodeSigningInfo(adHoc: false, teamID: nil, designated: nil)
+        var signed = false
+        for raw in text.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line == "Signature=adhoc" {
+                info.adHoc = true
+                signed = true
+            } else if line.hasPrefix("TeamIdentifier=") {
+                let team = String(line.dropFirst("TeamIdentifier=".count))
+                if team != "not set" && !team.isEmpty { info.teamID = team }
+                signed = true
+            } else if line.hasPrefix("designated => ") {
+                info.designated = String(line.dropFirst("designated => ".count))
+                signed = true
+            } else if line.hasPrefix("Signature size=") || line.hasPrefix("CodeDirectory ") {
+                signed = true
+            }
+        }
+        return signed ? info : nil
+    }
+
+    /// The rule a staged update must meet.
+    public var rule: SignerRule {
+        if adHoc { return .anyValidSignature }
+        if let designated, !designated.hasPrefix("cdhash ") { return .requirement(designated) }
+        if let teamID, teamID.allSatisfy({ $0.isLetter || $0.isNumber }) {
+            return .requirement("anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\"")
+        }
+        return .unknown
+    }
+}
+
+/// Who may sign an update of the installed bundle.
+public enum SignerRule: Equatable, Sendable {
+    /// The installed app is ad hoc signed (or not signed): any bundle whose
+    /// signature is intact. The update keys are what protects it.
+    case anyValidSignature
+    /// The installed app has a developer identity: the update must satisfy
+    /// this code requirement (the installed bundle's designated
+    /// requirement, or its Team ID).
+    case requirement(String)
+    /// Signed with an identity whose requirement could not be read:
+    /// updates are refused rather than guessed at.
+    case unknown
+
+    /// One sentence for Settings.
+    public var summary: String {
+        switch self {
+        case .anyValidSignature:
+            return "This copy is signed ad hoc, so an update needs only an intact code signature; your trusted keys are what protect it."
+        case .requirement:
+            return "Updates must be code signed by the same developer as this copy."
+        case .unknown:
+            return "This copy's code signature could not be read, so updates will be refused."
+        }
+    }
+}
+
+/// `codesign`, run as a separate process.
+public enum CodeSign {
+    /// The installed bundle's rule: from its signature, or
+    /// `.anyValidSignature` when it is not signed (a development build).
+    public static func rule(forInstalled bundle: URL) -> SignerRule {
+        let (status, text) = run(["-d", "-r-", "--verbose=2", bundle.path])
+        guard let info = CodeSigningInfo.parse(text) else {
+            return status == 0 ? .unknown : .anyValidSignature
+        }
+        return info.rule
+    }
+
+    /// `codesign --verify --deep --strict`, with `-R` for a requirement.
+    public static func verify(_ bundle: URL, rule: SignerRule) -> Bool {
+        var args = ["--verify", "--deep", "--strict"]
+        switch rule {
+        case .anyValidSignature: break
+        case .requirement(let r): args += ["-R", "=\(r)"]
+        case .unknown: return false
+        }
+        return run(args + [bundle.path]).status == 0
+    }
+
+    private static func run(_ args: [String]) -> (status: Int32, text: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        guard (try? p.run()) != nil else { return (-1, "") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+}
+
 /// Moving a verified, unpacked bundle into place (docs/UPDATES.md,
 /// "Applying", macOS). Everything that touches the installed bundle is here
 /// and runs only after the app has quit.
@@ -225,14 +340,34 @@ public enum BundleInstaller {
         case missingBundle
         case wrongBundle(String)
         case signatureInvalid
+        /// The update is not signed by the installed app's developer.
+        case signerMismatch
+        /// The installed app's signing requirement could not be read.
+        case signerUnknown
         case swapFailed(Int32)
+
+        /// One sentence for the next start's status line.
+        public var message: String {
+            switch self {
+            case .appStillRunning: return "NVRView did not quit in time."
+            case .missingBundle: return "the downloaded or the installed app was missing."
+            case .wrongBundle(let what): return "the downloaded app has the wrong \(what)."
+            case .signatureInvalid: return "the downloaded app's code signature is not intact."
+            case .signerMismatch: return "the downloaded app is not code signed by the developer of this copy."
+            case .signerUnknown: return "this copy's code signing requirement could not be read."
+            case .swapFailed(let e): return "the apps could not be swapped (error \(e))."
+            }
+        }
     }
 
     /// Installs `staged/NVRView.app` (`staged` is the core's `ready` path)
     /// in place of `target`:
     /// 1. waits for the app to exit (`waitForExit`, false: give up);
     /// 2. checks the staged bundle: same bundle identifier as the installed
-    ///    one, the expected version, and `verifySignature`;
+    ///    one, the expected version, an intact signature
+    ///    (`verifySignature` with `.anyValidSignature`), and the installed
+    ///    bundle's `signerRule` (its designated requirement when it has a
+    ///    developer identity; nothing more when it is ad hoc);
     /// 3. swaps the two in one atomic rename (`renamex_np`, `RENAME_SWAP`);
     /// 4. moves the old bundle to `<update folder>/previous/<name>.app`,
     ///    replacing an older one there.
@@ -241,7 +376,8 @@ public enum BundleInstaller {
     @discardableResult
     public static func install(
         staged: URL, target: URL, expectedVersion: String, updateFolder: URL,
-        waitForExit: () -> Bool, verifySignature: (URL) -> Bool,
+        waitForExit: () -> Bool, verifySignature: (URL, SignerRule) -> Bool = CodeSign.verify,
+        signerRule: (URL) -> SignerRule = CodeSign.rule(forInstalled:),
         fileManager: FileManager = .default, log: (String) -> Void = { _ in }
     ) throws(Failure) -> URL {
         guard waitForExit() else {
@@ -265,9 +401,21 @@ public enum BundleInstaller {
             log("the staged bundle is not version \(expectedVersion); nothing changed")
             throw .wrongBundle("version")
         }
-        guard verifySignature(new) else {
+        guard verifySignature(new, .anyValidSignature) else {
             log("the staged bundle's code signature did not verify; nothing changed")
             throw .signatureInvalid
+        }
+        switch signerRule(target) {
+        case .anyValidSignature:
+            log("the installed app is signed ad hoc: an intact signature is enough")
+        case .requirement(let r):
+            guard verifySignature(new, .requirement(r)) else {
+                log("the staged bundle is not signed by the installed app's developer; nothing changed")
+                throw .signerMismatch
+            }
+        case .unknown:
+            log("the installed app's signing requirement could not be read; nothing changed")
+            throw .signerUnknown
         }
         let swapped = new.withUnsafeFileSystemRepresentation { a in
             target.withUnsafeFileSystemRepresentation { b in

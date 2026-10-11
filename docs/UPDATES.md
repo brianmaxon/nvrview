@@ -269,12 +269,27 @@ session). The helper:
    up and changes nothing);
 2. checks the staged `NVRView.app`: its `CFBundleIdentifier` matches the
    installed app's, its `CFBundleShortVersionString` is the accepted version,
-   and `codesign --verify --deep --strict` accepts it;
+   `codesign --verify --deep --strict` accepts it, and it is signed by the
+   same developer as the installed app (below);
 3. swaps the staged bundle and the installed one in a single atomic rename
    (`renamex_np` with `RENAME_SWAP`), so `NVRView.app` is never missing;
 4. moves the old bundle to `.NVRView-update/previous/NVRView.app` (replacing
    an older one kept there);
 5. with Restart Now, opens the new `NVRView.app` with `open`.
+
+**Who may sign the new bundle.** The helper reads the installed app's
+signature (`codesign -d -r-`):
+
+- signed with a developer identity (Apple Development or Developer ID): the
+  staged bundle must satisfy the installed bundle's designated requirement
+  (`codesign --verify -R`), or, if it has none, carry the same Team ID.
+  Anything else is refused ("not code signed by the developer of this
+  copy"), and nothing changes. A requirement that cannot be read refuses
+  the update too;
+- signed ad hoc (or not signed, a development build): an intact signature
+  is enough, as an ad hoc requirement names only the build's own hash. The
+  trusted update keys are then the only check on who made the update;
+  Settings says which of the two applies to the running copy.
 
 **Later** installs the same way when the user next quits the app, without
 reopening it. The helper writes what it did to `.NVRView-update/update.log`,

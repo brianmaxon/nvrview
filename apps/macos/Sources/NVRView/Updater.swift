@@ -30,6 +30,14 @@ final class Updater {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var userAsked = false
     @ObservationIgnored private var pendingVersion: String?
+    @ObservationIgnored private var cachedSignerRule: SignerRule?
+
+    /// Who may code sign an update of this copy, for Settings (read once:
+    /// it runs `codesign`).
+    var signerSummary: String {
+        if cachedSignerRule == nil { cachedSignerRule = CodeSign.rule(forInstalled: bundleURL) }
+        return cachedSignerRule?.summary ?? ""
+    }
     /// Shows a prompt (set by the app delegate).
     @ObservationIgnored var present: (Prompt) -> Void = { _ in }
     /// Quits the app (Restart Now).
