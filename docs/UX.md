@@ -543,9 +543,14 @@ the same call themselves without a press ("Start Conversation", below):
   Moonshine's streaming models (MIT) on Windows (about 4-5% clean; the tiny
   and base models are tried first on modest CPUs, with sherpa-onnx as a
   lighter fallback), behind one engine interface in each app. One session per
-  source (doorbell, microphone), so the speaker label is the source; while
-  doorbell audio plays through the speakers the microphone session is muted
-  or echo-cancelled so it does not transcribe the visitor twice. Shown live in the call; saved with the event only if the user
+  source (doorbell, microphone), so the speaker label is the source. While
+  the user talks, the operating system's echo cancellation removes the
+  doorbell's audio playing through the speakers from the microphone, so the
+  visitor does not hear themselves sent back and both sides can talk at once;
+  the call says "Echo cancellation on". Where the system cannot confirm echo
+  cancellation, the call says "No echo cancellation" and the microphone's
+  captions pause while the doorbell audibly plays (and 0.4 s after) so the
+  visitor is not transcribed twice (AUDIO.md, "Echo cancellation"). Shown live in the call; saved with the event only if the user
   turned saving on (recording a conversation may need the other person's
   consent in some places).
 - **Typed reply:** a text box in the call speaks what the user types through
@@ -593,9 +598,18 @@ Details settled while building it (macOS):
   (AUDIO.md, "Talk-back (sending)"); talking or sending again meanwhile
   continues the same talk. Both apps do this.
 - The visitor's transcript comes from the doorbell tile's audio tap (16 kHz
-  mono), enabled for the call; the user's from the microphone while talking,
-  not while the doorbell's audio is audible and carrying sound (and 0.4 s
-  after). Apple's SpeechTranscriber (volatile and fast results) runs on the
+  mono), enabled for the call; the user's from the microphone while talking.
+  The microphone runs on the playback engine with the system's voice
+  processing (echo cancellation), so it is captioned while the doorbell
+  speaks, except for 0.15 s after the doorbell is very loud (a peak over
+  0.5). Without voice processing it is not captioned while the doorbell's
+  audio is audible and carrying sound (and 0.4 s after). Voice processing
+  is prepared when a call opens and stays on for 2 minutes after Talk (or
+  until the call ends), so pressing Talk again does not interrupt the
+  doorbell's audio; meanwhile the system shows the microphone in use,
+  though nothing is taken from it or sent. Switching to
+  it and back each interrupts the doorbell's audio briefly (AUDIO.md, "Echo
+  cancellation"). Apple's SpeechTranscriber (volatile and fast results) runs on the
   Mac; while it installs its English assets the call says "Preparing speech
   recognition", and without them, or without the speech recognition
   permission, the call goes on without a transcript.
@@ -647,8 +661,11 @@ Details settled while building it (Windows):
   Windows blocks it the call says so). A typed reply is rendered by the
   system voice (`Windows.Media.SpeechSynthesis`) into memory, never played on
   the computer, and pushed to the camera at the voice's own rate; the core
-  resamples it. The echo gate is the Mac's: the microphone is not
-  transcribed while the camera plays through the speakers, and 0.4 s after.
+  resamples it. The microphone is captured in communications mode, with
+  Windows' echo canceller pointed at the device that plays the camera where
+  Windows allows it (AUDIO.md, "Echo cancellation"); the call's status says
+  "Echo cancellation on" or "No echo cancellation", and the caption gate
+  follows the Mac's rules for each.
 - Captions use the desktop speech recognizer of Windows (`System.Speech`,
   local, no model to ship), one session per source, fed the same 16 kHz audio
   as on the Mac. It is a stand-in for the engine docs/ARCHITECTURE.md plans
