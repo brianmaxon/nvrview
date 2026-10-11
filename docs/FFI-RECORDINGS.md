@@ -1642,3 +1642,62 @@ F3.
    C10 or the downloads provide one. Proposed C surface for F3:
    `nv_sound_analyze_day(core, json, out, cap, len)` and
    `nv_sound_analyze_cancel(core, request)`.
+
+## Clarifications from the implementation (C13, 2026-10-11)
+
+What building locked incidents (MILESTONE-P.md, C13;
+`recordings::locks` and `viewer_core::recordings_owner::locks`) settled
+where section 3, "Locked incidents", was silent.
+
+1. **Overlap** compares the incident's event intervals (without margins)
+   with the lock's extent (with margins), camera by camera, so an
+   incident that only touches a locked incident's margin does not join
+   its lock. An extent is a set of ranges per camera, not one range, so
+   unlocking a part removes only that part's ranges.
+2. **Unlocked keys are remembered** by their lock (at most 256 per lock)
+   and never join it again by overlap, so unlocking one part of a split
+   sticks even where the parts' events overlap in time. Locking that
+   incident again forgets this; it rejoins the lock if it still overlaps
+   it, else it gets a lock of its own.
+3. **Keys of a lock** after matching are the incidents it covers plus the
+   keys it had whose earliest event no incident holds now (their days may
+   not be indexed in this run). A key whose earliest event another
+   incident now holds (merged away, regrouped) is dropped. An unlock also
+   drops keys whose earliest event left the extent, and a lock with no key
+   left is dropped, even if part of its extent remains.
+4. **31 days.** Locking checks the incident's own span and, if it joins a
+   lock, the joined span; a merge checks every lock its parts belong to
+   together with the parts (`NV_ERR_LIMIT`, nothing stored). During
+   matching, an incident that would stretch a lock beyond 31 days by
+   overlap alone is not joined (it stays unlocked); one matched by key
+   always is.
+5. **Locking a locked incident** changes no lock (`keys` is empty) and runs
+   the download step again: an unfinished or unchanged download is
+   returned (`existing`); after a trash, a new folder is made, because the
+   user asked. Unlocking an incident that is not locked answers `keys`
+   empty. The unlock answer has `revision` and `keys` only.
+6. **Key rewriting** happens in `nv_camera_groups_put`: every key in the
+   stored edits that the old groups made and whose earliest event lies in
+   a lock's extent (or that is a lock's key) gets the key the new groups
+   make, and so do the locks' keys. Keys of a merge across groups (no
+   group) are left as they are.
+7. **Edits that never expire** are those with a key that is a lock's key
+   or whose earliest event lies in a lock's extent.
+8. **Kept index days** are, per device, every day an extent range touches
+   (a day file holds every camera of that device's day).
+9. **Pinned thumbnails** are entries whose camera (that lens, either tier)
+   and range overlap a lock's extent, the 16 most recently used per lock;
+   an entry two locks cover counts for the older.
+10. **Waiting downloads** (`when_settled`) are stored with the lock, so they
+    survive a restart. Each regroup checks them, and the owner looks again
+    when the incident can stop growing (`gap_s` after its end), without
+    waiting for new events. An incident not in the index waits; if
+    `downloads_dir` is gone or the scheduler is at its 1000 downloads when
+    it settles, the core logs it and the download is not queued (the app
+    can offer `nv_download_incident`). The queued download's `download`
+    event is the only report.
+11. **A failure to write the download's folder** while locking returns
+    `NV_ERR_INTERNAL`; the lock stays stored.
+12. **Incidents are regrouped at the end of every fill**, because a lane
+    prunes its index then (days past the age or size limit, which locks
+    now exempt), and incidents in dropped days disappear.

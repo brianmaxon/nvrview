@@ -13,6 +13,8 @@
 //! - [`edits`]: the user's edits to incidents, stored and replayed over
 //!   every fresh grouping, keyed by the incidents' stable keys.
 //! - [`groups`]: the user's camera groups and camera names, stored.
+//! - [`locks`]: locked incidents (kept past every age and size limit),
+//!   stored and matched to every fresh grouping.
 //! - [`scheduler`]: downloads incidents in the background: one job per
 //!   camera, fetched in chunks with command 143, retried on stalls and
 //!   disconnects, resumed from the first missing chunk after any failure or
@@ -51,6 +53,7 @@ pub mod incident;
 pub mod index;
 pub mod indexer;
 pub mod lane;
+pub mod locks;
 pub mod naming;
 pub mod recorded_time;
 pub mod scheduler;

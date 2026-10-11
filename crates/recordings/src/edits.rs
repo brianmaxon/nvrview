@@ -407,14 +407,56 @@ impl EditLog {
     /// limit): their incidents' events are no longer indexed. Returns how
     /// many were dropped.
     pub fn expire(&mut self, oldest: Secs) -> io::Result<usize> {
+        self.expire_except(oldest, |_| false)
+    }
+
+    /// As [`EditLog::expire`], but edits for which `keep` is true never
+    /// expire (those of locked incidents, [`crate::locks`]).
+    pub fn expire_except(
+        &mut self,
+        oldest: Secs,
+        keep: impl Fn(&Edit) -> bool,
+    ) -> io::Result<usize> {
         let before = self.edits.len();
-        self.edits.retain(|e| e.time().is_none_or(|t| t >= oldest));
+        self.edits
+            .retain(|e| e.time().is_none_or(|t| t >= oldest) || keep(e));
         let dropped = before - self.edits.len();
         if dropped > 0 {
             info!(dropped, "expired incident edits dropped");
             self.save()?;
         }
         Ok(dropped)
+    }
+
+    /// Replaces every key `f` maps to a new one, in every stored edit (a
+    /// locked incident's key changed with its camera group). Returns how
+    /// many keys changed; nothing is stored when none did.
+    pub fn rewrite_keys(&mut self, f: impl Fn(&str) -> Option<String>) -> io::Result<usize> {
+        let before = self.edits.clone();
+        let mut n = 0;
+        for e in &mut self.edits {
+            let keys: Vec<&mut String> = match e {
+                Edit::Merge { keys } => keys.iter_mut().collect(),
+                Edit::Split { key, .. }
+                | Edit::Rename { key, .. }
+                | Edit::AddCamera { key, .. }
+                | Edit::RemoveCamera { key, .. }
+                | Edit::Revert { key } => vec![key],
+            };
+            for k in keys {
+                if let Some(new) = f(k) {
+                    *k = new;
+                    n += 1;
+                }
+            }
+        }
+        if n > 0
+            && let Err(e) = self.save()
+        {
+            self.edits = before;
+            return Err(e);
+        }
+        Ok(n)
     }
 }
 
@@ -642,10 +684,49 @@ mod tests {
         // And applies once they are.
         let out = log.apply(&base);
         assert_eq!(out.edited.len(), 1);
-        // Older than the index keeps: dropped.
+        // Older than the index keeps: dropped, unless kept.
+        assert_eq!(log.expire_except(1001, |_| true).unwrap(), 0);
         assert_eq!(log.expire(999).unwrap(), 0);
         assert_eq!(log.expire(1001).unwrap(), 1);
         assert!(log.edits().is_empty());
+    }
+
+    #[test]
+    fn keys_are_rewritten_and_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("incident-edits.json");
+        let base = base();
+        let mut log = EditLog::open(&path);
+        let (k1, k2) = (key_at(&base, 1000), key_at(&base, 2000));
+        log.push(
+            &base,
+            Edit::Merge {
+                keys: vec![k1.clone(), k2.clone()],
+            },
+        )
+        .unwrap();
+        log.push(
+            &base,
+            Edit::Rename {
+                key: k1.clone(),
+                name: Some("Gate".into()),
+            },
+        )
+        .unwrap();
+        let new = format!("{k1}-new");
+        let n = log
+            .rewrite_keys(|k| (k == k1).then(|| new.clone()))
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(log.rewrite_keys(|_| None).unwrap(), 0);
+        let log = EditLog::open(&path);
+        assert_eq!(
+            log.edits()[0],
+            Edit::Merge {
+                keys: vec![new.clone(), k2]
+            }
+        );
+        assert_eq!(log.edits()[1].keys(), vec![new.as_str()]);
     }
 
     #[test]

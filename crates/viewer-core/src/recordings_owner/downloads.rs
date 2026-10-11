@@ -21,7 +21,8 @@ use super::{Hub, RecError, camera_name, config, lock, query};
 use crate::recordings_owner::config::DownloadSettings;
 use bc_session::DeviceSession;
 use recordings::finalize::Mp4Finalizer;
-use recordings::incident::CameraId;
+use recordings::groups::GroupStore;
+use recordings::incident::{CameraId, Incident};
 use recordings::scheduler::{
     CameraProgress, CameraSource, CameraState, EnqueueError, IncidentDownload, IncidentProgress,
     Scheduler, SchedulerConfig,
@@ -294,7 +295,28 @@ async fn pump(hub: Weak<Hub>, sched: Scheduler) {
     }
 }
 
-fn io_error(e: std::io::Error) -> RecError {
+/// The download of `inc`'s `chosen` cameras.
+pub(super) fn incident_request(
+    groups: &GroupStore,
+    inc: Incident,
+    chosen: Vec<(CameraId, recordings::Tier)>,
+) -> IncidentDownload {
+    let cameras = chosen
+        .into_iter()
+        .map(|(c, tier)| CameraSource {
+            name: camera_name(groups, &c),
+            uid: None,
+            stream: c.local().stream(tier),
+            camera: c,
+        })
+        .collect();
+    IncidentDownload {
+        incident: inc,
+        cameras,
+    }
+}
+
+pub(super) fn io_error(e: std::io::Error) -> RecError {
     warn!(error = %e, "download control failed");
     RecError::Internal
 }
@@ -357,22 +379,7 @@ impl crate::Core {
                 }
             };
             let groups = &st.stores.as_ref().expect("configured").groups;
-            let cameras = chosen
-                .into_iter()
-                .map(|(c, tier)| CameraSource {
-                    name: camera_name(groups, &c),
-                    uid: None,
-                    stream: c.local().stream(tier),
-                    camera: c,
-                })
-                .collect();
-            (
-                sched,
-                IncidentDownload {
-                    incident: inc,
-                    cameras,
-                },
-            )
+            (sched, incident_request(groups, inc, chosen))
         };
         let r = sched.enqueue_incident(&req).map_err(|e| match e {
             EnqueueError::Limit => RecError::Limit,
