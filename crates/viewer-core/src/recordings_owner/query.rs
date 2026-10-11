@@ -265,7 +265,8 @@ fn incident_json(
         "key": key, "id": inc.id, "name": inc.name, "group": inc.group,
         "start": inc.start(), "end": inc.end(), "margin_s": inc.margin,
         "kinds": kinds, "growing": growing,
-        "edited": st.incidents.edited.edited.contains(&key), "locked": false,
+        "edited": st.incidents.edited.edited.contains(&key),
+        "locked": st.incidents.locks.locked.contains_key(&key),
         "cameras": cameras, "events": events,
         "downloads": downloads.get(&key).cloned().unwrap_or_default(),
     })

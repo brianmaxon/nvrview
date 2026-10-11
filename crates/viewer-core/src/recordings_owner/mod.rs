@@ -10,7 +10,8 @@
 //!   device's existing session;
 //! - one [`ThumbnailCache`], one [`EditLog`], one [`GroupStore`], and the
 //!   incidents derived from every index (regrouped when the index, the
-//!   groups, the settings, or the edits change);
+//!   groups, the settings, or the edits change), and the locked incidents'
+//!   store, matched to every regrouping (`locks`);
 //! - with a `downloads_dir`, one [`Scheduler`] with the MP4 finalizer;
 //! - the app's today holds, by hold number.
 //!
@@ -44,6 +45,7 @@
 
 mod config;
 mod downloads;
+mod locks;
 mod query;
 
 use crate::clock::HostClock;
@@ -217,6 +219,7 @@ struct Stores {
     thumbs: Arc<Mutex<ThumbnailCache>>,
     edits: EditLog,
     groups: GroupStore,
+    locks: recordings::locks::LockStore,
     downloads: Option<downloads::Downloads>,
 }
 
@@ -310,6 +313,7 @@ struct Incidents {
     base: Vec<Incident>,
     edited: Edited,
     revision: u64,
+    locks: locks::Matched,
 }
 
 #[derive(Default)]
@@ -714,6 +718,9 @@ impl Hub {
                 }
             }
         }
+        if let Some(t) = self.settle_timer(now) {
+            at(t);
+        }
         if changed.is_empty() && index.is_empty() && !self.st().incidents.dirty {
             return next;
         }
@@ -725,7 +732,8 @@ impl Hub {
             }));
         }
         let mut st = self.st();
-        if !changed.is_empty() {
+        // A lane prunes its index as a fill ends (before it reports idle).
+        if !changed.is_empty() || index.iter().any(|(_, s)| *s == "idle") {
             st.incidents.dirty = true;
         }
         if st.incidents.dirty {
@@ -769,16 +777,15 @@ impl Hub {
         // Edits older than the index keeps refer to nothing any more.
         let oldest =
             self.device_now(0) - (i64::from(stores.settings.index.max_age_days) + 1) * 86_400;
-        if let Err(e) = stores.edits.expire(oldest) {
-            warn!(error = %e, "cannot store the incident edits");
-        }
+        locks::expire_edits(stores, oldest);
         let cfg = stores
             .groups
             .grouping(stores.settings.gap_s, stores.settings.margin_s);
         let base = group(&events, &cfg);
         let edited = stores.edits.apply(&base);
         st.incidents.base = base;
-        if edited != st.incidents.edited {
+        let locks_changed = self.follow_locks(st, &edited);
+        if edited != st.incidents.edited || locks_changed {
             st.incidents.edited = edited;
             st.incidents.revision += 1;
             self.send(json!({"type": "incidents_changed", "revision": st.incidents.revision}));
@@ -923,11 +930,12 @@ impl crate::Core {
             };
             st.stores = Some(Stores {
                 settings: settings.clone(),
-                root,
                 _scratch: scratch,
                 thumbs: Arc::new(Mutex::new(thumbs)),
                 edits,
                 groups,
+                locks: locks::open(persistent.then(|| root.join("incident-locks.json"))),
+                root,
                 downloads: None,
             });
             st.pump = Some(h.rt.spawn(pump(Arc::downgrade(h))));
@@ -1018,6 +1026,7 @@ impl crate::Core {
                             background: None,
                         },
                     );
+                    locks::keep_days(&st, device_key);
                     let n = h.next_lane(&mut st);
                     h.set_report(device_key, n, Some("waiting_device"));
                     h.start_lane(&mut st, device_key)
@@ -1328,6 +1337,7 @@ impl crate::Core {
             return Err(RecError::NotConfigured);
         }
         h.fresh_incidents(&mut st);
+        locks::check_merge(&st, &edit)?;
         let base = std::mem::take(&mut st.incidents.base);
         let stores = st.stores.as_mut().expect("checked");
         let r = stores.edits.push(&base, edit);
@@ -1390,6 +1400,9 @@ impl crate::Core {
         }
         let mut st = h.st();
         let stores = st.stores.as_mut().ok_or(RecError::NotConfigured)?;
+        let before = stores
+            .groups
+            .grouping(stores.settings.gap_s, stores.settings.margin_s);
         let revision = stores.groups.put(value).map_err(|e| match e {
             GroupsError::Invalid(_) => RecError::InvalidArgument,
             GroupsError::Io(e) => {
@@ -1397,6 +1410,7 @@ impl crate::Core {
                 RecError::Internal
             }
         })?;
+        locks::rekey(stores, &before);
         h.send(json!({"type": "camera_groups_changed", "revision": revision}));
         h.regroup(&mut st);
         Ok(())
