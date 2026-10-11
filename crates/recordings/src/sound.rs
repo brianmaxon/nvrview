@@ -275,6 +275,15 @@ impl EnvelopeStore {
         self.cfg = cfg;
     }
 
+    /// Every camera that has data.
+    pub fn cameras(&self) -> Vec<DeviceCamera> {
+        let mut v: Vec<DeviceCamera> = self.known.keys().map(|(c, _)| *c).collect();
+        v.dedup();
+        v.sort();
+        v.dedup();
+        v
+    }
+
     /// Days of `camera` that have data, oldest first.
     pub fn days(&self, camera: DeviceCamera) -> Vec<Secs> {
         self.known
