@@ -417,7 +417,10 @@ that is refused once, then streams):
     kept in the layout leaf, and show the synthetic sphere's quadrant colors
     at the pixels the shared mapping predicts (90% of the samples, away from
     cell edges); the Virtual PTZ zoom eases on a manual clock to its target
-    and is saved, 0 resets the view, and Original removes the member;
+    and is saved, the Settings dialog's Mount picker sets the camera's mount
+    (saved, and the tile follows), a synthetic pinch scale divides the
+    Virtual PTZ field of view and stops at 20°, 0 resets the view, and
+    Original removes the member;
 14. stopping the mock makes every tile say it is reconnecting;
 15. no callback threw, no tile reported an error or a failed tier switch;
 16. calls, against the mock's talk-capable channel (`--talk 0`) with a fake

@@ -189,6 +189,10 @@ internal sealed partial class StageView : UserControl
         _viewer.Leases.TileChanged += OnTileChanged;
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
+        // A mount chosen in Settings (or another window) reaches this window's tiles at once.
+        _viewer.Settings.Changed += PublishAllFisheye;
+        // A touch screen's two-finger pinch (a touchpad's arrives as Ctrl+wheel).
+        ManipulationMode = ManipulationModes.Scale;
         _timer = new DispatcherQueueTimerHolder(DispatcherQueue, TimeSpan.FromMilliseconds(250), Tick);
         Loaded += (_, _) => Microsoft.UI.Xaml.Media.CompositionTarget.Rendering += OnRendering;
         Unloaded += (_, _) => Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
@@ -796,10 +800,10 @@ internal sealed partial class StageView : UserControl
         PointerPoint pp = e.GetCurrentPoint(this);
         if (TileAt(pp.Position) is { Fisheye: { } fe } ft && fe.Mode.Dewarps())
         {
-            // Virtual PTZ zooms (eased); the other dewarped views do nothing.
+            // Virtual PTZ zooms (eased), and so does a touchpad pinch (Ctrl+wheel); the other dewarped views do nothing.
             if (fe.Mode == FisheyeViewMode.Ptz)
             {
-                ZoomFisheye(ft, Math.Pow(1.25, pp.Properties.MouseWheelDelta / 120.0));
+                ZoomFisheye(ft, FisheyePinch.WheelFactor(pp.Properties.MouseWheelDelta));
             }
             e.Handled = true;
             Interact();
@@ -813,6 +817,31 @@ internal sealed partial class StageView : UserControl
             Interact();
         }
     }
+
+    /// <summary>A two-finger pinch on a touch screen: zooms a Virtual PTZ tile by the step's scale (the tile where the fingers are).</summary>
+    protected override void OnManipulationStarted(ManipulationStartedRoutedEventArgs e)
+    {
+        // The first finger began a drag; the pinch replaces it (its view is saved, not left half-turned).
+        if (_gesture == GestureKind.Fisheye && _panTile is { } turned)
+        {
+            SaveFisheye(turned);
+            _gesture = GestureKind.None;
+            _panTile = null;
+        }
+    }
+
+    protected override void OnManipulationDelta(ManipulationDeltaRoutedEventArgs e)
+    {
+        if (TileAt(e.Position) is { Fisheye: { Mode: FisheyeViewMode.Ptz } } ft)
+        {
+            PinchFisheye(ft, e.Delta.Scale);
+            e.Handled = true;
+            Interact();
+        }
+    }
+
+    /// <summary>One pinch step on a tile (<paramref name="scale"/> above 1 spreads: zooms in); only Virtual PTZ zooms.</summary>
+    public void PinchFisheye(StageTile t, double scale) => ZoomFisheye(t, FisheyePinch.Factor(scale));
 
     // ---- drag and drop (cameras from the sidebar) ----
 
@@ -1062,6 +1091,11 @@ internal sealed partial class StageView : UserControl
     public void SetFisheyeMount(CameraRef camera, FisheyeMount mount)
     {
         _viewer.Settings.SetMount(camera, mount);
+        PublishAllFisheye();
+    }
+
+    private void PublishAllFisheye()
+    {
         foreach (StageTile t in _tiles)
         {
             PublishFisheye(t);
