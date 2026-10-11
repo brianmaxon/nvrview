@@ -4,3 +4,5 @@
 1cc2ad5b8e22144485d3f14679c43ac4f48f830c:docs/FFI-RECORDINGS.md:generic-api-key:172
 # Synthetic device key in the Windows layout compatibility test:
 da9a3bd2bfd62cac2c740a08c8667f5eef1b9907:apps/windows/NvrView.Shell.Tests/LayoutTests.cs:generic-api-key:370
+# The same example incident key, after the contract update (2026-10-11):
+a2483754073e955f57ea03802585007670dc8816:docs/FFI-RECORDINGS.md:generic-api-key:317
