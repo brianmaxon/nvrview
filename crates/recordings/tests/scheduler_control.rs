@@ -287,3 +287,34 @@ async fn downloads_are_deduplicated_by_key_while_unfinished_and_trashed_whole() 
     drop(sched);
     close(s).await;
 }
+
+/// A device going away clears the size estimate in the same progress list
+/// that says the camera waits for it, so one change is one event (the
+/// estimate is not reset in a later, second change).
+#[tokio::test(start_paused = true)]
+async fn removing_a_device_clears_the_estimate_in_the_same_update() {
+    let nvr = spawn_mock(Some(150_000));
+    let s = session(&nvr);
+    let root = tempfile::tempdir().unwrap();
+    let sched = Scheduler::new(fast(root.path()), None);
+    sched.add_device("nvr-a", s.clone());
+    sched
+        .enqueue(&IncidentDownload {
+            incident: incident(10),
+            cameras: sources(),
+        })
+        .unwrap();
+    wait(&sched, |p| {
+        cam(p, 1).bytes_estimate.is_some() && !cam(p, 1).waiting_device
+    })
+    .await;
+    // The single-threaded test runtime cannot run the workers between these
+    // two statements, so this is the list the removal itself published.
+    sched.remove_device("nvr-a");
+    let p = sched.progress().borrow().clone();
+    assert!(cam(&p, 1).waiting_device);
+    assert_eq!(cam(&p, 1).bytes_estimate, None);
+    sched.shutdown().await;
+    drop(sched);
+    close(s).await;
+}
