@@ -323,6 +323,13 @@ struct Shared {
     talk_open_status: AtomicU32,
     /// Status for talk audio replies (202); 200 accepts.
     talk_audio_status: AtomicU32,
+    /// While set, a preview start is accepted and then never answered or
+    /// fed (a stream that is silent).
+    silent_previews: AtomicBool,
+    /// While set, new in-memory connections are refused.
+    refuse_connections: AtomicBool,
+    /// Closes every open connection when sent to.
+    kill: tokio::sync::broadcast::Sender<()>,
     /// The runtime every task of this server runs on.
     runtime: Handle,
     /// Connection tasks, for a clean shutdown.
@@ -459,6 +466,9 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         talks: Mutex::new(Vec::new()),
         talk_open_status: AtomicU32::new(200),
         talk_audio_status: AtomicU32::new(200),
+        silent_previews: AtomicBool::new(false),
+        refuse_connections: AtomicBool::new(false),
+        kill: tokio::sync::broadcast::channel(4).0,
         runtime,
         conns: Mutex::new(Vec::new()),
     });
@@ -517,7 +527,7 @@ pub fn connect(addr: SocketAddr) -> io::Result<DuplexStream> {
 }
 
 fn open_pipe(shared: &Arc<Shared>) -> io::Result<DuplexStream> {
-    if shared.is_shutdown() {
+    if shared.is_shutdown() || shared.refuse_connections.load(Ordering::SeqCst) {
         return Err(io::ErrorKind::ConnectionRefused.into());
     }
     let (client, server) = tokio::io::duplex(PIPE_BUF);
@@ -538,6 +548,24 @@ impl MockNvr {
     /// `ConnectionRefused` once the server is shutting down.
     pub fn connect(&self) -> io::Result<DuplexStream> {
         open_pipe(&self.shared)
+    }
+
+    /// While `on`, a preview start is accepted (nothing is sent back) and
+    /// no media ever follows: a stream that is up but silent. Starts made
+    /// before the switch keep streaming.
+    pub fn set_silent_previews(&self, on: bool) {
+        self.shared.silent_previews.store(on, Ordering::SeqCst);
+    }
+
+    /// While `on`, new in-memory connections ([`MockNvr::connect`]) are
+    /// refused, as a device that is down or out of logins would.
+    pub fn set_refuse_connections(&self, on: bool) {
+        self.shared.refuse_connections.store(on, Ordering::SeqCst);
+    }
+
+    /// Closes every open connection (the device dropped its clients).
+    pub fn drop_connections(&self) {
+        let _ = self.shared.kill.send(());
     }
 
     /// Number of sessions that are currently logged in.
@@ -821,6 +849,7 @@ impl Conn {
         let mut buf = vec![0u8; 8192];
         let shared = Arc::clone(&self.shared);
         let mut closed = self.writer.closed.subscribe();
+        let mut kill = shared.kill.subscribe();
         loop {
             loop {
                 match dec.next_message() {
@@ -834,6 +863,7 @@ impl Conn {
             }
             tokio::select! {
                 () = shared.stopping() => return Ok(()),
+                _ = kill.recv() => return Ok(()),
                 _ = closed.wait_for(|c| *c) => return Ok(()),
                 r = reader.read(&mut buf) => match r {
                     Ok(0) => return Ok(()),
@@ -1299,6 +1329,10 @@ impl Conn {
             return self.reply_xml(3, id, 400, "").await;
         }
         let stop = Arc::new(AtomicBool::new(false));
+        if self.shared.silent_previews.load(Ordering::SeqCst) {
+            self.streams.insert(handle, Stream { stop, task: None });
+            return Ok(());
+        }
         if matches!(tier, StreamTier::Extern | StreamTier::Mobile) {
             match self.shared.config.extern_mode(channel) {
                 ExternMode::Listed | ExternMode::Hidden => {}

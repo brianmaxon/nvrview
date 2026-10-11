@@ -129,7 +129,7 @@ fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
     assert_eq!(NV_ABI_VERSION, 3);
     assert_eq!(nv_abi_minor(), NV_ABI_MINOR);
-    assert_eq!(NV_ABI_MINOR, 2);
+    assert_eq!(NV_ABI_MINOR, 3);
 }
 
 #[test]
@@ -202,6 +202,14 @@ fn a_tile_plays_through_the_c_interface() {
         assert_eq!(
             nv_tile_set_tier(core, tile + 100, NvStreamTier::NV_TIER_MAIN as u32),
             NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(nv_tile_retry(core, tile), NvStatus::NV_OK);
+        // Again at once: nothing happens, and it is not an error.
+        assert_eq!(nv_tile_retry(core, tile), NvStatus::NV_OK);
+        assert_eq!(nv_tile_retry(core, tile + 100), NvStatus::NV_ERR_UNKNOWN_ID);
+        assert_eq!(
+            nv_tile_retry(std::ptr::null_mut(), tile),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
         );
     }
     // (The new generation may decode pictures before it is shown, while it

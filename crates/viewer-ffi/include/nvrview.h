@@ -23,7 +23,7 @@
  * unchanged (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates.
  */
-#define NV_ABI_MINOR 2
+#define NV_ABI_MINOR 3
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -385,6 +385,20 @@ enum NvStatus nv_tile_close(struct NvCore *core, uint64_t tile);
  * `core` is a live handle.
  */
 enum NvStatus nv_tile_set_tier(struct NvCore *core, uint64_t tile, NvStreamTier tier);
+
+/**
+ * Retries a tile that has no picture (the app's Retry button): its stream
+ * is stopped and started again now, on the same login. When the device is
+ * waiting before a reconnect, the next connection attempt is made now. A
+ * tile asked again within 2 s does nothing (NV_OK), and so does one whose
+ * device refused the login (that state stays terminal; apps do not offer
+ * the button for it). Returns at once; progress arrives as the usual
+ * events. NV_ERR_UNKNOWN_ID for an unknown tile. Added in minor 3.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_tile_retry(struct NvCore *core, uint64_t tile);
 
 /**
  * Decoder results, for the generation of the action they answer. Every

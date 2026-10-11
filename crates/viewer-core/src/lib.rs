@@ -290,6 +290,9 @@ impl Pending {
     }
 }
 
+/// The least time between two retries of one tile ([`Core::retry_tile`]).
+pub const RETRY_FLOOR: Duration = Duration::from_secs(2);
+
 #[derive(Default)]
 struct Registry {
     devices: HashMap<u64, Device>,
@@ -852,6 +855,35 @@ impl Core {
         }
         t.tier = tier;
         info!(tile, tier = device::tier_name(tier), "tier requested");
+        Ok(())
+    }
+
+    /// Retries a tile that has no picture (the app's Retry button): its
+    /// stream is stopped and started again now, on the same login; when the
+    /// device is waiting to reconnect, the next attempt is made now. Asked
+    /// again within [`RETRY_FLOOR`] it does nothing, and nothing happens
+    /// after the device refused the login (that state is terminal, to
+    /// protect the account).
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback.
+    pub fn retry_tile(&self, tile: u64) -> Result<(), CoreError> {
+        self.check_api()?;
+        let now = self.clock.now_ns();
+        let mut reg = lock(&self.registry);
+        let t = reg.tiles.get_mut(&tile).ok_or(CoreError::UnknownId)?;
+        if t.last_retry_ns
+            .is_some_and(|l| now.saturating_sub(l) < RETRY_FLOOR.as_nanos() as u64)
+        {
+            return Ok(());
+        }
+        t.last_retry_ns = Some(now);
+        let (device, channel, tier) = (t.device, t.channel, t.tier);
+        if let Some(s) = reg.devices.get(&device).and_then(|d| d.handle.session()) {
+            s.retry_stream(channel, tier);
+            info!(tile, "retry requested");
+        }
         Ok(())
     }
 

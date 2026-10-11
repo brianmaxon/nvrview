@@ -144,6 +144,8 @@ pub(crate) struct TileHandle {
     pub(crate) channel: u8,
     /// The tier most recently requested (opened with, or set since).
     pub(crate) tier: StreamTier,
+    /// When the app last asked for a retry of this tile (core clock, ns).
+    pub(crate) last_retry_ns: Option<u64>,
     id: u64,
     events: EventSink,
     /// Set once `tile_closed` has been sent.
@@ -292,6 +294,7 @@ pub(crate) fn spawn(
             device,
             channel,
             tier,
+            last_retry_ns: None,
             id,
             events,
             closed_reported,

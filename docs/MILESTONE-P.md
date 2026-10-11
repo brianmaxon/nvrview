@@ -9,8 +9,8 @@ reported there leaves a documented seam instead of guessing.
 
 **Versioning.** FFI-RECORDINGS.md was written as ABI 4. Its decision 1
 replaced that with a minor version, and discovery (minor 1) and updates
-(minor 2) have since taken the first ones, so recordings arrive as **ABI 3,
-minor 3** (`NV_ABI_MINOR` 3), with no existing declaration changed. "ABI
+(minor 2) have since taken the first ones, and `nv_tile_retry` has taken minor 3, so recordings arrive as **ABI 3,
+minor 4** (`NV_ABI_MINOR` 4), with no existing declaration changed. "ABI
 4" in that document reads as "the recordings minor".
 
 ## Where the core stands

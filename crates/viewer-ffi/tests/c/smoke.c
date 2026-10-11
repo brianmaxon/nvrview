@@ -222,6 +222,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 1000 && atomic_load(&g_gen_answered[1]) < 20; i++) {
         sleep_ms(10);
     }
+    if (nv_tile_retry(core, tile + 100) != NV_ERR_UNKNOWN_ID) {
+        problem("nv_tile_retry accepted an unknown tile");
+    }
     if (atomic_load(&g_gen_answered[1]) < 20 || atomic_load(&g_gen_resets[0]) != 1) {
         problem("the tier switch did not complete");
     }
