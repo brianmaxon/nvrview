@@ -34,6 +34,7 @@
 //! `share_safe` so the writer knows to add nothing of its own.
 
 pub mod range;
+pub mod still;
 pub mod trim;
 
 use serde::{Deserialize, Serialize};
