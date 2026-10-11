@@ -45,6 +45,9 @@ public partial class App : Application
 
     internal Viewer? Viewer => _viewer;
 
+    /// <summary>Self-update (docs/UPDATES.md); automatic checks are off in development and test runs.</summary>
+    internal Updater? Updater { get; private set; }
+
     /// <summary>The open windows, the first opened first.</summary>
     internal IReadOnlyList<ViewerWindow> Windows => _windows;
 
@@ -63,6 +66,10 @@ public partial class App : Application
         string dataDir = o.ResolvedDataDir;
         AppLog.Open(Path.Combine(dataDir, "logs"));
         AppLog.Info($"NvrView {typeof(App).Assembly.GetName().Version?.ToString(3)}");
+        if (Program.WaitedForPrevious is { } waited)
+        {
+            AppLog.Info(waited);
+        }
         try
         {
             Start(o, dataDir);
@@ -101,6 +108,9 @@ public partial class App : Application
             new ViewSettings(memoryOnly ? null : Path.Combine(dataDir, "view-settings.json")),
             new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
         _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
+        Updater = new Updater(
+            _viewer, ui, memoryOnly ? null : Path.Combine(dataDir, "update-settings.json"),
+            automaticAllowed: !memoryOnly && !o.Background);
         _saveTimer = ui.CreateTimer();
         _saveTimer.Interval = TimeSpan.FromSeconds(1);
         _saveTimer.IsRepeating = false;
@@ -246,6 +256,7 @@ public partial class App : Application
         }
         _shutDown = true;
         _saveTimer?.Stop();
+        Updater?.Stop();
         foreach (ViewerWindow w in _windows.ToArray())
         {
             w.Close();

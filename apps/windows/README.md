@@ -664,6 +664,19 @@ set after 12 s):
 The differences are within run-to-run noise (one run each), so both
 settings stay off by default and no cap is applied.
 
+### Updates
+
+Self-update from a folder or server the user hosts, signed with the user's
+own Ed25519 keys ([docs/UPDATES.md](../../docs/UPDATES.md)). Settings has an
+Updates section under the devices; the stage's right-click menu has "Check
+for updates...". Versions live side by side: an update is unpacked into a new
+`NvrView-<version>` folder next to the running one (staging in
+`.NvrView-update`), and Restart now starts it with `--wait-for-pid` so it
+waits for this version to exit before logging in. The running folder and the
+data directory are never modified, and nothing needs administrator rights.
+Shortcuts keep pointing at the old folder until you repoint them.
+`scripts/windows-app.sh update` tests the whole path.
+
 ## Running the tests
 
 ### On macOS or Linux, in Docker (no .NET needed)

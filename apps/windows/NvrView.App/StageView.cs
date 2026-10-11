@@ -201,6 +201,11 @@ internal sealed partial class StageView : UserControl
     /// <summary>The Settings dialog opener (set by the window).</summary>
     public Action? SettingsRequested { get; set; }
 
+    /// <summary>The update menu item's title and action (set by the window); no item when null.</summary>
+    public Func<string>? UpdateTitle { get; set; }
+
+    public Action? UpdateRequested { get; set; }
+
     /// <summary>The tree changed by a finished gesture or command (the window stores it).</summary>
     public event Action<LayoutNode>? Edited;
 
@@ -966,6 +971,10 @@ internal sealed partial class StageView : UserControl
         Item(menu.Items, _diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
         Item(menu.Items, "Keyboard shortcuts", ToggleHelp);
         Item(menu.Items, "Settings…", () => SettingsRequested?.Invoke());
+        if (UpdateTitle?.Invoke() is { } updateTitle)
+        {
+            Item(menu.Items, updateTitle, () => UpdateRequested?.Invoke());
+        }
         menu.ShowAt(this, at);
         e.Handled = true;
     }

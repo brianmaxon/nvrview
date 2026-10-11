@@ -262,9 +262,10 @@ is taken), and the running folder is never modified.
 **Restart Now** starts `NvrView-<version>\NvrView.App.exe --wait-for-pid
 <pid>` and closes the app. The new version waits for the old process to exit
 (at most 2 minutes) before it logs in to any device, so the NVR never sees
-both versions' sessions at once. **Later** leaves the new folder in place;
-the app reports the update as installed and offers the switch again at its
-next start, without downloading it again.
+both versions' sessions at once. **Later** leaves the new folder in place
+(marked with a `.nvrview-version` file); when the old version next checks
+and is offered that version, it offers the switch again without
+downloading it.
 
 The folder-switch habit: shortcuts and pinned taskbar entries point at the
 old folder's `NvrView.App.exe`. After an update, open the new folder and pin
@@ -296,15 +297,18 @@ app as it writes any setting, never by the updater.
 
 ## Settings and checks in the apps
 
-- **Settings, Updates**: the update source (a text field, plus Choose Folder),
-  the trusted keys (listed by key ID; Add Key accepts a pasted key or a key
-  file; Remove), **Check automatically** (off by default), **Check Now**, and
-  one line of status ("Up to date (0.3.0), checked 10:42", "0.4.0 is
-  available", "Signature did not verify with any trusted key").
-- **Menu**: "Check for Updates..." in the app menu (macOS) or the main menu
-  (Windows). When an automatic check finds a newer version, the item reads
-  "Update to 0.4.0..." instead; automatic checks never open a window on their
-  own.
+- **Settings, Updates** (a tab on macOS; a section under the devices in the
+  Windows Settings dialog): the update source (a text field; on macOS also
+  Choose Folder), the trusted keys (listed by key ID; Add Key takes a pasted
+  key, and on macOS Choose File reads a key file; Remove), **Check
+  automatically** (off by default), **Check Now**, and one line of status
+  ("Up to date (0.3.0), checked 10:42", "Version 0.4.0 is available", "The
+  update's signature did not verify with any trusted key."). Windows also
+  shows the folder the running version lives in.
+- **Menu**: "Check for Updates..." in the app menu (macOS) or the stage's
+  right-click menu after "Settings..." (Windows). When an automatic check
+  finds a newer version, the item reads "Update to 0.4.0..." instead;
+  automatic checks never open a window on their own.
 - **Schedule**: with a source, a key, and Check automatically on, the app
   checks once shortly after it starts and then about every 24 hours while it
   runs (the time of the last check is kept, so restarting the app does not
@@ -335,8 +339,9 @@ For each release:
 ```sh
 scripts/package-macos.sh     # build/NVRView.app and build/NVRView-<version>-macos-arm64.zip
 cp build/NVRView-"$(cat VERSION)"-macos-arm64.zip dist/
-# on Windows: zip the contents of the app folder as
-#   dist/NvrView-<version>-win-x64.zip
+# on Windows, from the app folder (Windows' own tar writes zip with -a):
+#   tar.exe -a -c -f dist\NvrView-<version>-win-x64.zip *
+# (scripts/windows-app.sh update does exactly this for its test)
 
 cargo run -p sign-update -- manifest --version "$(cat VERSION)" \
   --notes-file notes.txt --out dist/updates.json dist/*.zip
@@ -434,6 +439,15 @@ quarantined files stood in for it; the core reads bytes either way and
 writes new files), and the real NVRView.app (never replaced by the tests).
 Local Network permission after an update needs a person to watch for the
 system prompt; see "Testing by hand".
+
+### Measured on Windows
+
+`scripts/windows-app.sh update` (run by `scripts/windows-worker.sh` with
+`NVRVIEW_APP_SELFTEST=1`) packages the freshly built app folder, signs it
+with a key made for the run, stages it with the core (`sign-update check
+--stage`, the same code as the app), moves it to `NvrView-<version>`, and
+starts that copy with `--wait-for-pid` on a running stand-in process and
+`--startup-test`: it must wait for the process, then start and pass.
 
 ### Testing by hand
 

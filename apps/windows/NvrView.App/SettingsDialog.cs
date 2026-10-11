@@ -308,6 +308,14 @@ internal static class SettingsDialog
         Grid.SetRow(note, 2);
         Grid.SetColumnSpan(note, 2);
         layout.Children.Add(note);
+        if (App.Instance.Updater is { } updater)
+        {
+            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            FrameworkElement updates = UpdateSettingsPanel.Build(updater);
+            Grid.SetRow(updates, 3);
+            Grid.SetColumnSpan(updates, 2);
+            layout.Children.Add(updates);
+        }
 
         Reload(viewer.Devices.FirstOrDefault()?.Config.Key);
         var dialog = new ContentDialog

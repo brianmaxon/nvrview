@@ -52,6 +52,9 @@ internal sealed class CoreEvent
     /// <summary>A discovery event (discovery_started, discovered, discovery_done), parsed whole.</summary>
     public DiscoveryEvent? Discovery;
 
+    /// <summary>An update event (minor 2), parsed whole.</summary>
+    public NvrView.Shell.UpdateEvent? Update;
+
     /// <summary>The raw JSON of audio_stats events (diagnostics only).</summary>
     public string? Raw;
 
@@ -67,6 +70,11 @@ internal sealed class CoreEvent
             return null;
         }
         var e = new CoreEvent { Type = t.GetString() ?? "" };
+        if (e.Type == "update")
+        {
+            e.Update = NvrView.Shell.UpdateEvent.Parse(json);
+            return e.Update is null ? null : e;
+        }
         if (e.Type is "discovery_started" or "discovered" or "discovery_done")
         {
             e.Discovery = DiscoveryEvent.Parse(json);

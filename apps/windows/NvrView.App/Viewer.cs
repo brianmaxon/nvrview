@@ -404,6 +404,9 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     /// <summary>Raised on the UI thread when devices, tiles, statuses, or detections change.</summary>
     public event Action? Changed;
 
+    /// <summary>The core's update events (the updater listens).</summary>
+    public event Action<NvrView.Shell.UpdateEvent>? UpdateReceived;
+
     /// <summary>Raised when the stored layouts changed (here or in another window or app).</summary>
     public event Action? LayoutsChanged;
 
@@ -1244,6 +1247,12 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                 DetectionEvents++;
                 ApplyDetection(e);
                 break;
+            case "update":
+                if (e.Update is { } update)
+                {
+                    UpdateReceived?.Invoke(update);
+                }
+                return;
             case "discovery_started":
             case "discovered":
             case "discovery_done":

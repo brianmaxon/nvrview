@@ -76,6 +76,8 @@ internal sealed class ViewerWindow
         Stage.Renderer = Renderer;
         Renderer.Circles = viewer.Circles;
         Stage.SettingsRequested = OpenSettings;
+        Stage.UpdateTitle = () => App.Instance.Updater?.MenuTitle ?? "Check for updates…";
+        Stage.UpdateRequested = () => App.Instance.Updater?.MenuAction();
         Stage.Edited += OnEdited;
         Stage.StateChanged += () => _editBar!.Update();
         Stage.WindowMenu = AddWindowMenu;

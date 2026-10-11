@@ -10,6 +10,14 @@
 #   scripts/windows-app.sh startup [SECONDS]  runs `NvrView.App.exe --startup-test`: the plain
 #                                             start (as a double-click) on an empty data
 #                                             directory, idling SECONDS (default 5)
+#   scripts/windows-app.sh update             the side-by-side update end to end
+#                                             (docs/UPDATES.md): packages the built app as
+#                                             NvrView-<version>-win-x64.zip, signs it with a
+#                                             key made for the test, stages it with the core
+#                                             (`sign-update check --stage`), moves it to
+#                                             NvrView-<version>, and starts that copy with
+#                                             --wait-for-pid on a running process and
+#                                             --startup-test; it must wait, then pass
 #
 # The app is a GUI program and an SSH session has no desktop, so each test
 # runs as a one-time scheduled task that runs only while the user
@@ -89,18 +97,19 @@ selftest() {
 # folder as Explorer does.
 startup() {
   local seconds="${1:-5}"
-  local dir="$out/startup"
+  local dir="${STARTUP_DIR:-$out/startup}"
+  local run_exe="${STARTUP_EXE:-$PWD/$exe}"
   rm -rf "$dir"
   mkdir -p "$dir/data"
   local win_exe win_log win_out win_data
-  win_exe="$(cygpath -w "$PWD/$exe")"
+  win_exe="$(cygpath -w "$run_exe")"
   win_log="$(cygpath -w "$PWD/$dir/startup.log")"
   win_out="$(cygpath -w "$PWD/$dir/output.txt")"
   win_data="$(cygpath -w "$PWD/$dir/data")"
   {
     printf '@echo off\r\n'
-    printf 'cd /d "%s"\r\n' "$(cygpath -w "$PWD/$(dirname "$exe")")"
-    printf '"%s" --startup-test %s --log "%s" --data-dir "%s" > "%s" 2>&1\r\n' "$win_exe" "$seconds" "$win_log" "$win_data" "$win_out"
+    printf 'cd /d "%s"\r\n' "$(cygpath -w "$(dirname "$run_exe")")"
+    printf '"%s" --startup-test %s --log "%s" --data-dir "%s"%s > "%s" 2>&1\r\n' "$win_exe" "$seconds" "$win_log" "$win_data" "${STARTUP_ARGS:-}" "$win_out"
   } >"$dir/startup.cmd"
   local status=0
   run_task startup "$dir/startup.cmd" "$dir/startup.log" "$dir/output.txt" $((seconds + 90)) || status=$?
@@ -111,12 +120,52 @@ startup() {
   return "$status"
 }
 
+# The side-by-side update, end to end (see the usage above). The app must
+# have been built (`build`).
+update() {
+  local version dir app_dir sign pid
+  version="$(tr -d '[:space:]' <VERSION)"
+  dir="$out/update-test"
+  app_dir="$(dirname "$exe")"
+  rm -rf "$dir"
+  mkdir -p "$dir/source" "$dir/keys" "$dir/Apps"
+  cargo build -q -p sign-update
+  sign=target/debug/sign-update.exe
+  # The package: the app folder's contents at the top (Windows' own tar
+  # writes zip with -a).
+  local zip_win
+  zip_win="$(cygpath -w "$PWD/$dir/source/NvrView-$version-win-x64.zip")"
+  (cd "$app_dir" && /c/Windows/System32/tar.exe -a -c -f "$zip_win" -- *)
+  ls -l "$dir/source"
+  "$sign" keygen --secret "$dir/keys/update.key" --public "$dir/keys/update.pub" >/dev/null
+  "$sign" manifest --version "$version" --notes "End-to-end test." --out "$dir/source/updates.json" "$dir/source/NvrView-$version-win-x64.zip"
+  "$sign" sign --secret "$dir/keys/update.key" "$dir/source/updates.json"
+  "$sign" check --source "$(cygpath -w "$PWD/$dir/source")" --key "$dir/keys/update.pub" --current 0.0.1 \
+    --platform win-x64 --stage "$(cygpath -w "$PWD/$dir/Apps/.NvrView-update")"
+  mv "$dir/Apps/.NvrView-update/staging-$version/content" "$dir/Apps/NvrView-$version"
+  test -f "$dir/Apps/NvrView-$version/NvrView.App.exe"
+  # The "previous version": a process that runs a few seconds.
+  pid="$(powershell -NoProfile -Command "(Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 8' -WindowStyle Hidden -PassThru).Id" | tr -d '\r')"
+  echo "previous version stand-in: process $pid"
+  local status=0
+  STARTUP_DIR="$dir/run" STARTUP_EXE="$PWD/$dir/Apps/NvrView-$version/NvrView.App.exe" \
+    STARTUP_ARGS=" --wait-for-pid $pid" startup 3 || status=$?
+  grep -h "started after an update" "$dir"/run/data/logs/*.log || { echo "the new version did not log its wait" >&2; status=1; }
+  if grep -h "started after an update" "$dir"/run/data/logs/*.log | grep -q "still running"; then
+    echo "the new version did not see the previous one exit" >&2
+    status=1
+  fi
+  rm -rf "$dir"
+  return "$status"
+}
+
 case "${1:-}" in
   build) build ;;
+  update) update ;;
   selftest) shift; selftest "$@" ;;
   startup) shift; startup "$@" ;;
   *)
-    echo "usage: $0 build | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS]" >&2
+    echo "usage: $0 build | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
     exit 2
     ;;
 esac

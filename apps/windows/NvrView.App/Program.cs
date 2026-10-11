@@ -23,6 +23,10 @@
 // A crash (an exception nothing handled) is written to crash-*.log in the
 // logs directory (AppLog.Crash) before the process ends.
 //
+// After an update the new version is started with --wait-for-pid PID: it
+// waits (at most 2 minutes) for the previous version to exit before it logs in
+// to any device (docs/UPDATES.md, "Applying", Windows).
+//
 // Other options: --lib PATH (nvrview.dll), --data-dir DIR (settings, layouts,
 // logs; default %LOCALAPPDATA%\NvrView), --gpu auto|hardware|warp,
 // --software, --decoder-samples N and --limit-coded-size (decoder memory,
@@ -73,6 +77,9 @@ internal sealed class AppOptions
     public bool NoAudio { get; private set; }
 
     public bool CredentialTest { get; private set; }
+
+    /// <summary>Started by an update: wait for the previous version (this process ID) to exit first.</summary>
+    public int? WaitForPid { get; private set; }
 
     public bool SelfTest => SelfTestSeconds > 0;
 
@@ -134,6 +141,7 @@ internal sealed class AppOptions
                 case "--software": o.Software = true; break;
                 case "--no-audio": o.NoAudio = true; break;
                 case "--credential-test": o.CredentialTest = true; break;
+                case "--wait-for-pid": o.WaitForPid = Int(1, int.MaxValue); break;
                 case "--decoder-samples": DecoderSettings.OutputSamples = Int(0, 32); break;
                 case "--limit-coded-size": DecoderSettings.LimitCodedSize = true; break;
                 default: throw new ArgumentException($"unknown option {a}");
@@ -159,6 +167,9 @@ internal static class Program
 {
     public static AppOptions Options { get; private set; } = new();
 
+    /// <summary>What --wait-for-pid found, logged once the log is open.</summary>
+    public static string? WaitedForPrevious { get; private set; }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -171,6 +182,12 @@ internal static class Program
             // A WinExe has no console: say it where it can be seen.
             AppLog.Startup($"nvrview: {e.Message}");
             return 2;
+        }
+        if (Options.WaitForPid is { } pid)
+        {
+            var waited = System.Diagnostics.Stopwatch.StartNew();
+            bool exited = NvrView.Shell.SideBySide.WaitForExit(pid, TimeSpan.FromMinutes(2));
+            WaitedForPrevious = $"started after an update: the previous version {(exited ? "exited" : "was still running")} after {waited.ElapsedMilliseconds} ms";
         }
         if (Options.Lib is { } lib)
         {

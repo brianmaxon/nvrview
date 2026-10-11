@@ -92,6 +92,7 @@ internal static class Program
         AllCamerasTests.Run();
         LayoutTemplateTests.Run();
         DiscoveryTests.Run();
+        UpdateTests.Run();
         return T.Summary();
     }
 }
