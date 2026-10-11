@@ -904,6 +904,9 @@ observed (client capture); the rest are reported (client) and did not appear.
 5. The first keyframe's wall-clock seconds (video extra header) matched
    `seekTime` exactly in five plays and lay 1 s before it in two, with a GOP
    of about 1.1 s: play starts at the keyframe at or before `seekTime`.
+   (Measured later with nvrview on an NVR whose local time is not UTC, the
+   seconds read UTC while `seekTime` is local: see "Live view and plays on
+   one session" below. Which reading holds on which device is open.)
 6. Pacing: about 2 to 4.4 s of video arrived within the first 0.25 s, then
    roughly real time (about 1.1 s of video per second). Whether the device or
    TCP flow control set that pace was not determined.
@@ -945,6 +948,25 @@ observed (client capture).
 | **One session carried several plays at once.** Up to four simultaneous command-5 plays ran on the one session, each with its own message ID (two started together, and four within 40 ms), all answered status 200 with no refusal, demultiplexed by message ID like live streams. The synchronized multi-view plays were low bit rate (about 0.05 MB/s each, media every ~4 s) against about 1 MB/s for a single main-stream play, so the client plays the **sub-stream** for synchronized views. No concurrency limit was reached at four. | observed (client capture) |
 | **The client stops live view when the playback tab opens.** Live media (command 3) flowed only before playback began; once the playback tab was open, no command-3 media arrived on either NVR for the rest of the capture (the client sent a stop (4) for each live stream). So this capture shows concurrent *replay* streams but not live and replay media together; whether one session can carry both at once is still unmeasured (the download step was not exercised here). | observed (client capture) |
 | **No error status appeared.** Across the whole capture every seek (123) and play (5) was answered status 200 (the only non-200 statuses were the 300 that commands 146 and 199 use for large replies). A seek to a time with no recording produced no error reply; the client decides "no recording" from the search results (142/14–16/272–274) and does not start a play. How a play or seek reports an error is therefore still unknown. | observed (client capture) |
+
+#### Live view and plays on one session
+
+Measured with nvrview's own read-only client (`bc-cli replay-probe`) on one
+NVR with recent firmware: one session, one live preview of a camera's
+sub-stream, then one play at `playSpeed` 1 of a finished sub-stream recording
+of the same camera, beside it. Only the file search (14–16), preview (3, 4),
+seek (123), play (5) and stop (7) were sent. The run stopped after its first
+stage (one play, about 5 s) because the probe's stall threshold was then too
+strict for the burst below, so more than one play beside live view was not
+tried. All observed.
+
+| Fact | Provenance |
+| --- | --- |
+| **One session carried live view and a play at once.** With the live preview running, the 123 seek and the 5 play were accepted and the play's media arrived beside the live media on the same connection, told apart by message ID; nothing was refused and the connection stayed up. | observed |
+| **Live view kept its rate.** The live sub-stream ran at 9.8 frames per second alone and 10.0 while the play ran; one second during the play's burst carried half the usual frames and the next made up for it (5 then 15), with no gap of a whole second. | observed |
+| **The burst can be long.** The play's first picture came 0.37 s after the request, and within the first second the device sent 8 s of video (80 frames at 10 frames per second, about 235 KB of sub-stream). Then nothing came for the 4 s the probe waited, consistent with the play running 8 s ahead of real time; whether it resumed at real time was not observed. The client capture's 1× bursts held 2 to 4.4 s of video. | observed |
+| **Keyframe wall clock in UTC, recording times local.** The live keyframes' wall-clock seconds matched the host's UTC clock within a second, and the play's first keyframe read `seekTime` (device local, like every search time) plus the device's UTC offset, less 1 s: the play started at the keyframe at or before `seekTime` on the local timeline, and the seconds in the extra header are UTC on this device. | observed |
+| **What a refusal looks like** was not seen: no seek, play, or search was refused. | observed (nothing to report) |
 
 ### Cover images: command 298
 

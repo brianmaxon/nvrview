@@ -41,10 +41,10 @@ recordings owner and the C interface has no recordings functions.
 | A play continues across a file boundary with no wire event | observed (timing and bytes only) | C9, C10 |
 | Several plays on one session, demultiplexed by message ID | observed (client capture), up to four | C9, C10 |
 | Rate change is stop, seek, play with `playSpeed` | observed (timing and bytes only) | C9 seam |
-| Keyframes carry wall-clock seconds in extra-header bytes 0–3 | observed (live view); matches `seekTime` at replay start (observed) | C7, C10 |
+| Keyframes carry wall-clock seconds in extra-header bytes 0–3 | observed (live view); matched `seekTime` at replay start in the client capture, but read UTC against a local `seekTime` on an NVR measured with `bc-cli replay-probe` (observed) | C7, C10 |
 | `playSpeed` values above 1, which frames a fast rate keeps, frames per second per rate | **blocked**: encrypted in the capture | B1 |
 | How a play ends at the end of the last file; how 5, 123 and 143 report errors | **unknown**: never seen | C9 seam |
-| Live media and replay (or download) media on one session at once | **unmeasured**: the client stops live view in its playback tab | B5 |
+| Live media and replay media on one session at once | **observed** for one play beside one live preview (`bc-cli replay-probe`): accepted, live rate unchanged; two or more plays beside live view, and downloads beside live view, not yet measured | B5 |
 | Reply fields of 104, 106, 38 (device time zone, DST, NTP) | **blocked**: encrypted | B2 |
 | Event-search (273) type names for animals | **blocked**: encrypted; live push says `dog_cat` | B3 |
 | Event log and AI search 516–519, 759, 653 | **reported (client)** only, never on the wire | B4 |
@@ -99,9 +99,9 @@ next minor.
 | B2 | The device's own time zone (104, 106, 38 replies) | the app passes `utc_offset_s` |
 | B3 | Animal names in event-search replies | kinds pass through unchanged; the apps' "animal" filter covers `dog_cat` and any later animal kind (decision 10) |
 | B4 | Event log and AI search (516–519, 759, 653) | not on the allowlist; nothing built |
-| B5 | Live and replay (or download) media on one session at once; how many plays a device allows beside live view | the design keeps live running (decision 2); plays limited by `max_plays_per_device` (default 4); downloads already share the session today and the end-to-end test checks live view keeps flowing in the mock |
+| B5 | ~~Live and replay media on one session at once~~ (observed: one play beside one live preview was accepted and live view kept its rate; docs/protocol.md, "Live view and plays on one session"). Still open: how many plays a device allows beside live view (the first hardware run stopped after one play, on the probe's own too-strict stall threshold, since fixed), and live view beside a download | the design keeps live running (decision 2); plays limited by `max_plays_per_device` (default 4); downloads already share the session today and the end-to-end test checks live view keeps flowing in the mock. Next: a second `bc-cli replay-probe` run, with the user's permission |
 | B6 | How a play ends at the end of the last file; error replies of 5, 123, 143 | C9 reports `ended` when the core's clock passes the last indexed recording, and `refused` for any non-200 status |
-| B7 | Whether the wall-clock seconds in keyframe extra headers are the device's local time or UTC | recorded times stay on the keyframes' own clock (`recordings::recorded_time`); conversion to the index's local time waits |
+| B7 | Whether the wall-clock seconds in keyframe extra headers are the device's local time or UTC. Observed UTC (live and replay) on one NVR whose local time is not UTC, with `seekTime` and search times local; the client capture's reading (seconds equal to `seekTime`) disagrees, so whether this differs by device or firmware is open | recorded times stay on the keyframes' own clock (`recordings::recorded_time`); conversion to the index's local time waits |
 
 ## Order and parallel agents
 
@@ -156,6 +156,9 @@ the capture stays in the git-ignored `captures/` directory.
 7. If the NVR has it, the AI search screen: a type search, a danger-level
    search, a track, opening one hit and its cover (B4).
 
-B5 can also be measured with nvrview's own read-only client, without the
-official app: one session, one live preview plus one play or download, with
-the user's permission to use real hardware for that measurement.
+B5 is measured with nvrview's own read-only client instead, with the
+user's permission to use real hardware: `bc-cli replay-probe` (one session,
+one live preview, then 1 to 4 simultaneous plays at 1×, each at most 10 s,
+the run capped at 90 s; it stops at the first refusal, error, stall, or
+live disruption). Its first run settled live plus one play; the play limit
+beside live view needs another run.
