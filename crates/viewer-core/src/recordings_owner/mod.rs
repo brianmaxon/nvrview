@@ -45,6 +45,11 @@
 mod config;
 mod downloads;
 mod query;
+mod sound;
+mod sound_work;
+
+pub use sound::{MAX_LABELS_PER_DAY, PATTERN_ANALYZER, SOUND_KINDS};
+pub use sound_work::{AudioChunk, DayAudioSource, SourceError};
 
 use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
@@ -60,7 +65,7 @@ use recordings::scheduler::Scheduler;
 use recordings::thumbs::{ThumbKey, ThumbnailCache};
 use recordings::{DeviceCamera, Secs, day_start};
 use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -310,6 +315,9 @@ struct Incidents {
     base: Vec<Incident>,
     edited: Edited,
     revision: u64,
+    /// Events found by the computer's sound analysis (camera, kind, start,
+    /// end), to tell them from device events in incident JSON.
+    local: HashSet<(CameraId, String, Secs, Secs)>,
 }
 
 #[derive(Default)]
@@ -370,6 +378,8 @@ pub(crate) struct Hub {
     /// until their removal is reported).
     trashing: Mutex<HashMap<String, PathBuf>>,
     wake: Notify,
+    /// Sound for recordings (`sound.rs`).
+    sound: sound::SoundOwner,
     /// Grows with every change to any index.
     revision: AtomicU64,
     closing: AtomicBool,
@@ -397,6 +407,7 @@ impl RecordingsHub {
                 reports: Mutex::new(HashMap::new()),
                 trashing: Mutex::new(HashMap::new()),
                 wake: Notify::new(),
+                sound: sound::SoundOwner::default(),
                 revision: AtomicU64::new(0),
                 closing: AtomicBool::new(false),
             }),
@@ -424,6 +435,7 @@ impl RecordingsHub {
         // The previous session's lane (if the device was added twice with
         // the same key) ends by itself once its search completes.
         drop(old);
+        h.sound_device_added(key);
     }
 
     /// A device is being removed (before its session closes): its lane is
@@ -432,6 +444,7 @@ impl RecordingsHub {
     /// (until a search in flight completes).
     pub(crate) fn device_removed(&self, key: &str, id: u64) {
         let h = &self.hub;
+        h.sound_device_removed(key, id);
         let lane = {
             let mut st = lock(&h.state);
             if st.sessions.get(key).is_none_or(|a| a.id != id) {
@@ -468,6 +481,7 @@ impl RecordingsHub {
         if h.closing.swap(true, Ordering::SeqCst) {
             return;
         }
+        h.sound_shutdown();
         let (lanes, downloads, pump) = {
             let mut st = lock(&h.state);
             st.holds.clear();
@@ -755,17 +769,25 @@ impl Hub {
             end: 253_402_300_799,
         };
         let mut events: Vec<CameraEvent> = Vec::new();
+        let mut local = HashSet::new();
         let mut keys: Vec<&String> = st.devices.keys().collect();
         keys.sort();
         for key in keys {
             let idx = lock(&st.devices[key].index);
-            events.extend(idx.events(&all).into_iter().map(|e| CameraEvent {
-                start: e.start,
-                end: e.end,
-                camera: CameraId::with_lens(key.clone(), e.channel, e.lens),
-                kind: e.kind,
+            events.extend(idx.events(&all).into_iter().map(|e| {
+                let camera = CameraId::with_lens(key.clone(), e.channel, e.lens);
+                if e.source == recordings::index::EventSource::LocalAudio {
+                    local.insert((camera.clone(), e.kind.clone(), e.start, e.end));
+                }
+                CameraEvent {
+                    start: e.start,
+                    end: e.end,
+                    camera,
+                    kind: e.kind,
+                }
             }));
         }
+        st.incidents.local = local;
         // Edits older than the index keeps refer to nothing any more.
         let oldest =
             self.device_now(0) - (i64::from(stores.settings.index.max_age_days) + 1) * 86_400;

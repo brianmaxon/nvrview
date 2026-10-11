@@ -57,7 +57,10 @@ pub mod update;
 
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector};
-pub use recordings_owner::{RecError, ThumbKind, Thumbnail, ThumbnailAnswer};
+pub use recordings_owner::{
+    AudioChunk, DayAudioSource, MAX_LABELS_PER_DAY, PATTERN_ANALYZER, RecError, SOUND_KINDS,
+    SourceError, ThumbKind, Thumbnail, ThumbnailAnswer,
+};
 pub use video_pipeline::{
     Action, ActionKind, Codec, ColorMatrix, DecodeFailureKind, PipelineConfig, TileStatus,
 };
@@ -430,6 +433,9 @@ impl Core {
             clock.clone(),
             config.data_dir.clone(),
         );
+        // Sound analysis of tiles also feeds the recordings (loudness
+        // envelope and sound labels), and lets it listen without tiles.
+        recordings.attach_sound(tile_ctx.sound.clone());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),

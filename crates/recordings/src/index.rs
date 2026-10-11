@@ -101,8 +101,34 @@ impl IndexedFile {
     }
 }
 
+/// Where an event came from (docs/FFI-RECORDINGS.md, section 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSource {
+    /// The camera or NVR reported it.
+    #[default]
+    Device,
+    /// The computer's sound analysis found it (section 2a). Stored in
+    /// [`CameraDay::local`], so a search of the device never replaces it.
+    LocalAudio,
+}
+
+impl EventSource {
+    fn is_device(&self) -> bool {
+        *self == EventSource::Device
+    }
+
+    /// The name the C interface uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventSource::Device => "device",
+            EventSource::LocalAudio => "local_audio",
+        }
+    }
+}
+
 /// An event in the index.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IndexedEvent {
     /// Channel.
     pub channel: u8,
@@ -115,8 +141,22 @@ pub struct IndexedEvent {
     pub start: Secs,
     /// End (naive seconds).
     pub end: Secs,
-    /// The `Id` of the recording file that contains it.
+    /// The `Id` of the recording file that contains it (empty for events of
+    /// the computer's own analysis).
     pub file_id: String,
+    /// Where it came from.
+    #[serde(default, skip_serializing_if = "EventSource::is_device")]
+    pub source: EventSource,
+    /// The analyzer that found it (local events only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyzer: Option<String>,
+    /// The classifier's own name for it (local events only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Confidence in thousandths (local events only; none: it matched or
+    /// it did not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pm: Option<u16>,
 }
 
 impl IndexedEvent {
@@ -130,6 +170,7 @@ impl IndexedEvent {
             start,
             end: end.max(start),
             file_id: e.file_id.clone(),
+            ..IndexedEvent::default()
         }
     }
 
@@ -148,6 +189,11 @@ pub struct CameraDay {
     pub files: Vec<IndexedFile>,
     /// Events, sorted by start.
     pub events: Vec<IndexedEvent>,
+    /// Events the computer found itself (sound labels), kept apart so a
+    /// search of the device replaces `events` and leaves these. Sorted by
+    /// start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<IndexedEvent>,
 }
 
 /// A map stored as a list of pairs (JSON object keys must be strings).
@@ -379,12 +425,18 @@ impl DeviceIndex {
             day,
             cameras: BTreeMap::new(),
         });
+        let local = d
+            .cameras
+            .get(&camera)
+            .map(|c| c.local.clone())
+            .unwrap_or_default();
         d.cameras.insert(
             camera,
             CameraDay {
                 fetched_at,
                 files,
                 events,
+                local,
             },
         );
         let path = self.dir.join("days").join(day_name(day));
@@ -420,6 +472,7 @@ impl DeviceIndex {
                 out.extend(
                     cd.events
                         .iter()
+                        .chain(&cd.local)
                         .filter(|e| e.end >= q.start && e.start <= q.end)
                         .filter(|e| q.kinds.is_empty() || q.kinds.contains(&e.kind))
                         .cloned(),
@@ -429,6 +482,102 @@ impl DeviceIndex {
         out.sort_by_key(|e| (e.start, e.channel, e.lens, e.end));
         out.dedup();
         out
+    }
+
+    /// Stores sound labels of `camera` from `analyzer`: the analyzer's
+    /// earlier labels that start within `start..=end` are replaced by
+    /// `labels` (so analyzing a range again does not duplicate), and each
+    /// day keeps at most `cap` labels of the camera in all (the lowest
+    /// confidence goes first; a label without confidence counts as sure).
+    /// Labels outside the range are ignored. Returns the starts of the days
+    /// whose file changed.
+    ///
+    /// # Errors
+    /// A day file could not be written.
+    pub fn put_labels(
+        &mut self,
+        camera: DeviceCamera,
+        analyzer: &str,
+        start: Secs,
+        end: Secs,
+        labels: Vec<IndexedEvent>,
+        cap: usize,
+    ) -> io::Result<Vec<Secs>> {
+        let mut by_day: BTreeMap<Secs, Vec<IndexedEvent>> = BTreeMap::new();
+        for mut l in labels {
+            if l.start < start || l.start > end {
+                continue;
+            }
+            l.channel = camera.channel;
+            l.lens = camera.lens;
+            l.end = l.end.max(l.start);
+            l.source = EventSource::LocalAudio;
+            l.analyzer = Some(analyzer.to_owned());
+            l.file_id = String::new();
+            by_day.entry(day_start(l.start)).or_default().push(l);
+        }
+        let existing: Vec<Secs> = self
+            .days
+            .range(day_start(start)..=day_start(end))
+            .filter(|(_, d)| {
+                d.cameras.get(&camera).is_some_and(|c| {
+                    c.local
+                        .iter()
+                        .any(|e| e.analyzer.as_deref() == Some(analyzer))
+                })
+            })
+            .map(|(d, _)| *d)
+            .collect();
+        let touched: BTreeSet<Secs> = by_day.keys().copied().chain(existing).collect();
+        let mut changed = Vec::new();
+        for day in touched {
+            let new = by_day.remove(&day).unwrap_or_default();
+            let before = self
+                .days
+                .get(&day)
+                .and_then(|d| d.cameras.get(&camera))
+                .map(|c| c.local.clone())
+                .unwrap_or_default();
+            let mut local: Vec<IndexedEvent> = before
+                .iter()
+                .filter(|e| {
+                    e.analyzer.as_deref() != Some(analyzer) || e.start < start || e.start > end
+                })
+                .cloned()
+                .collect();
+            local.extend(new);
+            local.sort_by(|a, b| (a.start, a.end, &a.kind).cmp(&(b.start, b.end, &b.kind)));
+            local.dedup();
+            if local.len() > cap {
+                // Lowest confidence first; the later ones among equals.
+                let mut order: Vec<usize> = (0..local.len()).collect();
+                order.sort_by_key(|&i| {
+                    (
+                        std::cmp::Reverse(local[i].confidence_pm.unwrap_or(1000)),
+                        std::cmp::Reverse(local[i].start),
+                    )
+                });
+                order.truncate(cap);
+                order.sort_unstable();
+                local = order.into_iter().map(|i| local[i].clone()).collect();
+            }
+            if local == before {
+                continue;
+            }
+            let d = self.days.entry(day).or_insert_with(|| DayFile {
+                version: FORMAT_VERSION,
+                day,
+                cameras: BTreeMap::new(),
+            });
+            d.cameras.entry(camera).or_default().local = local;
+            let path = self.dir.join("days").join(day_name(day));
+            self.revision += 1;
+            write_json(&path, d)?;
+            self.sizes
+                .insert(day, fs::metadata(&path).map_or(0, |m| m.len()));
+            changed.push(day);
+        }
+        Ok(changed)
     }
 
     /// Recording files of `camera` overlapping `start..=end`.
@@ -528,6 +677,7 @@ mod tests {
             start,
             end: start + len,
             file_id: format!("f{}", c.channel),
+            ..IndexedEvent::default()
         }
     }
 
@@ -603,6 +753,172 @@ mod tests {
         assert_eq!(idx.prune(day(10) + 5).unwrap(), 1);
         assert!(idx.days().is_empty());
         assert!(!dir.path().join("days").join(day_name(day(9))).exists());
+    }
+
+    fn label(kind: &str, start: Secs, len: Secs, conf: Option<u16>) -> IndexedEvent {
+        IndexedEvent {
+            kind: kind.into(),
+            start,
+            end: start + len,
+            label: Some(format!("{kind}-raw")),
+            confidence_pm: conf,
+            ..IndexedEvent::default()
+        }
+    }
+
+    #[test]
+    fn sound_labels_replace_by_analyzer_survive_searches_and_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = DeviceIndex::open(dir.path(), IndexConfig::default()).unwrap();
+        let c = cam(0);
+        idx.put_day(
+            day(9),
+            c,
+            vec![],
+            vec![ev(c, "md", day(9) + 100, 10)],
+            day(10),
+        )
+        .unwrap();
+        let q = EventQuery {
+            start: day(9),
+            end: day(9) + 86_399,
+            ..EventQuery::default()
+        };
+        let put = |idx: &mut DeviceIndex, a: &str, s: Secs, e: Secs, l: Vec<IndexedEvent>, cap| {
+            idx.put_labels(c, a, s, e, l, cap).unwrap()
+        };
+        let range = (day(9), day(9) + 86_399);
+        let r = put(
+            &mut idx,
+            "app-v1",
+            range.0,
+            range.1,
+            vec![
+                label("dog_bark", day(9) + 500, 6, Some(910)),
+                label("siren", day(9) + 900, 20, Some(500)),
+                // Outside the range: ignored.
+                label("siren", day(10) + 5, 2, Some(500)),
+            ],
+            2000,
+        );
+        assert_eq!(r, vec![day(9)]);
+        let got = idx.events(&q);
+        assert_eq!(
+            got.iter()
+                .map(|e| (e.kind.as_str(), e.source))
+                .collect::<Vec<_>>(),
+            [
+                ("md", EventSource::Device),
+                ("dog_bark", EventSource::LocalAudio),
+                ("siren", EventSource::LocalAudio)
+            ]
+        );
+        assert_eq!(got[1].analyzer.as_deref(), Some("app-v1"));
+        assert_eq!(got[1].label.as_deref(), Some("dog_bark-raw"));
+        assert_eq!(got[1].camera(), c);
+
+        // Another analyzer's labels are kept; the same analyzer's are
+        // replaced within the range only; the same labels change nothing.
+        let rev = idx.revision();
+        put(
+            &mut idx,
+            "pattern-v1",
+            range.0,
+            range.1,
+            vec![label("smoke_alarm", day(9) + 700, 30, None)],
+            2000,
+        );
+        assert_eq!(idx.events(&q).len(), 4);
+        let again = put(
+            &mut idx,
+            "pattern-v1",
+            range.0,
+            range.1,
+            vec![label("smoke_alarm", day(9) + 700, 30, None)],
+            2000,
+        );
+        assert!(again.is_empty());
+        assert_eq!(idx.revision(), rev + 1);
+        put(
+            &mut idx,
+            "app-v1",
+            day(9) + 800,
+            day(9) + 1000,
+            vec![label("glass_break", day(9) + 950, 1, Some(800))],
+            2000,
+        );
+        let kinds: Vec<_> = idx.events(&q).iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(kinds, ["md", "dog_bark", "smoke_alarm", "glass_break"]);
+
+        // A device search of the day leaves the labels alone.
+        idx.put_day(
+            day(9),
+            c,
+            vec![],
+            vec![ev(c, "people", day(9) + 50, 5)],
+            day(11),
+        )
+        .unwrap();
+        let kinds: Vec<_> = idx.events(&q).iter().map(|e| e.kind.clone()).collect();
+        assert_eq!(kinds, ["people", "dog_bark", "smoke_alarm", "glass_break"]);
+        // Kinds filter across sources.
+        let only = EventQuery {
+            kinds: vec!["smoke_alarm".into()],
+            ..q.clone()
+        };
+        assert_eq!(idx.events(&only).len(), 1);
+
+        // They survive a reload, as local events, without a device source
+        // in the file of device events.
+        drop(idx);
+        let mut idx = DeviceIndex::open(dir.path(), IndexConfig::default()).unwrap();
+        let got = idx.events(&q);
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[2].confidence_pm, None);
+        assert_eq!(got[1].confidence_pm, Some(910));
+        assert_eq!(got[0].source, EventSource::Device);
+
+        // The cap keeps the most confident (labels without a confidence
+        // count as sure), per camera and day.
+        let r = put(
+            &mut idx,
+            "app-v1",
+            range.0,
+            range.1,
+            vec![
+                label("a", day(9) + 10, 1, Some(100)),
+                label("b", day(9) + 20, 1, Some(900)),
+                label("c", day(9) + 30, 1, Some(500)),
+                label("d", day(9) + 40, 1, Some(900)),
+            ],
+            3,
+        );
+        assert_eq!(r, vec![day(9)]);
+        let kinds: Vec<_> = idx
+            .events(&q)
+            .iter()
+            .filter(|e| e.source == EventSource::LocalAudio)
+            .map(|e| e.kind.clone())
+            .collect();
+        // Cap 3 across the day: the sure smoke alarm, then the two 0.9s.
+        assert_eq!(kinds, ["b", "d", "smoke_alarm"]);
+
+        // Labels of days that no search covered are days of the index too
+        // (the lane still treats them as not fetched), and age out with it.
+        let other = DeviceCamera::first(5);
+        idx.put_labels(
+            other,
+            "app-v1",
+            day(3),
+            day(3) + 86_399,
+            vec![label("knock", day(3) + 5, 1, None)],
+            10,
+        )
+        .unwrap();
+        assert_eq!(idx.camera_day(day(3), other).unwrap().fetched_at, 0);
+        idx.cfg.max_age_days = 2;
+        idx.prune(day(10)).unwrap();
+        assert!(idx.camera_day(day(3), other).is_none());
     }
 
     #[test]

@@ -21,6 +21,8 @@
 //!   audio, and a small index of timestamps), the input of the MP4 step.
 //! - [`finalize`]: joins a camera job's chunks into one standard MP4
 //!   (crash-safe, through a fragmented file): the scheduler's final step.
+//! - [`sound`]: the loudness envelope store (peak and RMS per second, per
+//!   camera and day), bounded like the index.
 //! - [`thumbs`]: cover thumbnails (one keyframe per time range) in a
 //!   bounded on-disk cache, capped by count and bytes.
 //! - [`naming`]: the output folder and file names and `incident.json`.
@@ -52,6 +54,7 @@ pub mod lane;
 pub mod naming;
 pub mod recorded_time;
 pub mod scheduler;
+pub mod sound;
 mod store;
 pub mod sync_samples;
 pub mod thumbs;

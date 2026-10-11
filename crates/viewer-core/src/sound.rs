@@ -38,7 +38,7 @@ use sound_events::{
     AlarmConfig, AlarmDetector, AlarmEvent, AlarmKind, LoudnessMeter, SecondLevels,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 pub use sound_events::Level;
 
@@ -334,26 +334,64 @@ pub struct TileLoudness {
     pub rms: Vec<Level>,
 }
 
+/// Where the core's sound analysis also reports (the recordings owner:
+/// the loudness envelope store and sound labels, docs/FFI-RECORDINGS.md
+/// section 2a). Called on tile threads, so it must be quick.
+pub(crate) trait SoundTap: Send + Sync {
+    /// One second of loudness of a camera, as heard by one tile (several
+    /// tiles of a channel report the same second; the receiver merges).
+    fn second(&self, device: u64, channel: u8, levels: &SecondLevels);
+    /// An alarm episode of a channel started or ended (once per channel,
+    /// not per tile); `at_ns` is on the core's clock.
+    fn alarm(&self, device: u64, channel: u8, kind: AlarmKind, start: bool, at_ns: u64);
+}
+
 /// The core's sound state: which alarm episodes are active per channel,
 /// and each tile's loudness ring.
 pub(crate) struct SoundHub {
-    settings: SoundSettings,
+    settings: Mutex<SoundSettings>,
     events: EventSink,
     clock: HostClock,
     /// Tiles reporting each active (device, channel, kind).
     active: Mutex<HashMap<(u64, u8, AlarmKind), u32>>,
     lanes: Mutex<HashMap<u64, Arc<Mutex<LoudnessRing>>>>,
+    /// Tiles (not headless listeners) per (device, channel).
+    shown: Mutex<HashMap<(u64, u8), u32>>,
+    tap: OnceLock<Arc<dyn SoundTap>>,
 }
 
 impl SoundHub {
     pub(crate) fn new(settings: SoundSettings, events: EventSink, clock: HostClock) -> SoundHub {
         SoundHub {
-            settings,
+            settings: Mutex::new(settings),
             events,
             clock,
             active: Mutex::new(HashMap::new()),
             lanes: Mutex::new(HashMap::new()),
+            shown: Mutex::new(HashMap::new()),
+            tap: OnceLock::new(),
         }
+    }
+
+    /// Reports to `tap` as well (set once, before tiles open).
+    pub(crate) fn set_tap(&self, tap: Arc<dyn SoundTap>) {
+        let _ = self.tap.set(tap);
+    }
+
+    /// The settings new tiles start with.
+    pub(crate) fn settings(&self) -> SoundSettings {
+        *lock(&self.settings)
+    }
+
+    /// Changes the settings for tiles opened afterwards.
+    pub(crate) fn configure(&self, f: impl FnOnce(&mut SoundSettings)) {
+        f(&mut lock(&self.settings));
+    }
+
+    /// True while a tile shows the channel (its audio is decoded and
+    /// analyzed already).
+    pub(crate) fn channel_shown(&self, device: u64, channel: u8) -> bool {
+        lock(&self.shown).contains_key(&(device, channel))
     }
 
     /// The analysis of a new tile, or `None` when sound analysis is off.
@@ -364,14 +402,37 @@ impl SoundHub {
         device: u64,
         channel: u8,
     ) -> Option<TileSoundLink> {
-        let analyzer = TileSound::new(&self.settings)?;
-        let ring = (self.settings.loudness_history_s > 0).then(|| {
-            let r = Arc::new(Mutex::new(LoudnessRing::new(
-                self.settings.loudness_history_s,
-            )));
+        self.add(tile, device, channel, true)
+    }
+
+    /// The analysis of a headless listener (a camera on the "always listen"
+    /// list): as a tile's, but it does not count as one showing the channel.
+    pub(crate) fn add_listener(
+        self: &Arc<SoundHub>,
+        id: u64,
+        device: u64,
+        channel: u8,
+    ) -> Option<TileSoundLink> {
+        self.add(id, device, channel, false)
+    }
+
+    fn add(
+        self: &Arc<SoundHub>,
+        tile: u64,
+        device: u64,
+        channel: u8,
+        shown: bool,
+    ) -> Option<TileSoundLink> {
+        let settings = self.settings();
+        let analyzer = TileSound::new(&settings)?;
+        let ring = (settings.loudness_history_s > 0).then(|| {
+            let r = Arc::new(Mutex::new(LoudnessRing::new(settings.loudness_history_s)));
             lock(&self.lanes).insert(tile, r.clone());
             r
         });
+        if shown {
+            *lock(&self.shown).entry((device, channel)).or_insert(0) += 1;
+        }
         Some(TileSoundLink {
             hub: self.clone(),
             tile,
@@ -379,6 +440,7 @@ impl SoundHub {
             channel,
             analyzer,
             ring,
+            shown,
         })
     }
 
@@ -412,6 +474,9 @@ impl SoundHub {
                 detection_event(device, channel, kind, start, at_ns),
                 Priority::State,
             );
+            if let Some(tap) = self.tap.get() {
+                tap.alarm(device, channel, kind, start, at_ns);
+            }
         }
     }
 }
@@ -445,6 +510,7 @@ pub(crate) struct TileSoundLink {
     channel: u8,
     analyzer: TileSound,
     ring: Option<Arc<Mutex<LoudnessRing>>>,
+    shown: bool,
 }
 
 impl TileSoundLink {
@@ -461,6 +527,9 @@ impl TileSoundLink {
             SoundOutput::Second(s) => {
                 if let Some(r) = ring {
                     lock(r).put(&s);
+                }
+                if let Some(tap) = hub.tap.get() {
+                    tap.second(device, channel, &s);
                 }
             }
         }
@@ -492,6 +561,16 @@ impl Drop for TileSoundLink {
         self.end();
         if self.ring.is_some() {
             lock(&self.hub.lanes).remove(&self.tile);
+        }
+        if self.shown {
+            let mut shown = lock(&self.hub.shown);
+            let key = (self.device, self.channel);
+            if let Some(n) = shown.get_mut(&key) {
+                *n -= 1;
+                if *n == 0 {
+                    shown.remove(&key);
+                }
+            }
         }
     }
 }

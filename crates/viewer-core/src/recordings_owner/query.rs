@@ -8,7 +8,7 @@ use super::{
     kind_out, lock, tier_name,
 };
 use recordings::incident::{CameraId, Incident};
-use recordings::index::EventQuery;
+use recordings::index::{EventQuery, EventSource, IndexedEvent};
 use recordings::{DeviceCamera, Secs, day_start};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
@@ -190,7 +190,7 @@ pub(super) fn spans(ctx: &Ctx<'_>, q: &Query) -> Value {
 
 /// Events matching the query, by start.
 pub(super) fn events(ctx: &Ctx<'_>, q: &Query) -> Value {
-    let mut all: Vec<(Secs, &String, u8, u8, Secs, String)> = Vec::new();
+    let mut all: Vec<(Secs, &String, IndexedEvent)> = Vec::new();
     for key in ctx.keys() {
         if !q.names_device(key) {
             continue;
@@ -205,17 +205,35 @@ pub(super) fn events(ctx: &Ctx<'_>, q: &Query) -> Value {
         if q.of_device(key).is_some_and(|c| c.is_empty()) {
             continue;
         }
-        all.extend(
-            idx.events(&eq)
-                .into_iter()
-                .map(|e| (e.start, key, e.channel, e.lens, e.end, e.kind)),
-        );
+        all.extend(idx.events(&eq).into_iter().map(|e| (e.start, key, e)));
     }
-    all.sort();
+    all.sort_by(|a, b| {
+        let k = |t: &(Secs, &String, IndexedEvent)| {
+            (
+                t.0,
+                t.1.clone(),
+                t.2.channel,
+                t.2.lens,
+                t.2.end,
+                t.2.kind.clone(),
+            )
+        };
+        k(a).cmp(&k(b))
+    });
     let mut out = Fit::new(q.limit);
-    for (start, key, channel, lens, end, kind) in all {
-        let v = json!({"camera": camera_json(key, DeviceCamera::new(channel, lens)),
-                       "kind": kind_out(&kind), "source": "device", "start": start, "end": end});
+    for (start, key, e) in all {
+        let mut v = json!({"camera": camera_json(key, e.camera()),
+                           "kind": kind_out(&e.kind), "source": e.source.as_str(),
+                           "start": start, "end": e.end});
+        if e.source == EventSource::LocalAudio {
+            v["analyzer"] = json!(e.analyzer);
+            if let Some(l) = &e.label {
+                v["label"] = json!(l);
+            }
+            if let Some(c) = e.confidence_pm {
+                v["confidence"] = json!(f64::from(c) / 1000.0);
+            }
+        }
         if !out.push(v) {
             break;
         }
@@ -256,7 +274,12 @@ fn incident_json(
         .events
         .iter()
         .map(|e| {
-            json!({"camera": cam(&e.camera), "kind": kind_out(&e.kind), "source": "device",
+            let local =
+                st.incidents
+                    .local
+                    .contains(&(e.camera.clone(), e.kind.clone(), e.start, e.end));
+            json!({"camera": cam(&e.camera), "kind": kind_out(&e.kind),
+                   "source": if local { "local_audio" } else { "device" },
                    "start": e.start, "end": e.end})
         })
         .collect();
