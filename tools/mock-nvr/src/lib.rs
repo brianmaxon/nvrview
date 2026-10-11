@@ -1839,9 +1839,17 @@ impl Conn {
     /// the seek, GOP by GOP, each message with the `seq` of the latest seek
     /// of the connection at the moment it is sent, in place of status and
     /// class (so a later seek re-tags running plays, as observed); a burst
-    /// of [`ArchiveConfig::play_burst_secs`], then real time. The play goes on across files, as observed, up to
-    /// the end of the recordings, where it sends an empty message (the
-    /// mock's choice: how a device ends a play is not known).
+    /// of [`ArchiveConfig::play_burst_secs`] times the speed, then the media
+    /// clock runs at `playSpeed` (observed). At `playSpeed` 2 and above a
+    /// main-stream play (main or extern) carries keyframes only and no
+    /// audio: every keyframe up to 4x, every second at 8x, every fourth at
+    /// 16x (observed on a main stream); a sub-stream play keeps every frame
+    /// and its audio (observed at 4x; the mock does so at every speed). The
+    /// play goes on across files, as observed, up to the end of the
+    /// recordings, where it sends an empty message if
+    /// [`ArchiveConfig::play_end_message`] (the mock's choice: a device was
+    /// never seen ending a play). A play whose file does not hold the seek
+    /// time gets nothing at all (observed).
     async fn start_play(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
         let id = m.header.message_id;
         let text = self.request_text(m);
@@ -1865,6 +1873,7 @@ impl Conn {
         if cfg.max_plays.is_some_and(|n| self.plays.len() >= n) {
             return self.reply_xml(5, id, 400, "").await;
         }
+        let served = archive::file_holds(&cfg, ch, &file_id, at);
         {
             let mut log = lock(&self.shared.play_log);
             if log.len() >= DOWNLOAD_LOG_LEN {
@@ -1878,8 +1887,16 @@ impl Conn {
                 speed,
                 stream,
                 support_sub,
+                served,
             });
         }
+        if !served {
+            return Ok(());
+        }
+        let thin = PlayPace {
+            speed: speed.filter(|s| [1, 2, 4, 8, 16].contains(s)).unwrap_or(1),
+            main: matches!(stream, Some(StreamTier::Main | StreamTier::Extern)),
+        };
         let key = self.key.clone().expect("logged in");
         let (stop, writer) = (Arc::new(AtomicBool::new(false)), Arc::clone(&self.writer));
         let (shared, stop2) = (Arc::clone(&self.shared), Arc::clone(&stop));
@@ -1887,7 +1904,7 @@ impl Conn {
         shared.active_plays.fetch_add(1, Ordering::SeqCst);
         let task = self.shared.runtime.spawn(async move {
             let _count = PlayCount(Arc::clone(&shared));
-            let _ = serve_play(&shared, &writer, &key, id, &latest, &cfg, at, &stop2).await;
+            let _ = serve_play(&shared, &writer, &key, id, &latest, &cfg, at, thin, &stop2).await;
         });
         self.plays.retain(|_, (_, s)| !s.is_finished());
         self.plays.insert(
@@ -1913,6 +1930,26 @@ impl Drop for PlayCount {
     }
 }
 
+/// A play's speed and stream kind, which decide its pacing and thinning.
+#[derive(Clone, Copy, Debug)]
+struct PlayPace {
+    /// `playSpeed` (1, 2, 4, 8, or 16).
+    speed: u32,
+    /// A main-stream play (main or extern): keyframes only from 2x.
+    main: bool,
+}
+
+impl PlayPace {
+    /// Keyframes only, and every `n`th GOP (`None`: every frame).
+    fn keyframe_stride(self) -> Option<u32> {
+        (self.main && self.speed >= 2).then_some(match self.speed {
+            8 => 2,
+            16 => 4,
+            _ => 1,
+        })
+    }
+}
+
 /// Sends a play (see [`Conn::start_play`]); stops silently once `stop` is
 /// set (a 7 arrived).
 #[allow(clippy::too_many_arguments)]
@@ -1924,6 +1961,7 @@ async fn serve_play(
     latest_seq: &AtomicU32,
     cfg: &ArchiveConfig,
     at: bc_protocol::archive::DateTime,
+    pace: PlayPace,
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
@@ -1952,10 +1990,13 @@ async fn serve_play(
     let mut window = archive::ts(at).div_euclid(gop) * gop;
     let end = cfg.recorded_end();
     let start = Instant::now();
-    let burst = i64::from(cfg.play_burst_secs);
+    let speed = i64::from(pace.speed);
+    let burst = i64::from(cfg.play_burst_secs) * speed;
+    let stride = pace.keyframe_stride();
     // Seconds of video sent; gaps without recording are skipped, not
     // waited out.
     let mut played: i64 = 0;
+    let mut gops: u32 = 0;
     while window < end {
         let recs = archive::media(
             cfg,
@@ -1969,9 +2010,13 @@ async fn serve_play(
         if recs.is_empty() {
             continue;
         }
-        let due = (played - burst).max(0);
-        sleep_until(start + Duration::from_secs(due as u64)).await;
+        let due_ms = (played - burst).max(0) * 1000 / speed;
+        sleep_until(start + Duration::from_millis(due_ms as u64)).await;
         played += gop;
+        gops += 1;
+        if stride.is_some_and(|n| !(gops - 1).is_multiple_of(n)) {
+            continue;
+        }
         out.clear();
         let mut seen_key = false;
         for (kind, rec) in &recs {
@@ -1979,6 +2024,9 @@ async fn serve_play(
             // Each window repeats the stream info and leading audio of a
             // fresh cut; a play has them once, at its start.
             if *kind == archive::Kind::Info || !seen_key {
+                continue;
+            }
+            if stride.is_some() && *kind != archive::Kind::Key {
                 continue;
             }
             let seq = latest_seq.load(Ordering::SeqCst);
@@ -1989,6 +2037,9 @@ async fn serve_play(
             return Ok(());
         }
         write_locked(&mut w, &out).await?;
+    }
+    if !cfg.play_end_message {
+        return Ok(());
     }
     let mut w = writer.lock().await;
     if stopped() {

@@ -977,9 +977,8 @@ allowlist, viewing tier: they position and stream a replay on our own
 session and stop it, and change nothing on the device (the observed
 client's playback used exactly these three). A play is the observed
 sequence: 123 with a `seq` and the start time, its empty status-200 reply,
-then 5 naming the file by `Id`, at `playSpeed` 1 for now (the client also
-sent 2, 4, 8 and 16, now observed, but nvrview does not send them yet); 7 on
-every exit path, naming the file. `seq` numbers increase
+then 5 naming the file by `Id`, with `playSpeed` 1, 2, 4, 8 or 16 (the
+observed values; no other is sent); 7 on every exit path, naming the file. `seq` numbers increase
 from the current Unix time, as the client's did; 123's `channelId` is 0, as
 the client sent it. With no observation of how a play ends or is refused,
 `bc-session` takes an empty message as the end and a non-200 reply without
@@ -990,9 +989,9 @@ a main-stream play, as the client sent it. To start several plays together
 nvrview follows the client's recipe (see "Four plays at once"): all seeks
 back to back with consecutive `seq` numbers and one `seekTime`, a pause of
 about 0.5 s, then all plays back to back (`DeviceSession::play_group`). The
-number of plays per device is capped by `max_plays` (default 2, see "Live
+number of plays per device is capped by `max_plays` (default 4, see "Live
 view and plays on one session"). Not sent: 150, 381–383 (not observed in
-use), and any other `playSpeed` (so far).
+use), and any `playSpeed` other than the five observed.
 
 #### Speed, file boundaries, and concurrent plays
 
