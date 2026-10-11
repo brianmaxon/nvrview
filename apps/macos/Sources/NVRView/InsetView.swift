@@ -27,8 +27,14 @@ struct CallContent: Equatable {
     /// "Preparing speech recognition", or why there is no transcript.
     var transcriptNote: String?
     var note: String?
+    /// "Keep talking" is on (kept with the call, not the view).
+    var latched: Bool
+    /// The reply typed and not sent yet (kept with the call).
+    var draft: String
 
     init(call: DoorbellCall, microphoneOn: Bool, note: String?) {
+        latched = call.latched
+        draft = call.draft
         showsUnmute = call.showsUnmute
         isConversation = call.origin == .conversation
         talkText = call.talk.text
@@ -49,6 +55,10 @@ struct CallContent: Equatable {
 protocol CallControlsDelegate: AnyObject {
     func callUnmute()
     func callTalk(_ down: Bool)
+    /// "Keep talking" turned on or off.
+    func callLatch(_ on: Bool)
+    /// The reply field's text changed.
+    func callDraft(_ text: String)
     /// `accepted(false)` when nothing was sent: the text stays in the field.
     func callSend(_ text: String, accepted: @escaping (Bool) -> Void)
 }
@@ -210,6 +220,8 @@ final class InsetView: NSView, CallControlsDelegate {
 
     func callUnmute() { callDelegate?.callUnmute() }
     func callTalk(_ down: Bool) { callDelegate?.callTalk(down) }
+    func callLatch(_ on: Bool) { callDelegate?.callLatch(on) }
+    func callDraft(_ text: String) { callDelegate?.callDraft(text) }
     func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callDelegate?.callSend(text, accepted: accepted) }
 }
 
@@ -281,8 +293,13 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
         transcript.stringValue = lines.isEmpty ? (c.transcriptNote ?? "") : lines.joined(separator: "\n")
         transcript.textColor = lines.isEmpty ? NSColor.white.withAlphaComponent(0.55) : .white
         talk.state = c.microphoneOn ? .on : .off
-        if !c.microphoneOn, keep.state == .on, !c.talking { keep.state = .off }
+        // The latch and the unsent reply belong to the call, so a view built
+        // again shows them; the field is left alone while it is edited.
+        keep.state = c.latched ? .on : .off
+        if reply.currentEditor() == nil, reply.stringValue != c.draft { reply.stringValue = c.draft }
     }
+
+    func controlTextDidChange(_ obj: Notification) { delegate?.callDraft(reply.stringValue) }
 
     override func layout() {
         super.layout()
@@ -295,7 +312,7 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
         send.frame = CGRect(x: w - pad - 52, y: 88, width: 52, height: 22)
     }
 
-    @objc private func keepChanged() { delegate?.callTalk(keep.state == .on) }
+    @objc private func keepChanged() { delegate?.callLatch(keep.state == .on) }
 
     @objc private func sendClicked() {
         let text = reply.stringValue

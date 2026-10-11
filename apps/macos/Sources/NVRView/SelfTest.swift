@@ -615,8 +615,10 @@ final class SelfTest {
         // A typed reply asks too; Cancel keeps the text (accepted false) and sends nothing.
         prompter.answers = [false]
         var accepted: Bool?
+        model.calls.setDraft(doorbell, "Not yet")
         model.calls.sendReply("Not yet", to: doorbell) { accepted = $0 }
         if accepted != false || prompter.asked.count != 2 { problems.append("a typed reply without the permission did not ask and keep its text") }
+        if model.calls.call(for: doorbell)?.draft != "Not yet" { problems.append("a canceled typed reply lost the call's draft") }
         if fake.talkStarts != startsBefore || model.calls.fakeSpeech?.rendered.isEmpty == false {
             problems.append("a canceled typed reply was rendered or sent")
         }
@@ -636,7 +638,9 @@ final class SelfTest {
             when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
                 // parity: call-typed-reply
                 // A typed reply: rendered, pushed once active, drained.
+                model.calls.setDraft(doorbell, "Hello, one moment please")
                 model.calls.sendReply("Hello, one moment please", to: doorbell)
+                if model.calls.call(for: doorbell)?.draft.isEmpty != true { problems.append("a sent reply stayed in the call's draft") }
                 when({
                     if case .stopped(let r)? = model.calls.call(for: doorbell)?.talk.phase { return r == "finished" }
                     return false
@@ -665,11 +669,13 @@ final class SelfTest {
         try? model.bridge.setTalkPermission(device: id, channel: UInt8(doorbell.channel), allowed: false)
         let asked = prompter.asked.count
         prompter.answers = [false]
-        model.calls.startTalking(doorbell)
+        // With "Keep talking": the latch is the call's, and a refusal turns it off.
+        model.calls.setLatched(doorbell, true)
         when({ prompter.asked.count == asked + 1 }, timeout: 2) { [self] in
             print("core refusal: asked again \(prompter.asked.count == asked + 1), \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
             if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
             if model.calls.call(for: doorbell)?.talk.isTalking == true { problems.append("Cancel after a core refusal left talk-back running") }
+            if model.calls.call(for: doorbell)?.latched == true { problems.append("Keep talking stayed on after a refusal") }
             model.calls.stopTalking(doorbell)
             model.setAllowTalk(doorbell, false)
             swapStep(doorbell, otherCamera)
@@ -684,8 +690,10 @@ final class SelfTest {
         if !model.audible.contains(doorbell) { problems.append("Unmute did not make the doorbell audible") }
         // parity: alert-inset-swap
         // A click swaps: the doorbell fills the stage, the focused camera
-        // goes into the return inset.
+        // goes into the return inset. Clicking a call's inset is call activity.
+        let clicked = model.clock.now
         stage.swapInset(doorbell)
+        if (model.calls.call(for: doorbell)?.lastActivity ?? 0) < clicked { problems.append("clicking the call's inset did not count as call activity") }
         let swapped = stage.insetBoard.swap?.shown == doorbell
             && stage.insetBoard.items.first.map { $0.isReturn && $0.camera == otherCamera } == true
         print("swap: doorbell on the stage \(swapped), wants \(model.leases.wantedTier(doorbell).name)")

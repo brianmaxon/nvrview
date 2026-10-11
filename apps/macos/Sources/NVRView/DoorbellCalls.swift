@@ -99,6 +99,26 @@ final class DoorbellCalls {
         model.changed()
     }
 
+    /// The user did something with the call's inset (hovered, clicked,
+    /// typed): it counts as activity, so the call stays open.
+    func use(_ camera: CameraRef) {
+        sessions[camera.firstLens]?.call.activity(now: model.clock.now)
+    }
+
+    /// "Keep talking" turned on or off. Kept with the call, so every view of
+    /// it (another window's inset, a view built again) shows the same.
+    func setLatched(_ camera: CameraRef, _ on: Bool) {
+        guard let s = sessions[camera.firstLens] else { return }
+        s.call.setLatched(on, now: model.clock.now)
+        if on { startTalking(camera) } else { stopTalking(camera) }
+        model.changed()
+    }
+
+    /// The reply field's text, kept with the call until it is sent.
+    func setDraft(_ camera: CameraRef, _ text: String) {
+        sessions[camera.firstLens]?.call.edited(draft: text, now: model.clock.now)
+    }
+
     /// Opens the call: lease, audio, and the visitor's transcript.
     private func open(_ camera: CameraRef, at date: Date, audio: CallAudio.Decision, origin: DoorbellCall.Origin) {
         let s = Session(call: DoorbellCall(camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin))
@@ -215,7 +235,9 @@ final class DoorbellCalls {
         s.call.activity(now: model.clock.now)
         s.lastAction = .microphone
         if TalkPermission.gate(allowed: talkAllowed(camera)) == .ask {
-            askTalkPermission(s, action: .microphone) { [weak self] in self?.beginMicrophoneTalk(s) }
+            askTalkPermission(
+                s, action: .microphone, onAllow: { [weak self] in self?.beginMicrophoneTalk(s) },
+                onCancel: { s.call.microphoneStopped() })
             return
         }
         beginMicrophoneTalk(s)
@@ -229,6 +251,7 @@ final class DoorbellCalls {
             guard let self, let s = self.sessions[camera.firstLens], s.micTalk else { return }
             guard granted else {
                 s.micTalk = false
+                s.call.microphoneStopped()
                 s.note = "Talk-back: " + (reason ?? "no microphone")
                 self.model.changed()
                 return
@@ -236,6 +259,7 @@ final class DoorbellCalls {
             s.note = nil
             guard self.beginTalk(s) else {
                 s.micTalk = false
+                s.call.microphoneStopped()
                 self.model.changed()
                 return
             }
@@ -246,7 +270,10 @@ final class DoorbellCalls {
 
     /// Talk released (or the toggle off).
     func stopTalking(_ camera: CameraRef) {
-        guard let s = sessions[camera.firstLens], s.micTalk else { return }
+        guard let s = sessions[camera.firstLens] else { return }
+        // Whatever stops the microphone turns "Keep talking" off.
+        s.call.microphoneStopped()
+        guard s.micTalk else { return }
         s.micTalk = false
         services.microphone.stop()
         s.you?.finish()
@@ -306,9 +333,14 @@ final class DoorbellCalls {
     /// through the doorbell with the system voice, under the same permission
     /// and limits as Talk. `accepted(false)` when nothing was sent (the user
     /// answered Cancel to the talk-back prompt): the caller keeps the text.
-    func sendReply(_ text: String, to camera: CameraRef, accepted: @escaping (Bool) -> Void = { _ in }) {
+    func sendReply(_ text: String, to camera: CameraRef, accepted done: @escaping (Bool) -> Void = { _ in }) {
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let s = sessions[camera.firstLens], !typed.isEmpty, !s.asking else { return accepted(false) }
+        guard let s = sessions[camera.firstLens], !typed.isEmpty, !s.asking else { return done(false) }
+        // On its way: the call's draft empties too (unless the user typed on).
+        let accepted: (Bool) -> Void = { sent in
+            if sent { s.call.sent(text) }
+            done(sent)
+        }
         s.call.activity(now: model.clock.now)
         s.lastAction = .reply
         if TalkPermission.gate(allowed: talkAllowed(camera)) == .ask {
@@ -365,6 +397,7 @@ final class DoorbellCalls {
             let samples = s.lastReply
             s.pendingReply = nil
             let wasMic = s.micTalk
+            s.call.microphoneStopped()
             if s.micTalk {
                 s.micTalk = false
                 services.microphone.stop()

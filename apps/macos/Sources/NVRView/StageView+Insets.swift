@@ -21,6 +21,8 @@ extension StageView {
         }
         func callUnmute() { stage?.unmuteCall(camera) }
         func callTalk(_ down: Bool) { stage?.talk(camera, down) }
+        func callLatch(_ on: Bool) { stage?.latch(camera, on) }
+        func callDraft(_ text: String) { stage?.draft(text, camera) }
         func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { stage?.sendReply(text, camera, accepted: accepted) }
     }
 
@@ -118,6 +120,8 @@ extension StageView {
             state.focused.flatMap { state.tree[$0]?.camera } ?? state.selected.flatMap { state.tree[$0]?.camera }
             ?? state.tree.cameras.first
         insetBoard.swap(camera, displaced: displaced, now: clock.now)
+        // Clicking a call's inset is using the call.
+        model.calls.use(camera)
         syncInsets()
     }
 
@@ -170,7 +174,7 @@ extension StageView {
         case .dismiss:
             if let shown = insetBoard.swap?.shown {
                 dismissInset(shown)
-            } else if let top = insetBoard.items.first {
+            } else if let top = insetBoard.shown.first {
                 if top.isReturn {
                     insetBoard.swapBack(now: nil)
                     syncInsets()
@@ -189,6 +193,17 @@ extension StageView {
 
     fileprivate func talk(_ camera: CameraRef, _ down: Bool) {
         if down { model.calls.startTalking(camera) } else { model.calls.stopTalking(camera) }
+        insetBoard.use(camera, now: clock.now)
+    }
+
+    fileprivate func latch(_ camera: CameraRef, _ on: Bool) {
+        model.calls.setLatched(camera, on)
+        insetBoard.use(camera, now: clock.now)
+    }
+
+    /// Typing a reply is using the call.
+    fileprivate func draft(_ text: String, _ camera: CameraRef) {
+        model.calls.setDraft(camera, text)
         insetBoard.use(camera, now: clock.now)
     }
 
@@ -255,6 +270,8 @@ extension StageView {
             view.onHover = { [weak self] inside in
                 guard let self else { return }
                 self.insetBoard.hover(camera, inside, now: self.clock.now)
+                // Hovering a call's inset is using the call.
+                self.model.calls.use(camera)
             }
             view.callDelegate = CallTarget(stage: self, camera: camera)
             insetLayer.addSubview(view)
@@ -466,5 +483,7 @@ final class StageCallView: PassThroughView, CallControlsDelegate {
 
     func callUnmute() { callTarget?.callUnmute() }
     func callTalk(_ down: Bool) { callTarget?.callTalk(down) }
+    func callLatch(_ on: Bool) { callTarget?.callLatch(on) }
+    func callDraft(_ text: String) { callTarget?.callDraft(text) }
     func callSend(_ text: String, accepted: @escaping (Bool) -> Void) { callTarget?.callSend(text, accepted: accepted) }
 }
