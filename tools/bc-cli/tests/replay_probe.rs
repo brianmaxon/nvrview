@@ -3,7 +3,7 @@
 //! session's one login released on every path. How the mock refuses a play
 //! is its own choice (docs/MILESTONE-P.md, B5, B6).
 
-use bc_cli::replay_probe::{Outcome, ProbeConfig, replay_probe};
+use bc_cli::replay_probe::{Outcome, PlaySource, ProbeConfig, replay_probe};
 use bc_protocol::archive::DateTime;
 use bc_session::{DeviceSession, FnConnector, SessionConfig};
 use mock_nvr::archive::ArchiveConfig;
@@ -267,5 +267,73 @@ async fn no_live_view_needs_the_device_time() {
         r.outcome
     );
     assert_eq!(r.plays_started, 0);
+    closed_cleanly(&nvr, s).await;
+}
+
+/// Batched starts, with and without live view: each stage's seeks go out
+/// together at one time (5 s after the file's start), then its plays; every
+/// play is stopped and the session's one login released.
+#[tokio::test(start_paused = true)]
+async fn batched_stages_seek_together_then_play_together() {
+    for no_live in [false, true] {
+        let nvr = spawn_mock(|_| {});
+        let s = session(&nvr);
+        let (_tx, rx) = watch::channel(false);
+        let mut out = Vec::new();
+        let mut cfg = probe_cfg();
+        cfg.batched = true;
+        cfg.no_live = no_live;
+        let r = replay_probe(&s, &cfg, &mut out, rx).await.unwrap();
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert_eq!(r.outcome, Outcome::Completed, "{text}");
+        assert_eq!(r.max_ok, 4);
+        assert_eq!(r.plays_started, 1 + 2 + 3 + 4);
+        assert!(text.contains("batched start: 4 seek(s)"), "{text}");
+        // One seek per play, and a stage's plays all start at one time.
+        assert_eq!(nvr.command_count(123), 10);
+        let log = nvr.play_log();
+        assert_eq!(log.len(), 10);
+        assert!(log.iter().all(|p| p.at == d(8, 10, 0, 5)), "{log:?}");
+        assert!(log.iter().all(|p| p.support_sub == Some(1)));
+        for st in &r.stages {
+            assert_eq!(st.delivered, st.plays);
+            assert!(st.play_fps.iter().all(|f| *f > 0.0), "{st:?}");
+        }
+        assert!(r.stops_sent >= 10, "{}", r.stops_sent);
+        closed_cleanly(&nvr, s).await;
+    }
+}
+
+/// Recordings that share no time cannot take one seek: each seek goes to
+/// its own recording's start + 5 s, still back to back before the plays.
+#[tokio::test(start_paused = true)]
+async fn batched_stages_of_disjoint_files_seek_each_files_start() {
+    let nvr = spawn_mock(|_| {});
+    let s = session(&nvr);
+    let (_tx, rx) = watch::channel(false);
+    let mut out = Vec::new();
+    let mut cfg = probe_cfg();
+    cfg.batched = true;
+    cfg.no_live = true;
+    cfg.plays = vec![
+        PlaySource {
+            channel: 1,
+            back: 0,
+        },
+        PlaySource {
+            channel: 1,
+            back: 1,
+        },
+    ];
+    let r = replay_probe(&s, &cfg, &mut out, rx).await.unwrap();
+    let text = String::from_utf8_lossy(&out).to_string();
+    assert_eq!(r.outcome, Outcome::Completed, "{text}");
+    assert!(text.contains("hold no common time"), "{text}");
+    // Stage 1: 10:00:05. Stage 2: seeks 10:00:05 and 09:00:05; the device
+    // keeps the last seek.
+    assert_eq!(nvr.command_count(123), 3);
+    let log = nvr.play_log();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[2].at, d(8, 9, 0, 5));
     closed_cleanly(&nvr, s).await;
 }
