@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use updates::{
     Cancel, CheckOutcome, Config, PublicKey, Reason, Source, UpdateError, Version, check, download,
@@ -91,7 +91,7 @@ fn assert_app_unpacked(content: &Path) {
         assert_eq!(mode("App/data.txt"), 0o644);
         assert_eq!(
             fs::read_link(content.join("App/current")).unwrap(),
-            PathBuf::from("bin")
+            std::path::PathBuf::from("bin")
         );
     }
 }
