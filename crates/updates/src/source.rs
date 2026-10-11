@@ -249,10 +249,12 @@ impl Url {
         if !only_path.bytes().all(path_byte) || query.is_some_and(|q| !q.bytes().all(query_byte)) {
             return Err(invalid("invalid characters in URL"));
         }
-        if only_path
-            .split('/')
-            .any(|seg| seg == "." || seg == ".." || seg.eq_ignore_ascii_case("%2e%2e"))
-        {
+        // A server decodes `%2e` to `.` before it resolves segments, so
+        // every spelling of `.` and `..` (`%2e`, `.%2E`, ...) counts.
+        if only_path.split('/').any(|seg| {
+            let decoded = seg.to_ascii_lowercase().replace("%2e", ".");
+            decoded == "." || decoded == ".."
+        }) {
             return Err(invalid("a URL path cannot have . or .. segments"));
         }
         Ok(Url {
@@ -468,6 +470,10 @@ mod tests {
             "https://updates.example.com/u#frag",
             "https://updates.example.com/a/../b/",
             "https://updates.example.com/a/./b/",
+            "https://updates.example.com/a/%2e%2e/b/",
+            "https://updates.example.com/a/.%2E/b/",
+            "https://updates.example.com/a/%2e./b/",
+            "https://updates.example.com/a/%2E/b/",
             "https://updates.example.com/a b/",
             "https://updates.example.com:0/",
             "https://updates.example.com:99999/",
@@ -550,6 +556,8 @@ mod tests {
         assert!(base.join("ftp://x/").is_err());
         assert!(base.join("javascript://x").is_err());
         assert!(base.join("/a/../../etc").is_err());
+        assert!(base.join("/a/.%2e/.%2e/etc").is_err());
+        assert!(base.join("%2e%2e/x.zip").is_err());
         let downgrade = base.join("http://updates.example.com/a/").unwrap();
         assert!(!downgrade.secure);
     }
