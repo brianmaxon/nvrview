@@ -925,7 +925,7 @@ observed (client capture); the rest are reported (client) and did not appear.
 
 | Command | Use | Body | Provenance |
 | --- | --- | --- | --- |
-| 5 / 7 | play a recording file / stop | 5: `FileInfo` with `channelId`, `Id`, `uid`, `supportSub` (0, or 1 for a sub-stream), `playSpeed` (1, 2, 4, 8 or 16), `streamType`; no `startTime` was sent. 7: `FileInfo` with `channelId`, `name`, `streamType` | observed |
+| 5 / 7 | play a recording file / stop | 5: `FileInfo` with `channelId`, `Id`, `uid`, `supportSub` (0 for a main-stream play, 1 for a sub-stream play), `playSpeed` (1, 2, 4, 8 or 16), `streamType`; no `startTime` was sent. 7: `FileInfo` with `channelId`, `name`, `streamType` | observed |
 | 123 | set the start position of the next play | `ReplaySeek` with `channelId`, `seq`, `seekTime` (a time block) | observed |
 | 298 | cover images for the timeline | `CoverPreview` with `channelId`, `uid`, `logicChnBitmap`, `desc` (0), `streamType`, `startTime`, `endTime`, `frameList/frameNo` (1) | observed (client capture) |
 | 382 | stop a play by time range | empty; sent once per NVR session just before the logout when the client quit | observed (client capture) |
@@ -978,8 +978,13 @@ the client sent it. With no observation of how a play ends or is refused,
 `bc-session` takes an empty message as the end and a non-200 reply without
 the play's `seq` as a refusal (the probe's one reported refusal turned out to
 be a misread media header, see "Live view and plays on one session"; the
-device refused nothing); at most four plays run per device by default
-(four were observed on one session). Not sent: 150, 381–383 (not observed in
+device refused nothing); `supportSub` is 1 on a sub-stream play and 0 on
+a main-stream play, as the client sent it. To start several plays together
+nvrview follows the client's recipe (see "Four plays at once"): all seeks
+back to back with consecutive `seq` numbers and one `seekTime`, a pause of
+about 0.5 s, then all plays back to back (`DeviceSession::play_group`). The
+number of plays per device is capped by `max_plays` (default 2, see "Live
+view and plays on one session"). Not sent: 150, 381–383 (not observed in
 use), and any other `playSpeed` (so far).
 
 #### Speed, file boundaries, and concurrent plays
@@ -1022,6 +1027,31 @@ recorded at 25 frames per second with a 2.0 s GOP (one keyframe in 50 frames).
 | **No play was ended by the device.** All plays ended with the client's own 7 (empty reply, status 200). In each, the last device message was an ordinary media message: no empty message, no status 300 or 201, no other command. The client stopped when its playhead reached the end of the file list it had last loaded (a list ends at the time of its search, see command 15), though the device had data past that point and the recording kept growing. Re-searching, then playing from the old end, ran until the new list end. A play running to a real end of data was not observed, so what the device sends then is unknown. | observed (client capture); end-of-data unknown |
 | 5, 123 and 7 were answered status 200 every time. Other non-200 statuses in that capture were 400 on 44 and 318 and a few others for channels without a feature (empty body), 300 for large replies of 146 and 199, 442 on one 517 (see above) and 201 ending each 653. No 143, 144, 106, 38 or live view occurred after the playback tab opened. | observed (client capture) |
 | Unsolicited messages on the event subscription's message ID besides 33: 600 `yoloWorldEventList` with a `range` (`start`, `end`, 0 to 23; probably the supported hit-type slots), and once at login 145, 291, 623, 677, 723 and 727 (not decoded further). | observed (client capture) |
+
+#### Four plays at once: the official client's recipe
+
+Observed (client capture), from a decrypted capture of the official client
+on recent NVR firmware: one session, one NVR, a 2x2 playback grid. Live view
+ran only before the playback tab opened; every play in it is a sub-stream
+play (no main-stream play occurred, so the main-stream facts above are not
+contradicted, only not tested here).
+
+| Fact | Provenance |
+| --- | --- |
+| Four simultaneous plays on one session, all sub-stream, with no live view, were all served at `playSpeed` 1 and at `playSpeed` 4, with no refusal, no non-200 status and no limit field in any reply. A fifth play was not tried. | observed (client capture) |
+| **The client starts N plays as:** 7 for each running play; then N seeks (123, consecutive `seq`, the SAME `seekTime`, `channelId` 0) sent back to back (within 10 to 50 ms) without waiting for replies; about 0.5 to 0.6 s later N plays (5, one per camera, each with its own message ID, the same `playSpeed`) sent within about 25 ms. The seek count equals the play count. A seek of all playing cameras and a speed change are the same sequence again (stop all, seek all, play all). | observed (client capture) |
+| A sub-stream play's 5 carries `supportSub` 1 and the sub-stream file `Id` (first number 1) that contains the seek time; the file search for it used `streamType` subStream. A main-stream play's 5 carried `supportSub` 0 (earlier captures). | observed (client capture) |
+| All media messages of all plays carry the `seq` of the latest seek the device has processed (the last of a batch of seeks), not the `seq` of their own play; the first seeks' `seq` numbers never appear on any media. Routing is by the 5's message ID. A 123 sent while plays run re-tags their media but does not move them. | observed (client capture) |
+| In a four-up start the first picture arrived 0.3 to 0.5 s after the 5 for the first play and 0.8 to 1.2 s for the others; at 4x 0.65 to 0.7 s for all four. Four sub-stream plays at 1x ran 4 to 9 s ahead of real time with media about every 4 s (0.03 to 0.2 MB/s each). | observed (client capture) |
+| **A sub-stream play at `playSpeed` 4 kept every video frame and the audio records** (frame spacing and keyframe ratio unchanged, 4 s GOP) and advanced the media clock at 4.0 s per wall second, 0.18 to 0.5 MB/s per play. (A 4K main stream at 4x kept keyframes only and no audio.) Whether a sub-stream thins at 8x or 16x was not tested. | observed (client capture) |
+| The first keyframe of a sub-stream play lay within about 4 s of the seek time (up to 2 s before it occurred), because the GOP is 3.4 to 8 s. | observed (client capture) |
+| 5, 7 and 123 were answered status 200 in every batch of four. | observed (client capture) |
+
+Differences from nvrview's earlier probe, which stalled or starved its
+fourth play: it sent `supportSub` 0 on sub-stream plays, and interleaved
+seek, play, seek, play with a different `seekTime` per play, at different
+times. Which of these matters (or whether the live preview alone does) is
+settled only by the runs below.
 
 #### Live view and plays on one session
 
@@ -1269,6 +1299,9 @@ port as `N`). Nothing else was sent.
   file boundary is observed to continue with no wire event, and rates
   2×–16× are served by stop/seek/play with `playSpeed` 2, 4, 8, 16 (keyframes
   only, no audio; settled, see "Rates, keyframes, and how a play ends").
+  Four plays at once are observed for the official client (see "Four plays
+  at once"); still open there: a fifth play, main-stream plays four-up,
+  plays beside live view with that recipe, and sub-stream 8x and 16x.
   Still open: how a play (5) *ends* when it reaches the true end of the
   recorded data (the official client always stopped it first, so no device
   end message has been seen), and what the device does when asked to play
