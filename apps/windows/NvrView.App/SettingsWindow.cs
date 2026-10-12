@@ -1,6 +1,6 @@
 // The Settings window (docs/UX.md "Settings window"): a resizable window of its
 // own, not a dialog, so a tall section scrolls. A pane on the left lists the
-// sections (Devices, Cameras, Alerts & calls, Updates, About); each section's
+// sections (Devices, Cameras, Alerts & calls, Capture, Updates, About); each section's
 // content sits in a ScrollViewer of its own (SettingsPages builds the content).
 // There is one instance: opening Settings again brings it to the front, on the
 // section asked for. It remembers its size and position (view-settings.json),
@@ -42,7 +42,7 @@ internal sealed class SettingsWindow
         Created++;
         Window = new Window { Title = "Settings - nvrview" };
         AppWindow = Window.AppWindow;
-        _pages = SettingsPages.Create(viewer, development, hooks);
+        _pages = SettingsPages.Create(viewer, development, hooks, () => WinRT.Interop.WindowNative.GetWindowHandle(Window));
 
         _nav.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
         _nav.IsSettingsVisible = false;

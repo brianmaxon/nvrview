@@ -14,7 +14,7 @@ internal static class HeaderTests
         ("header: app-wide titles are recognized, tile titles are not", AppWide),
         ("header: the recording spot is hidden until something records", Recording),
         ("recording pill: the corner opposite the indicators, never the header's top right", PillCorner),
-        ("settings: five sections in pane order", Sections),
+        ("settings: six sections in pane order", Sections),
         ("title bar: rectangles scale outward with the display scale", Scaling),
         ("title bar: passthrough regions are clipped and empty ones dropped", Passthrough),
         ("title bar: the height follows the system's caption", Height),
@@ -79,7 +79,7 @@ internal static class HeaderTests
 
     private static void Sections()
     {
-        Check.Equal("Devices, Cameras, Alerts & calls, Updates, About", string.Join(", ", SettingsSections.All.Select(s => s.Title())), "titles");
+        Check.Equal("Devices, Cameras, Alerts & calls, Capture, Updates, About", string.Join(", ", SettingsSections.All.Select(s => s.Title())), "titles");
         Check.True(SettingsSections.All.All(s => s.Glyph().Length == 1), "one glyph each");
     }
 

@@ -123,6 +123,7 @@ public enum SettingsSection
     Devices,
     Cameras,
     AlertsAndCalls,
+    Capture,
     Updates,
     About,
 }
@@ -136,6 +137,7 @@ public static class SettingsSections
         SettingsSection.Devices => "Devices",
         SettingsSection.Cameras => "Cameras",
         SettingsSection.AlertsAndCalls => "Alerts & calls",
+        SettingsSection.Capture => "Capture",
         SettingsSection.Updates => "Updates",
         _ => "About",
     };
@@ -146,6 +148,7 @@ public static class SettingsSections
         SettingsSection.Devices => "",
         SettingsSection.Cameras => "",
         SettingsSection.AlertsAndCalls => "",
+        SettingsSection.Capture => "\uE714",
         SettingsSection.Updates => "",
         _ => "",
     };

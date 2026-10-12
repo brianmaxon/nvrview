@@ -16,6 +16,32 @@ internal static class CaptureRecordingsTests
 
     private static JsonElement Object(string json) => JsonDocument.Parse(json).RootElement;
 
+    // ---- a small MP4, to read back ----
+
+    private static byte[] Be(uint v) => [(byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v];
+
+    private static byte[] Box(string type, params byte[][] parts)
+    {
+        byte[] payload = [.. parts.SelectMany(p => p)];
+        return [.. Be((uint)(8 + payload.Length)), .. System.Text.Encoding.ASCII.GetBytes(type), .. payload];
+    }
+
+    private static byte[] Track(string handler, string codec, bool enabled, ushort group, uint timescale, uint duration, uint samples, uint[]? sync)
+    {
+        // tkhd (version 0): flags, ids, duration, reserved, layer, alternate group, then the rest.
+        byte[] tkhd = [0, 0, 0, (byte)(enabled ? 3 : 0), .. new byte[20], .. new byte[8], 0, 0, (byte)(group >> 8), (byte)group, .. new byte[60]];
+        byte[] mdhd = [0, 0, 0, 0, .. new byte[8], .. Be(timescale), .. Be(duration), 0, 0, 0, 0];
+        byte[] hdlr = [0, 0, 0, 0, .. new byte[4], .. System.Text.Encoding.ASCII.GetBytes(handler), .. new byte[12], 0];
+        byte[] stsd = [0, 0, 0, 0, .. Be(1), .. Box(codec, new byte[8])];
+        byte[] stsz = [0, 0, 0, 0, .. Be(0), .. Be(samples)];
+        var table = new List<byte[]> { Box("stsd", stsd), Box("stsz", stsz) };
+        if (sync is not null)
+        {
+            table.Add(Box("stss", [0, 0, 0, 0, .. Be((uint)sync.Length), .. sync.SelectMany(Be)]));
+        }
+        return Box("trak", Box("tkhd", tkhd), Box("mdia", Box("mdhd", mdhd), Box("hdlr", hdlr), Box("minf", Box("stbl", [.. table.SelectMany(t => t)]))));
+    }
+
     public static void Run()
     {
         T.Run("recordings: the settings map to the configure JSON", () =>
@@ -178,6 +204,36 @@ internal static class CaptureRecordingsTests
             T.Check(Math.Abs(db - -15.05) < 0.1, $"{db} dB");
             T.Equal(0.0, ToneCheck.Frequency(new short[100], 0, 100, 48_000));
             T.Equal(-120.0, ToneCheck.Decibels(0));
+        });
+
+        T.Run("recordings: an MP4's tracks are read back", () =>
+        {
+            byte[] file =
+            [
+                .. Box("ftyp", System.Text.Encoding.ASCII.GetBytes("isom"), new byte[8]),
+                .. Box("moov",
+                    Track("vide", "avc1", enabled: true, group: 0, timescale: 90_000, duration: 270_000, samples: 90, sync: [1, 31, 61]),
+                    Track("soun", "mp4a", enabled: true, group: 1, timescale: 48_000, duration: 144_000, samples: 141, sync: null),
+                    Track("soun", "mp4a", enabled: false, group: 1, timescale: 48_000, duration: 144_000, samples: 141, sync: null)),
+                .. Box("mdat", new byte[16]),
+            ];
+            Mp4Info info = T.NotNull(Mp4Inspector.Inspect(file));
+            T.Equal("isom", info.Brand);
+            T.Check(!info.Fragmented);
+            T.Equal(3, info.Tracks.Count);
+            Mp4Track v = info.Video.Single();
+            T.Equal("avc1", v.Codec);
+            T.Equal(90u, v.Samples);
+            T.Check(Math.Abs(v.Seconds - 3) < 1e-9 && v.FirstSampleIsSync && v.Enabled && v.AlternateGroup == 0);
+            T.Equal("true,false", string.Join(",", info.Audio.Select(a => a.Enabled.ToString().ToLowerInvariant())));
+            T.Check(info.Audio.All(a => a.Codec == "mp4a" && a.AlternateGroup == 1 && a.FirstSampleIsSync && Math.Abs(a.Seconds - 3) < 1e-9));
+            // A video whose first sample is not a sync sample, and files that are not finished MP4s.
+            byte[] late = [.. Box("ftyp", System.Text.Encoding.ASCII.GetBytes("isom"), new byte[8]), .. Box("moov", Track("vide", "avc1", true, 0, 1000, 1000, 10, [4]))];
+            T.Check(!T.NotNull(Mp4Inspector.Inspect(late)).Video.Single().FirstSampleIsSync);
+            T.Equal(null, Mp4Inspector.Inspect([.. Box("ftyp", System.Text.Encoding.ASCII.GetBytes("isom"), new byte[8]), .. Box("mdat", new byte[16])]));
+            T.Equal(null, Mp4Inspector.Inspect(new byte[10]));
+            byte[] fragmented = [.. Box("ftyp", System.Text.Encoding.ASCII.GetBytes("isom"), new byte[8]), .. Box("moov", Track("vide", "avc1", true, 0, 1000, 0, 0, null)), .. Box("moof", new byte[8])];
+            T.Check(T.NotNull(Mp4Inspector.Inspect(fragmented)).Fragmented);
         });
 
         T.Run("recordings: the record-from names", () =>

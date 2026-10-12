@@ -3,7 +3,8 @@
 // to connect to: address, port, user, password; saving reconnects that device),
 // Cameras (each camera's options: where its calls open, unmute on ring, talk-back,
 // fisheye mount), Alerts & calls (the corners of the detection symbols and call
-// cards, calls in their own window, transcripts), Updates, and About. The password
+// cards, calls in their own window, transcripts, recording calls), Capture (where
+// recordings go and when they stop; CaptureSettingsPage), Updates, and About. The password
 // goes straight to the credential store and is never shown again: leaving the box
 // empty when editing keeps the saved one. The new-device form opens with "Find
 // Devices on This Network": a search of the local network starts when the form is
@@ -79,7 +80,7 @@ internal sealed class SettingsPages
     }
 
     /// <summary>The pages, not shown yet.</summary>
-    public static SettingsPages Create(Viewer viewer, bool development, SettingsPagesHooks? hooks = null)
+    public static SettingsPages Create(Viewer viewer, bool development, SettingsPagesHooks? hooks = null, Func<nint>? windowHandle = null)
     {
         var result = new SettingsPages();
         var list = new ListView { Width = 220, Height = 260, SelectionMode = ListViewSelectionMode.Single };
@@ -519,6 +520,7 @@ internal sealed class SettingsPages
         alertsPage.Children.Add(windowRow);
         alertsPage.Children.Add(transcriptRow);
         alertsPage.Children.Add(transcriptNote);
+        alertsPage.Children.Add(CaptureSettingsPage.RecordCalls(viewer));
 
         // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
         // like the menu's choice; shown only when a connected camera reports a fisheye lens.
@@ -616,6 +618,7 @@ internal sealed class SettingsPages
         result.Pages[SettingsSection.Devices] = devicesPage;
         result.Pages[SettingsSection.Cameras] = camerasPage;
         result.Pages[SettingsSection.AlertsAndCalls] = alertsPage;
+        result.Pages[SettingsSection.Capture] = CaptureSettingsPage.Build(viewer, windowHandle ?? (() => 0));
         result.Pages[SettingsSection.Updates] = updatesPage;
         result.Pages[SettingsSection.About] = aboutPage;
 

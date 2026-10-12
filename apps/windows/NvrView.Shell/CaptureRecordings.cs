@@ -249,7 +249,7 @@ public sealed class RecordingBoard
     }
 
     /// <summary>The running recordings, oldest first.</summary>
-    public IReadOnlyList<BoardEntry> List => [.. _running.Values.OrderBy(r => r.Id)];
+    public IReadOnlyList<BoardEntry> List => _running.Count == 0 ? [] : [.. _running.Values.OrderBy(r => r.Id)];
 
     /// <summary>Recordings of <paramref name="camera"/> (its device, channel and lens).</summary>
     public IReadOnlyList<BoardEntry> RecordingsOf(CameraRef camera) => [.. List.Where(r => r.Camera == camera)];

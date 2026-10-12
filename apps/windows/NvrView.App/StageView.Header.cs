@@ -18,11 +18,10 @@ namespace NvrView.App;
 /// <summary>The header items whose action lands later: their buttons, menu items and keys are in place and say so.</summary>
 internal static class TileActionStub
 {
-    /// <summary>Save picture, recording, and PTZ: not built yet.</summary>
-    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.Record or TileHeaderItem.SavePicture
+    /// <summary>Save picture and PTZ: not built yet (recording is built).</summary>
+    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.SavePicture
         or TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens or TileHeaderItem.SavePictureAs
-        or TileHeaderItem.SaveZoomedArea or TileHeaderItem.SaveOriginalFisheye or TileHeaderItem.RecordMain
-        or TileHeaderItem.RecordSub;
+        or TileHeaderItem.SaveZoomedArea or TileHeaderItem.SaveOriginalFisheye;
 
     /// <summary>"Save Picture is coming soon".</summary>
     public static string Message(string label) => $"{label.TrimEnd('…')} is coming soon";
@@ -32,6 +31,9 @@ internal sealed partial class StageView
 {
     /// <summary>How long a short message stays over the stage, on the viewer's clock.</summary>
     public const double ToastSeconds = 2.5;
+
+    /// <summary>How long a message with a button stays (long enough to reach it).</summary>
+    public const double ActionToastSeconds = 6;
 
     private double? _toastHideAt;
 
@@ -59,7 +61,7 @@ internal sealed partial class StageView
             Fisheye = _viewer.IsFisheye(camera),
             // A status over a picture that is still there ("Recovering" while a stream restarts) does not take the buttons away.
             Picture = StatusOf(t).Kind == TileMessage.None,
-            Recording = false,
+            Recording = FixedTile ? _viewer.Capture.CallRecording(camera) is not null : _viewer.Capture.IsRecorded(camera),
             Zoomed = zoomed || moved,
             Panned = !zoomed && !dewarped && Fills(t) && t.DigitalZoom.IsPanned,
             Alert = _viewer.Alerts.IsActive(camera),
@@ -100,6 +102,23 @@ internal sealed partial class StageView
                 break;
             case TileHeaderItem.DismissAlert:
                 _viewer.DismissAlert(camera);
+                break;
+            case TileHeaderItem.Record:
+                // In the call window's own tile, Record is the call recording.
+                if (FixedTile)
+                {
+                    _viewer.Capture.ToggleCall(camera);
+                }
+                else
+                {
+                    _viewer.Capture.ToggleLive(camera);
+                }
+                break;
+            case TileHeaderItem.RecordMain:
+                _viewer.Capture.StartLive(camera, RecordQuality.Main);
+                break;
+            case TileHeaderItem.RecordSub:
+                _viewer.Capture.StartLive(camera, RecordQuality.Sub);
                 break;
             case TileHeaderItem.Conversation:
                 if (_viewer.Calls.CallFor(camera) is null)
@@ -299,11 +318,23 @@ internal sealed partial class StageView
             TileAction.ToggleConversation => TileHeaderItem.Conversation,
             _ => null,
         };
+        if (item is TileHeaderItem.Record && !FixedTile && tile.CameraOrNone is { } camera && _viewer.Calls.CallFor(camera) is not null && CtrlShiftDown())
+        {
+            // Ctrl+Shift+R in a viewer window records the selected tile's call while its camera's call is open; R otherwise.
+            Interact();
+            _viewer.Capture.ToggleCall(camera);
+            RefreshAll();
+            return;
+        }
         if (item is { } i)
         {
             PerformHeaderItem(tile, i, null);
         }
     }
+
+    private static bool CtrlShiftDown() =>
+        InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down)
+        && InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(CoreVirtualKeyStates.Down);
 
     /// <summary>
     /// The tile keys alone (listen, capture, conversation, reset zoom) for the selected tile, without the window-level keys; the
@@ -339,12 +370,35 @@ internal sealed partial class StageView
     // ---- the short message over the stage ----
 
     /// <summary>Shows <paramref name="text"/> over the stage for a few seconds (on the viewer's clock).</summary>
-    public void ShowToast(string text)
+    public void ShowToast(string text, NoticeAction? action = null)
     {
         _toastText.Text = text;
         AutomationProperties.SetName(_toast, text);
+        _toastHandler = action?.Handler;
+        _toastAction.Content = action?.Title ?? "";
+        _toastAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
+        _toast.IsHitTestVisible = action is not null;
         _toast.Visibility = Visibility.Visible;
-        _toastHideAt = _viewer.Clock.Now + ToastSeconds;
+        _toastHideAt = _viewer.Clock.Now + (action is null ? ToastSeconds : ActionToastSeconds);
+    }
+
+    /// <summary>The message's button, null when it has none (self-test).</summary>
+    public string? ToastActionTitle => _toast.Visibility == Visibility.Visible && _toastHandler is not null ? _toastAction.Content as string : null;
+
+    /// <summary>Presses the message's button as a click does: its action runs and the message goes.</summary>
+    public void PressToastAction()
+    {
+        Action? handler = _toastHandler;
+        HideToast();
+        handler?.Invoke();
+    }
+
+    private void HideToast()
+    {
+        _toastHideAt = null;
+        _toastHandler = null;
+        _toast.Visibility = Visibility.Collapsed;
+        _toast.IsHitTestVisible = false;
     }
 
     /// <summary>What the message says now, null when none shows (self-test).</summary>
@@ -354,8 +408,7 @@ internal sealed partial class StageView
     {
         if (_toastHideAt is { } at && now >= at)
         {
-            _toastHideAt = null;
-            _toast.Visibility = Visibility.Collapsed;
+            HideToast();
         }
     }
 }

@@ -11,7 +11,7 @@ headless demo.
 | `NvrView.Interop/` | the bindings: `Native.cs` (raw P/Invoke and structs), `NvCore.cs` (safe wrapper) |
 | `NvrView.Smoke/` | the smoke test, and `NvLayoutCheck.cs`, which compares the bindings with the header |
 | `layout/nvlayout.c` | prints struct sizes, field offsets, and constants as the C compiler sees `nvrview.h` |
-| `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer (Windows only) |
+| `NvrView.Video/` | the platform side of the core's decoder actions: Media Foundation decoding into D3D11 NV12 textures, and the D3D11 grid renderer; and the recordings' AAC-LC encoder (Media Foundation's AAC encoder MFT, `AacCaptureEncoder`) with its decode round trip (Windows only) |
 | `NvrView.Demo/` | headless demo: `--selftest` checks rendered pixels, `--live` measures tiles against mock-nvr, `--bench` times the decoder (Windows only) |
 | `NvrView.Tiles/`, `NvrView.Tiles.Tests/` | the tile features' pure logic (detection tracking, corner indicators and their hold, alerts, stream quality and tier selection, full screen auto-hide, key mapping, the rules of calls, where call cards go) and its tests on simulated time; builds and runs on Windows and Linux |
 | `NvrView.Shell/`, `NvrView.Shell.Tests/` | the shell's logic without a window: split-pane layouts and their JSON (the macOS app's documents, byte for byte), layout geometry, tile leases, the sidebar's edge reveal, camera groups, window restore; and its tests; builds and runs on Windows and Linux |
@@ -678,12 +678,12 @@ Windows-only (macOS keeps its menu bar; docs/PARITY.md), described in
   (`HeaderChrome` in NvrView.Shell, the sidebar's `SidebarReveal` timing, one
   timer armed for the next deadline; an open header menu holds it). What each
   action is and where it lives is `HeaderActions` (NvrView.Tiles, tested);
-  `ViewerWindow.RunHeaderAction` does them. The "N recording" spot is
-  reserved and hidden (`RecordingIndicator`).
+  `ViewerWindow.RunHeaderAction` does them. The "N recording" spot shows while
+  recordings run (`RecordingIndicator`).
 - **The tile menu** (`StageView.BuildTileMenu`) holds the tile's own actions
   only; the self-test checks that none of `HeaderActions` is in it.
 - **The Settings window** (`SettingsWindow`) is a `Window` with a
-  `NavigationView` pane (Devices, Cameras, Alerts & calls, Updates, About;
+  `NavigationView` pane (Devices, Cameras, Alerts & calls, Capture, Updates, About;
   `SettingsSections`) and a `ScrollViewer` per section around the content
   `SettingsPages` builds. One instance (`SettingsWindow.Current`); opening
   again brings it forward. Its frame is kept in `view-settings.json`

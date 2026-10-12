@@ -65,7 +65,7 @@
 //    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
 //    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
 //    manual clock; the tile menu holds none of the app-wide items; Settings is one window of its own
-//    with a pane of five sections, a section taller than the window scrolls to its last control, a
+//    with a pane of six sections, a section taller than the window scrolls to its last control, a
 //    second open brings the same window forward, its size is remembered, and it closes with the app;
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
@@ -87,7 +87,7 @@ using Point = Windows.Foundation.Point;
 
 namespace NvrView.App;
 
-internal sealed class SelfTest(App app, AppOptions options)
+internal sealed partial class SelfTest(App app, AppOptions options)
 {
     private readonly List<string> _problems = [];
     private readonly List<string> _lines = [];
@@ -1142,6 +1142,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.Transcripts.Folder = transcriptsBefore;
 
         await CallWindowSteps(v, stage, camera, device, clock, mic);
+        await CallRecordingEndsWithCall(v, camera);
 
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.
@@ -1530,18 +1531,13 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.Split(SplitAxis.Row);
         bool fixedStill = !stage.IsFocused && stage.State.Tree.LeafCount == 1 && stage.Selected == tile;
         IReadOnlyList<TileHeaderItem> shownButtons = chrome.ShownButtons;
-        // Ctrl+Shift+R is the call recording, which is not built yet.
-        stage.ApplyAction(TileAction.ToggleRecording, tile);
-        string? toast = stage.ToastText;
-        clock.Advance(StageView.ToastSeconds + 0.1);
-        stage.Tick();
         Say($"call window tile menu: the model's {want.Count} items {menu.Take(want.Count).SequenceEqual(want)}, call items {callItems}, layout items [{string.Join(", ", layoutItems)}], " +
-            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}], Record Call: {toast ?? "nothing"}");
+            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}]");
         Expect(menu.SequenceEqual(want) && callItems, $"the call window tile's menu is not the header model's call menu: {string.Join(" / ", menu)}");
         Expect(layoutItems.Length == 0, $"the call window tile's menu offers {string.Join(", ", layoutItems)}");
         Expect(fixedStill, "focus or split changed the call window's single tile");
         Expect(shownButtons.Contains(TileHeaderItem.Speaker) && shownButtons.Contains(TileHeaderItem.Quality), "the call window's header lacks the speaker or quality button");
-        Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
+        await CallRecordButton(v, cw, camera, tile);
     }
 
     // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
@@ -1618,7 +1614,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
             Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
             Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
-            // A button whose action is not built yet says so; so do P and R.
+            // A button whose action is not built yet says so; so does P (R records; CaptureRecordSteps).
             At(1000);
             chrome.PressHeader(TileHeaderItem.SavePicture);
             string? clicked = stage.ToastText;
@@ -1628,20 +1624,18 @@ internal sealed class SelfTest(App app, AppOptions options)
             stage.Select(tile.Path);
             stage.HandleKey(Windows.System.VirtualKey.P, false, false);
             string? keyP = stage.ToastText;
-            stage.HandleKey(Windows.System.VirtualKey.R, false, false);
-            string? keyR = stage.ToastText;
             clock.Advance(StageView.ToastSeconds + 0.1);
             stage.Tick();
-            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, P {keyP ?? "nothing"}, R {keyR ?? "nothing"}");
+            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, P {keyP ?? "nothing"}");
             Expect(clicked == "Save Picture is coming soon" && gone, "Save Picture's button did not say it is coming soon");
-            Expect(keyP == "Save Picture is coming soon" && keyR == "Start Recording is coming soon", "P or R did not reach the header's actions");
+            Expect(keyP == "Save Picture is coming soon", "P did not reach the header's actions");
         }
         finally
         {
             chrome.ForceWidth(null);
             v.UseClock(new SystemViewerClock());
         }
-        await Task.CompletedTask;
+        await CaptureRecordSteps(v, stage, tile);
     }
 
     // The call card's picture: one more tile of this window's grid, drawn last from the camera's
@@ -2586,7 +2580,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool searching = await Until(() => v.Discovery.IsSearching, 5);
         Say($"settings window: sections {string.Join(" / ", sw.SectionTitles)}; on {sw.Section.Title()}, searching {searching}");
         Expect(sw.IsLoaded && sw.Section == SettingsSection.Devices && searching, "Find devices did not show the Devices section and start the search");
-        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list the five sections");
+        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list the six sections");
         foreach (SettingsSection section in SettingsSections.All)
         {
             sw.Show(section);
