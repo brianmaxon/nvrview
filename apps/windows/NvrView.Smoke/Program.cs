@@ -1152,6 +1152,7 @@ internal sealed class Smoke(Options options)
         {
             Problem("the download did not finish");
         }
+        CheckEditAndSound(core, id, day, firstEvent.GetProperty("camera").GetRawText());
         string locked = rec.IncidentLock(incident, true);
         if (!locked.Contains("\"existing\"", StringComparison.Ordinal) || !locked.Contains(id, StringComparison.Ordinal))
         {
@@ -1171,6 +1172,56 @@ internal sealed class Smoke(Options options)
         if (_app.EventCount("download") == 0 || _app.EventCount("incidents_changed") == 0)
         {
             Problem("no download or incidents_changed events");
+        }
+    }
+
+    // Edit lists and the rest of sound (minor 8) through the bindings, against
+    // the finished download: both plan kinds, the status codes, and the sound
+    // calls that need no audio.
+    private void CheckEditAndSound(NvCore core, string download, long day, string camera)
+    {
+        IEditSound sound = core;
+        using (JsonDocument grid = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"grid","download":"{{download}}","layout":"2up"}""")))
+        {
+            if (grid.RootElement.GetProperty("kind").GetString() != "grid" ||
+                grid.RootElement.GetProperty("cells").GetArrayLength() == 0)
+            {
+                Problem("nv_edit_compute grid");
+            }
+        }
+        using (JsonDocument follow = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"follow","download":"{{download}}"}""")))
+        {
+            if (follow.RootElement.GetProperty("kind").GetString() != "follow" ||
+                follow.RootElement.GetProperty("segments").GetArrayLength() == 0)
+            {
+                Problem("nv_edit_compute follow");
+            }
+        }
+        if (StatusOf(() => sound.EditCompute("""{"kind":"follow","download":"nope"}""")) != NvStatus.UnknownId ||
+            StatusOf(() => sound.EditCompute($$"""{"kind":"follow","download":"{{download}}","in_ms":1}""")) != NvStatus.Unsupported ||
+            StatusOf(() => sound.EditCompute("{")) != NvStatus.InvalidArgument)
+        {
+            Problem("nv_edit_compute status codes");
+        }
+
+        sound.SoundWatch(camera, true);
+        sound.SoundWatch(camera, false);
+        string query = $$"""{"start":{{day}},"end":{{day + 3599}},"bucket_s":60,"cameras":[{{camera}}]}""";
+        if (!sound.RecordingsLoudness(query).Contains("\"peak_db\"", StringComparison.Ordinal) ||
+            StatusOf(() => sound.RecordingsLoudness("{")) != NvStatus.InvalidArgument)
+        {
+            Problem("nv_recordings_loudness");
+        }
+        sound.SoundLabelsPut($$"""{"camera":{{camera}},"analyzer":"soundanalysis-v1","start":{{day}},"end":{{day + 600}},"labels":[{"kind":"dog_bark","start":{{day + 100}},"end":{{day + 105}},"confidence":0.9,"label":"dog_bark"}]}""");
+        if (StatusOf(() => sound.SoundLabelsPut("{")) != NvStatus.InvalidArgument)
+        {
+            Problem("nv_sound_labels_put accepted invalid JSON");
+        }
+        if (!sound.SoundAnalyzeDay($$"""{"camera":{{camera}},"day":{{day + 5}}}""").Contains("\"queued\"", StringComparison.Ordinal) ||
+            StatusOf(() => sound.SoundAnalyzeCancel(987654321)) != NvStatus.UnknownId ||
+            StatusOf(() => sound.GetTileLoudness(987654321, 8)) != NvStatus.UnknownId)
+        {
+            Problem("nv_sound_analyze_day, nv_sound_analyze_cancel, or nv_tile_loudness");
         }
     }
 

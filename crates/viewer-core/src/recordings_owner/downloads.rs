@@ -263,7 +263,7 @@ impl Hub {
     }
 
     /// The progress of a known download (not one being trashed).
-    fn progress_of(&self, sched: &Scheduler, id: &str) -> Option<IncidentProgress> {
+    pub(super) fn progress_of(&self, sched: &Scheduler, id: &str) -> Option<IncidentProgress> {
         if lock(&self.trashing).contains_key(id) {
             return None;
         }

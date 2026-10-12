@@ -216,11 +216,19 @@ public enum RecordingsEvent: Sendable, Equatable {
     /// After forget or trash; with `trash`, the folder the app moves to the
     /// Trash now.
     case downloadRemoved(download: String, trash: Bool, folder: String?)
+    /// A camera on the "always listen" list: `watching`, `stopped`, or
+    /// `refused` (`reason`: `no_audio`, `device_closed`, `sound_off`).
+    case soundWatch(camera: RecordingCamera, state: String, reason: String?)
+    /// A recorded day's sound analysis: `queued`, `running`, `done` (with
+    /// `seconds` and `labels`), `failed` (`reason`), or `canceled`.
+    case soundAnalyze(
+        request: UInt64, camera: RecordingCamera, day: Int64?, state: String, reason: String?,
+        seconds: Int?, labels: Int?)
 
     /// The event types this enum parses.
     public static let types: Set<String> = [
         "recordings_index", "recordings_day_failed", "recordings_changed", "incidents_changed",
-        "camera_groups_changed", "thumbnail", "download", "download_removed",
+        "camera_groups_changed", "thumbnail", "download", "download_removed", "sound_watch", "sound_analyze",
     ]
 
     private struct Wire: Decodable {
@@ -238,6 +246,9 @@ public enum RecordingsEvent: Sendable, Equatable {
         var download: String?
         var trash: Bool?
         var folder: String?
+        var request: UInt64?
+        var seconds: Int?
+        var labels: Int?
     }
 
     public static func parse(_ json: Data) -> RecordingsEvent? {
@@ -267,6 +278,14 @@ public enum RecordingsEvent: Sendable, Equatable {
         case "download_removed":
             guard let download = w.download else { return nil }
             return .downloadRemoved(download: download, trash: w.trash ?? false, folder: w.folder)
+        case "sound_watch":
+            guard let camera = w.camera, let state = w.state else { return nil }
+            return .soundWatch(camera: camera, state: state, reason: w.reason)
+        case "sound_analyze":
+            guard let request = w.request, let camera = w.camera, let state = w.state else { return nil }
+            return .soundAnalyze(
+                request: request, camera: camera, day: w.day, state: state, reason: w.reason, seconds: w.seconds,
+                labels: w.labels)
         default:
             return nil
         }
@@ -311,4 +330,35 @@ extension CoreAPI {
     public func downloadTrash(_ download: String) throws(CoreStatus) -> String { throw .unsupported }
     public func downloadsGet() throws(CoreStatus) -> String { throw .unsupported }
     public func soundConfigure(json: String) throws(CoreStatus) { throw .unsupported }
+}
+
+/// A live tile's recent loudness (`tileLoudness`): one byte per second and
+/// value, oldest first, from `startSeconds` (a Unix second). 0 means no audio
+/// was analyzed; 1...128 is -127...0 dBFS (`dBFS = byte - 128`).
+public struct TileLoudness: Equatable, Sendable {
+    public var startSeconds: Int64
+    public var peak: [UInt8]
+    public var rms: [UInt8]
+
+    public init(startSeconds: Int64 = 0, peak: [UInt8] = [], rms: [UInt8] = []) {
+        self.startSeconds = startSeconds
+        self.peak = peak
+        self.rms = rms
+    }
+
+    /// Whole dBFS of a stored byte, or nil when no audio was analyzed.
+    public static func decibels(_ byte: UInt8) -> Int? {
+        byte == 0 ? nil : Int(min(byte, 128)) - 128
+    }
+}
+
+// Cores older than minor 8 refuse edit lists and the rest of sound.
+extension CoreAPI {
+    public func editCompute(json: String) throws(CoreStatus) -> String { throw .unsupported }
+    public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) { throw .unsupported }
+    public func recordingsLoudness(query: String) throws(CoreStatus) -> String { throw .unsupported }
+    public func soundLabelsPut(json: String) throws(CoreStatus) { throw .unsupported }
+    public func soundAnalyzeDay(json: String) throws(CoreStatus) -> String { throw .unsupported }
+    public func soundAnalyzeCancel(_ request: UInt64) throws(CoreStatus) { throw .unsupported }
+    public func tileLoudness(_ tile: UInt64, capacity: Int) throws(CoreStatus) -> TileLoudness { throw .unsupported }
 }
