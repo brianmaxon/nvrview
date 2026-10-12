@@ -1120,8 +1120,9 @@ example to keep it beside other work. Both apps follow these rules.
 The NVR's own recordings, found by what happened and played back
 ([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
-(milestone P, M1 and M2) and on Windows (W1, W2). The sound lanes
-(M3) and exports (M4) come later.
+(milestone P, M1 and M2) and on Windows (W1, W2); the follow cut and
+grids on macOS (M3; Windows is W3). The sound lanes and exports (M4) come
+later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1208,6 +1209,33 @@ The NVR's own recordings, found by what happened and played back
   incident with its margins (or the whole day, with the Incident and Day
   switch) with the events marked by kind; dragging shows keyframes, the
   release the exact picture.
+- **Follow and Grid** (macOS, M3): the view menu at the right of the
+  transport switches the player between **Cameras** (the device playback
+  above) and three views made of the incident's **downloaded** files:
+  **Follow Cut** (one picture that cuts to the camera with the action, the
+  core's edit list, FFI-RECORDINGS.md section 7), **2-Up**, and **4-Up**
+  (the cameras composed on a 1920 by 1080 canvas, letterboxed into the
+  player; a cell is black where its camera has no video). The three are
+  disabled, with "Download the incident for a follow cut or a grid", until
+  the incident has a finished download. They start at the playhead; the
+  device playback pauses meanwhile (nothing is closed), and going back to
+  Cameras continues it from the edit's position. Selecting another
+  downloaded incident shows its own edit; one not downloaded goes back to
+  Cameras. The pictures are the files decoded by VideoToolbox and drawn by
+  the same Metal grid renderer as live view, nothing re-encoded; seeking is
+  frame accurate (decoding from the keyframe before the position), and while
+  dragging the scrubber and from 2× up only keyframes are decoded, as the
+  device does. The same transport drives it: play and pause (Space), back
+  and forward 10 s, the speeds, mute and volume, and the scrubber, which
+  spans the edit's range with the incident's events and, in the follow cut,
+  each cut as a white mark. A lane click inside the edit's range on one of
+  its cameras seeks the edit; elsewhere the cameras come back. The follow
+  cut's label is the shown camera's name and the device time; each grid
+  cell has its camera's name. **Sound** follows the picture: in the follow
+  cut the shown camera's, cutting with it; in a grid the first cell's, or
+  the cell clicked; at 1× only, as in Cameras. A file that cannot be opened
+  draws black and the player says so. The same drawing serves exports (M4):
+  `EditSession` renders any time of the edit offscreen at any size.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the
@@ -1248,8 +1276,8 @@ The NVR's own recordings, found by what happened and played back
 - **Never in the way:** every query reads the core's memory; device work
   (searches, thumbnails, downloads, plays) reports by events; the player's
   position is read ten times a second from memory; decoding runs off the
-  main thread. Self-test steps `recordings-*` and `playback-*` (the fake
-  core) and `recordings-real-core` and `playback-real-core`
+  main thread. Self-test steps `recordings-*`, `playback-*`, and `edit-*`
+  (the fake core) and `recordings-real-core` and `playback-real-core`
   (`scripts/macos-real-selftest.sh`, against the mock).
 
 ## Finding devices
