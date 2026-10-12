@@ -23,7 +23,7 @@ expect_not() { # NAME CMD...  (the command must fail)
 # A fresh repository with the scripts under test, main holding a few files.
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .
@@ -70,6 +70,15 @@ git reset -q --hard HEAD~1
 rm -f "$(stamp_dir)/$t0.windows"
 echo stamp >"$(stamp_dir)/$t0.windows-reused"
 expect_not "a reused-Windows stamp never counts for a release" release_stamp_tree windows "$t1"
+# A stamp from a run that took suites from the test result cache serves
+# merges but not a release (neither exactly nor by the version-only rule).
+scripts/checked.sh --record windows 5 "fake" "test (3 of 18 crates)" >/dev/null
+expect "a cached-suite stamp is a stamp" has_stamp windows "$t1"
+expect_not "a cached-suite stamp never counts for a release" release_stamp_tree windows "$t1"
+case "$(stamp_cached windows "$t1")" in "test (3 of 18 crates)") pass "the stamp names its cached suites" ;; *) fail "the stamp names its cached suites" ;; esac
+scripts/checked.sh --record windows 5 "fake" none >/dev/null
+expect "a full stamp counts for a release" release_stamp_tree windows "$t1"
+rm -f "$(stamp_dir)/$t1.windows"
 
 # --- reuse decision ---------------------------------------------------------
 # main: init; branch X changes a.txt; main moves on with b.txt.
@@ -128,6 +137,12 @@ export NVRVIEW_MERGE_MAC_CMD="echo mac >>$log"
 export NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log; scripts/checked.sh --record windows 1 fake"
 export NVRVIEW_FULL_WINDOWS_EVERY=3
 stamp windows main # main's tree has a real Windows result
+# A full Windows run passed just now, so the 72-hour rule forces nothing.
+full_state() { # EPOCH
+  mkdir -p "$(stamp_dir)/suite-cache"
+  printf '{"last_full": %s, "runs_since_full": 0}\n' "$1" >"$(stamp_dir)/suite-cache/state-windows.json"
+}
+full_state "$(date +%s)"
 # A branch with its own Windows stamp merges without a Windows run (rule A).
 git checkout -q -b b1
 commit_file a.txt one
@@ -161,14 +176,33 @@ after2=$(grep -c windows "$log")
 [ "$before" = "$after2" ] && pass "two stamped merges skipped Windows" || fail "two stamped merges skipped Windows"
 run_merge b5 "merge b5" >"$work/out5" 2>&1 || { cat "$work/out5"; fail "merge b5"; }
 [ "$(grep -c windows "$log")" = $((after2 + 1)) ] && pass "the Nth merge forced a real Windows run" || fail "the Nth merge forced a real Windows run"
-# A known flake is retried; a real failure undoes the merge.
+# By default no merge count forces a run; the 72-hour full-run rule does.
+unset NVRVIEW_FULL_WINDOWS_EVERY
+for b in b8 b9 b10 b11 b12 b13; do
+  git checkout -q -b "$b" main
+  commit_file "$b.txt" "$b"
+  stamp windows "$b"
+  git checkout -q main
+done
+before=$(grep -c windows "$log")
+for b in b8 b9 b10 b11 b12; do
+  run_merge "$b" "merge $b" >"$work/out-$b" 2>&1 || { cat "$work/out-$b"; fail "merge $b"; }
+done
+[ "$(grep -c windows "$log")" = "$before" ] && pass "five stamped merges skip Windows by default" || fail "five stamped merges skip Windows by default"
+full_state $(($(date +%s) - 73 * 3600))
+run_merge b13 "merge b13" >"$work/out-b13" 2>&1 || { cat "$work/out-b13"; fail "merge b13"; }
+[ "$(grep -c windows "$log")" = $((before + 1)) ] && pass "no full Windows pass in 72 hours forces a run" || fail "no full Windows pass in 72 hours forces a run"
+grep -q "a full Windows run is due" "$work/out-b13" && pass "...and says why" || fail "...and says why"
+full_state "$(date +%s)"
+# A known flake is retried, marked as a retry; a real failure undoes the merge.
 git checkout -q -b b6
 commit_file b.txt six
 git checkout -q main
 state="$work/flake-state"
 rm -f "$state"
-export NVRVIEW_MERGE_WINDOWS_CMD="if [ -f $state ]; then scripts/checked.sh --record windows 1 fake; else touch $state; echo '== Windows app self-test'; echo 'microphone step failed'; exit 1; fi"
+export NVRVIEW_MERGE_WINDOWS_CMD="if [ -f $state ]; then echo retried=\$NVRVIEW_RETRIED >>$log; scripts/checked.sh --record windows 1 fake; else touch $state; echo '== Windows app self-test'; echo 'microphone step failed'; exit 1; fi"
 run_merge b6 "merge b6" >"$work/out6" 2>&1 && pass "a microphone flake was retried and passed" || { cat "$work/out6"; fail "a microphone flake was retried and passed"; }
+grep -q '^retried=1$' "$log" && pass "the retry runs with NVRVIEW_RETRIED=1" || fail "the retry runs with NVRVIEW_RETRIED=1"
 git checkout -q -b b7
 commit_file c.txt seven
 git checkout -q main

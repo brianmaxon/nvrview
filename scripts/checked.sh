@@ -4,9 +4,13 @@
 #   scripts/checked.sh [--mac] [--windows]
 #       Exits 0 if HEAD's tree has every requested stamp (both when none is
 #       named); otherwise prints what is missing and exits 1.
-#   scripts/checked.sh --record mac|windows SECONDS "STEPS"
+#   scripts/checked.sh --record mac|windows SECONDS "STEPS" ["CACHED"]
 #       Writes a stamp for HEAD's tree. Called by scripts/check.sh and
-#       scripts/windows-check.sh, only after a full pass on a clean tree.
+#       scripts/windows-check.sh, only after a pass on a clean tree. CACHED
+#       lists the suites taken from the test result cache
+#       (scripts/suite-cache.py); "none" or empty makes it a full stamp
+#       (full=yes). A stamp with cached suites (full=no) serves merges;
+#       scripts/release.sh needs a full one.
 #       The kind windows-reused is written by scripts/merge-branch.sh for a
 #       merge accepted on a branch's earlier Windows result; --windows and
 #       scripts/release.sh never count it. Rules: scripts/stamps-lib.sh.
@@ -31,6 +35,10 @@ if [ "${1:-}" = "--record" ]; then
     printf 'commit=%s\n' "$(git rev-parse HEAD)"
     printf 'tree=%s\n' "$tree"
     printf 'steps=%s\n' "${4:-}"
+    case "${5:-none}" in
+      none | '') printf 'full=yes\n' ;;
+      *) printf 'full=no\ncached=%s\n' "$5" ;;
+    esac
   } >"$dir/$tree.$kind"
   echo "check stamp written: $dir/$tree.$kind"
   exit 0
@@ -54,7 +62,8 @@ missing=0
 report() {
   kind="$1"
   if [ -f "$dir/$tree.$kind" ]; then
-    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind"))"
+    cached=$(sed -n 's/^cached=//p' "$dir/$tree.$kind")
+    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached})"
   else
     echo "$kind: NOT checked for tree $tree" >&2
     missing=1

@@ -12,7 +12,9 @@
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
 #
 # Each run prints the Windows computer's free disk space first and warns
-# under 10 GB, then the time of every phase and step.
+# under 10 GB, then the time of every phase and step, and ends with a table
+# of the suites that ran and those taken from the test result cache
+# (scripts/suite-cache.py; NVRVIEW_FULL_CHECK=1 runs everything).
 #
 # Everything lives under %USERPROFILE%\nvrview on the Windows side (the
 # setup script's clone is %USERPROFILE%\nvrview\repo). Each worker name (default
@@ -150,30 +152,86 @@ if [ -n "$package_to" ]; then
   exit 0
 fi
 
+# Test result cache (scripts/suite-cache.py; it lives on this Mac): the
+# suites whose inputs have a clean Windows pass within the last 72 hours are
+# skipped, the rest are passed to the worker, and the worker's
+# "suite-result NAME SECONDS" lines are recorded. Full runs as for the Mac
+# check (NVRVIEW_FULL_CHECK=1, no full Windows pass in NVRVIEW_FULL_MAX_AGE_H
+# hours, NVRVIEW_FULL_EVERY). NVRVIEW_RETRIED=1 (a retry after a known flake)
+# records passes that never let a suite be skipped.
+sc() { python3 -I scripts/suite-cache.py "$@"; }
+logs=$(mktemp -d)
+run_file=""
+finish_cache() {
+  if [ -n "$run_file" ]; then sc finish "$run_file" "$@" || true; run_file=""; fi
+}
+trap 'finish_cache --failed "Windows worker"; rm -rf "$logs"' EXIT
+# The worker's tool versions are part of every Windows fingerprint.
+# shellcheck disable=SC2086,SC2029
+ssh $ssh_opts "$host" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
+  </dev/null | tr -d '\r' >"$logs/tools"
+run_file=$(sc plan windows --tools-file "$logs/tools" ${NVRVIEW_RETRIED:+--retried})
+only="${NVRVIEW_WINDOWS_ONLY:-}"
+# Exported only so that they count as used; they travel in $vars below.
+export NVRVIEW_CLIPPY_CRATES=none NVRVIEW_TEST_CRATES=none NVRVIEW_DOCTEST_CRATES=none
+if [ -z "$only" ]; then
+  NVRVIEW_CLIPPY_CRATES=$(sc crates "$run_file" clippy --list)
+  NVRVIEW_TEST_CRATES=$(sc crates "$run_file" test --list)
+  NVRVIEW_DOCTEST_CRATES=$(sc crates "$run_file" doctest --list)
+fi
+NVRVIEW_SUITES=""
+wanted="shell-tests"
+if [ "$only" != app ]; then wanted="csharp-smoke video-selftest $wanted"; fi
+if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then wanted="$wanted app-debug app-publish app-update"; fi
+for s in $wanted; do
+  if sc want "$run_file" "$s"; then NVRVIEW_SUITES="$NVRVIEW_SUITES${NVRVIEW_SUITES:+,}$s"; fi
+done
+NVRVIEW_SUITES=${NVRVIEW_SUITES:-none}
+
 echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
 # The worker's options travel as variables set in that script.
 vars=""
-for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY NVRVIEW_MIC_TEST; do
+for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY NVRVIEW_MIC_TEST \
+  NVRVIEW_SUITES NVRVIEW_CLIPPY_CRATES NVRVIEW_TEST_CRATES NVRVIEW_DOCTEST_CRATES; do
   eval "val=\${$v:-}"
   case "$val" in
-    *[!A-Za-z0-9_.-]*) echo "$v: letters, digits, '.', '-' and '_' only" >&2; exit 2 ;;
+    *[!A-Za-z0-9_.,-]*) echo "$v: letters, digits, '.', ',', '-' and '_' only" >&2; exit 2 ;;
   esac
   if [ -n "$val" ]; then
     vars="$vars $v=$val"
   fi
 done
 vars="$vars NVRVIEW_TREE=$tree_sent"
-# $gitbash and $vars are meant to expand here, on this side.
+# $gitbash and $vars are meant to expand here, on this side. The output goes
+# to the terminal and to a log, from which the suite results are read.
 # shellcheck disable=SC2086,SC2029
-ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""
+{
+  if ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\"" 2>&1; then
+    echo 0 >"$logs/rc"
+  else
+    echo "$?" >"$logs/rc"
+  fi
+} | tee "$logs/worker.log"
+rc=$(cat "$logs/rc")
+tr -d '\r' <"$logs/worker.log" | sed -n 's/^suite-result \([A-Za-z0-9_.-]*\) \([0-9]*\)$/\1 \2/p' >"$logs/results"
+while read -r name secs; do
+  sc pass "$run_file" "$secs" "$name"
+done <"$logs/results"
+if [ "$rc" != 0 ]; then
+  exit "$rc"
+fi
+partial=""
+if [ "${NVRVIEW_APP_SELFTEST:-}" != 1 ] || [ -n "$only" ]; then partial=--partial; fi
+finish_cache --ok $partial | tee "$logs/summary"
+cached=$(sed -n 's/.*; cached suites: //p' "$logs/summary")
 now=$(date +%s)
-# A full pass (app self-tests included) on a clean tree, i.e. exactly the
-# tree of HEAD, leaves a stamp that scripts/checked.sh --windows and
-# scripts/release.sh look for.
+# A pass (app self-tests included) on a clean tree, i.e. exactly the tree of
+# HEAD, leaves a stamp that scripts/checked.sh --windows looks for; with
+# cached suites it serves merges, and scripts/release.sh needs a full one.
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
   [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
-  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker"
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker" "${cached:-none}"
 else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi

@@ -5,8 +5,10 @@
 #
 #   scripts/merge-branch.sh BRANCH "merge commit message"
 #
-# 1. git merge --no-commit --no-ff BRANCH, then the full Mac check
-#    (NVRVIEW_FULL_CHECK=1 scripts/check.sh) on the merged working tree.
+# 1. git merge --no-commit --no-ff BRANCH, then the Mac check without the
+#    docs-only fast path (NVRVIEW_DOCS_FAST_PATH=0 scripts/check.sh) on the
+#    merged working tree. It may take suites from the test result cache
+#    (scripts/suite-cache.py); the script prints which.
 # 2. The merge is committed and the Mac stamp recorded for the merged tree.
 # 3. Windows: skipped when scripts/stamps-lib.sh (windows_reuse_decision)
 #    says the branch's Windows stamp still covers the result:
@@ -19,12 +21,16 @@
 #              merge base, main's tree before the merge has a Windows result,
 #              and no file was changed on both sides.
 #    A skipped merge leaves a windows-reused stamp (never enough for a
-#    release). Every NVRVIEW_FULL_WINDOWS_EVERY merges (default 5) since the
-#    last real Windows run, the Windows check runs regardless.
+#    release). The Windows check runs regardless when a full Windows run is
+#    due (none passed in NVRVIEW_FULL_MAX_AGE_H hours, default 72; see
+#    scripts/suite-cache.py), and, when NVRVIEW_FULL_WINDOWS_EVERY=N is set
+#    (off by default), every N merges since the last real Windows run.
 #    Otherwise NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh runs, up to 3
 #    tries when the failure looks like a known environmental flake (a
 #    software H.264 decoder fallback in the video self-test, the real
-#    microphone step).
+#    microphone step); passes of a retry are recorded as retried and never
+#    let a suite be skipped later. The script prints which suites, on
+#    either side, came from the test result cache.
 # 4. If a check fails, the merge is undone (merge --abort before the commit,
 #    reset to the old HEAD after it) and the script exits 1.
 #
@@ -41,8 +47,8 @@ die() { echo "merge-branch: $*" >&2; exit 1; }
 [ $# -eq 2 ] || { echo "usage: $0 BRANCH \"merge commit message\"" >&2; exit 2; }
 branch="$1"
 message="$2"
-every="${NVRVIEW_FULL_WINDOWS_EVERY:-5}"
-mac_cmd="${NVRVIEW_MERGE_MAC_CMD:-NVRVIEW_FULL_CHECK=1 scripts/check.sh}"
+every="${NVRVIEW_FULL_WINDOWS_EVERY:-0}"
+mac_cmd="${NVRVIEW_MERGE_MAC_CMD:-NVRVIEW_DOCS_FAST_PATH=0 scripts/check.sh}"
 win_cmd="${NVRVIEW_MERGE_WINDOWS_CMD:-NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh}"
 
 [ -z "$(git status --porcelain)" ] || die "the working tree is not clean"
@@ -72,13 +78,15 @@ if ! sh -c "$mac_cmd" >"$logs/mac.log" 2>&1; then
   die "the Mac check failed; the merge was undone"
 fi
 tail -n 2 "$logs/mac.log"
+mac_cached=$(sed -n 's/.*; cached suites: //p' "$logs/mac.log" | tail -n 1)
+echo "Mac suites taken from the test result cache: ${mac_cached:-none}"
 mac_secs=$(($(date +%s) - mac_start))
 [ -z "$(git status --porcelain --untracked-files=all | grep -v '^[MADRC] ')" ] ||
   { git merge --abort 2>/dev/null || git reset -q --hard "$pre"; die "the Mac check changed files; the merge was undone"; }
 
 git commit -q -m "$message" || { git merge --abort 2>/dev/null || true; die "the commit failed (hook?); the merge was undone"; }
 [ "$(git rev-parse 'HEAD^{tree}')" = "$merged" ] || die "the committed tree differs from the checked tree"
-scripts/checked.sh --record mac "$mac_secs" "full check on the merge of $branch" >/dev/null
+scripts/checked.sh --record mac "$mac_secs" "check on the merge of $branch" "${mac_cached:-none}" >/dev/null
 
 undo() {
   if [ "$(git rev-parse HEAD)" = "$merge_commit" ] && [ -z "$(git status --porcelain)" ]; then
@@ -95,31 +103,41 @@ count=0
 case "$count" in '' | *[!0-9]*) count=0 ;; esac
 
 echo "== Windows decision"
-force=0
-if [ "$((count + 1))" -ge "$every" ]; then force=1; fi
+force=""
+if [ "$every" -gt 0 ] && [ "$((count + 1))" -ge "$every" ]; then
+  force="$count merges since the last real Windows run; every $every merges one runs"
+elif due=$(python3 -I scripts/suite-cache.py full-due windows); then
+  force="a full Windows run is due ($due)"
+fi
 if reason=$(windows_reuse_decision "$tip" "$pre" "$merged"); then
   skip=1
 else
   skip=0
 fi
 echo "$reason"
-if [ "$skip" = 1 ] && [ "$force" = 1 ]; then
-  echo "run anyway: $count merges since the last real Windows run; every $every merges one runs"
+if [ "$skip" = 1 ] && [ -n "$force" ]; then
+  echo "run anyway: $force"
   skip=0
 fi
 
 if [ "$skip" = 1 ]; then
   scripts/checked.sh --record windows-reused 0 "no Windows run: $reason" >/dev/null
   echo "$((count + 1))" >"$counter"
-  echo "Windows check skipped ($((count + 1)) of $every merges since the last real run)."
+  echo "Windows check skipped ($((count + 1)) merges since the last real run)."
+  branch_cached=$(stamp_cached windows "$(git rev-parse "$tip^{tree}")")
+  echo "Windows suites the branch's stamp took from the test result cache: ${branch_cached:-none}"
 else
   : "${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
   windows_lock
   try=1
   while :; do
     echo "== Windows check on the merged tree (try $try of 3)"
-    if sh -c "$win_cmd" >"$logs/windows.log" 2>&1; then
+    # A retry after a known flake: its passes never let a suite be skipped.
+    retried=""
+    if [ "$try" -gt 1 ]; then retried=1; fi
+    if NVRVIEW_RETRIED=$retried sh -c "$win_cmd" >"$logs/windows.log" 2>&1; then
       tail -n 3 "$logs/windows.log"
+      echo "Windows suites taken from the test result cache: $(sed -n 's/.*; cached suites: //p' "$logs/windows.log" | tail -n 1)"
       break
     fi
     tail -n 25 "$logs/windows.log" >&2

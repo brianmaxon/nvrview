@@ -472,7 +472,8 @@ files are the tested ones. After a version bump that changes only `VERSION`,
 (packages are still built and signed fresh); `--full-check` runs both checks
 fresh instead. A merge that skipped its Windows run
 (`scripts/merge-branch.sh`) leaves a different stamp that a release never
-accepts.
+accepts, and so does a check that took suites from the test result cache
+(README, "Test result cache"): release checks are always full runs.
 
 `--skip-windows` builds only the macOS package; the output says clearly that
 it is macOS only. The script never tags, pushes, or uploads.

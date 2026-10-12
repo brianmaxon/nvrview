@@ -135,6 +135,42 @@ Environment variables skip the slow or optional steps:
 `NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
 every push) and `NVRVIEW_BROWSER_TESTS=1` the browser playback check. `scripts/clean-docker.sh` removes what the Docker steps leave behind.
 
+### Test result cache
+
+`scripts/check.sh` and `scripts/windows-check.sh` skip a test suite whose
+inputs have not changed since a clean pass on the same platform in the last
+72 hours, and print it as `cached pass <suite> (<age>, key <short>)`; a table
+at the end shows each suite as ran or cached, with its time.
+`scripts/suite-cache.py` holds the rules:
+
+- **Inputs.** A suite's fingerprint covers its files as committed or staged
+  (unstaged edits and untracked files outside its inputs do not matter), the
+  tool versions, and the suite name. Each Rust crate's clippy, tests, and
+  doctests cover the crate, every workspace crate it depends on (from
+  `cargo metadata`; dev-dependencies count for the crate itself),
+  `Cargo.lock`, the workspace and Cargo settings, and `fixtures/synthetic/`.
+  Changing one crate reruns that crate and the crates above it, with
+  `-p` arguments. The C header and C smoke tests cover the `viewer-ffi` and
+  `mock-nvr` crates; the Swift tests and demo self-tests `apps/macos/`, the C
+  header, and the fixtures; the C# and Windows app suites `apps/windows/`, the
+  core crates they load, and the fixtures. Sanitization, self-test parity,
+  the secret scan, and `cargo fmt` always run.
+- **Never cached.** A suite with an unstaged or untracked input runs and is
+  not recorded. Failures are never recorded. A pass from a Windows run retried
+  after a known flake is recorded as retried and never skips a suite.
+- **Full runs.** Nothing is skipped with `NVRVIEW_FULL_CHECK=1`, in the release
+  scripts (`scripts/release.sh --full-check`, `scripts/release-check.sh`),
+  and when no full run on that platform passed in the last 72 hours
+  (`NVRVIEW_FULL_MAX_AGE_H`; `NVRVIEW_CACHE_MAX_AGE_H` sets how long a pass
+  stays valid). `NVRVIEW_FULL_EVERY=N` also makes every Nth run full.
+- **Stamps.** A check stamp from a run with cached suites says so and serves
+  `scripts/merge-branch.sh`, which prints the cached suites; a release needs a
+  full stamp.
+- **Where.** The cache lives in the git directory
+  (`.git/nvrview-checks/suite-cache/`), shared by all worktrees, and is
+  pruned after 14 days. On Windows the Mac decides which suites to run and
+  records the worker's results. `scripts/test-suite-cache.sh` tests the rules.
+
 ## Versions
 
 The apps share one version, the `VERSION` file at the repository root. The

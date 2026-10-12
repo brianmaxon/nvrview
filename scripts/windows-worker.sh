@@ -38,6 +38,38 @@ dotnet --version
 
 only="${NVRVIEW_WINDOWS_ONLY:-}"
 
+# Which suites to run, decided on the Mac by the test result cache
+# (scripts/suite-cache.py; the cache lives there): NVRVIEW_SUITES is a comma
+# list of suites (csharp-smoke, video-selftest, shell-tests, app-debug,
+# app-publish, app-update; "none" for nothing), and NVRVIEW_CLIPPY_CRATES,
+# NVRVIEW_TEST_CRATES, NVRVIEW_DOCTEST_CRATES say which crates the Rust steps
+# cover (all, none, or a comma list). Unset means everything. Each passing
+# suite prints "suite-result NAME SECONDS" for the Mac to record.
+suites="${NVRVIEW_SUITES:-all}"
+want() {
+  [ "$suites" = all ] && return 0
+  case ",$suites," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+crate_args() { # all | none | a,b
+  case "${1:-all}" in
+    all) echo --workspace ;;
+    none) ;;
+    *) echo "-p ${1//,/ -p }" ;;
+  esac
+}
+report() { # SUITE START
+  echo "suite-result $1 $(($(date +%s) - $2))"
+}
+app_tests=0
+if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then app_tests=1; fi
+need_lib=0
+if { [ "$only" != app ] && { want csharp-smoke || want video-selftest; }; } ||
+  { [ "$app_tests" = 1 ] && { want app-debug || want app-publish || want app-update; }; } ||
+  [ "$app_tests" = 0 ]; then
+  need_lib=1
+fi
+
 # Compile cache shared by every worker on this computer (each worker has its
 # own target folder; sccache keys on each crate's exact inputs, so a second
 # worker on the same tree builds mostly from the cache). Without sccache the
@@ -68,32 +100,55 @@ export NVRVIEW_RELEASE_PACKAGES="-p viewer-ffi -p mock-nvr"
 # steps that run the results come after, when these builds are already done.
 prebuild_log=target/prebuild.log
 prebuild() {
-  # shellcheck disable=SC2086 # a list of cargo arguments
-  cargo build --release $NVRVIEW_RELEASE_PACKAGES
-  if [ "$only" != app ]; then
-    NVRVIEW_BUILD_ONLY=1 scripts/csharp-smoke.sh
-    NVRVIEW_BUILD_ONLY=1 scripts/csharp-video-selftest.sh
+  if [ "$need_lib" = 1 ]; then
+    # shellcheck disable=SC2086 # a list of cargo arguments
+    cargo build --release $NVRVIEW_RELEASE_PACKAGES
   fi
-  dotnet build apps/windows/NvrView.Shell.Tests -c Release --artifacts-path target/dotnet -v quiet -clp:ErrorsOnly -nologo
-  scripts/windows-app.sh build
+  if [ "$only" != app ]; then
+    if want csharp-smoke; then NVRVIEW_BUILD_ONLY=1 scripts/csharp-smoke.sh; fi
+    if want video-selftest; then NVRVIEW_BUILD_ONLY=1 scripts/csharp-video-selftest.sh; fi
+  fi
+  if want shell-tests; then
+    dotnet build apps/windows/NvrView.Shell.Tests -c Release --artifacts-path target/dotnet -v quiet -clp:ErrorsOnly -nologo
+  fi
+  # Without the app tests the app build is itself the check.
+  if [ "$app_tests" = 0 ] || want app-debug; then
+    scripts/windows-app.sh build
+  fi
 }
 prebuild >"$prebuild_log" 2>&1 &
 prebuild_pid=$!
 trap 'kill "$prebuild_pid" 2>/dev/null || true' EXIT
 
 if [ -z "$only" ]; then
-  step "clippy (release library and C# builds run in the background)"
-  cargo clippy --workspace --all-targets -- -D warnings
+  # shellcheck disable=SC2086 # lists of cargo arguments
+  {
+    args=$(crate_args "${NVRVIEW_CLIPPY_CRATES:-all}")
+    if [ -n "$args" ]; then
+      step "clippy ($args; release library and C# builds run in the background)"
+      cargo clippy $args --all-targets -- -D warnings
+      report clippy "$step_start"
+    fi
 
-  step "tests (build)"
-  cargo nextest run --workspace --no-run
+    args=$(crate_args "${NVRVIEW_TEST_CRATES:-all}")
+    if [ -n "$args" ]; then
+      step "tests (build: $args)"
+      tests_start=$step_start
+      cargo nextest run $args --no-run
 
-  # cargo-nextest runs each test with the time limit in .config/nextest.toml
-  # and names a test that hangs; it does not run doctests, cargo test does.
-  step "tests (run, per-test time limit)"
-  cargo nextest run --workspace
-  step "doctests"
-  cargo test --workspace --doc
+      # cargo-nextest runs each test with the time limit in .config/nextest.toml
+      # and names a test that hangs; it does not run doctests, cargo test does.
+      step "tests (run, per-test time limit)"
+      cargo nextest run $args
+      report test "$tests_start"
+    fi
+    args=$(crate_args "${NVRVIEW_DOCTEST_CRATES:-all}")
+    if [ -n "$args" ]; then
+      step "doctests ($args)"
+      cargo test $args --doc
+      report doctest "$step_start"
+    fi
+  }
 fi
 
 step "wait for the background builds"
@@ -104,20 +159,29 @@ if ! wait "$prebuild_pid"; then
 fi
 trap - EXIT
 cat "$prebuild_log"
-ls -l target/release/nvrview.dll target/release/nvrview.dll.lib
+if [ "$need_lib" = 1 ]; then ls -l target/release/nvrview.dll target/release/nvrview.dll.lib; fi
 
 if [ "$only" != app ]; then
-  step "C# smoke test"
-  scripts/csharp-smoke.sh
+  if want csharp-smoke; then
+    step "C# smoke test"
+    scripts/csharp-smoke.sh
+    report csharp-smoke "$step_start"
+  fi
 
-  step "Windows video self-test (GPU, then WARP)"
-  scripts/csharp-video-selftest.sh
+  if want video-selftest; then
+    step "Windows video self-test (GPU, then WARP)"
+    scripts/csharp-video-selftest.sh
+    report video-selftest "$step_start"
+  fi
 fi
 
-step "C# shell tests (layouts, leases, sidebar reveal, window restore)"
-if ! timeout "${NVRVIEW_CSHARP_TEST_TIMEOUT:-300}" dotnet target/dotnet/bin/NvrView.Shell.Tests/release/NvrView.Shell.Tests.dll; then
-  echo "NvrView.Shell.Tests failed or did not finish within ${NVRVIEW_CSHARP_TEST_TIMEOUT:-300} s (timeout exits 124)" >&2
-  exit 1
+if want shell-tests; then
+  step "C# shell tests (layouts, leases, sidebar reveal, window restore)"
+  if ! timeout "${NVRVIEW_CSHARP_TEST_TIMEOUT:-300}" dotnet target/dotnet/bin/NvrView.Shell.Tests/release/NvrView.Shell.Tests.dll; then
+    echo "NvrView.Shell.Tests failed or did not finish within ${NVRVIEW_CSHARP_TEST_TIMEOUT:-300} s (timeout exits 124)" >&2
+    exit 1
+  fi
+  report shell-tests "$step_start"
 fi
 
 # The real-microphone step needs a microphone that hears sound; an unattended
@@ -125,28 +189,44 @@ fi
 mic_test=
 if [ "${NVRVIEW_MIC_TEST:-0}" = 1 ]; then mic_test=--mic-test; else echo "real-microphone step not run (NVRVIEW_MIC_TEST=1 runs it)"; fi
 
-if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
-  step "Windows app plain start, first run (interactive session)"
-  scripts/windows-app.sh startup
+if [ "$app_tests" = 1 ]; then
+  if want app-debug; then
+    step "Windows app plain start, first run (interactive session)"
+    app_start=$step_start
+    scripts/windows-app.sh startup
 
-  step "Windows app self-test (interactive session)"
-  scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
+    step "Windows app self-test (interactive session)"
+    scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
+    report app-debug "$app_start"
+  fi
 
-  step "Windows app, trimmed release build (publish)"
-  scripts/windows-app.sh publish
+  if want app-publish || want app-update; then
+    step "Windows app, trimmed release build (publish)"
+    app_start=$step_start
+    scripts/windows-app.sh publish
+  fi
 
-  step "Windows app plain start, trimmed release build (interactive session)"
-  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
+  if want app-publish; then
+    step "Windows app plain start, trimmed release build (interactive session)"
+    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
 
-  step "Windows app self-test, trimmed release build (interactive session)"
-  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
+    step "Windows app self-test, trimmed release build (interactive session)"
+    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
+    report app-publish "$app_start"
+  fi
 
-  step "Windows side-by-side update, end to end, trimmed release build (interactive session)"
-  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh update
+  if want app-update; then
+    step "Windows side-by-side update, end to end, trimmed release build (interactive session)"
+    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh update
+    report app-update "$step_start"
+  fi
 
   # Everything on the publish output passed: a later `windows-check.sh
-  # --package` for the same tree ships exactly these files.
-  scripts/windows-app.sh mark-tested
+  # --package` for the same tree ships exactly these files. (When a publish
+  # suite was cached, the package step builds the publish output afresh.)
+  if want app-publish && want app-update; then
+    scripts/windows-app.sh mark-tested
+  fi
 fi
 
 now=$(date +%s)

@@ -10,6 +10,9 @@
 #     scripts/release-check.sh
 set -eu
 cd "$(git rev-parse --show-toplevel)"
+# Release checks are full runs: nothing comes from the test result cache
+# (scripts/suite-cache.py), so the stamps they write count for a release.
+export NVRVIEW_FULL_CHECK=1
 
 : "${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
 [ -z "$(git status --porcelain)" ] || echo "release-check: the working tree is not clean, so no stamps will be written" >&2
