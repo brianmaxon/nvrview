@@ -190,6 +190,20 @@ pub(crate) enum Cmd {
     DeviceGone(String, oneshot::Sender<()>),
     Close(oneshot::Sender<()>),
     Status(oneshot::Sender<Value>),
+    /// The picture each tile shows (stills).
+    Shown(oneshot::Sender<Vec<ShownTile>>),
+}
+
+/// What a tile shows, for a still: its generation and, once the app has
+/// answered a picture of it as shown, that picture's recorded time
+/// (device-local ms).
+#[derive(Clone, Debug)]
+pub(crate) struct ShownTile {
+    pub tile: u64,
+    pub device: String,
+    pub camera: DeviceCamera,
+    pub generation: u32,
+    pub position_ms: Option<i64>,
 }
 
 /// Reports from the playback's own tasks.
@@ -716,6 +730,9 @@ impl Engine {
             }
             Cmd::Status(ack) => {
                 let _ = ack.send(self.status());
+            }
+            Cmd::Shown(ack) => {
+                let _ = ack.send(self.shown());
             }
             Cmd::Close(_) => unreachable!("handled by the loop"),
         }
@@ -1508,6 +1525,28 @@ impl Engine {
                 Priority::State,
             );
         }
+    }
+
+    /// Each tile's newest answered picture of the generation it shows: a
+    /// generation not yet shown (a seek in progress) has none.
+    fn shown(&self) -> Vec<ShownTile> {
+        self.cams
+            .iter()
+            .map(|c| {
+                let pts = c
+                    .feed
+                    .as_ref()
+                    .filter(|f| f.shown())
+                    .and_then(FeedTx::decoded);
+                ShownTile {
+                    tile: c.tile,
+                    device: c.device.clone(),
+                    camera: c.camera,
+                    generation: c.generation,
+                    position_ms: pts.and_then(|p| lock(&c.buf).recorded_ms(p)),
+                }
+            })
+            .collect()
     }
 
     fn status(&self) -> Value {
