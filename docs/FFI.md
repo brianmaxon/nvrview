@@ -908,10 +908,9 @@ contract (sections 1 to 5, 8, 9, and 13, with its decisions and
 clarifications); the core side is `viewer_core::recordings_owner` (C11,
 C13, C15). Recorded playback (section 6, F2) is minor 6 ("Recorded
 playback (minor 6)"); edit lists and the rest of
-sound (sections 2a and 7, F3: `nv_sound_watch`, `nv_recordings_loudness`,
-`nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
-`nv_tile_loudness`), and export (section 7a, F4) come later; an app checks
-the minor before each group.
+sound (sections 2a and 7, F3) are minor 8 ("Edit lists and sound (minor
+8)"); export (section 7a, F4) comes later; an app checks the minor before
+each group.
 
 ```c
 NvStatus nv_recordings_configure(NvCore *core, const char *json);
@@ -1020,6 +1019,67 @@ The C smoke test (`scripts/test-c-ffi.sh`, also under AddressSanitizer)
 goes through configure, enable, want, the queries, an edit, a thumbnail from
 pending to ready and back as an image, a download to the end, a lock that
 returns it, and the Trash, against mock-nvr with two days of recordings.
+
+## Edit lists and sound (minor 8)
+
+Slice F3 of [MILESTONE-P.md](MILESTONE-P.md): edit decision lists
+([FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 7) and the rest of sound
+(section 2a, after `nv_sound_configure`). The core side is
+`viewer_core::recordings_owner` (`edit_compute` over `recordings::edl`;
+`sound_watch`, `recordings_loudness`, `sound_labels_put`,
+`sound_analyze_day`, `sound_analyze_cancel`; C8 and C12). The rules of both
+sections and their C8 and C12 clarifications apply; "Clarifications from the
+implementation (F3)" there lists what wrapping them settled.
+
+```c
+NvStatus nv_edit_compute(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+NvStatus nv_sound_watch(NvCore *core, const char *camera, bool enabled);
+NvStatus nv_recordings_loudness(NvCore *core, const char *query, char *out, size_t cap,
+                                size_t *len);
+NvStatus nv_sound_labels_put(NvCore *core, const char *json);
+NvStatus nv_sound_analyze_day(NvCore *core, const char *json, char *out, size_t cap, size_t *len);
+NvStatus nv_sound_analyze_cancel(NvCore *core, uint64_t request);
+NvStatus nv_tile_loudness(NvCore *core, uint64_t tile, uint8_t *peak, uint8_t *rms, size_t cap,
+                          int64_t *start_s, size_t *len);
+```
+
+- **Status codes, threads, JSON in and out** are those of "Recordings (minor
+  5)" (`RecError` maps one to one; out-buffer rules; never inside a
+  callback). `nv_tile_loudness` is the one that is not an answer in JSON:
+  it takes two brief locks and may be called from any thread outside
+  callbacks.
+- **`nv_edit_compute`** takes `{"kind": "follow" | "grid", "download":
+  "<id>", ...}` and answers the plan of section 7 (`version` 1). The
+  download must have finished; cameras whose job is not done or whose file
+  cannot be read are left out, and `NV_ERR_INVALID_ARGUMENT` says no camera
+  has a finished file or the plan has nothing to show (no events in the
+  files' footage). `NV_ERR_UNKNOWN_ID` is an unknown download or one whose
+  incident no longer exists. **`in_ms`, `out_ms`, and the `trim` kind answer
+  `NV_ERR_UNSUPPORTED`** in this minor: they belong to export (F4), which
+  adds them to this function without changing its declaration. `dest` and
+  `share_safe` are likewise F4's and are ignored here. The call reads each
+  finished file's `moov` box (bounded) on the caller's thread, so it takes
+  a few milliseconds per file, not a network round trip.
+- **Sound** calls are those of section 2a: `nv_sound_watch` (at most 64
+  cameras; `sound_watch` events), `nv_recordings_loudness` (lanes in
+  dBFS, `null` where no audio was analyzed), `nv_sound_labels_put` (answers
+  nothing; the reserved analyzer `pattern-v1` is refused),
+  `nv_sound_analyze_day` and `nv_sound_analyze_cancel` (`sound_analyze`
+  events; without a source for the day's audio a request fails with
+  `no_source`), and `nv_tile_loudness` (a live tile's newest seconds, one
+  byte per value: 0 no audio, 1 to 128 is -127 to 0 dBFS).
+
+Events (FFI-RECORDINGS.md, sections 2a and 8; ignore unknown types and fields):
+
+```json
+{"type":"sound_watch","camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"state":"watching"}
+{"type":"sound_analyze","request":4,"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"day":1791590400,"state":"done","seconds":86000,"labels":3}
+```
+
+`state` of `sound_watch` is `watching`, `stopped`, or `refused` (`reason`
+`no_audio`, `device_closed`, `sound_off`); of `sound_analyze` `queued`,
+`running`, `done`, `failed` (`reason` `no_source`, `no_audio`,
+`source_unavailable`, `not_enabled`, `index`, `internal`), or `canceled`.
 
 ## Recorded playback (minor 6)
 
@@ -1143,10 +1203,11 @@ symbol at all, so a bound app checks first):
 | 5 | recordings, part 1 (see "Recordings"): `nv_recordings_*`, `nv_incident*`, `nv_camera_groups_*`, `nv_thumbnail_*`, `nv_download*`, `nv_sound_configure`, `NvThumbKind`, `NvThumbnail`, `NV_ERR_UNSUPPORTED`, `NV_ERR_NOT_CONFIGURED`, `NV_PENDING`, and the recordings events; `device_info.recordings` |
 | 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
 | 7 | a month's calendar alone: `months` in `nv_recordings_want` and the `recordings_month_failed` event (see "Recordings"); no declaration changed |
+| 8 | edit lists and sound (see "Edit lists and sound (minor 8)"): `nv_edit_compute`, `nv_sound_watch`, `nv_recordings_loudness`, `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`, `nv_tile_loudness`, and the `sound_watch` and `sound_analyze` events |
 
 Later minors are taken in the order the additions land; this table is the
-source of truth. Edit lists and export (F3, F4) and stepping a playback
-(`nv_playback_step`) take the next free minors. Capture ("Capture") and camera motion ("Camera motion
+source of truth. Export (F4) and stepping a playback (`nv_playback_step`)
+take the next free minors. Capture ("Capture") and camera motion ("Camera motion
 (PTZ)") are proposed and take the next free minors when they land, each its
 own.
 
