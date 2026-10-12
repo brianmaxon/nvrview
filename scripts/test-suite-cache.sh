@@ -161,6 +161,73 @@ cd "$r"
 git merge -q other
 same "...and the main checkout then reuses the worktree's passes" "$(check)" "cached test=none swift=cached"
 
+# The Windows app self-test is cached by area: the areas whose inputs changed
+# rerun (with the startup smoke, which takes every change under apps/windows),
+# and a change to shared code reruns them all.
+mkdir -p apps/windows/NvrView.App apps/windows/NvrView.Shell apps/windows/NvrView.Demo
+for f in apps/windows/NvrView.App/SelfTest.cs apps/windows/NvrView.App/SelfTest.Recordings.cs \
+  apps/windows/NvrView.App/SelfTest.Ptz.cs apps/windows/NvrView.App/RecordingsWindow.cs \
+  apps/windows/NvrView.App/PtzControls.cs apps/windows/NvrView.App/StageView.cs \
+  apps/windows/NvrView.Shell/Recordings.cs apps/windows/NvrView.Demo/Program.cs \
+  scripts/windows-app.sh scripts/windows-selftest-areas.txt; do
+  echo "// $f" >"$f"
+done
+git add -A
+git commit -q -m "windows app files"
+# The areas to run, in the debug build and in the publish build (one check
+# per prefix: "areas <debug> | <publish>"); all pass.
+wcheck() {
+  tick 60
+  wrun=$(sc plan windows 2>/dev/null)
+  out=""
+  for prefix in app-debug app-publish; do
+    todo=""
+    for a in $(sc areas windows); do
+      if sc want "$wrun" "$prefix.$a" >/dev/null; then todo="$todo${todo:+,}$a"; sc pass "$wrun" 1 "$prefix.$a"; fi
+    done
+    out="$out${out:+ | }${todo:--}"
+  done
+  sc finish "$wrun" --ok >"$work/wtable"
+  echo "$out"
+}
+all_areas="startup,viewer,tiles,layouts,header,settings,calls,recordings,capture,ptz"
+same "app areas: the first run runs every area, debug and publish" "$(wcheck)" "$all_areas | $all_areas"
+same "app areas: unchanged, all cached" "$(wcheck)" "- | -"
+echo "// recordings window 2" >>apps/windows/NvrView.App/RecordingsWindow.cs
+git add -A
+git commit -q -m "recordings window"
+same "app areas: a recordings view file reruns recordings and startup only" "$(wcheck)" "startup,recordings | startup,recordings"
+commit_file apps/windows/NvrView.Shell/Recordings.cs "// shell recordings 2"
+same "app areas: so does a recordings shell file" "$(wcheck)" "startup,recordings | startup,recordings"
+commit_file apps/windows/NvrView.App/SelfTest.Recordings.cs "// self-test recordings 2"
+same "app areas: so does the recordings self-test file" "$(wcheck)" "startup,recordings | startup,recordings"
+commit_file apps/windows/NvrView.App/PtzControls.cs "// ptz 2"
+same "app areas: a PTZ file reruns ptz and startup" "$(wcheck)" "startup,ptz | startup,ptz"
+commit_file apps/windows/NvrView.Demo/Program.cs "// demo 2"
+same "app areas: a project that is not part of the app reruns nothing" "$(wcheck)" "- | -"
+commit_file apps/windows/NvrView.App/StageView.cs "// shared stage 2"
+same "app areas: a shared app file reruns every area" "$(wcheck)" "$all_areas | $all_areas"
+commit_file apps/windows/NvrView.App/SelfTest.cs "// shared self-test 2"
+same "app areas: the shared self-test file reruns every area" "$(wcheck)" "$all_areas | $all_areas"
+commit_file scripts/windows-selftest-areas.txt "# table 2"
+same "app areas: the area table reruns every area" "$(wcheck)" "$all_areas | $all_areas"
+commit_file fixtures/synthetic/clip.h264 "frame 2"
+same "app areas: the fixtures rerun every area" "$(wcheck)" "$all_areas | $all_areas"
+echo "// local edit" >>apps/windows/NvrView.App/RecordingsWindow.cs
+same "app areas: an unstaged edit of a recordings file runs recordings and startup" "$(wcheck)" "startup,recordings | startup,recordings"
+same "app areas: ...every time, as it is never recorded" "$(wcheck)" "startup,recordings | startup,recordings"
+git checkout -q apps/windows/NvrView.App/RecordingsWindow.cs
+same "app areas: an area can pass alone: the others stay cached" "$(wcheck)" "- | -"
+# One area failing leaves its entry unrecorded while the others are kept.
+echo "// ptz 3" >>apps/windows/NvrView.App/PtzControls.cs
+git add -A
+git commit -q -m "ptz 3"
+wrun=$(sc plan windows 2>/dev/null)
+sc want "$wrun" app-debug.ptz >/dev/null && sc want "$wrun" app-debug.startup >/dev/null && sc pass "$wrun" 1 app-debug.startup
+sc finish "$wrun" --failed app-debug.ptz >/dev/null
+same "app areas: a failed area is run again, a passed one is not" \
+  "$(tick 60; wrun=$(sc plan windows 2>/dev/null); o=""; for a in $(sc areas windows); do sc want "$wrun" "app-debug.$a" >/dev/null && o="$o${o:+,}$a"; done; sc finish "$wrun" --ok >/dev/null; echo "$o")" "ptz"
+
 # The store stays bounded: entries older than 14 days are pruned.
 entries=$(git rev-parse --git-common-dir)/nvrview-checks/suite-cache/entries
 old="$entries/mac/test.zz/0000.json"

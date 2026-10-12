@@ -182,7 +182,14 @@ fi
 NVRVIEW_SUITES=""
 wanted="shell-tests"
 if [ "$only" != app ]; then wanted="csharp-smoke video-selftest $wanted"; fi
-if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then wanted="$wanted app-debug app-publish app-update"; fi
+if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then
+  # The app self-test is cached by area (scripts/windows-selftest-areas.txt), for the debug and the publish build.
+  # NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no stamp, not a full pass).
+  for a in $(sc areas windows); do
+    case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a app-publish.$a" ;; esac
+  done
+  wanted="$wanted app-update"
+fi
 for s in $wanted; do
   if sc want "$run_file" "$s"; then NVRVIEW_SUITES="$NVRVIEW_SUITES${NVRVIEW_SUITES:+,}$s"; fi
 done
@@ -222,14 +229,14 @@ if [ "$rc" != 0 ]; then
   exit "$rc"
 fi
 partial=""
-if [ "${NVRVIEW_APP_SELFTEST:-}" != 1 ] || [ -n "$only" ]; then partial=--partial; fi
+if [ "${NVRVIEW_APP_SELFTEST:-}" != 1 ] || [ -n "$only" ] || [ -n "${NVRVIEW_APP_AREAS:-}" ]; then partial=--partial; fi
 finish_cache --ok $partial | tee "$logs/summary"
 cached=$(sed -n 's/.*; cached suites: //p' "$logs/summary")
 now=$(date +%s)
 # A pass (app self-tests included) on a clean tree, i.e. exactly the tree of
 # HEAD, leaves a stamp that scripts/checked.sh --windows looks for; with
 # cached suites it serves merges, and scripts/release.sh needs a full one.
-if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
+if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] && [ -z "${NVRVIEW_APP_AREAS:-}" ] &&
   [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
   scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker" "${cached:-none}"
 else
