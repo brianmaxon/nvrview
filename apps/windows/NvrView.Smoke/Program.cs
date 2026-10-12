@@ -4,7 +4,8 @@
 // generation 0 inline and later generations from a decoder thread), switches
 // it to main and back, renders and taps its audio, reads its level, round-
 // trips layouts and device keys (also across a second core on the same data
-// directory), and checks the guarantees of docs/FFI.md along the way.
+// directory), goes through the recordings calls (minor 5) against the mock's
+// recordings, and checks the guarantees of docs/FFI.md along the way.
 //
 // usage: NvrView.Smoke [--mock-nvr EXE --fixtures DIR | --host H --port N]
 //                      [--layout FILE] [--header FILE] [--lib PATH]
@@ -439,6 +440,11 @@ internal sealed class FakeApp : NvCoreCallbacks
                 {
                     Volatile.Write(ref KeyFromEvent, key.GetString());
                 }
+                if (!e.TryGetProperty("recordings", out JsonElement rec) || !rec.GetProperty("search").GetBoolean() ||
+                    !rec.GetProperty("download").GetBoolean() || !rec.GetProperty("thumbnails").GetBoolean())
+                {
+                    Problem("device_info without the recordings flags");
+                }
                 break;
             case "tile_tier":
                 lock (_gate)
@@ -630,7 +636,7 @@ internal sealed class Smoke(Options options)
         };
         foreach (string a in new[]
         {
-            "--port", "0", "--channels", "2",
+            "--port", "0", "--channels", "2", "--recordings", "2",
             "--fixture", Path.Combine(fixtures, "h264-basic.h264"),
             "--audio", Path.Combine(fixtures, "aac-tone.aac"),
         })
@@ -746,6 +752,7 @@ internal sealed class Smoke(Options options)
         SwitchTier(core, tile, NvStreamTier.Sub, "sub", 2);
 
         string key = CheckLayouts(core, device, dataDir);
+        CheckRecordings(core, key, dataDir);
         CheckDiscovery(core);
         CheckUpdates(core);
         CheckGrid();
@@ -1028,6 +1035,122 @@ internal sealed class Smoke(Options options)
             Problem("the deleted layout is still listed");
         }
         return key;
+    }
+
+    // Recordings (minor 5) through the bindings, against mock-nvr's two days
+    // of recordings: configuration, yesterday's index, an incident edited and
+    // locked, a thumbnail from pending to ready, a download to the end, and
+    // the Recycle Bin hand-off, with the events of each step.
+    private void CheckRecordings(NvCore core, string key, string dataDir)
+    {
+        IRecordings rec = core;
+        string downloads = Path.Combine(dataDir, "downloads");
+        string channels = """{"channels":[{"channel":0},{"channel":1}]}""";
+        if (StatusOf(() => rec.RecordingsEnable(key, channels)) != NvStatus.NotConfigured)
+        {
+            Problem("nv_recordings_enable before nv_recordings_configure");
+        }
+        rec.RecordingsConfigure(JsonSerializer.Serialize(new Dictionary<string, object> { ["downloads_dir"] = downloads }));
+        rec.RecordingsEnable(key, channels);
+        rec.SoundConfigure("""{"alarms":true}""");
+
+        long day = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 86400 - 1) * 86400;
+        string cams = $$"""[{"device":"{{key}}","channel":0},{"device":"{{key}}","channel":1}]""";
+        rec.RecordingsWant($$"""{"cameras":{{cams}},"days":[{{day}}]}""");
+        string query = $$"""{"start":{{day}},"end":{{day + 86399}}}""";
+        JsonElement firstEvent = default;
+        if (!WaitUntil(() =>
+            {
+                using JsonDocument doc = JsonDocument.Parse(rec.RecordingsEvents(query));
+                JsonElement list = doc.RootElement.GetProperty("events");
+                if (list.GetArrayLength() == 0 || _app.EventCount("recordings_changed") == 0)
+                {
+                    return false;
+                }
+                firstEvent = list[0].Clone();
+                return true;
+            }, 20_000))
+        {
+            Problem("no events indexed, or no recordings_changed");
+            return;
+        }
+        if (!rec.RecordingsCalendar(query).Contains("\"days\"", StringComparison.Ordinal) ||
+            !rec.RecordingsSpans(query).Contains("\"causes\"", StringComparison.Ordinal) ||
+            !rec.RecordingsStatus().Contains(key, StringComparison.Ordinal))
+        {
+            Problem("calendar, spans, or status");
+        }
+        rec.RecordingsHoldToday(1, $$"""{"cameras":{{cams}}}""");
+        rec.RecordingsHoldToday(1, null);
+
+        string incident;
+        using (JsonDocument doc = JsonDocument.Parse(rec.IncidentsGet(query)))
+        {
+            incident = doc.RootElement.GetProperty("incidents")[0].GetProperty("key").GetString()!;
+        }
+        if (StatusOf(() => rec.IncidentGet("i-unknown")) != NvStatus.UnknownId ||
+            !rec.IncidentEdit($$"""{"op":"rename","key":"{{incident}}","name":"Delivery"}""").Contains(incident, StringComparison.Ordinal))
+        {
+            Problem("nv_incident_get or nv_incident_edit");
+        }
+        rec.CameraGroupsPut("""{"groups":[]}""");
+        _ = rec.CameraGroupsGet();
+
+        // A thumbnail of the first event: pending, then ready.
+        string thumb = $$"""{"camera":{{firstEvent.GetProperty("camera").GetRawText()}},"tier":"sub","start":{{firstEvent.GetProperty("start").GetInt64()}},"end":{{firstEvent.GetProperty("end").GetInt64()}}}""";
+        if (rec.ThumbnailGet(thumb) is not null)
+        {
+            Problem("a thumbnail not cached yet was not pending");
+        }
+        RecordedThumbnail? t = null;
+        if (!WaitUntil(() => _app.EventCount("thumbnail") > 0 && (t = rec.ThumbnailGet(thumb)) is not null, 20_000) ||
+            t!.Kind != NvThumbKind.H264Keyframe || t.Data.Length < 5 || t.Data[0] != 0 || t.Data[1] != 0)
+        {
+            Problem("thumbnail from pending to ready");
+        }
+        var image = new RecordedThumbnail(NvThumbKind.Image, 64, 36, 0, [0xff, 0xd8, 0xff, 0xd9]);
+        rec.ThumbnailPut(thumb, image);
+        if (rec.ThumbnailGet(thumb) is not { Kind: NvThumbKind.Image } back || !back.Data.SequenceEqual(image.Data))
+        {
+            Problem("nv_thumbnail_put");
+        }
+        rec.ThumbnailCancel(null);
+
+        // A download to the end, a lock that returns it, and the Recycle Bin.
+        string id;
+        using (JsonDocument doc = JsonDocument.Parse(rec.DownloadIncident($$"""{"incident":"{{incident}}"}""")))
+        {
+            id = doc.RootElement.GetProperty("download").GetString()!;
+        }
+        if (!WaitUntil(() =>
+            {
+                using JsonDocument doc = JsonDocument.Parse(rec.DownloadsGet());
+                return doc.RootElement.GetProperty("downloads").EnumerateArray()
+                    .Any(d => d.GetProperty("download").GetString() == id && d.GetProperty("state").GetString() == "done");
+            }, 30_000))
+        {
+            Problem("the download did not finish");
+        }
+        string locked = rec.IncidentLock(incident, true);
+        if (!locked.Contains("\"existing\"", StringComparison.Ordinal) || !locked.Contains(id, StringComparison.Ordinal))
+        {
+            Problem($"nv_incident_lock: {locked}");
+        }
+        if (StatusOf(() => rec.DownloadPause("no-such-download", null, true)) != NvStatus.UnknownId)
+        {
+            Problem("nv_download_pause accepted an unknown download");
+        }
+        rec.DownloadRetry(id, null);
+        if (!rec.DownloadTrash(id).Contains("\"folder\"", StringComparison.Ordinal) ||
+            !WaitUntil(() => _app.EventCount("download_removed") > 0, 10_000) ||
+            StatusOf(() => rec.DownloadForget(id, false)) != NvStatus.UnknownId)
+        {
+            Problem("nv_download_trash and download_removed");
+        }
+        if (_app.EventCount("download") == 0 || _app.EventCount("incidents_changed") == 0)
+        {
+            Problem("no download or incidents_changed events");
+        }
     }
 
     private static (ulong Revision, JsonElement? Layout) ReadLayout(NvCore core, string id, int initialCapacity)
