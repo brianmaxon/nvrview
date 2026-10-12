@@ -57,7 +57,7 @@ public sealed unsafe class RecordedFile : IDisposable
     private bool _readerEnded;
     private bool _fresh;
     private long _readerStart;
-    private uint _width, _height;
+    private uint _width, _height, _visibleWidth, _visibleHeight;
     private int _defaultStride;
     private bool _d3d;
     private int _readers, _decoded;
@@ -386,11 +386,14 @@ public sealed unsafe class RecordedFile : IDisposable
             // MFVideoTransferMatrix_BT709 = 1, BT601 = 2; MFNominalRange_0_255 = 1.
             bool bt709 = hasMatrix ? matrix == 1 : h >= 720;
             Color = ColorMatrix.Of(bt709, hasRange && range == 1);
+            // The decoder may output the coded size (1088 rows for 1080); the file says how much of it is the picture.
+            _visibleWidth = Info.Width > 0 ? Math.Min((uint)Info.Width, w) : w;
+            _visibleHeight = Info.Height > 0 ? Math.Min((uint)Info.Height, h) : h;
             if (_picture is { } p)
             {
                 using (_gpu!.Lock())
                 {
-                    p.Visible = new NvRect { X = 0, Y = 0, Width = w, Height = h };
+                    p.Visible = new NvRect { X = 0, Y = 0, Width = _visibleWidth, Height = _visibleHeight };
                     p.Color = Color;
                 }
             }
@@ -557,7 +560,7 @@ public sealed unsafe class RecordedFile : IDisposable
 
     private void NewPicture(GpuDevice gpu)
     {
-        var picture = new TilePicture(gpu) { Color = Color, Visible = new NvRect { X = 0, Y = 0, Width = _width, Height = _height } };
+        var picture = new TilePicture(gpu) { Color = Color, Visible = new NvRect { X = 0, Y = 0, Width = _visibleWidth, Height = _visibleHeight } };
         TilePicture? old = Interlocked.Exchange(ref _picture, picture);
         if (old != null)
         {
