@@ -10,6 +10,7 @@
 #   scripts/windows-app.sh startup [SECONDS]  runs `NvrView.App.exe --startup-test`: the plain
 #                                             start (as a double-click) on an empty data
 #                                             directory, idling SECONDS (default 5)
+#   scripts/windows-app.sh package            builds, then zips the app as target/dotnet/package/NvrView-<version>-win-x64.zip
 #   scripts/windows-app.sh update             the side-by-side update end to end
 #                                             (docs/UPDATES.md): packages the built app as
 #                                             NvrView-<version>-win-x64.zip, signs it with a
@@ -120,6 +121,28 @@ startup() {
   return "$status"
 }
 
+# Zips the built app folder's contents (at the top of the archive) to the
+# given path, with Windows' own tar (zip with -a).
+make_zip() {
+  local zip_win
+  mkdir -p "$(dirname "$1")"
+  rm -f "$1"
+  zip_win="$(cygpath -w "$1")"
+  (cd "$(dirname "$exe")" && /c/Windows/System32/tar.exe -a -c -f "$zip_win" -- *)
+}
+
+# The update package for a release: builds, then writes
+# target/dotnet/package/NvrView-<version>-win-x64.zip (scripts/release.sh
+# fetches it).
+package() {
+  local version
+  version="$(tr -d '[:space:]' <VERSION)"
+  build
+  rm -rf "$out/package"
+  make_zip "$PWD/$out/package/NvrView-$version-win-x64.zip"
+  ls -l "$out/package"
+}
+
 # The side-by-side update, end to end (see the usage above). The app must
 # have been built (`build`).
 update() {
@@ -133,9 +156,7 @@ update() {
   sign=target/debug/sign-update.exe
   # The package: the app folder's contents at the top (Windows' own tar
   # writes zip with -a).
-  local zip_win
-  zip_win="$(cygpath -w "$PWD/$dir/source/NvrView-$version-win-x64.zip")"
-  (cd "$app_dir" && /c/Windows/System32/tar.exe -a -c -f "$zip_win" -- *)
+  make_zip "$PWD/$dir/source/NvrView-$version-win-x64.zip"
   ls -l "$dir/source"
   "$sign" keygen --secret "$dir/keys/update.key" --public "$dir/keys/update.pub" >/dev/null
   "$sign" manifest --version "$version" --notes "End-to-end test." --out "$dir/source/updates.json" "$dir/source/NvrView-$version-win-x64.zip"
@@ -161,11 +182,12 @@ update() {
 
 case "${1:-}" in
   build) build ;;
+  package) package ;;
   update) update ;;
   selftest) shift; selftest "$@" ;;
   startup) shift; startup "$@" ;;
   *)
-    echo "usage: $0 build | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
+    echo "usage: $0 build | package | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
     exit 2
     ;;
 esac

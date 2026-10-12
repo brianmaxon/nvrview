@@ -27,11 +27,17 @@ cd "$(git rev-parse --show-toplevel)"
 
 host="${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
 clean=0
+package_to=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
+elif [ "${1:-}" = "--package" ]; then
+  # Builds the release app on the Windows computer instead of running the
+  # checks, and fetches NvrView-<version>-win-x64.zip into the directory.
+  # Used by scripts/release.sh.
+  package_to="${2:?usage: $0 --package <directory>}"
 elif [ $# -gt 0 ]; then
-  echo "usage: $0 [--clean <worker name>]" >&2
+  echo "usage: $0 [--clean <worker name> | --package <directory>]" >&2
   exit 2
 fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
@@ -89,6 +95,20 @@ git ls-files -z --cached --others --exclude-standard -- . \
 
 sent=$(date +%s)
 printf '   (sync: %ss)\n' "$((sent - check_start))"
+
+if [ -n "$package_to" ]; then
+  version=$(tr -d '[:space:]' <VERSION)
+  zip="NvrView-$version-win-x64.zip"
+  echo "building the Windows app package on $host"
+  # shellcheck disable=SC2086,SC2029
+  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && scripts/windows-app.sh package\""
+  mkdir -p "$package_to"
+  # scp reads the Windows path relative to the home directory.
+  # shellcheck disable=SC2086
+  scp $ssh_opts "$host:nvrview/worker/$worker/src/target/dotnet/package/$zip" "$package_to/$zip"
+  ls -l "$package_to/$zip"
+  exit 0
+fi
 
 echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
