@@ -117,6 +117,7 @@ internal sealed class ExportDialogs(Func<nint> window) : IExportDialogs
             {
                 SuggestedStartLocation = extension is "mp4" ? PickerLocationId.VideosLibrary : PickerLocationId.PicturesLibrary,
                 SuggestedFileName = Path.GetFileNameWithoutExtension(suggestedName),
+                SettingsIdentifier = "nvrview-export",
             };
             if (extension == "mp4")
             {
@@ -142,7 +143,7 @@ internal sealed class ExportDialogs(Func<nint> window) : IExportDialogs
     {
         try
         {
-            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.VideosLibrary, CommitButtonText = "Save Here" };
+            var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.VideosLibrary, CommitButtonText = "Save Here", SettingsIdentifier = "nvrview-export" };
             picker.FileTypeFilter.Add("*");
             WinRT.Interop.InitializeWithWindow.Initialize(picker, window());
             Windows.Storage.StorageFolder? chosen = await picker.PickSingleFolderAsync();

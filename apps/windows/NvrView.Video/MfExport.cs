@@ -506,7 +506,7 @@ public static unsafe class MfExport
                 {
                     stride = (uint)(-(int)cw * 4);
                 }
-                return Copy(last, (int)cw, (int)ch, (int)stride);
+                return Copy(last, (int)cw, (int)ch, (int)stride, (int)Math.Min(w, cw), (int)Math.Min(h, ch));
             }
             finally
             {
@@ -528,8 +528,10 @@ public static unsafe class MfExport
         }
     }
 
-    // RGB32 rows to a top-down BGRA image; a negative stride means the rows come bottom first.
-    private static RenderedImage? Copy(IMFSample* sample, int width, int height, int stride)
+    // RGB32 rows to a top-down BGRA image; a negative stride means the rows come bottom first. The decoder pads a
+    // picture to whole macroblocks (368 rows for 360), at the bottom and right, so the image is cropped to the
+    // size the file says (outWidth by outHeight) from the top left.
+    private static RenderedImage? Copy(IMFSample* sample, int width, int height, int stride, int outWidth, int outHeight)
     {
         IMFMediaBuffer* buffer = null;
         try
@@ -545,17 +547,17 @@ public static unsafe class MfExport
                 {
                     return null;
                 }
-                var pixels = new byte[width * height * 4];
-                for (int y = 0; y < height; y++)
+                var pixels = new byte[outWidth * outHeight * 4];
+                for (int y = 0; y < outHeight; y++)
                 {
                     int from = stride < 0 ? height - 1 - y : y;
-                    new ReadOnlySpan<byte>(data + (long)from * row, width * 4).CopyTo(pixels.AsSpan(y * width * 4));
+                    new ReadOnlySpan<byte>(data + (long)from * row, outWidth * 4).CopyTo(pixels.AsSpan(y * outWidth * 4));
                 }
                 for (int i = 3; i < pixels.Length; i += 4)
                 {
                     pixels[i] = 255;
                 }
-                return new RenderedImage(width, height, pixels);
+                return new RenderedImage(outWidth, outHeight, pixels);
             }
             finally
             {
