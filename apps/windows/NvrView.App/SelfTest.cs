@@ -1394,6 +1394,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             return;
         }
         // parity: call-window-tile-zoom
+        // The call window is narrow, and which buttons fit there depends on how many the camera's capabilities add (priority order,
+        // checked in HeaderModel), so the header is laid out wide here: this step is about what the buttons do.
+        chrome.ForceWidth(1000);
         stage.Hover(tile);
         stage.PinchDigital(tile, tile.X + tile.Width / 2, tile.Y + tile.Height / 2, 2);
         stage.Tick();
@@ -1438,6 +1441,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         Expect(fixedStill, "focus or split changed the call window's single tile");
         Expect(shownButtons.Contains(TileHeaderItem.Speaker) && shownButtons.Contains(TileHeaderItem.Quality), "the call window's header lacks the speaker or quality button");
         Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
+        chrome.ForceWidth(null);
     }
 
     // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
