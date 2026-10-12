@@ -270,6 +270,11 @@ public enum RecordingsPanes {
     /// One timeline lane, and the hour ruler above them.
     public static let laneHeight: CGFloat = 26
     public static let rulerHeight: CGFloat = 18
+    /// The loudness strip under each lane, a lane with its strip, and the
+    /// strips' legend under the lanes.
+    public static let loudnessHeight: CGFloat = 10
+    public static let rowHeight: CGFloat = laneHeight + loudnessHeight
+    public static let legendHeight: CGFloat = 14
     /// The least height of the player.
     public static let playerMin: CGFloat = 200
 
@@ -287,8 +292,8 @@ public enum RecordingsPanes {
     /// every lane if they fit in a third of it, else a third (they scroll),
     /// never less than two lanes.
     public static func lanesHeight(height: CGFloat, lanes: Int) -> CGFloat {
-        let want = rulerHeight + CGFloat(max(lanes, 1)) * laneHeight + 8
-        let cap = max((height - transportHeight) / 3, rulerHeight + 2 * laneHeight + 8)
+        let want = rulerHeight + CGFloat(max(lanes, 1)) * rowHeight + legendHeight + 8
+        let cap = max((height - transportHeight) / 3, rulerHeight + 2 * rowHeight + legendHeight + 8)
         return min(want, cap)
     }
 }

@@ -745,6 +745,63 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(b.Timeline == new TimelineViewport(), $"recordings: wheeling back left {b.Timeline}");
         }
 
+        // parity: recordings-listen-for-sounds
+        // A camera's switch reaches nv_sound_watch and its sound_watch state comes back; a fifth camera of one device
+        // is refused; switching off takes it off the core's list.
+        RecordingCamera[] heard = [.. Enumerable.Range(0, 5).Select(c => new RecordingCamera("d-selftest", c))];
+        foreach (RecordingCamera c in heard.Take(4))
+        {
+            Expect(service.SetListening(c, true), $"recordings: listening to {c} was refused ({service.Notice})");
+        }
+        Expect(!service.SetListening(heard[4], true), "recordings: a fifth camera of a device listens");
+        Expect(fake.Watched.SequenceEqual(heard.Take(4)), $"recordings: the core listens to {fake.Watched.Count} cameras");
+        bool watching = await Until(() => service.ListenStates.TryGetValue(heard[0], out var st) && st.State == "watching", 5);
+        Expect(watching, "recordings: no sound_watch state for a listening camera");
+        foreach (RecordingCamera c in heard.Skip(1))
+        {
+            service.SetListening(c, false);
+        }
+        Expect(fake.Watched.SequenceEqual([heard[0]]), "recordings: switching off left other cameras listening");
+        Say($"recordings: listening to {service.ListeningCameras.Count} camera, the fifth refused: {service.Notice}");
+
+        // parity: recordings-loudness-lanes
+        // A listening camera's lane has loudness (the fake answers a steady level), the others are blank; zooming in
+        // asks again with a finer bucket.
+        {
+            b.Timeline = new TimelineViewport();
+            b.ReloadLoudness(force: true);
+            long whole = b.LoudnessBucket;
+            List<RecordingCamera> loud = [.. b.Lanes.Where(l => b.LoudnessOf(l.Camera)?.Heard == true).Select(l => l.Camera)];
+            Say($"recordings: loudness at {whole} s buckets, heard on {string.Join(", ", loud.Select(c => c.Channel))}");
+            Expect(loud.SequenceEqual([heard[0]]), "recordings: loudness is not on the listening camera's lane alone");
+            Expect(b.LoudnessOf(heard[0])?.Bucket == whole, "recordings: the loudness lane is not at the bucket asked");
+            int reads = b.LoudnessReads;
+            b.Timeline = new TimelineViewport(48);
+            Expect(b.LoudnessReads == reads + 1 && b.LoudnessOf(heard[0])?.Bucket == b.LoudnessBucket && b.LoudnessBucket < whole,
+                $"recordings: zooming in did not ask for finer loudness ({b.LoudnessBucket} s)");
+            b.Timeline = new TimelineViewport();
+            w.Refresh();
+        }
+
+        // parity: recordings-sound-labels
+        // A label (as the app's classifier would put it) becomes an event from sound on its camera's lane and an
+        // incident of its own, which the Sounds filter alone shows, with the sound badge.
+        {
+            long at = b.Day + 10 * 3600;
+            fake.SoundLabelsPut($$"""{"camera":{{heard[0].Json}},"analyzer":"selftest-v1","start":{{at - 60}},"end":{{at + 60}},"labels":[{"kind":"dog_bark","start":{{at}},"end":{{at + 4}},"confidence":0.9,"label":"dog_bark"}]}""");
+            bool labeled = await Until(() => b.DayIncidents.Any(i => i.Kinds.SequenceEqual(["dog_bark"])), 5);
+            bool onLane = b.Lanes.FirstOrDefault(l => l.Camera == heard[0])?.Events.Any(e => e.Kind == "dog_bark" && e.Source == SoundKinds.LocalAudio) == true;
+            b.SetKindFilter(KindFilter.Sound, true);
+            List<string> soundsShown = [.. b.Incidents.Select(i => string.Join("+", i.Kinds))];
+            IReadOnlyList<string> badge = b.Incidents.Count > 0 ? SoundKinds.Names(b.Incidents[0].Events) : [];
+            Say($"recordings: a sound label on the lane {onLane}, the Sounds filter shows {string.Join(", ", soundsShown)}, badge {string.Join(", ", badge)}");
+            Expect(labeled && onLane, "recordings: the sound label is not on its camera's lane");
+            Expect(soundsShown.SequenceEqual(["dog_bark"]), "recordings: the Sounds filter does not show the sound alone");
+            Expect(badge.SequenceEqual(["Dog barking"]), "recordings: the sound badge is wrong");
+            b.SetKindFilter(KindFilter.Sound, false);
+            service.SetListening(heard[0], false);
+        }
+
         // parity: recordings-layout
         // The window at its smallest and at a large size: the side panes give way in a narrow window (inspector first)
         // and come back in a wide one.

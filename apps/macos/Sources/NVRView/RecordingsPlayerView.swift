@@ -301,7 +301,7 @@ struct TimelineLanes: View {
     private let labelWidth: CGFloat = 130
 
     var body: some View {
-        let laneHeight = RecordingsPanes.laneHeight
+        let laneHeight = RecordingsPanes.laneHeight, rowHeight = RecordingsPanes.rowHeight
         VStack(spacing: 0) {
             if browser.lanes.isEmpty {
                 Text("Choose the cameras to search to see their recordings here.")
@@ -337,8 +337,13 @@ struct TimelineLanes: View {
                                             Image(systemName: "exclamationmark.triangle").font(.caption)
                                                 .help("The device could not search this day; use Refresh")
                                         }
+                                        if browser.model.isListening(lane.camera) {
+                                            Image(systemName: "ear").font(.system(size: 8)).foregroundStyle(.secondary)
+                                                .help("Listening for sounds")
+                                        }
                                     }
                                     .frame(width: labelWidth - 8, height: laneHeight, alignment: .leading)
+                                    .padding(.bottom, rowHeight - laneHeight)
                                 }
                             }
                             .padding(.leading, 8)
@@ -349,12 +354,16 @@ struct TimelineLanes: View {
                                     ForEach(browser.lanes) { lane in
                                         LaneView(browser: browser, lane: lane, zoom: zoom, start: start)
                                             .frame(width: viewport, height: laneHeight)
+                                        LoudnessStrip(lane: browser.loudness(of: lane.camera), day: browser.day, zoom: zoom, start: start)
+                                            .frame(width: viewport, height: rowHeight - laneHeight)
+                                            .help(LoudnessStrip.help(browser.loudness(of: lane.camera), listening: browser.model.isListening(lane.camera)))
                                     }
+                                    LoudnessLegend().frame(height: RecordingsPanes.legendHeight)
                                 }
                                 Playhead(browser: browser, zoom: zoom, start: start)
                                     .frame(
                                         width: viewport,
-                                        height: RecordingsPanes.rulerHeight + CGFloat(browser.lanes.count) * laneHeight)
+                                        height: RecordingsPanes.rulerHeight + CGFloat(browser.lanes.count) * rowHeight)
                                     .allowsHitTesting(false)
                             }
                             .frame(width: viewport, alignment: .leading)
@@ -363,6 +372,8 @@ struct TimelineLanes: View {
                             .padding(.trailing, 12)
                         }
                     }
+                    .onAppear { browser.lanesWidth = Double(viewport) }
+                    .onChange(of: viewport) { _, w in browser.lanesWidth = Double(w) }
                 }
             }
         }
@@ -611,14 +622,18 @@ struct LaneView: View, @preconcurrency Animatable {
             }
             for e in lane.events {
                 let kind = IndicatorKind(detectionKind: e.kind)
+                // A sound the core's detector or the app's labels found:
+                // alarms keep their kind's color, other sounds have their own.
+                let sound = SoundKinds.isSound(e) && kind == .other
                 let x = map.x(e.start), w = max(3, map.x(e.end) - x)
                 guard x + w >= 0, x <= size.width else { continue }
                 let rect = CGRect(x: x, y: 3, width: w, height: size.height - 6)
-                ctx.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(kind.laneColor))
+                ctx.fill(Path(roundedRect: rect, cornerRadius: 2), with: .color(sound ? Color.soundLane : kind.laneColor))
                 if selected.contains(e) {
                     ctx.stroke(Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3), with: .color(.primary), lineWidth: 2)
                 }
-                if w >= 14, let symbol = ctx.resolveSymbol(id: kind) {
+                let symbolID: AnyHashable = sound ? AnyHashable("sound") : AnyHashable(kind)
+                if w >= 14, let symbol = ctx.resolveSymbol(id: symbolID) {
                     ctx.draw(symbol, at: CGPoint(x: x + w / 2, y: size.height / 2))
                 }
             }
@@ -626,6 +641,7 @@ struct LaneView: View, @preconcurrency Animatable {
             ForEach(Array(Set(lane.events.map { IndicatorKind(detectionKind: $0.kind) })), id: \.self) { k in
                 Image(systemName: k.symbolName).font(.system(size: 9)).foregroundStyle(.white).tag(k)
             }
+            Image(systemName: "waveform").font(.system(size: 9)).foregroundStyle(.white).tag("sound")
         }
         .contentShape(Rectangle())
         .overlay {
@@ -640,10 +656,92 @@ struct LaneView: View, @preconcurrency Animatable {
                 }
             }
         }
-        .help(lane.events.isEmpty ? "\(lane.name): click to play from there" : "\(lane.name): \(lane.events.count) events; click to play from there")
+        .help(Self.help(lane))
+    }
+
+    private static func help(_ lane: RecordingsBrowser.Lane) -> String {
+        guard !lane.events.isEmpty else { return "\(lane.name): click to play from there" }
+        let sounds = SoundKinds.names(lane.events)
+        let heard = sounds.isEmpty ? "" : " (sounds: \(sounds.joined(separator: ", ")))"
+        return "\(lane.name): \(lane.events.count) events\(heard); click to play from there"
     }
 
     private func distance(_ e: RecordedEvent, _ t: Int64) -> Int64 {
         t < e.start ? e.start - t : (t > e.end ? t - e.end : 0)
+    }
+}
+
+extension Color {
+    /// The timeline's color for a sound (other than an alarm) and for loudness.
+    static let soundLane = Color(red: 0.86, green: 0.36, blue: 0.62)
+    static let loudness = Color.teal
+}
+
+/// A lane's loudness under it (`nv_recordings_loudness`): the loudest
+/// second of each bucket light, its average dark, from -80 dBFS (nothing)
+/// to 0 (full height). Blank where no audio was analyzed, which is not
+/// silence.
+struct LoudnessStrip: View, @preconcurrency Animatable {
+    let lane: LoudnessLane?
+    let day: Int64
+    var zoom: Double
+    var start: Double
+
+    // Zoom and start animate together (a wheel notch eases).
+    var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(zoom, start) }
+        set {
+            zoom = newValue.first
+            start = newValue.second
+        }
+    }
+
+    var body: some View {
+        Canvas { ctx, size in
+            ctx.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: size.height)), with: .color(.secondary.opacity(0.05)))
+            guard let lane, lane.bucket > 0 else { return }
+            let map = TimelineMap(day: day, zoom: zoom, start: start, width: size.width)
+            let w = max(map.pointsPerSecond * CGFloat(lane.bucket), 1)
+            let first = max(0, Int((map.second(atX: 0) - lane.start) / lane.bucket))
+            guard first < lane.peak.count else { return }
+            for i in first..<lane.peak.count {
+                let x = map.x(lane.start + Int64(i) * lane.bucket)
+                if x > size.width { break }
+                guard let p = lane.peak[i] else { continue }
+                let hp = max(1, size.height * LoudnessScale.level(p))
+                ctx.fill(Path(CGRect(x: x, y: size.height - hp, width: w, height: hp)), with: .color(Color.loudness.opacity(0.35)))
+                if i < lane.rms.count, let r = lane.rms[i] {
+                    let hr = size.height * LoudnessScale.level(r)
+                    ctx.fill(Path(CGRect(x: x, y: size.height - hr, width: w, height: hr)), with: .color(Color.loudness.opacity(0.85)))
+                }
+            }
+        }
+    }
+
+    static func help(_ lane: LoudnessLane?, listening: Bool) -> String {
+        if lane?.heard == true { return "Loudness: light is the loudest second, dark the average" }
+        return listening
+            ? "No sound analyzed on this day yet"
+            : "No sound analyzed: sound is analyzed while the camera is on screen or listens for sounds"
+    }
+}
+
+/// What the loudness strips show.
+struct LoudnessLegend: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Loudness:")
+            RoundedRectangle(cornerRadius: 1).fill(Color.loudness.opacity(0.35)).frame(width: 10, height: 7)
+            Text("loudest")
+            RoundedRectangle(cornerRadius: 1).fill(Color.loudness.opacity(0.85)).frame(width: 10, height: 7)
+            Text("average")
+            Text("· blank: not analyzed (not silence)")
+            RoundedRectangle(cornerRadius: 1).fill(Color.soundLane).frame(width: 10, height: 7).padding(.leading, 6)
+            Text("a sound")
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 9))
+        .foregroundStyle(.secondary)
+        .padding(.top, 2)
     }
 }

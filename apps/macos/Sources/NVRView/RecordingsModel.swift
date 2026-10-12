@@ -10,6 +10,9 @@ import VideoKit
 struct RecordingsEnablement: Codable, Equatable, Sendable {
     var device: String
     var cameras: [RecordingCamera]
+    /// The cameras that listen for sounds (`nv_sound_watch`; the core does
+    /// not keep this list either). Absent in older files.
+    var listen: [RecordingCamera]?
 }
 
 /// The recordings side of the app (docs/UX.md "Recordings"), shared by every
@@ -36,6 +39,10 @@ final class RecordingsModel {
     private(set) var downloadsFolder: URL?
     /// The searched cameras, by device key.
     private(set) var enabled: [String: [RecordingCamera]] = [:]
+    /// The cameras that listen for sounds, by device key.
+    private(set) var listening: [String: [RecordingCamera]] = [:]
+    /// Each listening camera's latest `sound_watch` state and reason.
+    private(set) var listenStates: [RecordingCamera: (state: String, reason: String?)] = [:]
     /// Each enabled device's search lane: `idle`, `busy`, `waiting_device`, `ended`.
     private(set) var indexStates: [String: (state: String, pendingDays: Int)] = [:]
     /// Grows with every `recordings_changed` (and enablement change).
@@ -109,9 +116,12 @@ final class RecordingsModel {
         }
         available = true
         downloadsFolder = downloads
-        for e in enablementFile.load() where !e.cameras.isEmpty {
-            enabled[e.device] = e.cameras
-            applyEnablement(e.device)
+        for e in enablementFile.load() where !e.cameras.isEmpty || !(e.listen ?? []).isEmpty {
+            if !e.cameras.isEmpty {
+                enabled[e.device] = e.cameras
+                applyEnablement(e.device)
+            }
+            for c in e.listen ?? [] { setListening(c, true, save: false) }
         }
         reloadGroups()
         if let list = (try? core.downloadsGet()).flatMap(DownloadList.parse) {
@@ -208,13 +218,70 @@ final class RecordingsModel {
     }
 
     private func saveEnablement() {
-        enablementFile.save(enabled.keys.sorted().map { RecordingsEnablement(device: $0, cameras: enabled[$0] ?? []) })
+        let devices = Set(enabled.keys).union(listening.keys).sorted()
+        enablementFile.save(
+            devices.map {
+                RecordingsEnablement(
+                    device: $0, cameras: enabled[$0] ?? [], listen: listening[$0].flatMap { $0.isEmpty ? nil : $0 })
+            })
+    }
+
+    // MARK: Listening for sounds
+
+    func isListening(_ camera: RecordingCamera) -> Bool { listening[camera.device]?.contains(camera) == true }
+
+    /// Every camera that listens for sounds.
+    var listeningCameras: [RecordingCamera] { listening.keys.sorted().flatMap { listening[$0] ?? [] } }
+
+    /// Turns listening for sounds on or off for a camera (`nv_sound_watch`:
+    /// its sub-stream stays open with no tile; at most four per device).
+    /// Returns false (with `notice` set) when it was refused.
+    @discardableResult
+    func setListening(_ camera: RecordingCamera, _ on: Bool, save: Bool = true) -> Bool {
+        var list = listening[camera.device] ?? []
+        if on, !SoundListening.canAdd(camera, to: listeningCameras) {
+            notice = "At most \(SoundListening.maxPerDevice) cameras of a device listen for sounds"
+            return false
+        }
+        if let core = core() {
+            do throws(CoreStatus) {
+                try core.soundWatch(camera: camera.json, enabled: on)
+            } catch {
+                if on {
+                    notice = error == .limit
+                        ? "Too many cameras listen for sounds" : "Could not listen to this camera (status \(error.code))"
+                    return false
+                }
+            }
+        }
+        if on, !list.contains(camera) { list.append(camera) }
+        if !on {
+            list.removeAll { $0 == camera }
+            listenStates[camera] = nil
+        }
+        listening[camera.device] = list.isEmpty ? nil : list
+        if save { saveEnablement() }
+        changed()
+        return true
+    }
+
+    /// Loudness lanes for `cameras` over `[start, end]` (memory only).
+    func loudness(start: Int64, end: Int64, bucket: Int64, cameras: [RecordingCamera]) -> LoudnessAnswer? {
+        guard !cameras.isEmpty else { return nil }
+        let q = LoudnessScale.query(start: start, end: end, bucket: bucket, cameras: cameras)
+        return query { core throws(CoreStatus) in try core.recordingsLoudness(query: q) }
     }
 
     /// The core named a device differently (first connection): its cameras
     /// follow.
     func rekey(_ old: String, to new: String) {
-        guard old != new, let cams = enabled.removeValue(forKey: old) else { return }
+        guard old != new else { return }
+        if let heard = listening[old] {
+            for c in heard { setListening(c, false, save: false) }
+            for c in heard { setListening(RecordingCamera(device: new, channel: c.channel, lens: c.lens), true, save: false) }
+            saveEnablement()
+        }
+        guard let cams = enabled.removeValue(forKey: old) else { return }
         if available, let core = core() { try? core.recordingsEnable(deviceKey: old, json: nil) }
         enabled[new] = cams.map { RecordingCamera(device: new, channel: $0.channel, lens: $0.lens) }
         applyEnablement(new)
@@ -224,6 +291,7 @@ final class RecordingsModel {
 
     /// A device the user removed is no longer searched.
     func deviceRemoved(_ key: String) {
+        for c in listening[key] ?? [] { setListening(c, false) }
         guard enabled[key] != nil else { return }
         setEnabled(device: key, cameras: [])
     }
@@ -613,8 +681,13 @@ final class RecordingsModel {
                     }
                 }
             }
-        case .soundWatch, .soundAnalyze:
-            break  // the loudness lanes (M3) read the envelope on demand
+        case .soundWatch(let camera, let state, let reason):
+            if isListening(camera) {
+                listenStates[camera] = (state, reason)
+                changed()
+            }
+        case .soundAnalyze:
+            break  // no recorded day can be analyzed yet (no day audio source)
         case .downloadRemoved(let id, let trash, let folder):
             if let folder = board.removed(id, trash: trash, folder: folder) {
                 trasher(URL(fileURLWithPath: folder))

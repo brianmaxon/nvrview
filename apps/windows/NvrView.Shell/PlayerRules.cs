@@ -293,6 +293,15 @@ public static class RecordingsPanes
     public const double LaneHeight = 26;
     public const double RulerHeight = 18;
 
+    /// <summary>The loudness strip under each lane.</summary>
+    public const double LoudnessHeight = 10;
+
+    /// <summary>A lane with its loudness strip.</summary>
+    public const double RowHeight = LaneHeight + LoudnessHeight;
+
+    /// <summary>The loudness strips' legend under the lanes.</summary>
+    public const double LegendHeight = 14;
+
     /// <summary>The least height of the player.</summary>
     public const double PlayerMin = 200;
 
@@ -322,8 +331,8 @@ public static class RecordingsPanes
     /// </summary>
     public static double LanesHeight(double height, int lanes)
     {
-        double want = RulerHeight + Math.Max(lanes, 1) * LaneHeight + 8;
-        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * LaneHeight + 8);
+        double want = RulerHeight + Math.Max(lanes, 1) * RowHeight + LegendHeight + 8;
+        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * RowHeight + LegendHeight + 8);
         return Math.Min(want, cap);
     }
 }

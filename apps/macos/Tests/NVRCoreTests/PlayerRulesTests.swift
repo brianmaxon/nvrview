@@ -125,9 +125,10 @@ import Testing
         #expect(RecordingsPanes.shown(width: 800, sidebar: false, inspector: true) == (false, true))
         #expect(RecordingsPanes.shown(width: 2000, sidebar: false, inspector: false) == (false, false))
         // Lanes: all of them while they fit in a third; at least two lanes.
-        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 26 + 8))
+        // Each lane has its loudness strip (26 + 10), and the legend is under them.
+        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 36 + 14 + 8))
         #expect(RecordingsPanes.lanesHeight(height: 600, lanes: 16) == (600 - RecordingsPanes.transportHeight) / 3)
-        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 26 + 8))
+        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 36 + 14 + 8))
     }
 
     @Test func splitAndStrip() {

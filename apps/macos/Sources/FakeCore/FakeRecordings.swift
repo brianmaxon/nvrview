@@ -21,6 +21,9 @@ import VideoKit
 // (merge, split, rename, add and remove a camera, revert); stored edits are
 // replayed in order over the incidents, and one whose keys match nothing is
 // skipped. Locks mark incidents; they do not follow edits as the core's do.
+// Sound labels (`nv_sound_labels_put`) are kept as events with `source`
+// `local_audio` on indexed days, replacing the same analyzer's labels in
+// the request's range, as the core's are.
 
 /// What the fake core keeps for recordings, under one lock.
 final class FakeRecordingsState: @unchecked Sendable {
@@ -71,6 +74,8 @@ final class FakeRecordingsState: @unchecked Sendable {
         var nextDownload = 1
         /// Cameras on the sound "always listen" list.
         var watched: [RecordingCamera] = []
+        /// Sound labels the app put: camera, kind, span, analyzer.
+        var labels: [(camera: RecordingCamera, kind: String, start: Int64, end: Int64, analyzer: String)] = []
         /// Sound analysis requests that have not finished: request, camera.
         var analyses: [(request: UInt64, camera: RecordingCamera, day: Int64)] = []
         var nextAnalysis: UInt64 = 1
@@ -130,6 +135,7 @@ extension FakeCore {
         var kind: String
         var start: Int64
         var end: Int64
+        var source = "device"
         var key: String { "i-\(start)-\(camera.device)-\(camera.channel)-\(camera.lens)" }
         /// The content hash's stand-in: the same in every run.
         var id: String {
@@ -217,13 +223,18 @@ extension FakeCore {
                         out.append(e)
                     }
                 }
+                for l in w.labels where l.camera == c && l.end >= q.start && l.start <= q.end {
+                    guard days.contains(DeviceTime.dayStart(l.start)) else { continue }
+                    if let kinds = q.kinds, !kinds.contains(l.kind) { continue }
+                    out.append(FakeEvent(camera: c, kind: l.kind, start: l.start, end: l.end, source: "local_audio"))
+                }
             }
         }
         return out.sorted { ($0.start, $0.key) < ($1.start, $1.key) }
     }
 
     private static func eventObject(_ e: FakeEvent) -> [String: Any] {
-        ["camera": cameraObject(e.camera), "kind": e.kind, "source": "device", "start": e.start, "end": e.end]
+        ["camera": cameraObject(e.camera), "kind": e.kind, "source": e.source, "start": e.start, "end": e.end]
     }
 
     /// An incident of the fake: events (and cameras added by an edit).
@@ -474,6 +485,9 @@ extension FakeCore {
     public var recordingsHolds: [UInt64: [RecordingCamera]] {
         (try? recordingsWorld { $0.holds }) ?? [:]
     }
+
+    /// The cameras on the sound "always listen" list (for tests).
+    public var soundWatched: [RecordingCamera] { (try? recordingsWorld { $0.watched }) ?? [] }
 
     /// How many months were asked for alone, per device and in all (for tests).
     public var recordingsMonthRequests: Int {
@@ -1099,7 +1113,26 @@ extension FakeCore {
                 let s = (l["start"] as? NSNumber)?.int64Value, let e = (l["end"] as? NSNumber)?.int64Value, e >= s
             else { throw .invalidArgument }
         }
-        try configuredWorld { w throws(CoreStatus) in try Self.requireKnownCamera(w, c) }
+        var parsed: [(kind: String, start: Int64, end: Int64)] = []
+        for l in labels {
+            if let k = l["kind"] as? String, let s = (l["start"] as? NSNumber)?.int64Value,
+                let e = (l["end"] as? NSNumber)?.int64Value
+            {
+                parsed.append((k, s, e))
+            }
+        }
+        let revision = try configuredWorld { w throws(CoreStatus) -> (Int, Int) in
+            try Self.requireKnownCamera(w, c)
+            w.labels.removeAll { $0.camera == c && $0.analyzer == analyzer && $0.start >= start && $0.start <= end }
+            w.labels += parsed.map { (c, $0.kind, $0.start, $0.end, analyzer) }
+            w.revision += 1
+            w.incidentsRevision += 1
+            return (w.revision, w.incidentsRevision)
+        }
+        emit(event: Self.json([
+            "type": "recordings_changed", "device": c.device, "revision": revision.0, "start": start, "end": end,
+        ]))
+        emit(event: Self.json(["type": "incidents_changed", "revision": revision.1]))
     }
 
     public func soundAnalyzeDay(json: String) throws(CoreStatus) -> String {

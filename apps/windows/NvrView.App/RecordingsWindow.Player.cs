@@ -183,6 +183,11 @@ internal sealed partial class RecordingsWindow
             Browser.Timeline = view;
             RefreshLanes();
         };
+        _lanes.WidthChanged += width =>
+        {
+            Browser.LanesWidth = width;
+            RefreshLanes();
+        };
         Grid.SetRow(_lanes, 3);
         _playerColumn.Children.Add(_lanes);
 
@@ -259,7 +264,7 @@ internal sealed partial class RecordingsWindow
             _scrub.Set(0, 0, [], 0);
             _scrubStart.Text = _scrubEnd.Text = "";
         }
-        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Timeline, open ? t.PositionMs : null);
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, open ? t.PositionMs : null);
         _emptyText.Text = open ? ""
             : Browser.Player.Message is { } m ? m
             : Browser.Cameras.Count == 0 ? "Choose cameras to search, then pick an incident to play."
@@ -267,11 +272,14 @@ internal sealed partial class RecordingsWindow
         UpdateStage();
     }
 
+    /// <summary>Each lane's loudness, in lane order.</summary>
+    private List<LoudnessLane?> LanesLoudness => [.. Browser.Lanes.Select(l => Browser.LoudnessOf(l.Camera))];
+
     private void RefreshLanes()
     {
         double height = Math.Max(_playerColumn.ActualHeight, RecordingsPanes.WindowMinHeight - 80);
         _lanesRow.Height = new GridLength(RecordingsPanes.LanesHeight(height, Browser.Lanes.Count));
-        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null);
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null);
     }
 
     // ---- the picture area ----

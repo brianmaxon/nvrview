@@ -1120,8 +1120,9 @@ example to keep it beside other work. Both apps follow these rules.
 The NVR's own recordings, found by what happened and played back
 ([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
-(milestone P, M1 and M2) and on Windows (W1, W2). The sound lanes
-(M3) and exports (M4) come later.
+(milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
+strips, sound events, listening for sounds) on both. Exports (M4) come
+later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1221,6 +1222,37 @@ The NVR's own recordings, found by what happened and played back
   to 5 minutes). A click on a lane of a camera that plays seeks there; a click on
   an event of another camera selects its incident; anywhere else that
   camera plays alone from there.
+- **Sound** ([PLAYBACK.md](PLAYBACK.md) "Sound"; FFI-RECORDINGS.md
+  section 2a). Under each lane a **loudness strip** (10 points) shows the
+  camera's loudness for the day from `nv_recordings_loudness`: per bucket
+  the loudest second light and the average dark, from -80 dBFS (nothing)
+  to 0 dBFS (full height), blank where no audio was analyzed, which is not
+  silence. A legend under the lanes says so. The bucket follows the zoom,
+  about one value per two points (60 to 300 s for the whole day, down to a
+  few seconds at 48×); the strip of a camera's second lens shows the first
+  lens's microphone. Today's strips are read again every 10 s (live seconds
+  come with no event; the call answers from memory). **Sound events**
+  (`source` `local_audio`: smoke and CO alarms from the core's detector,
+  other sounds from labels an app classifier puts) are bars in the lanes
+  like other events, alarms in their kind's color and other sounds in their
+  own (with a waveform symbol on macOS); they join incidents, the
+  incident rows show a sound badge with the sounds' names on hover (alarms
+  keep their own badges), and a **Sounds** kind filter shows only incidents
+  with a sound (the sound kinds, or any event from sound). **Listen for
+  sounds** is a per-camera switch (an ear on macOS, a speaker on Windows)
+  beside each camera in "Cameras to search": `nv_sound_watch` keeps that
+  camera's sub-stream open with no tile, so its sound is analyzed while it
+  is not on screen. It costs the device a sub-stream (about 110 kbit/s)
+  that counts toward its streams like a tile, so at most four cameras of a
+  device listen (a device carried six sub-streams on one session, and the
+  player takes up to four); a fifth is refused with a message. The switch's
+  tooltip says what the core answered (listening, no sound from this
+  camera, the device is not connected). The list is kept with the cameras
+  to search (`listen` in `recordings-cameras.json`) and given to the core
+  at each launch. Not built yet: analyzing a recorded day
+  (`nv_sound_analyze_day` answers `no_source` until the core has a source
+  for recorded audio), and the app classifiers that put labels (SoundAnalysis
+  on macOS, a model on Windows).
 - **The selected incident (inspector):** its name (Rename; an empty name
   goes back to time and kinds), time span and date, badges, and camera
   group; Locked (locking keeps it: its video is downloaded and nothing about

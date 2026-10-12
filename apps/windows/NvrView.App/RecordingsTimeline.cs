@@ -2,7 +2,8 @@
 // scrubber under the transport (the selected incident with its margins, or
 // the whole day, with the events marked by kind; dragging shows keyframes,
 // the release the exact picture) and the day's timeline lanes (one lane per
-// camera: recording spans in gray, events as bars colored by kind, an hour
+// camera: recording spans in gray, events as bars colored by kind (sounds in
+// their own color), a loudness strip under each lane with a legend, an hour
 // ruler, zoom from the whole day to 48x with the wheel around the pointer, and
 // the playhead). Both only draw what the browser hands them and report where the
 // user pointed; the browser and the player decide what that means.
@@ -37,6 +38,12 @@ internal static class TimelineColors
         _ => Windows.UI.Color.FromArgb(0xFF, 0xA1, 0x62, 0x07),
     };
 
+    /// <summary>An event from sound other than an alarm (alarms keep their kind's color).</summary>
+    public static Windows.UI.Color Of(RecordedEvent e) =>
+        SoundKinds.IsSound(e) && KindFilters.Indicator(e.Kind) == IndicatorKind.Other ? Sound : Of(e.Kind);
+
+    public static readonly Windows.UI.Color Sound = Windows.UI.Color.FromArgb(0xFF, 0xDB, 0x5C, 0x9E);
+    public static readonly Windows.UI.Color Loudness = Windows.UI.Color.FromArgb(0xFF, 0x2D, 0xB8, 0xC0);
     public static readonly Windows.UI.Color Playhead = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x5A, 0x4F);
     public static readonly Windows.UI.Color Track = Windows.UI.Color.FromArgb(0xFF, 0x3A, 0x3C, 0x42);
     public static readonly Windows.UI.Color Recorded = Windows.UI.Color.FromArgb(0xFF, 0x70, 0x73, 0x7A);
@@ -185,6 +192,7 @@ internal sealed class LanesView : Grid
     private readonly Rectangle _head = new() { Width = 2, Fill = new SolidColorBrush(TimelineColors.Playhead), IsHitTestVisible = false };
     private readonly List<TextBlock> _labels = [];
     private IReadOnlyList<TimelineLane> _lanes = [];
+    private IReadOnlyList<LoudnessLane?> _loudness = [];
     private long _day;
     private TimelineViewport _view = new();
     // Scrolls of ours still to land (their ViewChanged is not the user's), and retries left.
@@ -197,7 +205,11 @@ internal sealed class LanesView : Grid
     {
         Children.Add(_scroll);
         _scroll.Content = _canvas;
-        _scroll.SizeChanged += (_, _) => Rebuild();
+        _scroll.SizeChanged += (_, _) =>
+        {
+            Rebuild();
+            WidthChanged?.Invoke(ViewportWidth);
+        };
         _scroll.ViewChanged += OnViewChanged;
         _canvas.Tapped += OnTapped;
         _canvas.PointerWheelChanged += OnWheel;
@@ -210,18 +222,22 @@ internal sealed class LanesView : Grid
     public event Action<TimelineViewport>? ViewportRequested;
 
     /// <summary>The lanes' visible width.</summary>
-    private double ViewportWidth => Math.Max(_scroll.ActualWidth - 4, 100);
+    public double ViewportWidth => Math.Max(_scroll.ActualWidth - 4, 100);
+
+    /// <summary>Raised when the lanes' width changed (the loudness bucket follows it).</summary>
+    public event Action<double>? WidthChanged;
 
     private double ContentWidth => ViewportWidth * _view.Zoom;
 
     /// <summary>The part of the day shown.</summary>
     public TimelineViewport Viewport => _view;
 
-    /// <summary>Shows the lanes of a day, <paramref name="view"/>'s part of it.</summary>
-    public void Set(IReadOnlyList<TimelineLane> lanes, long day, TimelineViewport view, long? playheadMs)
+    /// <summary>Shows the lanes of a day, <paramref name="view"/>'s part of it, with each lane's loudness (in lane order).</summary>
+    public void Set(IReadOnlyList<TimelineLane> lanes, IReadOnlyList<LoudnessLane?> loudness, long day, TimelineViewport view, long? playheadMs)
     {
-        bool changed = !ReferenceEquals(lanes, _lanes) || day != _day || view.Zoom != _view.Zoom || !_drawn;
+        bool changed = !ReferenceEquals(lanes, _lanes) || !loudness.SequenceEqual(_loudness) || day != _day || view.Zoom != _view.Zoom || !_drawn;
         _lanes = lanes;
+        _loudness = loudness;
         _day = day;
         _view = view;
         _playheadSec = playheadMs is { } ms ? DeviceTime.FloorDiv(ms, 1000) : null;
@@ -291,7 +307,7 @@ internal sealed class LanesView : Grid
         _drawn = true;
         _canvas.Children.Clear();
         _labels.Clear();
-        double height = RecordingsPanes.RulerHeight + Math.Max(_lanes.Count, 1) * RecordingsPanes.LaneHeight;
+        double height = RecordingsPanes.RulerHeight + Math.Max(_lanes.Count, 1) * RecordingsPanes.RowHeight + RecordingsPanes.LegendHeight;
         _canvas.Width = w;
         _canvas.Height = height;
         // Hour ruler: every 6 hours at the whole day, finer as it zooms.
@@ -313,7 +329,7 @@ internal sealed class LanesView : Grid
         for (int i = 0; i < _lanes.Count; i++)
         {
             TimelineLane lane = _lanes[i];
-            double top = RecordingsPanes.RulerHeight + i * RecordingsPanes.LaneHeight;
+            double top = RecordingsPanes.RulerHeight + i * RecordingsPanes.RowHeight;
             foreach (RecordingSpan s in lane.Spans)
             {
                 double x0 = w * (s.Start - _day) / 86400.0, x1 = w * (s.End - _day) / 86400.0;
@@ -325,11 +341,12 @@ internal sealed class LanesView : Grid
             foreach (RecordedEvent e in lane.Events)
             {
                 double x0 = w * (e.Start - _day) / 86400.0, x1 = w * (e.End - _day) / 86400.0;
-                var bar = new Rectangle { Width = Math.Max(x1 - x0, 3), Height = RecordingsPanes.LaneHeight - 6, Fill = new SolidColorBrush(TimelineColors.Of(e.Kind)), RadiusX = 2, RadiusY = 2, IsHitTestVisible = false };
+                var bar = new Rectangle { Width = Math.Max(x1 - x0, 3), Height = RecordingsPanes.LaneHeight - 6, Fill = new SolidColorBrush(TimelineColors.Of(e)), RadiusX = 2, RadiusY = 2, IsHitTestVisible = false };
                 Canvas.SetLeft(bar, x0);
                 Canvas.SetTop(bar, top + 3);
                 _canvas.Children.Add(bar);
             }
+            AddLoudness(i < _loudness.Count ? _loudness[i] : null, top + RecordingsPanes.LaneHeight, w);
             var label = new TextBlock
             {
                 Text = lane.Failed ? $"{lane.Name} ⚠ could not search this day" : lane.Name,
@@ -341,9 +358,54 @@ internal sealed class LanesView : Grid
             _labels.Add(label);
             _canvas.Children.Add(label);
         }
+        var legend = new TextBlock
+        {
+            Text = "Loudness: light = loudest second, dark = average; blank = not analyzed (not silence). Pink bars are sounds.",
+            FontSize = 10,
+            Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xA0, 0xA3, 0xA8)),
+            IsHitTestVisible = false,
+        };
+        Canvas.SetTop(legend, height - RecordingsPanes.LegendHeight);
+        _labels.Add(legend);
+        _canvas.Children.Add(legend);
         _canvas.Children.Add(_head);
         PlaceLabels();
         PlaceHead();
+    }
+
+    // A lane's loudness strip: the loudest second of each bucket light, its average dark, from -80 dBFS (nothing)
+    // to 0 (full height), as two polygons (not a shape per bucket); blank where no audio was analyzed.
+    private void AddLoudness(LoudnessLane? lane, double top, double width)
+    {
+        double h = RecordingsPanes.LoudnessHeight, bottom = top + h;
+        var track = new Rectangle { Width = width, Height = h, Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF)), IsHitTestVisible = false };
+        Canvas.SetTop(track, top);
+        _canvas.Children.Add(track);
+        if (lane is null || lane.Bucket <= 0 || !lane.Heard)
+        {
+            return;
+        }
+        _canvas.Children.Add(Envelope(lane, lane.Peak, 0x60, bottom, width));
+        _canvas.Children.Add(Envelope(lane, lane.Rms, 0xD8, bottom, width));
+    }
+
+    private Polygon Envelope(LoudnessLane lane, IReadOnlyList<int?> values, byte alpha, double bottom, double width)
+    {
+        double h = RecordingsPanes.LoudnessHeight;
+        var points = new Microsoft.UI.Xaml.Media.PointCollection();
+        double x = 0;
+        points.Add(new Windows.Foundation.Point(0, bottom));
+        for (int i = 0; i < values.Count; i++)
+        {
+            double x0 = width * (lane.Start + i * lane.Bucket - _day) / 86400.0, x1 = width * (lane.Start + (i + 1) * lane.Bucket - _day) / 86400.0;
+            double y = values[i] is { } db ? bottom - Math.Max(h * LoudnessScale.Level(db), 1) : bottom;
+            points.Add(new Windows.Foundation.Point(x0, y));
+            points.Add(new Windows.Foundation.Point(x1, y));
+            x = x1;
+        }
+        points.Add(new Windows.Foundation.Point(x, bottom));
+        Windows.UI.Color c = TimelineColors.Loudness;
+        return new Polygon { Points = points, Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, c.R, c.G, c.B)), IsHitTestVisible = false };
     }
 
     private void PlaceLabels()
@@ -369,7 +431,7 @@ internal sealed class LanesView : Grid
     }
 
     private (int Lane, long Second) At(Windows.Foundation.Point p) =>
-        ((int)Math.Floor((p.Y - RecordingsPanes.RulerHeight) / RecordingsPanes.LaneHeight), _day + (long)(p.X / ContentWidth * 86400));
+        ((int)Math.Floor((p.Y - RecordingsPanes.RulerHeight) / RecordingsPanes.RowHeight), _day + (long)(p.X / ContentWidth * 86400));
 
     private void OnTapped(object sender, TappedRoutedEventArgs e)
     {

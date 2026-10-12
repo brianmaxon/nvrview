@@ -38,7 +38,7 @@ import Testing
             #expect(KindFilter(kind: animal) == .animal, "\(animal)")
             #expect(IndicatorKind(detectionKind: animal) == .animal)
         }
-        #expect(KindFilter(kind: "dog_bark") == .other)
+        #expect(KindFilter(kind: "dog_bark") == .sound, "a sound, not an animal seen")
         #expect(KindFilter(kind: "people") == .people)
         #expect(KindFilter(kind: "vehicle") == .vehicle)
         #expect(KindFilter(kind: "motion") == .motion)

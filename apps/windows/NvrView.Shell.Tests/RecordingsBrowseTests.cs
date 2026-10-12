@@ -57,7 +57,7 @@ internal static class RecordingsBrowseTests
             {
                 T.Equal(KindFilter.Animal, KindFilters.Of(animal), animal);
             }
-            T.Equal(KindFilter.Other, KindFilters.Of("dog_bark"));
+            T.Equal(KindFilter.Sound, KindFilters.Of("dog_bark"));
             T.Equal(KindFilter.People, KindFilters.Of("people"));
             T.Equal(KindFilter.Vehicle, KindFilters.Of("vehicle"));
             T.Equal(KindFilter.Motion, KindFilters.Of("motion"));
@@ -296,9 +296,10 @@ internal static class RecordingsBrowseTests
             T.Equal((false, false), RecordingsPanes.Shown(600, true, true));
             T.Equal((false, true), RecordingsPanes.Shown(800, false, true));
             T.Equal((false, false), RecordingsPanes.Shown(2000, false, false));
-            T.Equal(18.0 + 3 * 26 + 8, RecordingsPanes.LanesHeight(900, 3));
+            // Each lane has its loudness strip (26 + 10), and the legend is under them.
+            T.Equal(18.0 + 3 * 36 + 14 + 8, RecordingsPanes.LanesHeight(900, 3));
             T.Equal((600 - RecordingsPanes.TransportHeight) / 3, RecordingsPanes.LanesHeight(600, 16));
-            T.Equal(18.0 + 2 * 26 + 8, RecordingsPanes.LanesHeight(200, 16));
+            T.Equal(18.0 + 2 * 36 + 14 + 8, RecordingsPanes.LanesHeight(200, 16));
             T.Equal<long?>(105, IncidentSplit.Second(100, 110, 105_400));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 100_900));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 110_000));
