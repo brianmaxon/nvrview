@@ -207,24 +207,30 @@ fn frame_list(stbl: &[([u8; 4], &[u8])]) -> Result<Vec<(u64, u32)>, Error> {
         let b = stsz
             .get(12..12 + need)
             .ok_or(Error::Malformed("stsz is short"))?;
-        b.chunks_exact(4).map(|c| be32(c, 0)).collect()
+        b.as_chunks::<4>().0.iter().map(|c| be32(c, 0)).collect()
     };
     let stsc: Vec<(u64, u64)> = table(
         find(stbl, b"stsc").ok_or(Error::Malformed("no stsc"))?,
         12,
         "stsc",
     )?
-    .chunks_exact(12)
+    .as_chunks::<12>()
+    .0
+    .iter()
     .map(|e| (u64::from(be32(e, 0)), u64::from(be32(e, 4))))
     .collect();
     let offsets: Vec<u64> = if let Some(p) = find(stbl, b"stco") {
         table(p, 4, "stco")?
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|e| u64::from(be32(e, 0)))
             .collect()
     } else if let Some(p) = find(stbl, b"co64") {
         table(p, 8, "co64")?
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|e| be64(e, 0))
             .collect()
     } else {
