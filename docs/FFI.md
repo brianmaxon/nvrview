@@ -622,6 +622,27 @@ The `channels` event gains, without an ABI change, from each channel's
 > preset recall for [CAPTURE.md](CAPTURE.md) "Pan, tilt, and zoom"; the
 > commands are in protocol.md, "What nvrview will send". Its own minor,
 > the next free one when it lands ("Versioning").
+>
+> **Implementation status (Z1).** The Rust side exists on `Core`:
+> `ptz_info`, `ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset` (each
+> taking a `MotionOrigin`; the C functions will pass `Manual`) and
+> `set_motion_grant`, with the `ptz` events below. The C functions are
+> not exported yet: other branches in flight take minors 7 and 8, and
+> minors are numbered in the order they land, so they come with the apps'
+> PTZ controls (Z2) on the next free minor. As built, beyond the shapes
+> below: a renewal sends nothing and reports nothing; a lens move's `sent`
+> event carries the clamped `position`; `refused` (the core's rules:
+> `not_granted`, `user_steering`, `rate_limited` with `retry_after_ms`,
+> `max_hold`, `not_supported`, `unknown_preset`) is told apart from
+> `failed` (`device_refused` with `status`, `connection_lost`,
+> `timed_out`, `session_closed`, `query_failed`); and the session's own
+> stops come on the tile that started the move as `{"type":"ptz",
+> "tile":7,"action":"stop","state":"sent","reason":"deadman"}`, with
+> `reason` one of `released` (an `nv_ptz_stop`), `deadman`, `max_hold`,
+> `replaced`, `device_refused`, `grant_withdrawn`, `session_closed`,
+> `reconnected`. A speed outside 1–64, or an automation name that is empty,
+> longer than 64 bytes or holds control characters, is
+> `NV_ERR_INVALID_ARGUMENT`. `nv_ptz_info` blocks for at most 20 s.
 
 ```c
 NvStatus nv_ptz_info(NvCore *core, const char *request, char *out, size_t cap, size_t *len);

@@ -242,6 +242,35 @@ PTZ and focus controls, or reported from static analysis) in
 `docs/protocol.md` before any code sends it, and a mock-nvr model so it is
 tested without hardware.
 
+**Implementation status (Z1).** Pan, tilt, preset recall and lens moves are
+built in the core; the apps do not call them yet (Z2).
+
+- `bc_protocol::session` builds 18 (the four observed directions and
+  `stop`), 19 (`toPos` only) and 295 from fixed templates, and refuses them
+  unless the capabilities (199) read *on the same connection* offer them;
+  a recall names a preset of the channel's list (190) and a lens position
+  is clamped to the range of the last 294. These facts come from the
+  device's own replies, never from the caller. A stop is always possible
+  except to a channel known not to pan or tilt.
+- `bc_session` (`crate::ptz`) holds every rule: the origin
+  (`MotionOrigin::Manual` needs no enable; `MotionOrigin::Automation(name)`
+  needs a per-camera grant, held for the session's life and passed by the
+  app, and is refused while the user moves the camera and for 5 s after the
+  user's last command there); per-camera limits as above plus per-device
+  ones (moves and lens 60 per second, bursts of 120; recalls 15 per second);
+  the dead-man timer (1 s), the maximum hold (30 s, after which the same
+  direction is refused until released); and the stop on every path:
+  release, a different direction or a recall, the timers, a refused move,
+  a withdrawn grant, close and drop of the session, and, for a move the
+  connection lost before its stop, right after the next login. Commands
+  reach the device in the order they were made, so a release never
+  overtakes its move. Every command sent is logged with its origin, within
+  a budget of log lines (bursts of 40, then 10 per second, the rest
+  counted).
+- `viewer_core::Core` (`ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset`,
+  `ptz_info`, `set_motion_grant`) reports outcomes as `ptz` events and
+  stops a move when the tile that started it closes.
+
 ## Other protocols (later)
 
 Baichuan is the first protocol, not the only one the design allows. Everything

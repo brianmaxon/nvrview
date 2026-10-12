@@ -18,7 +18,8 @@
 //!   each subscriber has its own queue, keyframe gating, and drop counters, so
 //!   a slow one never affects another. A subscriber that attaches mid-stream
 //!   gets the stream info, then video from the next keyframe.
-//! - **Read-only, but for talk-back**: only commands the protocol crate's allowlist can build are
+//! - **Read-only, but for camera motion control** (talk-back, pan, tilt, presets, lens):
+//!   only commands the protocol crate's allowlist can build are
 //!   ever sent (login, preview start and stop, keepalive, the detection
 //!   subscription (192) behind [`DeviceSession::alarms`], the read-only
 //!   info queries behind [`DeviceSession::query`], and the recording
