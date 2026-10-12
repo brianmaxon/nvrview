@@ -36,6 +36,7 @@ static atomic_bool g_stop_render;
 /* Recordings events seen. */
 static atomic_ulong g_rec_changed, g_thumb_ready, g_download_done, g_download_trashed;
 static atomic_ulong g_device_info_rec;
+static atomic_ulong g_ptz_move, g_ptz_stop, g_ptz_preset, g_ptz_zoom_clamped;
 /* nv_tile_open writes the ID here, and only then lets actions run, so the
  * callback may read it without further synchronization. */
 static uint64_t g_tile;
@@ -165,6 +166,20 @@ static void on_event(void *context, const char *json, size_t len) {
     }
     if (contains(json, len, "\"type\":\"download_removed\"") && contains(json, len, "\"trash\":true")) {
         atomic_fetch_add(&g_download_trashed, 1);
+    }
+    if (contains(json, len, "\"type\":\"ptz\"") && contains(json, len, "\"state\":\"sent\"")) {
+        if (contains(json, len, "\"action\":\"move\"")) {
+            atomic_fetch_add(&g_ptz_move, 1);
+        }
+        if (contains(json, len, "\"action\":\"stop\"")) {
+            atomic_fetch_add(&g_ptz_stop, 1);
+        }
+        if (contains(json, len, "\"action\":\"preset\"")) {
+            atomic_fetch_add(&g_ptz_preset, 1);
+        }
+        if (contains(json, len, "\"action\":\"lens\"") && contains(json, len, "\"position\":6000")) {
+            atomic_fetch_add(&g_ptz_zoom_clamped, 1);
+        }
     }
     if (contains(json, len, "\"type\":\"device_info\"") &&
         contains(json, len, "\"recordings\":{")) {
@@ -1110,6 +1125,45 @@ int main(int argc, char **argv) {
     if (nv_talk_set_conversation(core, tile, true) != NV_OK ||
         nv_talk_set_conversation(core, tile, false) != NV_OK) {
         problem("nv_talk_set_conversation refused a tile");
+    }
+    /* Camera motion (minor 11) on the mock's pan-and-tilt camera (channel 0). */
+    {
+        char info[1024];
+        size_t info_len = 0;
+        char request[64];
+        snprintf(request, sizeof request, "{\"tile\":%llu}", (unsigned long long)tile);
+        if (nv_ptz_info(core, request, info, sizeof info, &info_len) != NV_OK ||
+            !contains(info, info_len, "\"pan_tilt\":true") ||
+            !contains(info, info_len, "\"speeds\":[1,64]")) {
+            problem("nv_ptz_info did not describe the camera");
+        }
+        if (nv_ptz_move(core, tile, "sideways", 20) != NV_ERR_INVALID_ARGUMENT ||
+            nv_ptz_move(core, tile, "left", 0) != NV_ERR_INVALID_ARGUMENT ||
+            nv_ptz_move(core, tile + 100, "left", 20) != NV_ERR_UNKNOWN_ID ||
+            nv_ptz_stop(core, tile + 100) != NV_ERR_UNKNOWN_ID ||
+            nv_motion_grant(core, device, 0, "", true) != NV_ERR_INVALID_ARGUMENT ||
+            nv_motion_grant(core, device, 0, "example-client", true) != NV_OK ||
+            nv_motion_grant(core, device, 0, "example-client", false) != NV_OK) {
+            problem("a camera motion call mishandled its arguments");
+        }
+        if (nv_ptz_move(core, tile, "left", 20) != NV_OK) {
+            problem("nv_ptz_move failed");
+        }
+        for (int i = 0; i < 1000 && atomic_load(&g_ptz_move) < 1; i++) {
+            sleep_ms(10);
+        }
+        if (nv_ptz_stop(core, tile) != NV_OK || nv_ptz_preset(core, tile, 1) != NV_OK ||
+            nv_ptz_lens(core, tile, "zoom", 99999) != NV_OK) {
+            problem("a camera motion call failed");
+        }
+        for (int i = 0; i < 1000 && (atomic_load(&g_ptz_stop) < 1 || atomic_load(&g_ptz_preset) < 1 ||
+                                      atomic_load(&g_ptz_zoom_clamped) < 1); i++) {
+            sleep_ms(10);
+        }
+        if (atomic_load(&g_ptz_move) != 1 || atomic_load(&g_ptz_stop) < 1 ||
+            atomic_load(&g_ptz_preset) != 1 || atomic_load(&g_ptz_zoom_clamped) != 1) {
+            problem("camera motion events did not arrive");
+        }
     }
     if (atomic_load(&g_gen_answered[1]) < 20 || atomic_load(&g_gen_resets[0]) != 1) {
         problem("the tier switch did not complete");

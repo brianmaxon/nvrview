@@ -128,7 +128,8 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
 > the keys). Save picture and recording are built on both apps (see "Save
-> picture" and "Recording"); PTZ is not built yet: its buttons and menu
+> picture" and "Recording"); PTZ is built on macOS (see "Pan, tilt, and
+> zoom") and not yet on Windows: there its buttons and menu
 > items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
@@ -171,10 +172,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** the PTZ pad, Presets and Lens are shown in their final
-  places (so the layout and the overflow are the final ones), dimmed, with
-  "coming soon" in the tooltip. A click, the key or the menu item
-  shows "Presets is coming soon" (and so on) over the stage for
+- **Not built yet (Windows):** the PTZ pad, Presets and Lens are shown in
+  their final places (so the layout and the overflow are the final ones),
+  dimmed, with "coming soon" in the tooltip. A click, the key or the menu
+  item shows "Presets is coming soon" (and so on) over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -713,9 +714,11 @@ records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
 
-> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"). The core's side is
-> built (Z1: commands, limits, the stop on every path, grants); the apps'
-> controls are not.
+> **Built on macOS** (Z2; Windows is Z3). The pad and lens popovers under
+> the header buttons and the Camera menu's "Pan and Tilt…", the presets
+> menu (recall only; also Camera ▸ Presets), the Option keys, and the stop
+> on release, window close, tile close and focus loss. Per-camera grants
+> for automation are in Settings ▸ Cameras.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device

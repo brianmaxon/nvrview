@@ -605,11 +605,13 @@ doorbell's speaker (AUDIO.md, "Recording calls").
 
 ## Pan, tilt, and zoom
 
-> **Implementation status (Z1).** The core's side is built and tested
-> against the mock NVR's PTZ model (`tools/mock-nvr`, `ptz`):
-> ARCHITECTURE.md, "Device commands" has what it does, FFI.md "Camera
-> motion (PTZ)" the Rust API and events. Not built: the C functions and
-> the apps' controls and self-test steps (Z2).
+> **Implementation status (Z2).** The core, the C functions (ABI 3, minor
+> 9) and the macOS controls are built and tested against the mock NVR's
+> PTZ model (`tools/mock-nvr`, `ptz`, `--ptz`): ARCHITECTURE.md, "Device
+> commands" has what the core does, FFI.md "Camera motion (PTZ)" the API
+> and events. A second lens of a multi-lens camera is its own camera
+> (`subChannel` 1 in the request extension). Not built: the Windows
+> controls and their self-test steps (Z3).
 
 Moving a PTZ camera, its lens zoom and focus, and recalling its presets from
 the tile. It is camera motion control (ARCHITECTURE.md, "Device commands"):

@@ -18,7 +18,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--multi-lens CH:BITS,BITS] [--extern CH:MODE,CH:MODE]\n\
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
     \x20               [--talk CH,CH] [--fisheye CH,CH] [--fisheye-fixture FILE]\n\
-    \x20               [--fisheye-size N]\n\
+    \x20               [--fisheye-size N] [--ptz CH[.LENS][:lens],...]\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
     --extern sets how channel CH lists and answers externStream/mobileStream: listed\n\
     (default), hidden (not listed, served: a second lens), info-only (not listed, one\n\
@@ -27,6 +27,9 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
     later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
     --talk gives channels a speaker (doorbell talk-back: ipcAudioTalk, ability, talk).\n\
+    --ptz makes channels cameras that move: CH pans, tilts, zooms and has 3 presets; CH:lens\n\
+    has only a motorized zoom and focus lens; CH.1 is the second lens of a multi-lens\n\
+    channel (addressed with subChannel 1), also CH.1:lens.\n\
     --fisheye makes channels fisheye cameras (fishEye 1, channelType fisheye_ipc) that\n\
     stream --fisheye-fixture (default fixtures/synthetic/fisheye/h264-fisheye.h264), advertised\n\
     as --fisheye-size squared (default 384, the synthetic fixture's size).\n\
@@ -51,6 +54,7 @@ fn run() -> Result<(), String> {
     let mut third_party: Vec<u8> = Vec::new();
     let (mut third_party_refusals, mut third_party_delay_ms) = (2u32, 200u64);
     let mut talk: Vec<u8> = Vec::new();
+    let mut ptz: Vec<(u8, u8, bool)> = Vec::new();
     let mut fisheye: Vec<u8> = Vec::new();
     let mut fisheye_fixture = PathBuf::from("fixtures/synthetic/fisheye/h264-fisheye.h264");
     let mut fisheye_size = 384u32;
@@ -133,6 +137,22 @@ fn run() -> Result<(), String> {
                     .split(',')
                     .map(|c| c.parse().map_err(|_| format!("bad value for {a}: {v}")))
                     .collect::<Result<_, _>>()?
+            }
+            "--ptz" => {
+                for item in v.split(',') {
+                    let bad = || format!("bad value for {a}: {item} (CH[.LENS][:lens])");
+                    let (cam, kind) = match item.split_once(':') {
+                        Some((cam, "lens")) => (cam, true),
+                        Some(_) => return Err(bad()),
+                        None => (item, false),
+                    };
+                    let (ch, lens) = match cam.split_once('.') {
+                        Some((ch, "1")) => (ch, 1),
+                        Some(_) => return Err(bad()),
+                        None => (cam, 0),
+                    };
+                    ptz.push((ch.parse().map_err(|_| bad())?, lens, kind));
+                }
             }
             "--fisheye" => {
                 fisheye = v
@@ -238,6 +258,21 @@ fn run() -> Result<(), String> {
         return Err(format!("--talk channel {ch} is not below --channels"));
     }
     cfg.talk_channels = talk;
+    for (ch, lens, lens_only) in ptz {
+        if ch >= channels {
+            return Err(format!("--ptz channel {ch} is not below --channels"));
+        }
+        let camera = if lens_only {
+            mock_nvr::ptz::PtzCamera::lens_only()
+        } else {
+            mock_nvr::ptz::PtzCamera::pan_tilt_zoom(3)
+        };
+        if lens == 1 {
+            cfg.ptz_lens1.insert(ch, camera);
+        } else {
+            cfg.ptz.insert(ch, camera);
+        }
+    }
     if !fisheye.is_empty() {
         if let Some(ch) = fisheye.iter().find(|c| **c >= channels) {
             return Err(format!("--fisheye channel {ch} is not below --channels"));

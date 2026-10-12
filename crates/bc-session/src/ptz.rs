@@ -37,7 +37,7 @@
 use crate::config::{PtzConfig, RateLimit};
 use crate::supervisor::{DeviceSession, QueryError};
 use crate::talk::Outgoing;
-use bc_protocol::ptz::{Direction, LensAxis, LensRange, Preset};
+use bc_protocol::ptz::{Cam, Direction, LensAxis, LensRange, Preset};
 use bc_protocol::session::{Command, PtzCaps, Session, SessionError};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -219,7 +219,7 @@ impl StopCause {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PtzNotice {
     /// The channel.
-    pub channel: u8,
+    pub cam: Cam,
     /// Why.
     pub cause: StopCause,
     /// Who started the move that stopped (`None` for a stop sent after a
@@ -343,7 +343,7 @@ pub(crate) enum Kind {
 /// timers.
 pub(crate) struct Policy {
     cfg: PtzConfig,
-    channels: HashMap<u8, ChannelMotion>,
+    channels: HashMap<Cam, ChannelMotion>,
     device_moves: Bucket,
     device_presets: Bucket,
 }
@@ -358,23 +358,21 @@ impl Policy {
         }
     }
 
-    fn channel(&mut self, channel: u8) -> &mut ChannelMotion {
+    fn cam(&mut self, cam: Cam) -> &mut ChannelMotion {
         let cfg = self.cfg;
-        self.channels
-            .entry(channel)
-            .or_insert_with(|| ChannelMotion {
-                moving: None,
-                held_out: None,
-                last_manual: None,
-                moves: Bucket::new(cfg.camera_moves),
-                presets: Bucket::new(cfg.camera_presets),
-            })
+        self.channels.entry(cam).or_insert_with(|| ChannelMotion {
+            moving: None,
+            held_out: None,
+            last_manual: None,
+            moves: Bucket::new(cfg.camera_moves),
+            presets: Bucket::new(cfg.camera_presets),
+        })
     }
 
     /// The origin rules: automation needs a grant and yields to the user.
     fn check_origin(
         &mut self,
-        channel: u8,
+        cam: Cam,
         origin: &MotionOrigin,
         granted: bool,
         now: Instant,
@@ -386,7 +384,7 @@ impl Policy {
             return Err(PtzRefusal::NotGranted);
         }
         let priority = self.cfg.manual_priority;
-        let c = self.channel(channel);
+        let c = self.cam(cam);
         let steering = c.moving.as_ref().is_some_and(|m| m.origin.is_manual())
             || c.last_manual.is_some_and(|t| now < t + priority);
         if steering {
@@ -398,17 +396,18 @@ impl Policy {
     /// Decides a move (or its renewal) and records it.
     pub(crate) fn decide_move(
         &mut self,
-        channel: u8,
+        cam: impl Into<Cam>,
         direction: Direction,
         speed: u8,
         origin: &MotionOrigin,
         granted: bool,
         now: Instant,
     ) -> Result<MoveDecision, PtzRefusal> {
-        self.check_origin(channel, origin, granted, now)?;
+        let cam = cam.into();
+        self.check_origin(cam, origin, granted, now)?;
         let deadman = self.cfg.deadman;
-        self.channel(channel);
-        let c = self.channels.get_mut(&channel).expect("created above");
+        self.cam(cam);
+        let c = self.channels.get_mut(&cam).expect("created above");
         if let Some((d, last)) = c.held_out {
             if now >= last + deadman || d != direction {
                 c.held_out = None;
@@ -444,15 +443,16 @@ impl Policy {
     /// Decides a preset recall or lens move and records it.
     pub(crate) fn decide(
         &mut self,
-        channel: u8,
+        cam: impl Into<Cam>,
         kind: Kind,
         origin: &MotionOrigin,
         granted: bool,
         now: Instant,
     ) -> Result<(), PtzRefusal> {
-        self.check_origin(channel, origin, granted, now)?;
-        self.channel(channel);
-        let Some(c) = self.channels.get_mut(&channel) else {
+        let cam = cam.into();
+        self.check_origin(cam, origin, granted, now)?;
+        self.cam(cam);
+        let Some(c) = self.channels.get_mut(&cam) else {
             return Err(PtzRefusal::NotSupported);
         };
         let mine = match kind {
@@ -472,8 +472,9 @@ impl Policy {
 
     /// Records a stop: the move (if any) ends, and a release clears a
     /// max-hold refusal.
-    pub(crate) fn stop(&mut self, channel: u8, released: bool) -> Option<ActiveMove> {
-        let c = self.channels.get_mut(&channel)?;
+    pub(crate) fn stop(&mut self, cam: impl Into<Cam>, released: bool) -> Option<ActiveMove> {
+        let cam = cam.into();
+        let c = self.channels.get_mut(&cam)?;
         if released {
             c.held_out = None;
         }
@@ -482,7 +483,7 @@ impl Policy {
 
     /// The moves whose dead-man or hold timer has run out by `now`, now
     /// ended (a max-hold one also refuses its direction until released).
-    pub(crate) fn due(&mut self, now: Instant) -> Vec<(u8, ActiveMove, StopCause)> {
+    pub(crate) fn due(&mut self, now: Instant) -> Vec<(Cam, ActiveMove, StopCause)> {
         let (deadman, max_hold) = (self.cfg.deadman, self.cfg.max_hold);
         let mut out = Vec::new();
         for (ch, c) in &mut self.channels {
@@ -516,14 +517,14 @@ impl Policy {
     }
 
     /// Every move in progress.
-    pub(crate) fn moving(&self) -> impl Iterator<Item = (u8, &ActiveMove)> + '_ {
+    pub(crate) fn moving(&self) -> impl Iterator<Item = (Cam, &ActiveMove)> + '_ {
         self.channels
             .iter()
             .filter_map(|(ch, c)| c.moving.as_ref().map(|m| (*ch, m)))
     }
 
     /// Forgets every move (the connection is gone), returning them.
-    pub(crate) fn take_all(&mut self) -> Vec<(u8, ActiveMove)> {
+    pub(crate) fn take_all(&mut self) -> Vec<(Cam, ActiveMove)> {
         let mut v: Vec<_> = self
             .channels
             .iter_mut()
@@ -610,11 +611,11 @@ impl PtzControl {
         }
     }
 
-    fn granted(&self, channel: u8, origin: &MotionOrigin) -> bool {
+    fn granted(&self, cam: Cam, origin: &MotionOrigin) -> bool {
         match origin {
             MotionOrigin::Manual => true,
             MotionOrigin::Automation(c) => lock(&self.grants)
-                .get(&channel)
+                .get(&cam.channel)
                 .is_some_and(|s| s.contains(c)),
         }
     }
@@ -700,7 +701,7 @@ impl PtzCommand {
 type PtzReply = oneshot::Sender<Result<PtzOutcome, PtzRefusal>>;
 
 pub(crate) struct PtzReq {
-    channel: u8,
+    cam: Cam,
     op: Op,
     origin: MotionOrigin,
     reply: Option<PtzReply>,
@@ -710,12 +711,12 @@ pub(crate) struct PtzReq {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Fact {
     Caps,
-    Lens(u8),
-    Presets(u8),
+    Lens(Cam),
+    Presets(Cam),
 }
 
 struct InFlight {
-    channel: u8,
+    cam: Cam,
     op: Op,
     origin: MotionOrigin,
     reply: Option<PtzReply>,
@@ -736,11 +737,11 @@ pub(crate) struct Ptz {
     failed: HashSet<Fact>,
     /// Channels where a move was sent and no stop has been confirmed since.
     /// Only these are owed a stop after a lost connection.
-    sent_moves: HashSet<u8>,
+    sent_moves: HashSet<Cam>,
     /// Channels to stop as soon as a connection is logged in.
-    pending_stops: HashSet<u8>,
+    pending_stops: HashSet<Cam>,
     /// Lens re-reads (294) due, by channel.
-    rereads: HashMap<u8, Instant>,
+    rereads: HashMap<Cam, Instant>,
     log: LineBudget,
 }
 
@@ -765,18 +766,23 @@ impl Ptz {
         }
     }
 
-    fn log_sent(&mut self, channel: u8, action: &str, origin: &str, reason: &str, now: Instant) {
+    fn log_sent(&mut self, cam: Cam, action: &str, origin: &str, reason: &str, now: Instant) {
         if let Some(suppressed) = self.log.allow(now) {
             info!(
-                channel,
-                action, origin, reason, suppressed, "camera motion command sent"
+                channel = cam.channel,
+                lens = cam.lens,
+                action,
+                origin,
+                reason,
+                suppressed,
+                "camera motion command sent"
             );
         }
     }
 
     fn log_refused(
         &mut self,
-        channel: u8,
+        cam: Cam,
         action: &str,
         origin: &MotionOrigin,
         why: PtzRefusal,
@@ -784,7 +790,8 @@ impl Ptz {
     ) {
         if let Some(suppressed) = self.log.allow(now) {
             warn!(
-                channel,
+                channel = cam.channel,
+                lens = cam.lens,
                 action,
                 origin = origin.name(),
                 reason = why.name(),
@@ -796,7 +803,7 @@ impl Ptz {
 
     fn answer(&mut self, r: PtzReq, result: Result<PtzOutcome, PtzRefusal>, now: Instant) {
         if let Err(why) = result {
-            self.log_refused(r.channel, r.op.action(), &r.origin, why, now);
+            self.log_refused(r.cam, r.op.action(), &r.origin, why, now);
         }
         if let Some(tx) = r.reply {
             let _ = tx.send(result);
@@ -807,21 +814,21 @@ impl Ptz {
     fn send_stop(
         &mut self,
         session: &mut Session,
-        channel: u8,
+        cam: Cam,
         origin: MotionOrigin,
         reply: Option<PtzReply>,
         reason: &str,
         out: &mut Outgoing,
     ) -> bool {
         let now = Instant::now();
-        match session.ptz_stop(channel) {
+        match session.ptz_stop(cam) {
             Ok((id, bytes)) => {
-                self.log_sent(channel, "stop", origin.name(), reason, now);
+                self.log_sent(cam, "stop", origin.name(), reason, now);
                 out.push(bytes);
                 self.in_flight.insert(
                     id,
                     InFlight {
-                        channel,
+                        cam,
                         op: Op::Stop,
                         origin,
                         reply,
@@ -831,7 +838,7 @@ impl Ptz {
                 true
             }
             Err(e) => {
-                warn!(channel, error = %e, reason, "camera stop not sent");
+                warn!(channel = cam.channel, lens = cam.lens, error = %e, reason, "camera stop not sent");
                 if let Some(tx) = reply {
                     let _ = tx.send(Err(session_refusal(&e)));
                 }
@@ -840,12 +847,8 @@ impl Ptz {
         }
     }
 
-    fn notify(&self, channel: u8, cause: StopCause, origin: Option<MotionOrigin>) {
-        self.control.notify(PtzNotice {
-            channel,
-            cause,
-            origin,
-        });
+    fn notify(&self, cam: Cam, cause: StopCause, origin: Option<MotionOrigin>) {
+        self.control.notify(PtzNotice { cam, cause, origin });
     }
 
     /// The read a request still needs on this connection, if any.
@@ -853,13 +856,13 @@ impl Ptz {
         if !session.ptz_caps_known() {
             return Some(Fact::Caps);
         }
-        let caps = session.ptz_caps(r.channel).unwrap_or_default();
+        let caps = session.ptz_caps(r.cam.channel).unwrap_or_default();
         match r.op {
-            Op::Preset { .. } if caps.presets && session.ptz_presets(r.channel).is_none() => {
-                Some(Fact::Presets(r.channel))
+            Op::Preset { .. } if caps.presets && session.ptz_presets(r.cam).is_none() => {
+                Some(Fact::Presets(r.cam))
             }
-            Op::Lens { .. } if caps.zoom_focus && session.ptz_lens_ranges(r.channel).is_none() => {
-                Some(Fact::Lens(r.channel))
+            Op::Lens { .. } if caps.zoom_focus && session.ptz_lens_ranges(r.cam).is_none() => {
+                Some(Fact::Lens(r.cam))
             }
             _ => None,
         }
@@ -895,8 +898,8 @@ impl Ptz {
         if !session.is_logged_in() {
             return out;
         }
-        let owed: Vec<u8> = {
-            let mut v: Vec<u8> = self.pending_stops.drain().collect();
+        let owed: Vec<Cam> = {
+            let mut v: Vec<Cam> = self.pending_stops.drain().collect();
             v.sort_unstable();
             v
         };
@@ -916,7 +919,7 @@ impl Ptz {
             self.send_stop(session, ch, m.origin.clone(), None, cause.name(), &mut out);
             self.notify(ch, cause, Some(m.origin));
         }
-        let revoked: Vec<(u8, MotionOrigin)> = self
+        let revoked: Vec<(Cam, MotionOrigin)> = self
             .policy
             .moving()
             .filter(|(ch, m)| !self.control.granted(*ch, &m.origin))
@@ -934,7 +937,7 @@ impl Ptz {
             );
             self.notify(ch, StopCause::GrantWithdrawn, Some(origin));
         }
-        let due: Vec<u8> = self
+        let due: Vec<Cam> = self
             .rereads
             .iter()
             .filter(|(_, t)| **t <= now)
@@ -949,7 +952,8 @@ impl Ptz {
         }
         // Requests in order; one waiting for a read holds back the ones
         // behind it, so a channel's commands never overtake each other.
-        while let Some(r) = self.queue.pop_front() {
+        while let Some(mut r) = self.queue.pop_front() {
+            r.cam = session.ptz_resolve(r.cam);
             let abandoned = r.reply.as_ref().is_some_and(oneshot::Sender::is_closed);
             if abandoned && r.op != Op::Stop {
                 continue;
@@ -974,8 +978,8 @@ impl Ptz {
     }
 
     fn run(&mut self, session: &mut Session, r: PtzReq, now: Instant, out: &mut Outgoing) {
-        let ch = r.channel;
-        let caps = session.ptz_caps(ch);
+        let ch = r.cam;
+        let caps = session.ptz_caps(ch.channel);
         match r.op {
             Op::Stop => {
                 let m = self.policy.stop(ch, true);
@@ -1010,7 +1014,7 @@ impl Ptz {
                                 self.in_flight.insert(
                                     id,
                                     InFlight {
-                                        channel: ch,
+                                        cam: ch,
                                         op: r.op,
                                         origin: r.origin,
                                         reply: r.reply,
@@ -1055,7 +1059,7 @@ impl Ptz {
                         self.in_flight.insert(
                             msg,
                             InFlight {
-                                channel: ch,
+                                cam: ch,
                                 op: r.op,
                                 origin: r.origin,
                                 reply: r.reply,
@@ -1084,7 +1088,7 @@ impl Ptz {
                         self.in_flight.insert(
                             msg,
                             InFlight {
-                                channel: ch,
+                                cam: ch,
                                 op: r.op,
                                 origin: r.origin,
                                 reply: r.reply,
@@ -1121,12 +1125,12 @@ impl Ptz {
         let ok = status == 200;
         let result = match (f.op, ok) {
             (Op::Stop, true) => {
-                self.sent_moves.remove(&f.channel);
+                self.sent_moves.remove(&f.cam);
                 Ok(PtzOutcome::Stopped)
             }
             (Op::Move { .. }, true) => Ok(PtzOutcome::Moving),
             (Op::Preset { .. }, true) => {
-                self.rereads.insert(f.channel, now + self.cfg.lens_reread);
+                self.rereads.insert(f.cam, now + self.cfg.lens_reread);
                 Ok(PtzOutcome::Recalled)
             }
             (
@@ -1136,7 +1140,7 @@ impl Ptz {
                 },
                 true,
             ) => {
-                self.rereads.insert(f.channel, now + self.cfg.lens_reread);
+                self.rereads.insert(f.cam, now + self.cfg.lens_reread);
                 Ok(PtzOutcome::Lens(f.position))
             }
             (Op::Lens { .. }, true) => Ok(PtzOutcome::Lens(f.position)),
@@ -1144,7 +1148,8 @@ impl Ptz {
         };
         if !ok {
             warn!(
-                channel = f.channel,
+                channel = f.cam.channel,
+                lens = f.cam.lens,
                 action = f.op.action(),
                 origin = f.origin.name(),
                 status,
@@ -1152,9 +1157,9 @@ impl Ptz {
             );
             if matches!(f.op, Op::Move { .. }) {
                 // Stop anyway, at once: the camera may have started.
-                self.policy.stop(f.channel, false);
-                self.pending_stops.insert(f.channel);
-                self.notify(f.channel, StopCause::DeviceRefused, Some(f.origin.clone()));
+                self.policy.stop(f.cam, false);
+                self.pending_stops.insert(f.cam);
+                self.notify(f.cam, StopCause::DeviceRefused, Some(f.origin.clone()));
             }
         }
         if let Some(tx) = f.reply {
@@ -1179,11 +1184,11 @@ impl Ptz {
         for (_, f) in self.in_flight.drain() {
             let owed = match f.op {
                 Op::Move { .. } => true,
-                Op::Stop => self.sent_moves.contains(&f.channel),
+                Op::Stop => self.sent_moves.contains(&f.cam),
                 _ => false,
             };
             if owed {
-                self.pending_stops.insert(f.channel);
+                self.pending_stops.insert(f.cam);
             }
             if let Some(tx) = f.reply {
                 let _ = tx.send(Err(PtzRefusal::ConnectionLost));
@@ -1215,7 +1220,7 @@ impl Ptz {
         let mut out = Vec::new();
         let inbox = self.control.take_inbox();
         self.queue.extend(inbox);
-        let mut stops: Vec<(u8, Option<MotionOrigin>)> = self
+        let mut stops: Vec<(Cam, Option<MotionOrigin>)> = self
             .policy
             .take_all()
             .into_iter()
@@ -1225,7 +1230,7 @@ impl Ptz {
         let queued = std::mem::take(&mut self.queue);
         for r in queued {
             if r.op == Op::Stop {
-                stops.push((r.channel, None));
+                stops.push((r.cam, None));
             }
             if let Some(tx) = r.reply {
                 let _ = tx.send(Err(PtzRefusal::SessionClosed));
@@ -1262,7 +1267,7 @@ impl Ptz {
                 let _ = tx.send(Err(PtzRefusal::SessionClosed));
             }
         }
-        let left: Vec<u8> = self
+        let left: Vec<Cam> = self
             .policy
             .take_all()
             .into_iter()
@@ -1333,7 +1338,13 @@ impl DeviceSession {
     /// reach the device in the order of these calls (a release is never
     /// overtaken by its move). See [`DeviceSession::ptz_move`] and its
     /// siblings for what each does.
-    pub fn ptz_send(&self, channel: u8, command: PtzCommand, origin: MotionOrigin) -> PtzPending {
+    pub fn ptz_send(
+        &self,
+        cam: impl Into<Cam>,
+        command: PtzCommand,
+        origin: MotionOrigin,
+    ) -> PtzPending {
+        let cam = cam.into();
         let wait = self.query_timeout;
         let refused = |r| PtzPending {
             rx: None,
@@ -1352,13 +1363,18 @@ impl DeviceSession {
         };
         let (tx, rx) = oneshot::channel();
         let req = PtzReq {
-            channel,
+            cam,
             op: command,
             origin,
             reply: Some(tx),
         };
         if let Err(r) = self.ptz_control.submit(req) {
-            warn!(channel, action = r.op.action(), "camera motion inbox full");
+            warn!(
+                channel = cam.channel,
+                lens = cam.lens,
+                action = r.op.action(),
+                "camera motion inbox full"
+            );
             return refused(PtzRefusal::RateLimited {
                 retry_after: Duration::from_millis(100),
             });
@@ -1373,11 +1389,11 @@ impl DeviceSession {
 
     async fn ptz_request(
         &self,
-        channel: u8,
+        cam: impl Into<Cam>,
         op: Op,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        self.ptz_send(channel, op, origin).outcome().await
+        self.ptz_send(cam, op, origin).outcome().await
     }
 
     /// Starts or renews a pan or tilt move on `channel` at `speed` (1 to
@@ -1393,12 +1409,12 @@ impl DeviceSession {
     /// capabilities, or the device.
     pub async fn ptz_move(
         &self,
-        channel: u8,
+        cam: impl Into<Cam>,
         direction: Direction,
         speed: u8,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        self.ptz_request(channel, Op::Move { direction, speed }, origin)
+        self.ptz_request(cam, Op::Move { direction, speed }, origin)
             .await
     }
 
@@ -1411,17 +1427,17 @@ impl DeviceSession {
     /// or the session or device failing.
     pub async fn ptz_stop(
         &self,
-        channel: u8,
+        cam: impl Into<Cam>,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        self.ptz_request(channel, Op::Stop, origin).await
+        self.ptz_request(cam, Op::Stop, origin).await
     }
 
     /// Queues a stop for `channel` without waiting for it (for drop and
     /// close paths that cannot wait). It goes out as soon as the
     /// supervisor runs, or after the next login.
-    pub fn ptz_stop_now(&self, channel: u8, origin: MotionOrigin) {
-        drop(self.ptz_send(channel, Op::Stop, origin));
+    pub fn ptz_stop_now(&self, cam: impl Into<Cam>, origin: MotionOrigin) {
+        drop(self.ptz_send(cam, Op::Stop, origin));
     }
 
     /// Recalls preset `id` (19 `toPos`) on `channel`. A move in progress
@@ -1432,11 +1448,11 @@ impl DeviceSession {
     /// the channel's list lacks.
     pub async fn ptz_recall(
         &self,
-        channel: u8,
+        cam: impl Into<Cam>,
         id: u32,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        self.ptz_request(channel, Op::Preset { id }, origin).await
+        self.ptz_request(cam, Op::Preset { id }, origin).await
     }
 
     /// Moves `channel`'s lens zoom or focus to `position`, clamped to the
@@ -1447,12 +1463,12 @@ impl DeviceSession {
     /// A [`PtzRefusal`].
     pub async fn ptz_lens(
         &self,
-        channel: u8,
+        cam: impl Into<Cam>,
         axis: LensAxis,
         position: i32,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        self.ptz_request(channel, Op::Lens { axis, position }, origin)
+        self.ptz_request(cam, Op::Lens { axis, position }, origin)
             .await
     }
 
@@ -1463,7 +1479,8 @@ impl DeviceSession {
     /// # Errors
     /// [`PtzRefusal::SessionClosed`], [`PtzRefusal::ConnectionLost`],
     /// [`PtzRefusal::TimedOut`], [`PtzRefusal::QueryFailed`].
-    pub async fn ptz_info(&self, channel: u8) -> Result<PtzInfo, PtzRefusal> {
+    pub async fn ptz_info(&self, cam: impl Into<Cam>) -> Result<PtzInfo, PtzRefusal> {
+        let cam = cam.into();
         let support = self
             .query(Command::Support, None)
             .await
@@ -1472,14 +1489,14 @@ impl DeviceSession {
             .map_err(|_| PtzRefusal::QueryFailed)?;
         let caps = items
             .iter()
-            .find(|i| i.channel == channel)
+            .find(|i| i.channel == cam.channel)
             .map(PtzCaps::of)
             .unwrap_or_default();
         let mut info = PtzInfo {
             caps,
             ..PtzInfo::default()
         };
-        let read = |cmd: Command| self.call(Box::new(move |s| s.ptz_query(cmd, channel)), None);
+        let read = |cmd: Command| self.call(Box::new(move |s| s.ptz_query(cmd, cam)), None);
         if caps.zoom_focus {
             let r = read(Command::PtzZoomFocus).await.map_err(query_refusal)?;
             if r.status == 200 {

@@ -139,6 +139,28 @@ public protocol CoreAPI: Sendable {
     /// permission and are logged.
     func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus)
 
+    // MARK: Camera motion (minor 11; docs/FFI.md "Camera motion (PTZ)")
+    //
+    // The app's own calls are the user's manual control and need no enable.
+    // Moves, stops, lens moves and preset recalls return at once (a `ptz`
+    // event tells the outcome); `ptzInfo` waits for the camera (up to 20 s),
+    // so call it off the main thread. None from inside a callback.
+
+    /// `nv_ptz_info`: what the tile's camera can do and where its lens is (JSON).
+    func ptzInfo(tile: UInt64) throws(CoreStatus) -> String
+    /// `nv_ptz_move`: starts or renews a move; call again at least every
+    /// 500 ms while held (the core stops the camera 1 s after the last call).
+    func ptzMove(_ tile: UInt64, direction: PTZDirection, speed: Int) throws(CoreStatus)
+    /// `nv_ptz_stop`: at once; never limited.
+    func ptzStop(_ tile: UInt64) throws(CoreStatus)
+    /// `nv_ptz_lens`: zoom or focus to an absolute position (clamped by the core).
+    func ptzLens(_ tile: UInt64, axis: PTZLensAxis, position: Int) throws(CoreStatus)
+    /// `nv_ptz_preset`: recalls a preset of the camera's list.
+    func ptzPreset(_ tile: UInt64, id: Int) throws(CoreStatus)
+    /// `nv_motion_grant`: lets an automation (a client name, or
+    /// `auto_correction`) move one channel for this run of the core.
+    func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus)
+
     // MARK: Recordings, part 1 (minor 5; docs/FFI.md "Recordings (minor 5)")
     //
     // JSON in and out as the contract shapes it (docs/FFI-RECORDINGS.md);
