@@ -342,7 +342,7 @@ first), **Visitor** and **You** (both disabled, for listening to one side).
 
 The core provides the tap; recognition runs outside it at first, in the app
 or a helper process, because model runtimes are platform-specific (MLX or
-Core ML on macOS, ONNX Runtime/DirectML on Windows). Results come back as
+Core ML on macOS, ONNX Runtime/DirectML on Windows; the Windows app does not deploy Windows ML, the Windows App SDK's ML component, until the first feature that runs a model adds it back). Results come back as
 timestamped text that the UI can align with video. A Rust-side engine can
 replace this later without changing the tap. Nothing leaves the machine.
 

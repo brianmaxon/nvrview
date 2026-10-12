@@ -127,8 +127,17 @@ if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
   step "Windows app self-test (interactive session)"
   scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --mic-test
 
-  step "Windows side-by-side update, end to end (interactive session)"
-  scripts/windows-app.sh update
+  step "Windows app, trimmed release build (publish)"
+  scripts/windows-app.sh publish
+
+  step "Windows app plain start, trimmed release build (interactive session)"
+  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
+
+  step "Windows app self-test, trimmed release build (interactive session)"
+  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --mic-test
+
+  step "Windows side-by-side update, end to end, trimmed release build (interactive session)"
+  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh update
 fi
 
 now=$(date +%s)

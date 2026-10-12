@@ -399,7 +399,7 @@ a third of one core out of 14, and no GPU.
   time, so sampling there will be exact.
 - **Model updates.** Whether newer permissive detectors (D-FINE, RT-DETRv2,
   both Apache-2.0) convert as cleanly and do better on night footage.
-- **Windows.** The same measurement with ONNX Runtime and DirectML is still
+- **Windows.** The same measurement with ONNX Runtime and DirectML (Windows ML, not yet deployed by the app) is still
   to do.
 
 ## Reproducing
