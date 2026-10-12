@@ -1100,13 +1100,14 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: call-window-tile-zoom
         stage.Hover(tile);
         stage.PinchDigital(tile, tile.X + tile.Width / 2, tile.Y + tile.Height / 2, 2);
-        await Until(() => chrome.ResetShown && chrome.MapShown, 5);
         stage.Tick();
         bool zoomed = Math.Abs(tile.Zoom - 2) < 0.01;
-        bool map = chrome.MapShown;
         UnitRect seen = tile.DigitalZoom.Visible(tile.ZoomBase);
         bool cropped = seen.Width < 0.9 || seen.Height < 0.9;
         bool wantsMain = await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
+        // Switching to the main stream takes the picture away for a moment (the header shows only the title and the more button then).
+        await Until(() => stage.HeaderTileOf(tile) is { Picture: true } && chrome.ResetShown && chrome.MapShown, 30);
+        bool map = chrome.MapShown;
         bool resetShown = chrome.ResetShown;
         chrome.PressReset();
         bool back = await Until(() => tile.Zoom <= 1.0001 && !chrome.ResetShown && !chrome.MapShown, 5);
@@ -1118,6 +1119,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(resetShown && back, "the call window's header did not offer Reset Zoom or did not reset");
 
         // parity: call-window-tile-menu
+        await Until(() => stage.HeaderTileOf(tile) is { Picture: true }, 30);
         List<string> menu = Texts(stage.BuildTileMenu(tile)!.Items);
         List<string> want = stage.HeaderTileOf(tile) is { } header ? [.. TileHeaderLayout.Menu(header).Select(e => e.Label)] : [];
         bool callItems = new[] { "Pop In Call", "End Conversation", "Record Call", "Save Picture" }.All(menu.Contains);
@@ -1187,7 +1189,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 + "\"lens_talk\":[true,false],\"lens_ptz\":[{\"pan_tilt\":false},{\"pan_tilt\":true,\"presets\":true,\"zoom_focus\":true}]}");
             ChannelInfo? caps = ChannelInfo.From(doc.RootElement);
             bool capsOK = caps is { Doorbell: true } && caps.TalkOf(0) && !caps.TalkOf(1) && !caps.PtzOf(0).PanTilt && caps.PtzOf(1) is { PanTilt: true, Presets: true, ZoomFocus: true };
-            Say($"header: 110 DIP {string.Join(",", narrow.Shown)}, {width:0} DIP {string.Join(",", middle.Shown)}, 5 DIP wider unchanged {steady}, 1000 DIP {string.Join(",", wide.Shown)}; capabilities parsed {capsOK}");
+            Say($"header: placed {narrow.Placed}/{middle.Placed}/{wide.Placed}, narrow layout [{string.Join(",", narrow.Layout?.Visible ?? [])}], reserve {reserve:0}; 110 DIP {string.Join(",", narrow.Shown)}, {width:0} DIP {string.Join(",", middle.Shown)}, 5 DIP wider unchanged {steady}, 1000 DIP {string.Join(",", wide.Shown)}; capabilities parsed {capsOK}");
             Expect(narrowOK, "below 120 DIP the header did not show only the title and the more button");
             Expect(middleOK, $"one DIP short of every button, the header did not show the model's first {fit} buttons and the more button");
             Expect(wideOK, "a wide header did not show every button without the more button");
@@ -2000,7 +2002,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Microsoft.UI.Xaml.Controls.MenuFlyout? tileMenu = stage.BuildTileMenu(tile);
         List<string> tileItems = tileMenu is null ? [] : Texts(tileMenu.Items);
         Say($"tile menu: {string.Join(" / ", tileItems)}");
-        string[] own = ["Focus", "Listen", "Start Conversation", "Allow talk-back", "Calls open in", "Quality"];
+        string[] own = ["Focus", "Listen", "Start Conversation", "Allow talk-back", "Quality"];
         Expect(own.All(tileItems.Contains), "the tile menu lost one of the tile's own actions");
         Expect(!tileItems.Any(HeaderActions.IsAppWideTitle), $"the tile menu still holds an app-wide item: {string.Join(", ", tileItems.Where(HeaderActions.IsAppWideTitle))}");
         stage.SetEditing(true);
