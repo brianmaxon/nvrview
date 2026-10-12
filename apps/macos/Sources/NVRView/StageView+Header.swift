@@ -62,6 +62,14 @@ extension StageView {
         case .speaker:
             let flags = NSEvent.modifierFlags
             model.toggleListening(camera, additive: view != nil && (flags.contains(.option) || flags.contains(.command)))
+        case .savePicture:
+            savePicture(at: path, kind: .view, ask: false)
+        case .savePictureAs:
+            savePicture(at: path, kind: .view, ask: true)
+        case .saveZoomedArea:
+            savePicture(at: path, kind: .zoomedArea, ask: false)
+        case .saveOriginalFisheye:
+            savePicture(at: path, kind: .originalFisheye, ask: false)
         case .dismissAlert:
             dismissAlert(camera)
         case .conversation:
@@ -182,11 +190,11 @@ extension StageView {
     }
 
     /// Shows `text` over the stage for a few seconds (on the stage's clock).
-    func showToast(_ text: String) {
-        toast.show(text)
+    func showToast(_ text: String, action: (title: String, handler: () -> Void)? = nil) {
+        toast.show(text, action: action)
         toast.place(in: bounds)
         addSubview(toast, positioned: .above, relativeTo: nil)
-        toastHideAt = clock.now + ToastView.duration
+        toastHideAt = clock.now + (action == nil ? ToastView.duration : ToastView.actionDuration)
     }
 
     /// What the message says now, nil when none shows (self-test).

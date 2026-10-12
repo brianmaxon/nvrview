@@ -78,7 +78,7 @@ extension ViewerWindowController {
     @objc func captureRecord(_ sender: Any?) { stage.performOnSelected(.record) }
     @objc func panTiltItem(_ sender: Any?) { stage.performOnSelected(.panTilt) }
     @objc func stopAllRecordings(_ sender: Any?) {}
-    @objc func openPicturesFolder(_ sender: Any?) { stage.showToast(TileActionStub.message("Open Pictures Folder")) }
+    @objc func openPicturesFolder(_ sender: Any?) { stage.openPicturesFolder() }
     @objc func openRecordingsFolder(_ sender: Any?) { stage.showToast(TileActionStub.message("Open Recordings Folder")) }
 
     /// The Camera menu's items for the selected tile (nil: not one of them).

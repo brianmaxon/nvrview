@@ -78,6 +78,10 @@ final class StageView: NSView {
     let toast = ToastView()
     /// When the toast goes, on the stage's clock.
     var toastHideAt: Double?
+    /// The pictures this stage saved, the last one with what it was made
+    /// from (self-test).
+    var pictureSaves = 0
+    var lastPictureSave: PictureSaveRecord?
 
     /// Wired by the alert work (docs/UX.md "Alerts"): whether a camera has
     /// an active alert (its tile's header then stays shown, also in full

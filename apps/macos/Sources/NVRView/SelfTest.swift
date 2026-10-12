@@ -850,8 +850,8 @@ final class SelfTest {
     /// order, inside the tile and clear of the title; "…" holds the rest
     /// and the right-click menu is the model's list. Capabilities from the
     /// `channels` event put Start Conversation in a doorbell's header and
-    /// the PTZ buttons in a moving camera's. Save picture and recording are
-    /// not built yet: their button and keys say "coming soon".
+    /// the PTZ buttons in a moving camera's. Recording is not
+    /// built yet: its button and key say "coming soon".
     private func headerStep() {
         guard let model = app.model, let window else { return insetStep() }
         let stage = window.stage
@@ -918,27 +918,198 @@ final class SelfTest {
             && context.contains("Split Side by Side") && more.contains("Entrance") && !more.contains("Listen")
         print("header menus: … \(more), right-click starts with the model's \(wantContext.count) items \(menusOK)")
         if !menusOK { problems.append("the … or right-click menu is not the header model's list (\(more) vs \(wantMore))") }
-        // A button whose action is not built yet says so; so do P and R.
+        // A button whose action is not built yet (Record) says so; so does R.
         _ = at(1000)
-        chrome.pressHeader(.savePicture)
+        chrome.pressHeader(.record)
         let clicked = stage.toastText
         advance(ToastView.duration + 0.1)
         let gone = stage.toastText == nil
         window.window?.makeFirstResponder(stage)
         window.state.selected = leaf.path
-        press("p", keyCode: 35)
-        let keyP = stage.toastText
         press("r", keyCode: 15)
         let keyR = stage.toastText
         advance(ToastView.duration + 0.1)
         chrome.frame = saved
         stage.relayoutChrome()
-        print("header stubs: click \(clicked ?? "nothing"), gone after \(ToastView.duration) s \(gone), P \(keyP ?? "nothing"), R \(keyR ?? "nothing")")
-        if clicked != "Save Picture is coming soon" || !gone { problems.append("Save Picture's button did not say it is coming soon") }
-        if keyP != "Save Picture is coming soon" || keyR != "Start Recording is coming soon" {
-            problems.append("P or R did not reach the header's actions")
+        print("header stubs: click \(clicked ?? "nothing"), gone after \(ToastView.duration) s \(gone), R \(keyR ?? "nothing")")
+        if clicked?.hasSuffix("is coming soon") != true || !gone { problems.append("Record's button did not say it is coming soon") }
+        if keyR != "Start Recording is coming soon" { problems.append("R did not reach the header's actions") }
+        pictureStep()
+    }
+
+    // MARK: Save picture (docs/CAPTURE.md "Save picture")
+
+    /// A throwaway pictures folder for the model to save into.
+    private func freshPictureFolder(_ model: AppModel) -> URL {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nvrview-selftest-pictures-\(UUID().uuidString)", isDirectory: true)
+        model.picturesFolder = folder
+        model.pictureFormat = .png
+        model.shareSafeNames = false
+        return folder
+    }
+
+    /// Runs `action` (a key or a menu item), waits for the save it starts to
+    /// finish, and gives the record (nil if none came).
+    private func saving(
+        _ stage: StageView, _ action: () -> Void, then body: @escaping @MainActor (PictureSaveRecord?) -> Void
+    ) {
+        let before = stage.pictureSaves
+        action()
+        when({ stage.pictureSaves > before }, timeout: 8) {
+            body(stage.pictureSaves > before ? stage.lastPictureSave : nil)
         }
-        insetStep()
+    }
+
+    /// Checks one finished save: a file with the naming rule's shape and
+    /// extension, its size, its dimensions (`size`, within a pixel, when
+    /// given), and, for a copy of the decoded picture, its pixels against a
+    /// CPU conversion of the buffer it was made from. Returns the image.
+    @discardableResult
+    private func checkSaved(
+        _ record: PictureSaveRecord?, _ what: String, ext: String, nameEnds: String, size: CGSize?, tolerance: Int
+    ) -> RenderedImage? {
+        guard let record else {
+            problems.append("\(what): no picture was saved")
+            return nil
+        }
+        guard case .success(let saved) = record.result else {
+            problems.append("\(what): the save failed: \(record.result)")
+            return nil
+        }
+        let name = saved.url.lastPathComponent
+        let shape = /\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}\.\d{3} .+/
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: saved.url.path)[.size] as? Int) ?? nil
+        guard let data = try? Data(contentsOf: saved.url), let image = PictureEncoder.decode(data) else {
+            problems.append("\(what): \(name) is not an image file")
+            return nil
+        }
+        let sized = size.map { abs(CGFloat(image.width) - $0.width) <= 1 && abs(CGFloat(image.height) - $0.height) <= 1 } ?? true
+        let named = name.wholeMatch(of: shape) != nil && name.hasSuffix(nameEnds + "." + ext)
+        let toast = window?.stage.toastText
+        print("\(what): \(name), \(image.width)x\(image.height), \(data.count) bytes, toast \(toast ?? "none")")
+        if !named { problems.append("\(what): the file name \(name) does not follow the rule") }
+        if fileSize != data.count || data.count < 100 { problems.append("\(what): the file has \(fileSize ?? -1) bytes") }
+        if !sized { problems.append("\(what): \(image.width)x\(image.height), expected \(size.map { "\($0)" } ?? "?")") }
+        if toast != "Picture saved" || window?.stage.toast.actionTitle != "Show in Finder" {
+            problems.append("\(what): the confirmation toast said \(toast ?? "nothing")")
+        }
+        if !record.dewarped {
+            let (checked, matched) = PictureCheck.compare(
+                image, buffer: record.picture.pixelBuffer, color: record.color, region: record.region, tolerance: tolerance)
+            print("\(what): \(matched) of \(checked) sampled pixels match the decoded picture")
+            if checked < 20 || matched * 100 < checked * 95 {
+                problems.append("\(what): only \(matched) of \(checked) pixels match the decoded picture")
+            }
+        }
+        return image
+    }
+
+    /// P saves the tile's full picture as PNG, a share-safe JPEG names the
+    /// camera Camera A, and Save Zoomed Area saves the visible region of a
+    /// zoomed tile at the source's resolution; each file is read back and its
+    /// pixels compared with the decoded buffer.
+    private func pictureStep() {
+        guard let model = app.model, let window else { return insetStep() }
+        let stage = window.stage
+        guard let leaf = stage.frames.leaves.first(where: { $0.camera.map { !model.isFisheye($0) } == true }),
+            let camera = leaf.camera
+        else {
+            problems.append("no plain tile to save a picture from")
+            return insetStep()
+        }
+        let path = leaf.path
+        let folder = freshPictureFolder(model)
+        let name = PictureNaming.sanitize(model.name(of: camera))
+        when({ model.leases.tile(for: camera)?.latestPicture() != nil }, timeout: 3) { [self] in
+            // parity: capture-picture-tile
+            window.window?.makeFirstResponder(stage)
+            window.state.selected = path
+            let size = stage.pictureSizes[camera]
+            saving(stage, { press("p", keyCode: 35) }) { [self] record in
+                checkSaved(record, "picture", ext: "png", nameEnds: " " + name, size: size, tolerance: 3)
+                // Share-safe names and JPEG.
+                model.shareSafeNames = true
+                model.pictureFormat = .jpeg
+                saving(stage, { press("p", keyCode: 35) }) { [self] record in
+                    checkSaved(record, "picture (share-safe JPEG)", ext: "jpg", nameEnds: " Camera A", size: size, tolerance: 14)
+                    model.shareSafeNames = false
+                    model.pictureFormat = .png
+                    zoomedPictureStep(path, camera, folder: folder)
+                }
+            }
+        }
+    }
+
+    private func zoomedPictureStep(_ path: NodePath, _ camera: CameraRef, folder: URL) {
+        guard let model = app.model, let window else { return insetStep() }
+        let stage = window.stage
+        guard let leaf = stage.frames.leaves.first(where: { $0.path == path }) else { return insetStep() }
+        // parity: capture-picture-zoomed
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
+        advance(1)
+        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
+        let want = stage.renderedSource(of: path)
+        let full = stage.pictureSizes[camera]
+        let name = PictureNaming.sanitize(model.name(of: camera))
+        saving(stage, { stage.performOnSelected(.saveZoomedArea) }) { [self] record in
+            if let want, let full {
+                checkSaved(record, "zoomed area", ext: "png", nameEnds: " " + name, size: want.size, tolerance: 3)
+                if let r = record?.region, abs(r.minX - want.minX) > 1 || abs(r.minY - want.minY) > 1 {
+                    problems.append("zoomed area: the region \(r) is not the one shown, \(want)")
+                }
+                if want.width >= full.width || want.height >= full.height {
+                    problems.append("zoomed area: the region \(want.size) is not smaller than the picture \(full)")
+                }
+            } else {
+                problems.append("zoomed area: the tile drew no source rectangle")
+            }
+            stage.resetZoom(at: path)
+            advance(1)
+            try? FileManager.default.removeItem(at: folder)
+            insetStep()
+        }
+    }
+
+    /// A fisheye tile's saved view is the dewarped picture at the source's
+    /// resolution (its pixels match the fixture's colors where the reference
+    /// mapping says), and Save Original Fisheye Picture is the circle as
+    /// received.
+    private func fisheyePictureStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let model = app.model, let window else { return checkLog() }
+        let stage = window.stage
+        let folder = freshPictureFolder(model)
+        let name = PictureNaming.sanitize(model.name(of: camera))
+        stage.setFisheyeMode(.panorama, at: path)
+        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
+        window.window?.makeFirstResponder(stage)
+        window.state.selected = path
+        // parity: capture-picture-fisheye
+        saving(stage, { stage.performOnSelected(.savePicture) }) { [self] record in
+            let image = checkSaved(record, "fisheye view", ext: "png", nameEnds: " " + name, size: nil, tolerance: 3)
+            if record?.dewarped != true { problems.append("fisheye view: the saved picture was not dewarped") }
+            if let image, let record,
+                let dewarp = stage.fisheyeDewarp(
+                    camera: camera, path: path, picture: record.picture,
+                    tileSize: CGSize(width: image.width, height: image.height))
+            {
+                let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+                let (checked, matched) = Self.fisheyeMatches(dewarp, in: rect) { image.rgb(x: $0, y: $1) }
+                print("fisheye view: \(matched) of \(checked) saved pixels match the fixture")
+                if checked < 20 || Double(matched) < 0.9 * Double(checked) {
+                    problems.append("fisheye view: \(matched) of \(checked) saved pixels match the fixture")
+                }
+            }
+            saving(stage, { stage.performOnSelected(.saveOriginalFisheye) }) { [self] original in
+                let circle = checkSaved(original, "original fisheye", ext: "png", nameEnds: " " + name, size: nil, tolerance: 3)
+                if original?.dewarped != false { problems.append("original fisheye: the saved picture was dewarped") }
+                if let circle, let image, circle.width != image.width || circle.height != image.height {
+                    problems.append("original fisheye: \(circle.width)x\(circle.height), not the source's size \(image.width)x\(image.height)")
+                }
+                try? FileManager.default.removeItem(at: folder)
+                checkLog()
+            }
+        }
     }
 
     // MARK: Alert insets and doorbell calls
@@ -2105,8 +2276,34 @@ final class SelfTest {
             stage.setFisheyeMode(.original, at: path)
             grid.prepare?(grid.renderer, grid.drawableSize)
             if stage.fisheyeDewarp(of: path) != nil { problems.append("Original still dewarps") }
-            checkLog()
+            fisheyePictureStep(path, camera)
         }
+    }
+
+    /// How many of the fisheye view's sample points show the fixture's color
+    /// for the direction they look along (`pixel` reads the picture at
+    /// whole-pixel positions of `rect`, where the view is drawn).
+    private static func fisheyeMatches(
+        _ dewarp: FisheyeDewarp, in rect: CGRect, pixel: (Int, Int) -> SIMD3<Int>
+    ) -> (checked: Int, matched: Int) {
+        var checked = 0, matched = 0
+        let step = max(rect.width, rect.height) / 40
+        for y in stride(from: rect.minY + 1, to: rect.maxY - 1, by: step) {
+            for x in stride(from: rect.minX + 1, to: rect.maxX - 1, by: step) {
+                let t = CGPoint(x: (x + 0.5 - rect.minX) / rect.width, y: (y + 0.5 - rect.minY) / rect.height)
+                guard let d = dewarp.direction(atTile: t), dewarp.picturePoint(atTile: t) != nil else { continue }
+                let (pan, tilt) = panTilt(of: d)
+                let psi = (pan + 360).truncatingRemainder(dividingBy: 360)
+                func clear(_ a: Double) -> Bool {
+                    let m = a.truncatingRemainder(dividingBy: 15)
+                    return m > 3 && m < 12
+                }
+                guard tilt > 5, tilt < 80, abs(tilt - 20) > 7, clear(psi), clear(tilt) else { continue }
+                checked += 1
+                if fixtureSector(pixel(Int(x), Int(y))) == Int(psi / 90) % 4 { matched += 1 }
+            }
+        }
+        return (checked, matched)
     }
 
     /// Draws the window offscreen and compares the fisheye tile's pixels
@@ -2123,23 +2320,7 @@ final class SelfTest {
             return
         }
         let drawn = grid.renderer.dewarpedTilesDrawn
-        var checked = 0, matched = 0
-        let step = max(rect.width, rect.height) / 40
-        for y in stride(from: rect.minY + 1, to: rect.maxY - 1, by: step) {
-            for x in stride(from: rect.minX + 1, to: rect.maxX - 1, by: step) {
-                let t = CGPoint(x: (x + 0.5 - rect.minX) / rect.width, y: (y + 0.5 - rect.minY) / rect.height)
-                guard let d = dewarp.direction(atTile: t), dewarp.picturePoint(atTile: t) != nil else { continue }
-                let (pan, tilt) = panTilt(of: d)
-                let psi = (pan + 360).truncatingRemainder(dividingBy: 360)
-                func clear(_ a: Double) -> Bool {
-                    let m = a.truncatingRemainder(dividingBy: 15)
-                    return m > 3 && m < 12
-                }
-                guard tilt > 5, tilt < 80, abs(tilt - 20) > 7, clear(psi), clear(tilt) else { continue }
-                checked += 1
-                if Self.fixtureSector(image.rgb(x: Int(x), y: Int(y))) == Int(psi / 90) % 4 { matched += 1 }
-            }
-        }
+        let (checked, matched) = Self.fisheyeMatches(dewarp, in: rect) { image.rgb(x: $0, y: $1) }
         print("fisheye \(mode.title): dewarped tiles drawn \(drawn), pixels matching the fixture \(matched) of \(checked)")
         if drawn < 1 { problems.append("\(mode.title): the dewarp pipeline drew nothing") }
         if checked < 20 || Double(matched) < 0.9 * Double(checked) {

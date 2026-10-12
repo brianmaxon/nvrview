@@ -107,3 +107,6 @@ playback-transport          macos    gap: Windows Recordings window not built (W
 recordings-calendar-month   macos    gap: Windows Recordings window not built (W1/W2)
 recordings-camera-names     macos    gap: Windows Recordings window not built (W1/W2)
 recordings-layout           macos    gap: Windows Recordings window not built (W1/W2)
+capture-picture-tile        macos    gap: Windows Save Picture is CAP-P2
+capture-picture-zoomed      macos    gap: Windows Save Picture is CAP-P2
+capture-picture-fisheye     macos    gap: Windows Save Picture is CAP-P2

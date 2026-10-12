@@ -127,8 +127,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on macOS** (the header, its "…" menu, the right-click menu and
-> the keys); planned on Windows. Save picture, recording and PTZ are not
-> built yet: their buttons and menu items are in place and say so (below).
+> the keys); planned on Windows. Save picture is built on macOS (see "Save
+> picture"); recording and PTZ are not built yet: their buttons and menu
+> items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -169,11 +170,11 @@ Details settled while building it (macOS):
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** Save Picture, Record, the PTZ pad, Presets, Lens, and
-  the long tail's save and record items are shown in their final places
+- **Not built yet:** Record, the PTZ pad, Presets, Lens, and
+  the long tail's record items are shown in their final places
   (so the layout and the overflow are the final ones), dimmed, with "coming
-  soon" in the tooltip. A click, the key (P, Shift+P, R) or the menu item
-  shows "Save Picture is coming soon" (and so on) over the stage for
+  soon" in the tooltip. A click, the key (R) or the menu item
+  shows "Start Recording is coming soon" (and so on) over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -260,7 +261,7 @@ with = or a digit works on every keyboard layout that has those keys.
   As…, Start Recording (Stop Recording while recording), Start
   Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
   of the running recordings, each with Stop), Stop All Recordings, Open
-  Pictures Folder, Open Recordings Folder. Until capture and PTZ land,
+  Pictures Folder, Open Recordings Folder. Until recording and PTZ land,
   Presets and Recordings hold a disabled placeholder, Stop All Recordings
   is disabled, and the other items say "coming soon". Pan and Tilt… is
   enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
@@ -562,7 +563,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Save picture
 
-> **Planned** (CAPTURE.md, "Save picture"; not built yet).
+> **Built on macOS** (CAPTURE.md, "Save picture"); planned on Windows
+> (CAP-P2). Playback tiles come later.
 
 - **Where:** the header's camera button, the right-click menu, P (and
   Shift+P for Save Picture As…), the call window's tile, and later playback
@@ -577,7 +579,12 @@ stream on many tiles costs the device and this computer much more.
   `2026-10-11 17.02.03.250 Camera 1.png`; with "Share-safe names" the
   camera is `Camera A`. No metadata; an optional time and name label burned
   in, off by default.
-- **Feedback:** a brief shutter flash on the tile and a "Picture saved"
+- **Settings (macOS):** Settings > Capture has "Save pictures to" (Choose…
+  and Reset), Format (PNG or JPEG) and "Share-safe names". Save Picture As…
+  (Shift+P) opens a save panel in that folder with a Format menu; Open
+  Pictures Folder is in the Camera menu.
+- **Feedback:** a brief shutter flash on the tile (not under Reduce Motion)
+  and a "Picture saved"
   toast with Show in Finder or Show in Explorer. A failure names the file,
   not the folder path.
 
