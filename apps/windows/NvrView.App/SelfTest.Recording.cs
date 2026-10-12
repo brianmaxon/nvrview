@@ -44,7 +44,7 @@ internal sealed partial class SelfTest
             db = ToneCheck.Decibels(ToneCheck.Rms(tone.Decoded, (int)reported + 4800, 24_000));
         }
         Say($"capture: AAC priming reported {reported}, impulse back at {measured?.ToString() ?? "?"}; a 1 kHz tone at -15 dB comes back at {hz:0.0} Hz, {db:0.0} dB " +
-            $"({tone?.Units.Count ?? 0} units, config {Convert.ToHexString(tone?.AudioSpecificConfig ?? [])}); encoder installed {cap.Encoder is not null}, core configured {cap.Configured}");
+            $"({tone?.Units.Count ?? 0} units for 47 frames, {tone?.Decoded.Length ?? 0} samples decoded, config {Convert.ToHexString(tone?.AudioSpecificConfig ?? [])}); encoder installed {cap.Encoder is not null}, core configured {cap.Configured}");
         Expect(measured is { } m && Math.Abs(m - (int)reported) <= 48 && reported <= 4096, $"capture: the encoder's priming {reported} is not where the audio comes back ({measured})");
         Expect(tone is not null && Math.Abs(hz - 1000) < 10, $"capture: the tone came back at {hz:0.0} Hz");
         Expect(tone is not null && Math.Abs(db - -15.05) < 2, $"capture: the tone came back at {db:0.0} dB");

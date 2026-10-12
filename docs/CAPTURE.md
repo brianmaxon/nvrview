@@ -267,7 +267,9 @@ What differs from M5:
   encoder and the system's AAC decoder (`CLSID_CMSAACDecMFT`) and the
   position it comes back at, less 4096, is reported, so it is the delay a
   player sees (the macOS encoder reports its converter's prime info); 1024
-  if it cannot be measured. Each frame is encoded on the recorder's thread
+  if it cannot be measured. Measured on Windows 11 (the self-test's first
+  run): 0, with as many units as frames in (the MFT drops its own delay), so
+  the priming reported there is 0. Each frame is encoded on the recorder's thread
   that hands it over and its units are answered at once, in order, through
   `ICapture.RecordAudioEncoded`; a fresh input sample is made per frame
   (the MFT may keep its input); a flushing `Close` ends the stream and
