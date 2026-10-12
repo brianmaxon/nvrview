@@ -978,7 +978,8 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
-- **Layout (planned, CAPTURE.md "The call window is a regular tile"):**
+- **Layout (built on macOS, planned on Windows; CAPTURE.md "The call
+  window is a regular tile"):**
   the picture becomes the viewer's own tile in a single-tile mode (no
   layout editing, split, swap, focus, Show Camera, Remove or Clear; the
   window keeps its own lease), so zoom, the zoom map, fisheye views,
@@ -990,6 +991,18 @@ example to keep it beside other work. Both apps follow these rules.
   talking, the echo status); the reply field and Send. Record there is the
   call recording. Insets and call cards keep their drawing for now, with
   the same header buttons.
+  - macOS: the tile is the viewer's `StageView` in a single fixed tile
+    mode, under the call bar ("Doorbell · 14:02:11 · 0:42", the pin, Pop
+    In, close) and above the captions, the Talk row and the reply. Wheel
+    and pinch zoom, the zoom map, Reset Zoom (the header button or the
+    menu), fisheye views and Quality work as in the grid; Quality and views
+    chosen there stay with that window. Its right-click menu is the header
+    model's list for a call window (Pop In Call, End Conversation, Record
+    Call, Save Picture with ⇧⌘R and ⇧⌘P), with no layout items; focus,
+    split and dropping a camera do nothing. The tile asks for the main
+    stream while its picture, zoom included, is drawn wider than the
+    sub-stream's (`CallWindowQuality`). Save Picture and Record Call say
+    "coming soon" until capture lands; no recording pill yet.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows),

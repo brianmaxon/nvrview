@@ -1136,7 +1136,7 @@ final class SelfTest {
                     && !stage.insetBoard.shown.contains { $0.camera == doorbell }
             }
             draw(c)
-            let drawn = c.grid.renderer.tiles
+            let drawn = c.stage.grid.renderer.tiles
             let exact = drawn.count == 1 && drawn.first.map { ObjectIdentifier($0.picture as AnyObject) } == ObjectIdentifier(tile)
             let after = model.calls.call(for: doorbell)
             let same = after?.startedAt == before.startedAt && after?.presses == before.presses
@@ -1162,17 +1162,83 @@ final class SelfTest {
                 problems.append("the call window's stream demand did not reach the leases (\(tier.name))")
             }
             if c.window?.isKeyWindow == true || NSApp.isActive { problems.append("the call window took the focus in the self-test") }
-            popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
+            callTileStep(doorbell, c) { [self] in
+                popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
+            }
         }
+    }
+
+    /// The call window's picture is a regular tile (docs/CAPTURE.md "The
+    /// call window is a regular tile"): a pinch zooms it, the zoom map
+    /// shows, the renderer samples the zoomed region, Auto asks for the
+    /// main stream, and the header's Reset Zoom eases it back; its menu is
+    /// the header model's (Pop In, End Conversation, Record Call) with no
+    /// layout items, and focus and split do nothing there.
+    private func callTileStep(_ doorbell: CameraRef, _ c: CallWindowController, then next: @escaping @MainActor () -> Void) {
+        guard let model = app.model else { return next() }
+        let stage = c.stage
+        draw(c)
+        guard stage.fixedTile, stage.frames.leaves.count == 1, let leaf = stage.frames.leaves.first,
+            leaf.camera == doorbell, let full = stage.renderedSource(of: leaf.path)
+        else {
+            problems.append("the call window's picture is not one tile of the doorbell")
+            return next()
+        }
+        // parity: call-window-tile-zoom
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: false)
+        stage.noteInteraction()
+        draw(c)
+        let zoomed = stage.zoom(of: doorbell)
+        let map = stage.zoomMapShown(leaf.path) == true
+        let source = stage.renderedSource(of: leaf.path)
+        let narrower = source.map { $0.width < full.width * 0.9 || $0.height < full.height * 0.9 } == true
+        let wantsMain = c.asksForMainStream && model.leases.wantedTier(doorbell) == model.leases.tiers(for: doorbell).focus
+        let resetShown = stage.chromes[leaf.path]?.shownHeaderButtons.contains(.resetZoom) == true
+        stage.chromes[leaf.path]?.pressHeader(.resetZoom)
+        advance(1)
+        draw(c)
+        let back = stage.zoom(of: doorbell) == .none && !stage.isEasingZoom
+        print(
+            String(format: "call window tile: pinch to %.2fx, ", zoomed.scale)
+                + "zoom map \(map), source cropped \(narrower), main stream \(wantsMain), "
+                + "header Reset Zoom shown \(resetShown) and back to 1x \(back)")
+        if abs(zoomed.scale - 2) > 0.01 { problems.append("a pinch did not zoom the call window's tile") }
+        if !map { problems.append("the call window's zoomed tile showed no zoom map") }
+        if !narrower { problems.append("the call window's renderer did not sample the zoomed region") }
+        if !wantsMain { problems.append("the zoomed call window tile did not ask for the main stream") }
+        if !resetShown || !back { problems.append("the call window's header did not offer Reset Zoom or did not reset") }
+        // parity: call-window-tile-menu
+        let menu = stage.contextMenu(for: leaf).items.map(\.title)
+        let want = stage.headerTile(doorbell, path: leaf.path).map { TileHeaderLayout.menu(for: $0).map(\.label) } ?? []
+        let callItems = ["Pop In Call", "End Conversation", "Record Call", "Save Picture"].allSatisfy(menu.contains)
+        let layoutItems = ["Focus", "Split Side by Side", "Remove Tile", "Clear Tile", "Show Camera", "Record Main Stream"]
+            .filter(menu.contains)
+        stage.toggleFocus()
+        stage.split(.row)
+        let fixed = stage.state.focused == nil && stage.state.tree.leafCount == 1 && stage.selectedPath == leaf.path
+        let header = stage.chromes[leaf.path]?.shownHeaderButtons ?? []
+        c.captureRecord(nil)
+        let toast = stage.toastText
+        advance(ToastView.duration + 0.1)
+        print(
+            "call window tile menu: the model's \(want.count) items \(menu == want), call items \(callItems), "
+                + "layout items \(layoutItems), focus and split ignored \(fixed), header \(header.map(\.rawValue)), ⇧⌘R \(toast ?? "nothing")")
+        if menu != want || !callItems { problems.append("the call window tile's menu is not the header model's call menu: \(menu)") }
+        if !layoutItems.isEmpty { problems.append("the call window tile's menu offers \(layoutItems)") }
+        if !fixed { problems.append("focus or split changed the call window's single tile") }
+        if !header.contains(.conversation) { problems.append("the doorbell's call window header has no conversation button") }
+        if toast != "Record Call is coming soon" { problems.append("⇧⌘R in the call window did not reach Record Call") }
+        next()
     }
 
     /// Lays out a call window and runs one display refresh's preparation
     /// (a window behind the others gets few refreshes).
     private func draw(_ c: CallWindowController) {
         c.window?.contentView?.layoutSubtreeIfNeeded()
+        let grid = c.stage.grid
         let scale = c.window?.backingScaleFactor ?? 1
-        let b = c.grid.bounds
-        c.grid.prepare?(c.grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
+        let b = grid.bounds
+        grid.prepare?(grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
     }
 
     /// Talk with "Keep talking" and a typed draft survives popping in and

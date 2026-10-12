@@ -64,6 +64,8 @@ zoom-touch-pinch            windows  gap: the macOS self-test does not send a ma
 alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one
 alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
+call-window-tile-menu       macos    gap: the Windows call window still draws its own picture, not a tile with the header model's menu
+call-window-tile-zoom       macos    gap: the Windows call window still draws its own picture, without digital zoom
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
 header-overflow-menu        macos    gap: the Windows tile header does not use TileHeaderLayout yet, so no "…" menu or model-built tile menu

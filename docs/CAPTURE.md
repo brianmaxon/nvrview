@@ -12,7 +12,7 @@
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
 > macOS the header, its menus and keys (capture and PTZ actions say "coming
-> soon").
+> soon") and the call window's picture as a single fixed tile.
 
 ## Principles
 
