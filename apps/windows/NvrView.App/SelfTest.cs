@@ -856,9 +856,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
                 Expect(done && entry is { Seconds: > 0, Labels: 1 }, $"recordings: the analysis found {entry}");
                 Expect(b.AnalysisOf(analyzed) is null, "recordings: a finished analysis still shows progress");
                 Expect(entry is not null && service.Notice == SoundAnalysis.Outcome(entry), $"recordings: the done message was {service.Notice ?? "missing"}");
-                bool shown = await Until(() => b.LoudnessOf(analyzed)?.Heard == true
+                bool laneShown = await Until(() => b.LoudnessOf(analyzed)?.Heard == true
                     && b.Lanes.FirstOrDefault(l => l.Camera == analyzed)?.Events.Any(e => e.Kind == "smoke_alarm" && e.Source == SoundKinds.LocalAudio) == true, 5);
-                Expect(shown, "recordings: no loudness or sound label on the lane after the analysis");
+                Expect(laneShown, "recordings: no loudness or sound label on the lane after the analysis");
             }
             else
             {
