@@ -133,20 +133,20 @@ started on that app.
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Recordings window (Window > Recordings, ⌥⌘R) | yes | no (planned) | UX.md "Recordings"; Windows is W1 (MILESTONE-P.md). The macOS self-test runs it on the fake core and, with `scripts/macos-real-selftest.sh`, on the real core against the mock (`recordings-real-core`). |
-| Cameras to search, per device and per camera, kept between launches | yes | no (planned) | ID `recordings-enable`. |
-| Days asked for as shown; today held per window while shown, released on another day or close | yes | no (planned) | IDs `recordings-hold-today`, `recordings-navigate-day`, `recordings-window-close`. |
-| Calendar of days with recordings; refresh; a failed day marked | yes | no (planned) | ID `recordings-calendar-lanes`. The failed-day mark is not in the self-test. |
-| Calendar paged to another month asks for that month's calendar alone (minor 7) | yes | no (planned) | ID `recordings-calendar-month`. |
-| Camera names as the camera list shows them (override, reported name, lens) | yes | no (planned) | ID `recordings-camera-names`; the core also names cameras by the reported names (FFI.md "Recordings"). |
-| Window layout: player in the middle, collapsible sidebar and inspector that give way in a narrow window | yes | no (planned) | ID `recordings-layout`. |
-| Timeline lanes per camera (spans, events by kind with badges, zoom, playhead; a click seeks the player or plays that camera) | yes | no (planned) | IDs `recordings-calendar-lanes`, `playback-scrub`. |
-| Incident list with kind filters (Animals matches every animal kind), camera or group scope, Locked | yes | no (planned) | ID `recordings-animal-filter`. |
-| Cover thumbnails: keyframe decoded, shrunk, put back into the core's cache | yes | no (planned) | VideoToolbox and ImageIO; Windows: Media Foundation and WIC. ID `recordings-thumbnail`. |
-| Incident edits: rename, merge, split, add and remove a camera, revert | yes | no (planned) | ID `recordings-edits`. |
-| Lock and unlock (the video is downloaded; says when it is not kept) | yes | no (planned) | ID `recordings-lock`. |
-| Downloads panel: progress, pause, resume, retry, Show in Finder, forget, Move to Trash | yes | no (planned) | Trash through `NSWorkspace.recycle` after `download_removed`; Windows: the Recycle Bin (FFI-RECORDINGS.md section 12). ID `recordings-downloads`. Retry is not in the self-test. |
-| Camera groups for incidents | yes | no (planned) | ID `recordings-groups`. |
+| Recordings window (Window > Recordings, ⌥⌘R; Windows: Ctrl+Alt+R or Recordings in the header's "…" menu) | yes | yes | UX.md "Recordings"; Windows is W1/W2 (MILESTONE-P.md). The macOS self-test runs it on the fake core and, with `scripts/macos-real-selftest.sh`, on the real core against the mock (`recordings-real-core`); the Windows self-test runs the same window class on the Windows fakes (`FakeRecordings`, `FakePlayback`), the model and rules also in the shell unit tests with the macOS vectors. Not on Windows yet: the real-core steps, cover thumbnails (below), and the edits and groups steps (the fake does not model them).
+| Cameras to search, per device and per camera, kept between launches | yes | yes | ID `recordings-enable`. |
+| Days asked for as shown; today held per window while shown, released on another day or close | yes | yes | IDs `recordings-hold-today`, `recordings-navigate-day`, `recordings-window-close`. |
+| Calendar of days with recordings; refresh; a failed day marked | yes | yes | ID `recordings-calendar-lanes`. The failed-day mark is not in the self-test. |
+| Calendar paged to another month asks for that month's calendar alone (minor 7) | yes | yes | ID `recordings-calendar-month`. |
+| Camera names as the camera list shows them (override, reported name, lens) | yes | yes | ID `recordings-camera-names`; the core also names cameras by the reported names (FFI.md "Recordings"). |
+| Window layout: player in the middle, collapsible sidebar and inspector that give way in a narrow window | yes | yes | ID `recordings-layout`. |
+| Timeline lanes per camera (spans, events by kind with badges, zoom, playhead; a click seeks the player or plays that camera) | yes | yes | IDs `recordings-calendar-lanes`, `playback-scrub`. |
+| Incident list with kind filters (Animals matches every animal kind), camera or group scope, Locked | yes | yes | ID `recordings-animal-filter`. |
+| Cover thumbnails: keyframe decoded, shrunk, put back into the core's cache | yes | no (planned) | VideoToolbox and ImageIO; Windows: Media Foundation and WIC. ID `recordings-thumbnail`. The Windows window asks for covers and shows what the core holds; the keyframe decoder (Media Foundation, WIC) is the seam `RecordingsService.ThumbnailDecoder` and is not built, so a keyframe shows a placeholder. |
+| Incident edits: rename, merge, split, add and remove a camera, revert | yes | yes (built; the self-test covers rename and revert only) | ID `recordings-edits`. |
+| Lock and unlock (the video is downloaded; says when it is not kept) | yes | yes | ID `recordings-lock`. |
+| Downloads panel: progress, pause, resume, retry, Show in Finder, forget, Move to Trash | yes | yes | Trash through `NSWorkspace.recycle` after `download_removed`; Windows: the Recycle Bin (FFI-RECORDINGS.md section 12). ID `recordings-downloads`. Retry is not in the self-test. |
+| Camera groups for incidents | yes | yes | ID `recordings-groups`. |
 
 ### Devices, settings, and updates
 
@@ -164,8 +164,8 @@ started on that app.
 | Bundled update key and source (`update-defaults.json`; shown as "Bundled with this build" / "Bundled default") | yes | yes | Self-test step `updates-bundled-defaults`. macOS: in the signed bundle's Resources; Windows: next to the exe. |
 | Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
-| Recorded-video playback in the Recordings window (up to four cameras on one clock, grid with large and single views, transport with skip, speeds 0.25× to 16×, mute and volume, scrubber with the incident's events) | yes | no (planned) | Milestone P, M2 (macOS) and W2; [PLAYBACK.md](PLAYBACK.md) is the design, docs/UX.md "Recordings" the screen. IDs `playback-open`, `playback-transport`, `playback-grid`, `playback-scrub`, `playback-close`, and `playback-real-core` (real core against the mock). Stepping and per-camera offsets are not built. |
-| Remove from Incident and Split Here at the playhead | yes | no (planned) | IDs `playback-remove-camera`, `playback-split-here`. |
+| Recorded-video playback in the Recordings window (up to four cameras on one clock, grid with large and single views, transport with skip, speeds 0.25× to 16×, mute and volume, scrubber with the incident's events) | yes | yes | Milestone P, M2 (macOS) and W2; [PLAYBACK.md](PLAYBACK.md) is the design, docs/UX.md "Recordings" the screen. IDs `playback-open`, `playback-transport`, `playback-grid`, `playback-scrub`, `playback-close`, and `playback-real-core` (real core against the mock). Stepping and per-camera offsets are not built. Windows draws the playback with the window's own D3D11 renderer; its pictures are not yet checked in the self-test (the fake makes none; `playback-real-core` is a gap). |
+| Remove from Incident and Split Here at the playhead | yes | yes (built, not in the self-test) | IDs `playback-remove-camera`, `playback-split-here`. |
 
 ## Open gaps
 

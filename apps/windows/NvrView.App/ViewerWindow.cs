@@ -90,6 +90,7 @@ internal sealed class ViewerWindow
         Stage.Renderer = Renderer;
         Renderer.Circles = viewer.Circles;
         Stage.SettingsRequested = () => OpenSettings();
+        Stage.RecordingsRequested = () => App.Instance.OpenRecordings();
         Stage.Edited += OnEdited;
         Stage.StateChanged += () =>
         {
@@ -711,6 +712,9 @@ internal sealed class ViewerWindow
                 break;
             case HeaderAction.KeyboardShortcuts:
                 Stage.ToggleHelp();
+                break;
+            case HeaderAction.Recordings:
+                App.Instance.OpenRecordings();
                 break;
             case HeaderAction.CheckForUpdates:
                 App.Instance.Updater?.MenuAction();

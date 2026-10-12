@@ -169,6 +169,7 @@ internal sealed partial class StageView : UserControl
                     "Ctrl+N                       new window",
                     "Ctrl+D                       diagnostics",
                     "Ctrl+,                       Settings (devices)",
+                    "Ctrl+Alt+R                   Recordings",
                     "F1                           this list"),
             },
         };
@@ -221,6 +222,9 @@ internal sealed partial class StageView : UserControl
 
     /// <summary>The Settings window opener (set by the window).</summary>
     public Action? SettingsRequested { get; set; }
+
+    /// <summary>The Recordings window opener (set by the window).</summary>
+    public Action? RecordingsRequested { get; set; }
 
     /// <summary>The tree changed by a finished gesture or command (the window stores it).</summary>
     public event Action<LayoutNode>? Edited;
@@ -1334,6 +1338,9 @@ internal sealed partial class StageView : UserControl
                 {
                     ResetZoom(s);
                 }
+                return true;
+            case VirtualKey.R when ctrl && !repeat && InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Menu).HasFlag(CoreVirtualKeyStates.Down):
+                RecordingsRequested?.Invoke();
                 return true;
             case VirtualKey.D when ctrl && !repeat:
                 ToggleDiagnostics();

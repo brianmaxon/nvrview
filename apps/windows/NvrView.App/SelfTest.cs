@@ -398,6 +398,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await FisheyeViews(v, stage, r);
         await LayoutsAndWindows(v);
         await Calls(v, stage);
+        await RecordingsSteps(v);
 
         // parity: detection-events
         // Detections from the mock (camera AI) reached the tiles.
@@ -465,6 +466,301 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             Say($"timing {what}: {Ms(ns)}");
         }
+    }
+
+    // 11d. The Recordings window (docs/UX.md "Recordings"). First the entry points on the real service (the header's
+    // menu, one window, the playback closed with it); then the steps of the macOS self-test on a model over the fakes,
+    // shown in the same window class (the mock-nvr has no playback, and a made-up store makes the numbers exact).
+    private async Task RecordingsSteps(Viewer v)
+    {
+        if (app.Recordings is not { Available: true })
+        {
+            Say("recordings: the core has none; skipped");
+            return;
+        }
+        List<string> overflow = Texts(app.Windows[0].Header.BuildOverflow().Items);
+        Expect(overflow.Contains("Recordings"), "the header's menu lacks Recordings");
+        RecordingsWindow? first = app.OpenRecordings();
+        bool loaded = first is not null && await Until(() => first.IsLoaded, 5);
+        RecordingsWindow? again = app.OpenRecordings();
+        Say($"recordings: window {(first is null ? "not opened" : "opened")}, loaded {loaded}, second open the same {ReferenceEquals(first, again)}, created {RecordingsWindow.Created}");
+        Expect(loaded && ReferenceEquals(first, again) && RecordingsWindow.Created == 1, "the Recordings window did not open once");
+        first?.Close();
+        await Until(() => RecordingsWindow.Current is null, 5);
+
+        var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        RecordingsService service = null!;
+        var fake = new FakeRecordings(json => service.Route(Encoding.UTF8.GetBytes(json))) { RecordingWorkIsManual = true };
+        var playback = new FakePlayback(json => service.Route(Encoding.UTF8.GetBytes(json)), fake) { RecordingWorkIsManual = true };
+        var host = new PlainPlaybackHost(playback);
+        var trashed = new List<string>();
+        var revealed = new List<IReadOnlyList<string>>();
+        service = new RecordingsService(fake, host)
+        {
+            Post = a => _ = ui.TryEnqueue(() => a()),
+            Now = () => DateTimeOffset.UtcNow,
+            Trasher = trashed.Add,
+            Revealer = revealed.Add,
+            CameraNamer = c => $"Camera {c.Channel + 1}",
+        };
+        service.Start(Path.Combine(Path.GetTempPath(), "nvrview-selftest-incidents-" + Environment.ProcessId));
+        Task<bool> Playing(Func<bool> condition, double seconds) => Until(() =>
+        {
+            playback.CompletePlaybackWork();
+            return condition();
+        }, seconds);
+
+        // parity: recordings-enable
+        RecordingCamera[] cams = [.. Enumerable.Range(0, 3).Select(c => new RecordingCamera("d-selftest", c))];
+        foreach (RecordingCamera c in cams)
+        {
+            service.SetEnabled(c, true);
+        }
+        Expect(service.EnabledCameras.SequenceEqual(cams), "recordings: the chosen cameras are not the enabled ones");
+        RecordingsWindow w = RecordingsWindow.Open(v, v.Host, service, background: true);
+        RecordingsBrowser b = w.Browser;
+        RecordingsPlayer p = b.Player;
+        await Until(() => w.IsLoaded, 5);
+
+        // parity: recordings-hold-today
+        bool held = await Until(() => fake.Holds.TryGetValue(b.HoldId, out var h) && h.Count == 3 && b.Lanes.Count == 3, 5);
+        Say($"recordings: hold {b.HoldId} on {(fake.Holds.TryGetValue(b.HoldId, out var held3) ? held3.Count : 0)} cameras, {b.Lanes.Count} lanes");
+        Expect(held && b.Holding, "recordings: today is not held");
+
+        // parity: recordings-calendar-lanes
+        bool shown = await Until(() => b.RecordedDays.Contains(b.Day) && b.Lanes.All(l => l.Spans.Count > 0) && b.DayIncidents.Count == 6 && w.IncidentRows().Count == 6, 5);
+        int events = b.Lanes.Sum(l => l.Events.Count);
+        Say($"recordings: calendar {b.RecordedDays.Count} days, {events} events, {b.DayIncidents.Count} incidents, {w.IncidentRows().Count} rows");
+        Expect(shown && events == 6, "recordings: the calendar, lanes, or incident list are not what the store holds");
+        Expect(w.CalendarDays().Any(d => d.Day == b.Day && d.Recorded && d.Enabled), "recordings: the calendar does not mark today");
+        if (b.Lanes[0].Events.Count > 0)
+        {
+            b.Select(b.Lanes[0].Events[0]);
+            Expect(b.Selected?.Involves(b.Lanes[0].Camera) == true, "recordings: a timeline click selected nothing");
+            b.Selection = new HashSet<string>();
+            p.Close();
+        }
+
+        // parity: recordings-navigate-day
+        long today = b.Day;
+        b.PreviousDay();
+        Expect(!b.Holding && !fake.Holds.ContainsKey(b.HoldId), "recordings: yesterday is held");
+        bool yesterday = await Until(() => b.DayIncidents.Count == 6 && b.RecordedDays.Contains(today - DeviceTime.Day), 5);
+        b.NextDay();
+        bool heldBack = b.Day == today && fake.Holds.TryGetValue(b.HoldId, out var heldAgain) && heldAgain.Count == 3;
+        Say($"recordings: yesterday {(yesterday ? "has" : "lacks")} its incidents; today held again {heldBack}");
+        Expect(yesterday && heldBack, "recordings: navigating a day did not ask for it or hold today again");
+        await Until(() => b.DayIncidents.Count == 6, 5);
+
+        // parity: recordings-lock
+        Incident? vehicle = b.DayIncidents.FirstOrDefault(i => i.Kinds.SequenceEqual(["vehicle"]));
+        if (vehicle is not null)
+        {
+            b.SetLocked(vehicle.Key, true);
+            bool locked = await Until(() => b.DayIncidents.FirstOrDefault(i => i.Key == vehicle.Key)?.Locked == true && service.Downloads.Count == 1, 5);
+            Say($"recordings: locked; {service.Notice ?? "no message"}; downloads {service.Downloads.Count}");
+            Expect(locked && service.Notice?.Contains("downloading", StringComparison.Ordinal) == true, "recordings: locking did not queue the download and say so");
+            b.LockedOnly = true;
+            Expect(b.Incidents.Select(i => i.Key).SequenceEqual([vehicle.Key]), "recordings: the Locked filter shows another list");
+            b.LockedOnly = false;
+            b.SetLocked(vehicle.Key, false);
+            await Until(() => b.DayIncidents.FirstOrDefault(i => i.Key == vehicle.Key)?.Locked == false, 5);
+            Expect(service.Downloads.Count == 1, "recordings: unlocking touched the download");
+        }
+        else
+        {
+            _problems.Add("recordings: no vehicle incident to lock");
+        }
+
+        // parity: recordings-downloads
+        if (service.Downloads.Count == 1)
+        {
+            DownloadProgress queued = service.Downloads[0];
+            b.Center = RecordingsCenter.Downloads;
+            w.Refresh();
+            Expect(w.DownloadsShown && !w.PlayerColumnShown, "recordings: the downloads panel is not shown with its tab");
+            service.Pause(queued.Download, true);
+            await Until(() => service.Downloads.FirstOrDefault()?.Paused == true, 5);
+            fake.CompleteRecordingWork();
+            Expect(service.Downloads.FirstOrDefault()?.State != "done", "recordings: a paused download finished");
+            service.Pause(queued.Download, false);
+            await Until(() => service.Downloads.FirstOrDefault()?.Paused == false, 5);
+            fake.CompleteRecordingWork();
+            bool done = await Until(() => service.Downloads.FirstOrDefault()?.State == "done", 5);
+            DownloadProgress? finished = service.Downloads.FirstOrDefault();
+            if (done && finished is not null)
+            {
+                service.Reveal(finished);
+                Expect(revealed.LastOrDefault()?.SequenceEqual(finished.Outputs()) == true, "recordings: Show in Explorer showed something else");
+                service.Forget(finished.Download);
+                Incident? other = b.DayIncidents.FirstOrDefault(i => i.Key != vehicle?.Key);
+                if (other is not null)
+                {
+                    b.Download(other.Key);
+                    await Until(() => service.Downloads.Count == 1 && service.Downloads[0].Download != finished.Download, 5);
+                    string? folder = service.Downloads.FirstOrDefault()?.Folder;
+                    if (folder is not null)
+                    {
+                        service.Trash(service.Downloads[0].Download);
+                        bool moved = await Until(() => trashed.Count > 0, 5);
+                        Say($"recordings: downloads done, forgotten, trashed {trashed.Count}");
+                        Expect(moved && trashed.SequenceEqual([folder]) && service.Downloads.Count == 0, "recordings: the Recycle Bin did not get the folder");
+                    }
+                }
+            }
+            else
+            {
+                _problems.Add("recordings: the download did not finish after the resume");
+            }
+            b.Center = RecordingsCenter.Player;
+            w.Refresh();
+        }
+
+        // parity: recordings-calendar-month
+        int asked = fake.MonthRequests;
+        long shownMonth = b.Month;
+        b.ShowMonth(-1);
+        long previous = b.Month;
+        bool paged = await Until(() => fake.MonthRequests > asked && b.RecordedDays.Count > 0, 5);
+        Say($"recordings: previous month asked {fake.MonthRequests - asked} time(s), {b.RecordedDays.Count} days marked");
+        Expect(paged && fake.MonthRequests == asked + 1 && b.RecordedDays.All(d => DeviceTime.Month(d).Start == previous), "recordings: paging the calendar did not ask for that month alone");
+        b.ShowMonth(1);
+        b.ShowMonth(-1);
+        Expect(fake.MonthRequests == asked + 1, "recordings: a month already asked was asked again");
+        b.ShowMonth(1);
+        Expect(b.Month == shownMonth, "recordings: the calendar did not come back to the shown day's month");
+
+        // parity: recordings-camera-names
+        List<string> names = [.. b.Lanes.Select(l => l.Name)];
+        List<string> listed = [.. b.Cameras.Select(c => $"Camera {c.Channel + 1}")];
+        Say($"recordings: camera names {string.Join(", ", names)}");
+        Expect(names.SequenceEqual(listed), "recordings: the lanes are not named as the camera list names them");
+
+        // parity: playback-open
+        Incident? firstIncident = b.DayIncidents.OrderBy(i => i.Start).FirstOrDefault();
+        if (firstIncident is null)
+        {
+            _problems.Add("recordings: no incident to play");
+        }
+        else
+        {
+            b.Click(firstIncident.Key, extend: false);
+            bool open = await Playing(() => p.Playback is not null && p.Cells.Count == 1 && p.Cells[0].State == "playing", 5);
+            long start = (firstIncident.Start - firstIncident.Margin) * 1000;
+            Say($"recordings: playback {p.Playback} of {p.Cells.Count} cameras, {p.State}, opens {p.Opens}");
+            Expect(open && p.PositionMs >= start && p.PositionMs <= start + 5_000 && p.Transport.IsPlaying, "recordings: the selected incident did not start playing at its start less the margin");
+            // The fake has no incident of three cameras; with nothing selected the player keeps the cameras added to it.
+            b.Selection = new HashSet<string>();
+            p.Add(cams.First(c => !p.Cameras.Contains(c)));
+            p.Add(cams.First(c => !p.Cameras.Contains(c)));
+            await Playing(() => p.Cells.Count == 3, 5);
+            await Until(() => w.Renderer?.Layout.Tiles.Length == 3, 5);
+            Expect(p.Cells.Count == 3 && w.Renderer?.Layout.Tiles.Length == 3, "recordings: the window's renderer does not draw the playback's three cameras");
+
+            // parity: playback-transport
+            int opens = p.Opens;
+            p.Pause();
+            await Playing(() => p.State == NvrView.Interop.NvPlaybackState.Paused, 5);
+            long before = p.PositionMs;
+            p.Skip(TransportState.SkipMs);
+            Expect(p.PositionMs == Math.Min(before + TransportState.SkipMs, p.EndMs), "recordings: +10 s moved somewhere else");
+            p.SetRate(4);
+            Expect(PlaybackSpeed.Hint(p.Rate) == "Keyframes only, no sound" && host.Audio.Values.All(a => !a.Audible), "recordings: at 4x the hint or the sound is wrong");
+            w.Refresh();
+            Expect(w.TransportShown().Hint == "Keyframes only, no sound" && w.TransportShown().Speed == "4×", "recordings: the transport does not show the speed and its hint");
+            p.SetRate(1);
+            p.Play();
+            await Playing(() => p.State == NvrView.Interop.NvPlaybackState.Playing && p.Rate == 1, 5);
+            bool[] audible = [.. p.Cells.Select(c => host.Audio.TryGetValue(c.Tile, out var a) && a.Audible)];
+            Say($"recordings: paused, skipped 10 s, 4x and back, playing; audible {string.Join(",", audible)}");
+            Expect(audible.SequenceEqual([true, false, false]) && p.Opens == opens, "recordings: at 1x the first camera should be audible, with no reopen");
+
+            // parity: playback-grid
+            p.Click(1);
+            PlayerGridMode emphasis = p.Mode;
+            bool[] afterClick = [.. p.Cells.Select(c => host.Audio.TryGetValue(c.Tile, out var a) && a.Audible)];
+            p.DoubleClick(1);
+            PlayerGridMode single = p.Mode;
+            p.DoubleClick(1);
+            Expect(emphasis.Equals(new PlayerGridMode.Emphasis(1)) && single.Equals(new PlayerGridMode.Single(1)) && p.Mode.Equals(PlayerGridMode.Tiled), "recordings: the grid did not go large, single, and back");
+            Expect(afterClick.SequenceEqual([false, true, false]), "recordings: the large camera's sound did not play");
+            p.Muted = true;
+            Expect(host.Audio.Values.All(a => !a.Audible), "recordings: muted, a camera is audible");
+            p.Muted = false;
+            w.Refresh();
+            await Until(() => w.CellRects.Count(r => r is not null) == 3, 5);
+            Expect(w.CellRects.Count(r => r is not null) == 3 && w.LabelTexts().Count >= 3, "recordings: the player's cells or labels are missing");
+
+            // parity: playback-scrub
+            Incident? playing = b.PlayingIncident;
+            TimelineLane? lane = b.Lanes.FirstOrDefault(l => p.Cameras.Contains(l.Camera));
+            if (playing is not null && lane is not null)
+            {
+                long target = playing.End + 2;
+                int seeks = p.Seeks;
+                b.LaneClick(lane.Camera, target);
+                Expect(p.Seeks == seeks + 1 && p.PositionMs == target * 1000 && p.Opens == opens, "recordings: a lane click did not seek");
+                // The scrubber seeks the same way (a drag shows keyframes, the release the exact picture).
+                w.Refresh();
+                (long rs, long re) = w.Scrubber.Range;
+                Expect(re > rs, "recordings: the scrubber has no range");
+                long point = rs + (re - rs) / 4;
+                w.Scrubber.PointAt(point);
+                Expect(Math.Abs(p.PositionMs - point) <= 1, "recordings: the scrubber did not seek to the point");
+                await Playing(() => p.State == NvrView.Interop.NvPlaybackState.Playing, 5);
+            }
+            else
+            {
+                _problems.Add("recordings: no lane of a playing camera");
+            }
+        }
+
+        // parity: recordings-layout
+        // The window at its smallest and at a large size: the side panes give way in a narrow window (inspector first)
+        // and come back in a wide one.
+        WindowRect saved = w.CurrentFrame;
+        double scale = w.Window.Content.XamlRoot?.RasterizationScale ?? 1;
+        var results = new List<string>();
+        (int Width, int Height)[] sizes =
+        [
+            ((int)Math.Ceiling(RecordingsPanes.WindowMinWidth * scale), (int)Math.Ceiling(RecordingsPanes.WindowMinHeight * scale)),
+            ((int)(900 * scale), (int)(640 * scale)),
+            ((int)(1400 * scale), (int)(900 * scale)),
+        ];
+        foreach ((int wide, int tall) in sizes)
+        {
+            w.ResizeTo(wide, tall);
+            await Until(() => Math.Abs(w.ContentWidth - wide / scale) < 40, 5);
+            await Until(() => w.ShownPanes == RecordingsPanes.Shown(w.ContentWidth, true, true) && w.ContentWidth > 0, 5);
+            (bool sidebar, bool inspector) = RecordingsPanes.Shown(w.ContentWidth, true, true);
+            results.Add($"{w.ContentWidth:0}: sidebar {w.ShownPanes.Sidebar}, inspector {w.ShownPanes.Inspector}");
+            Expect(w.ShownPanes == (sidebar, inspector), $"recordings: at {w.ContentWidth:0} the panes are {w.ShownPanes}, expected {(sidebar, inspector)}");
+        }
+        Say($"recordings: layout {string.Join("; ", results)}");
+        Expect(w.ContentWidth > RecordingsPanes.SidebarWidth + RecordingsPanes.InspectorWidth + RecordingsPanes.CenterMin && w.ShownPanes == (true, true), "recordings: the wide window does not show both side panes");
+        w.ResizeTo((int)saved.Width, (int)saved.Height);
+
+        // parity: recordings-window-close
+        ulong hold = b.HoldId;
+        ulong? openPlayback = p.Playback;
+        w.Close();
+        bool closed = await Until(() => w.IsClosed && RecordingsWindow.Current is null, 5);
+        Expect(closed && !fake.Holds.ContainsKey(hold), "recordings: closing the window kept its hold");
+        // parity: playback-close
+        bool stillOpen = false;
+        if (openPlayback is { } id)
+        {
+            try
+            {
+                _ = playback.PlaybackPosition(id);
+                stillOpen = true;
+            }
+            catch (NvrView.Interop.NvException)
+            {
+            }
+        }
+        Expect(p.Playback is null && !stillOpen, "recordings: closing the window left its playback open");
+        Say($"recordings: closed; hold released {!fake.Holds.ContainsKey(hold)}, playback closed {!stillOpen}");
     }
 
     private static CoreEvent Alarm(DeviceEntry device, int channel, string kind, bool start) => new()
@@ -1671,7 +1967,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(fullName == "Leave full screen" && header.Buttons().First(b => b.Action == HeaderAction.FullScreen).Name == "Full screen", "the Full screen button does not say what it does");
         List<string> overflow = Texts(header.BuildOverflow().Items);
         Say($"header: overflow {string.Join(" / ", overflow)}");
-        string[] rest = ["New window", w.SidebarDocked ? "Hide sidebar" : "Show sidebar", "Indicator corner", "Show diagnostics", "Keyboard shortcuts"];
+        string[] rest = ["New window", "Recordings", w.SidebarDocked ? "Hide sidebar" : "Show sidebar", "Indicator corner", "Show diagnostics", "Keyboard shortcuts"];
         Expect(rest.All(overflow.Contains) && overflow.Any(t => t == "Check for updates…" || t.StartsWith("Update to ", StringComparison.Ordinal) || t.StartsWith("Switch to ", StringComparison.Ordinal)),
             "the overflow menu lacks an app-wide item that left the tile menu");
         // The same arrangement saved as a layout, so no camera loses its lease while the window switches.
