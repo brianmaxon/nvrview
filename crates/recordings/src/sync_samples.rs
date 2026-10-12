@@ -120,6 +120,11 @@ pub fn read_sync_samples(path: &Path) -> Result<SyncSamples, Error> {
 
 /// [`read_sync_samples`] over any seekable source.
 pub fn read_sync_samples_from<R: Read + Seek>(mut r: R) -> Result<SyncSamples, Error> {
+    parse_moov(&read_moov(&mut r)?)
+}
+
+/// The payload of the file's `moov` box (bounded by [`MAX_MOOV`]).
+pub(crate) fn read_moov<R: Read + Seek>(r: &mut R) -> Result<Vec<u8>, Error> {
     let len = r.seek(SeekFrom::End(0))?;
     let mut pos = 0u64;
     for _ in 0..MAX_BOXES {
@@ -148,29 +153,29 @@ pub fn read_sync_samples_from<R: Read + Seek>(mut r: R) -> Result<SyncSamples, E
             }
             let mut buf = vec![0u8; body as usize];
             r.read_exact(&mut buf)?;
-            return parse_moov(&buf);
+            return Ok(buf);
         }
         pos += size;
     }
     Err(Error::Malformed("no moov box"))
 }
 
-fn be32(b: &[u8], at: usize) -> u32 {
+pub(crate) fn be32(b: &[u8], at: usize) -> u32 {
     b.get(at..at + 4)
         .and_then(|s| s.try_into().ok())
         .map_or(0, u32::from_be_bytes)
 }
 
-fn be64(b: &[u8], at: usize) -> u64 {
+pub(crate) fn be64(b: &[u8], at: usize) -> u64 {
     b.get(at..at + 8)
         .and_then(|s| s.try_into().ok())
         .map_or(0, u64::from_be_bytes)
 }
 
-type Boxes<'a> = Vec<([u8; 4], &'a [u8])>;
+pub(crate) type Boxes<'a> = Vec<([u8; 4], &'a [u8])>;
 
 /// The child boxes of a container's payload, as (type, payload).
-fn children(data: &[u8]) -> Result<Boxes<'_>, Error> {
+pub(crate) fn children(data: &[u8]) -> Result<Boxes<'_>, Error> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos + 8 <= data.len() {
@@ -198,13 +203,17 @@ fn children(data: &[u8]) -> Result<Boxes<'_>, Error> {
     Ok(out)
 }
 
-fn find<'a>(list: &[([u8; 4], &'a [u8])], typ: &[u8; 4]) -> Option<&'a [u8]> {
+pub(crate) fn find<'a>(list: &[([u8; 4], &'a [u8])], typ: &[u8; 4]) -> Option<&'a [u8]> {
     list.iter().find(|(t, _)| t == typ).map(|(_, p)| *p)
 }
 
 /// A table of `entry_size`-byte entries after a full-box header and a
 /// count; the count is checked against the bytes present.
-fn table<'a>(p: &'a [u8], entry_size: usize, what: &'static str) -> Result<&'a [u8], Error> {
+pub(crate) fn table<'a>(
+    p: &'a [u8],
+    entry_size: usize,
+    what: &'static str,
+) -> Result<&'a [u8], Error> {
     if p.len() < 8 {
         return Err(Error::Malformed(what));
     }

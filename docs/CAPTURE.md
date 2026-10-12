@@ -11,8 +11,9 @@
 > ("Local captures and the NVR's recordings"); the PTZ commands in
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
-> macOS the header, its menus and keys (capture and PTZ actions say "coming
-> soon") and the call window's picture as a single fixed tile; in the core,
+> macOS and Windows the header, its menus and keys (recording and PTZ actions
+> say "coming soon"), Save picture, and the call window's picture as a single
+> fixed tile; in the core,
 > the pure base (`crates/capture`, K2) and the recorders behind a Rust API
 > (K4, below). The C interface and the apps' use of it come next.
 
