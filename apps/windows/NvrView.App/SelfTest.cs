@@ -1104,14 +1104,16 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool zoomed = Math.Abs(tile.Zoom - 2) < 0.01;
         UnitRect seen = tile.DigitalZoom.Visible(tile.ZoomBase);
         bool cropped = seen.Width < 0.9 || seen.Height < 0.9;
-        bool wantsMain = await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
-        // Switching to the main stream takes the picture away for a moment (the header shows only the title and the more button then).
-        await Until(() => stage.HeaderTileOf(tile) is { Picture: true } && chrome.ResetShown && chrome.MapShown, 30);
+        bool wantsMain = v.Planner.WantedTier(camera) == StreamTier.Main;
+        // Switching to the main stream takes the picture away for a while (the header then shows only the title and the more button),
+        // so the header is read before the switch happens and the zoom is reset, which sends the tile back to the sub-stream.
+        await Until(() => chrome.ResetShown && chrome.MapShown, 5);
         bool map = chrome.MapShown;
         bool resetShown = chrome.ResetShown;
+        wantsMain |= await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
         chrome.PressReset();
         bool back = await Until(() => tile.Zoom <= 1.0001 && !chrome.ResetShown && !chrome.MapShown, 5);
-        Say($"call window tile: pinch to {tile.Zoom:0.00}x then reset, zoom map {map}, source cropped {cropped} ({seen.Width:0.00}x{seen.Height:0.00}), main stream {wantsMain}, header Reset Zoom shown {resetShown} and back to 1x {back}");
+        Say($"call window tile: status \"{stage.StatusText(tile)}\" ({tile.Shared?.Video.Status}); pinch to {tile.Zoom:0.00}x then reset, zoom map {map}, source cropped {cropped} ({seen.Width:0.00}x{seen.Height:0.00}), main stream {wantsMain}, header Reset Zoom shown {resetShown} and back to 1x {back}");
         Expect(zoomed, "a pinch did not zoom the call window's tile");
         Expect(map, "the call window's zoomed tile showed no zoom map");
         Expect(cropped, "the call window's renderer did not sample the zoomed region");
@@ -1158,6 +1160,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             IReadOnlyList<TileHeaderItem> buttons = TileHeaderLayout.Buttons(model);
             TileHeaderMetrics m = TileHeaderMetrics.Standard;
+            string placedWhy = "", whyNot = "";
             // Lays the header out at a total width: the buttons shown, and whether they sit inside the tile, apart, and right of the title.
             (IReadOnlyList<TileHeaderItem> Shown, TileHeaderLayout? Layout, bool Placed) At(double width)
             {
@@ -1166,12 +1169,21 @@ internal sealed class SelfTest(App app, AppOptions options)
                 bool apart = frames.Zip(frames.Skip(1)).All(p => p.First.X + p.First.Width <= p.Second.X + 0.5);
                 bool inside = frames.All(f => f.X >= 0 && f.X + f.Width <= width + 0.5);
                 bool clear = frames.Count == 0 || chrome.TitleFrame.X + chrome.TitleFrame.Width <= frames[0].X + 0.5;
+                placedWhy = $"{width:0}: apart {apart} inside {inside} clear {clear}; title {chrome.TitleFrame.X:0}+{chrome.TitleFrame.Width:0}; buttons {string.Join(" ", frames.Select(f => $"{f.X:0}+{f.Width:0}"))}";
+                if (apart && inside && clear)
+                {
+                    placedWhy = "";
+                }
+                else
+                {
+                    whyNot += placedWhy + " | ";
+                }
                 return (chrome.ShownButtons, chrome.HeaderLayout, apart && inside && clear);
             }
             // parity: header-priority-narrow
             chrome.ForceWidth(m.Narrow + 100);
             double reserve = chrome.Reserve;
-            var narrow = At(110);
+            var narrow = At(110 + reserve);
             // One DIP short of every button: some go into "...".
             double width = reserve + 2 * m.Padding + m.TitleMin + m.Icon * buttons.Count - 1;
             int fit = (int)((width - reserve - 2 * m.Padding - m.TitleMin - m.Icon) / m.Icon);
@@ -1189,7 +1201,7 @@ internal sealed class SelfTest(App app, AppOptions options)
                 + "\"lens_talk\":[true,false],\"lens_ptz\":[{\"pan_tilt\":false},{\"pan_tilt\":true,\"presets\":true,\"zoom_focus\":true}]}");
             ChannelInfo? caps = ChannelInfo.From(doc.RootElement);
             bool capsOK = caps is { Doorbell: true } && caps.TalkOf(0) && !caps.TalkOf(1) && !caps.PtzOf(0).PanTilt && caps.PtzOf(1) is { PanTilt: true, Presets: true, ZoomFocus: true };
-            Say($"header: placed {narrow.Placed}/{middle.Placed}/{wide.Placed}, narrow layout [{string.Join(",", narrow.Layout?.Visible ?? [])}], reserve {reserve:0}; 110 DIP {string.Join(",", narrow.Shown)}, {width:0} DIP {string.Join(",", middle.Shown)}, 5 DIP wider unchanged {steady}, 1000 DIP {string.Join(",", wide.Shown)}; capabilities parsed {capsOK}");
+            Say($"header: placed {narrow.Placed}/{middle.Placed}/{wide.Placed}, narrow layout [{string.Join(",", narrow.Layout?.Visible ?? [])}], reserve {reserve:0}, {whyNot}; 110 DIP {string.Join(",", narrow.Shown)}, {width:0} DIP {string.Join(",", middle.Shown)}, 5 DIP wider unchanged {steady}, 1000 DIP {string.Join(",", wide.Shown)}; capabilities parsed {capsOK}");
             Expect(narrowOK, "below 120 DIP the header did not show only the title and the more button");
             Expect(middleOK, $"one DIP short of every button, the header did not show the model's first {fit} buttons and the more button");
             Expect(wideOK, "a wide header did not show every button without the more button");
