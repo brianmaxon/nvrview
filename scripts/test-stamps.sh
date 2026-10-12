@@ -80,6 +80,8 @@ expect_not "a cached-suite stamp never counts for a release" release_stamp_tree 
 case "$(stamp_cached windows "$t1")" in "test (3 of 18 crates)") pass "the stamp names its cached suites" ;; *) fail "the stamp names its cached suites" ;; esac
 scripts/checked.sh --record windows 5 "fake" none >/dev/null
 expect "a full stamp counts for a release" release_stamp_tree windows "$t1"
+scripts/checked.sh --record windows 5 "fake" "test (1 of 18 crates)" >/dev/null
+expect "a later cached run keeps the full stamp" release_stamp_tree windows "$t1"
 rm -f "$(stamp_dir)/$t1.windows"
 
 # --- reuse decision ---------------------------------------------------------

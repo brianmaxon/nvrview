@@ -29,6 +29,12 @@ if [ "${1:-}" = "--record" ]; then
   kind="${2:?usage: $0 --record mac|windows SECONDS STEPS}"
   case "$kind" in mac | windows | windows-reused) ;; *) echo "unknown stamp kind: $kind" >&2; exit 2 ;; esac
   mkdir -p "$dir"
+  # A run with cached suites never replaces a full stamp of the same tree.
+  if [ "${5:-none}" != none ] && [ -n "${5:-}" ] && [ -f "$dir/$tree.$kind" ] &&
+    ! grep -q '^full=no$' "$dir/$tree.$kind"; then
+    echo "check stamp kept: $dir/$tree.$kind is from a full run"
+    exit 0
+  fi
   {
     printf 'date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'duration=%ss\n' "${3:-unknown}"
