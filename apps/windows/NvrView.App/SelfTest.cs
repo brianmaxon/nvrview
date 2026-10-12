@@ -83,7 +83,9 @@ using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
+using NvThumbKind = NvrView.Interop.NvThumbKind;
 using Point = Windows.Foundation.Point;
+using RecordedThumbnail = NvrView.Interop.RecordedThumbnail;
 
 namespace NvrView.App;
 
@@ -516,6 +518,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             Revealer = revealed.Add,
             CameraNamer = c => $"Camera {c.Channel + 1}",
         };
+        ThumbnailDecodeQueue thumbnailQueue = App.UseThumbnailDecoder(service);
         service.Start(Path.Combine(Path.GetTempPath(), "nvrview-selftest-incidents-" + Environment.ProcessId));
         Task<bool> Playing(Func<bool> condition, double seconds) => Until(() =>
         {
@@ -564,6 +567,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         Say($"recordings: yesterday {(yesterday ? "has" : "lacks")} its incidents; today held again {heldBack}");
         Expect(yesterday && heldBack, "recordings: navigating a day did not ask for it or hold today again");
         await Until(() => b.DayIncidents.Count == 6, 5);
+
+        // parity: recordings-thumbnail
+        await RecordingsThumbnails(service, fake, b, w);
 
         // parity: recordings-lock
         Incident? vehicle = b.DayIncidents.FirstOrDefault(i => i.Kinds.SequenceEqual(["vehicle"]));
@@ -869,6 +875,112 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         }
         Expect(p.Playback is null && !stillOpen, "recordings: closing the window left its playback open");
         Say($"recordings: closed; hold released {!fake.Holds.ContainsKey(hold)}, playback closed {!stillOpen}");
+        thumbnailQueue.Dispose();
+    }
+
+    // The bar colors of the *-colors fixtures (COLOR_BARS in fixtures/synthetic/make-video.sh), left to right, 32 x 64 px each.
+    private static readonly (int R, int G, int B)[] ColorBars =
+    [
+        (0xB4, 0x28, 0x28), (0x28, 0xA0, 0x3C), (0x32, 0x3C, 0xBE), (0xDC, 0xDC, 0xDC), (0x80, 0x80, 0x80), (0x18, 0x18, 0x18),
+    ];
+
+    // The decoded JPEG as BGRA rows, with its size.
+    private static async Task<(int Width, int Height, byte[] Pixels)?> DecodeJpeg(byte[] jpeg)
+    {
+        try
+        {
+            using var stream = new Windows.Storage.Streams.InMemoryRandomAccessStream();
+            _ = await stream.WriteAsync(System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.AsBuffer(jpeg));
+            stream.Seek(0);
+            var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(stream);
+            var data = await decoder.GetPixelDataAsync(Windows.Graphics.Imaging.BitmapPixelFormat.Bgra8,
+                Windows.Graphics.Imaging.BitmapAlphaMode.Straight, new Windows.Graphics.Imaging.BitmapTransform(),
+                Windows.Graphics.Imaging.ExifOrientationMode.IgnoreExifOrientation, Windows.Graphics.Imaging.ColorManagementMode.DoNotColorManage);
+            return ((int)decoder.PixelWidth, (int)decoder.PixelHeight, data.DetachPixelData());
+        }
+        catch (Exception e) when (e is InvalidOperationException or System.Runtime.InteropServices.COMException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    // A cover keyframe through the real decoder (Media Foundation and WIC): the size, the bars' colors, and a row that shows it.
+    private async Task RecordingsThumbnails(RecordingsService service, FakeRecordings fake, RecordingsBrowser b, RecordingsWindow w)
+    {
+        string? exe = options.MockNvr;
+        string? root = exe is null ? null : Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(exe)));
+        string fixtures = root is null ? "" : Path.Combine(root, "fixtures", "synthetic");
+        if (!Directory.Exists(fixtures))
+        {
+            _problems.Add("recordings: no synthetic fixtures to decode a cover keyframe from");
+            return;
+        }
+        byte[] ReadKeyframe(string file, bool h265) => AnnexBKeyframes.Last(File.ReadAllBytes(Path.Combine(fixtures, file)), h265);
+        // Each codec's colors fixture at its own size, and the resize fixture's last keyframe (480 x 270) shrunk to 320 wide.
+        foreach ((string codec, bool h265, NvThumbKind kind) in new[] { ("h264", false, NvThumbKind.H264Keyframe), ("h265", true, NvThumbKind.H265Keyframe) })
+        {
+            byte[] colors = ReadKeyframe($"{codec}-colors.{codec}", h265);
+            Nv12Picture? raw = KeyframeImage.Decode(h265 ? NvrView.Interop.NvCodec.H265 : NvrView.Interop.NvCodec.H264, colors, 192, 96, out _);
+            (YuvMatrix? vuiMatrix, bool? vuiFull) = h265 ? HevcColor.Read(colors) : (null, null);
+            Say($"recordings: {codec} decoder {raw?.Decoder}, matrix {raw?.Matrix}, full range {raw?.FullRange}; stream says {vuiMatrix?.ToString() ?? "nothing"}, {vuiFull?.ToString() ?? "nothing"}");
+            RecordedThumbnail? small = KeyframeImage.Thumbnail(new RecordedThumbnail(kind, 192, 96, 0, colors), out string? why);
+            if (small is null)
+            {
+                // The H.265 decoder comes with the HEVC Video Extension; without it that codec is reported, not failed.
+                if (h265 && why?.Contains("no H.265 decoder", StringComparison.Ordinal) == true)
+                {
+                    Say($"recordings: {codec} cover keyframe skipped ({why})");
+                    continue;
+                }
+                _problems.Add($"recordings: the {codec} cover keyframe did not decode: {why}");
+                continue;
+            }
+            var image = await DecodeJpeg(small.Data);
+            if (image is not { } decoded || decoded.Width != 192 || decoded.Height != 96 || small.Width != 192 || small.Height != 96)
+            {
+                _problems.Add($"recordings: the {codec} cover is {image?.Width}x{image?.Height}, expected 192x96");
+                continue;
+            }
+            int worst = 0;
+            for (int i = 0; i < ColorBars.Length; i++)
+            {
+                int o = (24 * decoded.Width + 16 + 32 * i) * 4;
+                (int r, int g, int bl) = (decoded.Pixels[o + 2], decoded.Pixels[o + 1], decoded.Pixels[o]);
+                worst = Math.Max(worst, Math.Max(Math.Abs(r - ColorBars[i].R), Math.Max(Math.Abs(g - ColorBars[i].G), Math.Abs(bl - ColorBars[i].B))));
+            }
+            Say($"recordings: {codec} cover {decoded.Width}x{decoded.Height}, {small.Data.Length} bytes, bars within {worst} codes");
+            Expect(worst <= 14, $"recordings: the {codec} cover's bar colors are {worst} codes off");
+
+            byte[] resize = ReadKeyframe($"{codec}-resize.{codec}", h265);
+            RecordedThumbnail? shrunk = KeyframeImage.Thumbnail(new RecordedThumbnail(kind, 480, 270, 0, resize), out why);
+            var shrunkImage = shrunk is null ? null : await DecodeJpeg(shrunk.Data);
+            Say($"recordings: {codec} 480x270 keyframe shrunk to {shrunkImage?.Width}x{shrunkImage?.Height}");
+            Expect(shrunkImage is { Width: 320, Height: 180 }, $"recordings: the {codec} 480x270 cover is {shrunkImage?.Width}x{shrunkImage?.Height} ({why})");
+        }
+
+        // The window: the first incident's covers are keyframes in the core's cache; its rows decode and show them,
+        // and the small pictures are put back.
+        Incident? incident = b.DayIncidents.OrderBy(i => i.Start).FirstOrDefault();
+        if (incident is null)
+        {
+            _problems.Add("recordings: no incident for a cover");
+            return;
+        }
+        byte[] keyframe = ReadKeyframe("h264-colors.h264", false);
+        foreach (ThumbnailKey key in incident.CoverKeys)
+        {
+            fake.ThumbnailPut(key.Json, new RecordedThumbnail(NvThumbKind.H264Keyframe, 192, 96, 0, keyframe));
+        }
+        int putBefore = service.ThumbnailsPut;
+        int shownBefore = w.ThumbnailsShown;
+        service.CancelThumbnails();
+        w.Refresh();
+        bool shown = await Until(() => w.ThumbnailsShown > shownBefore && service.Thumbnails[incident.CoverKeys[0]] is ThumbnailState.Image, 10);
+        ThumbnailKey first = incident.CoverKeys[0];
+        RecordedThumbnail? cached = fake.ThumbnailGet(first.Json);
+        Say($"recordings: row covers shown {w.ThumbnailsShown - shownBefore}, put back {service.ThumbnailsPut - putBefore}, cached kind {cached?.Kind}");
+        Expect(shown && service.ThumbnailsPut > putBefore && cached?.Kind == NvThumbKind.Image,
+            "recordings: the incident's row did not show the decoded cover, or it was not put back in the core's cache");
     }
 
     // 11e. The follow cut and grids of a downloaded incident (docs/UX.md "Recordings", "Follow and Grid"; milestone P,

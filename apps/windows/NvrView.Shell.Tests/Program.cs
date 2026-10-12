@@ -99,6 +99,7 @@ internal static class Program
         CaptureRecordingsTests.Run();
         RecordingsBrowseTests.Run();
         RecordingsModelTests.Run();
+        ThumbnailDecodingTests.Run();
         RecordingsSoundTests.Run();
         EditPlanTests.Run();
         return T.Summary();

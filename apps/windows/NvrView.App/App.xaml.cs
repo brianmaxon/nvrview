@@ -249,6 +249,7 @@ public partial class App : Application
             Revealer = SystemActions.ShowInExplorer,
             CameraNamer = c => _viewer!.FindDevice(c.Device) is null ? null : _viewer.CameraName(new CameraRef(c.Device, c.Channel, c.Lens)),
         };
+        UseThumbnailDecoder(Recordings);
         _host.Recordings = Recordings;
         string downloads = o.DataDir is not null || o.SelfTest || o.StartupTest
             ? Path.Combine(dataDir, "Incidents")
@@ -279,6 +280,29 @@ public partial class App : Application
         {
             stage.ShowToast(text, action?.Title, action?.Handler);
         }
+    }
+
+    /// <summary>
+    /// Cover keyframes are decoded (Media Foundation) and shrunk to JPEG (WIC) on a worker thread, newest request
+    /// first; the queue is bounded and dropped when the window moves on. Failures show a placeholder and are logged
+    /// at most every 30 seconds.
+    /// </summary>
+    internal static ThumbnailDecodeQueue UseThumbnailDecoder(RecordingsService service)
+    {
+        var queue = new ThumbnailDecodeQueue(
+            keyframe =>
+            {
+                RecordedThumbnail? small = NvrView.Video.KeyframeImage.Thumbnail(keyframe, out string? why);
+                if (small is null)
+                {
+                    AppLog.Limited("thumbnail-decode", 30, $"a cover picture could not be decoded: {why}");
+                }
+                return small;
+            },
+            error: message => AppLog.Limited("thumbnail-decode", 30, message));
+        service.ThumbnailDecoder = queue.Submit;
+        service.ThumbnailDecoderCancel = () => queue.CancelQueued();
+        return queue;
     }
 
     /// <summary>Opens a window with its own content (behind the others and never activated in the self-tests).</summary>
