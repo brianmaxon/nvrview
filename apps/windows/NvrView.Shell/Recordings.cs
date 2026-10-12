@@ -24,9 +24,9 @@ public sealed record RecordingCamera(string Device, int Channel, int Lens = 0)
     public static RecordingCamera? From(JsonElement e) =>
         e.ValueKind == JsonValueKind.Object &&
         e.TryGetProperty("device", out JsonElement d) && d.ValueKind == JsonValueKind.String &&
-        e.TryGetProperty("channel", out JsonElement c) && c.TryGetInt32(out int channel)
+        e.TryGetProperty("channel", out JsonElement c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out int channel)
             ? new RecordingCamera(d.GetString()!, channel,
-                e.TryGetProperty("lens", out JsonElement l) && l.TryGetInt32(out int lens) ? lens : 0)
+                e.TryGetProperty("lens", out JsonElement l) && l.ValueKind == JsonValueKind.Number && l.TryGetInt32(out int lens) ? lens : 0)
             : null;
 }
 
@@ -126,8 +126,11 @@ public sealed record DownloadProgress(
     internal static string? Str(JsonElement e, string name) =>
         e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
+    // A number member, null when missing, null, or not a whole number. JsonElement.TryGetInt64 throws on anything
+    // but a number, so a JSON null (bytes_estimate before the device's estimate, output before the file) is checked
+    // first; it used to throw out of the event parser and drop the whole event.
     internal static long? Long(JsonElement e, string name) =>
-        e.TryGetProperty(name, out JsonElement v) && v.TryGetInt64(out long n) ? n : null;
+        e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out long n) ? n : null;
 
     internal static bool Bool(JsonElement e, string name) =>
         e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.True;
@@ -241,7 +244,7 @@ public abstract record RecordingsEvent
                 _ => null,
             };
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         {
             return null;
         }

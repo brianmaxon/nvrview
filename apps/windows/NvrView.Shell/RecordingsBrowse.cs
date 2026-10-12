@@ -111,6 +111,7 @@ public enum KindFilter
     Vehicle,
     Animal,
     Motion,
+    Sound,
     Other,
 }
 
@@ -127,6 +128,7 @@ public static class KindFilters
         KindFilter.Vehicle => "Vehicles",
         KindFilter.Animal => "Animals",
         KindFilter.Motion => "Motion",
+        KindFilter.Sound => "Sounds",
         _ => "Other",
     };
 
@@ -144,8 +146,8 @@ public static class KindFilters
     public static IndicatorKind Indicator(string kind) =>
         IsAnimal(kind) ? IndicatorKind.Animal : IndicatorKinds.FromDetection(kind);
 
-    /// <summary>The filter an event kind belongs to.</summary>
-    public static KindFilter Of(string kind) => Indicator(kind) switch
+    /// <summary>The filter an event kind belongs to (the sound kinds, alarms included, are Sounds).</summary>
+    public static KindFilter Of(string kind) => SoundKinds.All.Contains(kind) ? KindFilter.Sound : Indicator(kind) switch
     {
         IndicatorKind.Person => KindFilter.People,
         IndicatorKind.Vehicle => KindFilter.Vehicle,
@@ -160,6 +162,11 @@ public static class KindFilters
     /// <summary>Whether any of <paramref name="kinds"/> passes <paramref name="filters"/> (an empty set passes all).</summary>
     public static bool Passes(IEnumerable<string> kinds, ISet<KindFilter> filters) =>
         filters.Count == 0 || kinds.Any(k => filters.Contains(Of(k)));
+
+    /// <summary>Whether an incident passes <paramref name="filters"/>: by its kinds, and for Sounds also by any event from sound.</summary>
+    public static bool Passes(Incident incident, ISet<KindFilter> filters) =>
+        Passes(incident.Kinds, filters) ||
+        (filters.Contains(KindFilter.Sound) && incident.Events.Any(e => e.Source == SoundKinds.LocalAudio));
 }
 
 // ---- Answers ----

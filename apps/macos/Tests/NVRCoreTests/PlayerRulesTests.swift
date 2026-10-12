@@ -21,6 +21,42 @@ import Testing
         #expect(PlaybackSpeed.slower(than: 1) == 0.5 && PlaybackSpeed.slower(than: 0.25) == nil)
     }
 
+    @Test func openRefusalsSayWhy() {
+        #expect(PlaybackOpenMessage.text(.invalidArgument) == "A camera's device is not searched for recordings")
+        #expect(PlaybackOpenMessage.text(.limit) == "Too many cameras or playbacks to play this")
+        #expect(PlaybackOpenMessage.text(.notConfigured) == "Recordings are not set up yet")
+        #expect(PlaybackOpenMessage.text(.unknownID) == "That incident changed; select it again")
+        #expect(PlaybackOpenMessage.text(.internal) == "The recording could not be played (status -5)")
+    }
+
+    /// The same vectors as the Windows app's RecordingsBrowseTests "timeline viewport".
+    @Test func timelineViewport() {
+        func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-9 }
+        let whole = TimelineViewport()
+        #expect(whole.zoom == 1 && whole.start == 0 && whole.visible == 1)
+        // A notch at the middle: the middle stays.
+        let a = whole.zoomed(by: TimelineViewport.notch, at: 0.5)
+        #expect(near(a.zoom, 1.25) && near(a.start, 0.1) && near(a.fraction(atPointer: 0.5), 0.5))
+        // Off center: the time under the pointer stays under it.
+        let b = TimelineViewport(zoom: 4, start: 0.3)
+        let b2 = b.zoomed(by: 1.25, at: 0.25)
+        #expect(near(b2.zoom, 5) && near(b2.start, 0.3125))
+        #expect(near(b.fraction(atPointer: 0.25), b2.fraction(atPointer: 0.25)))
+        // Clamped to 48x, and to the day's ends.
+        let c = TimelineViewport(zoom: 40, start: 0.5).zoomed(by: 2, at: 0)
+        #expect(c.zoom == 48 && near(c.start, 0.5))
+        let d = TimelineViewport(zoom: 2, start: 0.5).zoomed(by: 0.25, at: 1)
+        #expect(d.zoom == 1 && d.start == 0)
+        let e = whole.zoomed(by: 2, at: 1)
+        #expect(e.zoom == 2 && near(e.start, 0.5))
+        #expect(near(TimelineViewport(zoom: 2).panned(by: 5).start, 0.5))
+        #expect(TimelineViewport(zoom: 2, start: 0.25).panned(by: -5).start == 0)
+        #expect(near(TimelineViewport(zoom: 4, start: 0.25).panned(by: 0.5).start, 0.375))
+        let f = TimelineViewport(zoom: 100, start: 2)
+        #expect(f.zoom == 48 && near(f.start, 1 - 1.0 / 48))
+        #expect(near(TimelineViewport.wheelFactor(notches: 2), 1.5625) && near(TimelineViewport.wheelFactor(notches: -1), 0.8))
+    }
+
     @Test func transport() {
         let t = TransportState(startMs: 1_000_000, endMs: 1_060_000, positionMs: 1_055_000, state: .paused, rate: 1)
         #expect(t.showsPlay && !t.isPlaying)
@@ -89,9 +125,10 @@ import Testing
         #expect(RecordingsPanes.shown(width: 800, sidebar: false, inspector: true) == (false, true))
         #expect(RecordingsPanes.shown(width: 2000, sidebar: false, inspector: false) == (false, false))
         // Lanes: all of them while they fit in a third; at least two lanes.
-        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 26 + 8))
+        // Each lane has its loudness strip (26 + 10), and the legend is under them.
+        #expect(RecordingsPanes.lanesHeight(height: 900, lanes: 3) == CGFloat(18 + 3 * 36 + 14 + 8))
         #expect(RecordingsPanes.lanesHeight(height: 600, lanes: 16) == (600 - RecordingsPanes.transportHeight) / 3)
-        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 26 + 8))
+        #expect(RecordingsPanes.lanesHeight(height: 200, lanes: 16) == CGFloat(18 + 2 * 36 + 14 + 8))
     }
 
     @Test func splitAndStrip() {
