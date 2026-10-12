@@ -372,7 +372,10 @@ final class SelfTest {
             overlay.pointerAt(CGPoint(x: 2, y: 200))
             advance(overlay.reveal.dwell / 2)
             if overlay.isShown { problems.append("the sidebar slid in before the dwell") }
-            advance(overlay.reveal.dwell / 2)
+            // To the dwell's deadline exactly: two half steps can land one
+            // rounding step short of it, depending on the clock's start.
+            let now = app.testClock?.now ?? 0
+            advance(overlay.reveal.deadline.map { max(0, $0 - now) } ?? overlay.reveal.dwell / 2)
             if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
             // A few real refreshes with the overlay sliding in over the stage.
             after(0.25) { [self] in
