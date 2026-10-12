@@ -92,3 +92,11 @@ edit-download                macos    gap: Windows follow cut and grids are W3
 edit-follow-cut              macos    gap: Windows follow cut and grids are W3
 edit-grid                    macos    gap: Windows follow cut and grids are W3
 edit-back-to-cameras         macos    gap: Windows follow cut and grids are W3
+capture-encoder-priming     macos    gap: Windows recording is CAP-W5
+capture-record-tile         macos    gap: Windows recording is CAP-W5
+capture-record-indicator    macos    gap: Windows recording is CAP-W5
+capture-record-disk-low     macos    gap: Windows recording is CAP-W5
+capture-record-main-limit   macos    gap: Windows recording is CAP-W5
+capture-call-record-button  macos    gap: Windows recording is CAP-W5
+capture-record-real-core    macos    gap: Windows recording is CAP-W5
+capture-call-record-real-core macos    gap: Windows recording is CAP-W5

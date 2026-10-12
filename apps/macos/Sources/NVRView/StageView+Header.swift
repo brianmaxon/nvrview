@@ -23,7 +23,9 @@ extension StageView {
         return TileHeaderTile(
             audio: true, talk: info?.talk(lens: camera.lens) == true, doorbell: info?.doorbell == true,
             panTilt: ptz.panTilt, presets: ptz.presets, lens: ptz.zoomFocus, fisheye: model.isFisheye(camera),
-            picture: model.veil(for: camera) == nil, recording: false, zoomed: isZoomed(path), panned: isPanned(path),
+            picture: model.veil(for: camera) == nil,
+            recording: fixedTile ? model.capture.callRecording(camera) != nil : model.capture.isRecorded(camera),
+            zoomed: isZoomed(path), panned: isPanned(path),
             alert: alertActive(camera), listening: model.audible.contains(camera), conversation: call != nil,
             call: where_)
     }
@@ -48,6 +50,16 @@ extension StageView {
         performHeaderItem(item, at: path, from: nil)
     }
 
+    /// ⇧⌘R in a viewer window: the selected tile's call recording while
+    /// its camera's call is open, else as R.
+    func recordCallOnSelected() {
+        guard let path = selectedPath, let camera = state.tree[path]?.camera else { return }
+        guard !fixedTile, model.calls.call(for: camera.firstLens) != nil else { return performOnSelected(.record) }
+        noteInteraction()
+        model.capture.toggleCall(camera)
+        refreshChrome()
+    }
+
     /// Does what `item` does for the tile at `path`; `view` is the button
     /// clicked, under which a menu pops up (nil from a key or a menu).
     func performHeaderItem(_ item: TileHeaderItem, at path: NodePath, from view: NSView?) {
@@ -70,6 +82,12 @@ extension StageView {
             savePicture(at: path, kind: .zoomedArea, ask: false)
         case .saveOriginalFisheye:
             savePicture(at: path, kind: .originalFisheye, ask: false)
+        case .record:
+            if fixedTile { model.capture.toggleCall(camera) } else { model.capture.toggleLive(camera) }
+        case .recordMain:
+            model.capture.startLive(camera, quality: .main)
+        case .recordSub:
+            model.capture.startLive(camera, quality: .sub)
         case .dismissAlert:
             dismissAlert(camera)
         case .conversation:

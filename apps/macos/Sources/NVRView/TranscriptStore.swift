@@ -48,6 +48,27 @@ final class TranscriptStore {
         }
     }
 
+    /// Deletes the oldest call recordings (`.mp4`, not the `.partial.mp4`
+    /// files being written) beyond `CallTranscriptFile.maxRecordings` files
+    /// and `maxRecordingBytes` bytes.
+    func pruneRecordings() {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
+        guard let urls = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys) else { return }
+        var files: [CallTranscriptFile.StoredFile] = []
+        for url in urls
+        where url.pathExtension.lowercased() == "mp4" && !url.lastPathComponent.lowercased().hasSuffix(".partial.mp4") {
+            guard let v = try? url.resourceValues(forKeys: Set(keys)), v.isRegularFile == true else { continue }
+            files.append(
+                .init(name: url.lastPathComponent, bytes: v.fileSize ?? 0, modified: v.contentModificationDate ?? .distantPast))
+        }
+        for name in CallTranscriptFile.toDelete(
+            files, maxFiles: CallTranscriptFile.maxRecordings, maxBytes: CallTranscriptFile.maxRecordingBytes)
+        {
+            try? fm.removeItem(at: folder.appendingPathComponent(name))
+        }
+    }
+
     /// The saved transcripts, by name (self-test).
     func names() -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".txt") }.sorted()

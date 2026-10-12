@@ -59,6 +59,27 @@ public enum CallTranscriptFile {
         return "\(stem) \(n).txt"
     }
 
+    /// Call recordings kept beside the transcripts (docs/CAPTURE.md
+    /// "Recording calls", "Files"): the newest 100, at most 10 GB.
+    public static let maxRecordings = 100
+    public static let maxRecordingBytes = 10_000_000_000
+
+    /// The stem a call's recording and its transcript share (`<stem>.mp4`
+    /// and `<stem>.txt`): the transcript's name without ".txt", numbered as
+    /// `uniqueName` numbers it until none of `<stem>.txt`, `<stem>.mp4` and
+    /// `<stem>.partial.mp4` is in `taken` (compared without regard to case).
+    public static func sharedStem(_ name: String, taken: Set<String>) -> String {
+        let lower = Set(taken.map { $0.lowercased() })
+        let base = name.hasSuffix(".txt") ? String(name.dropLast(4)) : name
+        func free(_ stem: String) -> Bool {
+            ["txt", "mp4", "partial.mp4"].allSatisfy { !lower.contains("\(stem).\($0)".lowercased()) }
+        }
+        if free(base) { return base }
+        var n = 2
+        while !free("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
+    }
+
     /// The file's text: a header (camera, kind of call, start and end in
     /// `timeZone` with its offset), a blank line, then each finished caption
     /// line with its time and side ("17:02:10 Visitor: Hello there."). Lines
