@@ -106,6 +106,11 @@ from a Mac, including uncommitted work:
 NVRVIEW_WINDOWS_HOST=<ssh host> scripts/windows-check.sh
 ```
 
+The script takes a lock on the computer itself (`scripts/windows-lock.sh`:
+merges and releases go before agents), so parallel sessions queue without
+extra steps. Several computers can share the load:
+`NVRVIEW_WINDOWS_HOSTS="host-a host-b"` (see
+[apps/windows/README.md](apps/windows/README.md#adding-a-windows-test-computer)).
 Each run prints the computer's free disk space (and warns under 10 GB), then
 the seconds every step took. Parallel sessions give themselves a worker folder
 with `NVRVIEW_WINDOWS_WORKER=<name>` (default `main`); each keeps about 5 GB of

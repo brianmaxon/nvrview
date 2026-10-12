@@ -204,9 +204,10 @@ if [ -n "$args" ]; then
   cargo test $args --doc
 fi
 
-if want script-tests "check-stamp, merge, and cache scripts (throwaway repositories, fake checks)"; then
+if want script-tests "check-stamp, merge, merge-train, lock, and cache scripts (throwaway repositories, fake checks)"; then
   sh scripts/test-stamps.sh
   sh scripts/test-suite-cache.sh
+  sh scripts/test-merge-train.sh
 fi
 
 if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
