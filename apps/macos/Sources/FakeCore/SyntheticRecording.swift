@@ -50,6 +50,10 @@ public enum SyntheticRecording {
 
     /// Writes an H.264 MP4 (BT.601, video range, flagged that way).
     public static func write(_ spec: Spec, to url: URL) async throws {
+        try await EncoderGate.run { try await writeNow(spec, to: url) }
+    }
+
+    private static func writeNow(_ spec: Spec, to url: URL) async throws {
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -278,5 +282,39 @@ public enum SyntheticRecording {
             frame = frame << 1 | ((v.x + v.y + v.z) / 3 > 128 ? 1 : 0)
         }
         return (color, frame)
+    }
+}
+
+/// One hardware video encoder session at a time in a process that runs tests
+/// in parallel: with several, the encoder falls back to other keyframe
+/// timing (a 17-frame group of pictures for a 20-frame interval), which the
+/// tests that count keyframes in synthetic files cannot take.
+public actor EncoderGate {
+    private static let shared = EncoderGate()
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    public static func run<T: Sendable>(_ body: @Sendable () async throws -> T) async rethrows -> T {
+        await shared.enter()
+        do {
+            let value = try await body()
+            await shared.leave()
+            return value
+        } catch {
+            await shared.leave()
+            throw error
+        }
+    }
+
+    private func enter() async {
+        if busy {
+            await withCheckedContinuation { waiting.append($0) }
+        } else {
+            busy = true
+        }
+    }
+
+    private func leave() {
+        if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
     }
 }

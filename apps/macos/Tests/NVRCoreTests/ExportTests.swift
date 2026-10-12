@@ -203,7 +203,7 @@ struct ExportWriterTests {
         let source = dir.appendingPathComponent("a.mp4"), target = dir.appendingPathComponent("trim.mp4")
         // 10 fps, a keyframe every 2 s, 6 s with sound.
         try await SyntheticRecording.write(.init(frames: 60, color: 1, audioHz: 440), to: source)
-        let outcome = await TrimExporter.export(
+        let outcome = await gatedTrim(
             output(source, in: 2_000, out: 4_500, copy: true), exact: false, to: target, shareSafe: false, control: ExportControl())
         #expect(outcome.result == .done && outcome.width == 640 && outcome.height == 360)
         let asset = AVURLAsset(url: target)
@@ -225,7 +225,7 @@ struct ExportWriterTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let source = dir.appendingPathComponent("a.mp4"), target = dir.appendingPathComponent("exact.mp4")
         try await SyntheticRecording.write(.init(frames: 60, color: 3), to: source)
-        let outcome = await TrimExporter.export(
+        let outcome = await gatedTrim(
             output(source, in: 2_300, out: 4_000, copy: false), exact: true, to: target, shareSafe: false, control: ExportControl())
         #expect(outcome.result == .done)
         let duration = try await AVURLAsset(url: target).load(.duration).seconds
@@ -243,8 +243,8 @@ struct ExportWriterTests {
         let source = dir.appendingPathComponent("a.mp4"), plain = dir.appendingPathComponent("plain.mp4"), safe = dir.appendingPathComponent("safe.mp4")
         try await SyntheticRecording.write(.init(frames: 60, color: 0, audioHz: 300), to: source)
         let cut = output(source, in: 0, out: 3_000, copy: true)
-        _ = await TrimExporter.export(cut, exact: false, to: plain, shareSafe: false, control: ExportControl())
-        let outcome = await TrimExporter.export(cut, exact: false, to: safe, shareSafe: true, control: ExportControl())
+        _ = await gatedTrim(cut, exact: false, to: plain, shareSafe: false, control: ExportControl())
+        let outcome = await gatedTrim(cut, exact: false, to: safe, shareSafe: true, control: ExportControl())
         #expect(outcome.result == .done)
         let bytes = try Data(contentsOf: safe)
         #expect(bytes.range(of: Data("Core Media".utf8)) == nil, "a framework handler name remains")
@@ -275,7 +275,7 @@ struct ExportWriterTests {
         try await SyntheticRecording.write(.init(frames: 60, color: 0), to: source)
         let control = ExportControl()
         control.cancel()
-        let outcome = await TrimExporter.export(output(source, in: 0, out: 3_000, copy: true), exact: false, to: target, shareSafe: false, control: control)
+        let outcome = await gatedTrim(output(source, in: 0, out: 3_000, copy: true), exact: false, to: target, shareSafe: false, control: control)
         #expect(outcome.result == .canceled)
         let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(left == ["a.mp4"], "\(left)")
@@ -299,7 +299,7 @@ struct ExportWriterTests {
                 .init(startMs: 12_000, endMs: 14_000, source: 1, sourceInMs: 3_000),
             ])
         let control = ExportControl()
-        let outcome = await EditExporter.export(plan: plan, to: target, settings: .init(codec: .hevc, fps: 10), control: control)
+        let outcome = await gatedEdit(plan: plan, to: target, settings: .init(codec: .hevc, fps: 10), control: control)
         #expect(outcome.result == .done && outcome.width == 320 && outcome.height == 180 && outcome.frames == 40, "\(outcome)")
         #expect(control.fraction == 1)
         let asset = AVURLAsset(url: target)
@@ -329,7 +329,7 @@ struct ExportWriterTests {
             segments: [.init(startMs: 10_000, endMs: 13_000, source: 0, sourceInMs: 0)])
         let control = ExportControl()
         control.cancel()
-        let outcome = await EditExporter.export(plan: plan, to: target, settings: .init(fps: 10), control: control)
+        let outcome = await gatedEdit(plan: plan, to: target, settings: .init(fps: 10), control: control)
         #expect(outcome.result == .canceled)
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["a.mp4"])
     }
@@ -366,4 +366,12 @@ struct ExportWriterTests {
         }
         return [440, 880].max { power(Double($0)) < power(Double($1)) }
     }
+}
+
+private func gatedTrim(_ o: TrimPlan.Output, exact: Bool, to url: URL, shareSafe: Bool, control: ExportControl) async -> ExportOutcome {
+    await EncoderGate.run { await TrimExporter.export(o, exact: exact, to: url, shareSafe: shareSafe, control: control) }
+}
+
+private func gatedEdit(plan: EditPlan, to url: URL, settings: EditExporter.Settings, control: ExportControl) async -> ExportOutcome {
+    await EncoderGate.run { await EditExporter.export(plan: plan, to: url, settings: settings, control: control) }
 }
