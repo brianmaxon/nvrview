@@ -340,6 +340,40 @@ public sealed record EditExportPlan(string Kind, string Download, long StartMs, 
 /// <param name="AtMs">Where it starts in the output, from its first frame.</param>
 public sealed record AudioPiece(int Source, long FileStartMs, long FileEndMs, long AtMs)
 {
+    /// <summary>
+    /// The sound of an exported edit, by the rules of the player (<see cref="EditTimeline.AudibleSource"/>): the follow cut
+    /// carries the shown camera's sound (it cuts with the picture); a grid carries one cell's (the first unless another is
+    /// chosen) while it has video. Adjacent pieces of one file join.
+    /// </summary>
+    public static List<AudioPiece> Of(EditPlan plan, int gridCell = 0)
+    {
+        var raw = new List<AudioPiece>();
+        if (plan.Kind == EditKind.Follow)
+        {
+            foreach (EditSegment s in plan.Segments.Where(s => s.EndMs > s.StartMs))
+            {
+                raw.Add(new AudioPiece(s.Source, s.SourceInMs, s.SourceInMs + (s.EndMs - s.StartMs), s.StartMs - plan.StartMs));
+            }
+        }
+        else
+        {
+            if (gridCell < 0 || gridCell >= plan.Cells.Count || plan.SourceOf(plan.Cells[gridCell].Source) is not { } source)
+            {
+                return [];
+            }
+            foreach ((long start, long end) in plan.Cells[gridCell].Present)
+            {
+                long a = Math.Max(start, plan.StartMs), b = Math.Min(end, plan.EndMs);
+                if (b > a)
+                {
+                    raw.Add(new AudioPiece(source.Source, EditTimeline.FilePosition(source, a), EditTimeline.FilePosition(source, b), a - plan.StartMs));
+                }
+            }
+            raw.Sort((x, y) => x.AtMs.CompareTo(y.AtMs));
+        }
+        return Join(raw);
+    }
+
     /// <summary>Joins adjacent pieces of one file that follow each other in file and time.</summary>
     public static List<AudioPiece> Join(IEnumerable<AudioPiece> pieces)
     {
@@ -392,6 +426,18 @@ public static class ExportGeometry
             h = Math.Max(h, sh);
         }
         return Fitted(w, h);
+    }
+
+    /// <summary>An edit's output: a grid's canvas, or the follow cut's largest source among those it shows, fitted.</summary>
+    public static (int Width, int Height) EditSize(EditPlan plan)
+    {
+        if (plan.Kind == EditKind.Grid)
+        {
+            EditCanvas canvas = plan.Canvas ?? new EditCanvas(MaxWidth, MaxHeight);
+            return Fitted(canvas.Width, canvas.Height);
+        }
+        HashSet<int> used = [.. plan.Segments.Select(s => s.Source)];
+        return FollowSize(plan.Sources.Where(s => used.Contains(s.Source)).Select(s => (s.Width, s.Height)));
     }
 
     /// <summary>How many frames a plan from <paramref name="startMs"/> to <paramref name="endMs"/> makes.</summary>

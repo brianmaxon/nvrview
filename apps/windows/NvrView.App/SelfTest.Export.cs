@@ -40,6 +40,153 @@ internal sealed partial class SelfTest
     private static async Task<bool> JobDone(RecordingsWindow w) =>
         await Until(() => w.Browser.Export.Job is { Running: false }, 90);
 
+    // The follow cut and a 4-up grid of the edit steps' download written to MP4 through the Export menu's commands
+    // (W3's EditFrameRenderer behind ExportWriters.EditFrames), read back with Media Foundation: the length, the size,
+    // which camera and frame sample times show, and the sound (the synthetic files carry a silent AAC track) placed
+    // where the player's rules put it (AudioPiece.Of).
+    private async Task ExportEditSteps(RecordingsWindow w, RecordingsBrowser b, FakeRecordings fake, string download, long s)
+    {
+        ExportController export = b.Export;
+        string dir = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-export-edit-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        IExportDialogs? realDialogs = export.Dialogs;
+        bool wasShareSafe = export.ShareSafe;
+        ExportCodec wasCodec = export.Codec;
+        export.Dialogs = new ScriptedDialogs(dir);
+        export.ShareSafe = false;
+        EditPlan? Planned(string? grid, long from, long to)
+        {
+            try
+            {
+                return EditPlan.Parse(fake.EditCompute(ExportRequest.Edit(grid, download, (from, to), new ExportOptions())));
+            }
+            catch (NvrView.Interop.NvException)
+            {
+                return null;
+            }
+        }
+        // Writes the edit and returns its file, retrying with H.264 when this computer has no H.265 encoder.
+        async Task<string?> Export(string? grid, string what)
+        {
+            await export.ExportEditAsync(grid);
+            bool done = await JobDone(w);
+            if (done && export.Job is { Files.Count: 0, Result: { } why } && why.Contains("H.265", StringComparison.Ordinal))
+            {
+                Say($"export: {what}: {why}; H.264 instead");
+                export.DismissJob();
+                export.Codec = ExportCodec.H264;
+                await export.ExportEditAsync(grid);
+                done = await JobDone(w);
+            }
+            string? file = export.Job?.Files.FirstOrDefault();
+            if (!done || file is null)
+            {
+                _problems.Add($"export: the {what} wrote nothing ({export.Job?.Result ?? b.Message ?? "no message"})");
+            }
+            return file;
+        }
+        // The sound the file holds against the pieces the plan's rules give.
+        void CheckSound(string file, EditPlan plan, int cell, string what)
+        {
+            List<AudioPiece> pieces = AudioPiece.Of(plan, cell);
+            long want = pieces.Count == 0 ? 0 : pieces.Max(p => p.AtMs + (p.FileEndMs - p.FileStartMs));
+            (long StartMs, long EndMs, int Samples)? sound = MfExport.SoundSpan(file);
+            Say($"export: {what} sound {(sound is { } x ? $"{x.StartMs}-{x.EndMs} ms in {x.Samples} samples" : "none")}, expected {pieces.Count} pieces to {want} ms");
+            Expect(sound is { Samples: > 0 } got && got.StartMs <= 150 && Math.Abs(got.EndMs - want) <= 150,
+                $"export: the {what}'s sound covers {sound?.StartMs}-{sound?.EndMs} ms, expected 0-{want}");
+        }
+        try
+        {
+            w.Refresh();
+            Expect(w.Writers.CanExportEdit, "export: the follow cut and grid exports are not offered");
+
+            // parity: export-follow-cut
+            export.RawPoints = new InOutPoints(s + 500, s + 2_500);
+            export.Codec = ExportCodec.Hevc;
+            EditPlan? cut = Planned(null, s + 500, s + 2_500);
+            if (cut is null)
+            {
+                _problems.Add("export: the fake planned no follow cut");
+            }
+            else if (await Export(null, "follow cut") is { } file)
+            {
+                (long DurationMs, int Width, int Height)? probe = MfExport.Probe(file);
+                double length = (cut.EndMs - cut.StartMs) / 1000.0;
+                Say($"export: follow cut {Path.GetFileName(file)} {(probe is { } pr ? $"{pr.DurationMs / 1000.0:0.00} s, {pr.Width}x{pr.Height}" : "unreadable")} of {length:0.00} s, cuts {string.Join(", ", EditTimeline.Cuts(cut).Select(c => c - s))}");
+                Expect(probe is { } f && Math.Abs(f.DurationMs / 1000.0 - length) <= 0.25 && f.Width == 640 && f.Height == 360,
+                    $"export: the follow cut is {probe}, expected {length:0.00} s at 640x360");
+                foreach (long t in new long[] { 0, 400, 600, 1_100, 1_400, 1_900 })
+                {
+                    if (EditTimeline.Shot(cut, cut.StartMs + t) is not { } shot)
+                    {
+                        continue;
+                    }
+                    RenderedImage? image = MfExport.Picture(file, t, exact: true);
+                    (int? color, int frame) = image is null ? (null, -9) : SyntheticRecording.Read(image, new NvrView.Shell.Rect(0, 0, image.Width, image.Height));
+                    long expected = shot.FilePositionMs / 100;
+                    Expect(color == shot.Source && Math.Abs(frame - expected) <= 1,
+                        $"export: the follow cut at {t} ms shows camera {color?.ToString() ?? "none"} frame {frame}, expected camera {shot.Source} frame {expected}");
+                }
+                CheckSound(file, cut, 0, "follow cut");
+            }
+            export.DismissJob();
+
+            // parity: export-grid
+            export.RawPoints = new InOutPoints(s, s + 2_000);
+            export.Codec = ExportCodec.H264;
+            EditPlan? grid = Planned("4up", s, s + 2_000);
+            if (grid is null)
+            {
+                _problems.Add("export: the fake planned no grid");
+            }
+            else if (await Export("4up", "grid") is { } file)
+            {
+                (long DurationMs, int Width, int Height)? probe = MfExport.Probe(file);
+                Say($"export: grid {Path.GetFileName(file)} {(probe is { } pr ? $"{pr.DurationMs / 1000.0:0.00} s, {pr.Width}x{pr.Height}" : "unreadable")}, {grid.Cells.Count} cells");
+                Expect(probe is { } f && Math.Abs(f.DurationMs / 1000.0 - 2.0) <= 0.25 && f.Width == 1920 && f.Height == 1080,
+                    $"export: the grid is {probe}, expected 2 s at 1920x1080");
+                var bounds = new NvrView.Shell.Rect(0, 0, 1920, 1080);
+                List<NvrView.Shell.Rect> rects = EditComposition.CellRects(grid, bounds);
+                foreach (long t in new long[] { 200, 1_000, 1_800 })
+                {
+                    if (MfExport.Picture(file, t, exact: true) is not { } image)
+                    {
+                        _problems.Add($"export: the grid's picture at {t} ms could not be read");
+                        continue;
+                    }
+                    for (int i = 0; i < grid.Cells.Count && i < rects.Count; i++)
+                    {
+                        if (EditTimeline.CellPosition(grid, i, s + t) is not { } position)
+                        {
+                            continue;
+                        }
+                        NvrView.Shell.Rect picture = PictureFit.Of(640, 360, rects[i], fill: false).Destination;
+                        (int? color, int frame) = SyntheticRecording.Read(image, picture);
+                        Expect(color == grid.Cells[i].Source && Math.Abs(frame - position / 100) <= 1,
+                            $"export: the grid at {t} ms cell {i} shows camera {color?.ToString() ?? "none"} frame {frame}, expected {grid.Cells[i].Source} frame {position / 100}");
+                    }
+                }
+                CheckSound(file, grid, b.EditPlayer.GridSound, "grid");
+            }
+            export.DismissJob();
+        }
+        finally
+        {
+            export.Dialogs = realDialogs;
+            export.ShareSafe = wasShareSafe;
+            export.Codec = wasCodec;
+            export.RawPoints = default;
+            export.DismissJob();
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
     private async Task ExportSteps(RecordingsWindow w, FakeRecordings fake, RecordingsService service)
     {
         RecordingsBrowser b = w.Browser;

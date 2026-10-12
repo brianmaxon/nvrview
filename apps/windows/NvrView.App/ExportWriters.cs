@@ -1,8 +1,11 @@
 // What export does on Windows (docs/UX.md "Recordings", "Export"): the Media
 // Foundation writers of NvrView.Video behind the shell's IExportWriters, the
 // save and folder pickers behind IExportDialogs, and the frames a follow cut
-// or grid is drawn from (supplied by the follow and grid views once they
-// exist; until then those two exports are not offered).
+// or grid is drawn from (EditFrames: the Recordings window opens W3's
+// EditFrameRenderer over a second set of the plan's files, so the window's
+// pictures never move). The sound follows the player's rules
+// (AudioPiece.Of): the shown camera's in a follow cut, the chosen cell's in a
+// grid while it has video, copied from the files as AAC.
 
 using NvrView.Shell;
 using NvrView.Tiles;
@@ -29,8 +32,67 @@ internal sealed class ExportWriters(CoreHost host) : IExportWriters
     /// <summary>Opens the frames of an edit plan (the core's <c>nv_edit_compute</c> answer); null when the edit cannot be drawn.</summary>
     public Func<string, IEditFrames?>? EditFrames { get; set; }
 
+    /// <summary>The grid cell whose sound a grid export carries (the one the player plays; the first when unset).</summary>
+    public Func<int>? GridSoundCell { get; set; }
+
     /// <inheritdoc/>
     public bool CanExportEdit => EditFrames is not null;
+
+    /// <summary>Opens W3's offscreen edit renderer as an export's frames, at the output size; null when the files cannot be opened.</summary>
+    public static IEditFrames? OpenEditFrames(string planJson, Func<GpuDevice> gpuOf)
+    {
+        if (EditPlan.Parse(planJson) is not { } plan)
+        {
+            return null;
+        }
+        (int width, int height) = ExportGeometry.EditSize(plan);
+        try
+        {
+            var renderer = new EditFrameRenderer(plan, gpuOf, width, height);
+            if (renderer.Failures.Count == plan.Sources.Count)
+            {
+                AppLog.Limited("export-edit", 5, $"export: no file of the edit opened ({string.Join("; ", renderer.Failures.Values)})");
+                renderer.Dispose();
+                return null;
+            }
+            return new RendererFrames(renderer);
+        }
+        catch (Exception e) when (e is VideoException or InvalidOperationException)
+        {
+            AppLog.Limited("export-edit", 5, $"export: the edit could not be drawn: {e.Message}");
+            return null;
+        }
+    }
+
+    // W3's renderer as the export's frames.
+    private sealed class RendererFrames(EditFrameRenderer renderer) : IEditFrames
+    {
+        public int Width => renderer.Width;
+
+        public int Height => renderer.Height;
+
+        public bool Render(long timeMs, byte[] bgra) => renderer.Render(timeMs, bgra);
+
+        public void Dispose() => renderer.Dispose();
+    }
+
+    /// <summary>The sound pieces of an edit plan, placed in its files (none when the plan cannot be read).</summary>
+    public static List<MfSoundPiece> Sound(string planJson, int gridCell)
+    {
+        if (EditPlan.Parse(planJson) is not { } plan)
+        {
+            return [];
+        }
+        var pieces = new List<MfSoundPiece>();
+        foreach (AudioPiece p in AudioPiece.Of(plan, gridCell))
+        {
+            if (plan.SourceOf(p.Source) is { } source)
+            {
+                pieces.Add(new MfSoundPiece(source.File, p.FileStartMs, p.FileEndMs, p.AtMs));
+            }
+        }
+        return pieces;
+    }
 
     private static ExportOutcome Outcome(MfExportResult r, string path) => r.Status switch
     {
@@ -95,11 +157,12 @@ internal sealed class ExportWriters(CoreHost host) : IExportWriters
         using (frames)
         {
             int count = ExportGeometry.FrameCount(plan.StartMs, plan.EndMs);
+            List<MfSoundPiece> sound = Sound(planJson, plan.Kind == "grid" ? GridSoundCell?.Invoke() ?? 0 : 0);
             return Outcome(
                 MfExport.RenderEdit(partialPath, frames.Width, frames.Height, ExportGeometry.FramesPerSecond, count, codec == ExportCodec.Hevc,
                     ExportGeometry.FramesPerSecond * 2,
                     (i, pixels) => frames.Render(ExportGeometry.FrameTime(plan.StartMs, plan.EndMs, i), pixels),
-                    () => control.IsCanceled, f => control.Fraction = f),
+                    () => control.IsCanceled, f => control.Fraction = f, sound),
                 partialPath);
         }
     }

@@ -88,6 +88,4 @@ playback-real-core           macos    gap: the Windows playback steps run on the
 recordings-analyze-real-core macos    gap: the Windows recordings steps run on the fakes only; the real core analyzing a day downloaded from tools/mock-nvr is not driven from the Windows self-test yet
 playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
-export-follow-cut            macos    gap: Windows follow cut export needs the follow and grid views (W3); the writer (MfExport.RenderEdit, IEditFrames) is built and the rules are unit-tested
-export-grid                  macos    gap: Windows grid export needs the follow and grid views (W3); see export-follow-cut
 export-real-core            macos    gap: the Windows playback steps run on the fakes only (playback-real-core); a keyframe trim and a range download against the mock are not driven on Windows yet

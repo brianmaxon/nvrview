@@ -1199,8 +1199,7 @@ The NVR's own recordings, found by what happened and played back
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
 (milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
 strips, sound events, listening for sounds) on both; the follow cut and
-grids on both (M3 and W3); exports on macOS (M4) and Windows (W4;
-follow cut and grid export waits for W3's renderer).
+grids on both (M3 and W3); exports on both (M4 and W4).
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1409,10 +1408,14 @@ follow cut and grid export waits for W3's renderer).
     at a time is decoded with Media Foundation, for the follow cut and grid
     views). Share-safe zeroes the creation times, renames the handlers to
     `VideoHandler` and `SoundHandler`, and turns user-data and metadata boxes
-    into free space with their contents cleared. Follow cut and grid export
-    (the menu items appear once the follow and grid views supply a
-    renderer, W3) will write 30 frames a second without sound until the
-    sound pieces (`ExportGeometry`, `AudioPiece.Join`) are wired in.
+    into free space with their contents cleared. **Export Follow Cut / 2-Up /
+    4-Up** draws 30 frames a second with W3's offscreen renderer
+    (`EditFrameRenderer`, over a second set of the plan's files, so the
+    player's pictures do not move) into the size macOS uses, and writes them
+    with Media Foundation as H.264 or H.265; the sound is the pieces the
+    player's rules give (`AudioPiece.Of`), copied from the files as AAC; a
+    file whose sound has another format than the first piece's is left
+    silent rather than re-encoded.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the

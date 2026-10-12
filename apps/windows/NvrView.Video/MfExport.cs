@@ -575,11 +575,13 @@ public static unsafe class MfExport
     /// <summary>
     /// Writes <paramref name="frameCount"/> frames at <paramref name="fps"/> into <paramref name="partialPath"/> (H.264
     /// or HEVC); <paramref name="draw"/> fills a frame's pixels (BGRA, top row first) and says whether it could.
-    /// <paramref name="keyframeInterval"/> frames separate keyframes (0: the encoder's choice).
+    /// <paramref name="keyframeInterval"/> frames separate keyframes (0: the encoder's choice). <paramref name="sound"/>
+    /// places pieces of the files' sound (AAC, copied as it is) in the output; a piece whose file has no sound, or sound
+    /// in another format than the first piece's, is left silent.
     /// </summary>
     public static MfExportResult RenderEdit(
         string partialPath, int width, int height, int fps, int frameCount, bool hevc, int keyframeInterval,
-        Func<int, byte[], bool> draw, Func<bool> canceled, Action<double> progress)
+        Func<int, byte[], bool> draw, Func<bool> canceled, Action<double> progress, IReadOnlyList<MfSoundPiece>? sound = null)
     {
         Start();
         IMFSinkWriter* writer = null;
@@ -587,6 +589,7 @@ public static unsafe class MfExport
         IMFMediaType* input = null;
         IMFSample* sample = null;
         IMFMediaBuffer* buffer = null;
+        using var feed = new SoundFeed(sound ?? []);
         try
         {
             writer = OpenWriter(partialPath);
@@ -605,15 +608,19 @@ public static unsafe class MfExport
                 return MfExportResult.Failed(hevc ? "This computer cannot write H.265 video; choose H.264" : $"The video could not be set up (0x{(int)added:X8})");
             }
             Ok(writer->SetInputMediaType(sink, input, null), "SetInputMediaType");
+            feed.AddTo(writer);
             Ok(writer->BeginWriting(), "BeginWriting");
             var pixels = new byte[width * height * 4];
             long frameDuration = 10_000_000L / fps;
+            long end = frameCount * 10_000_000L / fps;
             for (int i = 0; i < frameCount; i++)
             {
                 if (canceled())
                 {
                     return new MfExportResult(MfExportStatus.Canceled);
                 }
+                // The sound up to the end of this frame goes first, so the file interleaves.
+                feed.WriteUntil(writer, Math.Min((i + 1) * 10_000_000L / fps, end), end);
                 if (!draw(i, pixels))
                 {
                     return MfExportResult.Failed("A picture of the video could not be drawn");
@@ -634,6 +641,7 @@ public static unsafe class MfExport
                 Release(ref buffer);
                 progress((i + 1.0) / frameCount);
             }
+            feed.WriteUntil(writer, end, end);
             Ok(writer->Finalize(), "Finalize");
             return new MfExportResult(MfExportStatus.Done, null, width, height, frameCount);
         }
@@ -650,4 +658,272 @@ public static unsafe class MfExport
             Release(ref writer);
         }
     }
+
+    // Two sound formats are the same when their subtype, rate, channels, and codec configuration (user data) are.
+    private static bool SameSound(IMFMediaType* a, IMFMediaType* b)
+    {
+        Guid sa, sb;
+        uint ra = 0, rb = 0, ca = 0, cb = 0;
+        if ((int)a->GetGUID(Ref(in MF_MT_SUBTYPE), &sa) < 0 || (int)b->GetGUID(Ref(in MF_MT_SUBTYPE), &sb) < 0 || sa != sb)
+        {
+            return false;
+        }
+        _ = a->GetUINT32(Ref(in MF_MT_AUDIO_SAMPLES_PER_SECOND), &ra);
+        _ = b->GetUINT32(Ref(in MF_MT_AUDIO_SAMPLES_PER_SECOND), &rb);
+        _ = a->GetUINT32(Ref(in MF_MT_AUDIO_NUM_CHANNELS), &ca);
+        _ = b->GetUINT32(Ref(in MF_MT_AUDIO_NUM_CHANNELS), &cb);
+        return ra == rb && ca == cb && Blob(a, MF_MT_USER_DATA).AsSpan().SequenceEqual(Blob(b, MF_MT_USER_DATA));
+    }
+
+    private static byte[] Blob(IMFMediaType* type, in Guid key)
+    {
+        uint size = 0;
+        if ((int)type->GetBlobSize(Ref(in key), &size) < 0 || size == 0)
+        {
+            return [];
+        }
+        var data = new byte[size];
+        fixed (byte* p = data)
+        {
+            uint got;
+            return (int)type->GetBlob(Ref(in key), p, size, &got) < 0 ? [] : data[..(int)got];
+        }
+    }
+
+    // The sound of an exported edit: each piece's samples read from its file (compressed, as they are) and moved to
+    // the piece's place in the output. Samples that would overlap the previous piece's are dropped, so times only rise.
+    private sealed class SoundFeed(IReadOnlyList<MfSoundPiece> pieces) : IDisposable
+    {
+        private IMFMediaType* _format;
+        private IMFSourceReader* _reader;
+        private uint _stream;
+        private int _next;
+        private MfSoundPiece _piece;
+        private IMFSample* _pending;
+        private long _pendingTime;
+        private long _written;
+        private uint _sink = uint.MaxValue;
+
+        // Adds the sound stream (the first piece's format) before the writer begins; no stream when no piece has sound.
+        public void AddTo(IMFSinkWriter* writer)
+        {
+            foreach (MfSoundPiece piece in pieces)
+            {
+                IMFSourceReader* reader = null;
+                try
+                {
+                    reader = OpenReader(piece.File, processing: false);
+                    IMFMediaType* native = null;
+                    if ((int)reader->GetNativeMediaType(FirstAudio, 0, &native) < 0)
+                    {
+                        continue;
+                    }
+                    uint sink;
+                    if ((int)writer->AddStream(native, &sink) < 0 || (int)writer->SetInputMediaType(sink, native, null) < 0)
+                    {
+                        AppLogHook.Report("export: the edit's sound format cannot be written; the export is silent");
+                        native->Release();
+                        return;
+                    }
+                    _format = native;
+                    _sink = sink;
+                    return;
+                }
+                catch (VideoException)
+                {
+                }
+                finally
+                {
+                    Release(ref reader);
+                }
+            }
+        }
+
+        // Writes the sound samples that start before `until` (100 ns), none at or after `end`.
+        public void WriteUntil(IMFSinkWriter* writer, long until, long end)
+        {
+            if (_sink == uint.MaxValue)
+            {
+                return;
+            }
+            while (Pending() && _pendingTime < until)
+            {
+                IMFSample* sample = _pending;
+                _pending = null;
+                try
+                {
+                    if (_pendingTime < end)
+                    {
+                        long duration = 0;
+                        _ = sample->GetSampleDuration(&duration);
+                        _ = sample->SetSampleTime(_pendingTime);
+                        Ok(writer->WriteSample(_sink, sample), "WriteSample(sound)");
+                        _written = _pendingTime + Math.Max(duration, 1);
+                    }
+                }
+                finally
+                {
+                    _ = sample->Release();
+                }
+            }
+        }
+
+        // Reads ahead to the next sample to write, opening pieces in turn; false when none is left.
+        private bool Pending()
+        {
+            while (_pending == null)
+            {
+                if (_reader == null && !OpenNext())
+                {
+                    return false;
+                }
+                uint flags, actual;
+                long time;
+                IMFSample* sample = null;
+                if ((int)_reader->ReadSample(_stream, 0, &actual, &flags, &time, &sample) < 0 || (flags & (EndOfStream | ReadError)) != 0)
+                {
+                    if (sample != null)
+                    {
+                        _ = sample->Release();
+                    }
+                    Release(ref _reader);
+                    continue;
+                }
+                if (sample == null || (flags & StreamTick) != 0)
+                {
+                    if (sample != null)
+                    {
+                        _ = sample->Release();
+                    }
+                    continue;
+                }
+                long duration = 0;
+                _ = sample->GetSampleDuration(&duration);
+                long from = _piece.FileStartMs * HundredNs, to = _piece.FileEndMs * HundredNs;
+                if (time >= to)
+                {
+                    _ = sample->Release();
+                    Release(ref _reader);
+                    continue;
+                }
+                long at = (_piece.AtMs * HundredNs) + (time - from);
+                if (time + duration <= from || at < _written || at < 0)
+                {
+                    _ = sample->Release();
+                    continue;
+                }
+                _pending = sample;
+                _pendingTime = at;
+            }
+            return true;
+        }
+
+        // Opens the next piece whose file has sound in the stream's format, at the piece's start.
+        private bool OpenNext()
+        {
+            while (_next < pieces.Count)
+            {
+                _piece = pieces[_next++];
+                if (_piece.FileEndMs <= _piece.FileStartMs)
+                {
+                    continue;
+                }
+                IMFMediaType* native = null;
+                try
+                {
+                    _reader = OpenReader(_piece.File, processing: false);
+                    List<Stream> streams = Streams(_reader, out IMFMediaType* video);
+                    Release(ref video);
+                    if (streams.FirstOrDefault(s => !s.Video) is not { } audio
+                        || (int)_reader->GetNativeMediaType(audio.Index, 0, &native) < 0 || !SameSound(native, _format))
+                    {
+                        Release(ref _reader);
+                        continue;
+                    }
+                    _stream = audio.Index;
+                    _ = _reader->SetStreamSelection(AllStreams, false);
+                    Ok(_reader->SetStreamSelection(_stream, true), "SetStreamSelection(sound)");
+                    Seek(_reader, Math.Max(_piece.FileStartMs, 0));
+                    return true;
+                }
+                catch (VideoException)
+                {
+                    Release(ref _reader);
+                }
+                finally
+                {
+                    Release(ref native);
+                }
+            }
+            return false;
+        }
+
+        public void Dispose()
+        {
+            if (_pending != null)
+            {
+                _ = _pending->Release();
+                _pending = null;
+            }
+            Release(ref _reader);
+            Release(ref _format);
+        }
+    }
+
+    /// <summary>The span (milliseconds) the first sound stream's samples cover, and their count; null when the file has no sound.</summary>
+    public static (long StartMs, long EndMs, int Samples)? SoundSpan(string path)
+    {
+        Start();
+        IMFSourceReader* reader = null;
+        IMFMediaType* native = null;
+        try
+        {
+            reader = OpenReader(path, processing: false);
+            if ((int)reader->GetNativeMediaType(FirstAudio, 0, &native) < 0)
+            {
+                return null;
+            }
+            _ = reader->SetStreamSelection(AllStreams, false);
+            Ok(reader->SetStreamSelection(FirstAudio, true), "SetStreamSelection");
+            long first = -1, last = 0;
+            int count = 0;
+            while (true)
+            {
+                uint flags, actual;
+                long time;
+                IMFSample* sample = null;
+                Ok(reader->ReadSample(FirstAudio, 0, &actual, &flags, &time, &sample), "ReadSample");
+                if (sample != null)
+                {
+                    long duration = 0;
+                    _ = sample->GetSampleDuration(&duration);
+                    _ = sample->Release();
+                    first = first < 0 ? time : first;
+                    last = Math.Max(last, time + duration);
+                    count++;
+                }
+                if ((flags & (EndOfStream | ReadError)) != 0)
+                {
+                    break;
+                }
+            }
+            return count == 0 ? (0, 0, 0) : (first / HundredNs, last / HundredNs, count);
+        }
+        catch (VideoException)
+        {
+            return null;
+        }
+        finally
+        {
+            Release(ref native);
+            Release(ref reader);
+        }
+    }
 }
+
+/// <summary>A piece of a file's sound placed in an exported edit.</summary>
+/// <param name="File">The MP4 whose first sound stream is read.</param>
+/// <param name="FileStartMs">Where in the file the piece starts (milliseconds from its first picture).</param>
+/// <param name="FileEndMs">Where it ends.</param>
+/// <param name="AtMs">Where it starts in the output, from its first frame.</param>
+public readonly record struct MfSoundPiece(string File, long FileStartMs, long FileEndMs, long AtMs);

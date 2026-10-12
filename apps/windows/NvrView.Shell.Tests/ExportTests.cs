@@ -325,6 +325,47 @@ internal static class ExportTests
             T.Equal(new AudioPiece(0, 5_000, 6_000, 3_000), joined[1]);
         });
 
+        // The same vectors as the macOS ExportTests (followSoundCutsWithThePictureAndJoinsNeighbors,
+        // gridSoundIsOneCellsWhereItHasVideo, outputSizeFitsAndIsEven).
+        T.Run("export: the follow cut's sound cuts with the picture; a grid's is one cell's where it has video", () =>
+        {
+            var cam = new RecordingCamera("d-example", 0);
+            EditPlan Follow(int[] widths, EditSegment[] segments) => new()
+            {
+                Kind = EditKind.Follow,
+                StartMs = 10_000,
+                EndMs = 14_000,
+                Sources = [.. widths.Select((w, i) => new EditSource(i, cam, "", $"/x/{i}.mp4", 9_000, 0, "h264", w, w * 9 / 16))],
+                Segments = segments,
+            };
+            EditPlan follow = Follow([640, 2560], [new EditSegment(10_000, 12_000, 0, 1_000), new EditSegment(12_000, 14_000, 1, 3_000)]);
+            T.Check(AudioPiece.Of(follow).SequenceEqual([new AudioPiece(0, 1_000, 3_000, 0), new AudioPiece(1, 3_000, 5_000, 2_000)]), "follow pieces");
+            T.Equal((1920, 1080), ExportGeometry.EditSize(follow));
+            T.Equal((640, 360), ExportGeometry.EditSize(Follow([640, 641], [.. follow.Segments])));
+            EditPlan joined = Follow([640], [
+                new EditSegment(10_000, 11_000, 0, 1_000), new EditSegment(11_000, 12_000, 0, 2_000), new EditSegment(13_000, 14_000, 0, 5_000)]);
+            T.Check(AudioPiece.Of(joined).SequenceEqual([new AudioPiece(0, 1_000, 3_000, 0), new AudioPiece(0, 5_000, 6_000, 3_000)]), "joined pieces");
+
+            var grid = new EditPlan
+            {
+                Kind = EditKind.Grid,
+                StartMs = 10_000,
+                EndMs = 20_000,
+                Sources = [new EditSource(0, cam, "", "a", 9_000, 0, "h264", 640, 360), new EditSource(1, cam, "", "b", 10_000, 500, "h264", 640, 360)],
+                Layout = "2up",
+                Canvas = new EditCanvas(3840, 2160),
+                Cells =
+                [
+                    new EditCell(new EditRect(0, 0, 960, 1080), 0, "fit", [(8_000, 12_000), (15_000, 30_000)]),
+                    new EditCell(new EditRect(960, 0, 960, 1080), 1, "fit", [(10_000, 20_000)]),
+                ],
+            };
+            T.Check(AudioPiece.Of(grid).SequenceEqual([new AudioPiece(0, 1_000, 3_000, 0), new AudioPiece(0, 6_000, 11_000, 5_000)]), "grid pieces");
+            T.Check(AudioPiece.Of(grid, gridCell: 1).SequenceEqual([new AudioPiece(1, -500, 9_500, 0)]), "second cell's pieces");
+            T.Equal(0, AudioPiece.Of(grid, gridCell: 5).Count);
+            T.Equal((1920, 1080), ExportGeometry.EditSize(grid));
+        });
+
         T.Run("export: share-safe zeroes times, renames handlers, and clears user data without moving anything", () =>
         {
             byte[] mp4 = MiniMp4();

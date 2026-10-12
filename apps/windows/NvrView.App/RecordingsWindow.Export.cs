@@ -26,13 +26,17 @@ internal sealed partial class RecordingsWindow
     private readonly Button _exportCancel = new() { Content = "Cancel" };
     private ExportWriters? _exportWriters;
 
-    /// <summary>The window's export writers; the follow and grid views set <see cref="ExportWriters.EditFrames"/> on them.</summary>
+    /// <summary>The window's export writers, with the follow cut's and grids' frames (<see cref="ExportWriters.EditFrames"/>).</summary>
     internal ExportWriters Writers => _exportWriters!;
 
     /// <summary>The window's export, with the platform writers and pickers (the self-test replaces the pickers).</summary>
     private void AttachExport(CoreHost host)
     {
-        _exportWriters = new ExportWriters(host);
+        _exportWriters = new ExportWriters(host)
+        {
+            EditFrames = json => ExportWriters.OpenEditFrames(json, () => host.Gpu),
+            GridSoundCell = () => Browser.EditPlayer.GridSound,
+        };
         ExportController export = Browser.Export;
         export.Writers = _exportWriters;
         export.Dialogs = new ExportDialogs(() => Microsoft.UI.Win32Interop.GetWindowFromWindowId(AppWindow.Id));
