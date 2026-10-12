@@ -15,13 +15,15 @@
 //! **Analysis of recorded days.** A request names a camera and a day; the
 //! owner holds at most [`MAX_REQUESTS`], runs one per device at a time on a
 //! blocking thread, and reads the day's decoded audio from a
-//! [`DayAudioSource`]. The source is the seam for downloaded files and
-//! playback (slices C10 and the downloads): the core has no way to read
-//! recorded audio by itself yet, so without a source every request fails
-//! with `no_source`. The analysis is plain: the loudness meter and alarm
+//! [`DayAudioSource`] the app set, or, when none is set, from the finished
+//! downloads of that camera-day ([`super::day_audio`]). Without a source
+//! and without downloads set up a request fails with `no_source`; with
+//! downloads set up but none covering the day, with `no_audio`. The
+//! analysis is plain: the loudness meter and alarm
 //! detector of `crates/sound-events` over the chunks the source gives, with
 //! sample numbers counted from the day's local midnight.
 
+use super::day_audio;
 use super::sound::PATTERN_ANALYZER;
 use super::{Hub, RecError, camera_json, lock};
 use crate::audio::{AudioFrame, TileAudio, TileConfig};
@@ -512,17 +514,31 @@ async fn run_request(
     req: &Request,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(usize, usize), Failure> {
-    let source = lock(&h.sound.work.source)
-        .clone()
-        .ok_or(Failure::Reason("no_source"))?;
+    // A source set by the app wins; otherwise the day's downloaded files.
+    let explicit = lock(&h.sound.work.source).clone();
+    let files = match &explicit {
+        Some(_) => Vec::new(),
+        None => {
+            let files = day_audio::files_for_day(h, &req.device, req.camera, req.day)
+                .ok_or(Failure::Reason("no_source"))?;
+            if files.is_empty() {
+                return Err(Failure::Reason("no_audio"));
+            }
+            files
+        }
+    };
+    let from_files = explicit.is_none();
     let (device, camera, day) = (req.device.clone(), req.camera, req.day);
     let flag = cancel.clone();
     let done =
         h.rt.spawn_blocking(move || {
-            let chunks = source.open(&device, camera, day).map_err(|e| match e {
-                SourceError::NoAudio => "no_audio",
-                SourceError::Unavailable => "source_unavailable",
-            })?;
+            let chunks: Box<dyn Iterator<Item = AudioChunk> + Send> = match explicit {
+                Some(source) => source.open(&device, camera, day).map_err(|e| match e {
+                    SourceError::NoAudio => "no_audio",
+                    SourceError::Unavailable => "source_unavailable",
+                })?,
+                None => Box::new(day_audio::chunks(files, day)),
+            };
             Ok::<_, &'static str>(analyze(day, chunks, &flag))
         })
         .await
@@ -530,6 +546,10 @@ async fn run_request(
         .map_err(Failure::Reason)?;
     if cancel.load(Ordering::SeqCst) || h.closing.load(Ordering::SeqCst) {
         return Err(Failure::Canceled);
+    }
+    if from_files && done.span.is_none() {
+        // The downloaded files had no readable audio in the day.
+        return Err(Failure::Reason("no_audio"));
     }
     store_analysis(h, req, done)
 }

@@ -91,7 +91,7 @@ internal sealed class CaptureController
             var s = new CaptureSettings(FolderOverride ?? v.RecordingsFolder)
             {
                 Quality = v.RecordFrom,
-                ShareSafe = v.ShareSafeNames,
+                ShareSafe = v.ShareSafePictureNames,
                 Minutes = v.MaxRecordingMinutes,
                 Bytes = (ulong)Math.Round(v.MaxRecordingGB * 1e9),
             };

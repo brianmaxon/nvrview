@@ -148,7 +148,7 @@ public static class SettingsSections
         SettingsSection.Devices => "",
         SettingsSection.Cameras => "",
         SettingsSection.AlertsAndCalls => "",
-        SettingsSection.Capture => "\uE714",
+        SettingsSection.Capture => "\uE722",
         SettingsSection.Updates => "",
         _ => "",
     };

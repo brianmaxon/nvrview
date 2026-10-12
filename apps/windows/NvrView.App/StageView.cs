@@ -129,8 +129,7 @@ internal sealed partial class StageView : UserControl
     private readonly Border _help;
     private readonly Border _toast;
     private readonly TextBlock _toastText;
-    private readonly Button _toastAction;
-    private Action? _toastHandler;
+    private readonly HyperlinkButton _toastButton;
     private readonly CallStack _calls;
     private readonly List<TileChrome> _chromes = [];
     private readonly List<Rectangle> _outlines = [];
@@ -210,7 +209,7 @@ internal sealed partial class StageView : UserControl
                     "Wheel, pinch, drag           digital zoom and pan; 0 or the header's button resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
-                    "P, Shift+P                   save picture, save picture as (coming soon)",
+                    "P, Shift+P                   save picture, save picture as",
                     "R                            record the selected tile's camera (again to stop)",
                     "Ctrl+Shift+R                 record the selected tile's call, in a call window too",
                     "T                            start or end a conversation on the selected tile",
@@ -233,12 +232,6 @@ internal sealed partial class StageView : UserControl
         }
         root.Children.Add(_help);
         _toastText = new TextBlock { Foreground = new SolidColorBrush(Colors.White), FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis };
-        // A message may carry one button ("Show in folder", "Record Sub-stream"); it takes clicks only then.
-        _toastAction = new Button { FontSize = 12, Padding = new Thickness(10, 2, 10, 2), MinHeight = 0, Margin = new Thickness(12, 0, 0, 0), Visibility = Visibility.Collapsed };
-        _toastAction.Click += (_, _) => PressToastAction();
-        var toastRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        toastRow.Children.Add(_toastText);
-        toastRow.Children.Add(_toastAction);
         _toast = new Border
         {
             Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0xD9, 0x1A, 0x1A, 0x1A)),
@@ -249,8 +242,18 @@ internal sealed partial class StageView : UserControl
             Margin = new Thickness(12, 12, 12, 22),
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = false,
-            Child = toastRow,
         };
+        _toastButton = new HyperlinkButton { Padding = new Thickness(0), Visibility = Visibility.Collapsed, VerticalAlignment = VerticalAlignment.Center };
+        _toastButton.Click += (_, _) =>
+        {
+            Action? action = _toastAction;
+            _toastHideAt = 0;
+            action?.Invoke();
+        };
+        var toastRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
+        toastRow.Children.Add(_toastText);
+        toastRow.Children.Add(_toastButton);
+        _toast.Child = toastRow;
         AutomationProperties.SetLiveSetting(_toast, AutomationLiveSetting.Polite);
         root.Children.Add(_toast);
         Content = root;

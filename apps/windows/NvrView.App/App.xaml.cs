@@ -277,7 +277,7 @@ public partial class App : Application
         }
         foreach (StageView stage in stages)
         {
-            stage.ShowToast(text, action);
+            stage.ShowToast(text, action?.Title, action?.Handler);
         }
     }
 

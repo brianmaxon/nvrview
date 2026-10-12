@@ -42,7 +42,8 @@ internal sealed class SettingsWindow
         Created++;
         Window = new Window { Title = "Settings - nvrview" };
         AppWindow = Window.AppWindow;
-        _pages = SettingsPages.Create(viewer, development, hooks, () => WinRT.Interop.WindowNative.GetWindowHandle(Window));
+        _pages = SettingsPages.Create(viewer, development, hooks);
+        _pages.WindowHandle = () => WinRT.Interop.WindowNative.GetWindowHandle(Window);
 
         _nav.PaneDisplayMode = NavigationViewPaneDisplayMode.Left;
         _nav.IsSettingsVisible = false;

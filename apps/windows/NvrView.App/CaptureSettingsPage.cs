@@ -1,5 +1,5 @@
-// Settings > Capture > Recordings (docs/UX.md "Recording"): where recordings go, "Record from", when a
-// recording stops by itself, and share-safe names; and the "Record calls" setting of Alerts & calls with
+// Settings > Capture > Recordings (docs/UX.md "Recording"): where recordings go, "Record from", and when a
+// recording stops by itself (share-safe names are the pictures' box above it); and the "Record calls" setting of Alerts & calls with
 // its consent note (docs/UX.md "Recording calls"). Every change is kept in view-settings.json and sent to
 // the core at once (CaptureController); it applies to recordings started afterwards.
 
@@ -11,10 +11,10 @@ namespace NvrView.App;
 
 internal static class CaptureSettingsPage
 {
-    /// <summary>The Capture section's page.</summary>
+    /// <summary>The recordings' part of the Capture section's page.</summary>
     /// <param name="viewer">The settings and the capture controller.</param>
     /// <param name="windowHandle">The Settings window's handle, for the folder picker.</param>
-    public static StackPanel Build(Viewer viewer, Func<nint> windowHandle)
+    public static StackPanel Recordings(Viewer viewer, Func<nint> windowHandle)
     {
         ViewSettings settings = viewer.Settings;
         var page = new StackPanel { Spacing = 12 };
@@ -109,15 +109,6 @@ internal static class CaptureSettingsPage
         limits.Children.Add(gigabytes);
         limits.Children.Add(gigabytesText);
         page.Children.Add(limits);
-
-        var shareSafe = new CheckBox { Content = "Share-safe names", IsChecked = settings.ShareSafeNames };
-        shareSafe.Click += (_, _) => settings.ShareSafeNames = shareSafe.IsChecked == true;
-        page.Children.Add(shareSafe);
-        page.Children.Add(new TextBlock
-        {
-            Text = "Recordings are named with the time and the camera's name. With share-safe names the camera is called Camera A, so a file can be shared without saying where it came from.",
-            TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Opacity = 0.7,
-        });
 
         var open = new Button { Content = "Open recordings folder" };
         open.Click += (_, _) => viewer.Capture.OpenFolder();

@@ -59,6 +59,15 @@ internal sealed class ViewSettingsFile
     /// <summary>Call transcripts go into the log and, one text file per call, the Transcripts folder (off by default).</summary>
     public bool SaveCallTranscripts { get; set; }
 
+    /// <summary>Where Save Picture writes (docs/UX.md "Save picture"); absent: Pictures\NvrView.</summary>
+    public string? PicturesFolder { get; set; }
+
+    /// <summary>The picture format: absent for png (the default), or jpeg.</summary>
+    public string? PictureFormat { get; set; }
+
+    /// <summary>Saved pictures name the camera "Camera A" (off by default).</summary>
+    public bool ShareSafePictureNames { get; set; }
+
     /// <summary>"Save recordings to" (docs/CAPTURE.md "Live recording"); absent: the Videos folder's nvrview folder.</summary>
     public string? RecordingsFolder { get; set; }
 
@@ -70,9 +79,6 @@ internal sealed class ViewSettingsFile
 
     /// <summary>"or at" in gigabytes (decimal); absent: 4.</summary>
     public double? MaxRecordingGB { get; set; }
-
-    /// <summary>"Share-safe names": pictures and live recordings call the camera Camera A.</summary>
-    public bool ShareSafeNames { get; set; }
 
     /// <summary>"Record calls": a doorbell call is recorded from the moment it opens (off by default).</summary>
     public bool RecordCalls { get; set; }
@@ -91,6 +97,9 @@ internal sealed class ViewSettings(string? file)
     private ChromeCorner? _insetCorner;
     private bool _hideOffline = true;
     private bool _saveTranscripts;
+    private string? _picturesFolder;
+    private PictureFormat _pictureFormat = PictureFormat.Png;
+    private bool _shareSafeNames;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
@@ -105,7 +114,6 @@ internal sealed class ViewSettings(string? file)
     private RecordQuality _recordFrom = RecordQuality.Main;
     private int _maxRecordingMinutes = 60;
     private double _maxRecordingGB = 4;
-    private bool _shareSafe;
     private bool _recordCalls;
     private bool _recordCallsConsent;
 
@@ -351,6 +359,74 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
+    /// <summary>Pictures\NvrView in the user's Pictures folder: where Save Picture writes unless told otherwise.</summary>
+    public static string DefaultPicturesFolder =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "NvrView");
+
+    /// <summary>Where Save Picture writes (Settings > Capture); the default folder unless chosen.</summary>
+    public string PicturesFolder
+    {
+        get
+        {
+            Load();
+            return _picturesFolder ?? DefaultPicturesFolder;
+        }
+        set
+        {
+            Load();
+            string? chosen = string.IsNullOrWhiteSpace(value) || value == DefaultPicturesFolder ? null : value;
+            if (_picturesFolder == chosen)
+            {
+                return;
+            }
+            _picturesFolder = chosen;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The format Save Picture writes (PNG unless changed).</summary>
+    public PictureFormat PictureFormat
+    {
+        get
+        {
+            Load();
+            return _pictureFormat;
+        }
+        set
+        {
+            Load();
+            if (_pictureFormat == value)
+            {
+                return;
+            }
+            _pictureFormat = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>Saved pictures name the camera "Camera A" instead of its own name.</summary>
+    public bool ShareSafePictureNames
+    {
+        get
+        {
+            Load();
+            return _shareSafeNames;
+        }
+        set
+        {
+            Load();
+            if (_shareSafeNames == value)
+            {
+                return;
+            }
+            _shareSafeNames = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
     /// <summary>Where this computer's recordings go; the Videos folder's "nvrview" folder until the user chooses (docs/CAPTURE.md "Live recording").</summary>
     public string RecordingsFolder
     {
@@ -409,17 +485,6 @@ internal sealed class ViewSettings(string? file)
             return _maxRecordingGB;
         }
         set => Change(ref _maxRecordingGB, Math.Round(Math.Clamp(value, CaptureSettings.MinBytes / 1e9, CaptureSettings.MaxBytes / 1e9), 1));
-    }
-
-    /// <summary>"Share-safe names": the camera is called Camera A in the files' names.</summary>
-    public bool ShareSafeNames
-    {
-        get
-        {
-            Load();
-            return _shareSafe;
-        }
-        set => Change(ref _shareSafe, value);
     }
 
     /// <summary>"Record calls": a doorbell call is recorded from the moment it opens.</summary>
@@ -526,6 +591,9 @@ internal sealed class ViewSettings(string? file)
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
             _unmuteOnRing = read?.UnmuteOnRing is { } u ? [.. u] : [];
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
+            _picturesFolder = string.IsNullOrWhiteSpace(read?.PicturesFolder) ? null : read.PicturesFolder;
+            _pictureFormat = PictureFormats.FromKey(read?.PictureFormat);
+            _shareSafeNames = read?.ShareSafePictureNames ?? false;
             _callsInWindow = read?.CallsOpenInWindow ?? false;
             _callPresentations = read?.CallPresentation is { } cp ? new Dictionary<string, string>(cp) : [];
             _placement = read?.CallWindowPlacement == "activeScreen" ? CallWindowPlacement.Mode.ActiveScreen : CallWindowPlacement.Mode.Remembered;
@@ -536,7 +604,6 @@ internal sealed class ViewSettings(string? file)
             _recordFrom = RecordQualityNames.Parse(read?.RecordFrom) ?? RecordQuality.Main;
             _maxRecordingMinutes = Math.Clamp(read?.MaxRecordingMinutes ?? 60, CaptureSettings.MinMinutes, CaptureSettings.MaxMinutes);
             _maxRecordingGB = Math.Clamp(read?.MaxRecordingGB ?? 4, CaptureSettings.MinBytes / 1e9, CaptureSettings.MaxBytes / 1e9);
-            _shareSafe = read?.ShareSafeNames ?? false;
             _recordCalls = read?.RecordCalls ?? false;
             _recordCallsConsent = read?.RecordCallsConsentShown ?? false;
         }
@@ -567,6 +634,9 @@ internal sealed class ViewSettings(string? file)
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
                     UnmuteOnRing = _unmuteOnRing.Count > 0 ? [.. _unmuteOnRing.Order(StringComparer.Ordinal)] : null,
                     SaveCallTranscripts = _saveTranscripts,
+                    PicturesFolder = _picturesFolder,
+                    PictureFormat = _pictureFormat == PictureFormat.Png ? null : _pictureFormat.Key(),
+                    ShareSafePictureNames = _shareSafeNames,
                     CallsOpenInWindow = _callsInWindow,
                     CallPresentation = _callPresentations.Count > 0 ? new Dictionary<string, string>(_callPresentations) : null,
                     CallWindowPlacement = _placement == CallWindowPlacement.Mode.ActiveScreen ? "activeScreen" : null,
@@ -577,7 +647,6 @@ internal sealed class ViewSettings(string? file)
                     RecordFrom = _recordFrom == RecordQuality.Main ? null : _recordFrom.Name(),
                     MaxRecordingMinutes = _maxRecordingMinutes == 60 ? null : _maxRecordingMinutes,
                     MaxRecordingGB = _maxRecordingGB == 4 ? null : _maxRecordingGB,
-                    ShareSafeNames = _shareSafe,
                     RecordCalls = _recordCalls,
                     RecordCallsConsentShown = _recordCallsConsent,
                 }, ViewSettingsJson.Default.ViewSettingsFile);

@@ -1,8 +1,10 @@
-// The recording steps of the self-test (docs/CAPTURE.md "Live recording", "Recording calls"). They run on
-// the real core against the mock-nvr, with the real AAC encoder: the files are written into the run's own
-// Recordings folder and read back with Mp4Inspector. Each step carries the macOS step's parity ID.
+// Self-test steps of Save Picture (docs/CAPTURE.md "Save picture"; the same IDs as the Mac app's). Each
+// saves through the tile's own entry points (the P key, the header's items), reads the file back with WIC,
+// and checks its name, size, dimensions and pixels: a plain tile and a zoomed area against a CPU conversion
+// of the decoded picture the file was made from (the same matrix, the sampler's bilinear chroma, so the
+// D3D11 path and the encoder are what is checked), a fisheye view against the synthetic scene's colors.
 
-using NvrView.Shell;
+using System.Text.RegularExpressions;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.System;
@@ -11,248 +13,358 @@ namespace NvrView.App;
 
 internal sealed partial class SelfTest
 {
-    /// <summary>
-    /// The encoder (a tone through it and back with the system's AAC decoder: pitch, level, and the delay the file will
-    /// say), then R on a tile: it records from the next keyframe, the pill stays when the header fades, the header's
-    /// Record becomes Stop and the window header lists the recording, Stop ends it ("Recording saved") and the file
-    /// reads back; the free-space guard and the main-stream limit say why; Stop all ends what runs.
-    /// </summary>
-    private async Task CaptureRecordSteps(Viewer v, StageView stage, StageTile tile)
+    private static readonly Regex PictureNameShape = new(@"^\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}\.\d{3} .+$");
+
+    // The decoded picture as planes, with the matrix the renderer used.
+    private sealed record Yuv(int Width, int Height, byte[] Luma, byte[] Chroma, float[] Rows);
+
+    // A throwaway pictures folder for the viewer to save into.
+    private static string FreshPictureFolder(Viewer v)
     {
-        CaptureController cap = v.Capture;
-        if (stage.ChromeFor(tile) is not { } chrome)
-        {
-            _problems.Add("capture: no chrome for the tile to record");
-            return;
-        }
-        CameraRef camera = tile.Camera;
-
-        // parity: capture-encoder-priming
-        uint reported = 0;
-        int? measured = null;
-        AacRoundTripResult? tone = null;
-        await Task.Run(() =>
-        {
-            reported = AacRoundTrip.Priming;
-            measured = AacRoundTrip.MeasureImpulse();
-            tone = AacRoundTrip.Run(ToneCheck.Sine(1000, 0.25, 47 * AacCaptureEncoder.FrameSamples, 48_000), 48_000, flush: true);
-        });
-        double hz = 0, db = -120;
-        if (tone is not null && reported <= 4096)
-        {
-            hz = ToneCheck.Frequency(tone.Decoded, (int)reported + 4800, 24_000, 48_000);
-            db = ToneCheck.Decibels(ToneCheck.Rms(tone.Decoded, (int)reported + 4800, 24_000));
-        }
-        Say($"capture: AAC priming reported {reported}, impulse back at {measured?.ToString() ?? "?"}; a 1 kHz tone at -15 dB comes back at {hz:0.0} Hz, {db:0.0} dB " +
-            $"({tone?.Units.Count ?? 0} units, config {Convert.ToHexString(tone?.AudioSpecificConfig ?? [])}); encoder installed {cap.Encoder is not null}, core configured {cap.Configured}");
-        Expect(measured is { } m && Math.Abs(m - (int)reported) <= 48 && reported <= 4096, $"capture: the encoder's priming {reported} is not where the audio comes back ({measured})");
-        Expect(tone is not null && Math.Abs(hz - 1000) < 10, $"capture: the tone came back at {hz:0.0} Hz");
-        Expect(tone is not null && Math.Abs(db - -15.05) < 2, $"capture: the tone came back at {db:0.0} dB");
-        Expect(tone is { AudioSpecificConfig.Length: >= 2 } t && t.AudioSpecificConfig[0] >> 3 == 2, "capture: the encoder's AudioSpecificConfig is not AAC-LC");
-        Expect(cap.Encoder is not null && cap.Configured, "capture: the encoder was not installed or the core not configured");
-
-        // parity: capture-record-tile
-        stage.Select(tile.Path);
-        stage.HandleKey(VirtualKey.R, false, false);
-        BoardEntry? started = cap.Board.LiveOf(camera);
-        bool recording = await Until(() => cap.Board.LiveOf(camera)?.State == "recording", 30);
-        stage.Tick();
-        BoardEntry? entry = cap.Board.LiveOf(camera);
-        string? label = stage.HeaderTileOf(tile) is { } model ? TileHeaderLayout.Menu(model).FirstOrDefault(e => e.Item == TileHeaderItem.Record)?.Label : null;
-        Say($"capture: R started {(started is null ? "nothing" : Path.GetFileName(started.File))}, state {entry?.State ?? "none"}, Record says {label ?? "?"}");
-        Expect(started is not null, $"capture: R did not start a recording ({stage.ToastText ?? "no message"})");
-        Expect(recording, "capture: the recording did not reach its first keyframe");
-        Expect(label == "Stop Recording", "capture: the header's Record did not become Stop");
-        Expect(started is not null && started.File.StartsWith(cap.Settings.LiveFolder, StringComparison.OrdinalIgnoreCase), "capture: the recording is not in the recordings folder");
-        await Until(() => cap.Board.LiveOf(camera) is { DurationMs: >= 3000 }, 30);
-
-        // parity: capture-record-indicator
-        stage.Tick();
-        string? pill = chrome.PillText;
-        bool wasShown = chrome.HeaderShown;
-        chrome.SetHover(false, false);
-        bool stays = chrome.PillText is not null;
-        chrome.SetHover(wasShown, false);
-        bool narrow = stage.HeaderTileOf(tile) is { } narrowModel && TileHeaderLayout.Compute(100, 200, narrowModel).Visible.Contains(TileHeaderItem.RecordingPill);
-        HeaderBar header = app.Windows[0].Header;
-        header.Update();
-        string? spot = header.RecordingSpotText;
-        List<string> menu = Texts(header.BuildRecordingMenu().Items);
-        int stops = menu.Count(t => t.StartsWith("Stop ", StringComparison.Ordinal) && t != "Stop all recordings");
-        List<string> overflow = Texts(header.BuildOverflow().Items);
-        Say($"capture: pill {pill ?? "none"} in the {chrome.PillCorner} corner, stays when the header fades {stays}, at 100 DIP {narrow}; window header \"{spot ?? "none"}\", " +
-            $"its menu [{string.Join(" / ", menu)}], the … menu has Stop all {overflow.Contains("Stop all recordings")} and Open folder {overflow.Contains("Open recordings folder")}");
-        Expect(pill?.StartsWith("● REC", StringComparison.Ordinal) == true && stays, "capture: the tile's pill did not show or did not stay");
-        Expect(narrow, "capture: a narrow header dropped the recording pill");
-        Expect(spot == "● 1 recording", $"capture: the window header said \"{spot ?? "nothing"}\"");
-        Expect(stops == 1 && menu.Contains("Stop all recordings") && menu.Contains("Open recordings folder"), "capture: the recordings menu does not list the recording, Stop all, and the folder");
-        Expect(overflow.Contains("Stop all recordings") && overflow.Contains("Open recordings folder"), "capture: the … menu lacks Stop all recordings or Open recordings folder");
-
-        // The header's Record, now Stop, ends it.
-        stage.PerformHeaderItem(tile, TileHeaderItem.Record, null);
-        bool stopped = await Until(() => cap.Board.Running.Count == 0, 20);
-        stage.Tick();
-        RecordingEvent? end = cap.Board.Ended.LastOrDefault();
-        string? toast = stage.ToastText;
-        string? action = stage.ToastActionTitle;
-        header.Update();
-        Say($"capture: Stop ended it {end?.State ?? "no"} ({end?.Reason ?? "-"}), message \"{toast ?? "none"}\" with {action ?? "no button"}, pill {chrome.PillText ?? "gone"}, window header {(header.RecordingSpotVisible ? "still shows" : "hidden")}");
-        Expect(stopped && end is { State: "finished", Reason: "stopped" }, "capture: Stop did not finish the recording");
-        Expect(toast == "Recording saved" && action == "Show in folder", $"capture: the end said \"{toast}\" with {action}");
-        Expect(chrome.PillText is null && !header.RecordingSpotVisible, "capture: the pill or the window header's count stayed after the recording ended");
-
-        // parity: capture-record-real-core
-        await CaptureFileCheck(end, "the live recording", video: 1, audio: end?.Audio == "passthrough" ? 1 : 0, enabled: null);
-
-        await CaptureLimitSteps(v, stage, tile);
+        string folder = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-pictures-{Guid.NewGuid():N}");
+        v.Settings.PicturesFolder = folder;
+        v.Settings.PictureFormat = PictureFormat.Png;
+        v.Settings.ShareSafePictureNames = false;
+        return folder;
     }
 
-    /// <summary>The free-space guard and the main-stream limit, as messages.</summary>
-    private async Task CaptureLimitSteps(Viewer v, StageView stage, StageTile tile)
+    private static void RemoveFolder(string folder)
     {
-        CaptureController cap = v.Capture;
-
-        // parity: capture-record-disk-low
-        cap.MinFreeOverride = 1UL << 62;
-        stage.PerformHeaderItem(tile, TileHeaderItem.Record, null);
-        string? refused = stage.ToastText;
-        bool none = cap.Board.Running.Count == 0;
-        cap.MinFreeOverride = null;
-        Say($"capture: low disk says \"{refused ?? "nothing"}\", nothing started {none}");
-        Expect(refused?.Contains("free disk space", StringComparison.Ordinal) == true && none, "capture: low disk did not refuse with its reason");
-
-        // parity: capture-record-main-limit
-        CameraRef[] cameras = [.. Tiles.Where(t => t.Camera.Lens == 0 && t.Camera.Device == tile.Camera.Device && t.Shown > 0).Select(t => t.Camera).Distinct().Take(3)];
-        if (cameras.Length < 3)
-        {
-            Say("capture: fewer than three cameras of one device are playing; the main-stream limit is not checked");
-            return;
-        }
-        cap.StartLive(cameras[0], RecordQuality.Main);
-        cap.StartLive(cameras[1], RecordQuality.Main);
-        cap.StartLive(cameras[2], RecordQuality.Main);
-        string message = stage.ToastText ?? "nothing";
-        string? offer = stage.ToastActionTitle;
-        if (offer == "Record Sub-stream")
-        {
-            stage.PressToastAction();
-        }
-        BoardEntry? third = cap.Board.LiveOf(cameras[2]);
-        Say($"capture: a third main stream says \"{message}\", offers {offer ?? "nothing"}, then {third?.Tier ?? "nothing"}");
-        Expect(message.Contains("two main streams", StringComparison.Ordinal) && offer == "Record Sub-stream" && third?.Tier == "sub", "capture: the main-stream limit did not offer the sub-stream");
-        bool allRecording = await Until(() => cap.Board.List.Count == 3 && cap.Board.List.All(r => r.State == "recording"), 30);
-        Expect(allRecording, "capture: three recordings (two main, one sub) did not all reach their keyframe");
-        app.Windows[0].RunHeaderAction(HeaderAction.StopAllRecordings);
-        Expect(await Until(() => cap.Board.Running.Count == 0, 20), "capture: Stop all recordings left recordings running");
-    }
-
-    /// <summary>
-    /// Reads a finished recording back (docs/CAPTURE.md "Files"): one video track starting on a keyframe that lasts what the
-    /// events said, and the tracks asked for; <paramref name="enabled"/> (a call's) lists which sound tracks are enabled.
-    /// </summary>
-    private async Task CaptureFileCheck(RecordingEvent? end, string what, int video, int audio, bool[]? enabled)
-    {
-        if (end is null || !File.Exists(end.File))
-        {
-            _problems.Add($"capture (real core): {what} has no file to read back");
-            return;
-        }
-        Mp4Info? info = null;
         try
         {
-            byte[] bytes = await File.ReadAllBytesAsync(end.File);
-            info = Mp4Inspector.Inspect(bytes);
+            Directory.Delete(folder, recursive: true);
         }
-        catch (IOException e)
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            _problems.Add($"capture (real core): {what} could not be read ({e.GetType().Name})");
-            return;
-        }
-        if (info is null)
-        {
-            _problems.Add($"capture (real core): {what} is not a finished MP4");
-            return;
-        }
-        Mp4Track? first = info.Video.FirstOrDefault();
-        double seconds = first?.Seconds ?? 0;
-        Say($"capture (real core): {what} {Path.GetFileName(end.File)}, {info.Video.Count()} video, {info.Audio.Count()} sound ({end.Audio}), " +
-            $"{seconds:0.00} s for {end.DurationMs} ms, keyframe start {first?.FirstSampleIsSync}, sound samples [{string.Join(", ", info.Audio.Select(a => a.Samples))}], " +
-            $"enabled [{string.Join(", ", info.Audio.Select(a => a.Enabled))}]");
-        Expect(!info.Fragmented && info.Video.Count() == video && first is { Samples: > 0, FirstSampleIsSync: true }, $"capture (real core): {what}'s video is wrong");
-        Expect(Math.Abs(seconds - end.DurationMs / 1000.0) <= 0.5, $"capture (real core): {what} lasts {seconds:0.00} s, the events said {end.DurationMs} ms");
-        Expect(info.Audio.Count() == audio && info.Audio.All(a => a.Codec == "mp4a" && a.Samples > 0), $"capture (real core): {what}'s sound tracks are wrong ({info.Audio.Count()})");
-        if (enabled is not null)
-        {
-            Expect(info.Audio.Select(a => a.Enabled).SequenceEqual(enabled), $"capture (real core): {what}'s enabled sound tracks are [{string.Join(", ", info.Audio.Select(a => a.Enabled))}]");
+            // A leftover temp folder is harmless.
         }
     }
 
-    /// <summary>
-    /// Ctrl+Shift+R in a call window records the call (docs/CAPTURE.md "Recording calls"): beside the transcripts under
-    /// the stem the transcript will take, the four tracks through the app's AAC encoder, the call bar's "● Recording"
-    /// pill, and the key again stops it.
-    /// </summary>
-    private async Task CallRecordButton(Viewer v, CallWindow cw, CameraRef camera, StageTile tile)
+    // Runs an action (a key or a menu item), waits for the save it starts to finish, and gives the record (null if none came).
+    private async Task<PictureSaveRecord?> Saving(StageView stage, Action action)
     {
-        StageView stage = cw.Stage;
-        CaptureController cap = v.Capture;
-        // parity: capture-call-record-button
-        long answeredBefore = cap.Encoder?.Answered ?? 0;
-        stage.ApplyAction(TileAction.ToggleRecording, tile);
-        BoardEntry? entry = cap.CallRecording(camera);
-        string? stem = cap.ReservedCallStem(camera);
-        bool recording = await Until(() => cap.CallRecording(camera)?.State == "recording", 30);
-        stage.Tick();
-        cw.Refresh();
-        entry = cap.CallRecording(camera);
-        string? pill = cw.Card.RecordingPillText;
-        string? label = stage.HeaderTileOf(tile) is { } model ? TileHeaderLayout.Menu(model).FirstOrDefault(e => e.Item == TileHeaderItem.Record)?.Label : null;
-        bool beside = entry is not null && string.Equals(Path.GetDirectoryName(entry.File), v.Transcripts.Folder, StringComparison.OrdinalIgnoreCase);
-        bool named = stem is not null && entry is not null && Path.GetFileName(entry.File) == stem + ".mp4";
-        await Until(() => cap.CallRecording(camera) is { DurationMs: >= 1500 }, 20);
-        stage.ApplyAction(TileAction.ToggleRecording, tile);
-        bool ended = await Until(() => cap.CallRecording(camera) is null, 20);
-        RecordingEvent? end = cap.Board.Ended.LastOrDefault(e => e.Kind == "call");
-        long answered = (cap.Encoder?.Answered ?? 0) - answeredBefore;
-        stage.Tick();
-        cw.Refresh();
-        Say($"capture: call recording {(entry is null ? "none" : Path.GetFileName(entry.File))}, beside the transcripts {beside}, named for the transcript {named}, pill {pill ?? "none"}, " +
-            $"Record says {label ?? "?"}, tracks {end?.Tracks ?? "?"}, ended {end?.State ?? "no"}, encoder answered {answered} refused {cap.Encoder?.Refused}");
-        Expect(entry is not null && recording, $"capture: Ctrl+Shift+R did not start the call recording ({stage.ToastText ?? "no message"}, {cap.LastRefusal})");
-        Expect(beside && named, "capture: the call recording is not beside the transcripts under its stem");
-        Expect(pill?.StartsWith("● Recording", StringComparison.Ordinal) == true, "capture: the call bar showed no pill");
-        Expect(label == "Stop Recording Call", "capture: Record Call did not become Stop");
-        Expect(ended && end is { Kind: "call", Tracks: "video,Conversation,Visitor,You" }, $"capture: the call recording's tracks were {end?.Tracks}");
-        Expect(answered > 0 && (cap.Encoder?.Refused ?? 1) == 0, $"capture: the AAC encoder answered {answered} units");
-        Expect(cw.Card.RecordingPillText is null, "capture: the pill stayed after the call recording stopped");
+        int before = stage.PictureSaves;
+        action();
+        return await Until(() => stage.PictureSaves > before, 20) ? stage.LastPictureSave : null;
     }
 
-    /// <summary>
-    /// A conversation's recording ends with the call (docs/CAPTURE.md "Recording calls"), and the file reads back: the
-    /// video and three sound tracks, only the Conversation enabled, each with samples.
-    /// </summary>
-    private async Task CallRecordingEndsWithCall(Viewer v, CameraRef camera)
+    // Reads the tile's picture as it is now (device lock held inside; no await here).
+    private static Yuv? ReadYuv(Viewer v, StageTile t)
     {
-        CaptureController cap = v.Capture;
-        // parity: capture-call-record-real-core
-        v.Calls.StartConversation(camera);
-        bool tileOpen = await Until(() => v.Calls.ConversationTileFor(camera) is not null, 10);
-        cap.StartCall(camera);
-        BoardEntry? entry = cap.CallRecording(camera);
-        if (entry is null)
+        using DeviceLock held = v.Host.Gpu.Lock();
+        return t.Video?.ShownPicture is { } p ? YuvOf(p) : null;
+    }
+
+    // The picture's planes (call under the device lock).
+    private static Yuv? YuvOf(TilePicture p) =>
+        p.ReadYuv(out int w, out int h, out byte[] luma, out byte[] chroma) ? new Yuv(w, h, luma, chroma, p.ColorRows()) : null;
+
+    // A pixel of the picture converted to RGB as the shader does: luma at the pixel, chroma interpolated between its texels.
+    private static (int R, int G, int B) CpuRgb(Yuv y, int x, int row)
+    {
+        int cw = (y.Width + 1) / 2, ch = (y.Height + 1) / 2;
+        float luma = y.Luma[row * y.Width + x] / 255f;
+        float fx = (x + 0.5f) * cw / y.Width - 0.5f, fy = (row + 0.5f) * ch / y.Height - 0.5f;
+        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
+        float tx = fx - x0, ty = fy - y0;
+        (float, float) Texel(int cx, int cy)
         {
-            _problems.Add($"capture (real core): the call recording did not start ({cap.LastRefusal ?? "?"}, tile open {tileOpen})");
-            v.Calls.End(camera, "closed");
+            int o = (Math.Clamp(cy, 0, ch - 1) * cw + Math.Clamp(cx, 0, cw - 1)) * 2;
+            return (y.Chroma[o] / 255f, y.Chroma[o + 1] / 255f);
+        }
+        (float, float) a = Texel(x0, y0), b = Texel(x0 + 1, y0), c = Texel(x0, y0 + 1), d = Texel(x0 + 1, y0 + 1);
+        float Mix(float p, float q, float r, float s) => (p * (1 - tx) + q * tx) * (1 - ty) + (r * (1 - tx) + s * tx) * ty;
+        float cb = Mix(a.Item1, b.Item1, c.Item1, d.Item1), cr = Mix(a.Item2, b.Item2, c.Item2, d.Item2);
+        int Channel(int r) => (int)MathF.Round(Math.Clamp(y.Rows[r * 4] * luma + y.Rows[r * 4 + 1] * cb + y.Rows[r * 4 + 2] * cr + y.Rows[r * 4 + 3], 0, 1) * 255);
+        return (Channel(0), Channel(1), Channel(2));
+    }
+
+    // How many of a grid of sample points of the saved image match the picture at region (its top left in picture pixels) within tolerance codes per channel.
+    private static (int Checked, int Matched) ComparePicture(RenderedImage image, Yuv y, PixelRegion region, int tolerance)
+    {
+        int tried = 0, right = 0;
+        for (int j = 1; j <= 6; j++)
+        {
+            for (int i = 1; i <= 6; i++)
+            {
+                int x = image.Width * i / 7, row = image.Height * j / 7;
+                if (region.X + x >= y.Width || region.Y + row >= y.Height)
+                {
+                    continue;
+                }
+                (int wr, int wg, int wb) = CpuRgb(y, region.X + x, region.Y + row);
+                (int gr, int gg, int gb) = image.Rgb(x, row);
+                tried++;
+                if (Math.Abs(gr - wr) <= tolerance && Math.Abs(gg - wg) <= tolerance && Math.Abs(gb - wb) <= tolerance)
+                {
+                    right++;
+                }
+            }
+        }
+        return (tried, right);
+    }
+
+    // Checks one finished save: a file with the naming rule's shape and extension, the "Picture saved" toast with its button, the
+    // dimensions (size, within a pixel, when given), and, when the picture is a copy of the decoded one (yuv given), its pixels
+    // (JPEG blurs the edges between colors, so it is asked for fewer matches).
+    private async Task<RenderedImage?> CheckSaved(StageView stage, PictureSaveRecord? rec, string what, string ext, string nameEnds, (int W, int H)? size, int tolerance, Yuv? yuv, PixelRegion? region = null, int minPercent = 95)
+    {
+        if (rec is null)
+        {
+            _problems.Add($"{what}: no picture was saved");
+            return null;
+        }
+        if (rec.Result.Saved is not { } saved)
+        {
+            _problems.Add($"{what}: the save failed ({rec.Result.Failure} {rec.Result.FileName})");
+            return null;
+        }
+        string name = Path.GetFileName(saved.Path);
+        long fileSize = File.Exists(saved.Path) ? new FileInfo(saved.Path).Length : -1;
+        RenderedImage? image = await PictureSaver.DecodeAsync(saved.Path);
+        if (image is null)
+        {
+            _problems.Add($"{what}: {name} is not an image file");
+            return null;
+        }
+        bool named = PictureNameShape.IsMatch(name) && name.EndsWith($"{nameEnds}.{ext}", StringComparison.Ordinal);
+        bool sized = size is not { } s || (Math.Abs(image.Width - s.W) <= 1 && Math.Abs(image.Height - s.H) <= 1);
+        string? toast = stage.ToastText;
+        Say($"{what}: {name}, {image.Width}x{image.Height}, {fileSize} bytes, toast {toast ?? "none"}");
+        Expect(named, $"{what}: the file name {name} does not follow the rule");
+        Expect(fileSize == saved.Bytes && fileSize > 100, $"{what}: the file has {fileSize} bytes, wrote {saved.Bytes}");
+        Expect(sized, $"{what}: {image.Width}x{image.Height}, expected {size?.W}x{size?.H}");
+        Expect(image.Width == saved.Width && image.Height == saved.Height, $"{what}: the file is {image.Width}x{image.Height}, not the rendered {saved.Width}x{saved.Height}");
+        Expect(toast == "Picture saved" && stage.ToastActionTitle == "Show in folder", $"{what}: the confirmation toast said {toast ?? "nothing"}");
+        if (yuv is not null)
+        {
+            (int tried, int right) = ComparePicture(image, yuv, region ?? PictureRegion.Whole(yuv.Width, yuv.Height), tolerance);
+            Say($"{what}: {right} of {tried} sampled pixels match the decoded picture");
+            Expect(tried >= 20 && right * 100 >= tried * minPercent, $"{what}: only {right} of {tried} pixels match the decoded picture");
+        }
+        return image;
+    }
+
+    // P saves the tile's full picture as PNG; a share-safe JPEG names the camera Camera A; Save Picture As uses the chosen file; a
+    // folder that cannot be written fails naming the file only; Settings > Capture holds the choices; Save Zoomed Area saves the
+    // visible region of a zoomed tile at the source's resolution. Each file is read back and its pixels compared with the decoded picture.
+    private async Task SavePictures(Viewer v, StageView stage)
+    {
+        StageTile? t = Tiles.FirstOrDefault(x => x.Video is not null && !v.IsFisheye(x.Camera) && stage.HeaderTileOf(x) is { Picture: true });
+        if (t is null)
+        {
+            _problems.Add("no plain tile to save a picture from");
             return;
         }
-        ulong id = entry.Id;
-        bool long_ = await Until(() => cap.Board.Running.TryGetValue(id, out BoardEntry? e) && e.DurationMs >= 2500, 30);
-        // The recording ends with the call.
-        v.Calls.End(camera, "closed");
-        bool ended = await Until(() => !cap.Board.Running.ContainsKey(id), 20);
-        RecordingEvent? end = cap.Board.Ended.LastOrDefault(e => e.Recording == id);
-        Say($"capture (real core): call recording ran {long_}, ended with the call {ended} ({end?.State ?? "no"}, {end?.Reason ?? "-"}), tracks {end?.Tracks ?? "?"}");
-        Expect(ended && end is { State: "finished", Reason: "stopped" }, $"capture (real core): the call recording ended {end?.State} ({end?.Reason ?? "-"}) or not with the call");
-        await CaptureFileCheck(end, "the call recording", video: 1, audio: 3, enabled: [true, false, false]);
+        string folder = FreshPictureFolder(v);
+        try
+        {
+            bool ready = await Until(() => t.PictureWidth > 0 && t.ViewWidth > 0 && ReadYuv(v, t) is not null, 15);
+            Expect(ready, "the tile to save a picture from showed no picture");
+            string nameEnd = " " + PictureNaming.Sanitize(t.Name);
+
+            // parity: capture-picture-tile
+            await CaptureSettingsPage(v);
+            folder = FreshPictureFolder(v);
+            stage.Select(t.Path);
+            (int W, int H) full = (t.PictureWidth, t.PictureHeight);
+            // The picture each save draws, read under the same lock at the moment it is drawn (the stream keeps moving).
+            Yuv? drawn = null;
+            stage.PictureObserver = p => drawn = YuvOf(p);
+            PictureSaveRecord? rec = await Saving(stage, () => stage.HandleKey(VirtualKey.P, false, false));
+            await CheckSaved(stage, rec, "picture", "png", nameEnd, full, 3, drawn);
+            Expect(rec?.Plan is { Dewarp: false } plan && plan.SrcWidth == full.W && plan.SrcHeight == full.H, "P did not save the whole picture");
+
+            // Share-safe names and JPEG, from Settings.
+            v.Settings.ShareSafePictureNames = true;
+            v.Settings.PictureFormat = PictureFormat.Jpeg;
+            rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SavePicture, null));
+            await CheckSaved(stage, rec, "picture (share-safe JPEG)", "jpg", " Camera A", full, 24, drawn, minPercent: 80);
+            v.Settings.ShareSafePictureNames = false;
+            v.Settings.PictureFormat = PictureFormat.Png;
+
+            // Save Picture As…: exactly the file the picker answers; the format follows its extension.
+            string chosen = Path.Combine(folder, "chosen name.jpg");
+            string? suggested = null;
+            stage.ChoosePictureFile = (name, _) =>
+            {
+                suggested = name;
+                return Task.FromResult<string?>(chosen);
+            };
+            rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SavePictureAs, null));
+            RenderedImage? asked = rec?.Result.Saved is { } sa && sa.Path == chosen ? await PictureSaver.DecodeAsync(chosen) : null;
+            byte[] head = File.Exists(chosen) ? File.ReadAllBytes(chosen).Take(3).ToArray() : [];
+            Say($"picture as: suggested {suggested ?? "nothing"}, wrote {(File.Exists(chosen) ? "the chosen file" : "nothing")}, {asked?.Width}x{asked?.Height}");
+            Expect(asked is not null && head.SequenceEqual(new byte[] { 0xFF, 0xD8, 0xFF }), "Save Picture As did not write a JPEG to the chosen file");
+            Expect(suggested is not null && PictureNameShape.IsMatch(suggested) && suggested.EndsWith(nameEnd + ".png", StringComparison.Ordinal), "Save Picture As did not suggest the shared name");
+            // Canceled: nothing saved.
+            int saves = stage.PictureSaves;
+            stage.ChoosePictureFile = (_, _) => Task.FromResult<string?>(null);
+            stage.PerformHeaderItem(t, TileHeaderItem.SavePictureAs, null);
+            await Task.Delay(300); // proves that nothing happens
+            Expect(stage.PictureSaves == saves, "canceling the picker still saved a picture");
+            stage.ChoosePictureFile = null;
+
+            // A folder that cannot be made: the message names the file, never the path.
+            string blocker = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-blocker-{Guid.NewGuid():N}");
+            File.WriteAllText(blocker, "not a folder");
+            try
+            {
+                v.Settings.PicturesFolder = blocker;
+                rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SavePicture, null));
+                string? failure = stage.ToastText;
+                Say($"picture to a blocked folder: {rec?.Result.Failure}, toast {failure ?? "none"}");
+                Expect(rec?.Result is { Failure: PictureFailure.Write, FileName: not null } && failure is not null && failure.StartsWith("Couldn't save ", StringComparison.Ordinal)
+                    && !failure.Contains(blocker, StringComparison.OrdinalIgnoreCase) && !failure.Contains(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase),
+                    $"a blocked folder did not fail naming the file only (\"{failure}\")");
+            }
+            finally
+            {
+                File.Delete(blocker);
+                v.Settings.PicturesFolder = folder;
+            }
+
+            // parity: capture-picture-zoomed
+            t.DigitalZoom = new TileZoom(2, 0.5, 0.5);
+            bool zoomed = await Until(() => stage.HeaderTileOf(t) is { Zoomed: true }, 5);
+            PixelRegion? want = PictureRegion.Visible(t.PictureWidth, t.PictureHeight, t.ViewWidth, t.ViewHeight, t.Fill, t.DigitalZoom);
+            bool offered = stage.HeaderTileOf(t) is { } model && TileHeaderLayout.Menu(model).Any(e => e.Item == TileHeaderItem.SaveZoomedArea);
+            Expect(zoomed && offered && want is not null, "a zoomed tile does not offer Save Zoomed Area");
+            if (want is { } region)
+            {
+                rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SaveZoomedArea, null));
+                await CheckSaved(stage, rec, "zoomed area", "png", nameEnd, (region.Width, region.Height), 3, drawn, region);
+                Expect(region.Width < t.PictureWidth && region.Height < t.PictureHeight, $"the zoomed region {region.Width}x{region.Height} is not smaller than the picture {t.PictureWidth}x{t.PictureHeight}");
+                Expect(rec?.Plan is { Dewarp: false } z && z.SrcX == region.X && z.SrcY == region.Y && z.SrcWidth == region.Width, "the zoomed area was not the region the tile shows");
+            }
+            StageView.ResetZoom(t);
+        }
+        finally
+        {
+            stage.ChoosePictureFile = null;
+            stage.PictureObserver = null;
+            RemoveFolder(folder);
+            v.Settings.PicturesFolder = ViewSettings.DefaultPicturesFolder;
+        }
+    }
+
+    // Settings > Capture: the page shows the saved choices and changes them, and they come back from view-settings.json.
+    private async Task CaptureSettingsPage(Viewer v)
+    {
+        var hooks = new SettingsPagesHooks();
+        SettingsWindow window = SettingsWindow.Open(v, development: true, SettingsSection.Capture, hooks: hooks, background: true);
+        await Until(() => window.IsLoaded, 5);
+        string folder = v.Settings.PicturesFolder;
+        var shown = hooks.Capture();
+        Expect(shown.Folder == folder && shown.Format == PictureFormat.Png && !shown.ShareSafe && shown.CanReset, $"the Capture page does not show the saved choices ({shown})");
+        hooks.ChooseFormat(PictureFormat.Jpeg);
+        hooks.SetShareSafe(true);
+        Expect(v.Settings.PictureFormat == PictureFormat.Jpeg && v.Settings.ShareSafePictureNames, "the Capture page did not change the format or the share-safe names");
+        hooks.ChooseFormat(PictureFormat.Png);
+        hooks.SetShareSafe(false);
+        hooks.ResetFolder();
+        var reset = hooks.Capture();
+        Expect(v.Settings.PicturesFolder == ViewSettings.DefaultPicturesFolder && reset.Folder == ViewSettings.DefaultPicturesFolder && !reset.CanReset, "Reset did not bring back the default pictures folder");
+        window.Close();
+        // The choices are kept between launches.
+        string file = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-{Guid.NewGuid():N}.json");
+        try
+        {
+            string custom = Path.Combine(Path.GetTempPath(), "nvrview-selftest-custom");
+            var written = new ViewSettings(file) { PicturesFolder = custom, PictureFormat = PictureFormat.Jpeg, ShareSafePictureNames = true };
+            var read = new ViewSettings(file);
+            bool kept = read.PicturesFolder == custom && read.PictureFormat == PictureFormat.Jpeg && read.ShareSafePictureNames;
+            written.PicturesFolder = ViewSettings.DefaultPicturesFolder;
+            written.PictureFormat = PictureFormat.Png;
+            written.ShareSafePictureNames = false;
+            var back = new ViewSettings(file);
+            Say($"capture settings: kept {kept}, defaults back {back.PicturesFolder == ViewSettings.DefaultPicturesFolder && back.PictureFormat == PictureFormat.Png && !back.ShareSafePictureNames}");
+            Expect(kept, "the pictures folder, format or share-safe names were not read back from view-settings.json");
+            Expect(back.PicturesFolder == ViewSettings.DefaultPicturesFolder && back.PictureFormat == PictureFormat.Png && !back.ShareSafePictureNames, "the default capture settings were not read back");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    // A fisheye tile's saved view is the dewarped picture at the source's resolution (its pixels show the synthetic scene's colors
+    // where the shared mapping says), and Save Original Fisheye Picture is the circle as received.
+    private async Task FisheyePictures(Viewer v, StageView stage, StageRenderer r, StageTile f, FisheyeCircle circle)
+    {
+        string folder = FreshPictureFolder(v);
+        try
+        {
+            stage.SetFisheyeMode(f, FisheyeViewMode.Panorama);
+            long drawn = r.DewarpDraws;
+            await Until(() => r.DewarpDraws > drawn + 3 && f.PictureWidth > 0, 10);
+            stage.Select(f.Path);
+            string nameEnd = " " + PictureNaming.Sanitize(f.Name);
+            TileHeaderTile? model = stage.HeaderTileOf(f);
+            Expect(model is not null && TileHeaderLayout.Menu(model).Any(e => e.Item == TileHeaderItem.SaveOriginalFisheye), "a dewarped fisheye tile does not offer Save Original Fisheye Picture");
+
+            // parity: capture-picture-fisheye
+            PictureSaveRecord? rec = await Saving(stage, () => stage.HandleKey(VirtualKey.P, false, false));
+            RenderedImage? view = await CheckSaved(stage, rec, "fisheye view", "png", nameEnd, null, 3, null);
+            Expect(rec?.Plan is { Dewarp: true }, "fisheye view: the saved picture was not dewarped");
+            if (view is not null && rec is not null && f.Fisheye is { } fe)
+            {
+                Expect(view.Width == rec.PictureWidth && view.Height == rec.PictureHeight, $"fisheye view: {view.Width}x{view.Height}, not the source's size {rec.PictureWidth}x{rec.PictureHeight}");
+                var lens = new FisheyeLens(circle, rec.PictureWidth / (double)Math.Max(rec.PictureHeight, 1));
+                FisheyeDewarp d = FisheyeDewarp.Of(lens, fe.Mount, fe.Mode, fe.Aim, view.Width, view.Height);
+                (int tried, int right) = FisheyeImageMatches(view, d);
+                Say($"fisheye view: {right} of {tried} saved pixels match the fixture");
+                Expect(tried >= 20 && right * 10 >= tried * 9, $"fisheye view: {right} of {tried} saved pixels match the synthetic scene");
+            }
+            Yuv? yuv = null;
+            stage.PictureObserver = p => yuv = YuvOf(p);
+            rec = await Saving(stage, () => stage.PerformHeaderItem(f, TileHeaderItem.SaveOriginalFisheye, null));
+            RenderedImage? original = await CheckSaved(stage, rec, "original fisheye", "png", nameEnd, view is null ? null : (view.Width, view.Height), 3, yuv);
+            Expect(rec?.Plan is { Dewarp: false }, "original fisheye: the saved picture was dewarped");
+            Say($"original fisheye: {original?.Width}x{original?.Height}");
+        }
+        finally
+        {
+            stage.PictureObserver = null;
+            RemoveFolder(folder);
+            v.Settings.PicturesFolder = ViewSettings.DefaultPicturesFolder;
+        }
+    }
+
+    // How many of the dewarped image's sample points show the synthetic scene's color for the direction they look along.
+    private static (int Tried, int Right) FisheyeImageMatches(RenderedImage image, FisheyeDewarp d)
+    {
+        int tried = 0, right = 0;
+        for (int j = 0; j < 32; j++)
+        {
+            for (int i = 0; i < 32; i++)
+            {
+                var p = new UnitPoint((i + 0.5) / 32, (j + 0.5) / 32);
+                if (d.Direction(p) is not { } dir)
+                {
+                    continue;
+                }
+                (double pan, double tilt) = Fisheye.PanTilt(dir);
+                double psi = ((pan % 360) + 360) % 360;
+                static double Off(double a) => Math.Abs(a - Math.Round(a / 15) * 15);
+                if (tilt < 5 || tilt > 80 || Off(psi) < 3 || Off(tilt) < 3 || Math.Abs(tilt - 20) < 8)
+                {
+                    continue;
+                }
+                int sx = Math.Min((int)(p.X * image.Width), image.Width - 1), sy = Math.Min((int)(p.Y * image.Height), image.Height - 1);
+                (int cr, int cg, int cb) = image.Rgb(sx, sy);
+                int got = cr > cb + 40 && cg > cb + 40 && cg > cr * 0.6 ? 3
+                    : cr > cg + 25 && cr > cb + 25 ? 0
+                    : cg > cr + 25 && cg > cb + 25 ? 1
+                    : cb > cr + 25 && cb > cg + 25 ? 2
+                    : -1;
+                tried++;
+                if (got == (int)(psi / 90) % 4)
+                {
+                    right++;
+                }
+            }
+        }
+        return (tried, right);
     }
 }

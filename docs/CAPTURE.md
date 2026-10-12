@@ -11,13 +11,12 @@
 > ("Local captures and the NVR's recordings"); the PTZ commands in
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
-> macOS the header, its menus and keys (PTZ actions say "coming soon") and
-> the call window's picture as a single fixed tile; in the core, the pure
-> base (`crates/capture`, K2) and the recorders behind a Rust API (K4,
-> below), and the C interface with its Swift and C# bindings (F5, ABI 3
-> minor 9, below); on macOS, saving pictures, and live and call recording
-> with the app's AAC encoder (M5, below); on Windows, live and call recording
-with the app's AAC encoder (W5, below).
+> macOS and Windows the header, its menus and keys (PTZ actions say "coming
+> soon"), Save picture, and the call window's picture as a single fixed tile;
+> in the core, the pure base (`crates/capture`, K2) and the recorders behind
+> a Rust API (K4, below), and the C interface with its Swift and C# bindings
+> (F5, ABI 3 minor 9, below); live and call recording with the app's AAC
+> encoder on macOS (M5, below) and on Windows (W5, below).
 
 ## Implementation status (K2)
 

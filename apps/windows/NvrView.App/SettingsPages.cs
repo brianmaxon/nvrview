@@ -3,8 +3,9 @@
 // to connect to: address, port, user, password; saving reconnects that device),
 // Cameras (each camera's options: where its calls open, unmute on ring, talk-back,
 // fisheye mount), Alerts & calls (the corners of the detection symbols and call
-// cards, calls in their own window, transcripts, recording calls), Capture (where
-// recordings go and when they stop; CaptureSettingsPage), Updates, and About. The password
+// cards, calls in their own window, transcripts, recording calls), Capture (where saved
+// pictures and recordings go, the picture format, when a recording stops, share-safe names;
+// CaptureSettingsPage has the recordings), Updates, and About. The password
 // goes straight to the credential store and is never shown again: leaving the box
 // empty when editing keeps the saved one. The new-device form opens with "Find
 // Devices on This Network": a search of the local network starts when the form is
@@ -42,6 +43,18 @@ internal sealed class SettingsPagesHooks
 
     /// <summary>Chooses a mount in a camera's picker, as a click on its item does.</summary>
     public Action<CameraRef, FisheyeMount> ChooseMount = (_, _) => { };
+
+    /// <summary>The Capture page as shown: the pictures folder's text, the format, the share-safe names box, and whether Reset is enabled.</summary>
+    public Func<(string Folder, PictureFormat Format, bool ShareSafe, bool CanReset)> Capture = () => ("", PictureFormat.Png, false, false);
+
+    /// <summary>Chooses a format in the Capture page's picker.</summary>
+    public Action<PictureFormat> ChooseFormat = _ => { };
+
+    /// <summary>Sets the Capture page's share-safe names box, as a click does.</summary>
+    public Action<bool> SetShareSafe = _ => { };
+
+    /// <summary>Presses the Capture page's Reset button.</summary>
+    public Action ResetFolder = () => { };
 }
 
 /// <summary>The pages of the Settings window, built once and alive until <see cref="Closed"/>.</summary>
@@ -51,6 +64,9 @@ internal sealed class SettingsPages
     private Action _closed = () => { };
     private Action<SettingsSection> _shown = _ => { };
     private Action _findDevices = () => { };
+
+    /// <summary>The window's handle, for the folder picker (set by the Settings window).</summary>
+    public Func<nint>? WindowHandle { get; set; }
 
     private SettingsPages()
     {
@@ -80,7 +96,7 @@ internal sealed class SettingsPages
     }
 
     /// <summary>The pages, not shown yet.</summary>
-    public static SettingsPages Create(Viewer viewer, bool development, SettingsPagesHooks? hooks = null, Func<nint>? windowHandle = null)
+    public static SettingsPages Create(Viewer viewer, bool development, SettingsPagesHooks? hooks = null)
     {
         var result = new SettingsPages();
         var list = new ListView { Width = 220, Height = 260, SelectionMode = ListViewSelectionMode.Single };
@@ -599,6 +615,88 @@ internal sealed class SettingsPages
         camerasPage.Children.Add(talkSection);
         camerasPage.Children.Add(mounts);
 
+        // Settings > Capture (docs/UX.md "Save picture"): where pictures go, their format, and share-safe names.
+        var capturePage = new StackPanel { Spacing = 12 };
+        var folderText = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 380, Opacity = 0.85 };
+        var chooseFolder = new Button { Content = "Choose\u2026" };
+        var resetFolder = new Button { Content = "Reset" };
+        var openFolder = new Button { Content = "Open pictures folder" };
+        var formatPicker = new ComboBox { Header = "Format", MinWidth = 160 };
+        foreach (PictureFormat f in Enum.GetValues<PictureFormat>())
+        {
+            formatPicker.Items.Add(new ComboBoxItem { Content = f.Title(), Tag = f });
+        }
+        var shareSafe = new CheckBox { Content = "Share-safe names" };
+        bool buildingCapture = false;
+
+        void RefreshCapture()
+        {
+            buildingCapture = true;
+            folderText.Text = viewer.Settings.PicturesFolder;
+            resetFolder.IsEnabled = viewer.Settings.PicturesFolder != ViewSettings.DefaultPicturesFolder;
+            formatPicker.SelectedIndex = (int)viewer.Settings.PictureFormat;
+            shareSafe.IsChecked = viewer.Settings.ShareSafePictureNames;
+            buildingCapture = false;
+        }
+
+        RefreshCapture();
+        chooseFolder.Click += async (_, _) =>
+        {
+            if (result.WindowHandle is not { } handle)
+            {
+                return;
+            }
+            var picker = new Windows.Storage.Pickers.FolderPicker { SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.PicturesLibrary };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, handle());
+            Windows.Storage.StorageFolder? folder = await picker.PickSingleFolderAsync();
+            if (folder is not null)
+            {
+                viewer.Settings.PicturesFolder = folder.Path;
+            }
+        };
+        resetFolder.Click += (_, _) => viewer.Settings.PicturesFolder = ViewSettings.DefaultPicturesFolder;
+        openFolder.Click += (_, _) =>
+        {
+            try
+            {
+                Directory.CreateDirectory(viewer.Settings.PicturesFolder);
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = viewer.Settings.PicturesFolder, UseShellExecute = true })?.Dispose();
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            {
+                AppLog.Warn($"the pictures folder could not be opened: {e.GetType().Name}");
+            }
+        };
+        formatPicker.SelectionChanged += (_, _) =>
+        {
+            if (!buildingCapture && formatPicker.SelectedItem is ComboBoxItem { Tag: PictureFormat chosenFormat })
+            {
+                viewer.Settings.PictureFormat = chosenFormat;
+            }
+        };
+        shareSafe.Click += (_, _) => viewer.Settings.ShareSafePictureNames = shareSafe.IsChecked == true;
+        Action refreshCapture = RefreshCapture;
+        viewer.Changed += refreshCapture;
+        var folderRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        folderRow.Children.Add(new TextBlock { Text = "Save pictures to", VerticalAlignment = VerticalAlignment.Center });
+        folderRow.Children.Add(folderText);
+        folderRow.Children.Add(chooseFolder);
+        folderRow.Children.Add(resetFolder);
+        capturePage.Children.Add(folderRow);
+        capturePage.Children.Add(openFolder);
+        capturePage.Children.Add(formatPicker);
+        capturePage.Children.Add(shareSafe);
+        capturePage.Children.Add(new TextBlock
+        {
+            Text = "Pictures and recordings are named with the time and the camera's name. With share-safe names the camera is called Camera A, so a file can be shared without saying where it came from. JPEG is saved at quality 0.9.",
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 560,
+            Opacity = 0.7,
+        });
+        // Recordings (docs/UX.md "Recording"): the same page, below the pictures.
+        capturePage.Children.Add(CaptureSettingsPage.Recordings(viewer, () => result.WindowHandle?.Invoke() ?? 0));
+
         var updatesPage = new StackPanel { Spacing = 8 };
         if (App.Instance.Updater is { } updater)
         {
@@ -618,7 +716,7 @@ internal sealed class SettingsPages
         result.Pages[SettingsSection.Devices] = devicesPage;
         result.Pages[SettingsSection.Cameras] = camerasPage;
         result.Pages[SettingsSection.AlertsAndCalls] = alertsPage;
-        result.Pages[SettingsSection.Capture] = CaptureSettingsPage.Build(viewer, windowHandle ?? (() => 0));
+        result.Pages[SettingsSection.Capture] = capturePage;
         result.Pages[SettingsSection.Updates] = updatesPage;
         result.Pages[SettingsSection.About] = aboutPage;
 
@@ -662,6 +760,7 @@ internal sealed class SettingsPages
             opened = false;
             viewer.Changed -= refresh;
             viewer.Changed -= refreshMounts;
+            viewer.Changed -= refreshCapture;
             viewer.Changed -= refreshCalls;
             StopFinding();
         };
@@ -677,6 +776,14 @@ internal sealed class SettingsPages
                 ComboBox picker = mountRows.First(r => r.Camera == camera).Picker;
                 picker.SelectedIndex = (int)mount;
             };
+            hooks.Capture = () => (folderText.Text, viewer.Settings.PictureFormat, shareSafe.IsChecked == true, resetFolder.IsEnabled);
+            hooks.ChooseFormat = format => formatPicker.SelectedIndex = (int)format;
+            hooks.SetShareSafe = on =>
+            {
+                shareSafe.IsChecked = on;
+                viewer.Settings.ShareSafePictureNames = on;
+            };
+            hooks.ResetFolder = () => viewer.Settings.PicturesFolder = ViewSettings.DefaultPicturesFolder;
             hooks.Form = () => (name.Text, host.Text, port.Value);
             hooks.Panel = () => (
                 finder.Visibility == Visibility.Visible,

@@ -18,10 +18,8 @@ namespace NvrView.App;
 /// <summary>The header items whose action lands later: their buttons, menu items and keys are in place and say so.</summary>
 internal static class TileActionStub
 {
-    /// <summary>Save picture and PTZ: not built yet (recording is built).</summary>
-    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.SavePicture
-        or TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens or TileHeaderItem.SavePictureAs
-        or TileHeaderItem.SaveZoomedArea or TileHeaderItem.SaveOriginalFisheye;
+    /// <summary>PTZ: not built yet (Save Picture and recording are built).</summary>
+    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens;
 
     /// <summary>"Save Picture is coming soon".</summary>
     public static string Message(string label) => $"{label.TrimEnd('…')} is coming soon";
@@ -32,10 +30,8 @@ internal sealed partial class StageView
     /// <summary>How long a short message stays over the stage, on the viewer's clock.</summary>
     public const double ToastSeconds = 2.5;
 
-    /// <summary>How long a message with a button stays (long enough to reach it).</summary>
-    public const double ActionToastSeconds = 6;
-
     private double? _toastHideAt;
+    private Action? _toastAction;
 
     /// <summary>What the header model needs to know about a tile: its camera's capabilities (the channels event) and its state. Null for an empty tile.</summary>
     internal TileHeaderTile? HeaderTileOf(StageTile t)
@@ -96,12 +92,17 @@ internal sealed partial class StageView
         }
         switch (item)
         {
-            case TileHeaderItem.Speaker:
-                bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
-                _viewer.ToggleListening(camera, ctrl && from is not null);
+            case TileHeaderItem.SavePicture:
+                _ = SavePictureAsync(t, PictureKind.View, ask: false);
                 break;
-            case TileHeaderItem.DismissAlert:
-                _viewer.DismissAlert(camera);
+            case TileHeaderItem.SavePictureAs:
+                _ = SavePictureAsync(t, PictureKind.View, ask: true);
+                break;
+            case TileHeaderItem.SaveZoomedArea:
+                _ = SavePictureAsync(t, PictureKind.ZoomedArea, ask: false);
+                break;
+            case TileHeaderItem.SaveOriginalFisheye:
+                _ = SavePictureAsync(t, PictureKind.OriginalFisheye, ask: false);
                 break;
             case TileHeaderItem.Record:
                 // In the call window's own tile, Record is the call recording.
@@ -119,6 +120,13 @@ internal sealed partial class StageView
                 break;
             case TileHeaderItem.RecordSub:
                 _viewer.Capture.StartLive(camera, RecordQuality.Sub);
+                break;
+            case TileHeaderItem.Speaker:
+                bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
+                _viewer.ToggleListening(camera, ctrl && from is not null);
+                break;
+            case TileHeaderItem.DismissAlert:
+                _viewer.DismissAlert(camera);
                 break;
             case TileHeaderItem.Conversation:
                 if (_viewer.Calls.CallFor(camera) is null)
@@ -370,35 +378,28 @@ internal sealed partial class StageView
     // ---- the short message over the stage ----
 
     /// <summary>Shows <paramref name="text"/> over the stage for a few seconds (on the viewer's clock).</summary>
-    public void ShowToast(string text, NoticeAction? action = null)
+    public void ShowToast(string text, string? actionTitle = null, Action? action = null)
     {
         _toastText.Text = text;
         AutomationProperties.SetName(_toast, text);
-        _toastHandler = action?.Handler;
-        _toastAction.Content = action?.Title ?? "";
-        _toastAction.Visibility = action is null ? Visibility.Collapsed : Visibility.Visible;
-        _toast.IsHitTestVisible = action is not null;
+        _toastAction = action;
+        _toastButton.Content = actionTitle;
+        _toastButton.Visibility = actionTitle is not null && action is not null ? Visibility.Visible : Visibility.Collapsed;
+        // A message with a button takes the pointer and stays longer.
+        _toast.IsHitTestVisible = _toastButton.Visibility == Visibility.Visible;
         _toast.Visibility = Visibility.Visible;
-        _toastHideAt = _viewer.Clock.Now + (action is null ? ToastSeconds : ActionToastSeconds);
+        _toastHideAt = _viewer.Clock.Now + (_toast.IsHitTestVisible ? ActionToastSeconds : ToastSeconds);
     }
 
-    /// <summary>The message's button, null when it has none (self-test).</summary>
-    public string? ToastActionTitle => _toast.Visibility == Visibility.Visible && _toastHandler is not null ? _toastAction.Content as string : null;
+    /// <summary>The title of the button on the message now, null when it has none (self-test).</summary>
+    public string? ToastActionTitle => _toast.Visibility == Visibility.Visible && _toastButton.Visibility == Visibility.Visible ? _toastButton.Content as string : null;
 
     /// <summary>Presses the message's button as a click does: its action runs and the message goes.</summary>
     public void PressToastAction()
     {
-        Action? handler = _toastHandler;
-        HideToast();
-        handler?.Invoke();
-    }
-
-    private void HideToast()
-    {
-        _toastHideAt = null;
-        _toastHandler = null;
-        _toast.Visibility = Visibility.Collapsed;
-        _toast.IsHitTestVisible = false;
+        Action? action = _toastAction;
+        _toastHideAt = 0;
+        action?.Invoke();
     }
 
     /// <summary>What the message says now, null when none shows (self-test).</summary>
@@ -408,7 +409,8 @@ internal sealed partial class StageView
     {
         if (_toastHideAt is { } at && now >= at)
         {
-            HideToast();
+            _toastHideAt = null;
+            _toast.Visibility = Visibility.Collapsed;
         }
     }
 }

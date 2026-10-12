@@ -127,9 +127,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture and recording are built on macOS (see "Save
-> picture" and "Recording") and planned on Windows; PTZ is not built yet:
-> its buttons and menu items are in place and say so (below).
+> the keys). Save picture and recording are built on both apps (see "Save
+> picture" and "Recording"); PTZ is not built yet: its buttons and menu
+> items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -171,11 +171,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** the PTZ pad, Presets and Lens (and, on Windows,
-  Save Picture and the long tail's save items) are shown in their final places
-  (so the layout and the overflow are the final ones), dimmed, with "coming
-  soon" in the tooltip. A click, the key (R) or the menu item
-  shows "Start Recording is coming soon" (and so on) over the stage for
+- **Not built yet:** the PTZ pad, Presets and Lens are shown in their final
+  places (so the layout and the overflow are the final ones), dimmed, with
+  "coming soon" in the tooltip. A click, the key or the menu item
+  shows "Presets is coming soon" (and so on) over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -197,8 +196,8 @@ Details settled while building it (macOS; Windows does the same except where
 - **Windows:** the header's buttons are real buttons (Tab reaches them while
   the header shows; a faded header takes no clicks), the Speaker button
   listens to several cameras with Ctrl-click, and the message over the
-  stage ("Save Picture is coming soon") is a small pill at the bottom,
-  announced to screen readers. Entrance is in its place in the menus but
+  stage ("Picture saved" with Show in folder, "Start Recording is coming soon")
+  is a small pill at the bottom, announced to screen readers. Entrance is in its place in the menus but
   unavailable, because Windows has no entrance insets yet. The Menu key and
   Shift+F10 open the selected tile's right-click menu at its header. The
   right-click menu is the model's list followed, after a separator, by the
@@ -255,11 +254,11 @@ overlay (Windows) so they can be discovered.
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
 > work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`); T and R work (Ctrl+Shift+R records the
-> selected tile's call while its call is open, and is R otherwise), the
-> picture keys say "… is coming soon"; there is no Camera menu (the window's
-> header has no menu bar: Stop all recordings and Open recordings folder are
-> in its "…" menu) and the Alt keys come with PTZ. They act on the selected tile,
+> Ctrl+Shift+R exist (`TileKeyMap`) and work (Ctrl+Shift+R records the
+> selected tile's call while its call is open, and is R otherwise); there is
+> no Camera menu (the window's header has no menu bar: Stop all recordings
+> and Open recordings folder are in its "…" menu) and the Alt keys come with
+> PTZ. They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -606,8 +605,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Save picture
 
-> **Built on macOS** (CAPTURE.md, "Save picture"); planned on Windows
-> (CAP-P2). Playback tiles come later.
+> **Built on both apps** (CAPTURE.md, "Save picture"). Playback tiles come
+> later.
 
 - **Where:** the header's camera button, the right-click menu, P (and
   Shift+P for Save Picture As…), the call window's tile, and later playback
@@ -622,12 +621,15 @@ stream on many tiles costs the device and this computer much more.
   `2026-10-11 17.02.03.250 Camera 1.png`; with "Share-safe names" the
   camera is `Camera A`. No metadata; an optional time and name label burned
   in, off by default.
-- **Settings (macOS):** Settings > Capture has "Save pictures to" (Choose…
+- **Settings:** Settings > Capture (both apps) has "Save pictures to" (Choose…
   and Reset), Format (PNG or JPEG) and "Share-safe names". Save Picture As…
   (Shift+P) opens a save panel in that folder with a Format menu; Open
-  Pictures Folder is in the Camera menu.
-- **Feedback:** a brief shutter flash on the tile (not under Reduce Motion)
-  and a "Picture saved"
+  Pictures Folder is in the Camera menu. On Windows, Save Picture As… opens
+  the system save dialog (it starts in the Pictures library, as the dialog
+  cannot be pointed at another folder) with PNG and JPEG choices, and Open
+  pictures folder is a button on the Capture page.
+- **Feedback:** on macOS a brief shutter flash on the tile (not under Reduce
+  Motion; not on Windows) and a "Picture saved"
   toast with Show in Finder or Show in Explorer. A failure names the file,
   not the folder path.
 
@@ -705,7 +707,8 @@ Stop all recordings and Open recordings folder (both are also in the
 header's "…" menu, Stop all only while one runs), and the settings are in
 Settings > Capture: "Save recordings to" (Choose… and Reset; Videos\nvrview
 by default), "Record from", "Stop a recording after (minutes)", "or when it
-reaches (GB)" and "Share-safe names". A given data directory or a test run
+reaches (GB)", below the pictures' settings; the pictures' "Share-safe
+names" applies to recordings too. A given data directory or a test run
 records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
@@ -1464,8 +1467,9 @@ section is left. A pane lists the sections, each in a scrolling page:
 - **Alerts & calls.** The corner of the detection symbols and of the call cards,
   calls in their own window and where those open, saved transcripts, and
   "Record calls" with its consent note ("Recording calls").
-- **Capture.** Where recordings go, "Record from", when a recording stops by
-  itself, and share-safe names ("Recording").
+- **Capture.** Where saved pictures go, their format and share-safe names
+  ("Save picture"), and below them where recordings go, "Record from" and
+  when a recording stops by itself ("Recording").
 - **Updates.** The update source, trusted keys, automatic checks, Check now.
 - **About.** The version and license.
 
