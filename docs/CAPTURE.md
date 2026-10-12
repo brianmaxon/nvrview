@@ -12,12 +12,11 @@
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
 > macOS and Windows the header, its menus and keys (PTZ actions say "coming
-> soon", and so does recording on Windows), Save picture, and the call
-> window's picture as a single fixed tile; in the core, the pure base
-> (`crates/capture`, K2) and the recorders behind a Rust API (K4, below),
-> and the C interface with its Swift and C# bindings (F5, ABI 3 minor 9,
-> below); on macOS, live and call recording with the app's AAC encoder
-> (M5, below). Windows recording is next (W5).
+> soon"), Save picture, and the call window's picture as a single fixed tile;
+> in the core, the pure base (`crates/capture`, K2) and the recorders behind
+> a Rust API (K4, below), and the C interface with its Swift and C# bindings
+> (F5, ABI 3 minor 9, below); live and call recording with the app's AAC
+> encoder on macOS (M5, below) and on Windows (W5, below).
 
 ## Implementation status (K2)
 
@@ -251,6 +250,62 @@ events', a keyframe first, the AAC decoding) and
 `capture-call-record-real-core` (a conversation's recording ended by the
 call: video and three audio tracks, only Conversation enabled, each
 decoding).
+
+## Implementation status (W5)
+
+The Windows app records the same way (UX.md "Recording", "Recording calls").
+What differs from M5:
+
+- **Encoder.** `AacCaptureEncoder` (NvrView.Video) behind `ICaptureEncoder`:
+  one AAC encoder MFT (`CLSID_AACMFTEncoder`, synchronous) per open track,
+  16-bit mono PCM at the track's rate in, raw AAC-LC units out at the
+  nearest of the bit rates the MFT offers to the one asked (96 kbps mono is
+  12000 bytes per second). The AudioSpecificConfig is the one in the output
+  type's user data (after the 12 bytes of the HEAACWAVEINFO extension), else
+  built from the format. The priming is measured once per process
+  (`AacRoundTrip.Priming`): an impulse at sample 4096 goes through the
+  encoder and the system's AAC decoder (`CLSID_CMSAACDecMFT`) and the
+  position it comes back at, less 4096, is reported, so it is the delay a
+  player sees (the macOS encoder reports its converter's prime info); 1024
+  if it cannot be measured. Measured on Windows 11 (the self-test's first
+  run): 0, with as many units as frames in (the MFT drops its own delay), so
+  the priming reported there is 0. Each frame is encoded on the recorder's thread
+  that hands it over and its units are answered at once, in order, through
+  `ICapture.RecordAudioEncoded`; a fresh input sample is made per frame
+  (the MFT may keep its input); a flushing `Close` ends the stream and
+  drains the MFT. At most 32 tracks are open.
+- **App.** `CaptureController` (NvrView.App) installs the encoder and sends
+  `CaptureConfigure` when the app starts (a test run or a given data
+  directory records into its own `Recordings` folder) and on every change of
+  the recordings folder, "Record from", the limits or "Share-safe names"
+  (settings kept in `view-settings.json`); live starts pass the camera's name
+  and the computer's UTC offset. `RecordingBoard`, `CaptureSettings` and
+  `RecordingText` (NvrView.Shell, with the macOS test vectors) are the pure
+  side. The window header lists the recordings; messages are toasts over
+  the stage with an optional button.
+- **Calls.** As on macOS: the recording and the transcript share a stem
+  (`CallRecordingFiles.SharedStem`, reserved when the recording starts),
+  "Record calls" starts the recording once the doorbell's tile is open, the
+  call ending ends it, and old call recordings in the Transcripts folder are
+  pruned to the newest 100 and 10 GB after each one ends
+  (`TranscriptStore.PruneRecordings`).
+- **Not built:** as on macOS, the per-doorbell Default, Always, Never and the
+  steps `capture-record-cap`, `capture-record-reconnect`,
+  `capture-record-survives-tile-close` and `capture-call-record-auto`.
+
+Tests: the pure pieces in `NvrView.Shell.Tests` (`CaptureRecordingsTests`:
+the settings JSON and its clamps, the pills, every limit's and end's
+message, the board, the shared stem and the pruning, `ToneCheck`, and
+`Mp4Inspector` on a built MP4; `Mp4Inspector` also reads the files the core
+writes in the C# smoke test), the pill's corner in `NvrView.Tiles.Tests`.
+Self-test on the real core against the mock (`SelfTest.Capture.cs`, the macOS
+IDs): `capture-encoder-priming` (the priming reported and measured, a 1 kHz
+tone through the encoder and the system's decoder: pitch and level),
+`capture-record-tile`, `capture-record-indicator`, `capture-record-disk-low`,
+`capture-record-main-limit`, `capture-record-real-core` (the file read
+back), `capture-call-record-button` (Ctrl+Shift+R in a call window) and
+`capture-call-record-real-core` (the call's four tracks, only Conversation
+enabled, ended with the call).
 
 ## Principles
 

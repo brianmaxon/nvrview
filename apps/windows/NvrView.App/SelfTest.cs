@@ -65,7 +65,7 @@
 //    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
 //    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
 //    manual clock; the tile menu holds none of the app-wide items; Settings is one window of its own
-//    with a pane of five sections, a section taller than the window scrolls to its last control, a
+//    with a pane of six sections, a section taller than the window scrolls to its last control, a
 //    second open brings the same window forward, its size is remembered, and it closes with the app;
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
@@ -1416,6 +1416,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         v.Transcripts.Folder = transcriptsBefore;
 
         await CallWindowSteps(v, stage, camera, device, clock, mic);
+        await CallRecordingEndsWithCall(v, camera);
 
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.
@@ -1813,13 +1814,8 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         stage.Split(SplitAxis.Row);
         bool fixedStill = !stage.IsFocused && stage.State.Tree.LeafCount == 1 && stage.Selected == tile;
         IReadOnlyList<TileHeaderItem> shownButtons = chrome.ShownButtons;
-        // Ctrl+Shift+R is the call recording, which is not built yet.
-        stage.ApplyAction(TileAction.ToggleRecording, tile);
-        string? toast = stage.ToastText;
-        clock.Advance(StageView.ToastSeconds + 0.1);
-        stage.Tick();
         Say($"call window tile menu: the model's {want.Count} items {menu.Take(want.Count).SequenceEqual(want)}, call items {callItems}, layout items [{string.Join(", ", layoutItems)}], " +
-            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}], Record Call: {toast ?? "nothing"}");
+            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}]");
         Expect(menu.SequenceEqual(want) && callItems, $"the call window tile's menu is not the header model's call menu: {string.Join(" / ", menu)}");
         Expect(layoutItems.Length == 0, $"the call window tile's menu offers {string.Join(", ", layoutItems)}");
         Expect(fixedStill, "focus or split changed the call window's single tile");
@@ -1828,7 +1824,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         bool Reachable(TileHeaderItem i) => shownButtons.Contains(i) || overflow.Any(e => e.Item == i);
         Expect(Reachable(TileHeaderItem.Speaker) && Reachable(TileHeaderItem.Quality), "the call window's header has no speaker or quality control, in the header or its \"...\" menu");
         Expect(!shownButtons.Contains(TileHeaderItem.SavePicture) || shownButtons.Contains(TileHeaderItem.Speaker), "the call window's header hides the speaker while Save Picture shows");
-        Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
+        await CallRecordButton(v, cw, camera, tile);
     }
 
     // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
@@ -1905,28 +1901,14 @@ internal sealed partial class SelfTest(App app, AppOptions options)
                 && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
             Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
             Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
-            // A button whose action is not built yet says so; so does R (Save Picture works: SavePictures).
-            At(1000);
-            chrome.PressHeader(TileHeaderItem.Record);
-            string? clicked = stage.ToastText;
-            clock.Advance(StageView.ToastSeconds + 0.1);
-            stage.Tick();
-            bool gone = stage.ToastText is null;
-            stage.Select(tile.Path);
-            stage.HandleKey(Windows.System.VirtualKey.R, false, false);
-            string? keyR = stage.ToastText;
-            clock.Advance(StageView.ToastSeconds + 0.1);
-            stage.Tick();
-            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, R {keyR ?? "nothing"}");
-            Expect(clicked == "Start Recording is coming soon" && gone, "Record's button did not say it is coming soon");
-            Expect(keyR == "Start Recording is coming soon", "R did not reach the header's actions");
+            // Every header action but PTZ's is built, and no mock camera moves: nothing is left to say "coming soon".
         }
         finally
         {
             chrome.ForceWidth(null);
             v.UseClock(new SystemViewerClock());
         }
-        await Task.CompletedTask;
+        await CaptureRecordSteps(v, stage, tile);
     }
 
     // The call card's picture: one more tile of this window's grid, drawn last from the camera's

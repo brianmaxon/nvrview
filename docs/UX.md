@@ -127,10 +127,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture is built on both apps (see "Save picture");
-> recording is built on macOS (see "Recording") and planned on Windows;
-> PTZ is not built yet: its buttons and menu items are in place and say so
-> (below).
+> the keys). Save picture and recording are built on both apps (see "Save
+> picture" and "Recording"); PTZ is not built yet: its buttons and menu
+> items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -172,11 +171,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** the PTZ pad, Presets and Lens (and, on Windows,
-  Record and the long tail's record items) are shown in their final places
-  (so the layout and the overflow are the final ones), dimmed, with "coming
-  soon" in the tooltip. A click, the key (R) or the menu item
-  shows "Start Recording is coming soon" (and so on) over the stage for
+- **Not built yet:** the PTZ pad, Presets and Lens are shown in their final
+  places (so the layout and the overflow are the final ones), dimmed, with
+  "coming soon" in the tooltip. A click, the key or the menu item
+  shows "Presets is coming soon" (and so on) over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -256,9 +254,11 @@ overlay (Windows) so they can be discovered.
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
 > work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`); P, Shift+P, Ctrl+Shift+P and T work, R and
-> Ctrl+Shift+R say "… is coming soon"; there is no Camera menu (the window's header has no menu bar) and
-> the Alt keys come with PTZ. They act on the selected tile,
+> Ctrl+Shift+R exist (`TileKeyMap`) and work (Ctrl+Shift+R records the
+> selected tile's call while its call is open, and is R otherwise); there is
+> no Camera menu (the window's header has no menu bar: Stop all recordings
+> and Open recordings folder are in its "…" menu) and the Alt keys come with
+> PTZ. They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -635,8 +635,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Recording
 
-> **Built on macOS** (CAPTURE.md, "Live recording", "Implementation status
-> (M5)"); Windows is CAP-W5.
+> **Built on both apps** (CAPTURE.md, "Live recording", "Implementation
+> status (M5, W5)").
 
 Recording saves a camera's live stream on this computer as an MP4 (video
 as received, the camera's audio).
@@ -696,6 +696,20 @@ Details settled while building it (macOS):
   file is there. Nothing is said for the recordings a quit stops.
 - **Toolbar:** "● N recording" while any runs; its menu lists them with
   Stop, then Stop All Recordings and Open Recordings Folder.
+
+Windows does the same with these differences: the pill is placed by
+`RecordingIndicator.PillCorner` (the top left where macOS would use the
+header's top right, and the sound badges keep clear of it), the message
+over the stage is a toast with an optional button ("Show in folder",
+"Record Sub-stream"; it stays 6 s instead of 2.5 s), the window header's
+"● N recording" is a button whose menu lists the recordings with Stop, then
+Stop all recordings and Open recordings folder (both are also in the
+header's "…" menu, Stop all only while one runs), and the settings are in
+Settings > Capture: "Save recordings to" (Choose… and Reset; Videos\nvrview
+by default), "Record from", "Stop a recording after (minutes)", "or when it
+reaches (GB)", below the pictures' settings; the pictures' "Share-safe
+names" applies to recordings too. A given data directory or a test run
+records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
 
@@ -1030,9 +1044,9 @@ Details settled while building it (Windows):
 
 ### Recording calls
 
-> **Built on macOS** (CAPTURE.md, "Recording calls", "Implementation status
-> (M5)"), except the per-doorbell Default, Always, Never: "Record calls" is
-> one setting for every doorbell. Windows is CAP-W5.
+> **Built on both apps** (CAPTURE.md, "Recording calls", "Implementation
+> status (M5, W5)"), except the per-doorbell Default, Always, Never: "Record
+> calls" is one setting for every doorbell.
 
 - **Setting:** Settings > Alerts > Doorbell calls, **"Record calls"**, off
   by default, and per doorbell Default, Always, or Never. Turning it on the
@@ -1467,9 +1481,11 @@ menu bar (docs/PARITY.md): this is a Windows-only part.
 - **Middle.** The app-wide quick actions: Find devices (opens Settings on
   Devices and searches the network), Edit layout (Ctrl+E, a toggle), Fill
   tiles (a toggle, per window, not kept), and Full screen (F).
-- **Right.** A spot reserved for a future "N recording" indicator (hidden until
-  recording is reported), Settings (Ctrl+,), and a "…" menu with the rest:
-  New window (Ctrl+N), Recordings (Ctrl+Alt+R), Show or Hide sidebar (S), Indicator corner, Show or
+- **Right.** The "● N recording" indicator (hidden until something records; a
+  button whose menu lists the recordings with Stop, then Stop all recordings
+  and Open recordings folder), Settings (Ctrl+,), and a "…" menu with the rest:
+  New window (Ctrl+N), Recordings (Ctrl+Alt+R), Stop all recordings (while one
+  runs), Open recordings folder, Show or Hide sidebar (S), Indicator corner, Show or
   Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
 - **Full screen.** The header is hidden and slides over the stage from the top
   edge like the sidebar does from the left: resting the pointer in a thin strip
@@ -1499,7 +1515,11 @@ section is left. A pane lists the sections, each in a scrolling page:
   talk-back (off until allowed; every use is logged), and for fisheye cameras
   the mount.
 - **Alerts & calls.** The corner of the detection symbols and of the call cards,
-  calls in their own window and where those open, and saved transcripts.
+  calls in their own window and where those open, saved transcripts, and
+  "Record calls" with its consent note ("Recording calls").
+- **Capture.** Where saved pictures go, their format and share-safe names
+  ("Save picture"), and below them where recordings go, "Record from" and
+  when a recording stops by itself ("Recording").
 - **Updates.** The update source, trusted keys, automatic checks, Check now.
 - **About.** The version and license.
 

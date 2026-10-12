@@ -299,9 +299,9 @@ cannot be produced or judged in a self-test.
 
 ## Recording calls
 
-> **Built** in the core (K4, F5) and on macOS (M5: the AAC encoder and the
-> call window's Record; CAPTURE.md, "Implementation status (M5)"); Windows
-> is CAP-W5.
+> **Built** in the core (K4, F5) and on both apps (M5, W5: the AAC encoder
+> and the call window's Record; CAPTURE.md, "Implementation status (M5)",
+> "(W5)").
 
 A recorded call holds the doorbell's video and three audio tracks in one
 alternate group, so a player plays one of them: **Conversation** (enabled,

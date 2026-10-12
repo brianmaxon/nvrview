@@ -3,8 +3,9 @@
 // to connect to: address, port, user, password; saving reconnects that device),
 // Cameras (each camera's options: where its calls open, unmute on ring, talk-back,
 // fisheye mount), Alerts & calls (the corners of the detection symbols and call
-// cards, calls in their own window, transcripts), Capture (where saved pictures go, their
-// format, share-safe names), Updates, and About. The password
+// cards, calls in their own window, transcripts, recording calls), Capture (where saved
+// pictures and recordings go, the picture format, when a recording stops, share-safe names;
+// CaptureSettingsPage has the recordings), Updates, and About. The password
 // goes straight to the credential store and is never shown again: leaving the box
 // empty when editing keeps the saved one. The new-device form opens with "Find
 // Devices on This Network": a search of the local network starts when the form is
@@ -535,6 +536,7 @@ internal sealed class SettingsPages
         alertsPage.Children.Add(windowRow);
         alertsPage.Children.Add(transcriptRow);
         alertsPage.Children.Add(transcriptNote);
+        alertsPage.Children.Add(CaptureSettingsPage.RecordCalls(viewer));
 
         // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
         // like the menu's choice; shown only when a connected camera reports a fisheye lens.
@@ -687,11 +689,13 @@ internal sealed class SettingsPages
         capturePage.Children.Add(shareSafe);
         capturePage.Children.Add(new TextBlock
         {
-            Text = "Pictures are named with the time and the camera's name. With share-safe names the camera is called Camera A, so a file can be shared without saying where it came from. JPEG is saved at quality 0.9.",
+            Text = "Pictures and recordings are named with the time and the camera's name. With share-safe names the camera is called Camera A, so a file can be shared without saying where it came from. JPEG is saved at quality 0.9.",
             TextWrapping = TextWrapping.Wrap,
             MaxWidth = 560,
             Opacity = 0.7,
         });
+        // Recordings (docs/UX.md "Recording"): the same page, below the pictures.
+        capturePage.Children.Add(CaptureSettingsPage.Recordings(viewer, () => result.WindowHandle?.Invoke() ?? 0));
 
         var updatesPage = new StackPanel { Spacing = 8 };
         if (App.Instance.Updater is { } updater)

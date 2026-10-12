@@ -64,6 +64,8 @@ internal sealed class CallCard : UserControl
     private readonly StackPanel _controls;
     private readonly Grid _picture = new();
     private readonly Border _hole = new() { Background = new SolidColorBrush(Colors.Transparent) };
+    private readonly TextBlock _pillText = new() { Foreground = new SolidColorBrush(Colors.White), FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Border _pill = new() { Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0xD9, 0xE0, 0x24, 0x24)), CornerRadius = new CornerRadius(8), Padding = new Thickness(7, 1, 7, 1), Visibility = Visibility.Collapsed, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _title = new() { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = new SolidColorBrush(Colors.White), TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _close = new() { Content = "✕", Padding = new Thickness(8, 2, 8, 2), MinWidth = 0, MinHeight = 0 };
     private readonly Button _pop = new() { Content = new FontIcon { Glyph = "\uE8A7", FontSize = 14 }, Padding = new Thickness(8, 2, 8, 2), MinWidth = 0, MinHeight = 0 };
@@ -92,16 +94,22 @@ internal sealed class CallCard : UserControl
         AutomationProperties.SetName(this, "Call");
 
         var header = new Grid { ColumnSpacing = 8 };
+        // The call recording's "● Recording 0:42" comes first.
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        _pill.Child = _pillText;
+        AutomationProperties.SetName(_pill, "Recording");
+        header.Children.Add(_pill);
+        Grid.SetColumn(_title, 1);
         header.Children.Add(_title);
-        Grid.SetColumn(_pop, 1);
+        Grid.SetColumn(_pop, 2);
         header.Children.Add(_pop);
-        Grid.SetColumn(_pin, 2);
+        Grid.SetColumn(_pin, 3);
         header.Children.Add(_pin);
-        Grid.SetColumn(_close, 3);
+        Grid.SetColumn(_close, 4);
         header.Children.Add(_close);
         AutomationProperties.SetName(_close, "End the call");
         ToolTipService.SetToolTip(_close, "End the call");
@@ -471,6 +479,9 @@ internal sealed class CallCard : UserControl
 
     public string TitleText => _title.Text;
 
+    /// <summary>The call bar's "● Recording 0:42" while the call is recorded, else null (self-test).</summary>
+    public string? RecordingPillText => _pill.Visibility == Visibility.Visible ? _pillText.Text : null;
+
     private void ReleaseTalk()
     {
         if (!_holding)
@@ -509,6 +520,15 @@ internal sealed class CallCard : UserControl
             string kind = call.Origin == CallOrigin.Conversation && call.Presses == 0 ? "Conversation" : "Doorbell";
             string presses = call.Presses > 1 ? $" · {call.Presses} presses" : "";
             _title.Text = $"{kind} · {_viewer.CameraName(Camera)} · {call.StartedAt.ToString("T", CultureInfo.CurrentCulture)}{presses}";
+            if (_viewer.Capture.CallRecording(Camera) is { } recording)
+            {
+                _pillText.Text = NvrView.Shell.RecordingText.CallPill(recording.DurationMs);
+                _pill.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                _pill.Visibility = Visibility.Collapsed;
+            }
             _unmute.Visibility = call.ShowsUnmute ? Visibility.Visible : Visibility.Collapsed;
             (IReadOnlyList<string> lines, string? note) = call.Captions();
             _captions.Text = string.Join("\n", lines);

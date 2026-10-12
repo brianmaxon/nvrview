@@ -128,6 +128,13 @@ public partial class App : Application
             new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
         _viewer.Transcripts = new TranscriptStore(Path.Combine(dataDir, "Transcripts"));
         _viewer.CallWindows = new CallWindows(_viewer, _host, () => ActiveViewerWindow, o.Background);
+        // Recordings: a test run or a given data directory records into its own folder; the messages go to the windows showing the camera.
+        if (o.DataDir is not null || o.SelfTest || o.StartupTest)
+        {
+            _viewer.Capture.FolderOverride = Path.Combine(dataDir, "Recordings");
+        }
+        _viewer.Capture.Notice = ShowRecordingNotice;
+        _viewer.Capture.Start();
         StartRecordings(ui, o, dataDir, memoryOnly);
         _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
         Updater = new Updater(
@@ -247,6 +254,31 @@ public partial class App : Application
             ? Path.Combine(dataDir, "Incidents")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "NvrView", "Incidents");
         Recordings.Start(downloads);
+    }
+
+    /// <summary>
+    /// A message about a recording over the stage of the windows showing the camera (the viewer windows and its call window), else
+    /// over the active window's.
+    /// </summary>
+    internal void ShowRecordingNotice(string text, CameraRef? camera, NoticeAction? action)
+    {
+        var stages = new List<StageView>();
+        if (camera is { } c)
+        {
+            stages.AddRange(_windows.Select(w => w.Stage).Where(s => s.Tiles.Any(t => !t.IsEmpty && t.Camera.ChannelKey == c.ChannelKey)));
+            if (_viewer?.CallWindows?.WindowFor(c) is { } callWindow)
+            {
+                stages.Add(callWindow.Stage);
+            }
+        }
+        if (stages.Count == 0 && ActiveViewerWindow is { } active)
+        {
+            stages.Add(active.Stage);
+        }
+        foreach (StageView stage in stages)
+        {
+            stage.ShowToast(text, action?.Title, action?.Handler);
+        }
     }
 
     /// <summary>Opens a window with its own content (behind the others and never activated in the self-tests).</summary>

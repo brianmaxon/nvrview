@@ -18,10 +18,8 @@ namespace NvrView.App;
 /// <summary>The header items whose action lands later: their buttons, menu items and keys are in place and say so.</summary>
 internal static class TileActionStub
 {
-    /// <summary>Recording and PTZ: not built yet.</summary>
-    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.Record
-        or TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens
-        or TileHeaderItem.RecordMain or TileHeaderItem.RecordSub;
+    /// <summary>PTZ: not built yet (Save Picture and recording are built).</summary>
+    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens;
 
     /// <summary>"Save Picture is coming soon".</summary>
     public static string Message(string label) => $"{label.TrimEnd('…')} is coming soon";
@@ -59,7 +57,7 @@ internal sealed partial class StageView
             Fisheye = _viewer.IsFisheye(camera),
             // A status over a picture that is still there ("Recovering" while a stream restarts) does not take the buttons away.
             Picture = StatusOf(t).Kind == TileMessage.None,
-            Recording = false,
+            Recording = FixedTile ? _viewer.Capture.CallRecording(camera) is not null : _viewer.Capture.IsRecorded(camera),
             Zoomed = zoomed || moved,
             Panned = !zoomed && !dewarped && Fills(t) && t.DigitalZoom.IsPanned,
             Alert = _viewer.Alerts.IsActive(camera),
@@ -105,6 +103,23 @@ internal sealed partial class StageView
                 break;
             case TileHeaderItem.SaveOriginalFisheye:
                 _ = SavePictureAsync(t, PictureKind.OriginalFisheye, ask: false);
+                break;
+            case TileHeaderItem.Record:
+                // In the call window's own tile, Record is the call recording.
+                if (FixedTile)
+                {
+                    _viewer.Capture.ToggleCall(camera);
+                }
+                else
+                {
+                    _viewer.Capture.ToggleLive(camera);
+                }
+                break;
+            case TileHeaderItem.RecordMain:
+                _viewer.Capture.StartLive(camera, RecordQuality.Main);
+                break;
+            case TileHeaderItem.RecordSub:
+                _viewer.Capture.StartLive(camera, RecordQuality.Sub);
                 break;
             case TileHeaderItem.Speaker:
                 bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
@@ -311,11 +326,23 @@ internal sealed partial class StageView
             TileAction.ToggleConversation => TileHeaderItem.Conversation,
             _ => null,
         };
+        if (item is TileHeaderItem.Record && !FixedTile && tile.CameraOrNone is { } camera && _viewer.Calls.CallFor(camera) is not null && CtrlShiftDown())
+        {
+            // Ctrl+Shift+R in a viewer window records the selected tile's call while its camera's call is open; R otherwise.
+            Interact();
+            _viewer.Capture.ToggleCall(camera);
+            RefreshAll();
+            return;
+        }
         if (item is { } i)
         {
             PerformHeaderItem(tile, i, null);
         }
     }
+
+    private static bool CtrlShiftDown() =>
+        InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down)
+        && InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(CoreVirtualKeyStates.Down);
 
     /// <summary>
     /// The tile keys alone (listen, capture, conversation, reset zoom) for the selected tile, without the window-level keys; the
@@ -366,6 +393,14 @@ internal sealed partial class StageView
 
     /// <summary>The title of the button on the message now, null when it has none (self-test).</summary>
     public string? ToastActionTitle => _toast.Visibility == Visibility.Visible && _toastButton.Visibility == Visibility.Visible ? _toastButton.Content as string : null;
+
+    /// <summary>Presses the message's button as a click does: its action runs and the message goes.</summary>
+    public void PressToastAction()
+    {
+        Action? action = _toastAction;
+        _toastHideAt = 0;
+        action?.Invoke();
+    }
 
     /// <summary>What the message says now, null when none shows (self-test).</summary>
     public string? ToastText => _toast.Visibility == Visibility.Visible ? _toastText.Text : null;

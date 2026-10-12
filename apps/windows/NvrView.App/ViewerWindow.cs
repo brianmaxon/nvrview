@@ -508,6 +508,8 @@ internal sealed class ViewerWindow
 
     private void OnViewerChanged()
     {
+        // The "N recording" spot follows the recordings.
+        UpdateHeaders();
         // An unedited All Cameras window follows devices connecting and channels
         // going on and offline. Rebuilding keeps the cameras that stay (the
         // leases are shared per camera, so their streams do not restart). Not
@@ -684,8 +686,8 @@ internal sealed class ViewerWindow
     public SettingsWindow OpenSettings(SettingsSection? section = null, bool findDevices = false) =>
         SettingsWindow.Open(_viewer, Program.Options.Development, section, findDevices, background: Program.Options.Background);
 
-    /// <summary>Recording is not reported yet: the header's "N recording" spot stays hidden.</summary>
-    public int RecordingCount => 0;
+    /// <summary>The recordings running now (the header's "N recording" spot hides at zero).</summary>
+    public int RecordingCount => _viewer.Capture.Board.Running.Count;
 
     /// <summary>
     /// An app-wide action from the header (docs/UX.md "Windows header"): what its button or menu item does, and what
@@ -730,6 +732,12 @@ internal sealed class ViewerWindow
                 break;
             case HeaderAction.Recordings:
                 App.Instance.OpenRecordings();
+                break;
+            case HeaderAction.StopAllRecordings:
+                _viewer.Capture.StopAll();
+                break;
+            case HeaderAction.OpenRecordingsFolder:
+                _viewer.Capture.OpenFolder();
                 break;
             case HeaderAction.CheckForUpdates:
                 App.Instance.Updater?.MenuAction();

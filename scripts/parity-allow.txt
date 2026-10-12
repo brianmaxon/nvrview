@@ -88,11 +88,3 @@ zoom-reset-key              macos    gap: the Windows self-test resets a digital
 playback-real-core           macos    gap: the Windows playback steps run on the fakes only; a decoded picture from a real playback is not checked on Windows yet
 playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
-capture-encoder-priming     macos    gap: Windows recording is CAP-W5
-capture-record-tile         macos    gap: Windows recording is CAP-W5
-capture-record-indicator    macos    gap: Windows recording is CAP-W5
-capture-record-disk-low     macos    gap: Windows recording is CAP-W5
-capture-record-main-limit   macos    gap: Windows recording is CAP-W5
-capture-call-record-button  macos    gap: Windows recording is CAP-W5
-capture-record-real-core    macos    gap: Windows recording is CAP-W5
-capture-call-record-real-core macos    gap: Windows recording is CAP-W5

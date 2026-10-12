@@ -11,6 +11,7 @@
 
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using NvrView.Shell;
 using NvrView.Tiles;
 
 namespace NvrView.App;
@@ -66,6 +67,24 @@ internal sealed class ViewSettingsFile
 
     /// <summary>Saved pictures name the camera "Camera A" (off by default).</summary>
     public bool ShareSafePictureNames { get; set; }
+
+    /// <summary>"Save recordings to" (docs/CAPTURE.md "Live recording"); absent: the Videos folder's nvrview folder.</summary>
+    public string? RecordingsFolder { get; set; }
+
+    /// <summary>"Record from": main (default) or sub.</summary>
+    public string? RecordFrom { get; set; }
+
+    /// <summary>"Stop after" in minutes; absent: 60.</summary>
+    public int? MaxRecordingMinutes { get; set; }
+
+    /// <summary>"or at" in gigabytes (decimal); absent: 4.</summary>
+    public double? MaxRecordingGB { get; set; }
+
+    /// <summary>"Record calls": a doorbell call is recorded from the moment it opens (off by default).</summary>
+    public bool RecordCalls { get; set; }
+
+    /// <summary>The consent note was shown (the first time "Record calls" is turned on).</summary>
+    public bool RecordCallsConsentShown { get; set; }
 }
 
 [JsonSerializable(typeof(ViewSettingsFile))]
@@ -91,6 +110,12 @@ internal sealed class ViewSettings(string? file)
     private WindowRect? _callFrame;
     private WindowRect? _settingsFrame;
     private bool _callOnTop = true;
+    private string? _recordingsFolder;
+    private RecordQuality _recordFrom = RecordQuality.Main;
+    private int _maxRecordingMinutes = 60;
+    private double _maxRecordingGB = 4;
+    private bool _recordCalls;
+    private bool _recordCallsConsent;
 
     private static string MountKey(CameraRef camera) => $"{camera.Device}:{camera.Channel}";
 
@@ -402,7 +427,102 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
-    /// <summary>Raised on the UI thread after a setting changes.
+    /// <summary>Where this computer's recordings go; the Videos folder's "nvrview" folder until the user chooses (docs/CAPTURE.md "Live recording").</summary>
+    public string RecordingsFolder
+    {
+        get
+        {
+            Load();
+            return _recordingsFolder is { Length: > 0 } f && Path.IsPathFullyQualified(f) ? f : DefaultRecordingsFolder;
+        }
+        set
+        {
+            Load();
+            string? v = value == DefaultRecordingsFolder || value.Length == 0 ? null : value;
+            if (_recordingsFolder == v)
+            {
+                return;
+            }
+            _recordingsFolder = v;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The Videos folder's nvrview folder.</summary>
+    public static string DefaultRecordingsFolder =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos) is { Length: > 0 } v ? v
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Videos"), "nvrview");
+
+    /// <summary>"Record from": the stream a recording takes.</summary>
+    public RecordQuality RecordFrom
+    {
+        get
+        {
+            Load();
+            return _recordFrom;
+        }
+        set => Change(ref _recordFrom, value);
+    }
+
+    /// <summary>"Stop after", in minutes (1 to 720).</summary>
+    public int MaxRecordingMinutes
+    {
+        get
+        {
+            Load();
+            return _maxRecordingMinutes;
+        }
+        set => Change(ref _maxRecordingMinutes, Math.Clamp(value, CaptureSettings.MinMinutes, CaptureSettings.MaxMinutes));
+    }
+
+    /// <summary>"or at", in gigabytes (0.1 to 64).</summary>
+    public double MaxRecordingGB
+    {
+        get
+        {
+            Load();
+            return _maxRecordingGB;
+        }
+        set => Change(ref _maxRecordingGB, Math.Round(Math.Clamp(value, CaptureSettings.MinBytes / 1e9, CaptureSettings.MaxBytes / 1e9), 1));
+    }
+
+    /// <summary>"Record calls": a doorbell call is recorded from the moment it opens.</summary>
+    public bool RecordCalls
+    {
+        get
+        {
+            Load();
+            return _recordCalls;
+        }
+        set => Change(ref _recordCalls, value);
+    }
+
+    /// <summary>The consent note was shown.</summary>
+    public bool RecordCallsConsentShown
+    {
+        get
+        {
+            Load();
+            return _recordCallsConsent;
+        }
+        set => Change(ref _recordCallsConsent, value);
+    }
+
+    // Sets a field, saves, and raises Changed, when the value is new.
+    private void Change<T>(ref T field, T value)
+    {
+        Load();
+        if (EqualityComparer<T>.Default.Equals(field, value))
+        {
+            return;
+        }
+        field = value;
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Raised on the UI thread after a setting changes.</summary>
     public event Action? Changed;
 
     public ChromeCorner IndicatorCorner
@@ -480,6 +600,12 @@ internal sealed class ViewSettings(string? file)
             _callFrame = read?.CallWindowFrame is { Length: 4 } f && f.All(double.IsFinite) && f[2] > 0 && f[3] > 0 ? new WindowRect(f[0], f[1], f[2], f[3]) : null;
             _settingsFrame = read?.SettingsWindowFrame is { Length: 4 } sf && sf.All(double.IsFinite) && sf[2] > 0 && sf[3] > 0 ? new WindowRect(sf[0], sf[1], sf[2], sf[3]) : null;
             _callOnTop = read?.CallWindowOnTop ?? true;
+            _recordingsFolder = read?.RecordingsFolder;
+            _recordFrom = RecordQualityNames.Parse(read?.RecordFrom) ?? RecordQuality.Main;
+            _maxRecordingMinutes = Math.Clamp(read?.MaxRecordingMinutes ?? 60, CaptureSettings.MinMinutes, CaptureSettings.MaxMinutes);
+            _maxRecordingGB = Math.Clamp(read?.MaxRecordingGB ?? 4, CaptureSettings.MinBytes / 1e9, CaptureSettings.MaxBytes / 1e9);
+            _recordCalls = read?.RecordCalls ?? false;
+            _recordCallsConsent = read?.RecordCallsConsentShown ?? false;
         }
         catch (Exception e) when (e is JsonException or IOException)
         {
@@ -517,6 +643,12 @@ internal sealed class ViewSettings(string? file)
                     CallWindowFrame = _callFrame is { } fr ? [fr.X, fr.Y, fr.Width, fr.Height] : null,
                     SettingsWindowFrame = _settingsFrame is { } sw ? [sw.X, sw.Y, sw.Width, sw.Height] : null,
                     CallWindowOnTop = _callOnTop ? null : false,
+                    RecordingsFolder = _recordingsFolder,
+                    RecordFrom = _recordFrom == RecordQuality.Main ? null : _recordFrom.Name(),
+                    MaxRecordingMinutes = _maxRecordingMinutes == 60 ? null : _maxRecordingMinutes,
+                    MaxRecordingGB = _maxRecordingGB == 4 ? null : _maxRecordingGB,
+                    RecordCalls = _recordCalls,
+                    RecordCallsConsentShown = _recordCallsConsent,
                 }, ViewSettingsJson.Default.ViewSettingsFile);
                 s.Flush(flushToDisk: true);
             }
