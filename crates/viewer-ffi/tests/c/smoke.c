@@ -423,7 +423,15 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     for (int i = 0; i < 2000; i++) {
         free(events);
         events = query_json(core, nv_recordings_events, query);
-        if (events != NULL && strstr(events, "\"kind\"") != NULL &&
+        /* Done once the index is complete (both cameras' events, no day
+         * pending, the lane idle), not at the first event: playback and
+         * the incident list below rely on all of it. */
+        char *status = query_json(core, status_fn, NULL);
+        bool filled = status != NULL && strstr(status, "\"state\":\"idle\"") != NULL &&
+                      strstr(status, "\"pending_days\":0") != NULL;
+        free(status);
+        if (filled && events != NULL && strstr(events, "\"kind\"") != NULL &&
+            strstr(events, "\"channel\":0") != NULL && strstr(events, "\"channel\":1") != NULL &&
             atomic_load(&g_rec_changed) > 0) {
             break;
         }
@@ -464,7 +472,17 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     }
 
     /* Incidents: the newest, renamed, then locked. */
-    char *incidents = query_json(core, nv_incidents_get, query);
+    char *incidents = NULL;
+    /* Incidents are grouped after the index settles and announced by an
+     * event, so ask until the list has one. */
+    for (int i = 0; i < 2000; i++) {
+        free(incidents);
+        incidents = query_json(core, nv_incidents_get, query);
+        if (incidents != NULL && strstr(incidents, "\"key\"") != NULL) {
+            break;
+        }
+        sleep_ms(10);
+    }
     if (incidents == NULL || !string_member(incidents, "key", incident, sizeof incident)) {
         problem("nv_incidents_get");
         free(incidents);

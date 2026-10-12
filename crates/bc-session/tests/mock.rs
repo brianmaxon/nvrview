@@ -157,3 +157,34 @@ async fn no_detection_subscription_when_turned_off() {
     assert_eq!(nvr.alarm_subscribers(), 0);
     s.close().await;
 }
+
+/// A subscription made while the session ends for good (the login is
+/// refused) must end too, whichever side wins the race: the supervisor
+/// closing its request channel, or the subscriber's request landing in it.
+/// The subscriber runs on its own thread so the two really are concurrent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscription_racing_a_refused_login_still_ends() {
+    use bc_protocol::stream::StreamTier;
+    let rt = tokio::runtime::Handle::current();
+    for _ in 0..300 {
+        let nvr = spawn_mock(1);
+        let s = std::sync::Arc::new(session(&nvr, "wrong-password"));
+        let subscriber = {
+            let (s, rt) = (s.clone(), rt.clone());
+            std::thread::spawn(move || {
+                let mut sub = rt.block_on(s.subscribe(0, StreamTier::Sub)).ok()?;
+                // The 60 s only bounds a hang if the bug is back; a correct
+                // run ends as soon as the refusal is processed.
+                Some(rt.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(60), sub.recv()).await
+                }))
+            })
+        };
+        let ended = tokio::task::spawn_blocking(move || subscriber.join().unwrap())
+            .await
+            .unwrap();
+        if let Some(r) = ended {
+            assert!(r.expect("the subscription ended").is_none());
+        }
+    }
+}
