@@ -405,14 +405,21 @@ internal sealed class TileChrome
 
     public Grid Root { get; }
 
+    /// <summary>Where <see cref="Place"/> last put the chrome (its outline and header), in the stage's units (self-test).</summary>
+    public (float X, float Y, float Width, float Height) Placed => (_x, _y, _w, _h);
+
     /// <summary>The header's opacity target (hover), 0 or 1.</summary>
     public bool HeaderShown { get; private set; }
 
-    /// <summary>Follows the tile's rectangle (published by the render thread). Per frame; allocation-free.</summary>
+    /// <summary>
+    /// Follows the tile's area (published by the render thread): the whole cell, also in focus and full screen,
+    /// not the fitted picture, so the outline and header belong to the tile as on macOS whatever the zoom or
+    /// Fill. Per frame; allocation-free.
+    /// </summary>
     public void Place()
     {
         StageTile t = Tile;
-        bool visible = t.Visible && t.Width > 1 && t.Height > 1;
+        bool visible = t.Visible && t.FrameWidth > 1 && t.FrameHeight > 1;
         Visibility v = visible ? Visibility.Visible : Visibility.Collapsed;
         if (Root.Visibility != v)
         {
@@ -422,7 +429,7 @@ internal sealed class TileChrome
         {
             return;
         }
-        float x = t.X, y = t.Y, w = _forcedWidth ?? t.Width, h = t.Height;
+        float x = t.FrameX, y = t.FrameY, w = _forcedWidth ?? t.FrameWidth, h = t.FrameHeight;
         if (x != _x || y != _y)
         {
             Root.Translation = new Vector3(x, y, 0);
@@ -484,7 +491,7 @@ internal sealed class TileChrome
             _mapVisible = visible;
             _map.Width = Math.Max(frame.Width, 0);
             _map.Height = Math.Max(frame.Height, 0);
-            _map.Translation = new Vector3((float)(frame.X - t.X), (float)(frame.Y - t.Y), 0);
+            _map.Translation = new Vector3((float)(frame.X - _x), (float)(frame.Y - _y), 0);
             UnitRect r = ZoomMap.Region(visible, Math.Max(frame.Width - 2, 0), Math.Max(frame.Height - 2, 0));
             _mapRegion.Width = r.Width;
             _mapRegion.Height = r.Height;

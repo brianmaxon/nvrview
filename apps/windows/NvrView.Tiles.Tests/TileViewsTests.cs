@@ -1,4 +1,4 @@
-// Tests of a window's picture settings per camera (NvrView.Tiles/TileViews.cs) and the filled crop's pan
+// Tests of a window's picture settings per tile (NvrView.Tiles/TileViews.cs), tile identities and the filled crop's pan
 // at 1x (Zoom.cs). The vectors are fixtures/synthetic/tile-views.json (copied beside the test binary), which
 // the Mac app's NVRCoreTests (TileViewsTests.swift) reads too; the saved form is tested in NvrView.Shell.Tests.
 
@@ -14,7 +14,8 @@ internal static class TileViewsTests
         ("tile views: the limit matches the vectors", LimitMatches),
         ("tile views: fill pan vectors", PanVectors),
         ("tile views: effective fill vectors", FillVectors),
-        ("tile views: the cameras changed longest ago go first", Bound),
+        ("tile views: the tiles changed longest ago go first", Bound),
+        ("tile views: tile identity vectors", TileIdVectors),
         ("tile views: read back clamped and bounded", ReadBack),
     ];
 
@@ -107,6 +108,20 @@ internal static class TileViewsTests
         }
     }
 
+    private static void TileIdVectors()
+    {
+        using JsonDocument doc = Vectors();
+        JsonElement cases = doc.RootElement.GetProperty("tileIDs");
+        Check.True(cases.GetArrayLength() >= 5, "the vectors have their cases");
+        foreach (JsonElement c in cases.EnumerateArray())
+        {
+            string name = c.GetProperty("name").GetString()!;
+            List<string?> have = [.. c.GetProperty("have").EnumerateArray().Select(e => e.ValueKind == JsonValueKind.String ? e.GetString() : null)];
+            string want = string.Join(", ", c.GetProperty("want").EnumerateArray().Select(e => e.GetString()));
+            Check.Equal(want, string.Join(", ", TileIds.Assign(have)), name);
+        }
+    }
+
     private static void Bound()
     {
         var views = new TileViews<int>();
@@ -116,7 +131,7 @@ internal static class TileViewsTests
             views.SetZoom(i, new TileZoom(2, 0.5, 0.5));
         }
         Check.Equal(limit, views.Count, "full");
-        // Changing camera 0 again makes it the newest.
+        // Changing tile 0 again makes it the newest.
         views.SetFill(0, true);
         views.SetZoom(limit, new TileZoom(3, 0.5, 0.5));
         Check.Equal(limit, views.Count, "still full");

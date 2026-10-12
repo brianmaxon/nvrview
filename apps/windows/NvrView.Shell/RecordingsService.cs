@@ -16,8 +16,11 @@ using NvrView.Interop;
 
 namespace NvrView.Shell;
 
-/// <summary>Which cameras of a device the user lets the recordings screens search (saved between launches).</summary>
-public sealed record RecordingsEnablement(string Device, IReadOnlyList<RecordingCamera> Cameras);
+/// <summary>
+/// Which cameras of a device the user lets the recordings screens search, and which listen for sounds
+/// (<c>nv_sound_watch</c>), saved between launches.
+/// </summary>
+public sealed record RecordingsEnablement(string Device, IReadOnlyList<RecordingCamera> Cameras, IReadOnlyList<RecordingCamera>? Listen = null);
 
 /// <summary>Keeps the searched cameras in <c>recordings-cameras.json</c>; the core does not keep them.</summary>
 public sealed class RecordingsEnablementStore(string path)
@@ -35,7 +38,10 @@ public sealed class RecordingsEnablementStore(string path)
             if (n is JsonObject o && o["device"] is JsonValue d && d.TryGetValue(out string? device) && o["cameras"] is JsonArray cams)
             {
                 RecordingCamera[] cameras = [.. cams.Select(c => c is null ? null : CameraOf(c)).OfType<RecordingCamera>()];
-                list.Add(new RecordingsEnablement(device, cameras));
+                RecordingCamera[]? listen = o["listen"] is JsonArray heard
+                    ? [.. heard.Select(c => c is null ? null : CameraOf(c)).OfType<RecordingCamera>()]
+                    : null;
+                list.Add(new RecordingsEnablement(device, cameras, listen));
             }
         }
         return list;
@@ -49,10 +55,18 @@ public sealed class RecordingsEnablementStore(string path)
 
     /// <summary>Writes the choices whole.</summary>
     public void Save(IEnumerable<RecordingsEnablement> all) =>
-        JsonFile.Write(path, new JsonArray([.. all.Select(e => (JsonNode?)new JsonObject
+        JsonFile.Write(path, new JsonArray([.. all.Select(e =>
         {
-            ["device"] = e.Device,
-            ["cameras"] = new JsonArray([.. e.Cameras.Select(c => JsonNode.Parse(c.Json))]),
+            var o = new JsonObject
+            {
+                ["device"] = e.Device,
+                ["cameras"] = new JsonArray([.. e.Cameras.Select(c => JsonNode.Parse(c.Json))]),
+            };
+            if (e.Listen is { Count: > 0 } listen)
+            {
+                o["listen"] = new JsonArray([.. listen.Select(c => JsonNode.Parse(c.Json))]);
+            }
+            return (JsonNode?)o;
         })]).ToJsonString(JsonFile.Pretty));
 }
 
@@ -140,6 +154,12 @@ public sealed class RecordingsService
 
     /// <summary>The searched cameras, by device key.</summary>
     public Dictionary<string, List<RecordingCamera>> Enabled { get; } = [];
+
+    /// <summary>The cameras that listen for sounds, by device key.</summary>
+    public Dictionary<string, List<RecordingCamera>> Listening { get; } = [];
+
+    /// <summary>Each listening camera's latest <c>sound_watch</c> state and reason.</summary>
+    public Dictionary<RecordingCamera, (string State, string? Reason)> ListenStates { get; } = [];
 
     /// <summary>Each enabled device's search lane: idle, busy, waiting_device, ended.</summary>
     public Dictionary<string, (string State, int PendingDays)> IndexStates { get; } = [];
@@ -238,6 +258,10 @@ public sealed class RecordingsService
             {
                 Enabled[e.Device] = [.. e.Cameras];
                 ApplyEnablement(e.Device);
+            }
+            foreach (RecordingCamera c in e.Listen ?? [])
+            {
+                SetListening(c, true, save: false);
             }
         }
         ReloadGroups();
@@ -359,11 +383,98 @@ public sealed class RecordingsService
     }
 
     private void SaveEnablement() =>
-        _store?.Save(Enabled.Keys.Order(StringComparer.Ordinal).Select(k => new RecordingsEnablement(k, Enabled[k])));
+        _store?.Save(Enabled.Keys.Union(Listening.Keys).Order(StringComparer.Ordinal).Select(k => new RecordingsEnablement(
+            k, Enabled.TryGetValue(k, out List<RecordingCamera>? on) ? on : [],
+            Listening.TryGetValue(k, out List<RecordingCamera>? heard) && heard.Count > 0 ? heard : null)));
+
+    // ---- listening for sounds ----
+
+    /// <summary>Whether a camera listens for sounds.</summary>
+    public bool IsListening(RecordingCamera camera) => Listening.TryGetValue(camera.Device, out List<RecordingCamera>? l) && l.Contains(camera);
+
+    /// <summary>Every camera that listens for sounds.</summary>
+    public List<RecordingCamera> ListeningCameras => [.. Listening.Keys.Order(StringComparer.Ordinal).SelectMany(k => Listening[k])];
+
+    /// <summary>
+    /// Turns listening for sounds on or off for a camera (<c>nv_sound_watch</c>: its sub-stream stays open with no
+    /// tile; at most four per device). Returns false (with <see cref="Notice"/> set) when it was refused.
+    /// </summary>
+    public bool SetListening(RecordingCamera camera, bool on, bool save = true)
+    {
+        if (on && !SoundListening.CanAdd(camera, ListeningCameras))
+        {
+            Notice = $"At most {SoundListening.MaxPerDevice} cameras of a device listen for sounds";
+            return false;
+        }
+        // The list changes before the call: the core's sound_watch event may arrive during it (the fake sends it
+        // at once) and is kept only for a camera on the list.
+        bool had = IsListening(camera);
+        SetListed(camera, on);
+        if (Usable && _core is IEditSound sound)
+        {
+            try
+            {
+                sound.SoundWatch(camera.Json, on);
+            }
+            catch (NvException e) when (on)
+            {
+                SetListed(camera, had);
+                Notice = e.Status == NvStatus.Limit
+                    ? "Too many cameras listen for sounds"
+                    : $"Could not listen to this camera {StatusText(e)}";
+                return false;
+            }
+            catch (NvException)
+            {
+            }
+        }
+        if (save)
+        {
+            SaveEnablement();
+        }
+        Changed();
+        return true;
+    }
+
+    private void SetListed(RecordingCamera camera, bool on)
+    {
+        List<RecordingCamera> list = Listening.TryGetValue(camera.Device, out List<RecordingCamera>? l) ? l : [];
+        if (on && !list.Contains(camera))
+        {
+            list.Add(camera);
+        }
+        if (!on)
+        {
+            list.Remove(camera);
+            ListenStates.Remove(camera);
+        }
+        if (list.Count == 0)
+        {
+            Listening.Remove(camera.Device);
+        }
+        else
+        {
+            Listening[camera.Device] = list;
+        }
+    }
+
+    /// <summary>Loudness lanes for <paramref name="cameras"/> over [start, end] (memory only).</summary>
+    public LoudnessAnswer? Loudness(long start, long end, long bucket, IReadOnlyList<RecordingCamera> cameras) =>
+        cameras.Count == 0 || _core is not IEditSound sound ? null
+            : Query(() => sound.RecordingsLoudness(LoudnessScale.Query(start, end, bucket, cameras)), LoudnessAnswer.Parse);
 
     /// <summary>The core named a device differently (first connection): its cameras follow.</summary>
     public void Rekey(string old, string next)
     {
+        if (old != next && Listening.TryGetValue(old, out List<RecordingCamera>? heard))
+        {
+            foreach (RecordingCamera c in heard.ToList())
+            {
+                SetListening(c, false, save: false);
+                SetListening(c with { Device = next }, true, save: false);
+            }
+            SaveEnablement();
+        }
         if (old == next || !Enabled.Remove(old, out List<RecordingCamera>? cams))
         {
             return;
@@ -387,6 +498,13 @@ public sealed class RecordingsService
     /// <summary>A device the user removed is no longer searched.</summary>
     public void DeviceRemoved(string key)
     {
+        if (Listening.TryGetValue(key, out List<RecordingCamera>? heard))
+        {
+            foreach (RecordingCamera c in heard.ToList())
+            {
+                SetListening(c, false);
+            }
+        }
         if (Enabled.ContainsKey(key))
         {
             SetEnabled(key, []);
@@ -1004,6 +1122,13 @@ public sealed class RecordingsService
                 else
                 {
                     _publishScheduled = true;
+                }
+                break;
+            case RecordingsEvent.SoundWatch w:
+                if (IsListening(w.Camera))
+                {
+                    ListenStates[w.Camera] = (w.State, w.Reason);
+                    Changed();
                 }
                 break;
             case RecordingsEvent.DownloadRemoved r:

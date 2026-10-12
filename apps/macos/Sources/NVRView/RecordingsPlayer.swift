@@ -140,12 +140,7 @@ final class RecordingsPlayer {
             startTimer()
             play()
         } catch {
-            message = switch error {
-            case .limit: "Too many cameras or playbacks to play this"
-            case .unsupported: "This device cannot play its recordings"
-            case .invalidArgument: "These cameras cannot be played (are they still searched?)"
-            default: "The recording could not be played (status \(error.code))"
-            }
+            message = PlaybackOpenMessage.text(error)
         }
     }
 

@@ -1,5 +1,5 @@
 {
-  "about": "Shared vectors for a window's picture settings per camera (docs/UX.md 'Fill Tiles'): read by apps/macos NVRCoreTests (TileViewsTests.swift) and apps/windows NvrView.Tiles.Tests (TileViewsTests.cs) and NvrView.Shell.Tests. 'pan': TileZoom at 1x on a filled picture: 'zoom' and 'result' are [scale, center x, center y] (fractions of the picture), 'drag' is in tile units (the picture follows), 'zoomTo' zooms around the tile's middle instead, 'visible' is the part of the picture shown [x, y, width, height]. 'fill': operations on an empty window ('window' sets the window's Fill Tiles, 'tile' a camera's own choice, 'zoom' a camera's [scale, x, y]), then each camera's effective fill, the choices kept, whether the switch is mixed, and how many cameras are kept. 'saved': windows.json members of one window, and what is read back: the window's fill and the entries, oldest first, as [device, channel, lens, scale, x, y, fill or null].",
+  "about": "Shared vectors for a window's picture settings per tile (docs/UX.md 'Digital zoom', 'Fill Tiles'): read by apps/macos NVRCoreTests (TileViewsTests.swift) and apps/windows NvrView.Tiles.Tests (TileViewsTests.cs) and NvrView.Shell.Tests. 'pan': TileZoom at 1x on a filled picture: 'zoom' and 'result' are [scale, center x, center y] (fractions of the picture), 'drag' is in tile units (the picture follows), 'zoomTo' zooms around the tile's middle instead, 'visible' is the part of the picture shown [x, y, width, height]. 'fill': operations on an empty window ('window' sets the window's Fill Tiles, 'tile' a tile's own choice, 'zoom' a tile's [scale, x, y]), then each tile's effective fill, the choices kept, whether the switch is mixed, and how many tiles are kept. 'tileIDs': the tile identities leaves have in reading order (null: none; a number: not a string) and the identities they get. 'saved': windows.json members of one window, and what is read back: the window's fill and the entries, oldest first, as [layout, tile, device, channel, lens, scale, x, y, fill or null]. 'migrate': a window saved in the old per-camera form ('tileViews'), the tiles of its layout in reading order as [tile, device, channel, lens] (device null: an empty tile), and the per-tile entries the views become, as in 'saved'.",
   "limit": 256,
   "pan": [
     {
@@ -502,9 +502,485 @@
       "count": 0
     }
   ],
+  "tileIDs": [
+    {
+      "name": "a layout stored before tiles had identities",
+      "have": [
+        null,
+        null,
+        null
+      ],
+      "want": [
+        "t0",
+        "t1",
+        "t2"
+      ]
+    },
+    {
+      "name": "identities are kept",
+      "have": [
+        "t4",
+        "t0",
+        "x"
+      ],
+      "want": [
+        "t4",
+        "t0",
+        "x"
+      ]
+    },
+    {
+      "name": "a new tile after a split takes its place's number",
+      "have": [
+        "t0",
+        null,
+        "t1"
+      ],
+      "want": [
+        "t0",
+        "t1.1",
+        "t1"
+      ]
+    },
+    {
+      "name": "a repeated identity is given to the first tile only",
+      "have": [
+        "t0",
+        "t0",
+        null
+      ],
+      "want": [
+        "t0",
+        "t1",
+        "t2"
+      ]
+    },
+    {
+      "name": "unusable identities are replaced",
+      "have": [
+        "",
+        7,
+        "t1"
+      ],
+      "want": [
+        "t0",
+        "t1.1",
+        "t1"
+      ]
+    },
+    {
+      "name": "a number already taken twice over",
+      "have": [
+        null,
+        "t0",
+        "t0.1"
+      ],
+      "want": [
+        "t0.2",
+        "t0",
+        "t0.1"
+      ]
+    },
+    {
+      "name": "too long",
+      "have": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "want": [
+        "t0",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ]
+    }
+  ],
   "saved": [
     {
-      "name": "a filled window with a zoom and a fitted tile",
+      "name": "a filled window with a zoomed tile and a fitted tile",
+      "window": {
+        "fill": true,
+        "tiles": [
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            },
+            "scale": 2,
+            "x": 0.25,
+            "y": 0.75
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 3,
+              "lens": 1
+            },
+            "fill": false
+          }
+        ]
+      },
+      "fill": true,
+      "entries": [
+        [
+          "layout:layout-1",
+          "t0",
+          "nvr-a",
+          2,
+          0,
+          2,
+          0.25,
+          0.75,
+          null
+        ],
+        [
+          "layout:layout-1",
+          "t1",
+          "nvr-a",
+          3,
+          1,
+          1,
+          0.5,
+          0.5,
+          false
+        ]
+      ]
+    },
+    {
+      "name": "two tiles of one camera, and another layout's tile",
+      "window": {
+        "tiles": [
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            },
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            },
+            "scale": 4,
+            "x": 0.1,
+            "y": 0.9
+          },
+          {
+            "layout": "group:group-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            },
+            "fill": true
+          }
+        ]
+      },
+      "fill": false,
+      "entries": [
+        [
+          "layout:layout-1",
+          "t0",
+          "nvr-a",
+          2,
+          0,
+          2,
+          0.5,
+          0.5,
+          null
+        ],
+        [
+          "layout:layout-1",
+          "t1",
+          "nvr-a",
+          2,
+          0,
+          4,
+          0.1,
+          0.9,
+          null
+        ],
+        [
+          "group:group-1",
+          "t0",
+          "nvr-a",
+          2,
+          0,
+          1,
+          0.5,
+          0.5,
+          true
+        ]
+      ]
+    },
+    {
+      "name": "values out of range are clamped",
+      "window": {
+        "tiles": [
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 20,
+            "x": -1,
+            "y": 7
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "scale": 0.5,
+            "x": 0.2
+          }
+        ]
+      },
+      "fill": false,
+      "entries": [
+        [
+          "layout:layout-1",
+          "t0",
+          "nvr-a",
+          0,
+          0,
+          8,
+          0,
+          1,
+          null
+        ],
+        [
+          "layout:layout-1",
+          "t1",
+          "nvr-a",
+          1,
+          0,
+          1,
+          0.2,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "damaged entries are skipped or read as the default",
+      "window": {
+        "fill": true,
+        "tiles": [
+          {
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": "nvr-a",
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": 3,
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "layout": 3,
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": "big",
+            "x": 0.1
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "fill": "yes",
+            "scale": 3
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t2",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            }
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t3",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 3
+            },
+            "fill": true
+          },
+          7
+        ]
+      },
+      "fill": true,
+      "entries": [
+        [
+          "layout:layout-1",
+          "t0",
+          "nvr-a",
+          0,
+          0,
+          1,
+          0.1,
+          0.5,
+          null
+        ],
+        [
+          "layout:layout-1",
+          "t1",
+          "nvr-a",
+          1,
+          0,
+          3,
+          0.5,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "a tile listed twice: the later entry, in its place",
+      "window": {
+        "tiles": [
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "fill": true
+          },
+          {
+            "layout": "layout:layout-1",
+            "tile": "t0",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 3
+          }
+        ]
+      },
+      "fill": false,
+      "entries": [
+        [
+          "layout:layout-1",
+          "t1",
+          "nvr-a",
+          1,
+          0,
+          1,
+          0.5,
+          0.5,
+          true
+        ],
+        [
+          "layout:layout-1",
+          "t0",
+          "nvr-a",
+          0,
+          0,
+          3,
+          0.5,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "members of the wrong type are ignored",
+      "window": {
+        "fill": "yes",
+        "tiles": {
+          "layout": "layout:layout-1",
+          "tile": "t0",
+          "camera": {
+            "device": "nvr-a",
+            "channel": 0
+          }
+        }
+      },
+      "fill": false,
+      "entries": []
+    },
+    {
+      "name": "an old file without them",
+      "window": {},
+      "fill": false,
+      "entries": []
+    }
+  ],
+  "migrate": [
+    {
+      "name": "a camera's view goes to every tile showing it",
       "window": {
         "fill": true,
         "tileViews": [
@@ -527,9 +1003,44 @@
           }
         ]
       },
+      "layout": "layout:layout-1",
+      "tiles": [
+        [
+          "t0",
+          "nvr-a",
+          2,
+          0
+        ],
+        [
+          "t1",
+          "nvr-a",
+          3,
+          1
+        ],
+        [
+          "t2",
+          null,
+          0,
+          0
+        ],
+        [
+          "t3",
+          "nvr-a",
+          2,
+          0
+        ],
+        [
+          "t4",
+          "nvr-a",
+          5,
+          0
+        ]
+      ],
       "fill": true,
       "entries": [
         [
+          "layout:layout-1",
+          "t0",
           "nvr-a",
           2,
           0,
@@ -539,6 +1050,8 @@
           null
         ],
         [
+          "layout:layout-1",
+          "t1",
           "nvr-a",
           3,
           1,
@@ -546,11 +1059,22 @@
           0.5,
           0.5,
           false
+        ],
+        [
+          "layout:layout-1",
+          "t3",
+          "nvr-a",
+          2,
+          0,
+          2,
+          0.25,
+          0.75,
+          null
         ]
       ]
     },
     {
-      "name": "values out of range are clamped",
+      "name": "the old form is read through the old rules (clamped, damaged entries skipped, the later of a repeat)",
       "window": {
         "tileViews": [
           {
@@ -559,48 +1083,7 @@
               "channel": 0
             },
             "scale": 20,
-            "x": -1,
-            "y": 7
-          },
-          {
-            "camera": {
-              "device": "nvr-a",
-              "channel": 1
-            },
-            "scale": 0.5,
-            "x": 0.2
-          }
-        ]
-      },
-      "fill": false,
-      "entries": [
-        [
-          "nvr-a",
-          0,
-          0,
-          8,
-          0,
-          1,
-          null
-        ],
-        [
-          "nvr-a",
-          1,
-          0,
-          1,
-          0.2,
-          0.5,
-          null
-        ]
-      ]
-    },
-    {
-      "name": "damaged entries are skipped or read as the default",
-      "window": {
-        "fill": true,
-        "tileViews": [
-          {
-            "scale": 2
+            "x": -1
           },
           {
             "camera": "nvr-a",
@@ -609,65 +1092,7 @@
           {
             "camera": {
               "device": "nvr-a",
-              "channel": 0
-            },
-            "scale": "big",
-            "x": 0.1
-          },
-          {
-            "camera": {
-              "device": "nvr-a",
               "channel": 1
-            },
-            "fill": "yes",
-            "scale": 3
-          },
-          {
-            "camera": {
-              "device": "nvr-a",
-              "channel": 2
-            }
-          },
-          {
-            "camera": {
-              "device": "nvr-a",
-              "channel": 3
-            },
-            "fill": true
-          },
-          7
-        ]
-      },
-      "fill": true,
-      "entries": [
-        [
-          "nvr-a",
-          0,
-          0,
-          1,
-          0.1,
-          0.5,
-          null
-        ],
-        [
-          "nvr-a",
-          1,
-          0,
-          3,
-          0.5,
-          0.5,
-          null
-        ]
-      ]
-    },
-    {
-      "name": "a camera listed twice: the later entry, in its place",
-      "window": {
-        "tileViews": [
-          {
-            "camera": {
-              "device": "nvr-a",
-              "channel": 0
             },
             "scale": 2
           },
@@ -676,8 +1101,79 @@
               "device": "nvr-a",
               "channel": 1
             },
-            "fill": true
+            "scale": 3
           },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 4
+            },
+            "fill": false
+          }
+        ]
+      },
+      "layout": "group:group-1",
+      "tiles": [
+        [
+          "t0",
+          "nvr-a",
+          1,
+          0
+        ],
+        [
+          "t1",
+          "nvr-a",
+          0,
+          0
+        ],
+        [
+          "t2",
+          "nvr-a",
+          4,
+          0
+        ]
+      ],
+      "fill": false,
+      "entries": [
+        [
+          "group:group-1",
+          "t0",
+          "nvr-a",
+          1,
+          0,
+          3,
+          0.5,
+          0.5,
+          null
+        ],
+        [
+          "group:group-1",
+          "t1",
+          "nvr-a",
+          0,
+          0,
+          8,
+          0,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "a file with the per-tile form ignores the old one",
+      "window": {
+        "tiles": [
+          {
+            "layout": "layout:layout-1",
+            "tile": "t1",
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          }
+        ],
+        "tileViews": [
           {
             "camera": {
               "device": "nvr-a",
@@ -687,47 +1183,35 @@
           }
         ]
       },
+      "layout": "layout:layout-1",
+      "tiles": [
+        [
+          "t0",
+          "nvr-a",
+          0,
+          0
+        ],
+        [
+          "t1",
+          "nvr-a",
+          0,
+          0
+        ]
+      ],
       "fill": false,
       "entries": [
         [
-          "nvr-a",
-          1,
-          0,
-          1,
-          0.5,
-          0.5,
-          true
-        ],
-        [
+          "layout:layout-1",
+          "t1",
           "nvr-a",
           0,
           0,
-          3,
+          2,
           0.5,
           0.5,
           null
         ]
       ]
-    },
-    {
-      "name": "members of the wrong type are ignored",
-      "window": {
-        "fill": "yes",
-        "tileViews": {
-          "camera": {
-            "device": "nvr-a",
-            "channel": 0
-          }
-        }
-      },
-      "fill": false,
-      "entries": []
-    },
-    {
-      "name": "an old file without them",
-      "window": {},
-      "fill": false,
-      "entries": []
     }
   ]
 }
