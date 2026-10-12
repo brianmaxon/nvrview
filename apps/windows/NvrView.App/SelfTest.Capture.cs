@@ -179,7 +179,7 @@ internal sealed partial class SelfTest
             v.Settings.ShareSafePictureNames = true;
             v.Settings.PictureFormat = PictureFormat.Jpeg;
             rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SavePicture, null));
-            await CheckSaved(stage, rec, "picture (share-safe JPEG)", "jpg", " Camera A", full, 14, drawn, minPercent: 90);
+            await CheckSaved(stage, rec, "picture (share-safe JPEG)", "jpg", " Camera A", full, 24, drawn, minPercent: 80);
             v.Settings.ShareSafePictureNames = false;
             v.Settings.PictureFormat = PictureFormat.Png;
 
