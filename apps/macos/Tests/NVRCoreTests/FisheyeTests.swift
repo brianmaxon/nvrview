@@ -307,6 +307,13 @@ private func degrees(_ r: Double) -> Double { r * 180 / .pi }
         #expect(with.fisheye && !without.fisheye)
     }
 
+    @Test func channelInfoIgnoresTheCapabilityFields() throws {
+        // `talk`, `doorbell`, `ptz`, `lens_talk` and `lens_ptz` are not read yet; they must not break decoding.
+        let json = #"{"channel":6,"connected":true,"tiers":["main","sub"],"detects":["people"],"talk":true,"doorbell":true,"ptz":{"pan_tilt":true,"presets":true,"zoom_focus":true},"lenses":2,"lens_detects":[["people"],[]],"lens_talk":[false,false],"lens_ptz":[{"pan_tilt":false,"presets":false,"zoom_focus":false},{"pan_tilt":true,"presets":false,"zoom_focus":true}]}"#
+        let info = try JSONDecoder().decode(ChannelInfo.self, from: Data(json.utf8))
+        #expect(info.channel == 6 && info.connected && info.detects == ["people"] && info.lenses == 2)
+    }
+
     @Test func aimDefaultsFollowTheMount() {
         let s = FisheyeTileSetting(mode: .ptz)
         #expect(s.aim(for: .ceiling) == FisheyeAim(pan: 0, tilt: 45, fov: 90))

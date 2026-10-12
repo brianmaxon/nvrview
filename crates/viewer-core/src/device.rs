@@ -207,6 +207,10 @@ struct ChannelDetects {
     lenses: Vec<Vec<&'static str>>,
     /// A fisheye camera (raw circular image; the apps dewarp it).
     fisheye: bool,
+    /// The item's own talk-back and motion capabilities.
+    caps: detection::Caps,
+    /// Per lens, parallel to `lenses`.
+    lens_caps: Vec<detection::Caps>,
 }
 
 impl ChannelDetects {
@@ -223,8 +227,21 @@ impl ChannelDetects {
                 Vec::new()
             },
             fisheye: c.fisheye,
+            caps: c.caps,
+            lens_caps: if c.lenses.len() >= 2 {
+                c.lenses.iter().map(|l| l.caps).collect()
+            } else {
+                Vec::new()
+            },
         }
     }
+}
+
+fn ptz_object(c: &detection::Caps) -> Object {
+    Object::new()
+        .bool("pan_tilt", c.pan_tilt())
+        .bool("presets", c.presets())
+        .bool("zoom_focus", c.zoom_focus())
 }
 
 /// What each channel detects (from 199), once known.
@@ -253,6 +270,23 @@ fn channels_event(
                 cd.into_iter().flat_map(|x| x.kinds.iter().copied()),
             ),
             None => o,
+        };
+        // Capabilities come with `detects`, from the same reply (199).
+        let o = match (detects, cd) {
+            (Some(_), cd) => {
+                let caps = cd.map(|x| x.caps).unwrap_or_default();
+                let o = o
+                    .bool("talk", caps.talk)
+                    .bool("doorbell", caps.doorbell)
+                    .object("ptz", ptz_object(&caps));
+                match cd {
+                    Some(x) if x.lenses.len() >= 2 => o
+                        .bools("lens_talk", x.lens_caps.iter().map(|l| l.talk))
+                        .objects("lens_ptz", x.lens_caps.iter().map(ptz_object)),
+                    _ => o,
+                }
+            }
+            (None, _) => o,
         };
         let o = match (cd, probed.get(&c.channel)) {
             (Some(x), _) if x.lenses.len() >= 2 => o
@@ -809,6 +843,8 @@ mod tests {
                 kinds: vec!["people", "vehicle"],
                 lenses: Vec::new(),
                 fisheye: false,
+                caps: detection::Caps::default(),
+                lens_caps: Vec::new(),
             },
         );
         let v: serde_json::Value = serde_json::from_str(&channels_event(
@@ -832,13 +868,16 @@ mod tests {
                 detection::LensAi {
                     lens: 0,
                     aitype: 1 | 2 | 4,
+                    ..Default::default()
                 },
                 detection::LensAi {
                     lens: 1,
                     aitype: 1 | 16,
+                    ..Default::default()
                 },
             ],
             fisheye: false,
+            ..Default::default()
         };
         detects.insert(1, ChannelDetects::from_ai(&ai));
         let v: serde_json::Value = serde_json::from_str(&channels_event(
@@ -873,6 +912,7 @@ mod tests {
             aitype: 0,
             lenses: Vec::new(),
             fisheye: true,
+            ..Default::default()
         };
         detects.insert(0, ChannelDetects::from_ai(&fisheye));
         let v: serde_json::Value = serde_json::from_str(&channels_event(

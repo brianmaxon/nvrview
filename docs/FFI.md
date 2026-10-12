@@ -176,6 +176,8 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
 {"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"channels","device":1,"channels":[{"channel":5,"connected":true,"tiers":["main","sub"],"detects":["people"],"fisheye":true}]}
+{"type":"channels","device":1,"channels":[{"channel":6,"connected":true,"tiers":["main","sub"],"detects":[],"talk":true,"doorbell":true,"ptz":{"pan_tilt":false,"presets":false,"zoom_focus":false}}]}
+{"type":"channels","device":1,"channels":[{"channel":7,"connected":true,"tiers":["main","sub"],"detects":[],"talk":false,"doorbell":false,"ptz":{"pan_tilt":true,"presets":true,"zoom_focus":true}}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
 {"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"local_audio","at_ns":457}
@@ -303,6 +305,32 @@ change.
   It is an added event field: no header change and no ABI number (apps
   ignore fields they do not know). The core does nothing else for such a
   camera; dewarping is drawing (docs/RENDERING.md, "Fisheye dewarping").
+- `talk`, `doorbell` and `ptz` say what a channel's camera can do, read
+  from the same capabilities reply (199) and present, like `detects`, once
+  it is known (a later `channels` event than the slot list; all three
+  together, `false` values included). They are added event fields: no
+  header change and no ABI number. They describe the device, not what the
+  user allowed: nothing here enables talk-back or motion.
+  - `talk` is `true` when the channel's item has `ipcAudioTalk` 1
+    (observed: the official client asked for the talk ability of exactly
+    those channels). The same test gates `nv_talk_start` (see "Talk-back").
+  - `doorbell` is `true` when the item's `channelType` is `Doorbell`
+    (observed; compared without regard to case).
+  - `ptz` is `{"pan_tilt","presets","zoom_focus"}`, all booleans.
+    `pan_tilt` is `ptzType` 3 and `zoom_focus` is `ptzType` 1 or 3 (the
+    meanings of the values are inferred from which controls the official
+    client offered, not documented by the vendor); `presets` is `ptzPreset`
+    bit 0 (reported by the official client). Missing fields read as
+    `false`. These only say what the camera has; nvrview sends no motion
+    commands for them yet.
+  - Only the item's own fields count for the channel (the same rule as
+    talk-back). For a multi-lens camera (`lenses`) the capabilities of a
+    lens sit in its `subItem`, so `lens_talk` (booleans) and `lens_ptz`
+    (objects as `ptz`) list them, lens 0 first, parallel to
+    `lens_detects`; a lens that moves while the channel's item says
+    nothing is normal (observed: a pan-tilt-zoom lens as the second lens of
+    a two-lens camera). `lens_talk` and `lens_ptz` are present only with
+    `lenses` from the capabilities, never for a probed second lens.
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from

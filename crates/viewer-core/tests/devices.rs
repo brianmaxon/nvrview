@@ -250,3 +250,54 @@ fn a_fisheye_camera_is_marked_in_the_channel_list() {
     }
     sim.run_free(|| core.shutdown());
 }
+
+#[test]
+fn channels_report_talk_doorbell_and_ptz_capabilities() {
+    let sim = SimRuntime::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic");
+    let mut cfg = mock_nvr::Config::new(
+        mock_nvr::fixture::Fixture::load(&dir.join("h264-basic.h264")).unwrap(),
+    );
+    // 0 plain camera, 1 doorbell, 2 pan/tilt/zoom camera with presets,
+    // 3 zoom-and-focus camera, 4 multi-lens camera whose second lens moves.
+    cfg.channels = 5;
+    cfg.talk_channels = vec![1];
+    cfg.doorbell_channels = vec![1];
+    cfg.ptz_types = vec![0, 0, 3, 1, 0];
+    cfg.ptz_presets = vec![0, 0, 3, 0, 0];
+    cfg.aitypes = vec![0; 5];
+    cfg.lens_aitypes = vec![vec![], vec![], vec![], vec![], vec![3, 3]];
+    cfg.lens_ptz_types = vec![vec![], vec![], vec![], vec![], vec![0, 3]];
+    let nvr = sim_spawn(&sim, cfg);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let dev = add(&core, &nvr);
+    sim_until(&sim, &core, "capabilities", 10, || {
+        of_device(&rec, "channels", dev)
+            .iter()
+            .any(|e| e["channels"][0].get("ptz").is_some())
+    });
+    let e = of_device(&rec, "channels", dev).pop().unwrap();
+    let c = &e["channels"];
+    let ptz = |pt, pre, zf| serde_json::json!({"pan_tilt": pt, "presets": pre, "zoom_focus": zf});
+    assert_eq!(c[0]["talk"], false, "{e}");
+    assert_eq!(c[0]["doorbell"], false, "{e}");
+    assert_eq!(c[0]["ptz"], ptz(false, false, false), "{e}");
+    assert_eq!(c[1]["talk"], true, "{e}");
+    assert_eq!(c[1]["doorbell"], true, "{e}");
+    assert_eq!(c[1]["ptz"], ptz(false, false, false), "{e}");
+    assert_eq!(c[2]["ptz"], ptz(true, true, true), "{e}");
+    assert_eq!(c[2]["talk"], false, "{e}");
+    assert_eq!(c[3]["ptz"], ptz(false, false, true), "{e}");
+    // The channel says what its own item says; the lenses have theirs.
+    assert_eq!(c[4]["ptz"], ptz(false, false, false), "{e}");
+    assert_eq!(
+        c[4]["lens_ptz"],
+        serde_json::json!([ptz(false, false, false), ptz(true, false, true)]),
+        "{e}"
+    );
+    assert_eq!(c[4]["lens_talk"], serde_json::json!([false, false]), "{e}");
+    for single in 0..4 {
+        assert!(c[single].get("lens_ptz").is_none(), "{e}");
+    }
+    sim.run_free(|| core.shutdown());
+}
