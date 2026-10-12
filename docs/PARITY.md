@@ -137,7 +137,10 @@ started on that app.
 | Cameras to search, per device and per camera, kept between launches | yes | no (planned) | ID `recordings-enable`. |
 | Days asked for as shown; today held per window while shown, released on another day or close | yes | no (planned) | IDs `recordings-hold-today`, `recordings-navigate-day`, `recordings-window-close`. |
 | Calendar of days with recordings; refresh; a failed day marked | yes | no (planned) | ID `recordings-calendar-lanes`. The failed-day mark is not in the self-test. |
-| Timeline lanes per camera (spans, events by kind with badges, zoom, click selects the incident) | yes | no (planned) | ID `recordings-calendar-lanes`. |
+| Calendar paged to another month asks for that month's calendar alone (minor 7) | yes | no (planned) | ID `recordings-calendar-month`. |
+| Camera names as the camera list shows them (override, reported name, lens) | yes | no (planned) | ID `recordings-camera-names`; the core also names cameras by the reported names (FFI.md "Recordings"). |
+| Window layout: player in the middle, collapsible sidebar and inspector that give way in a narrow window | yes | no (planned) | ID `recordings-layout`. |
+| Timeline lanes per camera (spans, events by kind with badges, zoom, playhead; a click seeks the player or plays that camera) | yes | no (planned) | IDs `recordings-calendar-lanes`, `playback-scrub`. |
 | Incident list with kind filters (Animals matches every animal kind), camera or group scope, Locked | yes | no (planned) | ID `recordings-animal-filter`. |
 | Cover thumbnails: keyframe decoded, shrunk, put back into the core's cache | yes | no (planned) | VideoToolbox and ImageIO; Windows: Media Foundation and WIC. ID `recordings-thumbnail`. |
 | Incident edits: rename, merge, split, add and remove a camera, revert | yes | no (planned) | ID `recordings-edits`. |
@@ -160,7 +163,8 @@ started on that app.
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
 | Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
-| Recorded-video playback (synchronized cameras, scrubber) | no (planned) | no (planned) | Milestone P, M2 and W2; [PLAYBACK.md](PLAYBACK.md) is the design. Finding and downloading recordings is under "Recordings". |
+| Recorded-video playback in the Recordings window (up to four cameras on one clock, grid with large and single views, transport with skip, speeds 0.25× to 16×, mute and volume, scrubber with the incident's events) | yes | no (planned) | Milestone P, M2 (macOS) and W2; [PLAYBACK.md](PLAYBACK.md) is the design, docs/UX.md "Recordings" the screen. IDs `playback-open`, `playback-transport`, `playback-grid`, `playback-scrub`, `playback-close`, and `playback-real-core` (real core against the mock). Stepping and per-camera offsets are not built. |
+| Remove from Incident and Split Here at the playhead | yes | no (planned) | IDs `playback-remove-camera`, `playback-split-here`. |
 
 ## Open gaps
 

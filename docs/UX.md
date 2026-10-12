@@ -1024,78 +1024,132 @@ example to keep it beside other work. Both apps follow these rules.
 
 ## Recordings
 
-The NVR's own recordings, found by what happened ([PLAYBACK.md](PLAYBACK.md),
-"Finding"; the calls are [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1
-to 5). Built on macOS (milestone P, M1); the Windows app follows (W1).
-Playing recordings (M2), the sound lanes (M3), and exports (M4) come later.
+The NVR's own recordings, found by what happened and played back
+([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
+[FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
+(milestone P, M1 and M2); the Windows app follows (W1, W2). The sound lanes
+(M3) and exports (M4) come later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
-  live view stays as it is while recordings are searched, and the window can
-  sit on another screen. The menu item is disabled with a core that has no
-  recordings. Proposed for the Windows app (W1): the right-click menu and
-  Ctrl+Alt+R.
-- **Layout:** a sidebar with the month's calendar, the search state, and
-  the cameras to search; in the middle the shown day ("Today, Sunday,
-  October 11, 2026" style, with previous and next day) and Incidents,
-  Timeline, or Downloads (with their count); on the right the selected
-  incident. A message line at the bottom says what a request answered when
-  it was refused or needs the user (for example that a locked incident's
-  video is not being kept).
+  live view stays as it is while recordings are searched and played, and
+  the window can sit on another screen. The menu item is disabled with a
+  core that has no recordings. Proposed for the Windows app (W1): the
+  right-click menu and Ctrl+Alt+R.
+- **Layout:** seeing the clip comes first, so the **player** is the middle
+  of the window, with the **transport** under it and the day's **timeline
+  lanes** under that. On the left, collapsible, the month's calendar, the
+  search state, the incident filters, the incident list, and the cameras to
+  search (folded away once some are chosen). On the right, collapsible, the
+  selected incident (the **inspector**). A header across the top has the
+  two pane buttons, the shown day ("Today, Sunday, October 11, 2026" style,
+  with previous and next day), and Player or Downloads (with their count).
+  The side panes have fixed widths (280 and 290 points) and the player
+  keeps at least 440: in a window too narrow for all three the inspector
+  gives way first, then the sidebar, and turning a pane on in a narrow
+  window widens the window instead; nothing is squeezed under or over
+  another, and nothing reaches into the title bar. A message line at the
+  bottom says what a request answered when it was refused or needs the
+  user (for example that a locked incident's video is not being kept).
 - **Cameras to search:** nothing is searched until the user chooses
   cameras, per device (one checkbox for all its cameras) or per camera (each
   lens of a multi-lens camera on its own). The choice is kept between
   launches (`recordings-cameras.json` in the app's data folder) and given to
   the core again at each launch; removing a device stops searching it.
+- **Camera names** everywhere in the window (rows, inspector, player,
+  lanes) are the camera list's: the user's name for the camera, else the
+  name the device reports with the lens for a multi-lens camera ("Front ·
+  Lens 2"), else "Channel N". The core names cameras the same way in its
+  answers and download folders.
 - **Days:** times are the device's own wall-clock time, as burned into the
   picture (the computer's time zone stands in for the device's until the
   core reads it). Showing a day asks the device for it; the window holds
   today (its own hold) only while it shows today, and lets go when it shows
   another day or closes. The calendar marks the days with recordings that
-  are known: a month's days arrive with the first day asked for in it. The
-  refresh button searches the shown day again. A day the device could not
-  search shows a warning on its lanes and is not asked again by itself.
+  are known: the shown day's month arrives with the day, and paging the
+  calendar to another month asks the device for that month's calendar
+  alone (once per window and set of cameras; minor 7). The refresh button
+  searches the shown day again. A day the device could not search shows a
+  warning on its lane and is not asked again by itself.
 - **Incidents:** newest first, filtered by kind (People, Vehicles,
-  Animals, Motion, Other; none chosen shows all; Animals matches every
-  animal kind a device reports, `dog_cat` today and finer kinds later), by
-  cameras (all, a camera group, or one camera), and Locked. Each row shows
-  the cover thumbnails of up to four of its cameras, its name (or its time
-  and kinds), its time span, the kinds as the live detection badges, its
-  cameras, and marks for locked and downloaded. A click selects one, ⌘-click
-  adds or removes one, and with several selected, Merge joins them.
-- **The selected incident:** its name (Rename; an empty name goes back to
-  time and kinds), time span and date, badges, and camera group; Locked
-  (locking keeps it: its video is downloaded and nothing about it expires;
-  the message line says when its video is not being kept because there is no
-  downloads folder or too many downloads; unlocking never touches files);
-  Download; Revert Edits when edited; each camera with a large thumbnail and
-  Remove (not the last); Add Camera from the searched cameras; and Split,
-  at a time chosen on a slider.
-- **Timeline:** one lane per camera for the day, recording spans in gray,
-  events as bars colored by kind with the kind's symbol when there is room,
-  an hour ruler, and zoom from the whole day to 48×. A click within a few
-  points of an event selects its incident (a generous target).
+  Animals, Motion, Other as icon buttons; none chosen shows all; Animals
+  matches every animal kind a device reports, `dog_cat` today and finer
+  kinds later), by cameras (all, a camera group, or one camera), and
+  Locked. Each row shows a strip of covers of a fixed width (two
+  thumbnails apart from each other, "+N" for more cameras), so every row's
+  text starts at the same place; then its name (or its time and kinds), its
+  time span, the kinds as the live detection badges, its cameras, and marks
+  for locked and downloaded. A click selects one, ⌘-click adds or removes
+  one, and with several selected, Merge joins them. A row's menu has Play,
+  Split Here (when it plays and the playhead is inside it), Remove from
+  Incident (one of its cameras), Lock or Unlock, Download, and Revert Edits.
+- **Playing:** selecting one incident **plays it at once** from its start
+  less its margin (the clip is what the user came for; Space or the button
+  pauses). The player shows the incident's first four cameras (the device
+  plays at most four at once beside live view, PLAYBACK.md "Review mode")
+  over the whole day, so the playhead can move past the incident; another
+  incident of the same cameras only seeks, and an edit that adds or removes
+  a camera adds or removes it without moving the playhead. Several cameras
+  share the player in a grid (side by side, or two by two); a click on a
+  camera makes it large with the others beside it, another click goes back,
+  and a double click (or the one-camera button) shows it alone. The large
+  (or first) camera's sound plays, through the core's tile audio like a
+  live tile's. Each camera's label says when it is loading, catching up, at
+  the end of its recording, or playing in another window, and a camera with
+  nothing at the time says "No recording at this time". A camera's menu has
+  Show Alone, Make Large, Show All Cameras, and Remove from Incident. Live
+  view keeps running. The playback closes when another day is shown, the
+  window closes, or the app quits.
+- **Transport:** back and forward 10 s, play and pause, the device time at
+  the playhead, the speed (0.25×, 0.5×, 1×, 2×, 4×, 8×, 16×; from 2× up
+  "Keyframes only, no sound", below 1× "No sound below 1×"), Split Here,
+  mute and volume, and the one-camera button. The scrubber spans the
+  incident with its margins (or the whole day, with the Incident and Day
+  switch) with the events marked by kind; dragging shows keyframes, the
+  release the exact picture.
+- **Timeline:** one lane per camera for the day under the player, recording
+  spans in gray, events as bars colored by kind with the kind's symbol when
+  there is room, an hour ruler, zoom from the whole day to 48×, and the
+  playhead. A click on a lane of a camera that plays seeks there; a click on
+  an event of another camera selects its incident; anywhere else that
+  camera plays alone from there.
+- **The selected incident (inspector):** its name (Rename; an empty name
+  goes back to time and kinds), time span and date, badges, and camera
+  group; Locked (locking keeps it: its video is downloaded and nothing about
+  it expires; the message line says when its video is not being kept
+  because there is no downloads folder or too many downloads; unlocking
+  never touches files); Download; Revert Edits when edited; **Split Here**
+  at the playhead, with what it does in words (the incident becomes two at
+  the playhead: what happened before stays, what follows becomes a new
+  incident; Revert Edits undoes it); and each camera with its thumbnail and
+  **Remove from Incident** (not the last camera), for a camera that only
+  happened to record at the same time; Add Camera from the searched
+  cameras. Removing a camera is the finest edit there is: the core's edit
+  log has no way to leave out one event (FFI-RECORDINGS.md section 3).
 - **Thumbnails:** asked for as rows appear; a spinner until the device's
   keyframe arrives, which the app decodes (VideoToolbox), shrinks to 320
   points, and gives back to the core's cache as a JPEG, so the next time it
   is read as is. A crossed-out camera means no recording in the range. The
   window keeps at most 512 in memory; queued fetches are dropped when it
   shows another day or closes.
-- **Downloads:** every download with its folder's name, state (Queued,
-  Waiting for the device, Downloading, Paused, Finishing, Done, Failed with
-  the reason), progress, and each camera's chunks; Pause or Resume, Retry
-  (failed), Show in Finder (the files, or the folder until they exist),
-  Forget (not while running; files stay), and Move to Trash (the core stops
-  writing first, then the folder goes to the Trash; nothing is deleted
-  permanently). Progress redraws at most four times a second. Downloads go
-  to `~/Movies/NVRView/Incidents` (`Incidents` in `--data-dir`).
-- **Camera groups:** "Camera Groups…" edits the groups whose cameras cover
-  the same area, so their events join one incident; it says that changing a
-  group changes its incidents.
+- **Downloads** (the header's Downloads): every download with its folder's
+  name, state (Queued, Waiting for the device, Downloading, Paused,
+  Finishing, Done, Failed with the reason), progress, and each camera's
+  chunks; Pause or Resume, Retry (failed), Show in Finder (the files, or
+  the folder until they exist), Forget (not while running; files stay), and
+  Move to Trash (the core stops writing first, then the folder goes to the
+  Trash; nothing is deleted permanently). Progress redraws at most four
+  times a second. Downloads go to `~/Movies/NVRView/Incidents` (`Incidents`
+  in `--data-dir`).
+- **Camera groups:** "Camera Groups…" (with the cameras to search) edits
+  the groups whose cameras cover the same area, so their events join one
+  incident; it says that changing a group changes its incidents.
 - **Never in the way:** every query reads the core's memory; device work
-  (searches, thumbnails, downloads) reports by events; decoding runs off the
-  main thread. Self-test steps `recordings-*` (the fake core) and
-  `recordings-real-core` (`scripts/macos-real-selftest.sh`, against the mock).
+  (searches, thumbnails, downloads, plays) reports by events; the player's
+  position is read ten times a second from memory; decoding runs off the
+  main thread. Self-test steps `recordings-*` and `playback-*` (the fake
+  core) and `recordings-real-core` and `playback-real-core`
+  (`scripts/macos-real-selftest.sh`, against the mock).
 
 ## Finding devices
 
