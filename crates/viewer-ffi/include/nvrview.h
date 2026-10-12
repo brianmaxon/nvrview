@@ -26,9 +26,15 @@
  * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
  * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
  * calendar alone) and the recordings_month_failed event. Minor 8: edit
- * lists (section 7) and the rest of sound (section 2a).
+ * lists (section 7) and the rest of sound (section 2a). Minor 9: capture
+ * (live and call recordings; docs/FFI.md, "Capture").
  */
-#define NV_ABI_MINOR 8
+#define NV_ABI_MINOR 9
+
+/**
+ * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
+ */
+#define NV_ASC_MAX 64
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -48,7 +54,8 @@ typedef enum NvStatus {
    */
   NV_ERR_CLOSED = -3,
   /**
-   * too many devices, tiles, layouts, or queued requests
+   * too many devices, tiles, layouts, queued requests, or recordings, or
+   * too little disk space for a recording
    */
   NV_ERR_LIMIT = -4,
   NV_ERR_INTERNAL = -5,
@@ -65,7 +72,9 @@ typedef enum NvStatus {
    */
   NV_ERR_UNSUPPORTED = -8,
   /**
-   * nv_recordings_configure not called, or no downloads_dir (minor 5)
+   * nv_recordings_configure not called, or no downloads_dir (minor 5);
+   * nv_capture_configure not called, or a call recording without an
+   * encoder (minor 9)
    */
   NV_ERR_NOT_CONFIGURED = -9,
   /**
@@ -293,7 +302,8 @@ typedef struct NvAction {
  * on_audio_tap: may be NULL (no taps). Serialized across the core; `block`
  *   and its samples are valid only during the call.
  * From inside a callback an app may call nv_tile_decoded and
- * nv_tile_decode_failed, and nothing else.
+ * nv_tile_decode_failed, and nothing else (and from inside an
+ * NvAudioEncoder callback, nv_record_audio_encoded).
  * No event names a device before nv_device_add returns its ID, and no
  * on_action for a tile runs before nv_tile_open returns its ID.
  */
@@ -373,6 +383,55 @@ typedef struct NvThumbnail {
    */
   int64_t pts_us;
 } NvThumbnail;
+
+typedef bool (*NvEncoderOpen)(void *context,
+                              uint64_t recording,
+                              uint32_t track,
+                              uint32_t sample_rate,
+                              uint32_t channels,
+                              uint32_t bit_rate,
+                              uint8_t *asc,
+                              size_t asc_cap,
+                              size_t *asc_len,
+                              uint32_t *priming_frames);
+
+typedef void (*NvEncoderEncode)(void *context,
+                                uint64_t recording,
+                                uint32_t track,
+                                const float *pcm,
+                                size_t frames);
+
+typedef void (*NvEncoderClose)(void *context, uint64_t recording, uint32_t track, bool flush);
+
+/**
+ * The app's AAC encoder (docs/FFI.md, "Capture"), copied by
+ * nv_capture_set_encoder. `track` is the audio track's index in the file
+ * (a live recording: 0; a call: 0 Conversation, 1 Visitor, 2 You). All
+ * three functions are called on the recorders' own threads (never at the
+ * same time for one recording) and must return quickly. Each encoded frame
+ * is answered with nv_record_audio_encoded, from inside `encode` or `close`
+ * or from any other thread, until `close` returns. The functions and
+ * `context` stay in use until nv_core_free returns.
+ */
+typedef struct NvAudioEncoder {
+  void *context;
+  /**
+   * Opens an AAC-LC encoder for one track of a recording. Writes the
+   * AudioSpecificConfig into asc (*asc_len bytes, 1 to asc_cap, which is
+   * NV_ASC_MAX) and the encoder's priming in frames. Returns false if it
+   * cannot.
+   */
+  NvEncoderOpen open;
+  /**
+   * One frame of 1024 mono float samples (`frames` is 1024), valid only
+   * during the call.
+   */
+  NvEncoderEncode encode;
+  /**
+   * Ends the track; with flush, the encoder's remaining output first.
+   */
+  NvEncoderClose close;
+} NvAudioEncoder;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1452,6 +1511,102 @@ enum NvStatus nv_playback_status(struct NvCore *core,
  * `core` is a live handle.
  */
 enum NvStatus nv_playback_close(struct NvCore *core, uint64_t playback);
+
+/**
+ * Sets the capture settings (docs/FFI.md, "Capture"): {"live_dir":
+ * "<absolute directory>","max_duration_s":3600,"max_bytes":4000000000,
+ * "min_free_bytes":2000000000,"stop_free_bytes":1000000000,"max_live":4,
+ * "max_calls":2,"quality":"main"|"sub","share_safe":false}; all but
+ * live_dir optional. Applies to recordings started afterwards. The first
+ * call also finalizes (event `recording` `recovered`) or deletes the
+ * partial files a crash left, before it returns. Call it before
+ * nv_record_start, which answers NV_ERR_NOT_CONFIGURED until then.
+ * NV_ERR_INVALID_ARGUMENT for invalid JSON or values or a relative
+ * live_dir. Any thread, never inside a callback. Added in minor 9, as
+ * everything down to nv_record_status.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_capture_configure(struct NvCore *core, const char *json);
+
+/**
+ * Installs the app's AAC encoder (the struct is copied), or removes it
+ * (NULL). Recordings already running keep the encoder they started with.
+ * Without one, a live recording whose camera audio is not AAC is video only
+ * (`audio` `unsupported`) and a call recording cannot start.
+ * NV_ERR_INVALID_ARGUMENT when a function pointer is NULL. Any thread,
+ * never inside a callback.
+ *
+ * # Safety
+ * `core` is a live handle; `encoder` is null or valid for reading one
+ * NvAudioEncoder, whose functions and context stay valid until
+ * nv_core_free returns.
+ */
+enum NvStatus nv_capture_set_encoder(struct NvCore *core, const struct NvAudioEncoder *encoder);
+
+/**
+ * One encoded AAC access unit (raw, no ADTS header; 1 to 8192 bytes) for
+ * `track` of `recording`, answering the encoder's `encode` (and the flush
+ * of `close`) in order. Any thread, including inside the encoder's own
+ * NV_ERR_UNKNOWN_ID for an unknown recording.
+ * NV_ERR_UNKNOWN_ID for a recording that has ended and been forgotten.
+ *
+ * # Safety
+ * `core` is a live handle; `data` is valid for reading `len` bytes.
+ */
+enum NvStatus nv_record_audio_encoded(struct NvCore *core,
+                                      uint64_t recording,
+                                      uint32_t track,
+                                      const uint8_t *data,
+                                      size_t len);
+
+/**
+ * Starts a live or call recording of a tile's camera:
+ * {"kind":"live","tile":7,"quality":"sub","name":"Camera 1",
+ *  "share_safe":false,"utc_offset_s":0} or {"kind":"call","tile":7,
+ *  "file":"<absolute path>.mp4"}. Answers {"recording":12,"file":
+ * "<absolute path>","state":"waiting_keyframe"}; `recording` events follow.
+ * NV_ERR_LIMIT for a count limit, the main-stream limit, or low disk, with
+ * {"limit":"live"|"calls"|"main_streams"|"disk_low"} as the answer
+ * (written when it fits; *len set either way); NV_ERR_NOT_CONFIGURED
+ * before nv_capture_configure, or for a call without an encoder;
+ * NV_ERR_UNKNOWN_ID for an unknown tile; NV_ERR_INVALID_ARGUMENT. When the
+ * answer does not fit, the recording is stopped again (its events, for an
+ * ID never handed out, may follow) and NV_ERR_BUFFER_TOO_SMALL returned
+ * with *len set: pass a buffer of a few KiB. Any thread, never inside a
+ * callback.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_record_start(struct NvCore *core,
+                              const char *request,
+                              char *out,
+                              size_t cap,
+                              size_t *len);
+
+/**
+ * Stops a recording and finalizes it; returns at once (events
+ * `finalizing`, then `finished`). NV_ERR_UNKNOWN_ID for an unknown
+ * recording (stopping one that is ending does nothing). Any thread, never
+ * inside a callback.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_record_stop(struct NvCore *core, uint64_t recording);
+
+/**
+ * {"recordings":[...]}: the latest `recording` event of each recording
+ * that has not ended.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+ * `len` is valid for one write.
+ */
+enum NvStatus nv_record_status(struct NvCore *core, char *out, size_t cap, size_t *len);
 
 #ifdef __cplusplus
 }  // extern "C"
