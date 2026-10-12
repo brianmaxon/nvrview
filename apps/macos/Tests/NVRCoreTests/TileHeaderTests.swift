@@ -14,7 +14,7 @@ import Testing
     private static func tile(_ json: [String: Any]) throws -> TileHeaderTile {
         let known: Set<String> = [
             "audio", "talk", "doorbell", "panTilt", "presets", "lens", "fisheye", "picture", "recording", "zoomed",
-            "alert", "listening", "conversation", "call",
+            "alert", "listening", "conversation", "call", "panned",
         ]
         for key in json.keys { #expect(known.contains(key), "unknown tile key \(key)") }
         func flag(_ key: String, _ fallback: Bool = false) -> Bool { json[key] as? Bool ?? fallback }
@@ -22,7 +22,7 @@ import Testing
         return TileHeaderTile(
             audio: flag("audio"), talk: flag("talk"), doorbell: flag("doorbell"), panTilt: flag("panTilt"),
             presets: flag("presets"), lens: flag("lens"), fisheye: flag("fisheye"), picture: flag("picture", true),
-            recording: flag("recording"), zoomed: flag("zoomed"), alert: flag("alert"),
+            recording: flag("recording"), zoomed: flag("zoomed"), panned: flag("panned"), alert: flag("alert"),
             listening: flag("listening"), conversation: flag("conversation"), call: call)
     }
 
@@ -75,7 +75,7 @@ import Testing
     @Test func invariants() {
         let flags: [WritableKeyPath<TileHeaderTile, Bool>] = [
             \.audio, \.talk, \.doorbell, \.panTilt, \.presets, \.lens, \.fisheye, \.picture, \.recording,
-            \.zoomed, \.alert,
+            \.zoomed, \.alert, \.panned,
         ]
         for mask in 0..<(1 << flags.count) {
             var tile = TileHeaderTile()
