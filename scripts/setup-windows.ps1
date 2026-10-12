@@ -134,6 +134,24 @@ if (Get-Command cbindgen -ErrorAction SilentlyContinue) {
   cargo install cbindgen --locked
 }
 
+Step 'sccache (shared compile cache for the check workers)'
+if (Get-Command sccache -ErrorAction SilentlyContinue) {
+  Write-Host 'sccache already installed'
+} else {
+  try { Install-WingetPackage 'Mozilla.sccache' } catch { Write-Host "winget could not install sccache: $_" }
+  Sync-SessionPath
+  if (-not (Get-Command sccache -ErrorAction SilentlyContinue)) {
+    cargo install sccache --locked
+  }
+}
+
+Step 'cargo-nextest (per-test time limits, .config\nextest.toml)'
+if (Get-Command cargo-nextest -ErrorAction SilentlyContinue) {
+  Write-Host 'cargo-nextest already installed'
+} else {
+  cargo install cargo-nextest --locked
+}
+
 Step "Repository in $RepoDir"
 if (Test-Path (Join-Path $RepoDir '.git')) {
   Write-Host 'already cloned; fetching'

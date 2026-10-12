@@ -49,14 +49,24 @@ docker run --rm \
   -e NVRVIEW_TEST_PASSWORD=example-password \
   "$dotnet_image" \
   sh -c 'set -e
+    # Each test process has its own time limit (NVRVIEW_CSHARP_TEST_TIMEOUT,
+    # default 300 s); a hang fails here naming the project.
+    run_limited() {
+      name=$1; shift; rc=0
+      timeout "${NVRVIEW_CSHARP_TEST_TIMEOUT:-300}" "$@" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        echo "$name failed (exit $rc; 124 means it did not finish within ${NVRVIEW_CSHARP_TEST_TIMEOUT:-300} s)" >&2
+        exit 1
+      fi
+    }
     dotnet build NvrView.Smoke --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
-    dotnet /build/artifacts/bin/NvrView.Smoke/debug/NvrView.Smoke.dll \
+    run_limited NvrView.Smoke dotnet /build/artifacts/bin/NvrView.Smoke/debug/NvrView.Smoke.dll \
       --mock-nvr /src/target/debug/mock-nvr \
       --fixtures /src/fixtures/synthetic \
       --lib /src/target/debug/libnvrview.so \
       --layout /src/target/csharp/layout.txt \
       --header /src/crates/viewer-ffi/include/nvrview.h
     dotnet build NvrView.Shell.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
-    dotnet /build/artifacts/bin/NvrView.Shell.Tests/debug/NvrView.Shell.Tests.dll
+    run_limited NvrView.Shell.Tests dotnet /build/artifacts/bin/NvrView.Shell.Tests/debug/NvrView.Shell.Tests.dll
     dotnet build NvrView.Tiles.Tests --nologo -v quiet -clp:ErrorsOnly --artifacts-path /build/artifacts
-    dotnet /build/artifacts/bin/NvrView.Tiles.Tests/debug/NvrView.Tiles.Tests.dll'
+    run_limited NvrView.Tiles.Tests dotnet /build/artifacts/bin/NvrView.Tiles.Tests/debug/NvrView.Tiles.Tests.dll'

@@ -391,20 +391,34 @@ refusing any path inside a git working tree) and prints the public key and
 its ID. Keep the secret key off the repository and back it up; publish the
 public key line where users can find it (release notes, the project page).
 
-For each release:
+For each release, with the checks passed for the exact commit (`scripts/check.sh`
+on the Mac and `NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh`, each on a
+clean tree; a passing run leaves a stamp that `scripts/checked.sh --mac
+--windows` looks for) and `VERSION` set:
 
 ```sh
-scripts/package-macos.sh     # build/NVRView.app and build/NVRView-<version>-macos-arm64.zip
-cp build/NVRView-"$(cat VERSION)"-macos-arm64.zip dist/
-# on Windows, from the app folder (Windows' own tar writes zip with -a):
-#   tar.exe -a -c -f dist\NvrView-<version>-win-x64.zip *
-# (scripts/windows-app.sh update does exactly this for its test)
-
-cargo run -p sign-update -- manifest --version "$(cat VERSION)" \
-  --notes-file notes.txt --expires-in 90 --out dist/updates.json dist/*.zip
-cargo run -p sign-update -- sign --secret ~/.config/nvrview-signing/update.key dist/updates.json
-cargo run -p sign-update -- check --source dist --key update.pub --current 0.0.0
+NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes notes.txt
 ```
+
+`scripts/release.sh` refuses unless the working tree is clean and the stamps
+exist for HEAD's tree (it does not rerun the checks), and refuses if the
+signing key (`--key-file`, default `~/.config/nvrview-signing/update.key`) is
+missing; it never prints the key. Then it:
+
+1. builds the macOS package (`scripts/package-macos.sh`);
+2. builds the Windows app on the Windows computer and fetches
+   `NvrView-<version>-win-x64.zip` (`scripts/windows-check.sh --package`; the
+   package is the app folder zipped with Windows' own tar, the same as
+   `scripts/windows-app.sh update` tests);
+3. puts both in `dist/<version>/` (git-ignored; `--out DIR` picks another
+   empty folder);
+4. runs `sign-update manifest` (`--notes-file`, `--expires-in 90`), `sign-update
+   sign`, and `sign-update check --source <folder> --current 0.0.0` with the
+   public key derived from the secret one;
+5. prints the files and the upload order.
+
+`--skip-windows` builds only the macOS package; the output says clearly that
+it is macOS only. The script never tags, pushes, or uploads.
 
 `manifest` reads each package's platform and version from its name
 (`<name>-<version>-<platform>.zip`), refuses names that disagree with
@@ -415,9 +429,13 @@ passes, even without a new release). `sign` writes
 rotation). `check` runs the same core code as the apps against the folder or
 URL: signature, manifest, download, hash, and unpacking into a temporary
 folder, then reports what an app of version `--current` would be offered.
-Upload the whole `dist/` folder to the update location, packages first and
-`updates.json` and its signature last, so a client never sees a manifest
-whose package is not there yet.
+Upload the whole `dist/<version>/` folder to the update location, packages
+first and `updates.json` then `updates.json.sig` last, so a client never sees
+a manifest whose package is not there yet.
+
+The macOS package is signed for local use only (an Apple Development identity
+or ad hoc). Distributing the macOS app beyond this Mac needs a Developer ID
+signature and notarization; `scripts/release.sh` does not do either.
 
 ### Rotating a key
 

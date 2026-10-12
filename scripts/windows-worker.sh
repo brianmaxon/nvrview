@@ -38,6 +38,18 @@ dotnet --version
 
 only="${NVRVIEW_WINDOWS_ONLY:-}"
 
+# Compile cache shared by every worker on this computer (each worker has its
+# own target folder; sccache keys on each crate's exact inputs, so a second
+# worker on the same tree builds mostly from the cache). Without sccache the
+# build is as before. No incremental caches: sccache cannot use them.
+if command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
+  export CARGO_INCREMENTAL=0
+  sccache --start-server >/dev/null 2>&1 || true
+  sccache --zero-stats >/dev/null 2>&1 || true
+fi
+
 # Worker-only build settings (CI and shipping builds are unchanged). No
 # debug information in the test builds: measured on this worker, a clean
 # `cargo test --no-run` took about half as long and the target folder shrank
@@ -74,10 +86,14 @@ if [ -z "$only" ]; then
   cargo clippy --workspace --all-targets -- -D warnings
 
   step "tests (build)"
-  cargo test --workspace --no-run
+  cargo nextest run --workspace --no-run
 
-  step "tests (run)"
-  cargo test --workspace
+  # cargo-nextest runs each test with the time limit in .config/nextest.toml
+  # and names a test that hangs; it does not run doctests, cargo test does.
+  step "tests (run, per-test time limit)"
+  cargo nextest run --workspace
+  step "doctests"
+  cargo test --workspace --doc
 fi
 
 step "wait for the background builds"
@@ -99,7 +115,10 @@ if [ "$only" != app ]; then
 fi
 
 step "C# shell tests (layouts, leases, sidebar reveal, window restore)"
-dotnet target/dotnet/bin/NvrView.Shell.Tests/release/NvrView.Shell.Tests.dll
+if ! timeout "${NVRVIEW_CSHARP_TEST_TIMEOUT:-300}" dotnet target/dotnet/bin/NvrView.Shell.Tests/release/NvrView.Shell.Tests.dll; then
+  echo "NvrView.Shell.Tests failed or did not finish within ${NVRVIEW_CSHARP_TEST_TIMEOUT:-300} s (timeout exits 124)" >&2
+  exit 1
+fi
 
 if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
   step "Windows app plain start, first run (interactive session)"
@@ -114,4 +133,7 @@ fi
 
 now=$(date +%s)
 printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
+if command -v sccache >/dev/null 2>&1; then
+  sccache --show-stats 2>/dev/null | grep -E 'Compile requests executed|Cache hits  |Cache misses  |Cache size|Max cache size' || true
+fi
 printf '\nWindows checks passed in %ss.\n' "$((now - check_start))"

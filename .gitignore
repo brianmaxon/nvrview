@@ -36,3 +36,6 @@ tools/vision-lab/.build/
 /.worktrees/
 /.claude/worktrees/
 /.playwright-cli/
+
+# Release output
+/dist/
