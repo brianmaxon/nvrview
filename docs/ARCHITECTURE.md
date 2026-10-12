@@ -20,8 +20,9 @@ stays in sync with video ([AUDIO.md](AUDIO.md)). How it should do it:
    vision, and triggers plug into defined extension points (below) instead of
    being bolted onto the viewer.
 4. **Safe for devices and accounts.** Never changes device configuration;
-   camera motion control (pointing, focus, a doorbell's speaker) only where
-   the user enabled it per camera ("Device commands" below). One login per
+   camera motion control (pointing, focus, a doorbell's speaker) only at the
+   user's hand or with the user's per-camera grant ("Device commands"
+   below). One login per
    device, logged out on every close; a refused login is never retried
    automatically, so the viewer can never lock an account or crowd out other
    clients.
@@ -200,9 +201,41 @@ every command it can send, and the tier decides whether it may be sent.
 
 | Tier | Examples | When it may be sent |
 | --- | --- | --- |
-| Viewing | login, logout, preview start and stop, connection test, read-only queries (version, channels, streams, PTZ position) | always |
-| Camera motion control | PTZ preset recall and moves, focus and autofocus, a doorbell's speaker (talk-back) | only for a camera the user enabled it on; rate-limited; every command logged with its reason; never while the user is steering the camera; automatic sends only where the user also enabled automatic correction |
-| Configuration | anything that changes a device's settings, users, network, recording, or firmware | never |
+| Viewing | login, logout, preview start and stop, connection test, read-only queries (version, channels, streams, PTZ position, presets) | always |
+| Camera motion control | PTZ moves and preset recall, lens zoom and focus, a doorbell's speaker (talk-back) | see the rules below: rate-limited, every command logged; the user's own PTZ controls need no enable; talk-back needs the camera's permission; automation needs a per-camera grant |
+| Configuration | anything that changes a device's settings, users, network, recording, or firmware; saving or deleting presets | never |
+
+Camera motion control is the one exception to "never change the device",
+and these rules hold for every command in the tier:
+
+- **The user's own controls need no enable.** Moving a camera, zooming or
+  focusing its lens, and recalling a preset from the app's PTZ controls is
+  the user acting by hand, as in the official client; there is no prior
+  "enable PTZ" step.
+- **Limits sized for runaway software, never felt by hand.** Per camera,
+  moves and lens commands at most 20 per second (bursts of 40), preset
+  recalls 5 per second, talk-back starts 20 per minute outside a call. A
+  person at the controls never reaches them; a loop that sends without
+  stopping does. `stop` is never limited.
+- **Every command is logged** with its origin (the user's control, a local
+  API client, automatic correction) and its reason.
+- **Moves always end.** A move is followed by `stop` on every path:
+  release, error, timeout, disconnect, tile close, session drop. The core
+  also stops a move on its own when the app stops renewing it (a dead-man
+  timer) and after a maximum hold.
+- **Automation needs a per-camera grant.** Nothing automated (the local
+  API, automatic correction such as focus drift or the PTZ watchdog) sends
+  a motion command unless the user granted that client or feature for that
+  camera, and never while the user is steering the camera.
+- **Talk-back keeps its permission.** Sound through a camera's speaker
+  needs that camera's "Allow talk-back" option; the first Talk or typed
+  reply on a camera without it asks "Allow talk-back for <camera>?"
+  (UX.md, "Doorbell calls").
+- **Fixed templates.** Every motion body is built by the core from a fixed
+  template (never forwarded from a client), and only the forms observed on
+  hardware are sent: for PTZ, protocol.md "What nvrview will send". Where
+  one command number covers motion and configuration (presets: recall
+  versus save and delete), only the motion form is ever built.
 
 Motion control has its own protocol facts (observed from the official app's
 PTZ and focus controls, or reported from static analysis) in

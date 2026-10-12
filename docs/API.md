@@ -85,7 +85,7 @@ session cookie.
 | `detections` | detection events and history |
 | `transcripts` | transcripts and keyword events (sensitive; separate on purpose) |
 | `app` | app actions: focus a tile, switch a layout, edit nvrview's own layouts |
-| `motion:{camera}` | camera motion control on that camera (preset recall, moves, focus), only where the camera itself has motion control enabled in nvrview |
+| `motion:{camera}` | camera motion control on that camera (preset recall, moves, focus); the per-camera grant automation needs (ARCHITECTURE.md, "Device commands") |
 | `speak:{camera}` | doorbell text-to-speech from the user's templates on that camera |
 
 There is no grant for device configuration, for pairing other clients, or for
