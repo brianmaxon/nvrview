@@ -354,8 +354,8 @@ per source ("Dates and replays").
 
 ## Settings and checks in the apps
 
-- **Settings, Updates** (a tab on macOS; a section under the devices in the
-  Windows Settings dialog): the update source (a text field; on macOS also
+- **Settings, Updates** (a tab on macOS; the Updates section of the
+  Windows Settings window): the update source (a text field; on macOS also
   Choose Folder), the trusted keys (listed by key ID; Add Key takes a pasted
   key, and on macOS Choose File reads a key file; Remove), **Check
   automatically** (off by default), **Check Now**, and one line of status
