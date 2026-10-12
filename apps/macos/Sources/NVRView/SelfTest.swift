@@ -3071,9 +3071,236 @@ final class SelfTest {
                 if p.opens != opens || b.playingIncident == nil || b.playingIncident?.key != b.selected?.key {
                     problems.append("recordings: after Split Here the player reopened or lost its incident")
                 }
-                recordingsLayout(b, fake)
+                editViews(b, fake, rec)
             }
         }
+    }
+
+    // MARK: Follow cut and grids (milestone P, M3)
+
+    /// The edit player's simulated host clock (seconds).
+    private final class ManualClock {
+        var now: Double = 1000
+    }
+
+    /// Synthetic files being written.
+    private final class Writing {
+        var done = false
+        var failure: String?
+    }
+
+    /// The follow cut and the 4-up grid of a downloaded incident, on the fake
+    /// core's plans (`editCompute`) over synthetic files written where its
+    /// download says they are: each camera's pictures are its own color with
+    /// the frame number in a strip (`SyntheticRecording`). Frames of each are
+    /// drawn with Metal from the VideoToolbox-decoded files and checked at
+    /// sample times for which camera is shown and which of its frames; then
+    /// the cuts, the sound following the shown camera, the transport on a
+    /// simulated clock, the picture on screen, and the way back to the
+    /// cameras.
+    private func editViews(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: edit-download
+        let vehicles = b.dayIncidents.filter { $0.kinds == ["vehicle"] }.map(\.key)
+        guard vehicles.count == 3 else {
+            problems.append("edits: \(vehicles.count) vehicle incidents, expected 3")
+            return recordingsLayout(b, fake)
+        }
+        b.selection = Set(vehicles)
+        b.merge()
+        when({ b.selected?.cameras.count == 3 }, timeout: 2) { [self] in
+            guard let incident = b.selected, incident.cameras.count == 3 else {
+                problems.append("edits: the vehicle incidents did not merge")
+                return recordingsLayout(b, fake)
+            }
+            if b.editable != nil { problems.append("edits: an incident not downloaded offers a follow cut") }
+            b.show(view: .follow)
+            if b.playerView != .cameras { problems.append("edits: Follow Cut showed without a download") }
+            b.message = nil
+            b.download(incident.key)
+            when({
+                fake.completeRecordingWork()
+                return rec.finishedDownload(of: incident.key) != nil
+            }, timeout: 3) { [self] in
+                guard let d = rec.finishedDownload(of: incident.key),
+                    let raw = try? fake.editCompute(json: #"{"kind":"follow","download":"\#(d.download)"}"#),
+                    let object = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+                    let sources = object["sources"] as? [[String: Any]]
+                else {
+                    problems.append("edits: the incident did not download, or the fake planned nothing")
+                    return recordingsLayout(b, fake)
+                }
+                let files = sources.compactMap { s -> (URL, SyntheticRecording.Spec)? in
+                    guard let file = s["file"] as? String, let n = s["source"] as? Int,
+                        let ms = (s["duration_ms"] as? NSNumber)?.intValue
+                    else { return nil }
+                    return (URL(fileURLWithPath: file), SyntheticRecording.Spec(frames: ms / 100 + 1, color: n))
+                }
+                let writing = Writing()
+                Task { @MainActor in
+                    do {
+                        for (url, spec) in files { try await SyntheticRecording.write(spec, to: url) }
+                    } catch {
+                        writing.failure = String(describing: error)
+                    }
+                    writing.done = true
+                }
+                when({ writing.done }, timeout: 30) { [self] in
+                    print("edits: downloaded \(d.download), \(files.count) synthetic files written\(writing.failure.map { ", failed: \($0)" } ?? "")")
+                    if let f = writing.failure { problems.append("edits: the synthetic files were not written (\(f))") }
+                    if files.count != 3 { problems.append("edits: the download has \(files.count) files, expected 3") }
+                    editFollow(b, fake, rec, incident, folder: d.folder)
+                }
+            }
+        }
+    }
+
+    /// Renders `samples` of a plan offscreen and returns what did not match.
+    private func editMismatches(
+        _ session: EditSession, _ renderer: GridRenderer, samples: [Int64], width: Int, height: Int
+    ) -> [String] {
+        let plan = session.plan
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        var out: [String] = []
+        for t in samples {
+            guard let image = session.render(at: t, width: width, height: height, with: renderer) else {
+                out.append("\(t): nothing rendered")
+                continue
+            }
+            switch plan.kind {
+            case .follow:
+                guard let shot = EditTimeline.shot(plan, at: t) else { continue }
+                let got = SyntheticRecording.read(image, picture: bounds)
+                if got.color != shot.source || got.frame != Int(shot.filePositionMs / 100) {
+                    out.append("\(t - plan.startMs) ms: camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(shot.source) frame \(shot.filePositionMs / 100)")
+                }
+            case .grid:
+                let rects = EditComposition.cellRects(plan, in: bounds)
+                for i in 0..<4 {
+                    let cell = i < rects.count ? rects[i] : CGRect(x: width / 2, y: height / 2, width: width / 2, height: height / 2)
+                    if i < plan.cells.count, let p = EditTimeline.cellPosition(plan, cell: i, at: t) {
+                        let picture = PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination
+                        let got = SyntheticRecording.read(image, picture: picture)
+                        if got.color != plan.cells[i].source || got.frame != Int(p / 100) {
+                            out.append("\(t - plan.startMs) ms cell \(i): camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(plan.cells[i].source) frame \(p / 100)")
+                        }
+                    } else {
+                        let c = image.rgb(x: Int(cell.midX), y: Int(cell.midY))
+                        if max(c.x, c.y, c.z) > 40 { out.append("\(t - plan.startMs) ms cell \(i): \(c), expected black") }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    private func editFollow(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ incident: Incident, folder: String?) {
+        // parity: edit-follow-cut
+        let ep = b.editPlayer
+        let clock = ManualClock()
+        ep.now = { clock.now }
+        b.show(view: .follow)
+        when({ ep.session != nil && (b.editStage?.framesDrawn ?? 0) > 0 }, timeout: 5) { [self] in
+            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
+                problems.append("edits: the follow cut did not open (\(ep.message ?? b.message ?? "no message"))")
+                return editBack(b, fake, folder: folder)
+            }
+            let s = incident.start * 1000
+            print("edits: follow cut \(plan.segments.map { "\($0.source)@\($0.startMs - s)" }), cuts \(ep.cuts.map { $0 - s }), frames drawn \(b.editStage?.framesDrawn ?? 0)")
+            if b.playerView != .follow || b.player.transport.isPlaying { problems.append("edits: the device playback still plays under the follow cut") }
+            if !session.failures.isEmpty { problems.append("edits: files not opened: \(session.failures)") }
+            if ep.cuts != [s + 1000, s + 2000] || plan.segments.map(\.source) != [0, 1, 2] {
+                problems.append("edits: the follow cut cuts at \(ep.cuts.map { $0 - s }) to \(plan.segments.map(\.source))")
+            }
+            let n: Int64 = 24
+            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) }
+                + [s + 500, s + 999, s + 1000, s + 1500, s + 1999, s + 2000, s + 2100, s + 700]
+            let bad = editMismatches(session, renderer, samples: samples, width: 320, height: 180)
+            print("edits: follow cut rendered \(samples.count) frames, \(bad.count) wrong")
+            if !bad.isEmpty { problems.append("edits: follow cut pictures: \(bad.prefix(4).joined(separator: "; "))") }
+            // The transport on the simulated clock, and the sound following the picture.
+            ep.pause()
+            ep.setRate(1)
+            ep.seek(to: s + 500)
+            ep.play()
+            var heard: [Int?] = [ep.playingSoundSource]
+            clock.now += 1
+            ep.tick()
+            heard.append(ep.playingSoundSource)
+            clock.now += 1
+            ep.tick()
+            heard.append(ep.playingSoundSource)
+            let position = ep.positionMs
+            ep.setRate(4)
+            heard.append(ep.playingSoundSource)
+            ep.setRate(1)
+            ep.muted = true
+            heard.append(ep.playingSoundSource)
+            ep.muted = false
+            ep.pause()
+            print("edits: played 2 s on the simulated clock to \(position - s) ms; sound from \(heard)")
+            if position != s + 2500 { problems.append("edits: 2 s of play moved to \(position - s) ms, expected 2500") }
+            if heard != [0, 1, 2, nil, nil] { problems.append("edits: the sound came from \(heard), expected [0, 1, 2, nil, nil]") }
+            // On screen: the third camera's picture at 2.5 s.
+            when({ session.files[2]?.shownPositionMs == 5500 }, timeout: 3) { [self] in
+                var seen: SIMD3<Int>?
+                b.editStage?.grid?.captureNextFrame { image in seen = image.rgb(x: image.width / 2, y: image.height / 2) }
+                when({ seen != nil }, timeout: 2) { [self] in
+                    let want = SyntheticRecording.palette[2]
+                    print("edits: on screen \(seen.map { "\($0)" } ?? "nothing"), expected \(want)")
+                    if let c = seen, abs(c.x - want.x) > 40 || abs(c.y - want.y) > 40 || abs(c.z - want.z) > 40 {
+                        problems.append("edits: the screen shows \(c) at 2.5 s, expected the third camera's \(want)")
+                    } else if seen == nil {
+                        problems.append("edits: the screen drew no frame")
+                    }
+                    editGrid(b, fake, folder: folder)
+                }
+            }
+        }
+    }
+
+    private func editGrid(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
+        // parity: edit-grid
+        let ep = b.editPlayer
+        b.show(view: .grid4)
+        when({ ep.session != nil && ep.plan?.kind == .grid }, timeout: 5) { [self] in
+            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
+                problems.append("edits: the grid did not open (\(ep.message ?? "no message"))")
+                return editBack(b, fake, folder: folder)
+            }
+            print("edits: grid \(plan.layout ?? "?") of \(plan.cells.count) cells on \(plan.canvas.map { "\($0.width)×\($0.height)" } ?? "no canvas")")
+            if plan.layout != "4up" || plan.cells.count != 3 || plan.canvas != .init(width: 1920, height: 1080) {
+                problems.append("edits: the 4-up grid is \(plan.layout ?? "none") with \(plan.cells.count) cells")
+            }
+            let n: Int64 = 16
+            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) } + [plan.startMs + 500, plan.startMs + 1500]
+            let bad = editMismatches(session, renderer, samples: samples, width: 640, height: 360)
+            print("edits: grid rendered \(samples.count) frames, \(bad.count) wrong")
+            if !bad.isEmpty { problems.append("edits: grid pictures: \(bad.prefix(4).joined(separator: "; "))") }
+            ep.seek(to: plan.startMs + 6000)
+            ep.play()
+            let first = ep.playingSoundSource
+            ep.gridSound = 1
+            let second = ep.playingSoundSource
+            ep.pause()
+            ep.gridSound = 0
+            if first != 0 || second != 1 { problems.append("edits: the grid's sound came from \(String(describing: first)), then \(String(describing: second))") }
+            editBack(b, fake, folder: folder)
+        }
+    }
+
+    /// Back to the cameras: the edit closes, the device playback continues from its position.
+    private func editBack(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
+        // parity: edit-back-to-cameras
+        let at = b.editPlayer.positionMs
+        b.show(view: .cameras)
+        print("edits: back to the cameras at \(TransportState.clock(b.player.positionMs))")
+        if b.playerView != .cameras || b.editPlayer.session != nil { problems.append("edits: the edit did not close") }
+        if b.player.playback != nil, b.player.positionMs != at {
+            problems.append("edits: the cameras continue at \(b.player.positionMs), not the edit's \(at)")
+        }
+        b.editPlayer.now = { CACurrentMediaTime() }
+        if let folder { try? FileManager.default.removeItem(at: URL(fileURLWithPath: folder)) }
+        recordingsLayout(b, fake)
     }
 
     /// The window at its smallest and at a large size: the side panes give

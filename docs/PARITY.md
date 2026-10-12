@@ -176,6 +176,7 @@ started on that app.
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
 | Recorded-video playback in the Recordings window (up to four cameras on one clock, grid with large and single views, transport with skip, speeds 0.25× to 16×, mute and volume, scrubber with the incident's events) | yes | yes | Milestone P, M2 (macOS) and W2; [PLAYBACK.md](PLAYBACK.md) is the design, docs/UX.md "Recordings" the screen. IDs `playback-open`, `playback-transport`, `playback-grid`, `playback-scrub`, `playback-close`, and `playback-real-core` (real core against the mock). Stepping and per-camera offsets are not built. Windows draws the playback with the window's own D3D11 renderer; its pictures are not yet checked in the self-test (the fake makes none; `playback-real-core` is a gap). |
 | Remove from Incident and Split Here at the playhead | yes | yes (built, not in the self-test) | IDs `playback-remove-camera`, `playback-split-here`. |
+| Follow cut and 2-up/4-up grids of a downloaded incident in the player (view menu; files decoded and drawn by the platform renderer, no re-encode; same transport; sound follows the shown camera) | yes | no (W3) | Milestone P, M3 (macOS); docs/UX.md "Recordings", "Follow and Grid". IDs `edit-download`, `edit-follow-cut`, `edit-grid`, `edit-back-to-cameras` (fake core, synthetic files; allowlisted for Windows until W3). |
 
 ## Open gaps
 
