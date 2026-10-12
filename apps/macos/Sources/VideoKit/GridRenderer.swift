@@ -132,6 +132,11 @@ public final class GridRenderer {
         return shown[index].rate(now: hostMicros())
     }
 
+    /// Called when a frame takes a tile's new picture: the tile's index, the
+    /// picture's timestamp, and the frame's time (host µs). Playback pacing
+    /// (docs/RENDERING.md "Playback pacing"); nil, and free, by default.
+    public var onNewPicture: ((_ tile: Int, _ ptsMicros: Int64, _ atMicros: Int64) -> Void)?
+
     /// Tiles drawn with the dewarp pipeline in the last frame (self-test).
     public private(set) var dewarpedTilesDrawn = 0
 
@@ -240,7 +245,10 @@ public final class GridRenderer {
             let picture = tile.picture.latestPicture()
             seen[i] = picture?.sequence ?? sequence
             textures[i] = picture.flatMap { makeTextures($0.pixelBuffer) }
-            if textures[i] != nil { shown[i].add(now) }
+            if textures[i] != nil {
+                shown[i].add(now)
+                if let picture { onNewPicture?(i, picture.ptsMicros, now) }
+            }
         }
     }
 

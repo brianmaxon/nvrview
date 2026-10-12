@@ -119,6 +119,18 @@ public sealed class VideoTile : IDisposable
     public long Rebuilds { get; private set; }
 
     /// <summary>
+    /// When set, records when each picture arrives, is answered decoded,
+    /// and is first drawn (playback pacing; off by default).
+    /// </summary>
+    public PacingTrace? Pacing
+    {
+        get => Volatile.Read(ref _pacing);
+        set => Volatile.Write(ref _pacing, value);
+    }
+
+    private PacingTrace? _pacing;
+
+    /// <summary>
     /// The picture to draw: the shown generation's. Read it only under the
     /// device lock; null before the first action.
     /// </summary>
@@ -151,6 +163,7 @@ public sealed class VideoTile : IDisposable
                 Configure(g, in action.Configure);
                 break;
             case NvActionKind.Decode:
+                Pacing?.Arrived(action.Decode.PtsUs);
                 Decode(g, in action.Decode);
                 break;
             case NvActionKind.Flush:
@@ -465,6 +478,7 @@ public sealed class VideoTile : IDisposable
         {
             tile.Count(ref tile._counters.Decoded);
             _ = tile._core.Decoded(tile.Id, Number, ptsUs);
+            tile.Pacing?.Decoded(ptsUs);
         }
 
         public void Failed(NvDecodeFailure kind)

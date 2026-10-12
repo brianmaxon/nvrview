@@ -420,6 +420,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         await Calls(v, stage);
         await PtzSteps(v, stage);
         await RecordingsSteps(v);
+        await PlaybackPacingStep(v);
 
         // parity: detection-events
         // Detections from the mock (camera AI) reached the tiles.

@@ -104,6 +104,7 @@ internal static class Program
         EditPlanTests.Run();
         ExportTests.Run();
         PtzTests.Run();
+        PacingTests.Run();
         return T.Summary();
     }
 }

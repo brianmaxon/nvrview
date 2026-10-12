@@ -184,6 +184,11 @@ public partial class App : Application
             }
             if (o.SelfTest)
             {
+                // Today is recorded on every channel, so the playback pacing step plays real recordings through the core.
+                mockArgs.AddRange(["--recordings", "1"]);
+            }
+            if (o.SelfTest)
+            {
                 // Channel 0 has a speaker (doorbell talk-back); the call steps talk to it, never to real hardware.
                 mockArgs.AddRange(["--talk", "0"]);
             }
