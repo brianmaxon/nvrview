@@ -1,10 +1,12 @@
-# C interface for recordings, ABI 3 minor 5 (proposal for milestone P)
+# C interface for recordings, ABI 3 minor 5 (contract for milestone P)
 
-> **Proposal, not implemented.** This is the contract for review before
-> the core and the apps are built in parallel, as [FFI-ABI3.md](FFI-ABI3.md)
-> was for M3. Everything in [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h)
-> still holds; on implementation this moves into FFI.md and the header as
-> **ABI 3, minor 5**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` becomes 5
+> **Sections 1 to 5, 8, 9, and `nv_sound_configure` are implemented**
+> (slice F1: FFI.md, "Recordings (minor 5)", and the header); the rest is
+> still a proposal (playback F2, edit lists and sound F3, export F4). This
+> was the contract for review before the core and the apps were built in
+> parallel, as [FFI-ABI3.md](FFI-ABI3.md) was for M3. Everything in
+> [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h) still holds; the additions
+> are **ABI 3, minor 5**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` is 5
 > (minors 1 to 4 are discovery, updates, `nv_tile_retry`, and
 > `nv_talk_set_conversation`; FFI.md, "Versioning"). Requirements come from
 > [PLAYBACK.md](PLAYBACK.md), [UX.md](UX.md), and
@@ -1286,8 +1288,8 @@ or a counted drop, never growth):
 8. **The recordings owner in `viewer-core`** is done (MILESTONE-P.md,
    C11): sections 1 to 5 and the events of section 8 have a Rust API on
    `viewer_core::Core` (JSON in, JSON out, `RecError` for the new
-   statuses) that the C functions (F1) wrap; locks (C13) and export (C14)
-   are not in it yet. mock-nvr serves playback (123/5/7) at 1× with the
+   statuses), with locks (C13), that the C functions of F1 wrap; export
+   (C14) has planners but no C functions yet (F4). mock-nvr serves playback (123/5/7) at 1× with the
    observed burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
@@ -1701,3 +1703,33 @@ where section 3, "Locked incidents", was silent.
 12. **Incidents are regrouped at the end of every fill**, because a lane
     prunes its index then (days past the age or size limit, which locks
     now exempt), and incidents in dropped days disappear.
+
+## Clarifications from the implementation (F1, 2026-10-11)
+
+What wrapping sections 1 to 5 in C functions (MILESTONE-P.md, F1)
+settled where the text above was silent.
+
+1. **Calls that change state answer once.** `nv_incident_edit`,
+   `nv_incident_lock`, `nv_download_incident`, and `nv_download_trash`
+   make their change even when the answer does not fit `cap`; then
+   `NV_ERR_BUFFER_TOO_SMALL` (with `*len` set) says only that the answer
+   was not written. Calling again would apply the change again, so the
+   bindings pass a 64 KiB buffer to these four. `len` is checked first: a
+   NULL `len` changes nothing.
+2. **Thumbnail bytes** have no terminator: `nv_thumbnail_get` fits when
+   `cap` >= `*len` (not `>`), fills `*info` and `*len` also when it returns
+   `NV_ERR_BUFFER_TOO_SMALL`, and sets `*len` to 0 with `NV_PENDING`.
+   `NvThumbnail.kind` is read as an integer and checked (an unknown kind,
+   and a negative `pts_us`, is `NV_ERR_INVALID_ARGUMENT`), so a bad value
+   from an app is an error, never an invalid enum in the core.
+3. **Callbacks.** These functions return `NV_ERR_INVALID_ARGUMENT` when
+   called from inside a callback, as the core's other calls that are not
+   allowed there (FFI.md, "Threads").
+4. **`device_info.recordings`** is sent for every device, all four flags
+   true for Baichuan devices.
+5. **Sound in F1** is `nv_sound_configure` only; `nv_sound_watch`,
+   `nv_recordings_loudness`, `nv_sound_labels_put`, the proposed
+   `nv_sound_analyze_day` and `nv_sound_analyze_cancel`, and
+   `nv_tile_loudness` are F3, with the `sound_watch` and `sound_analyze`
+   events (the core already sends those events if the Rust calls are used,
+   but no C function starts them yet).

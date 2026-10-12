@@ -61,6 +61,12 @@ public enum NvStatus
     [CName("NV_ERR_BUFFER_TOO_SMALL")] BufferTooSmall = -6,
     /// <summary>Talk-back (camera motion control) is not enabled for that camera.</summary>
     [CName("NV_ERR_NOT_PERMITTED")] NotPermitted = -7,
+    /// <summary>The device's backend cannot do this (minor 5).</summary>
+    [CName("NV_ERR_UNSUPPORTED")] Unsupported = -8,
+    /// <summary>Recordings are not configured, or there is no downloads folder (minor 5).</summary>
+    [CName("NV_ERR_NOT_CONFIGURED")] NotConfigured = -9,
+    /// <summary>Accepted; the answer arrives as an event (nv_thumbnail_get; minor 5).</summary>
+    [CName("NV_PENDING")] Pending = 1,
 }
 
 /// <summary>An action's kind. Unknown kinds (a newer core) need no answer.</summary>
@@ -143,6 +149,31 @@ public enum NvDecodeFailure
     [CName("NV_FAIL_DECODE_ERROR")] DecodeError = 5,
     /// <summary>The decoder dropped the picture; still an answer.</summary>
     [CName("NV_FAIL_NO_PICTURE")] NoPicture = 6,
+}
+
+/// <summary>What a cover thumbnail's bytes are (minor 5).</summary>
+public enum NvThumbKind
+{
+    /// <summary>An H.264 keyframe, Annex-B, parameter sets included.</summary>
+    [CName("NV_THUMB_H264_KEYFRAME")] H264Keyframe = 1,
+    /// <summary>An H.265 keyframe, Annex-B, parameter sets included.</summary>
+    [CName("NV_THUMB_H265_KEYFRAME")] H265Keyframe = 2,
+    /// <summary>The app's own small image (for example JPEG).</summary>
+    [CName("NV_THUMB_IMAGE")] Image = 3,
+}
+
+/// <summary>A cover thumbnail's description (minor 5).</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct NvThumbnail
+{
+    /// <summary>What the bytes are.</summary>
+    public NvThumbKind Kind;
+    /// <summary>Width of the picture the bytes decode to (0 when unknown).</summary>
+    public uint Width;
+    /// <summary>Height (0 when unknown).</summary>
+    public uint Height;
+    /// <summary>The keyframe's stream timestamp (0 for an image that did not keep it).</summary>
+    public long PtsUs;
 }
 
 /// <summary>Core configuration; read only during <c>nv_core_new</c>.</summary>
@@ -334,7 +365,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 4;
+    public const uint AbiMinor = 5;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -522,4 +553,132 @@ public static unsafe partial class NvNative
     public static partial NvStatus nv_grid_layout(
         uint tileCount, NvSize viewport, uint gap, NvSize* pictureSizes,
         [MarshalAs(UnmanagedType.U1)] bool fill, NvTileLayout* output);
+
+    // Recordings, part 1 (minor 5; docs/FFI.md, "Recordings (minor 5)").
+    // JSON goes in as UTF-8 strings; answers come back through the
+    // out-buffer convention (output, cap, len).
+
+    /// <summary>Sets the recordings configuration (JSON; minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_configure(nint core, string json);
+
+    /// <summary>Allows (json non-null) or stops (null) indexing a device by its key (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_enable(nint core, string deviceKey, string? json);
+
+    /// <summary>Days with recordings per camera (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_calendar(nint core, string query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Recording spans per camera (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_spans(nint core, string query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Events matching a query (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_events(nint core, string query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Asks for cameras' days to be indexed; returns at once (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_want(nint core, string json);
+
+    /// <summary>Keeps today fresh for a hold's cameras; null json releases the hold (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_hold_today(nint core, ulong hold, string? json);
+
+    /// <summary>Index state of every enabled device (minor 5).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_status(nint core, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Incidents overlapping a query's range, newest first (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_incidents_get(nint core, string query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>One incident by key (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_incident_get(nint core, string key, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Applies and stores one incident edit; changes state even when the answer does not fit (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_incident_edit(nint core, string edit, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Locks or unlocks an incident; changes state even when the answer does not fit (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_incident_lock(
+        nint core, string key, [MarshalAs(UnmanagedType.U1)] bool locked, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Camera groups and name overrides (minor 5).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_camera_groups_get(nint core, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Replaces the camera groups and name overrides (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_camera_groups_put(nint core, string json);
+
+    /// <summary>A cached cover thumbnail; NV_PENDING while it is fetched (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_thumbnail_get(
+        nint core, string key, NvThumbnail* info, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Replaces a cached thumbnail (usually with the app's small image; minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_thumbnail_put(nint core, string key, NvThumbnail* info, byte* data, nuint len);
+
+    /// <summary>Drops queued thumbnail fetches of one key, or all for null (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_thumbnail_cancel(nint core, string? key);
+
+    /// <summary>Queues an incident's download; changes state even when the answer does not fit (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_incident(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Pauses or resumes a download, or one camera of it (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_pause(
+        nint core, string download, string? camera, [MarshalAs(UnmanagedType.U1)] bool paused);
+
+    /// <summary>Retries a download's failed cameras, or one (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_retry(nint core, string download, string? camera);
+
+    /// <summary>Forgets a download with no job running (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_forget(
+        nint core, string download, [MarshalAs(UnmanagedType.U1)] bool deletePartial);
+
+    /// <summary>Hands a download's folder to the app for the Recycle Bin (minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_trash(nint core, string download, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Every known download (minor 5).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_downloads_get(nint core, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Live sound settings (JSON; minor 5).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_sound_configure(nint core, string json);
 }

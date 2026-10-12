@@ -686,6 +686,18 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
                         if let Some(f) = &v.firmware {
                             o = o.str("firmware", f);
                         }
+                        // What this backend can do with recordings
+                        // (docs/FFI-RECORDINGS.md, section 1): Baichuan
+                        // devices search, play back, download, and serve
+                        // cover images.
+                        o = o.object(
+                            "recordings",
+                            Object::new()
+                                .bool("search", true)
+                                .bool("playback", true)
+                                .bool("download", true)
+                                .bool("thumbnails", true),
+                        );
                         events.send(o.finish(), Priority::State);
                     }
                     Ok(Some(Info::Channels(found))) => {

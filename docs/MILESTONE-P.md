@@ -31,7 +31,7 @@ Already in `crates/recordings` (with end-to-end tests against
 | Mock device: 142, 14–16, 272–274, 298, 143/144 with stall and disconnect faults | `mock-nvr::archive` | done; no playback (123/5/7) |
 
 `viewer-core` holds it through the recordings owner (C11, below); the C
-interface has no recordings functions yet (F1).
+interface wraps sections 1 to 5 of it (F1, minor 5).
 
 ## Facts: what each slice may rely on
 
@@ -81,7 +81,7 @@ fact the slice needs is observed or reported; seams for the rest are named.
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| F1 | Minor 5, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | contract reviewed (decisions of 2026-10-11); unblocked once C11, C13, and C15 land | Opus for the contract, Sonnet for shaping JSON |
+| F1 | Minor 5, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | done (minor 5: the 24 functions of FFI.md, "Recordings (minor 5)", `NvThumbKind`/`NvThumbnail`, `NV_ERR_UNSUPPORTED` -8, `NV_ERR_NOT_CONFIGURED` -9, `NV_PENDING` 1, `device_info.recordings`; Rust tests through the C functions against the mock with a recording store; the C smoke test, also under ASan, goes from configure to the Trash). Clarifications in FFI-RECORDINGS.md, "Clarifications from the implementation (F1)". Deferred: the rest of sound (2a) to F3 | Opus |
 | F2 | Minor 5, part 2: recorded playback (section 6) | C10, F1 | unblocked at 1× | Opus |
 | F3 | Edit lists (section 7) and sound (section 2a) | C8, C12, F1 | unblocked | Sonnet |
 | F4 | Export (section 7a): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` in `nv_edit_compute`, `dest` and `share_safe` on every export request | C14, F1, F3 (F2 for stills from a playback) | unblocked except stills from a playback | Sonnet |

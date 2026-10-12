@@ -711,6 +711,111 @@ Events (ignore unknown types and fields, as always):
 - The core logs one line per outcome with its reason; sources and messages
   only at debug level.
 
+## Recordings (minor 5)
+
+Part 1 of the recordings interface (slice F1 of
+[MILESTONE-P.md](MILESTONE-P.md)): configuration, the index and its
+on-demand requests, incidents with the user's edits and locks, camera
+groups, cover thumbnails, downloads with the Trash, and
+`nv_sound_configure`. [FFI-RECORDINGS.md](FFI-RECORDINGS.md) is the
+contract (sections 1 to 5, 8, 9, and 13, with its decisions and
+clarifications); the core side is `viewer_core::recordings_owner` (C11,
+C13, C15). Recorded playback (section 6, F2), edit lists and the rest of
+sound (sections 2a and 7, F3: `nv_sound_watch`, `nv_recordings_loudness`,
+`nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
+`nv_tile_loudness`), and export (section 7a, F4) come later; an app checks
+the minor before each group.
+
+```c
+NvStatus nv_recordings_configure(NvCore *core, const char *json);
+NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *json);
+NvStatus nv_recordings_calendar(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_spans(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_events(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_want(NvCore *core, const char *json);
+NvStatus nv_recordings_hold_today(NvCore *core, uint64_t hold, const char *json);
+NvStatus nv_recordings_status(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_incidents_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_get(NvCore *core, const char *key, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_edit(NvCore *core, const char *edit, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_lock(NvCore *core, const char *key, bool locked, char *out, size_t cap,
+                          size_t *len);
+NvStatus nv_camera_groups_get(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_camera_groups_put(NvCore *core, const char *json);
+NvStatus nv_thumbnail_get(NvCore *core, const char *key, NvThumbnail *info, uint8_t *out,
+                          size_t cap, size_t *len);
+NvStatus nv_thumbnail_put(NvCore *core, const char *key, const NvThumbnail *info,
+                          const uint8_t *data, size_t len);
+NvStatus nv_thumbnail_cancel(NvCore *core, const char *key);
+NvStatus nv_download_incident(NvCore *core, const char *request, char *out, size_t cap,
+                              size_t *len);
+NvStatus nv_download_pause(NvCore *core, const char *download, const char *camera, bool paused);
+NvStatus nv_download_retry(NvCore *core, const char *download, const char *camera);
+NvStatus nv_download_forget(NvCore *core, const char *download, bool delete_partial);
+NvStatus nv_download_trash(NvCore *core, const char *download, char *out, size_t cap,
+                           size_t *len);
+NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_sound_configure(NvCore *core, const char *json);
+```
+
+- **Status codes.** Three are new, and only these functions return them:
+  `NV_ERR_UNSUPPORTED` (-8, the device's backend cannot do this),
+  `NV_ERR_NOT_CONFIGURED` (-9, `nv_recordings_configure` was not called,
+  or a download needs `downloads_dir`), and `NV_PENDING` (1, the first
+  positive status: accepted, the answer arrives as an event; only
+  `nv_thumbnail_get` returns it). The core's `RecError` maps one to one:
+  `InvalidArgument` -1, `UnknownId` -2, `Closed` -3, `Limit` -4,
+  `Internal` -5, `Unsupported` -8, `NotConfigured` -9. A NULL `core`, a
+  required string that is NULL or not UTF-8, and a NULL `len` or `info`
+  are `NV_ERR_INVALID_ARGUMENT`.
+- **Threads.** Every one of these answers from memory under short locks and
+  never waits on the network or a device permit; searches, thumbnail
+  fetches, and downloads run on core threads and report by event. Call
+  them from any thread but never from inside a callback (there they return
+  `NV_ERR_INVALID_ARGUMENT`). After `nv_core_free` returns, no search,
+  fetch, or download runs (job files keep the progress).
+- **JSON in and out.** Arguments are UTF-8, NUL-terminated, and copied
+  before the call returns; cameras are `{"device": "<device key>",
+  "channel": 3, "lens": 0}` (lens optional), times device-local seconds.
+  Answers follow the out-buffer rules of "Layouts". Queries may change
+  between two calls (the index fills meanwhile), so bindings loop until the
+  answer fits.
+- **Calls that change state answer once.** `nv_incident_edit`,
+  `nv_incident_lock`, `nv_download_incident`, and `nv_download_trash` make
+  their change even when the answer does not fit: `NV_ERR_BUFFER_TOO_SMALL`
+  (with `*len` set) then only says the answer was not written, and calling
+  again would apply the change again (or report `NV_ERR_UNKNOWN_ID` for a
+  download already trashed). Bindings pass a large buffer (64 KiB) for
+  these; `len` is checked before anything changes.
+- **Thumbnails.** `NvThumbnail.kind` is an `NvThumbKind`, received as an
+  integer and validated (`NV_ERR_INVALID_ARGUMENT` for other values), and
+  `pts_us` must not be negative. The bytes are binary, without a
+  terminator: `nv_thumbnail_get` returns `NV_ERR_BUFFER_TOO_SMALL` when
+  `out` is NULL or `cap` < `*len`, with `*info` and `*len` filled, and
+  `NV_PENDING` with `*len` 0. A fetch for a device that is not enabled and
+  added answers `NV_PENDING` and a `thumbnail` event `failed`.
+- **`device_info`** gains `"recordings": {"search": true, "playback":
+  true, "download": true, "thumbnails": true}`, what the device's backend
+  can do (all four for Baichuan devices).
+
+Events (FFI-RECORDINGS.md, section 8; ignore unknown types and fields):
+
+```json
+{"type":"recordings_index","device":"d-3f9a0c1b7e2d4a65","state":"busy","pending_days":11,"revision":40}
+{"type":"recordings_day_failed","device":"d-3f9a0c1b7e2d4a65","camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"day":1791504000,"reason":"session closed during the search"}
+{"type":"recordings_changed","device":"d-3f9a0c1b7e2d4a65","revision":41,"start":1791590400,"end":1791676799}
+{"type":"incidents_changed","revision":12}
+{"type":"camera_groups_changed","revision":3}
+{"type":"thumbnail","key":{"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"tier":"sub","start":1791618125,"end":1791618141},"state":"ready"}
+{"type":"download","download":"1791618125-9c1e5a2b7d40f316","state":"running","cameras":[]}
+{"type":"download_removed","download":"1791618125-9c1e5a2b7d40f316","trash":true,"folder":"/abs/downloads/2026-10-10 07.42 vehicle — Camera 1"}
+```
+
+The C smoke test (`scripts/test-c-ffi.sh`, also under AddressSanitizer)
+goes through configure, enable, want, the queries, an edit, a thumbnail from
+pending to ready and back as an image, a download to the end, a lock that
+returns it, and the Trash, against mock-nvr with two days of recordings.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
@@ -748,6 +853,7 @@ symbol at all, so a bound app checks first):
 | 2 | updates (`nv_update_check`, `nv_update_download`, `nv_update_cancel`, `nv_update_parse_key`, `nv_update_parse_source`, the `update` event) |
 | 3 | `nv_tile_retry` (the Retry button of a tile without a picture) |
 | 4 | `nv_talk_set_conversation` (no per-minute talk-back limit while the user has a call open; see "Talk-back") |
+| 5 | recordings, part 1 (see "Recordings"): `nv_recordings_*`, `nv_incident*`, `nv_camera_groups_*`, `nv_thumbnail_*`, `nv_download*`, `nv_sound_configure`, `NvThumbKind`, `NvThumbnail`, `NV_ERR_UNSUPPORTED`, `NV_ERR_NOT_CONFIGURED`, `NV_PENDING`, and the recordings events; `device_info.recordings` |
 
 ## Builds
 

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use viewer_core::audio::TapBlock;
 use viewer_core::{
     Action, Callbacks, Codec, ColorMatrix, Core, CoreConfig, CoreError, DecodeFailureKind,
-    LogSettings, StreamTier, TileStatus, clock,
+    LogSettings, RecError, StreamTier, ThumbKind, Thumbnail, ThumbnailAnswer, TileStatus, clock,
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
@@ -31,8 +31,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// Bumped for each addition that leaves every existing declaration
 /// unchanged (new functions, events, status codes); resets to 0 with a new
 /// NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
-/// nv_tile_retry. Minor 4: nv_talk_set_conversation.
-pub const NV_ABI_MINOR: u32 = 4;
+/// nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
+/// part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5).
+pub const NV_ABI_MINOR: u32 = 5;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -52,6 +53,13 @@ pub enum NvStatus {
     NV_ERR_BUFFER_TOO_SMALL = -6,
     /// talk-back (camera motion control) is not enabled for that camera
     NV_ERR_NOT_PERMITTED = -7,
+    /// the device's backend cannot do this (minor 5)
+    NV_ERR_UNSUPPORTED = -8,
+    /// nv_recordings_configure not called, or no downloads_dir (minor 5)
+    NV_ERR_NOT_CONFIGURED = -9,
+    /// accepted; the answer arrives as an event (only nv_thumbnail_get
+    /// returns it; minor 5)
+    NV_PENDING = 1,
 }
 
 #[repr(C)]
@@ -114,8 +122,22 @@ pub enum NvActionKind {
     NV_ACTION_STATUS = 5,
 }
 
+/// What a cover thumbnail's bytes are (minor 5).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NvThumbKind {
+    /// Annex-B, parameter sets included
+    NV_THUMB_H264_KEYFRAME = 1,
+    /// Annex-B, parameter sets included
+    NV_THUMB_H265_KEYFRAME = 2,
+    /// the app's own small image (for example JPEG)
+    NV_THUMB_IMAGE = 3,
+}
+
 /// An `NvStreamTier` value as received from C (validated before use).
 pub type NvStreamTierValue = u32;
+/// An `NvThumbKind` value as received from C (validated before use).
+pub type NvThumbKindValue = u32;
 /// An `NvDecodeFailure` value as received from C (validated before use).
 pub type NvDecodeFailureValue = u32;
 
@@ -263,6 +285,19 @@ pub struct NvTileLayout {
     pub cell: NvRect,
     pub dest: NvRect,
     pub source: NvRect,
+}
+
+/// A cover thumbnail's description (minor 5): what its bytes are and the
+/// picture they decode to.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NvThumbnail {
+    pub kind: NvThumbKindValue,
+    /// of the picture the bytes decode to (0 when unknown)
+    pub width: u32,
+    pub height: u32,
+    /// the keyframe's stream timestamp (0 for an image that did not keep it)
+    pub pts_us: i64,
 }
 
 /// The core. Opaque to C.
@@ -1513,6 +1548,672 @@ pub unsafe extern "C" fn nv_grid_layout(
         }
         NvStatus::NV_OK
     })
+}
+
+// ---- Recordings, part 1 (minor 5; docs/FFI-RECORDINGS.md, sections 1-5) --
+
+impl From<RecError> for NvStatus {
+    fn from(e: RecError) -> NvStatus {
+        match e {
+            RecError::InvalidArgument => NvStatus::NV_ERR_INVALID_ARGUMENT,
+            RecError::UnknownId => NvStatus::NV_ERR_UNKNOWN_ID,
+            RecError::Closed => NvStatus::NV_ERR_CLOSED,
+            RecError::Limit => NvStatus::NV_ERR_LIMIT,
+            RecError::Internal => NvStatus::NV_ERR_INTERNAL,
+            RecError::NotConfigured => NvStatus::NV_ERR_NOT_CONFIGURED,
+            RecError::Unsupported => NvStatus::NV_ERR_UNSUPPORTED,
+        }
+    }
+}
+
+/// A required string argument.
+///
+/// # Safety
+/// As [`string`].
+unsafe fn arg<'a>(p: *const c_char) -> Result<&'a str, NvStatus> {
+    // SAFETY: per the caller.
+    unsafe { string(p) }.ok_or(NvStatus::NV_ERR_INVALID_ARGUMENT)
+}
+
+/// An optional string argument: NULL is `None`, bad UTF-8 an error.
+///
+/// # Safety
+/// As [`string`].
+unsafe fn opt_arg<'a>(p: *const c_char) -> Result<Option<&'a str>, NvStatus> {
+    if p.is_null() {
+        Ok(None)
+    } else {
+        // SAFETY: per the caller.
+        unsafe { arg(p) }.map(Some)
+    }
+}
+
+/// Runs a recordings call without an answer.
+///
+/// # Safety
+/// `core` is null or a live handle.
+unsafe fn rec_call(core: *mut NvCore, f: impl FnOnce(&Core) -> Result<(), NvStatus>) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        match f(c) {
+            Ok(()) => NvStatus::NV_OK,
+            Err(e) => e,
+        }
+    })
+}
+
+/// Runs a recordings call that answers JSON through `out`/`cap`/`len`.
+/// `len` is checked before `f` runs, so a call that changes state never
+/// does so without being able to report the answer's size.
+///
+/// # Safety
+/// `core` is null or a live handle; `out` is null or valid for writing
+/// `cap` bytes; `len` is null or valid for one write.
+unsafe fn rec_answer(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+    f: impl FnOnce(&Core) -> Result<String, NvStatus>,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match f(c) {
+            // SAFETY: per the caller.
+            Ok(text) => unsafe { copy_out(&text, out, cap, len) },
+            Err(e) => e,
+        }
+    })
+}
+
+/// Sets the recordings configuration (docs/FFI-RECORDINGS.md, section 1):
+/// {"downloads_dir":"<absolute path>","index":{...},"grouping":{...},
+///  "thumbnails":{...},"downloads":{...},"playback":{...},"naming":{...}};
+/// every member optional, unknown members ignored. Call once after
+/// nv_core_new and again to change it. Starts resuming unfinished downloads
+/// of an earlier run (they wait for their devices). NV_ERR_INVALID_ARGUMENT
+/// for invalid JSON or values. Added in minor 5, as everything down to
+/// nv_sound_configure.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_configure(
+    core: *mut NvCore,
+    json: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.recordings_configure(arg(json)?)?)) }
+}
+
+/// Allows (json non-NULL) or stops (json NULL) indexing one device by its
+/// stable key: {"channels":[{"channel":0},{"channel":3,"lens":1}] or "all",
+/// "utc_offset_s":7200,"background":{"days_back":14,"pass_interval_s":60}}.
+/// Nothing is searched until a view asks (nv_recordings_want,
+/// nv_recordings_hold_today, a thumbnail), unless "background" is set. The
+/// device need not be added yet. NV_ERR_NOT_CONFIGURED before
+/// nv_recordings_configure; NV_ERR_UNSUPPORTED if the device's backend has
+/// no recordings.
+///
+/// # Safety
+/// `core` is a live handle; `device_key` is a NUL-terminated string; `json`
+/// is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_enable(
+    core: *mut NvCore,
+    device_key: *const c_char,
+    json: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.recordings_enable(arg(device_key)?, opt_arg(json)?)?)
+        })
+    }
+}
+
+/// Days with recordings per camera in [start, end]:
+/// {"revision":N,"truncated":false,"days":[{"camera":{...},"days":[...]}]}.
+/// Queries take {"start":S,"end":E,"cameras":[...],"kinds":[...],
+/// "limit":5000} (start and end required), answer from memory, and never
+/// cause a search. Answers come through out/cap/len: NUL-terminated, *len
+/// bytes without the NUL; NV_ERR_BUFFER_TOO_SMALL (with *len set) when out
+/// is NULL or cap <= *len. The index may change between two calls, so loop
+/// until the answer fits.
+///
+/// # Safety
+/// `core` is a live handle; `query` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_calendar(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.recordings_calendar(arg(query)?)?)
+        })
+    }
+}
+
+/// Continuous recording spans per camera (timeline lanes):
+/// {"revision":N,"truncated":false,"spans":[{"camera":{...},"spans":[{"start",
+/// "end","bytes","causes","tier"}]}]}. As nv_recordings_calendar.
+///
+/// # Safety
+/// As nv_recordings_calendar.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_spans(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(
+            core,
+            out,
+            cap,
+            len,
+            |c| Ok(c.recordings_spans(arg(query)?)?),
+        )
+    }
+}
+
+/// Events matching the query, by start:
+/// {"revision":N,"truncated":false,"events":[{"camera","kind","source",
+/// "start","end"}]}. As nv_recordings_calendar.
+///
+/// # Safety
+/// As nv_recordings_calendar.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_events(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.recordings_events(arg(query)?)?)
+        })
+    }
+}
+
+/// Asks for these cameras' days to be in the index:
+/// {"cameras":[{"device":"<key>","channel":3}],"days":[S,...],"force":false}
+/// (days: any second within each day, device-local). Returns at once;
+/// recordings_changed follows for each device as days arrive. Days already
+/// indexed are searched again only with "force" (the user's refresh).
+/// NV_ERR_LIMIT for more than 31 days or when a device's queue (4096
+/// camera-days) would overflow (nothing is queued); NV_ERR_INVALID_ARGUMENT
+/// for a camera nv_recordings_enable does not allow.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_want(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.recordings_want(arg(json)?)?)) }
+}
+
+/// Keeps today fresh for these cameras while the hold lasts: `hold` is any
+/// nonzero number the app chooses per window; json {"cameras":[...]} sets
+/// or replaces that hold's cameras, NULL releases it. Every hold ends with
+/// nv_core_free, and a device no longer enabled leaves every hold.
+///
+/// # Safety
+/// `core` is a live handle; `json` is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_hold_today(
+    core: *mut NvCore,
+    hold: u64,
+    json: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.recordings_hold_today(hold, opt_arg(json)?)?)) }
+}
+
+/// Index state of every enabled device: {"revision":N,"devices":[{"device",
+/// "state","pending_days","revision"}]}, as the recordings_index events say.
+/// Out-buffer rules as nv_recordings_calendar.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_recordings_status(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.recordings_status()?)) }
+}
+
+/// Incidents overlapping [start, end], newest first:
+/// {"revision":N,"truncated":false,"incidents":[...]}. Query as for
+/// nv_recordings_calendar, plus "group". Out-buffer rules as there.
+///
+/// # Safety
+/// As nv_recordings_calendar.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_incidents_get(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.incidents_get(arg(query)?)?)) }
+}
+
+/// One incident by its key: {"revision":N,"incident":{...}}.
+/// NV_ERR_UNKNOWN_ID if no incident has it now. Out-buffer rules as
+/// nv_recordings_calendar.
+///
+/// # Safety
+/// `core` is a live handle; `key` is a NUL-terminated string; `out` is null
+/// or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_incident_get(
+    core: *mut NvCore,
+    key: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.incident_get(arg(key)?)?)) }
+}
+
+/// Applies one edit ({"op":"merge"|"split"|"rename"|"add_camera"|
+/// "remove_camera"|"revert",...}), stores it, sends incidents_changed, and
+/// answers {"revision":N,"keys":[...]}. NV_ERR_UNKNOWN_ID for an unknown
+/// key; NV_ERR_INVALID_ARGUMENT for an edit that cannot apply (nothing is
+/// stored); NV_ERR_LIMIT beyond 10000 edits or 1000 incidents in a merge.
+/// The edit is made even when the answer does not fit: then
+/// NV_ERR_BUFFER_TOO_SMALL only says the answer was not written (do not
+/// apply the edit again).
+///
+/// # Safety
+/// `core` is a live handle; `edit` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_incident_edit(
+    core: *mut NvCore,
+    edit: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.incident_edit(arg(edit)?)?)) }
+}
+
+/// Locks (locked true) or unlocks an incident by key; stores it, sends
+/// incidents_changed, and answers {"revision":N,"keys":[...]} plus, when
+/// locking, "download", "folder", and "download_status" ("queued",
+/// "existing", "when_settled", "not_configured", "limit"). Locking queues
+/// the incident's download. NV_ERR_UNKNOWN_ID if no incident has the key;
+/// NV_ERR_LIMIT beyond 1000 locks or 31 days. As for nv_incident_edit, the
+/// change is made even when the answer does not fit.
+///
+/// # Safety
+/// As nv_incident_get.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_incident_lock(
+    core: *mut NvCore,
+    key: *const c_char,
+    locked: bool,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.incident_lock(arg(key)?, locked)?)
+        })
+    }
+}
+
+/// Camera groups: {"revision":N,"groups":[{"name","cameras"}],
+/// "camera_names":[{"camera","name"}]}. Out-buffer rules as
+/// nv_recordings_calendar.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_camera_groups_get(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.camera_groups_get()?)) }
+}
+
+/// Replaces the camera groups and names ({"groups":[...],
+/// "camera_names":[...]}); regroups; sends camera_groups_changed and
+/// incidents_changed. NV_ERR_LIMIT beyond 64 groups of 64 cameras, 4096
+/// names, or 256-byte names (nothing stored).
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_camera_groups_put(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.camera_groups_put(arg(json)?)?)) }
+}
+
+fn thumb_kind(k: ThumbKind) -> NvThumbKindValue {
+    (match k {
+        ThumbKind::H264Keyframe => NvThumbKind::NV_THUMB_H264_KEYFRAME,
+        ThumbKind::H265Keyframe => NvThumbKind::NV_THUMB_H265_KEYFRAME,
+        ThumbKind::Image => NvThumbKind::NV_THUMB_IMAGE,
+    }) as NvThumbKindValue
+}
+
+fn thumb_kind_from(k: NvThumbKindValue) -> Option<ThumbKind> {
+    Some(match k {
+        1 => ThumbKind::H264Keyframe,
+        2 => ThumbKind::H265Keyframe,
+        3 => ThumbKind::Image,
+        _ => return None,
+    })
+}
+
+/// Copies a cached cover thumbnail into `out`. `key` is the JSON object
+/// {"camera":{"device","channel","lens"},"tier":"sub","start":S,"end":E}.
+/// NV_OK: *info, out, and *len (the byte count) filled. NV_PENDING: not
+/// cached; a fetch is queued (or already was), *len is 0, and a thumbnail
+/// event follows. NV_ERR_BUFFER_TOO_SMALL: *info and *len filled (out is
+/// NULL or cap < *len; the bytes have no terminator). Never waits on the
+/// device.
+///
+/// # Safety
+/// `core` is a live handle; `key` is a NUL-terminated string; `info` and
+/// `len` are valid for one write; `out` is null or valid for writing `cap`
+/// bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_thumbnail_get(
+    core: *mut NvCore,
+    key: *const c_char,
+    info: *mut NvThumbnail,
+    out: *mut u8,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(key)) = (unsafe { core_ref(core) }, unsafe { string(key) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if info.is_null() || len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.thumbnail_get(key) {
+            Err(e) => e.into(),
+            Ok(ThumbnailAnswer::Pending) => {
+                // SAFETY: non-null and valid for one write per the caller.
+                unsafe { put(len, 0) };
+                NvStatus::NV_PENDING
+            }
+            Ok(ThumbnailAnswer::Ready(t)) => {
+                let d = NvThumbnail {
+                    kind: thumb_kind(t.kind),
+                    width: t.width,
+                    height: t.height,
+                    pts_us: i64::try_from(t.pts_us).unwrap_or(i64::MAX),
+                };
+                // SAFETY: both non-null and valid for one write per the
+                // caller.
+                unsafe {
+                    put(info, d);
+                    put(len, t.data.len());
+                }
+                if t.data.is_empty() {
+                    return NvStatus::NV_OK;
+                }
+                if out.is_null() || cap < t.data.len() {
+                    return NvStatus::NV_ERR_BUFFER_TOO_SMALL;
+                }
+                // SAFETY: `out` is valid for `cap` >= data.len() bytes per
+                // the caller and does not overlap memory the core owns.
+                unsafe { std::ptr::copy_nonoverlapping(t.data.as_ptr(), out, t.data.len()) };
+                NvStatus::NV_OK
+            }
+        }
+    })
+}
+
+/// Replaces the cached entry of `key` (usually with NV_THUMB_IMAGE after
+/// decoding). The bytes are copied. NV_ERR_LIMIT if larger than the cache's
+/// byte limit.
+///
+/// # Safety
+/// `core` is a live handle; `key` is a NUL-terminated string; `info` is
+/// valid for reading one NvThumbnail; `data` is valid for reading `len`
+/// bytes (or `len` is 0).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_thumbnail_put(
+    core: *mut NvCore,
+    key: *const c_char,
+    info: *const NvThumbnail,
+    data: *const u8,
+    len: usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let key = arg(key)?;
+            // SAFETY: null or valid for one read per the caller; every
+            // field is a plain integer, so any bit pattern is a value.
+            let info = info.as_ref().ok_or(NvStatus::NV_ERR_INVALID_ARGUMENT)?;
+            let kind = thumb_kind_from(info.kind).ok_or(NvStatus::NV_ERR_INVALID_ARGUMENT)?;
+            let pts_us =
+                u64::try_from(info.pts_us).map_err(|_| NvStatus::NV_ERR_INVALID_ARGUMENT)?;
+            let bytes: &[u8] = if len == 0 {
+                &[]
+            } else if data.is_null() {
+                return Err(NvStatus::NV_ERR_INVALID_ARGUMENT);
+            } else {
+                // SAFETY: non-null and valid for `len` bytes per the caller;
+                // copied below before the call returns.
+                std::slice::from_raw_parts(data, len)
+            };
+            let thumb = Thumbnail {
+                kind,
+                width: info.width,
+                height: info.height,
+                pts_us,
+                data: bytes.to_vec(),
+            };
+            Ok(c.thumbnail_put(key, &thumb)?)
+        })
+    }
+}
+
+/// Drops queued thumbnail fetches: of one key, or every queued fetch when
+/// key is NULL (the view scrolled away). A fetch already sent completes and
+/// is cached.
+///
+/// # Safety
+/// `core` is a live handle; `key` is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_thumbnail_cancel(core: *mut NvCore, key: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.thumbnail_cancel(opt_arg(key)?)?)) }
+}
+
+/// Queues an incident's download ({"incident":"<key>","cameras":[{"camera":
+/// {...},"tier":"main"}]}, cameras optional) and answers {"download":"<id>",
+/// "folder":"<absolute path>","existing":bool}. An unfinished download of
+/// the same incident key, or a finished one of the unchanged incident, is
+/// returned instead. NV_ERR_NOT_CONFIGURED without downloads_dir;
+/// NV_ERR_UNKNOWN_ID if the key matches no incident; NV_ERR_LIMIT if 1000
+/// downloads are known. As for nv_incident_edit, the download is queued
+/// even when the answer does not fit.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_incident(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.download_incident(arg(request)?)?)
+        })
+    }
+}
+
+/// Pauses or resumes a whole download (camera NULL) or one camera of it
+/// (a JSON camera object). A running chunk is stopped and fetched again on
+/// resume. Persisted. NV_ERR_UNKNOWN_ID for an unknown download or a camera
+/// not in it.
+///
+/// # Safety
+/// `core` is a live handle; `download` is a NUL-terminated string; `camera`
+/// is null or a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_pause(
+    core: *mut NvCore,
+    download: *const c_char,
+    camera: *const c_char,
+    paused: bool,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.download_pause(arg(download)?, opt_arg(camera)?, paused)?)
+        })
+    }
+}
+
+/// Queues failed camera jobs again with fresh attempts: every failed camera
+/// (camera NULL) or one (a JSON camera object).
+///
+/// # Safety
+/// As nv_download_pause.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_retry(
+    core: *mut NvCore,
+    download: *const c_char,
+    camera: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.download_retry(arg(download)?, opt_arg(camera)?)?)
+        })
+    }
+}
+
+/// Forgets a download with no camera job running (pause it first;
+/// NV_ERR_INVALID_ARGUMENT otherwise). With delete_partial, removes its
+/// .parts folder; finished MP4 files and incident.json are never deleted.
+/// download_removed follows.
+///
+/// # Safety
+/// `core` is a live handle; `download` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_forget(
+    core: *mut NvCore,
+    download: *const c_char,
+    delete_partial: bool,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.download_forget(arg(download)?, delete_partial)?)
+        })
+    }
+}
+
+/// For moving a download to the Trash: stops its camera jobs, forgets it,
+/// and answers {"folder":"<absolute path>"}. The core deletes nothing; the
+/// app moves the folder to the Trash or Recycle Bin after the
+/// download_removed event ("trash":true) for it, which follows once nothing
+/// writes there. NV_ERR_UNKNOWN_ID for an unknown download. As for
+/// nv_incident_edit, the download is trashed even when the answer does not
+/// fit (the event carries the folder too).
+///
+/// # Safety
+/// `core` is a live handle; `download` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_trash(
+    core: *mut NvCore,
+    download: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.download_trash(arg(download)?)?)
+        })
+    }
+}
+
+/// Every known download: {"downloads":[...]}, each as in the download
+/// event. No paging (at most 1000 downloads): out-buffer rules as
+/// nv_recordings_calendar.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_downloads_get(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.downloads_get()?)) }
+}
+
+/// Live sound settings, JSON (unknown members ignored; members left out keep
+/// their values): {"alarms":true,"loudness_history_s":600}. Applies to tiles
+/// opened afterwards. NV_ERR_INVALID_ARGUMENT for invalid JSON or values.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_sound_configure(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.sound_configure(arg(json)?)?)) }
 }
 
 #[cfg(test)]
