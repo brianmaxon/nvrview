@@ -11,6 +11,8 @@ struct InsetContent: Equatable {
     /// The return inset after a swap ("Back to …").
     var isReturn: Bool
     var call: CallContent?
+    /// "● Recording 0:42" while the call is recorded (the call bar's pill).
+    var recording: String? = nil
 }
 
 /// The doorbell call's part of an inset (or of the stage, when the doorbell
@@ -114,6 +116,10 @@ final class InsetView: NSView, CallControlsDelegate {
     private let border = CALayer()
     private let header = NSView()
     private let title = NSTextField(labelWithString: "")
+    /// The call bar's "● Recording 0:42".
+    private let recordingPill = NSTextField(labelWithString: "")
+    /// The pill's text while it shows (self-test).
+    var recordingText: String? { recordingPill.isHidden ? nil : recordingPill.stringValue }
     private let name = NSTextField(labelWithString: "")
     private let close = NSButton()
     /// Pop Out (stage) or Pop In (window).
@@ -179,6 +185,14 @@ final class InsetView: NSView, CallControlsDelegate {
         pin.refusesFirstResponder = true
         pin.isHidden = host == .stage
         setPinned(true)
+        recordingPill.font = .monospacedDigitSystemFont(ofSize: 10, weight: .bold)
+        recordingPill.textColor = .white
+        recordingPill.alignment = .center
+        recordingPill.wantsLayer = true
+        recordingPill.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.85).cgColor
+        recordingPill.layer?.cornerRadius = 7
+        recordingPill.isHidden = true
+        header.addSubview(recordingPill)
         header.addSubview(title)
         header.addSubview(name)
         header.addSubview(pin)
@@ -223,6 +237,8 @@ final class InsetView: NSView, CallControlsDelegate {
         content = c
         title.stringValue = c.isReturn ? "Back to the view (click or Tab)" : c.header
         name.stringValue = c.cameraName
+        recordingPill.stringValue = c.recording ?? ""
+        recordingPill.isHidden = c.recording == nil || c.isReturn
         close.toolTip = c.isReturn ? "Swap back" : "Close (Esc)"
         let color: NSColor = c.isReturn ? .secondaryLabelColor : c.critical ? .systemRed : .systemTeal
         border.borderColor = color.cgColor
@@ -262,7 +278,13 @@ final class InsetView: NSView, CallControlsDelegate {
         }
         let nameWidth = min(ceil(name.intrinsicContentSize.width) + 8, bounds.width * 0.35)
         name.frame = CGRect(x: right - nameWidth, y: 4, width: nameWidth, height: 14)
-        title.frame = CGRect(x: 8, y: 3, width: max(right - nameWidth - 12, 0), height: 16)
+        var titleLeft: CGFloat = 8
+        if !recordingPill.isHidden {
+            let pillWidth = ceil(recordingPill.intrinsicContentSize.width) + 12
+            recordingPill.frame = CGRect(x: 6, y: 3, width: pillWidth, height: 16)
+            titleLeft += pillWidth + 2
+        }
+        title.frame = CGRect(x: titleLeft, y: 3, width: max(right - nameWidth - 4 - titleLeft, 0), height: 16)
         unmute.frame = videoRect
         callPanel.frame = CGRect(x: 0, y: bounds.height - Self.callHeight, width: bounds.width, height: Self.callHeight)
         CATransaction.begin()

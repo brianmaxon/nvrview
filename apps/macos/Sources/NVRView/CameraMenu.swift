@@ -1,6 +1,46 @@
 import AppKit
 import NVRCore
 
+/// The Camera menu's Recordings submenu: the running recordings, each
+/// with Stop, rebuilt each time it opens.
+@MainActor
+final class RecordingsMenu: NSObject, NSMenuDelegate {
+    static let shared = RecordingsMenu()
+    /// The model whose recordings it lists (set by the app).
+    weak var model: AppModel?
+
+    static func make() -> NSMenu {
+        let m = NSMenu(title: "Recordings")
+        m.delegate = shared
+        shared.fill(m)
+        return m
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) { fill(menu) }
+
+    /// The items for the recordings running now.
+    func fill(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let running = model?.capture.board.list ?? []
+        guard let model, !running.isEmpty else {
+            let none = NSMenuItem(title: "No recordings", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+            return
+        }
+        for r in running {
+            let name = r.camera.map { model.name(of: $0) } ?? (r.file as NSString).lastPathComponent
+            let what = r.isCall ? "Call · " : ""
+            let item = NSMenuItem(
+                title: "Stop \(what)\(name) (\(RecordingText.elapsed(ms: r.durationMs)))",
+                action: #selector(ViewerWindowController.stopRecordingItem(_:)), keyEquivalent: "")
+            item.tag = Int(truncatingIfNeeded: r.id)
+            item.representedObject = NSNumber(value: r.id)
+            menu.addItem(item)
+        }
+    }
+}
+
 /// The Camera menu (docs/UX.md "Capture and camera keys"): the selected
 /// tile's capture and camera actions with their keys. A viewer window takes
 /// the single keys (P, ⇧P, R, T) before the menus do, as for the View
@@ -33,14 +73,7 @@ enum CameraMenu {
         let presets = item("Presets", nil)
         presets.submenu = placeholder("Presets")
         let recordings = item("Recordings", nil)
-        recordings.submenu = {
-            let m = NSMenu(title: "Recordings")
-            let none = NSMenuItem(title: "No recordings", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            m.addItem(none)
-            m.autoenablesItems = false
-            return m
-        }()
+        recordings.submenu = RecordingsMenu.make()
         let menu = NSMenu(title: "Camera")
         for i in [
             item("Save Picture", #selector(ViewerWindowController.savePictureKey(_:)), "p"),
@@ -75,11 +108,17 @@ extension ViewerWindowController {
     @objc func conversationKey(_ sender: Any?) { perform(.toggleConversation) }
     /// ⇧⌘P and ⇧⌘R: accepted in viewer windows too, for the selected tile.
     @objc func captureSavePicture(_ sender: Any?) { stage.performOnSelected(.savePicture) }
-    @objc func captureRecord(_ sender: Any?) { stage.performOnSelected(.record) }
+    @objc func captureRecord(_ sender: Any?) { stage.recordCallOnSelected() }
     @objc func panTiltItem(_ sender: Any?) { stage.performOnSelected(.panTilt) }
-    @objc func stopAllRecordings(_ sender: Any?) {}
+    @objc func stopAllRecordings(_ sender: Any?) { model.capture.stopAll() }
     @objc func openPicturesFolder(_ sender: Any?) { stage.openPicturesFolder() }
-    @objc func openRecordingsFolder(_ sender: Any?) { stage.showToast(TileActionStub.message("Open Recordings Folder")) }
+    @objc func openRecordingsFolder(_ sender: Any?) { model.capture.openFolder() }
+
+    /// A recording's Stop in the Recordings submenu.
+    @objc func stopRecordingItem(_ sender: Any?) {
+        guard let id = ((sender as? NSMenuItem)?.representedObject as? NSNumber)?.uint64Value else { return }
+        model.capture.stop(id)
+    }
 
     /// The Camera menu's items for the selected tile (nil: not one of them).
     func validateCameraItem(_ item: NSMenuItem) -> Bool? {
@@ -92,13 +131,15 @@ extension ViewerWindowController {
             return tile != nil
         case #selector(captureRecord(_:)):
             return tile != nil
+        case #selector(stopRecordingItem(_:)):
+            return true
         case #selector(conversationKey(_:)):
             item.title = tile?.conversation == true ? "End Conversation" : "Start Conversation"
             return tile != nil
         case #selector(panTiltItem(_:)):
             return tile?.panTilt == true
         case #selector(stopAllRecordings(_:)):
-            return false
+            return !model.capture.board.running.isEmpty
         case #selector(openPicturesFolder(_:)), #selector(openRecordingsFolder(_:)):
             return true
         default:

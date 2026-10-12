@@ -65,6 +65,13 @@ import Testing
         #expect(abs(hz - 1000) < 10, "\(hz) Hz")
     }
 
+    @Test func primingIsWhereTheImpulseComesBack() throws {
+        let (reported, measured) = try AACCaptureEncoder.measurePriming(lead: 4096)
+        let at = try #require(measured)
+        print("AAC priming: reported \(reported), impulse back at \(at - 4096)")
+        #expect(abs(at - 4096 - Int(reported)) <= 48)
+    }
+
     @Test func tracksAreIndependentAndBounded() {
         let encoder = AACCaptureEncoder { _, _, _ in .ok }
         for t in 0..<UInt32(AACCaptureEncoder.maxTracks) {

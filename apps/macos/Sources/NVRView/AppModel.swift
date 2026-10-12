@@ -59,6 +59,8 @@ final class AppModel {
     @ObservationIgnored private(set) var recordings: RecordingsModel!
     /// Doorbell calls in progress (docs/UX.md "Doorbell calls").
     @ObservationIgnored private(set) var calls: DoorbellCalls!
+    /// Live and call recordings (docs/CAPTURE.md "Live recording").
+    @ObservationIgnored private(set) var capture: CaptureController!
     @ObservationIgnored private let taps = TapRouter()
     /// Who wants to hear of every detection (the windows' insets).
     @ObservationIgnored private var detectionListeners: [UUID: (DetectionEvent, CameraRef, Date) -> Void] = [:]
@@ -197,6 +199,7 @@ final class AppModel {
         callsOpenInWindow = defaults.bool(forKey: Self.callsOpenInWindowKey)
         callWindowPlacement = Self.placement(in: defaults)
         saveCallTranscripts = defaults.bool(forKey: Self.saveTranscriptsKey)
+        recordCalls = defaults.bool(forKey: Self.recordCallsKey)
     }
     // MARK: Capture settings (docs/CAPTURE.md "Save picture")
 
@@ -223,12 +226,96 @@ final class AppModel {
             notify()
         }
     }
-    /// "Share-safe names": pictures name the camera `Camera A`.
+    /// "Share-safe names": pictures and live recordings name the camera
+    /// `Camera A`.
     var shareSafeNames = UserDefaults.standard.bool(forKey: AppModel.shareSafeNamesKey) {
         didSet {
             captureDefaults.set(shareSafeNames, forKey: Self.shareSafeNamesKey)
+            capture?.configure()
             notify()
         }
+    }
+    static let recordingsFolderKey = "recordingsFolder"
+    static let recordFromKey = "recordFrom"
+    static let maxRecordingMinutesKey = "maxRecordingMinutes"
+    static let maxRecordingGBKey = "maxRecordingGB"
+    static let recordCallsKey = "recordCalls"
+
+    /// "Save recordings to": `~/Movies/NVRView` until the user chooses.
+    var recordingsFolder = AppModel.recordingsFolder(in: .standard) {
+        didSet {
+            captureDefaults.set(recordingsFolder.path, forKey: Self.recordingsFolderKey)
+            capture?.configure()
+            notify()
+        }
+    }
+    /// "Record from": the main stream (default) or the sub-stream.
+    var recordFrom = AppModel.recordFrom(in: .standard) {
+        didSet {
+            captureDefaults.set(recordFrom.rawValue, forKey: Self.recordFromKey)
+            capture?.configure()
+            notify()
+        }
+    }
+    /// A live recording stops after this many minutes (1 to 720).
+    var maxRecordingMinutes = AppModel.maxRecordingMinutes(in: .standard) {
+        didSet {
+            captureDefaults.set(maxRecordingMinutes, forKey: Self.maxRecordingMinutesKey)
+            capture?.configure()
+            notify()
+        }
+    }
+    /// ... or at this size in GB (0.1 to 64).
+    var maxRecordingGB = AppModel.maxRecordingGB(in: .standard) {
+        didSet {
+            captureDefaults.set(maxRecordingGB, forKey: Self.maxRecordingGBKey)
+            capture?.configure()
+            notify()
+        }
+    }
+    /// "Record calls": a doorbell call is recorded from the moment it opens
+    /// (off by default; docs/UX.md "Recording calls"). Kept with the call
+    /// settings.
+    var recordCalls = UserDefaults.standard.bool(forKey: AppModel.recordCallsKey) {
+        didSet {
+            callDefaults.set(recordCalls, forKey: Self.recordCallsKey)
+            notify()
+        }
+    }
+
+    /// The consent note was shown (it shows the first time "Record calls"
+    /// is turned on).
+    var recordCallsConsentShown: Bool {
+        get { callDefaults.bool(forKey: Self.recordCallsConsentKey) }
+        set { callDefaults.set(newValue, forKey: Self.recordCallsConsentKey) }
+    }
+    static let recordCallsConsentKey = "recordCallsConsentShown"
+    static let recordCallsConsent =
+        "Recording a conversation may need the other person's consent where you live. The visitor is not told that the call is recorded."
+
+    static var defaultRecordingsFolder: URL {
+        FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("NVRView", isDirectory: true)
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Movies/NVRView", isDirectory: true)
+    }
+
+    private static func recordingsFolder(in defaults: UserDefaults) -> URL {
+        defaults.string(forKey: recordingsFolderKey).flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? defaultRecordingsFolder
+    }
+
+    private static func recordFrom(in defaults: UserDefaults) -> RecordQuality {
+        defaults.string(forKey: recordFromKey).flatMap(RecordQuality.init(rawValue:)) ?? .main
+    }
+
+    private static func maxRecordingMinutes(in defaults: UserDefaults) -> Int {
+        let m = defaults.integer(forKey: maxRecordingMinutesKey)
+        return m > 0 ? m : 60
+    }
+
+    private static func maxRecordingGB(in defaults: UserDefaults) -> Double {
+        let g = defaults.double(forKey: maxRecordingGBKey)
+        return g > 0 ? g : 4
     }
 
     static var defaultPicturesFolder: URL {
@@ -252,6 +339,10 @@ final class AppModel {
         picturesFolder = Self.picturesFolder(in: defaults)
         pictureFormat = Self.pictureFormat(in: defaults)
         shareSafeNames = defaults.bool(forKey: Self.shareSafeNamesKey)
+        recordingsFolder = Self.recordingsFolder(in: defaults)
+        recordFrom = Self.recordFrom(in: defaults)
+        maxRecordingMinutes = Self.maxRecordingMinutes(in: defaults)
+        maxRecordingGB = Self.maxRecordingGB(in: defaults)
     }
 
     /// Where the insets go now.
@@ -296,6 +387,7 @@ final class AppModel {
         target.model = self
         recordings.app = self
         calls = DoorbellCalls(model: self, services: callServices ?? .system(player: { [weak self] in self?.player }), taps: taps)
+        capture = CaptureController(model: self)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
             return info.tiers.contains("extern") && !info.isMultiLens
@@ -339,6 +431,7 @@ final class AppModel {
         reloadLayouts()
         for d in devices { connect(d.key) }
         startAudio(muted: muted)
+        capture.start()
         expiry = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.expireDetections()
@@ -573,6 +666,7 @@ final class AppModel {
         cameraFile.save(cameraSettings)
         audible = Set(audible.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 })
         recordings.rekey(old, to: coreKey)
+        capture.rekey(old, to: coreKey)
         for layout in layouts where layout.root.cameras.contains(where: { $0.device == old }) {
             var l = layout
             l.root = layout.root.rekeying(device: old, to: coreKey)
@@ -962,9 +1056,8 @@ final class AppModel {
             // The recordings windows' players (milestone P, M2).
             recordings.applyPlayback(e)
             return
-        case .recording:
-            // Capture (minor 9): no recording is started from the app yet.
-            return
+        case .recording(let e):
+            capture.apply(e)
         }
         notify()
     }

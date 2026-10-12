@@ -171,6 +171,65 @@ public final class AACCaptureEncoder: CaptureEncoder, @unchecked Sendable {
         return [UInt8(bits >> 8), UInt8(bits & 0xFF)]
     }
 
+    /// Encodes `pcm` (48 kHz mono, padded to whole frames) with a fresh
+    /// encoder, flushes it, and decodes the units with the system's AAC
+    /// decoder (as an ADTS file in the temporary folder): what was opened,
+    /// how many units came back, and the decoded samples (priming
+    /// included, nothing trimmed). For tests and the self-test.
+    public static func roundTrip(_ pcm: [Float], bitRate: UInt32 = 96_000) throws
+        -> (opened: EncoderOpened, units: Int, decoded: [Float])
+    {
+        final class Sink: @unchecked Sendable {
+            let lock = NSLock()
+            var units: [Data] = []
+        }
+        let sink = Sink()
+        let encoder = AACCaptureEncoder { _, _, unit in
+            sink.lock.withLock { sink.units.append(Data(unit)) }
+            return .ok
+        }
+        guard let opened = encoder.open(recording: 1, track: 0, sampleRate: 48_000, channels: 1, bitRate: bitRate) else {
+            throw CocoaError(.featureUnsupported)
+        }
+        var padded = pcm
+        padded += [Float](repeating: 0, count: (frameSamples - padded.count % frameSamples) % frameSamples)
+        for start in stride(from: 0, to: padded.count, by: frameSamples) {
+            padded[start..<(start + frameSamples)].withUnsafeBufferPointer {
+                encoder.encode(recording: 1, track: 0, pcm: $0)
+            }
+        }
+        encoder.close(recording: 1, track: 0, flush: true)
+        let units = sink.lock.withLock { sink.units }
+        var file = Data()
+        for u in units {
+            file.append(contentsOf: adtsHeader(length: u.count, sampleRate: 48_000, channels: 1))
+            file.append(u)
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-aac-\(UUID().uuidString).aac")
+        try file.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let f = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length + 4096))
+        else { throw CocoaError(.coderInvalidValue) }
+        try f.read(into: buffer)
+        guard let data = buffer.floatChannelData else { throw CocoaError(.coderInvalidValue) }
+        return (opened, units.count, Array(UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength))))
+    }
+
+    /// The priming check (self-test `capture-encoder-priming`): an impulse
+    /// after `lead` silent samples comes back `lead` plus the reported
+    /// priming into the decoded audio. Returns the reported priming and
+    /// where the impulse came back (nil if it did not).
+    public static func measurePriming(lead: Int = 4096) throws -> (reported: UInt32, measured: Int?) {
+        var pcm = [Float](repeating: 0, count: lead + 8 * frameSamples)
+        // A short burst rather than one sample: it survives the codec.
+        for i in 0..<48 { pcm[lead + i] = 0.8 * sin(2 * .pi * 1000 * Float(i) / 48_000) }
+        let (opened, _, decoded) = try roundTrip(pcm)
+        let peak = decoded.map(abs).max() ?? 0
+        let onset = decoded.firstIndex { abs($0) > peak * 0.25 }
+        return (opened.primingFrames, onset)
+    }
+
     /// A 7-byte ADTS header for one AAC-LC unit of `length` bytes (for
     /// reading units back with the system's decoders in tests).
     public static func adtsHeader(length: Int, sampleRate: UInt32, channels: UInt32) -> [UInt8] {
