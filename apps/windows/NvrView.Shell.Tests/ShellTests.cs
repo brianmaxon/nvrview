@@ -389,6 +389,58 @@ internal static class StoreTests
             T.Check(File.Exists(Path.Combine(dir, "bad.json.unreadable")));
         });
 
+        // The shared vectors (fixtures/synthetic/tile-views.json "saved"; the Mac app's TileViewsTests reads them too).
+        T.Run("windows: Fill Tiles and the tiles' zoom, crop and Fill choices (shared vectors)", () =>
+        {
+            JsonNode vectors = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "tile-views.json")))!;
+            foreach (JsonNode? c in vectors["saved"]!.AsArray())
+            {
+                string name = c!["name"]!.GetValue<string>();
+                var o = new JsonObject
+                {
+                    ["content"] = new JsonObject { ["layout"] = new JsonObject { ["id"] = "layout-1" } },
+                    ["frame"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0, ["width"] = 800.0, ["height"] = 500.0 },
+                };
+                foreach ((string key, JsonNode? value) in c["window"]!.AsObject())
+                {
+                    o[key] = value?.DeepClone();
+                }
+                List<SavedWindow> list = WindowStore.FromJson(new JsonArray(o));
+                T.Equal(1, list.Count, name);
+                SavedWindow w = list[0];
+                T.Equal(c["fill"]!.GetValue<bool>(), w.Fill, name);
+                string want = string.Join("; ", c["entries"]!.AsArray().Select(e =>
+                {
+                    JsonArray a = e!.AsArray();
+                    string fill = a[6] is null ? "null" : a[6]!.GetValue<bool>().ToString();
+                    return $"{a[0]!.GetValue<string>()} {a[1]!.GetValue<int>()} {a[2]!.GetValue<int>()} {a[3]!.GetValue<double>()} {a[4]!.GetValue<double>()} {a[5]!.GetValue<double>()} {fill}";
+                }));
+                string got = string.Join("; ", (w.Views?.Entries ?? []).Select(e =>
+                    $"{e.Camera.Device} {e.Camera.Channel} {e.Camera.Lens} {e.View.Zoom.Scale} {e.View.Zoom.CenterX} {e.View.Zoom.CenterY} {(e.View.Fill is { } f ? f.ToString() : "null")}"));
+                T.Equal(want, got, name);
+                // What is read back is written back the same.
+                List<SavedWindow> again = WindowStore.FromJson(JsonNode.Parse(WindowStore.ToJson(list)));
+                T.Equal(w with { Content = null! }, again[0] with { Content = null! }, $"{name}: round trip");
+            }
+            // A plain window writes neither member.
+            string plain = WindowStore.ToJson([new SavedWindow(new WindowContent.Layout("layout-1"), new Rect(0, 0, 800, 500))]);
+            T.Check(!plain.Contains("\"fill\"", StringComparison.Ordinal) && !plain.Contains("tileViews", StringComparison.Ordinal), "nothing written while default");
+            // At most the limit, the newest kept.
+            var many = new JsonArray();
+            for (int i = 0; i < TileViews<CameraRef>.Limit + 44; i++)
+            {
+                many.Add((JsonNode)new JsonObject { ["camera"] = new JsonObject { ["device"] = "nvr-a", ["channel"] = i }, ["scale"] = 2.0 });
+            }
+            var big = new JsonObject
+            {
+                ["content"] = new JsonObject { ["layout"] = new JsonObject { ["id"] = "layout-1" } },
+                ["frame"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0, ["width"] = 800.0, ["height"] = 500.0 },
+                ["tileViews"] = many,
+            };
+            IReadOnlyList<(CameraRef Camera, TileView View)> kept = WindowStore.FromJson(new JsonArray(big))[0].Views!.Entries;
+            T.Check(kept.Count == TileViews<CameraRef>.Limit && kept[0].Camera.Channel == 44 && kept[^1].Camera.Channel == TileViews<CameraRef>.Limit + 43, "bounded, newest kept");
+        });
+
         T.Run("windows: placement keeps a reachable frame, else centers it", () =>
         {
             var screen = new Rect(0, 0, 1920, 1040);

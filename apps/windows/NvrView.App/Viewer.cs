@@ -167,23 +167,36 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     public volatile float CenterX = 0.5f;
     public volatile float CenterY = 0.5f;
 
-    /// <summary>The digital zoom as one value (UI thread).</summary>
+    /// <summary>The digital zoom as one value (UI thread); setting it tells <see cref="ZoomChanged"/>.</summary>
     public TileZoom DigitalZoom
     {
         get => new(Zoom, CenterX, CenterY);
         set
         {
-            CenterX = (float)value.CenterX;
-            CenterY = (float)value.CenterY;
-            Zoom = (float)value.Scale;
+            LoadZoom(value);
+            ZoomChanged?.Invoke(this);
         }
     }
+
+    /// <summary>Sets the digital zoom without telling anyone (the window's kept value for the camera).</summary>
+    public void LoadZoom(TileZoom value)
+    {
+        CenterX = (float)value.CenterX;
+        CenterY = (float)value.CenterY;
+        Zoom = (float)value.Scale;
+    }
+
+    /// <summary>The digital zoom was set (the stage keeps it for the camera and saves the window).</summary>
+    public Action<StageTile>? ZoomChanged { get; set; }
 
     /// <summary>How the picture sits in the tile's area at 1x (from what the render thread published).</summary>
     public ZoomBase ZoomBase => ZoomBase.Of(PictureWidth, PictureHeight, ViewWidth, ViewHeight, Fill);
 
-    /// <summary>The picture is cropped to fill the tile (Fill Tiles) instead of fitted; published by the render thread.</summary>
+    /// <summary>The picture is cropped to fill the tile instead of fitted; published by the render thread (not in a dewarped view).</summary>
     public volatile bool Fill;
+
+    /// <summary>The camera fills in this window (its Fill tile choice, else Fill Tiles); set by the UI thread, read by the render thread.</summary>
+    public volatile bool WantsFill;
 
     // Written by the render thread each frame, read by the UI thread: where
     // the picture is drawn at 1x (the chrome sits on it), in panel units
