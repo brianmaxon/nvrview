@@ -576,17 +576,20 @@ impl RecordingsHub {
     /// that says which files hold which times, the device's offset from
     /// UTC, and its session and core ID while it is added.
     ///
+    /// Any camera of an enabled device plays, also one its channel list
+    /// no longer names: incidents group every camera the device's index
+    /// holds events of (one searched before stays in it), and the index
+    /// still says where its files are. A time it has no indexed file of
+    /// shows `no_recording`.
+    ///
     /// # Errors
     /// [`RecError::NotConfigured`] before `recordings_configure`,
-    /// [`RecError::InvalidArgument`] for a camera of a device that is not
-    /// enabled or not allowed by its channel list.
-    pub(crate) fn playback_device(
-        &self,
-        key: &str,
-        cam: DeviceCamera,
-    ) -> Result<PlaybackDevice, RecError> {
+    /// [`RecError::InvalidArgument`] for a device that is not enabled.
+    pub(crate) fn playback_device(&self, key: &str) -> Result<PlaybackDevice, RecError> {
         let st = lock(&self.hub.state);
-        sound::check_camera(&st, key, cam)?;
+        if st.stores.is_none() {
+            return Err(RecError::NotConfigured);
+        }
         let dev = st.devices.get(key).ok_or(RecError::InvalidArgument)?;
         let added = st.sessions.get(key);
         Ok(PlaybackDevice {

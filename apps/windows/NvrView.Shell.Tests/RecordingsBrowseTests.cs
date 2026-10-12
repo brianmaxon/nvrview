@@ -57,7 +57,7 @@ internal static class RecordingsBrowseTests
             {
                 T.Equal(KindFilter.Animal, KindFilters.Of(animal), animal);
             }
-            T.Equal(KindFilter.Other, KindFilters.Of("dog_bark"));
+            T.Equal(KindFilter.Sound, KindFilters.Of("dog_bark"));
             T.Equal(KindFilter.People, KindFilters.Of("people"));
             T.Equal(KindFilter.Vehicle, KindFilters.Of("vehicle"));
             T.Equal(KindFilter.Motion, KindFilters.Of("motion"));
@@ -186,6 +186,80 @@ internal static class RecordingsBrowseTests
             T.Check(board[keys[0]] is null && board.PendingKeys.Count == 0);
         });
 
+        T.Run("recordings: download events as the core sends them", () =>
+        {
+            // The core's shape (FFI-RECORDINGS.md section 5): null bytes_estimate and output until known. A null
+            // number used to throw out of the parser, so the window never saw a download move.
+            string Event(string state, string camState, int done, string estimate, string output) => $$"""
+                {"type":"download","download":"1791618125-9c1e5a2b7d40f316","incident":"i-1","folder":"/downloads/2026-10-10 07.42 vehicle",
+                 "state":"{{state}}","paused":false,"cameras":[{"camera":{"device":"d-example","channel":3,"lens":0},"name":"Camera 4",
+                 "state":"{{camState}}","paused":false,"chunks_done":{{done}},"chunks_total":2,"bytes":{{done * 1000}},
+                 "bytes_estimate":{{estimate}},"output":{{output}}}]}
+                """;
+            string[] sequence =
+            [
+                Event("queued", "queued", 0, "null", "null"),
+                Event("running", "running", 0, "null", "null"),
+                Event("running", "running", 1, "2000", "null"),
+                Event("finalizing", "finalizing", 2, "null", "null"),
+                Event("done", "done", 2, "null", "\"/downloads/2026-10-10 07.42 vehicle/Camera 4.mp4\""),
+            ];
+            var board = new DownloadBoard();
+            var states = new List<string>();
+            var changes = new List<bool>();
+            foreach (string json in sequence)
+            {
+                RecordingsEvent? e = RecordingsEvent.Parse(System.Text.Encoding.UTF8.GetBytes(json));
+                T.Check(e is RecordingsEvent.Download, json);
+                if (e is RecordingsEvent.Download d)
+                {
+                    changes.Add(board.Apply(d.Progress));
+                    states.Add(board.Downloads[0].StateText());
+                }
+            }
+            T.Equal("Queued,Downloading,Downloading,Finishing,Done", string.Join(",", states));
+            // Every state change publishes at once; progress alone waits for the next redraw.
+            T.Equal("True,True,False,True,True", string.Join(",", changes));
+            T.Equal(1, board.Downloads.Count);
+            T.Check(board.Downloads[0].Outputs().SequenceEqual(["/downloads/2026-10-10 07.42 vehicle/Camera 4.mp4"]));
+            T.Check(board.Downloads[0].Cameras[0].BytesEstimate is null && board.Downloads[0].Cameras[0].ChunksDone == 2);
+        });
+
+        T.Run("player: open refusals say why", () =>
+        {
+            T.Equal("A camera's device is not searched for recordings", PlaybackOpenMessage.Text(NvStatus.InvalidArgument));
+            T.Equal("Too many cameras or playbacks to play this", PlaybackOpenMessage.Text(NvStatus.Limit));
+            T.Equal("Recordings are not set up yet", PlaybackOpenMessage.Text(NvStatus.NotConfigured));
+            T.Equal("That incident changed; select it again", PlaybackOpenMessage.Text(NvStatus.UnknownId));
+            T.Equal("The recording could not be played (status -5)", PlaybackOpenMessage.Text(NvStatus.Internal));
+        });
+
+        // The same vectors as the macOS app's PlayerRulesTests.timelineViewport.
+        T.Run("player: timeline viewport", () =>
+        {
+            static bool Near(double a, double b) => Math.Abs(a - b) < 1e-9;
+            var whole = new TimelineViewport();
+            T.Check(whole.Zoom == 1 && whole.Start == 0 && whole.Visible == 1);
+            TimelineViewport a = whole.ZoomedBy(TimelineViewport.Notch, 0.5);
+            T.Check(Near(a.Zoom, 1.25) && Near(a.Start, 0.1) && Near(a.FractionAtPointer(0.5), 0.5));
+            var b = new TimelineViewport(4, 0.3);
+            TimelineViewport b2 = b.ZoomedBy(1.25, 0.25);
+            T.Check(Near(b2.Zoom, 5) && Near(b2.Start, 0.3125));
+            T.Check(Near(b.FractionAtPointer(0.25), b2.FractionAtPointer(0.25)));
+            TimelineViewport c = new TimelineViewport(40, 0.5).ZoomedBy(2, 0);
+            T.Check(c.Zoom == 48 && Near(c.Start, 0.5));
+            TimelineViewport d = new TimelineViewport(2, 0.5).ZoomedBy(0.25, 1);
+            T.Check(d.Zoom == 1 && d.Start == 0);
+            TimelineViewport e = whole.ZoomedBy(2, 1);
+            T.Check(e.Zoom == 2 && Near(e.Start, 0.5));
+            T.Check(Near(new TimelineViewport(2).PannedBy(5).Start, 0.5));
+            T.Check(new TimelineViewport(2, 0.25).PannedBy(-5).Start == 0);
+            T.Check(Near(new TimelineViewport(4, 0.25).PannedBy(0.5).Start, 0.375));
+            var f = new TimelineViewport(100, 2);
+            T.Check(f.Zoom == 48 && Near(f.Start, 1 - 1.0 / 48));
+            T.Check(Near(TimelineViewport.WheelFactor(2), 1.5625) && Near(TimelineViewport.WheelFactor(-1), 0.8));
+        });
+
         T.Run("player: speeds", () =>
         {
             T.Check(PlaybackSpeed.All.SequenceEqual([0.25, 0.5, 1, 2, 4, 8, 16]));
@@ -261,9 +335,10 @@ internal static class RecordingsBrowseTests
             T.Equal((false, false), RecordingsPanes.Shown(600, true, true));
             T.Equal((false, true), RecordingsPanes.Shown(800, false, true));
             T.Equal((false, false), RecordingsPanes.Shown(2000, false, false));
-            T.Equal(18.0 + 3 * 26 + 8, RecordingsPanes.LanesHeight(900, 3));
+            // Each lane has its loudness strip (26 + 10), and the legend is under them.
+            T.Equal(18.0 + 3 * 36 + 14 + 8, RecordingsPanes.LanesHeight(900, 3));
             T.Equal((600 - RecordingsPanes.TransportHeight) / 3, RecordingsPanes.LanesHeight(600, 16));
-            T.Equal(18.0 + 2 * 26 + 8, RecordingsPanes.LanesHeight(200, 16));
+            T.Equal(18.0 + 2 * 36 + 14 + 8, RecordingsPanes.LanesHeight(200, 16));
             T.Equal<long?>(105, IncidentSplit.Second(100, 110, 105_400));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 100_900));
             T.Equal<long?>(null, IncidentSplit.Second(100, 110, 110_000));

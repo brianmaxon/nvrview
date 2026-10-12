@@ -1812,7 +1812,9 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
 4. **Time.** Keyframe seconds are UTC; the position is device local. The
    device's offset is the `utc_offset_s` of `nv_recordings_enable` (the
    cameras' devices must be enabled for recordings; `NV_ERR_INVALID_ARGUMENT`
-   otherwise). Each camera's anchor is refined over its last 64 keyframes
+   otherwise). Any camera of an enabled device plays, also one its channel
+   list no longer names: incidents group every camera the device's index
+   holds events of, so an incident can name a camera searched earlier. Each camera's anchor is refined over its last 64 keyframes
    (slice C7) and taken at the middle of its window.
 5. **Rates** are exactly 0.25, 0.5, 1, 2, 4, 8, and 16 (others:
    `NV_ERR_INVALID_ARGUMENT`). The device gets `playSpeed` 1 below 1x

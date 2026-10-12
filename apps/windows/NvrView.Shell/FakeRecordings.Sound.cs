@@ -4,7 +4,9 @@
 // incident here, so a follow cut is one segment and a grid one cell);
 // SoundWatch keeps a list and sends sound_watch events; loudness lanes are
 // null except for watched cameras (a steady -40 dBFS peak, -50 RMS);
-// SoundLabelsPut only validates; SoundAnalyzeDay queues a request that
+// SoundLabelsPut keeps the labels as events with source local_audio on
+// indexed days, replacing the same analyzer's labels in the request's range
+// (as the core does); SoundAnalyzeDay queues a request that
 // CompleteRecordingWork finishes with sound_analyze running and done (no
 // seconds, no labels). GetTileLoudness is not a tile model's: the fake store
 // knows no tiles, so every tile is unknown.
@@ -18,6 +20,19 @@ namespace NvrView.Shell;
 public sealed partial class FakeRecordings
 {
     private readonly List<RecordingCamera> _watched = [];
+    private readonly List<(RecordingCamera Camera, string Kind, long Start, long End, string Analyzer)> _labels = [];
+
+    /// <summary>The cameras on the sound "always listen" list (tests).</summary>
+    public IReadOnlyList<RecordingCamera> Watched
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return [.. _watched];
+            }
+        }
+    }
     private readonly List<(ulong Request, RecordingCamera Camera, long Day)> _analyses = [];
     private ulong _nextAnalysis = 1;
 
@@ -220,6 +235,7 @@ public sealed partial class FakeRecordings
         {
             throw Error(NvStatus.Limit, F);
         }
+        var parsed = new List<(string Kind, long Start, long End)>();
         foreach (JsonNode? l in labels)
         {
             if (l is not JsonObject lo || lo["kind"] is not JsonValue kv || !kv.TryGetValue(out string? kind) || kind.Length == 0 ||
@@ -229,11 +245,18 @@ public sealed partial class FakeRecordings
             {
                 throw Error(NvStatus.InvalidArgument, F);
             }
+            parsed.Add((kind, labelStart, labelEnd));
         }
         lock (_gate)
         {
             Configured(F);
             RequireKnownCamera(c, F);
+            _labels.RemoveAll(l => l.Camera == c && l.Analyzer == analyzer && l.Start >= start && l.Start <= end);
+            _labels.AddRange(parsed.Select(p => (c, p.Kind, p.Start, p.End, analyzer)));
+            _revision++;
+            _incidentsRevision++;
+            Emit(new JsonObject { ["type"] = "recordings_changed", ["device"] = c.Device, ["revision"] = _revision, ["start"] = start, ["end"] = end });
+            Emit(new JsonObject { ["type"] = "incidents_changed", ["revision"] = _incidentsRevision });
         }
     }
 

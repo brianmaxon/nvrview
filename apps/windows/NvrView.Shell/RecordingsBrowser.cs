@@ -99,8 +99,68 @@ public sealed class RecordingsBrowser
     /// <summary>The inspector the user wants.</summary>
     public bool ShowInspector { get; set; } = true;
 
-    /// <summary>Timeline zoom: 1 shows the whole day in the window's width.</summary>
-    public double Zoom { get; set; } = 1;
+    /// <summary>The part of the day the timeline lanes show (zoom 1: the whole day in the lanes' width).</summary>
+    public TimelineViewport Timeline
+    {
+        get => _timeline;
+        set
+        {
+            bool zoomed = value.Zoom != _timeline.Zoom;
+            _timeline = value;
+            if (zoomed)
+            {
+                ReloadLoudness();
+            }
+        }
+    }
+
+    private TimelineViewport _timeline = new();
+    private Dictionary<RecordingCamera, LoudnessLane> _loudness = [];
+    private (long Day, long Bucket, List<RecordingCamera> Cameras, int Revision)? _loudnessAsked;
+    private double _lanesWidth = 600;
+
+    /// <summary>The lanes' width (the window reports it), for the loudness bucket.</summary>
+    public double LanesWidth
+    {
+        get => _lanesWidth;
+        set
+        {
+            if (Math.Abs(value - _lanesWidth) >= 1)
+            {
+                _lanesWidth = value;
+                ReloadLoudness();
+            }
+        }
+    }
+
+    /// <summary>About one loudness value per two points at the zoom shown.</summary>
+    public long LoudnessBucket => LoudnessScale.Bucket(DeviceTime.Day * _timeline.Visible, _lanesWidth);
+
+    /// <summary>How often the loudness lanes were read (self-test).</summary>
+    public int LoudnessReads { get; private set; }
+
+    /// <summary>The loudness a lane shows (its camera's microphone), if any.</summary>
+    public LoudnessLane? LoudnessOf(RecordingCamera camera) => _loudness.GetValueOrDefault(LoudnessScale.Microphone(camera));
+
+    /// <summary>
+    /// Reads the shown day's loudness lanes when the day, the cameras, the bucket, or the index changed
+    /// (<paramref name="force"/>: also when nothing did; the window does so now and then for today, since live
+    /// seconds arrive with no event).
+    /// </summary>
+    public void ReloadLoudness(bool force = false)
+    {
+        long bucket = LoudnessBucket;
+        List<RecordingCamera> cams = Cameras;
+        int revision = Model.IndexRevision;
+        if (!force && _loudnessAsked is { } a && a.Day == Day && a.Bucket == bucket && a.Cameras.SequenceEqual(cams) && a.Revision == revision)
+        {
+            return;
+        }
+        _loudnessAsked = (Day, bucket, cams, revision);
+        LoudnessReads++;
+        LoudnessAnswer? answer = Model.Loudness(Day, Day + DeviceTime.Day - 1, bucket, LoudnessScale.Microphones(cams));
+        _loudness = (answer?.Lanes ?? []).GroupBy(l => l.Camera).ToDictionary(g => g.Key, g => g.First());
+    }
 
     /// <summary>Days of the calendar's month that have recordings on an enabled camera.</summary>
     public IReadOnlySet<long> RecordedDays { get; private set; } = new HashSet<long>();
@@ -304,6 +364,7 @@ public sealed class RecordingsBrowser
         UpdateHold();
         ReloadCalendar();
         ReloadLanes();
+        ReloadLoudness();
         ReloadIncidents();
         SyncPlayer();
         Changed?.Invoke();
@@ -370,7 +431,7 @@ public sealed class RecordingsBrowser
     }
 
     private void ApplyFilters() =>
-        Incidents = [.. DayIncidents.Where(i => NvrView.Shell.KindFilters.Passes(i.Kinds, _kindFilters) && (!_lockedOnly || i.Locked))];
+        Incidents = [.. DayIncidents.Where(i => NvrView.Shell.KindFilters.Passes(i, _kindFilters) && (!_lockedOnly || i.Locked))];
 
     /// <summary>The selected keys that name an incident of the day.</summary>
     public List<string> SelectedKeys => [.. DayIncidents.Select(i => i.Key).Where(_selection.Contains)];
