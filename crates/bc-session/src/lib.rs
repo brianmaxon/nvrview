@@ -73,7 +73,7 @@ pub use queue::{Item, Subscription};
 pub use supervisor::{
     AlarmPush, ConnState, DeviceSession, MANUAL_RETRY_FLOOR, QueryError, QueryReply, SessionClosed,
 };
-pub use talk::{Refusal, StopReason, Talk, TalkState, TalkStats};
+pub use talk::{Refusal, SentRecord, StopReason, Talk, TalkObserver, TalkState, TalkStats};
 pub use transport::{Connector, FnConnector, TcpConnector};
 
 use std::sync::atomic::{AtomicBool, Ordering};
