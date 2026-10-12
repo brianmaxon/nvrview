@@ -11,6 +11,9 @@ rust-version.workspace = true
 audio-pipeline = { path = "../audio-pipeline" }
 bc-protocol = { path = "../bc-protocol" }
 bc-session = { path = "../bc-session" }
+# Live and call recordings (src/capture_owner): the pure base and the muxer.
+capture = { path = "../capture" }
+mp4-remux = { path = "../mp4" }
 discovery = { path = "../discovery" }
 # Recorded video: index, incidents, thumbnails, downloads (src/recordings_owner).
 recordings = { path = "../recordings" }
@@ -31,7 +34,7 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Performance"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Performance", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 mock-nvr = { path = "../../tools/mock-nvr" }
