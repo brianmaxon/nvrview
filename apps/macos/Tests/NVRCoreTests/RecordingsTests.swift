@@ -203,6 +203,11 @@ private final class EventLog: CoreSink, @unchecked Sendable {
         try core.cameraGroupsPut(json: #"{"groups":[{"name":"Group 1","cameras":\#(cams)}]}"#)
         #expect((try object(try core.cameraGroupsGet())["groups"] as? [Any])?.count == 1)
         #expect(log.take().contains(.cameraGroupsChanged(revision: 1)))
+        // A group changes the keys of its incidents (FFI-RECORDINGS.md
+        // section 3); without groups the key above names the incident again.
+        #expect(throws: CoreStatus.unknownID) { try core.incidentGet(key: incident) }
+        try core.cameraGroupsPut(json: #"{"groups":[]}"#)
+        _ = log.take()
 
         // A thumbnail: pending, then ready after its event, then the app's image.
         let thumbKey = ThumbnailKey(camera: RecordingCamera(device: device, channel: 0), start: day + 28_800, end: day + 28_815)

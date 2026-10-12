@@ -30,6 +30,7 @@ apps/windows/**/obj/
 
 # Swift package
 apps/macos/.build/
+apps/macos/.build-real-core/
 tools/vision-lab/.build/
 
 # Agent worktrees (ours and Claude Code's), and browser tool scratch

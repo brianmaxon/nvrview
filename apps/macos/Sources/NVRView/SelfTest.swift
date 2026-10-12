@@ -82,6 +82,18 @@ import VideoKit
 ///    fraction, a restored window puts the column there, Reset Position
 ///    returns it to the corner, and two insets move as one column that
 ///    grows away from the nearer horizontal edge;
+/// 14e. with `--fake`, the recordings window (behind the others) against the
+///    fake core's made-up recording store: the chosen cameras are searched,
+///    today is asked for and held under the window's own hold, the calendar
+///    marks the day and the timeline has a lane per camera, the animal
+///    filter shows only the animal incident, another day is asked for but
+///    not held, a cover thumbnail is decoded with VideoToolbox, shrunk to
+///    320 points, and put back into the core's cache, rename, merge, split,
+///    add and remove a camera, and revert apply, locking says the video is
+///    downloading, a download pauses, resumes, finishes, shows in the
+///    Finder, is forgotten, and goes to the Trash (both recorded, not done)
+///    once the core lets go of it, a camera group joins its cameras'
+///    incidents, and closing the window releases its hold;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -1785,6 +1797,10 @@ final class SelfTest {
             retryChecked = true
             return retryStep()
         }
+        if !recordingsChecked, app.model?.recordings.available == true {
+            recordingsChecked = true
+            return app.model?.fake != nil ? recordingsStep() : recordingsRealStep()
+        }
         guard !discoveryChecked, app.model?.fake != nil else { return checkLogNow() }
         discoveryChecked = true
         discoveryStep()
@@ -1911,6 +1927,332 @@ final class SelfTest {
                 checkLog()
             }
         }
+    }
+
+    // MARK: Recordings
+
+    private var recordingsChecked = false
+
+    /// What the recordings screens handed to the system (the Trash, the
+    /// Finder) during the step: recorded, never done.
+    private final class SystemCalls {
+        var trashed: [URL] = []
+        var revealed: [[URL]] = []
+    }
+
+    /// The recordings window (docs/UX.md "Recordings") against the fake
+    /// core's made-up recording store: choosing cameras, the day asked for
+    /// and today held under the window's own hold, the calendar and the
+    /// timeline lanes, the animal filter, a cover thumbnail decoded, shrunk
+    /// and put back, the edits, a lock, the downloads panel, camera groups,
+    /// and the hold released when the window closes. The fake finishes
+    /// fetches and downloads only when told (`completeRecordingWork`).
+    private func recordingsStep() {
+        guard let model = app.model, let fake = model.fake, let rec = model.recordings, rec.available,
+            let device = model.devices.first?.key
+        else { return checkLog() }
+        let calls = SystemCalls()
+        rec.trasher = { calls.trashed.append($0) }
+        rec.revealer = { calls.revealed.append($0) }
+        // parity: recordings-enable
+        let cams = (0..<3).map { RecordingCamera(device: device, channel: $0) }
+        for c in cams { rec.setEnabled(c, true) }
+        if rec.enabledCameras != cams { problems.append("recordings: the chosen cameras are \(rec.enabledCameras)") }
+        guard let controller = app.openRecordingsWindow() else {
+            problems.append("recordings: no window opened")
+            return checkLog()
+        }
+        let b = controller.browser
+        // parity: recordings-hold-today
+        when({ fake.recordingsHolds[b.holdID]?.count == 3 && b.lanes.count == 3 }, timeout: 3) { [self] in
+            print("recordings: hold \(b.holdID) on \(fake.recordingsHolds[b.holdID]?.count ?? 0) cameras, \(b.lanes.count) lanes")
+            if !b.holding || fake.recordingsHolds[b.holdID]?.count != 3 { problems.append("recordings: today is not held") }
+            // parity: recordings-calendar-lanes
+            when({ b.recordedDays.contains(b.day) && b.lanes.allSatisfy { !$0.spans.isEmpty } && b.dayIncidents.count == 7 },
+                timeout: 3
+            ) { [self] in
+                let events = b.lanes.reduce(0) { $0 + $1.events.count }
+                print("recordings: calendar \(b.recordedDays.count) days, \(events) events, \(b.dayIncidents.count) incidents")
+                if !b.recordedDays.contains(b.day) { problems.append("recordings: the calendar does not mark today") }
+                if events != 7 || b.dayIncidents.count != 7 {
+                    problems.append("recordings: \(events) events and \(b.dayIncidents.count) incidents, expected 7 and 7")
+                }
+                if let lane = b.lanes.first, let e = lane.events.first {
+                    b.select(event: e)
+                    if b.selected?.involves(e.camera) != true { problems.append("recordings: a timeline click selected nothing") }
+                }
+                // parity: recordings-animal-filter
+                b.kindFilters = [.animal]
+                let animals = b.incidents.map(\.kinds)
+                print("recordings: animal filter \(animals)")
+                if animals != [["dog_cat"]] { problems.append("recordings: the animal filter shows \(animals)") }
+                b.kindFilters = [.people, .vehicle]
+                if b.incidents.count != 6 { problems.append("recordings: people and vehicles show \(b.incidents.count), expected 6") }
+                b.kindFilters = []
+                recordingsNavigate(b, fake, rec, calls)
+            }
+        }
+    }
+
+    /// A day before today is asked for but not held; back on today it is held again.
+    private func recordingsNavigate(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: recordings-navigate-day
+        let today = b.day
+        b.previousDay()
+        if b.holding || fake.recordingsHolds[b.holdID] != nil { problems.append("recordings: yesterday is held") }
+        when({ b.dayIncidents.count == 7 && b.recordedDays.contains(today - DeviceTime.day) }, timeout: 3) { [self] in
+            print("recordings: yesterday has \(b.dayIncidents.count) incidents")
+            b.nextDay()
+            if b.day != today || fake.recordingsHolds[b.holdID]?.count != 3 { problems.append("recordings: today is not held again") }
+            when({ b.dayIncidents.count == 7 }, timeout: 3) { [self] in recordingsThumbnail(b, fake, rec, calls) }
+        }
+    }
+
+    /// A cover thumbnail: pending, its event, the keyframe decoded and shrunk
+    /// off the main thread, and the small image put back into the core's cache.
+    private func recordingsThumbnail(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: recordings-thumbnail
+        guard let incident = b.dayIncidents.first, let key = incident.coverKeys.first else {
+            problems.append("recordings: no incident for a thumbnail")
+            return recordingsEdits(b, fake, rec, calls)
+        }
+        rec.requestThumbnail(key)
+        if rec.thumbnails[key] != .pending { problems.append("recordings: a thumbnail was not pending first") }
+        fake.completeRecordingWork()
+        when({
+            if case .image = rec.thumbnails[key] { return true }
+            if case .failed = rec.thumbnails[key] { return true }
+            return false
+        }, timeout: 5) { [self] in
+            guard case .image(let jpeg) = rec.thumbnails[key] else {
+                problems.append("recordings: the thumbnail is \(String(describing: rec.thumbnails[key]))")
+                return recordingsEdits(b, fake, rec, calls)
+            }
+            let image = NSImage(data: jpeg)
+            let cached = try? fake.thumbnailGet(key: key.json)
+            var putBack = false
+            if case .ready(let t)? = cached, t.kind == .image, t.data == jpeg { putBack = true }
+            let size = image.map { "\(Int($0.size.width))x\(Int($0.size.height))" } ?? "none"
+            print("recordings: thumbnail \(jpeg.count) bytes, \(size), put back \(putBack)")
+            if image == nil || (image?.size.width ?? 0) > 320 { problems.append("recordings: the thumbnail image is \(size)") }
+            if !putBack { problems.append("recordings: the small image was not put back in the core's cache") }
+            recordingsEdits(b, fake, rec, calls)
+        }
+    }
+
+    /// Rename, merge, split, add and remove a camera, and revert, through
+    /// the browser as the window's controls call them.
+    private func recordingsEdits(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: recordings-edits
+        let people = b.dayIncidents.filter { $0.kinds == ["people"] }.sorted { $0.start < $1.start }
+        guard people.count == 3 else {
+            problems.append("recordings: \(people.count) people incidents, expected 3")
+            return recordingsLock(b, fake, rec, calls)
+        }
+        b.rename(people[0].key, "Delivery")
+        when({ b.dayIncidents.contains { $0.name == "Delivery" } }, timeout: 2) { [self] in
+            b.selection = [people[0].key, people[1].key]
+            b.merge()
+            when({ b.dayIncidents.count == 6 }, timeout: 2) { [self] in
+                guard let merged = b.selected, merged.cameras.count == 2 else {
+                    problems.append("recordings: the merge did not make one incident of two cameras")
+                    return recordingsLock(b, fake, rec, calls)
+                }
+                print("recordings: merged into \(merged.cameras.count) cameras, edited \(merged.edited)")
+                b.split(merged.key, at: people[1].start)
+                when({ b.dayIncidents.count == 7 }, timeout: 2) { [self] in
+                    let first = people[0].key
+                    b.add(RecordingCamera(device: people[2].cameras[0].camera.device, channel: 2), to: first)
+                    when({ b.dayIncidents.first { $0.key == first }?.cameras.count == 2 }, timeout: 2) { [self] in
+                        b.remove(RecordingCamera(device: people[2].cameras[0].camera.device, channel: 2), from: first)
+                        when({ b.dayIncidents.first { $0.key == first }?.cameras.count == 1 }, timeout: 2) { [self] in
+                            b.revert(first)
+                            when({ b.dayIncidents.allSatisfy { !$0.edited } && b.dayIncidents.count == 7 }, timeout: 2) {
+                                [self] in
+                                print("recordings: rename, merge, split, add, remove, revert done")
+                                if b.dayIncidents.contains(where: \.edited) { problems.append("recordings: revert left an edit") }
+                                recordingsLock(b, fake, rec, calls)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Locking queues the incident's download and says so; unlocking keeps it.
+    private func recordingsLock(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: recordings-lock
+        guard let vehicle = b.dayIncidents.first(where: { $0.kinds == ["vehicle"] }) else {
+            problems.append("recordings: no vehicle incident to lock")
+            return recordingsDownloads(b, fake, rec, calls)
+        }
+        b.setLocked(vehicle.key, true)
+        when({ b.dayIncidents.first { $0.key == vehicle.key }?.locked == true && rec.downloads.count == 1 }, timeout: 2) {
+            [self] in
+            print("recordings: locked; \(rec.notice ?? "no message"); downloads \(rec.downloads.count)")
+            if rec.notice?.contains("downloading") != true { problems.append("recordings: locking did not say the video is kept") }
+            b.lockedOnly = true
+            if b.incidents.map(\.key) != [vehicle.key] { problems.append("recordings: the Locked filter shows \(b.incidents.count)") }
+            b.lockedOnly = false
+            b.setLocked(vehicle.key, false)
+            when({ b.dayIncidents.first { $0.key == vehicle.key }?.locked == false }, timeout: 2) { [self] in
+                if rec.downloads.count != 1 { problems.append("recordings: unlocking touched the download") }
+                recordingsDownloads(b, fake, rec, calls)
+            }
+        }
+    }
+
+    /// The downloads panel: pause, resume, done, Show in Finder, forget,
+    /// and the Trash once the core has let go of the folder.
+    private func recordingsDownloads(
+        _ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls
+    ) {
+        // parity: recordings-downloads
+        guard let first = rec.downloads.first, let other = b.dayIncidents.first(where: { $0.kinds == ["dog_cat"] }) else {
+            problems.append("recordings: nothing to download")
+            return recordingsGroups(b, fake, rec, calls)
+        }
+        b.tab = .downloads
+        rec.pause(first.download, true)
+        when({ rec.downloads.first?.paused == true }, timeout: 2) { [self] in
+            fake.completeRecordingWork()
+            if rec.downloads.first?.state == "done" { problems.append("recordings: a paused download finished") }
+            rec.pause(first.download, false)
+            when({ rec.downloads.first?.paused == false }, timeout: 2) { [self] in
+                fake.completeRecordingWork()
+                when({ rec.downloads.first?.state == "done" }, timeout: 2) { [self] in
+                    guard let done = rec.downloads.first else { return }
+                    rec.reveal(done)
+                    if calls.revealed.last?.map(\.path) != done.outputs { problems.append("recordings: Show in Finder showed \(calls.revealed)") }
+                    rec.forget(done.download)
+                    b.download(other.key)
+                    when({ rec.downloads.count == 1 && rec.downloads.first?.download != done.download }, timeout: 2) { [self] in
+                        guard let queued = rec.downloads.first, let folder = queued.folder else { return }
+                        rec.trash(queued.download)
+                        when({ !calls.trashed.isEmpty }, timeout: 2) { [self] in
+                            print("recordings: downloads done, forgotten, trashed \(calls.trashed.count)")
+                            if calls.trashed.map(\.path) != [folder] { problems.append("recordings: the Trash got \(calls.trashed)") }
+                            if !rec.downloads.isEmpty { problems.append("recordings: \(rec.downloads.count) downloads left") }
+                            b.tab = .incidents
+                            recordingsGroups(b, fake, rec, calls)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A camera group joins its cameras' overlapping events; the window
+    /// closing releases its hold.
+    private func recordingsGroups(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: recordings-groups
+        let two = Array(b.cameras.prefix(2))
+        rec.putGroups(IncidentGroups(groups: [.init(name: "Front", cameras: two)]))
+        when({ rec.groups.groups.count == 1 && b.dayIncidents.count == 5 }, timeout: 2) { [self] in
+            print("recordings: with a group of two, \(b.dayIncidents.count) incidents")
+            if b.dayIncidents.count != 5 { problems.append("recordings: a group of two gave \(b.dayIncidents.count) incidents") }
+            b.scope = .group("Front")
+            if b.incidents.count != 2 { problems.append("recordings: the group scope shows \(b.incidents.count)") }
+            b.scope = .all
+            rec.putGroups(IncidentGroups())
+            when({ rec.groups.groups.isEmpty && b.dayIncidents.count == 7 }, timeout: 2) { [self] in
+                // parity: recordings-window-close
+                let hold = b.holdID
+                app.recordingsWindows.first?.window?.close()
+                if fake.recordingsHolds[hold] != nil { problems.append("recordings: closing the window kept its hold") }
+                if !app.recordingsWindows.isEmpty { problems.append("recordings: the window is still listed") }
+                checkLog()
+            }
+        }
+    }
+
+    /// The recordings window on the real core, against a device with
+    /// recordings (tools/mock-nvr `--recordings 3`; never a real NVR in a
+    /// self-test): every camera of the first device chosen, today asked for
+    /// and held, a lane per camera with spans and the day's incidents from
+    /// the device's search, a cover keyframe decoded with VideoToolbox and
+    /// put back, yesterday asked for and not held, a lock that downloads an
+    /// incident to the end, the Trash hand-over (recorded, not done), and the
+    /// hold released when the window closes. Skipped for a device without
+    /// recordings.
+    private func recordingsRealStep() {
+        // Only against a device on this computer (the mock): locking
+        // downloads, and a self-test pointed at a real NVR must not.
+        guard let model = app.model, let rec = model.recordings, rec.available,
+            let device = model.devices.first(where: { $0.link.state == .connected && !$0.channels.isEmpty }),
+            ["127.0.0.1", "localhost", "::1"].contains(device.config.host)
+        else { return checkLog() }
+        // parity: recordings-real-core
+        let calls = SystemCalls()
+        rec.trasher = { calls.trashed.append($0) }
+        rec.revealer = { calls.revealed.append($0) }
+        let cams = device.channels.map { RecordingCamera(device: device.key, channel: $0.channel) }
+        rec.setEnabled(device: device.key, cameras: cams)
+        guard let controller = app.openRecordingsWindow() else {
+            problems.append("recordings: no window opened")
+            return checkLog()
+        }
+        let b = controller.browser
+        let ready = { b.lanes.count == cams.count && b.lanes.allSatisfy { !$0.spans.isEmpty } && !b.dayIncidents.isEmpty }
+        when({ ready() && !rec.searching.busy }, timeout: 30) { [self] in
+            print("recordings (real core): \(b.lanes.map(\.spans.count)) spans, \(b.dayIncidents.count) incidents, holding \(b.holding)")
+            guard ready() else {
+                problems.append("recordings: the device's day did not arrive (\(b.lanes.map(\.spans.count)) spans)")
+                return recordingsRealClose(b)
+            }
+            if !b.holding { problems.append("recordings: today is not held") }
+            guard let key = b.dayIncidents.first?.coverKeys.first else { return recordingsRealClose(b) }
+            rec.requestThumbnail(key)
+            when({
+                switch rec.thumbnails[key] {
+                case .image, .failed, .empty: true
+                default: false
+                }
+            }, timeout: 30) { [self] in
+                var putBack = false
+                if case .ready(let t)? = try? model.bridge.recordings().thumbnailGet(key: key.json), t.kind == .image {
+                    putBack = true
+                }
+                var bytes = 0
+                if case .image(let jpeg) = rec.thumbnails[key] { bytes = jpeg.count }
+                print("recordings (real core): thumbnail image \(bytes) bytes, put back \(putBack)")
+                if !putBack { problems.append("recordings: the cover keyframe was not decoded and put back") }
+                recordingsRealDownload(b, rec, calls)
+            }
+        }
+    }
+
+    private func recordingsRealDownload(_ b: RecordingsBrowser, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        b.previousDay()
+        if b.holding { problems.append("recordings: yesterday is held") }
+        when({ b.dayIncidents.contains { !$0.growing } && !rec.searching.busy }, timeout: 30) { [self] in
+            guard let incident = b.dayIncidents.first(where: { !$0.growing }) else {
+                problems.append("recordings: yesterday has no incidents")
+                return recordingsRealClose(b)
+            }
+            b.setLocked(incident.key, true)
+            when({ rec.downloads.contains { $0.state == "done" || $0.state == "failed" } }, timeout: 60) { [self] in
+                guard let d = rec.downloads.first(where: { $0.incident == incident.key }) else {
+                    problems.append("recordings: locking downloaded nothing")
+                    return recordingsRealClose(b)
+                }
+                print("recordings (real core): lock \(rec.notice ?? ""), download \(d.stateText), \(d.outputs.count) files")
+                if d.state != "done" || d.outputs.isEmpty { problems.append("recordings: the download ended \(d.stateText)") }
+                rec.trash(d.download)
+                when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
+                    if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
+                    b.setLocked(incident.key, false)
+                    recordingsRealClose(b)
+                }
+            }
+        }
+    }
+
+    private func recordingsRealClose(_ b: RecordingsBrowser) {
+        app.recordingsWindows.first?.window?.close()
+        if b.holding { problems.append("recordings: closing the window kept its hold") }
+        checkLog()
     }
 
     private func checkLogNow() {

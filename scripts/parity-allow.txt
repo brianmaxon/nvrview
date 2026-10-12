@@ -81,5 +81,17 @@ inset-drag-resize           macos    gap: Windows call cards cannot be moved yet
 inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window
 inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
+recordings-animal-filter    macos    gap: the Windows recordings screens are not built yet (MILESTONE-P.md W1); the animal filter groups every animal kind
+recordings-calendar-lanes   macos    gap: the Windows recordings screens are not built yet (W1): calendar days and timeline lanes from the index
+recordings-downloads        macos    gap: the Windows recordings screens are not built yet (W1): downloads panel, pause, resume, forget, Recycle Bin
+recordings-edits            macos    gap: the Windows recordings screens are not built yet (W1): rename, merge, split, add and remove a camera, revert
+recordings-enable           macos    gap: the Windows recordings screens are not built yet (W1): choosing the cameras to search
+recordings-groups           macos    gap: the Windows recordings screens are not built yet (W1): camera groups join incidents
+recordings-hold-today       macos    gap: the Windows recordings screens are not built yet (W1): a window holds today under its own hold
+recordings-lock             macos    gap: the Windows recordings screens are not built yet (W1): lock queues the download and says so
+recordings-navigate-day     macos    gap: the Windows recordings screens are not built yet (W1): another day is asked for, not held
+recordings-real-core        macos    gap: the Windows recordings screens are not built yet (W1); the macOS self-test also runs them on the real core against tools/mock-nvr
+recordings-thumbnail        macos    gap: the Windows recordings screens are not built yet (W1): keyframe decoded with Media Foundation and WIC, put back
+recordings-window-close     macos    gap: the Windows recordings screens are not built yet (W1): closing the window releases its hold
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0

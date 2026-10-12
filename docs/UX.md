@@ -972,6 +972,81 @@ example to keep it beside other work. Both apps follow these rules.
   origin), the placement, the pin, and the choices are kept in
   `view-settings.json`; call windows are not in `windows.json`.
 
+## Recordings
+
+The NVR's own recordings, found by what happened ([PLAYBACK.md](PLAYBACK.md),
+"Finding"; the calls are [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1
+to 5). Built on macOS (milestone P, M1); the Windows app follows (W1).
+Playing recordings (M2), the sound lanes (M3), and exports (M4) come later.
+
+- **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
+  brings it forward. It is a window of its own, not a sidebar section:
+  live view stays as it is while recordings are searched, and the window can
+  sit on another screen. The menu item is disabled with a core that has no
+  recordings. Proposed for the Windows app (W1): the right-click menu and
+  Ctrl+Alt+R.
+- **Layout:** a sidebar with the month's calendar, the search state, and
+  the cameras to search; in the middle the shown day ("Today, Sunday,
+  October 11, 2026" style, with previous and next day) and Incidents,
+  Timeline, or Downloads (with their count); on the right the selected
+  incident. A message line at the bottom says what a request answered when
+  it was refused or needs the user (for example that a locked incident's
+  video is not being kept).
+- **Cameras to search:** nothing is searched until the user chooses
+  cameras, per device (one checkbox for all its cameras) or per camera (each
+  lens of a multi-lens camera on its own). The choice is kept between
+  launches (`recordings-cameras.json` in the app's data folder) and given to
+  the core again at each launch; removing a device stops searching it.
+- **Days:** times are the device's own wall-clock time, as burned into the
+  picture (the computer's time zone stands in for the device's until the
+  core reads it). Showing a day asks the device for it; the window holds
+  today (its own hold) only while it shows today, and lets go when it shows
+  another day or closes. The calendar marks the days with recordings that
+  are known: a month's days arrive with the first day asked for in it. The
+  refresh button searches the shown day again. A day the device could not
+  search shows a warning on its lanes and is not asked again by itself.
+- **Incidents:** newest first, filtered by kind (People, Vehicles,
+  Animals, Motion, Other; none chosen shows all; Animals matches every
+  animal kind a device reports, `dog_cat` today and finer kinds later), by
+  cameras (all, a camera group, or one camera), and Locked. Each row shows
+  the cover thumbnails of up to four of its cameras, its name (or its time
+  and kinds), its time span, the kinds as the live detection badges, its
+  cameras, and marks for locked and downloaded. A click selects one, ⌘-click
+  adds or removes one, and with several selected, Merge joins them.
+- **The selected incident:** its name (Rename; an empty name goes back to
+  time and kinds), time span and date, badges, and camera group; Locked
+  (locking keeps it: its video is downloaded and nothing about it expires;
+  the message line says when its video is not being kept because there is no
+  downloads folder or too many downloads; unlocking never touches files);
+  Download; Revert Edits when edited; each camera with a large thumbnail and
+  Remove (not the last); Add Camera from the searched cameras; and Split,
+  at a time chosen on a slider.
+- **Timeline:** one lane per camera for the day, recording spans in gray,
+  events as bars colored by kind with the kind's symbol when there is room,
+  an hour ruler, and zoom from the whole day to 48×. A click within a few
+  points of an event selects its incident (a generous target).
+- **Thumbnails:** asked for as rows appear; a spinner until the device's
+  keyframe arrives, which the app decodes (VideoToolbox), shrinks to 320
+  points, and gives back to the core's cache as a JPEG, so the next time it
+  is read as is. A crossed-out camera means no recording in the range. The
+  window keeps at most 512 in memory; queued fetches are dropped when it
+  shows another day or closes.
+- **Downloads:** every download with its folder's name, state (Queued,
+  Waiting for the device, Downloading, Paused, Finishing, Done, Failed with
+  the reason), progress, and each camera's chunks; Pause or Resume, Retry
+  (failed), Show in Finder (the files, or the folder until they exist),
+  Forget (not while running; files stay), and Move to Trash (the core stops
+  writing first, then the folder goes to the Trash; nothing is deleted
+  permanently). Progress redraws at most four times a second. Downloads go
+  to `~/Movies/NVRView/Incidents` (`Incidents` in `--data-dir`).
+- **Camera groups:** "Camera Groups…" edits the groups whose cameras cover
+  the same area, so their events join one incident; it says that changing a
+  group changes its incidents.
+- **Never in the way:** every query reads the core's memory; device work
+  (searches, thumbnails, downloads) reports by events; decoding runs off the
+  main thread. Self-test steps `recordings-*` (the fake core) and
+  `recordings-real-core` (`scripts/macos-real-selftest.sh`, against the mock).
+
 ## Finding devices
 
 Adding a device starts from a list of what answers on the network, so the
