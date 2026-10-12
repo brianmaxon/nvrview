@@ -47,6 +47,14 @@ Commands (RUN is the path that `plan` prints):
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
   areas windows         the Windows app self-test areas (suites app-debug.AREA
                         and app-publish.AREA; see WINDOWS_OWNED below)
+  check-projects        fails when DOTNET_REFS differs from the C# project files
+
+The trimmed publish build and what runs on it (app-publish.AREA) are deferred
+in ordinary runs ("deferred ...", counted like cached suites: a stamp with them
+serves merges, not a release); they run in full runs and when the last passing
+trimmed run on the platform is older than NVRVIEW_TRIMMED_MAX_AGE_H (24). app-update
+(the update test, also on the trimmed build) runs then too, and otherwise
+when its own inputs change.
 
 For tests: NVRVIEW_CACHE_NOW (epoch seconds), NVRVIEW_CACHE_METADATA (a
 `cargo metadata` JSON file), NVRVIEW_CACHE_TOOLS (tool versions, one string).
@@ -60,7 +68,7 @@ import subprocess
 import sys
 import time
 
-HARNESS = "suite-cache 1"  # bump to invalidate every entry
+HARNESS = "suite-cache 2"  # bump to invalidate every entry
 KEEP_DAYS = 14
 KEEP_MAX = 20000
 FAMILIES = ("clippy", "test", "doctest", "wincheck", "linuxcheck")
@@ -70,6 +78,35 @@ RUST_SHARED = [
     "rustfmt.toml", ".rustfmt.toml", "fixtures/synthetic/",
 ]
 FIXTURES = ["fixtures/synthetic/"]
+
+# The C# projects under apps/windows and the projects each references (kept in
+# step with the project files: `suite-cache.py check-projects`, run by
+# scripts/test-suite-cache.sh).
+W = "apps/windows/"
+DOTNET_REFS = {
+    "Interop": [], "Tiles": [], "Shell": ["Tiles", "Interop"],
+    "Video": ["Interop", "Tiles", "Shell"], "Demo": ["Interop", "Video"],
+    "Smoke": ["Interop", "Shell"], "Shell.Tests": ["Shell"], "Tiles.Tests": ["Tiles"],
+    "App": ["Interop", "Video", "Tiles", "Shell"],
+}
+
+
+def dotnet_inputs(project):
+    """The directories of PROJECT and every project it references, and the shared build settings."""
+    seen, todo = set(), [project]
+    while todo:
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo += DOTNET_REFS[p]
+    return sorted(W + "NvrView.%s/" % p for p in seen) + [W + "Directory.Build.props"]
+
+
+# What the side-by-side update test exercises: the updater and the start-up
+# handling, the app project (what is packaged), the updates model.
+UPDATE_FILES = [W + "NvrView.App/" + f for f in (
+    "Updater.cs", "Program.cs", "StartupTest.cs", "App.xaml.cs", "NvrView.App.csproj", "app.manifest",
+    "UpdateSettingsPanel.cs")] + [W + "NvrView.Shell/Updates.cs", W + "Directory.Build.props"]
 
 # Non-Rust suites: platform -> name -> (input paths, crates whose closure is
 # an input, tool kinds). A path ending in "/" is a directory.
@@ -91,15 +128,22 @@ SUITES = {
         "browser": ([""], [], ["rust"]),  # the whole tree
     },
     "windows": {
-        "csharp-smoke": (["apps/windows/", "scripts/csharp-smoke.sh", "VERSION"] + FIXTURES,
+        # Each C# suite covers the projects it builds (their project
+        # references, transitively), the shared build settings, and, for those
+        # that load the core, the core crates and the fixtures.
+        "csharp-smoke": (dotnet_inputs("Smoke") + [W + "layout/", "scripts/csharp-smoke.sh", "VERSION"] + FIXTURES,
                          ["viewer-ffi", "mock-nvr"], ["rust"]),
-        "video-selftest": (["apps/windows/", "scripts/csharp-video-selftest.sh", "VERSION"] + FIXTURES,
+        # The tile features' logic on simulated time (managed code only).
+        "tiles-tests": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-smoke.sh", "VERSION"], [], ["rust"]),
+        "video-selftest": (dotnet_inputs("Demo") + ["scripts/csharp-video-selftest.sh", "VERSION"] + FIXTURES,
                            ["viewer-ffi", "mock-nvr"], ["rust"]),
         # The shell tests are managed code only (no native library).
-        "shell-tests": (["apps/windows/", "VERSION"] + FIXTURES, [], ["rust"]),
+        "shell-tests": (dotnet_inputs("Shell.Tests") + ["VERSION"] + FIXTURES, [], ["rust"]),
+        # The side-by-side update end to end, on the trimmed build: the
+        # updater and start-up handling, the packaging script, and the
+        # signing tool's crates. The rest of the app is the self-test areas'.
+        "app-update": (UPDATE_FILES + ["scripts/windows-app.sh", "VERSION"], ["viewer-ffi", "sign-update"], ["rust"]),
         # app-debug.AREA and app-publish.AREA are added below (WINDOWS_AREAS).
-        "app-update": (["apps/windows/", "scripts/windows-app.sh", "VERSION"] + FIXTURES,
-                       ["viewer-ffi", "mock-nvr", "sign-update"], ["rust"]),
     },
 }
 
@@ -356,6 +400,32 @@ def entry_path(base, platform, suite, key, retried=False):
     return os.path.join(base, "entries", platform, suite, key + (".retried.json" if retried else ".json"))
 
 
+def is_trimmed(suite):
+    """The suites that need the trimmed publish build."""
+    return suite.startswith("app-publish.") or suite == "app-update"
+
+
+def trimmed_reason(base, platform, full):
+    """Why this run must run the trimmed-build suites, or None (they are deferred).
+
+    The trimmed publish and its self-test take minutes and fail only when
+    trimming breaks something, so ordinary runs defer them; they run in full
+    runs (releases) and when the last passing trimmed run on the platform is
+    older than NVRVIEW_TRIMMED_MAX_AGE_H hours (default 24).
+    """
+    if platform != "windows":
+        return None
+    if full:
+        return "full run"
+    last = read_json(os.path.join(base, "state-%s.json" % platform), {}).get("last_trimmed")
+    max_age = hours("NVRVIEW_TRIMMED_MAX_AGE_H", 24)
+    if not last:
+        return "no trimmed-build run has passed on %s yet" % platform
+    if now() - last > max_age * 3600:
+        return "the last trimmed-build run on %s was %s ago (every %gh)" % (platform, age(now() - last), max_age)
+    return None
+
+
 def full_reason(base, platform):
     """Why the next run must be full, or None."""
     if os.environ.get("NVRVIEW_FULL_CHECK", "0") == "1":
@@ -412,6 +482,7 @@ def cmd_plan(args):
         "platform": platform, "full": bool(reason), "reason": reason or "", "retried": retried,
         "started": now(), "tools": tree.tools, "suites": tree.suite_keys(), "selected": {},
         "passed": {}, "rows": [], "cached": [], "crates": {c: v["lib"] for c, v in tree.crates.items()},
+        "trimmed": trimmed_reason(base, platform, bool(reason)) or "",
     }
     run["tools"] = tree.tools  # filled while computing the keys
     state_file = os.path.join(base, "state-%s.json" % platform)
@@ -445,6 +516,16 @@ def cmd_want(args):
     path, suite = args
     run = read_json(path)
     base = store()
+    if is_trimmed(suite) and run["platform"] == "windows" and not run["full"]:
+        if run.get("trimmed"):
+            return 0  # the daily trimmed-build run is due: these run whatever the cache says
+        if suite != "app-update":
+            last = read_json(os.path.join(base, "state-windows.json"), {}).get("last_trimmed", now())
+            print("deferred %s (trimmed build; last passed %s ago, runs daily and for releases)" % (suite, age(now() - last)))
+            run["rows"].append([suite, "deferred", 0])
+            run["cached"].append(suite + " (deferred)")
+            write_json(path, run)
+            return 1
     e = cached_entry(base, run, suite)
     if e is None:
         return 0
@@ -540,6 +621,11 @@ def cmd_finish(args):
         state = read_json(state_file, {})
         state.update(last_full=now(), runs_since_full=0)
         write_json(state_file, state)
+    trimmed = [x for x in run["suites"] if is_trimmed(x)]
+    if ok and trimmed and not run["retried"] and all(x in run["passed"] for x in trimmed):
+        state = read_json(state_file, {})
+        state["last_trimmed"] = now()
+        write_json(state_file, state)
     prune(base)
     try:
         os.remove(path)
@@ -568,6 +654,24 @@ def cmd_full_due(args):
     return 1
 
 
+def cmd_check_projects(args):
+    """Fails when DOTNET_REFS differs from the ProjectReference lines of the C# projects."""
+    import re
+    bad = 0
+    for name, refs in DOTNET_REFS.items():
+        path = os.path.join(W, "NvrView.%s" % name, "NvrView.%s.csproj" % name)
+        with open(path) as f:
+            found = sorted(re.findall(r'ProjectReference Include="\.\./NvrView\.([A-Za-z.]+)/', f.read()))
+        if found != sorted(refs):
+            print("%s references %s, but DOTNET_REFS says %s" % (name, found, sorted(refs)))
+            bad = 1
+    for d in os.listdir(W):
+        if d.startswith("NvrView.") and d[len("NvrView."):] not in DOTNET_REFS:
+            print("%s is not in DOTNET_REFS" % d)
+            bad = 1
+    return bad
+
+
 def cmd_areas(args):
     """Prints the Windows app self-test areas, space separated."""
     print(" ".join(WINDOWS_AREAS))
@@ -575,12 +679,13 @@ def cmd_areas(args):
 
 
 def main():
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2 or (len(sys.argv) < 3 and sys.argv[1] != "check-projects"):
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = sys.argv[1], sys.argv[2:]
     return {"plan": cmd_plan, "want": cmd_want, "crates": cmd_crates, "pass": cmd_pass,
-            "finish": cmd_finish, "full-due": cmd_full_due, "areas": cmd_areas}[cmd](args) or 0
+            "finish": cmd_finish, "full-due": cmd_full_due, "areas": cmd_areas,
+            "check-projects": cmd_check_projects}[cmd](args) or 0
 
 
 if __name__ == "__main__":

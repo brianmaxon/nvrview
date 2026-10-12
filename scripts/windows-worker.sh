@@ -40,7 +40,7 @@ only="${NVRVIEW_WINDOWS_ONLY:-}"
 
 # Which suites to run, decided on the Mac by the test result cache
 # (scripts/suite-cache.py; the cache lives there): NVRVIEW_SUITES is a comma
-# list of suites (csharp-smoke, video-selftest, shell-tests, app-update, and
+# list of suites (csharp-smoke, tiles-tests, video-selftest, shell-tests, app-update, and
 # app-debug.AREA and app-publish.AREA for each app self-test area in
 # scripts/windows-selftest-areas.txt; "none" for nothing), and NVRVIEW_CLIPPY_CRATES,
 # NVRVIEW_TEST_CRATES, NVRVIEW_DOCTEST_CRATES say which crates the Rust steps
@@ -128,21 +128,29 @@ export NVRVIEW_RELEASE_PACKAGES="-p viewer-ffi -p mock-nvr"
 # build lock per profile, and the .NET builds need no cargo output. The
 # steps that run the results come after, when these builds are already done.
 prebuild_log=target/prebuild.log
+timed() { # LABEL COMMAND...  (prints "   (LABEL: Ns)", which the end table reads)
+  local label="$1" t0
+  t0=$(date +%s)
+  shift
+  "$@"
+  printf '   (%s: %ss)\n' "$label" "$(($(date +%s) - t0))"
+}
 prebuild() {
   if [ "$need_lib" = 1 ]; then
     # shellcheck disable=SC2086 # a list of cargo arguments
-    cargo build --release $NVRVIEW_RELEASE_PACKAGES
+    timed "build: release library and mock" cargo build --release $NVRVIEW_RELEASE_PACKAGES
   fi
   if [ "$only" != app ]; then
-    if want csharp-smoke; then NVRVIEW_BUILD_ONLY=1 scripts/csharp-smoke.sh; fi
-    if want video-selftest; then NVRVIEW_BUILD_ONLY=1 scripts/csharp-video-selftest.sh; fi
+    if want csharp-smoke; then NVRVIEW_SMOKE_PARTS=smoke NVRVIEW_BUILD_ONLY=1 timed "build: C# smoke" scripts/csharp-smoke.sh; fi
+    if want tiles-tests; then NVRVIEW_SMOKE_PARTS=tiles NVRVIEW_BUILD_ONLY=1 timed "build: C# tile tests" scripts/csharp-smoke.sh; fi
+    if want video-selftest; then NVRVIEW_BUILD_ONLY=1 timed "build: C# video demo" scripts/csharp-video-selftest.sh; fi
   fi
   if want shell-tests; then
-    dotnet build apps/windows/NvrView.Shell.Tests -c Release --artifacts-path target/dotnet -v quiet -clp:ErrorsOnly -nologo
+    timed "build: C# shell tests" dotnet build apps/windows/NvrView.Shell.Tests -c Release --artifacts-path target/dotnet -v quiet -clp:ErrorsOnly -nologo
   fi
   # Without the app tests the app build is itself the check.
   if [ "$app_tests" = 0 ] || [ -n "$debug_areas" ]; then
-    scripts/windows-app.sh build
+    timed "build: C# app" scripts/windows-app.sh build
   fi
 }
 prebuild >"$prebuild_log" 2>&1 &
@@ -193,8 +201,14 @@ if [ "$need_lib" = 1 ]; then ls -l target/release/nvrview.dll target/release/nvr
 if [ "$only" != app ]; then
   if want csharp-smoke; then
     step "C# smoke test"
-    scripts/csharp-smoke.sh
+    NVRVIEW_SMOKE_PARTS=smoke scripts/csharp-smoke.sh
     report csharp-smoke "$step_start"
+  fi
+
+  if want tiles-tests; then
+    step "C# tile tests"
+    NVRVIEW_SMOKE_PARTS=tiles scripts/csharp-smoke.sh
+    report tiles-tests "$step_start"
   fi
 
   if want video-selftest; then
