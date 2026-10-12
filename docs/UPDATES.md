@@ -463,6 +463,17 @@ missing; it never prints the key. Then it:
    public key derived from the secret one;
 5. prints the files and the upload order.
 
+Faster releases: `scripts/release-check.sh` runs the Mac and Windows checks at
+the same time and writes both stamps. When the Windows check passed for the
+same tree, the Windows package reuses the trimmed publish output that check
+tested (every file's hash must match; otherwise it is rebuilt), so the shipped
+files are the tested ones. After a version bump that changes only `VERSION`,
+`scripts/release.sh` accepts the stamps of the previous tree and says so
+(packages are still built and signed fresh); `--full-check` runs both checks
+fresh instead. A merge that skipped its Windows run
+(`scripts/merge-branch.sh`) leaves a different stamp that a release never
+accepts.
+
 `--skip-windows` builds only the macOS package; the output says clearly that
 it is macOS only. The script never tags, pushes, or uploads.
 
