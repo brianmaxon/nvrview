@@ -188,7 +188,7 @@ public abstract record WindowContent
 }
 
 /// <summary>One window as it is remembered between launches.</summary>
-public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0)
+public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0, double? InsetX = null, double? InsetY = null)
 {
     /// <summary>
     /// Where to put a restored window (screen pixels, origin top left): its
@@ -241,6 +241,12 @@ public sealed class WindowStore(string? path)
             {
                 o["sidebarWidth"] = w.SidebarWidth;
             }
+            if (w.InsetX is { } ix && w.InsetY is { } iy && double.IsFinite(ix) && double.IsFinite(iy))
+            {
+                // Where the user dragged the window's call insets (a fraction of the free space);
+                // left out while they sit in the default corner. The macOS app's key.
+                o["insetAnchor"] = new JsonObject { ["x"] = ix, ["y"] = iy };
+            }
             array.Add((JsonNode)o);
         }
         return array.ToJsonString(JsonFile.Pretty);
@@ -260,7 +266,13 @@ public sealed class WindowStore(string? path)
             static bool B(JsonNode? n) => n is JsonValue v && v.TryGetValue(out bool b) && b;
             var frame = new Rect(D(f["x"]), D(f["y"]), D(f["width"]), D(f["height"]));
             double width = D(o["sidebarWidth"]);
-            list.Add(new SavedWindow(content, frame, B(o["fullScreen"]), B(o["sidebarCollapsed"]), double.IsFinite(width) ? width : 0));
+            double? insetX = null, insetY = null;
+            if (o["insetAnchor"] is JsonObject a && double.IsFinite(D(a["x"])) && double.IsFinite(D(a["y"])))
+            {
+                insetX = Math.Clamp(D(a["x"]), 0, 1);
+                insetY = Math.Clamp(D(a["y"]), 0, 1);
+            }
+            list.Add(new SavedWindow(content, frame, B(o["fullScreen"]), B(o["sidebarCollapsed"]), double.IsFinite(width) ? width : 0, insetX, insetY));
         }
         return list;
     }

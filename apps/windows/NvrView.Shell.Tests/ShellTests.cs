@@ -297,7 +297,7 @@ internal static class StoreTests
             List<SavedWindow> windows =
             [
                 new(new WindowContent.Layout("layout-1"), new Rect(10, 20, 1180, 700), SidebarCollapsed: true, SidebarWidth: 280),
-                new(new WindowContent.Group("group-1"), new Rect(0, 0, 800, 500), FullScreen: true),
+                new(new WindowContent.Group("group-1"), new Rect(0, 0, 800, 500), FullScreen: true, InsetX: 1, InsetY: 0.4),
                 new(new WindowContent.Scratch("Unsaved", LayoutNode.Split(SplitAxis.Row, 0.5,
                     LayoutNode.Leaf(Fixtures.Cam(2)), LayoutNode.Leaf(Fixtures.Cam(4, lens: 1)))), new Rect(-1200, 300, 900, 600)),
             ];
@@ -315,6 +315,13 @@ internal static class StoreTests
             string text = File.ReadAllText(Path.Combine(dir, "windows.json"));
             T.Check(!text.Contains("password", StringComparison.Ordinal) && !text.Contains("host", StringComparison.Ordinal), "ids, names, trees, frames only");
             T.Check(!File.Exists(Path.Combine(dir, "windows.json.tmp")));
+            T.Check(back[0].InsetX is null && back[0].InsetY is null && back[1].InsetX == 1 && back[1].InsetY == 0.4, "the inset position is kept, and absent while default");
+            T.Check(!text.Contains("insetAnchor", StringComparison.Ordinal) || text.IndexOf("insetAnchor", StringComparison.Ordinal) == text.LastIndexOf("insetAnchor", StringComparison.Ordinal), "only the moved window has one");
+            List<SavedWindow> bad = WindowStore.FromJson(JsonNode.Parse("""
+                [{"content":{"layout":{"id":"x"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetAnchor":{"x":3,"y":-1}},
+                 {"content":{"layout":{"id":"y"}},"frame":{"x":1,"y":2,"width":900,"height":600},"insetAnchor":{"x":"a"}}]
+                """));
+            T.Check(bad[0].InsetX == 1 && bad[0].InsetY == 0 && bad[1].InsetX is null, "a saved inset position is clamped; a damaged one is ignored");
         });
 
         T.Run("windows: old or damaged entries", () =>
