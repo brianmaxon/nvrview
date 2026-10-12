@@ -9,6 +9,7 @@
 
 use bc_cli::analyze::Analysis;
 use bc_cli::playback_probe;
+use bc_cli::ptz_probe;
 use bc_cli::replay_probe::{self, MAX_PLAYS, ProbeConfig};
 use bc_cli::{
     CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, info_command,
@@ -47,6 +48,9 @@ usage:
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
          [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10] [--no-live] [--batched]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] ptz-probe
+         --allow-ptz-probe --channel N [--hold S] [--direction left|right|up|down]
+         [--edge min|max] [--steps a,b,c,d]
   bc-cli analyze FILE.nvrrec
   bc-cli discover --help
 
@@ -115,6 +119,18 @@ when they share no such time, each at its own recording's start + 5 s), a
 at each play's own time. Only the file search, live
 preview, seek (123), play (5) and stop (7) are sent. Keep its output in the
 ignored captures/ directory.
+ptz-probe moves a real camera briefly, through the core's own camera motion
+path (docs/protocol.md, \"Camera motion control\"): only with --allow-ptz-probe
+and an explicit --channel. It prints its plan and moves nothing until you
+type yes. (a) one move at the lowest speed in --direction (default left),
+never renewed, which the core's safety stop ends after --hold seconds
+(default 1.5, at most 3), with the zoom, focus and self-test state read
+before, during and after (pan and tilt cannot be read: watch the camera);
+(b) a recall of a preset id the camera does not list (the core refuses it
+unsent); (c) zoom and focus sent to their --edge (default max) and back;
+(d) reported as not possible (the core has no lens field). --steps picks
+parts. A stop is sent on every exit path, Ctrl-C included. Keep its output
+in the ignored captures/ directory.
 analyze prints a Markdown timing report of a recording (aggregates only).";
 
 /// How long to wait for the login before giving up.
@@ -152,6 +168,7 @@ enum Action {
     },
     ReplayProbe(ProbeConfig),
     PlaybackProbe(playback_probe::ProbeConfig),
+    PtzProbe(ptz_probe::ProbeConfig),
 }
 
 enum Parsed {
@@ -203,6 +220,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let (mut allow_pb_probe, mut utc_offset, mut pb_channels) = (false, None, None);
     let mut plays = None;
     let mut gap = None;
+    let mut ptz = ptz_probe::ProbeConfig::new(0);
+    let mut allow_ptz_probe = false;
     let mut it = args;
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -285,6 +304,29 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                         .ok_or("bad --channels (1 to 4 distinct channel numbers, A,B,C,D)")?,
                 );
             }
+            "--allow-ptz-probe" => allow_ptz_probe = true,
+            "--lens" => {
+                ptz.lens = Some(value("--lens")?.parse().map_err(|_| "bad --lens")?);
+            }
+            "--direction" => {
+                ptz.direction = bc_protocol::ptz::Direction::from_name(&value("--direction")?)
+                    .ok_or("bad --direction (left, right, up, down)")?;
+            }
+            "--hold" => {
+                ptz.hold = ptz_probe::parse_hold(&value("--hold")?)
+                    .ok_or("bad --hold (above 0 and at most 3 seconds)")?;
+            }
+            "--edge" => {
+                ptz.edge = match value("--edge")?.as_str() {
+                    "min" => ptz_probe::Edge::Min,
+                    "max" => ptz_probe::Edge::Max,
+                    _ => return Err("bad --edge (min or max)".into()),
+                };
+            }
+            "--steps" => {
+                ptz.steps = ptz_probe::parse_steps(&value("--steps")?)
+                    .ok_or("bad --steps (a, b, c, d: any of them, once each)")?;
+            }
             "--no-live" => no_live = true,
             "--batched" => batched = true,
             "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
@@ -297,7 +339,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             "-h" | "--help" => return Err(String::new()),
             "channels" | "record" | "capture" | "analyze" | "query" | "lenses" | "talk"
-            | "replay-probe" | "playback-probe"
+            | "replay-probe" | "playback-probe" | "ptz-probe"
                 if command.is_none() =>
             {
                 command = Some(a);
@@ -410,6 +452,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                 "", 0, "", now, utc_offset, channels,
             ))
         }
+        Some("ptz-probe") => {
+            if !allow_ptz_probe {
+                return Err("ptz-probe moves a camera briefly; pass --allow-ptz-probe".into());
+            }
+            ptz.channel = channel.ok_or("ptz-probe needs --channel")?;
+            Action::PtzProbe(ptz)
+        }
         Some("lenses") => Action::Lenses {
             channel,
             window: seconds.map_or(Duration::from_secs(2), Duration::from_secs),
@@ -515,6 +564,9 @@ async fn run(
         cfg.user = args.user;
         return run_playback_probe(cfg, password, logs.unwrap_or_default()).await;
     }
+    if let Action::PtzProbe(cfg) = args.action {
+        return run_ptz_probe(cfg, addr, &args.user, &password).await;
+    }
     let mut cfg = SessionConfig::new(args.user, password);
     if matches!(args.action, Action::ReplayProbe(_)) {
         cfg.max_plays = MAX_PLAYS;
@@ -525,6 +577,34 @@ async fn run(
     // Stops previews and closes the socket before the process exits.
     session.close().await;
     result.map_err(|e| e.to_string())
+}
+
+/// Runs the PTZ probe: one login, the confirmation read from stdin, and the
+/// session closed (which also stops any move) on every path.
+async fn run_ptz_probe(
+    cfg: ptz_probe::ProbeConfig,
+    addr: SocketAddr,
+    user: &str,
+    password: &str,
+) -> Result<(), String> {
+    let scfg = ptz_probe::session_config(user, password, cfg.hold);
+    let session = DeviceSession::spawn(TcpConnector::new(addr), scfg);
+    let result = async {
+        wait_logged_in(&session, LOGIN_LIMIT)
+            .await
+            .map_err(|e| e.to_string())?;
+        let input = tokio::io::BufReader::new(tokio::io::stdin());
+        let mut out = std::io::stdout();
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        ptz_probe::run(&session, &cfg, input, &mut out, ctrl_c).await
+    }
+    .await;
+    session.close().await;
+    let report = result?;
+    print!("{}", ptz_probe::format_summary(&report));
+    Ok(())
 }
 
 /// Runs the playback probe on a blocking thread (the core has its own
@@ -785,7 +865,9 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             );
             Ok(())
         }
-        Action::PlaybackProbe(_) => unreachable!("handled before the session opens"),
+        Action::PlaybackProbe(_) | Action::PtzProbe(_) => {
+            unreachable!("handled before the session opens")
+        }
         Action::ReplayProbe(cfg) => {
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
             let ctrl_c = tokio::spawn(async move {
@@ -1139,5 +1221,55 @@ mod tests {
         let mut bad = all.to_vec();
         bad[6] = "0,1,2,3,4";
         assert!(with(&bad).err().unwrap().contains("--channels"));
+    }
+
+    #[test]
+    fn ptz_probe_needs_its_flags() {
+        let with = |extra: &[&str]| {
+            let mut v: Vec<&str> = BASE.to_vec();
+            v.push("ptz-probe");
+            v.extend_from_slice(extra);
+            parse(&v)
+        };
+        assert!(
+            with(&["--channel", "1"])
+                .err()
+                .unwrap()
+                .contains("--allow-ptz-probe")
+        );
+        assert!(
+            with(&["--allow-ptz-probe"])
+                .err()
+                .unwrap()
+                .contains("--channel")
+        );
+        assert!(
+            with(&["--allow-ptz-probe", "--channel", "1", "--hold", "3.5"])
+                .err()
+                .unwrap()
+                .contains("--hold")
+        );
+        let Ok(Parsed::Device(Args {
+            action: Action::PtzProbe(cfg),
+            ..
+        })) = with(&[
+            "--allow-ptz-probe",
+            "--channel",
+            "4",
+            "--direction",
+            "up",
+            "--hold",
+            "2",
+            "--edge",
+            "min",
+            "--steps",
+            "a,c",
+        ])
+        else {
+            panic!("did not parse");
+        };
+        assert_eq!(cfg.channel, 4);
+        assert_eq!(cfg.steps.len(), 2);
+        assert_eq!(cfg.hold, Duration::from_secs(2));
     }
 }
