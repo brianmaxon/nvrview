@@ -79,6 +79,25 @@ model.
 - **Right-click menu** = the full overflow list from the same model, so
   everything in the header is also in the menu, in the same order.
 
+Details settled with the model (`TileHeader.swift`, `TileHeader.cs`; no
+view uses it yet):
+
+- The padding (8) is the header's inset at each end; items sit side by side.
+  The title gets what the buttons leave, at least 48; `titleTruncated`
+  compares that with the title's natural width, which the app measures.
+- Display order: the pill, the title, Dismiss, the buttons by priority, then
+  "…". Items have stable identifiers (`save-picture`, `pan-tilt`, ...), the
+  English labels of the menus, and key hints for each platform.
+- The "…" menu is the right-click menu without what the header shows, so it
+  also holds the long tail and, below 120 pt, Dismiss. Start Conversation is
+  in the menus for every camera and in the header only for a doorbell or a
+  camera with talk-back. In the call window's tile Record and Save Picture
+  carry ⇧⌘R / Ctrl+Shift+R and ⇧⌘P / Ctrl+Shift+P, and Record Main Stream
+  and Record Sub-stream are not offered.
+- Hysteresis keeps the visible items (and the anchor width) for the same
+  tile state; the title's truncation still follows the width. A change of
+  the tile's state (zoom, recording, a veil) lays it out again at once.
+
 Corner indicators are unchanged.
 
 ## Save picture
