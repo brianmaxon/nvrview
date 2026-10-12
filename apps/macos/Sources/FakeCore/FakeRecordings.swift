@@ -1,21 +1,43 @@
 import Foundation
 import NVRCore
+import VideoKit
 
 // Recordings, part 1 (minor 5) in the fake core: a made-up recording store
 // with the contract's JSON (docs/FFI-RECORDINGS.md, sections 1 to 5 and 8),
 // for the recordings views (milestone P, M1) before they meet the real core.
 // No device and no files: every enabled camera recorded every day all day,
-// with a person at 08:00 and a vehicle at 17:00 (device-local seconds).
+// with a person at 08:00 and a vehicle at 17:00 (device-local seconds), and
+// on channel 3 (index 2) an animal (`dog_cat`) at 12:00. Each event is an
+// incident of its own, except that events of cameras in one named camera
+// group join when they overlap (within 10 s); with no groups every event
+// stays alone (the real core then groups any cameras).
 // Asking for days indexes them at once (`recordings_index` busy, then
 // `recordings_changed`, `recordings_index` idle, `incidents_changed`).
 // Thumbnail fetches and downloads are queued and finish shortly after the
 // call (or only on `completeRecordingWork()` with
-// `Options.recordingWorkIsManual`): a fetch makes a stand-in keyframe, a
-// download goes to `done` with an output path that is never written. Edits
-// apply `rename` and `revert`; the other operations answer `.unsupported`.
+// `Options.recordingWorkIsManual`): a fetch returns the first keyframe of
+// the first clip (a stand-in keyframe without clips), a download goes to
+// `done` with an output path that is never written. Every edit applies
+// (merge, split, rename, add and remove a camera, revert); stored edits are
+// replayed in order over the incidents, and one whose keys match nothing is
+// skipped. Locks mark incidents; they do not follow edits as the core's do.
 
 /// What the fake core keeps for recordings, under one lock.
 final class FakeRecordingsState: @unchecked Sendable {
+    enum FakeEdit {
+        case merge([String])
+        case split(String, Int64)
+        case addCamera(String, RecordingCamera)
+        case removeCamera(String, RecordingCamera)
+
+        var keys: [String] {
+            switch self {
+            case .merge(let k): k
+            case .split(let k, _), .addCamera(let k, _), .removeCamera(let k, _): [k]
+            }
+        }
+    }
+
     struct Download {
         var id: String
         var incident: String
@@ -34,6 +56,7 @@ final class FakeRecordingsState: @unchecked Sendable {
         var revision = 0
         var incidentsRevision = 0
         var names: [String: String] = [:]
+        var edits: [FakeEdit] = []
         var locks: Set<String> = []
         var groups: Any = [String: Any]()
         var groupsRevision = 0
@@ -112,7 +135,8 @@ extension FakeCore {
         [
             FakeEvent(camera: camera, kind: "people", start: day + 8 * 3600 + Int64(camera.channel), end: day + 8 * 3600 + 15),
             FakeEvent(camera: camera, kind: "vehicle", start: day + 17 * 3600 + Int64(camera.channel), end: day + 17 * 3600 + 20),
-        ]
+        ] + (camera.channel == 2
+            ? [FakeEvent(camera: camera, kind: "dog_cat", start: day + 12 * 3600 + 30, end: day + 12 * 3600 + 45)] : [])
     }
 
     private func recordingsWorld<R>(_ body: (inout FakeRecordingsState.World) throws(CoreStatus) -> R) throws(CoreStatus) -> R {
@@ -193,25 +217,132 @@ extension FakeCore {
         ["camera": cameraObject(e.camera), "kind": e.kind, "source": "device", "start": e.start, "end": e.end]
     }
 
-    private static func incidentObject(_ w: FakeRecordingsState.World, _ e: FakeEvent) -> [String: Any] {
-        let name: Any = w.names[e.key] ?? NSNull()
-        let downloads = w.downloads.filter { $0.incident == e.key }.map(\.id)
+    /// An incident of the fake: events (and cameras added by an edit).
+    private struct FakeIncident {
+        var events: [FakeEvent]
+        var added: [RecordingCamera] = []
+        var group: String?
+        var edited = false
+
+        var start: Int64 { events.map(\.start).min() ?? 0 }
+        var end: Int64 { events.map(\.end).max() ?? 0 }
+        var first: FakeEvent { events.min { ($0.start, $0.key) < ($1.start, $1.key) }! }
+        var key: String { first.key + (group.map { "-g" + FakeCore.hash($0).prefix(8) } ?? "") }
+        var cameras: [RecordingCamera] {
+            var out: [RecordingCamera] = []
+            for e in events.sorted(by: { ($0.start, $0.key) < ($1.start, $1.key) }) where !out.contains(e.camera) {
+                out.append(e.camera)
+            }
+            for c in added where !out.contains(c) { out.append(c) }
+            return out
+        }
+        var kinds: [String] {
+            var out: [String] = []
+            for e in events where !out.contains(e.kind) { out.append(e.kind) }
+            return out
+        }
+        var id: String {
+            let text = key + cameras.map { "\($0.device)/\($0.channel)/\($0.lens)" }.joined() + "\(start)-\(end)"
+            return "\(start)-\(FakeCore.hash(text))"
+        }
+    }
+
+    fileprivate static func hash(_ text: String) -> String {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
+        return String(h, radix: 16)
+    }
+
+    private static func incidentObject(_ w: FakeRecordingsState.World, _ i: FakeIncident) -> [String: Any] {
+        let name: Any = w.names[i.key] ?? NSNull()
+        let downloads = w.downloads.filter { $0.incident == i.key }.map(\.id)
+        let cameras = i.cameras.map { c -> [String: Any] in
+            let own = i.events.filter { $0.camera == c }
+            let intervals = own.isEmpty ? [[i.start, i.end]] : own.map { [$0.start, $0.end] }
+            let lo = own.map(\.start).min() ?? i.start, hi = own.map(\.end).max() ?? i.end
+            return [
+                "camera": cameraObject(c), "name": "Camera \(c.channel + 1)", "intervals": intervals,
+                "download": [lo - 5, hi + 5], "added": own.isEmpty,
+            ]
+        }
         return [
-            "key": e.key, "id": e.id, "name": name, "group": NSNull(), "start": e.start, "end": e.end,
-            "margin_s": 5, "kinds": [e.kind], "growing": false, "edited": w.names[e.key] != nil,
-            "locked": w.locks.contains(e.key),
-            "cameras": [
-                [
-                    "camera": cameraObject(e.camera), "name": "Camera \(e.camera.channel + 1)",
-                    "intervals": [[e.start, e.end]], "download": [e.start - 5, e.end + 5], "added": false,
-                ] as [String: Any]
-            ],
-            "events": [eventObject(e)], "downloads": downloads,
+            "key": i.key, "id": i.id, "name": name, "group": i.group.map { $0 as Any } ?? NSNull(),
+            "start": i.start, "end": i.end, "margin_s": 5, "kinds": i.kinds, "growing": false,
+            "edited": i.edited || w.names[i.key] != nil, "locked": w.locks.contains(i.key), "cameras": cameras,
+            "events": i.events.sorted { ($0.start, $0.key) < ($1.start, $1.key) }.map(eventObject),
+            "downloads": downloads,
         ]
     }
 
-    private static func allIncidents(_ w: FakeRecordingsState.World) -> [FakeEvent] {
-        matching(w, Query(start: 0, end: .max, cameras: nil, kinds: nil, limit: .max))
+    /// The named groups' cameras (the stored camera groups).
+    private static func groupOf(_ w: FakeRecordingsState.World) -> [RecordingCamera: String] {
+        var out: [RecordingCamera: String] = [:]
+        let groups = (w.groups as? [String: Any])?["groups"] as? [[String: Any]] ?? []
+        for g in groups {
+            guard let name = g["name"] as? String else { continue }
+            for item in g["cameras"] as? [Any] ?? [] {
+                if let c = try? camera(item), out[c] == nil { out[c] = name }
+            }
+        }
+        return out
+    }
+
+    /// Every incident: the events grouped, then the stored edits replayed.
+    private static func allIncidents(_ w: FakeRecordingsState.World) -> [FakeIncident] {
+        let groupOf = groupOf(w)
+        var incidents: [FakeIncident] = []
+        for e in matching(w, Query(start: 0, end: .max, cameras: nil, kinds: nil, limit: .max)) {
+            let g = groupOf[e.camera]
+            if let g, let i = incidents.lastIndex(where: { $0.group == g && e.start <= $0.end + 10 }) {
+                incidents[i].events.append(e)
+            } else {
+                incidents.append(FakeIncident(events: [e], group: g))
+            }
+        }
+        for edit in w.edits { try? apply(edit, to: &incidents, w) }
+        return incidents.sorted { ($0.start, $0.key) < ($1.start, $1.key) }
+    }
+
+    /// Applies one edit; throws (changing nothing) when it cannot.
+    private static func apply(
+        _ edit: FakeRecordingsState.FakeEdit, to incidents: inout [FakeIncident], _ w: FakeRecordingsState.World
+    ) throws(CoreStatus) {
+        func index(_ key: String) throws(CoreStatus) -> Int {
+            guard let i = incidents.firstIndex(where: { $0.key == key }) else { throw .unknownID }
+            return i
+        }
+        switch edit {
+        case .merge(let keys):
+            guard Set(keys).count >= 2 else { throw .invalidArgument }
+            guard keys.count <= 1000 else { throw .limit }
+            var parts: [FakeIncident] = []
+            for k in Set(keys) { parts.append(incidents[try index(k)]) }
+            incidents.removeAll { i in parts.contains { $0.key == i.key } }
+            var merged = FakeIncident(
+                events: parts.flatMap(\.events), added: parts.flatMap(\.added),
+                group: Set(parts.map(\.group)).count == 1 ? parts[0].group : nil, edited: true)
+            merged.added.removeAll { c in merged.events.contains { $0.camera == c } }
+            incidents.append(merged)
+        case .split(let key, let at):
+            let i = try index(key)
+            let a = incidents[i].events.filter { $0.start < at }, b = incidents[i].events.filter { $0.start >= at }
+            guard !a.isEmpty, !b.isEmpty else { throw .invalidArgument }
+            let old = incidents.remove(at: i)
+            incidents.append(FakeIncident(events: a, added: old.added, group: old.group, edited: true))
+            incidents.append(FakeIncident(events: b, group: old.group, edited: true))
+        case .addCamera(let key, let c):
+            let i = try index(key)
+            guard allowed(w, c) else { throw .invalidArgument }
+            guard !incidents[i].cameras.contains(c) else { return }
+            incidents[i].added.append(c)
+            incidents[i].edited = true
+        case .removeCamera(let key, let c):
+            let i = try index(key)
+            guard incidents[i].cameras.contains(c), incidents[i].cameras.count > 1 else { throw .invalidArgument }
+            incidents[i].added.removeAll { $0 == c }
+            incidents[i].events.removeAll { $0.camera == c }
+            incidents[i].edited = true
+        }
     }
 
     // MARK: Configuration and the index
@@ -385,8 +516,15 @@ extension FakeCore {
 
     public func incidentsGet(query: String) throws(CoreStatus) -> String {
         let q = try Self.query(query)
+        let group = (try? Self.object(query))?["group"] as? String
         return try configuredWorld { w throws(CoreStatus) -> String in
-            let all = Array(Self.matching(w, q).reversed())
+            let all = Array(
+                Self.allIncidents(w).filter { i in
+                    i.end >= q.start && i.start <= q.end
+                        && (q.cameras.map { cs in i.cameras.contains { cs.contains($0) } } ?? true)
+                        && (q.kinds.map { ks in i.kinds.contains { ks.contains($0) } } ?? true)
+                        && (group.map { i.group == $0 } ?? true)
+                }.reversed())
             return Self.json([
                 "revision": w.incidentsRevision, "truncated": all.count > q.limit,
                 "incidents": all.prefix(q.limit).map { Self.incidentObject(w, $0) },
@@ -396,29 +534,67 @@ extension FakeCore {
 
     public func incidentGet(key: String) throws(CoreStatus) -> String {
         try configuredWorld { w throws(CoreStatus) -> String in
-            guard let e = Self.allIncidents(w).first(where: { $0.key == key }) else { throw .unknownID }
-            return Self.json(["revision": w.incidentsRevision, "incident": Self.incidentObject(w, e)])
+            guard let i = Self.allIncidents(w).first(where: { $0.key == key }) else { throw .unknownID }
+            return Self.json(["revision": w.incidentsRevision, "incident": Self.incidentObject(w, i)])
         }
     }
 
     public func incidentEdit(json: String) throws(CoreStatus) -> String {
         let o = try Self.object(json)
         guard let op = o["op"] as? String else { throw .invalidArgument }
-        let revision = try configuredWorld { w throws(CoreStatus) -> (Int, String) in
-            guard op == "rename" || op == "revert" else { throw .unsupported }
-            guard let key = o["key"] as? String else { throw .invalidArgument }
-            guard Self.allIncidents(w).contains(where: { $0.key == key }) else { throw .unknownID }
-            if op == "rename", let name = o["name"] as? String {
-                guard name.utf8.count <= 256 else { throw .invalidArgument }
-                w.names[key] = name
-            } else {
-                w.names[key] = nil
+        let (revision, keys) = try configuredWorld { w throws(CoreStatus) -> (Int, [String]) in
+            var incidents = Self.allIncidents(w)
+            func key() throws(CoreStatus) -> String {
+                guard let k = o["key"] as? String else { throw .invalidArgument }
+                guard incidents.contains(where: { $0.key == k }) else { throw .unknownID }
+                return k
+            }
+            var keys: [String]
+            switch op {
+            case "rename":
+                let k = try key()
+                if let name = o["name"] as? String {
+                    guard name.utf8.count <= 256 else { throw .invalidArgument }
+                    w.names[k] = name
+                } else {
+                    w.names[k] = nil
+                }
+                keys = [k]
+            case "revert":
+                let k = try key()
+                // Every stored edit that named this incident or one of the
+                // event incidents it is made of.
+                let base = Set(incidents.first { $0.key == k }!.events.map(\.key))
+                w.edits.removeAll { e in e.keys.contains { k2 in k2 == k || base.contains { k2.hasPrefix($0) } } }
+                w.names[k] = nil
+                keys = [k]
+            default:
+                let edit: FakeRecordingsState.FakeEdit
+                switch op {
+                case "merge":
+                    guard let ks = o["keys"] as? [String] else { throw .invalidArgument }
+                    edit = .merge(ks)
+                case "split":
+                    guard let at = (o["at"] as? NSNumber)?.int64Value else { throw .invalidArgument }
+                    edit = .split(try key(), at)
+                case "add_camera": edit = .addCamera(try key(), try Self.camera(o["camera"]))
+                case "remove_camera": edit = .removeCamera(try key(), try Self.camera(o["camera"]))
+                default: throw .invalidArgument
+                }
+                guard w.edits.count < 10_000 else { throw .limit }
+                try Self.apply(edit, to: &incidents, w)
+                w.edits.append(edit)
+                switch edit {
+                case .addCamera(let k, _), .removeCamera(let k, _): keys = [k]
+                case .merge: keys = incidents.suffix(1).map(\.key)
+                case .split: keys = incidents.suffix(2).map(\.key)
+                }
             }
             w.incidentsRevision += 1
-            return (w.incidentsRevision, key)
+            return (w.incidentsRevision, keys)
         }
-        emit(event: Self.json(["type": "incidents_changed", "revision": revision.0]))
-        return Self.json(["revision": revision.0, "keys": [revision.1]])
+        emit(event: Self.json(["type": "incidents_changed", "revision": revision]))
+        return Self.json(["revision": revision, "keys": keys])
     }
 
     public func incidentLock(key: String, locked: Bool) throws(CoreStatus) -> String {
@@ -439,7 +615,7 @@ extension FakeCore {
                 answer["folder"] = existing.folder
                 answer["download_status"] = "existing"
             } else {
-                let d = Self.newDownload(&w, e, cameras: [e.camera])
+                let d = Self.newDownload(&w, e, cameras: e.cameras)
                 queued = d
                 answer["download"] = d.id
                 answer["folder"] = d.folder
@@ -519,11 +695,12 @@ extension FakeCore {
     // MARK: Downloads
 
     private static func newDownload(
-        _ w: inout FakeRecordingsState.World, _ e: FakeEvent, cameras: [RecordingCamera]
+        _ w: inout FakeRecordingsState.World, _ e: FakeIncident, cameras: [RecordingCamera]
     ) -> FakeRecordingsState.Download {
         let id = "\(e.id)-\(w.nextDownload)"
         w.nextDownload += 1
-        let folder = (w.downloadsDir ?? "") + "/\(e.start) \(e.kind) — Camera \(e.camera.channel + 1)"
+        let names = e.cameras.map { "Camera \($0.channel + 1)" }.joined(separator: ", ")
+        let folder = (w.downloadsDir ?? "") + "/\(e.start) \(e.kinds.first ?? "recording") — \(names)"
         let d = FakeRecordingsState.Download(
             id: id, incident: e.key, folder: folder, cameras: cameras, state: "queued", paused: false)
         w.downloads.append(d)
@@ -563,12 +740,12 @@ extension FakeCore {
                 return (["download": existing.id, "folder": existing.folder, "existing": true], nil)
             }
             guard w.downloads.count < 1000 else { throw .limit }
-            var cameras = [e.camera]
+            var cameras = e.cameras
             if let list = o["cameras"] as? [Any] {
                 cameras = []
                 for item in list {
                     let c = try Self.camera((item as? [String: Any])?["camera"])
-                    guard c == e.camera else { throw .invalidArgument }
+                    guard e.cameras.contains(c) else { throw .invalidArgument }
                     cameras.append(c)
                 }
             }
@@ -662,17 +839,35 @@ extension FakeCore {
         }
     }
 
-    /// Finishes every queued thumbnail fetch (`thumbnail` `ready` with a
-    /// stand-in keyframe) and download (`running`, then `done`), sending
+    /// The keyframe a thumbnail fetch returns: the first clip's first
+    /// keyframe with its parameter sets (decodable), else the stand-in.
+    var coverKeyframe: Thumbnail {
+        guard let clip = options.clips.first, let unit = clip.units.first(where: \.isKeyframe) else {
+            return Thumbnail(kind: .h264Keyframe, width: 640, height: 360, ptsMicros: 0, data: Self.standInKeyframe)
+        }
+        var data = clip.data.subdata(in: unit.range)
+        let sets = { (d: Data) in
+            AnnexB.split(d, codec: clip.codec).filter { NALType.isParameterSet($0.type, codec: clip.codec) }
+        }
+        if sets(data).isEmpty, let first = clip.units.first {
+            let au = clip.data.subdata(in: first.range)
+            for nal in sets(au).reversed() { data = Data([0, 0, 0, 1]) + au.subdata(in: nal.range) + data }
+        }
+        return Thumbnail(
+            kind: clip.codec == .h265 ? .h265Keyframe : .h264Keyframe, width: 0, height: 0, ptsMicros: 0, data: data)
+    }
+
+    /// Finishes every queued thumbnail fetch (`thumbnail` `ready` with
+    /// `coverKeyframe`) and download (`running`, then `done`), sending
     /// their events. Paused downloads wait.
     public func completeRecordingWork() {
         guard !isFreed else { return }
+        let cover = coverKeyframe
         let (thumbs, downloads) = recordings.locked { w -> ([ThumbnailKey], [FakeRecordingsState.Download]) in
             let thumbs = w.pendingThumbnails
             w.pendingThumbnails.removeAll()
             for k in thumbs {
-                w.thumbnails[k] = Thumbnail(
-                    kind: .h264Keyframe, width: 640, height: 360, ptsMicros: 0, data: Self.standInKeyframe)
+                w.thumbnails[k] = cover
             }
             var done: [FakeRecordingsState.Download] = []
             for i in w.downloads.indices where !w.downloads[i].paused && w.downloads[i].state == "queued" {
