@@ -463,7 +463,9 @@ that is refused once, then streams):
     on the real computer: the system voice renders a sentence, the desktop
     recognizer hears it ("moment" must be in the text where Windows has a
     recognizer), and with `--mic-test` the microphone opens for 0.7 s (the
-    audio is measured and dropped);
+    audio is measured and dropped). `scripts/windows-check.sh` passes
+    `--mic-test` only with `NVRVIEW_MIC_TEST=1`: an unattended test computer
+    usually has no microphone that hears anything;
 17. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
 
