@@ -324,15 +324,55 @@ private final class EventLog: CoreSink, @unchecked Sendable {
         #expect(DownloadList.parse(try core.downloadsGet())?.map(\.download) == [id])
         // Edit lists over the finished download, and sound (minor 8).
         #expect(throws: CoreStatus.unknownID) { try core.editCompute(json: #"{"kind":"follow","download":"nope"}"#) }
-        #expect(throws: CoreStatus.unsupported) { try core.editCompute(json: #"{"kind":"trim","download":"\#(id)"}"#) }
-        #expect(throws: CoreStatus.unsupported) {
-            try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","in_ms":1}"#)
+        #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: #"{"kind":"trim","download":"\#(id)"}"#) }
+        #expect(throws: CoreStatus.invalidArgument) {
+            try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","in_ms":9,"out_ms":3}"#)
         }
         #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: #"{"kind":"nonsense","download":"\#(id)"}"#) }
         let follow = try object(try core.editCompute(json: #"{"kind":"follow","download":"\#(id)"}"#))
         #expect(follow["kind"] as? String == "follow" && (follow["segments"] as? [[String: Any]])?.count == 1)
         let grid = try object(try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","layout":"4up"}"#))
         #expect(grid["layout"] as? String == "4up" && (grid["cells"] as? [Any])?.count == 1)
+
+        // Export (minor 10): a trim, a trimmed grid, a range download, stills.
+        let start = try #require(grid["start_ms"] as? Int64)
+        let trimmed = try object(try core.editCompute(
+            json: #"{"kind":"trim","download":"\#(id)","in_ms":\#(start + 3000),"out_ms":\#(start + 9000),"share_safe":true}"#))
+        let outputs = try #require(trimmed["outputs"] as? [[String: Any]])
+        #expect(trimmed["kind"] as? String == "trim" && outputs.count == 1)
+        #expect(outputs[0]["name"] as? String == "Camera A" && outputs[0]["source_in_ms"] as? Int64 == 2000)
+        let cut = try object(try core.editCompute(
+            json: #"{"kind":"grid","download":"\#(id)","in_ms":\#(start + 3000),"out_ms":\#(start + 9000)}"#))
+        #expect(cut["start_ms"] as? Int64 == start + 3000 && cut["end_ms"] as? Int64 == start + 9000)
+        #expect(throws: CoreStatus.invalidArgument) {
+            try core.editCompute(json: #"{"kind":"trim","download":"\#(id)","in_ms":1,"out_ms":2,"dest":"relative"}"#)
+        }
+        let rangeJSON = #"{"start":\#(day + 100),"end":\#(day + 160),"cameras":[{"camera":{"device":"\#(device)","channel":0},"tier":"main"}]}"#
+        let ranged = try object(try core.downloadRange(json: rangeJSON))
+        let rid = try #require(ranged["download"] as? String)
+        #expect(rid.hasPrefix("r-") && ranged["existing"] as? Bool == false)
+        #expect(try object(try core.downloadRange(json: rangeJSON))["existing"] as? Bool == true)
+        #expect(throws: CoreStatus.invalidArgument) {
+            try core.downloadRange(json: #"{"start":5,"end":4,"cameras":[{"camera":{"device":"\#(device)","channel":0}}]}"#)
+        }
+        #expect(throws: CoreStatus.limit) {
+            try core.downloadRange(json: #"{"start":0,"end":100000,"cameras":[{"camera":{"device":"\#(device)","channel":0}}]}"#)
+        }
+        fake.completeRecordingWork()
+        let rangeEvents = log.take().compactMap { e -> DownloadProgress? in
+            if case .download(let d) = e, d.download == rid { d } else { nil }
+        }
+        #expect(rangeEvents.last?.state == "done" && rangeEvents.last?.incident == nil)
+        let rtrim = try object(try core.editCompute(
+            json: #"{"kind":"trim","download":"\#(rid)","in_ms":\#((day + 110) * 1000),"out_ms":\#((day + 130) * 1000),"cut":"exact"}"#))
+        #expect((rtrim["outputs"] as? [[String: Any]])?.first?["copy_possible"] as? Bool == false)
+        #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: #"{"kind":"follow","download":"\#(rid)"}"#) }
+        let still = try object(try core.stillPlan(
+            json: #"{"download":"\#(rid)","camera":{"device":"\#(device)","channel":0},"at_ms":\#((day + 121) * 1000),"format":"jpeg"}"#))
+        let stills = try #require(still["stills"] as? [[String: Any]])
+        #expect(stills.count == 1 && (stills[0]["suggested_file"] as? String)?.hasSuffix(".jpg") == true)
+        #expect(throws: CoreStatus.unknownID) { try core.stillPlan(json: #"{"playback":987654}"#) }
+        #expect(throws: CoreStatus.invalidArgument) { try core.stillPlan(json: "{}") }
 
         let cam1 = #"{"device":"\#(device)","channel":1,"lens":0}"#
         try core.soundWatch(camera: cam1, enabled: true)

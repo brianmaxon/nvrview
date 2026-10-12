@@ -176,6 +176,12 @@ public partial class App : Application
                 // (docs/UX.md "Fisheye cameras"); its first lens is all the dewarp step uses.
                 mockArgs.AddRange(["--fisheye", "2", "--fisheye-fixture", Path.Combine(root, "fixtures", "synthetic", "fisheye", "h264-fisheye.h264"), "--fisheye-size", "384"]);
             }
+            if (o.SelfTest && o.MockChannels >= 3)
+            {
+                // Channel 2 pans, tilts, zooms and has presets; the second lens of channel 1 does too, and its first lens
+                // does not (the camera motion steps; never real hardware).
+                mockArgs.AddRange(["--ptz", "2,1.1"]);
+            }
             if (o.SelfTest)
             {
                 // Channel 0 has a speaker (doorbell talk-back); the call steps talk to it, never to real hardware.
@@ -251,6 +257,7 @@ public partial class App : Application
         };
         UseThumbnailDecoder(Recordings);
         _host.Recordings = Recordings;
+        RecordingsWindow.ExportSettingsPath = memoryOnly ? null : Path.Combine(dataDir, "export-settings.json");
         string downloads = o.DataDir is not null || o.SelfTest || o.StartupTest
             ? Path.Combine(dataDir, "Incidents")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "NvrView", "Incidents");

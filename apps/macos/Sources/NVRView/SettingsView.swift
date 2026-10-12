@@ -301,7 +301,7 @@ struct CameraSettingsView: View {
         Form {
             Section {
                 Text(
-                    "Talk-back sends this Mac's microphone, or a typed reply spoken by the system voice, through a doorbell's speaker. It is off for every doorbell until allowed here, starts only when you press Talk or send a reply, is rate-limited by the core, and every use is logged."
+                    "Talk-back sends this Mac's microphone, or a typed reply spoken by the system voice, through a doorbell's speaker. It is off for every doorbell until allowed here, starts only when you press Talk or send a reply, is rate-limited by the core, and every use is logged. Your own pan, tilt, zoom and preset controls on a tile need no setting; the one for a camera that moves lets automation (automatic correction) move it, and is off until allowed here."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -333,6 +333,13 @@ struct CameraSettingsView: View {
             Toggle(
                 "Doorbell: allow talk-back",
                 isOn: Binding(get: { o.allowTalk }, set: { model.setAllowTalk(camera, $0) }))
+            if model.canMove(camera) {
+                Toggle(
+                    "Camera that moves: let automatic correction move it",
+                    isOn: Binding(
+                        get: { o.motionGrants.contains(MotionClient.autoCorrection) },
+                        set: { model.setMotionGrant(camera, client: MotionClient.autoCorrection, $0) }))
+            }
             Picker(
                 "Calls open in",
                 selection: Binding(

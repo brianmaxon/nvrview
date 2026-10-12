@@ -263,3 +263,73 @@ fn tile_close_device_removal_and_shutdown_stop_the_camera() {
         ["right", "stop", "down", "stop", "left", "stop"]
     );
 }
+
+#[test]
+fn a_second_lens_is_addressed_with_the_sub_channel() {
+    use bc_protocol::ptz::Cam;
+    let sim = SimRuntime::new();
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+    cfg.channels = 2;
+    // Channel 1 is a multi-lens camera whose second lens pans and tilts;
+    // channel 0 is a plain pan-and-tilt camera.
+    cfg.ptz_lens1.insert(1, PtzCamera::pan_tilt_zoom(2));
+    cfg.ptz.insert(0, PtzCamera::pan_tilt_zoom(1));
+    let nvr = sim_spawn(&sim, cfg);
+    let (core, rec) = start(on_sim(&sim, fast_config()));
+    let dev = core
+        .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
+        .unwrap();
+    let second = core.open_tile(dev, 1, StreamTier::Extern).unwrap();
+    let plain = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
+    // The extern stream of a single-lens camera is its middle quality, not a
+    // second lens: its tile steers the first lens.
+    let middle = core.open_tile(dev, 0, StreamTier::Extern).unwrap();
+
+    // The second lens's tile reads and moves lens 1.
+    let info: serde_json::Value =
+        serde_json::from_str(&sim.run_free(|| core.ptz_info(second)).unwrap()).unwrap();
+    assert_eq!(info["presets"].as_array().unwrap().len(), 2);
+    core.ptz_move(second, PtzDirection::Right, 20, MotionOrigin::Manual)
+        .unwrap();
+    sim_until(&sim, &core, "lens 1 moving", 5, || {
+        nvr.ptz_state(Cam::with_lens(1, 1))
+            .unwrap()
+            .moving
+            .is_some()
+    });
+    core.ptz_stop(second, MotionOrigin::Manual).unwrap();
+    core.ptz_preset(second, 1, MotionOrigin::Manual).unwrap();
+    core.ptz_move(plain, PtzDirection::Left, 20, MotionOrigin::Manual)
+        .unwrap();
+    core.ptz_stop(plain, MotionOrigin::Manual).unwrap();
+    core.ptz_move(middle, PtzDirection::Up, 20, MotionOrigin::Manual)
+        .unwrap();
+    core.ptz_stop(middle, MotionOrigin::Manual).unwrap();
+    sim_until(&sim, &core, "stopped and recalled", 5, || {
+        summary(&rec, plain).len() == 2
+            && summary(&rec, middle).len() == 2
+            && summary(&rec, second).len() == 3
+    });
+    assert!(nvr.ptz_state(Cam::with_lens(1, 0)).is_none());
+    assert_eq!(
+        nvr.ptz_state(Cam::with_lens(1, 1)).unwrap().last_preset,
+        Some(1)
+    );
+
+    // Every request of the second lens carried the lens, every request of
+    // the plain camera did not, and all were accepted.
+    let log = nvr.ptz_log();
+    assert!(log.iter().any(|e| e.control() == Some("right")));
+    for e in &log {
+        match e.channel {
+            Some(1) => assert_eq!(e.lens, 1, "{e:?}"),
+            Some(0) => assert_eq!(e.lens, 0, "{e:?}"),
+            other => panic!("unexpected channel {other:?}"),
+        }
+        assert_eq!(e.status, 200, "{e:?}");
+    }
+    sim.run_free(|| core.shutdown());
+    assert_eq!(nvr.ptz_config_requests(), 0);
+}

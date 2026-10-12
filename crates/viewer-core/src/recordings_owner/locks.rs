@@ -321,7 +321,9 @@ impl crate::Core {
                         Value::from(if r.existing { "existing" } else { "queued" });
                 }
                 Err(EnqueueError::Limit) => out["download_status"] = Value::from("limit"),
-                Err(EnqueueError::NoSource) => return Err(RecError::Internal),
+                Err(EnqueueError::NoSource | EnqueueError::NotConfigured) => {
+                    return Err(RecError::Internal);
+                }
                 Err(EnqueueError::Io(e)) => return Err(downloads::io_error(e)),
             }
         }

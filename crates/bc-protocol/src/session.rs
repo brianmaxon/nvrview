@@ -22,7 +22,7 @@ use crate::archive::{
 use crate::crypto::{SessionKey, credential_hash, xor_obfuscate};
 use crate::framer::{EncodeError, RawMessage, encode_message, encode_message_with_status};
 use crate::header::Class;
-use crate::ptz::{self, Direction, LensAxis, Preset, ZoomFocus};
+use crate::ptz::{self, Cam, Direction, LensAxis, Preset, ZoomFocus};
 use crate::stream::StreamTier;
 use crate::talk::{self, TalkConfig};
 use crate::xml::{self, PreviewPolicy, XmlError};
@@ -420,14 +420,16 @@ const READS_REMEMBERED: usize = 64;
 struct PtzFacts {
     /// Per channel, from the latest 199 reply; `None` until one arrived.
     caps: Option<HashMap<u8, PtzCaps>>,
+    /// Per channel, how many lenses its 199 item lists (sub-items).
+    lens_counts: HashMap<u8, usize>,
     /// Per channel, from the latest 294 reply.
-    lens: HashMap<u8, ZoomFocus>,
+    lens: HashMap<Cam, ZoomFocus>,
     /// Per channel, from the latest 190 reply.
-    presets: HashMap<u8, Vec<Preset>>,
+    presets: HashMap<Cam, Vec<Preset>>,
     /// Queries sent and not answered yet, by message ID.
-    reads: std::collections::BTreeMap<u32, (Command, Option<u8>)>,
+    reads: std::collections::BTreeMap<u32, (Command, Option<Cam>)>,
     /// Channels sent a move (18 with a direction) and no stop since.
-    moving: HashSet<u8>,
+    moving: HashSet<Cam>,
 }
 
 /// What a channel's camera can do, from its 199 item and its lenses'
@@ -1002,9 +1004,9 @@ impl Session {
         self.talks.iter().copied()
     }
 
-    fn remember_read(&mut self, id: u32, cmd: Command, channel: Option<u8>) {
+    fn remember_read(&mut self, id: u32, cmd: Command, cam: Option<Cam>) {
         let reads = &mut self.ptz.reads;
-        reads.insert(id, (cmd, channel));
+        reads.insert(id, (cmd, cam));
         while reads.len() > READS_REMEMBERED {
             reads.pop_first();
         }
@@ -1025,6 +1027,8 @@ impl Session {
                 if let Ok(items) = crate::detection::parse_channel_ai(xml_text) {
                     self.ptz.caps =
                         Some(items.iter().map(|i| (i.channel, PtzCaps::of(i))).collect());
+                    self.ptz.lens_counts =
+                        items.iter().map(|i| (i.channel, i.lenses.len())).collect();
                 }
             }
             (Command::PtzZoomFocus, Some(ch)) => {
@@ -1055,40 +1059,56 @@ impl Session {
             .map(|c| c.get(&channel).copied().unwrap_or_default())
     }
 
-    /// A channel's lens ranges, from the latest 294 reply on this session.
-    pub fn ptz_lens_ranges(&self, channel: u8) -> Option<ZoomFocus> {
-        self.ptz.lens.get(&channel).copied()
+    /// The camera a request for `cam` means on this device: a second lens
+    /// is kept only where the latest 199 reply lists two lenses for the
+    /// channel (a tile on the `extern` stream can also be the middle
+    /// quality of a single-lens camera, which has no second lens to
+    /// address). Unchanged before 199 was read.
+    pub fn ptz_resolve(&self, cam: Cam) -> Cam {
+        if cam.lens > 0
+            && self.ptz.caps.is_some()
+            && self.ptz.lens_counts.get(&cam.channel).copied().unwrap_or(0) < 2
+        {
+            return Cam::new(cam.channel);
+        }
+        cam
     }
 
-    /// A channel's presets, from the latest 190 reply on this session.
-    pub fn ptz_presets(&self, channel: u8) -> Option<&[Preset]> {
-        self.ptz.presets.get(&channel).map(Vec::as_slice)
+    /// A camera's lens ranges, from the latest 294 reply on this session.
+    pub fn ptz_lens_ranges(&self, cam: impl Into<Cam>) -> Option<ZoomFocus> {
+        self.ptz.lens.get(&cam.into()).copied()
     }
 
-    /// Channels sent a move and no stop since.
-    pub fn ptz_moving(&self) -> impl Iterator<Item = u8> + '_ {
+    /// A camera's presets, from the latest 190 reply on this session.
+    pub fn ptz_presets(&self, cam: impl Into<Cam>) -> Option<&[Preset]> {
+        self.ptz.presets.get(&cam.into()).map(Vec::as_slice)
+    }
+
+    /// Cameras sent a move and no stop since.
+    pub fn ptz_moving(&self) -> impl Iterator<Item = Cam> + '_ {
         self.ptz.moving.iter().copied()
     }
 
-    fn check_ptz(
-        &self,
-        channel: u8,
-        offers: impl Fn(&PtzCaps) -> bool,
-    ) -> Result<(), SessionError> {
+    fn check_ptz(&self, cam: Cam, offers: impl Fn(&PtzCaps) -> bool) -> Result<(), SessionError> {
         if self.state != State::LoggedIn {
             return Err(SessionError::WrongState("not logged in"));
         }
-        match self.ptz_caps(channel) {
+        match self.ptz_caps(cam.channel) {
             None => Err(SessionError::MotionStateUnknown("capabilities")),
             Some(c) if offers(&c) => Ok(()),
-            Some(_) => Err(SessionError::MotionNotSupported(channel)),
+            Some(_) => Err(SessionError::MotionNotSupported(cam.channel)),
         }
     }
 
     /// Builds a read-only PTZ query (294, 190 or 340, viewing tier) for a
-    /// channel. The session learns lens ranges (294) and presets (190)
+    /// camera. The session learns lens ranges (294) and presets (190)
     /// from the replies.
-    pub fn ptz_query(&mut self, cmd: Command, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+    pub fn ptz_query(
+        &mut self,
+        cmd: Command,
+        cam: impl Into<Cam>,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        let cam = cam.into();
         if !matches!(
             cmd,
             Command::PtzZoomFocus | Command::PtzPresets | Command::PtzSelfTest
@@ -1096,9 +1116,9 @@ impl Session {
             return Err(SessionError::CommandNotAllowed(cmd.number()));
         }
         let id = self.alloc_id()?;
-        let ext = ptz::query_extension(channel);
+        let ext = ptz::query_extension(cam);
         let bytes = self.send(cmd, id, ext.as_bytes(), &[])?;
-        self.remember_read(id, cmd, Some(channel));
+        self.remember_read(id, cmd, Some(cam));
         Ok((id, bytes))
     }
 
@@ -1108,16 +1128,17 @@ impl Session {
     /// with [`Session::ptz_stop`] on every path.
     pub fn ptz_move(
         &mut self,
-        channel: u8,
+        cam: impl Into<Cam>,
         direction: Direction,
         speed: u8,
     ) -> Result<(u32, Vec<u8>), SessionError> {
-        self.check_ptz(channel, |c| c.pan_tilt)?;
+        let cam = cam.into();
+        self.check_ptz(cam, |c| c.pan_tilt)?;
         let id = self.alloc_id()?;
-        let ext = ptz::command_extension(channel);
-        let body = ptz::move_body(channel, direction, speed);
+        let ext = ptz::command_extension(cam);
+        let body = ptz::move_body(cam.channel, direction, speed);
         let bytes = self.send(Command::PtzControl, id, ext.as_bytes(), body.as_bytes())?;
-        self.ptz.moving.insert(channel);
+        self.ptz.moving.insert(cam);
         Ok((id, bytes))
     }
 
@@ -1125,20 +1146,21 @@ impl Session {
     /// in, except on a channel this session knows cannot pan or tilt and
     /// never moved: a stop must go out on every path, also on a new
     /// connection that has not read the capabilities yet.
-    pub fn ptz_stop(&mut self, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+    pub fn ptz_stop(&mut self, cam: impl Into<Cam>) -> Result<(u32, Vec<u8>), SessionError> {
+        let cam = cam.into();
         if self.state != State::LoggedIn {
             return Err(SessionError::WrongState("not logged in"));
         }
-        if !self.ptz.moving.contains(&channel)
-            && self.ptz_caps(channel).is_some_and(|c| !c.pan_tilt)
+        if !self.ptz.moving.contains(&cam)
+            && self.ptz_caps(cam.channel).is_some_and(|c| !c.pan_tilt)
         {
-            return Err(SessionError::MotionNotSupported(channel));
+            return Err(SessionError::MotionNotSupported(cam.channel));
         }
         let id = self.alloc_id()?;
-        let ext = ptz::command_extension(channel);
-        let body = ptz::stop_body(channel);
+        let ext = ptz::command_extension(cam);
+        let body = ptz::stop_body(cam.channel);
         let bytes = self.send(Command::PtzControl, id, ext.as_bytes(), body.as_bytes())?;
-        self.ptz.moving.remove(&channel);
+        self.ptz.moving.remove(&cam);
         Ok((id, bytes))
     }
 
@@ -1146,10 +1168,15 @@ impl Session {
     /// name from this session's 190 reply. Refused unless the channel has
     /// presets (199) and its list (190, read first) holds `id`. Saving and
     /// deleting presets cannot be built.
-    pub fn ptz_recall(&mut self, channel: u8, id: u32) -> Result<(u32, Vec<u8>), SessionError> {
-        self.check_ptz(channel, |c| c.presets)?;
+    pub fn ptz_recall(
+        &mut self,
+        cam: impl Into<Cam>,
+        id: u32,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        let cam = cam.into();
+        self.check_ptz(cam, |c| c.presets)?;
         let name = self
-            .ptz_presets(channel)
+            .ptz_presets(cam)
             .ok_or(SessionError::MotionStateUnknown("preset list"))?
             .iter()
             .find(|p| p.id == id)
@@ -1157,8 +1184,8 @@ impl Session {
             .name
             .clone();
         let msg = self.alloc_id()?;
-        let ext = ptz::command_extension(channel);
-        let body = ptz::recall_body(channel, id, &name);
+        let ext = ptz::command_extension(cam);
+        let body = ptz::recall_body(cam.channel, id, &name);
         let bytes = self.send(
             Command::PtzPresetRecall,
             msg,
@@ -1174,20 +1201,21 @@ impl Session {
     /// motor's range has been read.
     pub fn ptz_lens(
         &mut self,
-        channel: u8,
+        cam: impl Into<Cam>,
         axis: LensAxis,
         position: i32,
     ) -> Result<(u32, Vec<u8>, i32), SessionError> {
-        self.check_ptz(channel, |c| c.zoom_focus)?;
+        let cam = cam.into();
+        self.check_ptz(cam, |c| c.zoom_focus)?;
         let range = self
-            .ptz_lens_ranges(channel)
+            .ptz_lens_ranges(cam)
             .ok_or(SessionError::MotionStateUnknown("lens ranges"))?
             .axis(axis)
-            .ok_or(SessionError::MotionNotSupported(channel))?;
+            .ok_or(SessionError::MotionNotSupported(cam.channel))?;
         let pos = range.clamp(position);
         let id = self.alloc_id()?;
-        let ext = ptz::command_extension(channel);
-        let body = ptz::lens_body(channel, axis, pos);
+        let ext = ptz::command_extension(cam);
+        let body = ptz::lens_body(cam.channel, axis, pos);
         let bytes = self.send(Command::PtzLensMove, id, ext.as_bytes(), body.as_bytes())?;
         Ok((id, bytes, pos))
     }
@@ -2491,11 +2519,32 @@ mod tests {
         key.decrypt(&mut ext);
         assert_eq!(String::from_utf8(ext).unwrap(), ptz::command_extension(2));
         assert_eq!(payload_text(&key, &m), ptz::move_body(2, Direction::Up, 40));
-        assert_eq!(s.ptz_moving().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(s.ptz_moving().collect::<Vec<_>>(), vec![ptz::Cam::new(2)]);
         let m = decode_one(&s.ptz_stop(2).unwrap().1);
         assert_eq!(payload_text(&key, &m), ptz::stop_body(2));
         assert_eq!(s.ptz_moving().count(), 0);
-        assert!(s.ptz_move(3, Direction::Right, 1).is_ok());
+        // A second lens is addressed in the extension, the body keeps the
+        // plain channel; its moves are tracked apart from the first lens's.
+        let cam = ptz::Cam::with_lens(3, 1);
+        let m = decode_one(&s.ptz_move(cam, Direction::Right, 1).unwrap().1);
+        let mut ext = m.extension().to_vec();
+        key.decrypt(&mut ext);
+        assert_eq!(String::from_utf8(ext).unwrap(), ptz::command_extension(cam));
+        assert_eq!(
+            payload_text(&key, &m),
+            ptz::move_body(3, Direction::Right, 1)
+        );
+        assert_eq!(s.ptz_moving().collect::<Vec<_>>(), vec![cam]);
+        let (_, bytes) = s.ptz_query(Command::PtzPresets, cam).unwrap();
+        let mut ext = decode_one(&bytes).extension().to_vec();
+        key.decrypt(&mut ext);
+        assert!(
+            String::from_utf8(ext)
+                .unwrap()
+                .contains("<chnType>0</chnType>\n<subChannel>1</subChannel>")
+        );
+        assert!(s.ptz_stop(cam).is_ok());
+        assert_eq!(s.ptz_moving().count(), 0);
 
         // A recall needs the preset list; only listed ids, with their name.
         assert_eq!(

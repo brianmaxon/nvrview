@@ -723,6 +723,9 @@ public static class DownloadText
     public static string FolderName(this DownloadProgress d) =>
         d.Folder is { Length: > 0 } f ? f.TrimEnd('/', '\\').Split('/', '\\')[^1] : d.Download;
 
+    /// <summary>"Range 07:42:05 to 07:47:05" for a range download, else the folder's name.</summary>
+    public static string Title(this DownloadProgress d) => d.RangeText is { } range ? "Range " + range : d.FolderName();
+
     /// <summary>"Downloading", "Paused", "Failed: stalled", ...</summary>
     public static string StateText(this DownloadProgress d)
     {

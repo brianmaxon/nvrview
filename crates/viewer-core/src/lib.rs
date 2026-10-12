@@ -1419,16 +1419,19 @@ impl Core {
     fn ptz_target(
         &self,
         tile: u64,
-    ) -> Result<(u64, u8, Arc<bc_session::DeviceSession>), CoreError> {
+    ) -> Result<(u64, bc_protocol::ptz::Cam, Arc<bc_session::DeviceSession>), CoreError> {
         let reg = lock(&self.registry);
         let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
-        let (device, channel) = (t.device, t.channel);
+        let (device, cam) = (
+            t.device,
+            bc_protocol::ptz::Cam::with_lens(t.channel, t.tier.lens()),
+        );
         let session = reg
             .devices
             .get(&device)
             .and_then(|d| d.handle.session())
             .ok_or(CoreError::UnknownId)?;
-        Ok((device, channel, session))
+        Ok((device, cam, session))
     }
 
     fn ptz_send(
@@ -1443,9 +1446,8 @@ impl Core {
         {
             return Err(CoreError::InvalidArgument);
         }
-        let (device, channel, session) = self.ptz_target(tile)?;
-        self.ptz
-            .send(tile, device, channel, &session, command, origin);
+        let (device, cam, session) = self.ptz_target(tile)?;
+        self.ptz.send(tile, device, cam, &session, command, origin);
         Ok(())
     }
 
@@ -1460,9 +1462,9 @@ impl Core {
     /// [`CoreError::Internal`] when the device did not answer.
     pub fn ptz_info(&self, tile: u64) -> Result<String, CoreError> {
         self.check_api()?;
-        let (_, channel, session) = self.ptz_target(tile)?;
+        let (_, cam, session) = self.ptz_target(tile)?;
         let read = self.handle.block_on(async move {
-            tokio::time::timeout(PTZ_INFO_TIMEOUT, session.ptz_info(channel)).await
+            tokio::time::timeout(PTZ_INFO_TIMEOUT, session.ptz_info(cam)).await
         });
         match read {
             Ok(Ok(info)) => Ok(ptz::info_json(&info)),

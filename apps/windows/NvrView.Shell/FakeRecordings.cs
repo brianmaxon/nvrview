@@ -18,7 +18,7 @@ using NvrView.Interop;
 namespace NvrView.Shell;
 
 /// <summary>A made-up recording store answering <see cref="IRecordings"/>; events go to the sink as JSON.</summary>
-public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, IEditSound
+public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, IEditSound, IExport
 {
     private const long Day = 86_400;
     private readonly object _gate = new();
@@ -60,6 +60,9 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
         public long End;
         public string State = "queued";
         public bool Paused;
+
+        /// <summary>The range (start, end seconds) of a range download, which has no incident.</summary>
+        public long[]? Range;
     }
 
     private sealed record FakeEvent(RecordingCamera Camera, string Kind, long Start, long End, string Source = "device")
@@ -822,10 +825,10 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
     {
         string s = state ?? d.State;
         bool done = s == "done";
-        return new JsonObject
+        var node = new JsonObject
         {
             ["download"] = d.Id,
-            ["incident"] = d.Incident,
+            ["incident"] = d.Range is null ? d.Incident : null,
             ["folder"] = d.Folder,
             ["state"] = d.Paused ? "paused" : s,
             ["paused"] = d.Paused,
@@ -843,6 +846,11 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
                 ["output"] = done ? $"{d.Folder}/Camera {c.Channel + 1}.mp4" : null,
             })]),
         };
+        if (d.Range is { } r)
+        {
+            node["range"] = new JsonObject { ["start"] = r[0], ["end"] = r[1] };
+        }
+        return node;
     }
 
     private void EmitDownload(FakeDownload d, string? state = null)
@@ -873,10 +881,16 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
         string key = o["incident"]?.GetValueKind() == JsonValueKind.String ? o["incident"]!.GetValue<string>() : throw Error(NvStatus.InvalidArgument, F);
         JsonObject answer;
         FakeDownload? queued = null;
+        string? dest = Destination(o["dest"], F);
         lock (_gate)
         {
             Configured(F);
             if (_downloadsDir is null)
+            {
+                throw Error(NvStatus.NotConfigured, F);
+            }
+            // No data directory in the fake: only the downloads directory.
+            if (dest is not null && dest != _downloadsDir)
             {
                 throw Error(NvStatus.NotConfigured, F);
             }

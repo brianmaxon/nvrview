@@ -139,6 +139,28 @@ public protocol CoreAPI: Sendable {
     /// permission and are logged.
     func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus)
 
+    // MARK: Camera motion (minor 11; docs/FFI.md "Camera motion (PTZ)")
+    //
+    // The app's own calls are the user's manual control and need no enable.
+    // Moves, stops, lens moves and preset recalls return at once (a `ptz`
+    // event tells the outcome); `ptzInfo` waits for the camera (up to 20 s),
+    // so call it off the main thread. None from inside a callback.
+
+    /// `nv_ptz_info`: what the tile's camera can do and where its lens is (JSON).
+    func ptzInfo(tile: UInt64) throws(CoreStatus) -> String
+    /// `nv_ptz_move`: starts or renews a move; call again at least every
+    /// 500 ms while held (the core stops the camera 1 s after the last call).
+    func ptzMove(_ tile: UInt64, direction: PTZDirection, speed: Int) throws(CoreStatus)
+    /// `nv_ptz_stop`: at once; never limited.
+    func ptzStop(_ tile: UInt64) throws(CoreStatus)
+    /// `nv_ptz_lens`: zoom or focus to an absolute position (clamped by the core).
+    func ptzLens(_ tile: UInt64, axis: PTZLensAxis, position: Int) throws(CoreStatus)
+    /// `nv_ptz_preset`: recalls a preset of the camera's list.
+    func ptzPreset(_ tile: UInt64, id: Int) throws(CoreStatus)
+    /// `nv_motion_grant`: lets an automation (a client name, or
+    /// `auto_correction`) move one channel for this run of the core.
+    func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus)
+
     // MARK: Recordings, part 1 (minor 5; docs/FFI.md "Recordings (minor 5)")
     //
     // JSON in and out as the contract shapes it (docs/FFI-RECORDINGS.md);
@@ -201,9 +223,10 @@ public protocol CoreAPI: Sendable {
     // JSON in and out as in docs/FFI-RECORDINGS.md, sections 7 and 2a. Not
     // from inside a callback, except nothing here is allowed there.
 
-    /// `nv_edit_compute`: the edit list (follow cut or grid) of a finished
-    /// download. `in_ms`, `out_ms`, and the trim kind are `.unsupported`
-    /// until export.
+    /// `nv_edit_compute`: the edit list (follow cut or grid) or the trim of a
+    /// finished download. Minor 10 added the `trim` kind, `in_ms` and
+    /// `out_ms` on follow and grid, and `dest` and `share_safe` (a core older
+    /// than that answers `.unsupported` or `.invalidArgument`).
     func editCompute(json: String) throws(CoreStatus) -> String
     /// `nv_sound_watch`: keeps a camera's sub-stream open for sound only.
     func soundWatch(camera: String, enabled: Bool) throws(CoreStatus)
@@ -243,6 +266,18 @@ public protocol CoreAPI: Sendable {
     /// `nv_record_status`: `{"recordings":[...]}`, the latest `recording`
     /// event of each running recording.
     func recordStatus() throws(CoreStatus) -> String
+    // MARK: Export (minor 10; docs/FFI.md "Export (minor 10)")
+    //
+    // JSON in and out as in docs/FFI-RECORDINGS.md, section 7a. The core plans;
+    // the app decodes, encodes, and writes. Not from inside a callback.
+
+    /// `nv_download_range`: queues the download of a time range of chosen
+    /// cameras (`{"start","end","cameras":[{"camera","tier"}],"name","dest",
+    /// "share_safe"}`) and answers `{"download","folder","existing"}`.
+    func downloadRange(json: String) throws(CoreStatus) -> String
+    /// `nv_still_plan`: which picture to save and what to call it, from a
+    /// playback's tiles or a position in a finished file.
+    func stillPlan(json: String) throws(CoreStatus) -> String
 
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //

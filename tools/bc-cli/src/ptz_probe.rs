@@ -501,7 +501,7 @@ async fn held_move<W: Write>(
     let stop = timeout(wait, async {
         loop {
             match rx.recv().await {
-                Ok(n) if n.channel == channel => return Some(n.cause),
+                Ok(n) if n.cam.channel == channel && n.cam.lens == 0 => return Some(n.cause),
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
