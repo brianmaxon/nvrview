@@ -262,6 +262,38 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    // MARK: Camera motion (minor 9)
+
+    public func ptzInfo(tile: UInt64) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_ptz_info(c, "{\"tile\":\(tile)}", $0, $1, $2) }
+    }
+
+    public func ptzMove(_ tile: UInt64, direction: PTZDirection, speed: Int) throws(CoreStatus) {
+        let status = CoreStatus(nv_ptz_move(try core(), tile, direction.rawValue, UInt32(clamping: speed)))
+        if !status.isOK { throw status }
+    }
+
+    public func ptzStop(_ tile: UInt64) throws(CoreStatus) {
+        let status = CoreStatus(nv_ptz_stop(try core(), tile))
+        if !status.isOK { throw status }
+    }
+
+    public func ptzLens(_ tile: UInt64, axis: PTZLensAxis, position: Int) throws(CoreStatus) {
+        let status = CoreStatus(nv_ptz_lens(try core(), tile, axis.rawValue, Int32(clamping: position)))
+        if !status.isOK { throw status }
+    }
+
+    public func ptzPreset(_ tile: UInt64, id: Int) throws(CoreStatus) {
+        let status = CoreStatus(nv_ptz_preset(try core(), tile, UInt32(clamping: id)))
+        if !status.isOK { throw status }
+    }
+
+    public func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus) {
+        let status = CoreStatus(nv_motion_grant(try core(), device, channel, client, granted))
+        if !status.isOK { throw status }
+    }
+
     // MARK: Recordings, part 1 (minor 5)
 
     private func check(_ status: NvStatus) throws(CoreStatus) {

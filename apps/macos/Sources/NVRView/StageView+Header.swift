@@ -85,6 +85,15 @@ extension StageView {
             model.setAllowTalk(camera, !model.cameraOptions(camera.firstLens).allowTalk)
         case .entrance:
             model.setEntrance(camera, !model.cameraOptions(camera).entrance)
+        case .panTilt:
+            showPTZ(.pad, camera: camera, path: path, from: view)
+            return
+        case .lens:
+            showPTZ(.lens, camera: camera, path: path, from: view)
+            return
+        case .presets:
+            showPresets(camera: camera, path: path, from: view)
+            return
         case .quality, .fisheye, .callsOpenIn, .more:
             if let menu = menu(for: item, at: path) { popUp(menu, under: view, path: path) }
         default:
@@ -112,7 +121,7 @@ extension StageView {
     /// The "…" menu of the tile at `path` (self-test).
     func moreMenu(_ path: NodePath) -> NSMenu? { menu(for: .more, at: path) }
 
-    private func popUp(_ menu: NSMenu, under view: NSView?, path: NodePath) {
+    func popUp(_ menu: NSMenu, under view: NSView?, path: NodePath) {
         if let view {
             menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.isFlipped ? view.bounds.height + 2 : -2), in: view)
         } else if let chrome = chromes[path] {
@@ -140,6 +149,8 @@ extension StageView {
             }
         case .callsOpenIn:
             item = callsOpenInMenuItem(camera)
+        case .presets:
+            item = presetsMenuItem(camera: camera)
         default:
             let what = entry.item
             item = ClosureMenuItem(title: entry.label) { [weak self] in self?.performHeaderItem(what, at: path, from: nil) }

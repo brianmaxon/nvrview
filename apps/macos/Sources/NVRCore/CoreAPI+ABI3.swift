@@ -78,3 +78,20 @@ extension CoreAPI {
 extension CoreAPI {
     public func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus) { throw .invalidArgument }
 }
+
+// Camera motion (minor 9). A core without it moves nothing; the app shows
+// the controls but every command is refused.
+extension CoreAPI {
+    public func ptzInfo(tile: UInt64) throws(CoreStatus) -> String { throw .invalidArgument }
+    public func ptzMove(_ tile: UInt64, direction: PTZDirection, speed: Int) throws(CoreStatus) {
+        throw .invalidArgument
+    }
+    public func ptzStop(_ tile: UInt64) throws(CoreStatus) { throw .invalidArgument }
+    public func ptzLens(_ tile: UInt64, axis: PTZLensAxis, position: Int) throws(CoreStatus) {
+        throw .invalidArgument
+    }
+    public func ptzPreset(_ tile: UInt64, id: Int) throws(CoreStatus) { throw .invalidArgument }
+    public func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus) {
+        throw .invalidArgument
+    }
+}

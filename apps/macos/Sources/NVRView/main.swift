@@ -164,11 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             var o = FakeCore.Options(clips: clips)
             o.fisheyeClip = try options.files.first(where: isFisheye).map { try FakeClip.load($0) }
             o.pacing = .realtime(fps: 20)
+            // The fake camera's dead-man stop counts on the self-test's clock.
+            if let manual = testClock { o.ptzClock = { manual.now } }
             o.devices = [
                 // Channel 4 is a made-up doorbell (talk-back capable);
                 // channel 2 reports pan, tilt, zoom and presets.
                 "192.0.2.10": FakeDeviceSpec(
-                    name: "NVR", channelCount: 6, multiLensChannels: [5], talkChannels: [3], ptzChannels: [1]),
+                    name: "NVR", channelCount: 6, multiLensChannels: [5], talkChannels: [3], ptzChannels: [1],
+                    ptzLens1Channels: [5]),
                 "192.0.2.11": FakeDeviceSpec(
                     name: "NVR", channelCount: 4, fisheyeChannels: o.fisheyeClip == nil ? [] : [3]),
             ]
