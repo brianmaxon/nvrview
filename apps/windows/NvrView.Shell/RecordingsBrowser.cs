@@ -59,12 +59,15 @@ public sealed class RecordingsBrowser
     /// <param name="model">The shared recordings model.</param>
     /// <param name="files">Opens the files of a follow cut or grid (none: they cannot be opened).</param>
     /// <param name="audio">The edit's sound (none: silent).</param>
-    public RecordingsBrowser(RecordingsService model, IEditFilesFactory? files = null, IEditAudio? audio = null)
+    /// <param name="exportSettings">What export keeps between launches (null: nothing is kept).</param>
+    public RecordingsBrowser(
+        RecordingsService model, IEditFilesFactory? files = null, IEditAudio? audio = null, ExportSettings? exportSettings = null)
     {
         Model = model;
         HoldId = model.NewHold();
         Player = new RecordingsPlayer(model);
         EditPlayer = new EditPlayer(model, Player, files ?? new NoEditFiles(), audio ?? new NoEditAudio());
+        Export = new ExportController(this, exportSettings);
         long today = model.Today;
         Day = today;
         Month = DeviceTime.Month(today).Start;
@@ -74,6 +77,9 @@ public sealed class RecordingsBrowser
 
     /// <summary>The shared recordings model.</summary>
     public RecordingsService Model { get; }
+
+    /// <summary>Export from this window: in and out points, trims, range downloads, stills (docs/UX.md "Export").</summary>
+    public ExportController Export { get; }
 
     /// <summary>This window's <c>nv_recordings_hold_today</c> number.</summary>
     public ulong HoldId { get; }

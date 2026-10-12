@@ -1193,7 +1193,8 @@ The NVR's own recordings, found by what happened and played back
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
 (milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
 strips, sound events, listening for sounds) on both; the follow cut and
-grids on both (M3 and W3); exports on macOS (M4; Windows is W4).
+grids on both (M3 and W3); exports on macOS (M4) and Windows (W4;
+follow cut and grid export waits for W3's renderer).
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1378,6 +1379,34 @@ grids on both (M3 and W3); exports on macOS (M4; Windows is W4).
     app adds no metadata of its own to pictures either. The `.parts` job
     state of a share-safe download still holds device keys until it is
     forgotten (FFI-RECORDINGS.md section 7a (d)).
+  - **On Windows** (W4) the same export is the **Export** button beside the
+    transport (a menu: Set In Point, Set Out Point, Clear In and Out, Trim to
+    In and Out, Trim One Camera, Exact Trim, Download Range, Save Picture,
+    Save a Picture of Each Camera, Share-Safe), with **I** and **O** (not
+    while typing). The in and out points show on the scrubber as a shaded
+    span with an I flag and an O flag (draggable; a press elsewhere seeks)
+    and as a band over the lanes. Every export asks with the Windows save
+    picker (one file) or folder picker (several; " (2)" when a name is
+    taken), which remember their last folder, and the app keeps the folder
+    too (`export-settings.json`, with the share-safe switch and the trim
+    kind). The strip above the transport shows progress and **Cancel**; a
+    canceled or failed export leaves no file (written as
+    `.nvrview-export-<id>.mp4` beside the destination and moved into place
+    when whole). **Trim** is made with Media Foundation: the keyframe copy
+    reads the compressed samples and writes them untouched; **Exact Trim**
+    decodes from the keyframe and encodes the output again as H.264, and
+    both carry the sound as it is (AAC). Choices where the docs were silent:
+    a trim that the core says cannot be a copy is re-encoded even when Exact
+    Trim is off; **Save Picture** is the shown (or first) playback camera's
+    current picture drawn with the renderer of Save Picture, and a picture of
+    each camera comes from its tile the same way (a downloaded file's picture
+    at a time is decoded with Media Foundation, for the follow cut and grid
+    views). Share-safe zeroes the creation times, renames the handlers to
+    `VideoHandler` and `SoundHandler`, and turns user-data and metadata boxes
+    into free space with their contents cleared. Follow cut and grid export
+    (the menu items appear once the follow and grid views supply a
+    renderer, W3) will write 30 frames a second without sound until the
+    sound pieces (`ExportGeometry`, `AudioPiece.Join`) are wired in.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the

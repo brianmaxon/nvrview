@@ -251,6 +251,7 @@ public partial class App : Application
         };
         UseThumbnailDecoder(Recordings);
         _host.Recordings = Recordings;
+        RecordingsWindow.ExportSettingsPath = memoryOnly ? null : Path.Combine(dataDir, "export-settings.json");
         string downloads = o.DataDir is not null || o.SelfTest || o.StartupTest
             ? Path.Combine(dataDir, "Incidents")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "NvrView", "Incidents");

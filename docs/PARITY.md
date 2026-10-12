@@ -174,12 +174,12 @@ Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
 | Lock and unlock (the video is downloaded; says when it is not kept) | yes | yes | ID `recordings-lock`. |
 | Downloads panel: progress, pause, resume, retry, Show in Finder, forget, Move to Trash | yes | yes | Trash through `NSWorkspace.recycle` after `download_removed`; Windows: the Recycle Bin (FFI-RECORDINGS.md section 12). ID `recordings-downloads`. Retry is not in the self-test. |
 | Camera groups for incidents | yes | yes | ID `recordings-groups`. |
-| In and out points (I and O, draggable flags on the scrubber, a band over the lanes), shown in the cameras view and the follow cut and grids | yes | no (planned, W4) | UX.md "Recordings", "Export". |
-| Trim to in and out: keyframe copy or exact re-encode, from the incident's download or a range downloaded first | yes | no (planned, W4) | IDs `export-trim`, `export-real-core`; Windows: Media Foundation. |
-| Export follow cut, 2-up, 4-up to an MP4 (H.264 or HEVC, progress and cancel, sound per the live rules) | yes | no (planned, W4) | IDs `export-follow-cut`, `export-grid`. |
-| Range download of chosen cameras for a time range; Downloads shows its range | yes | no (planned, W4) | ID `export-range-download`. |
-| Still pictures: current picture or one per camera, PNG or JPEG | yes | no (planned, W4) | ID `export-stills`; Windows: WIC. |
-| Share-safe switch on every export (neutral names, no metadata of the app's own) | yes | no (planned, W4) | ID `export-share-safe`. |
+| In and out points (I and O, draggable flags on the scrubber, a band over the lanes), shown in the cameras view and the follow cut and grids | yes | yes (cameras view; the follow cut and grids come with W3) | UX.md "Recordings", "Export". Windows: the Export button's menu beside the transport; the pure rules (`InOutPoints`, `ExportPlan.cs`) share the macOS vectors. |
+| Trim to in and out: keyframe copy or exact re-encode, from the incident's download or a range downloaded first | yes | yes | ID `export-trim` (`export-real-core` is a Windows gap: no real-core playback in the Windows self-test yet). Windows: Media Foundation source reader and sink writer (`MfExport.Cut`); an exact trim is always H.264, the sound is copied as it is. |
+| Export follow cut, 2-up, 4-up to an MP4 (H.264 or HEVC, progress and cancel, sound per the live rules) | yes | no (writer built; waits for W3's renderer) | IDs `export-follow-cut`, `export-grid`. Windows: `MfExport.RenderEdit` writes frames the follow and grid views draw (`IEditFrames`); the menu items appear when a renderer is supplied; sound is not written yet. |
+| Range download of chosen cameras for a time range; Downloads shows its range | yes | yes | ID `export-range-download`. |
+| Still pictures: current picture or one per camera, PNG or JPEG | yes | yes (the playback tiles' pictures, or a camera's picture from a downloaded file; not the follow cut or grid yet) | ID `export-stills` (from files; the tiles' pictures go through the same `PictureRender` as Save Picture and are not driven on the fakes). Windows: WIC through `PictureSaver`. |
+| Share-safe switch on every export (neutral names, no metadata of the app's own) | yes | yes | ID `export-share-safe`. Windows: `Mp4ShareSafe` patches the finished file in place like the macOS one and also clears what the user-data and metadata boxes held. |
 
 ### Devices, settings, and updates
 

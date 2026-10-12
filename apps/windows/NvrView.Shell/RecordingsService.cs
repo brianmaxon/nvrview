@@ -118,7 +118,7 @@ public sealed class PlainPlaybackHost(IPlayback playback) : IPlaybackHost
 }
 
 /// <summary>The recordings model (see the file comment).</summary>
-public sealed class RecordingsService
+public sealed partial class RecordingsService
 {
     private readonly IRecordings _core;
     private readonly RecordingsEnablementStore? _store;
@@ -1063,6 +1063,7 @@ public sealed class RecordingsService
     {
         _publishScheduled = false;
         Downloads = _board.Downloads;
+        RunFinishWaiters();
         DownloadsChanged?.Invoke();
     }
 

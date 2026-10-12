@@ -31,6 +31,7 @@ SOURCES = {
         ROOT / "apps/windows/NvrView.App/SelfTest.cs",
         ROOT / "apps/windows/NvrView.App/SelfTest.Capture.cs",
         ROOT / "apps/windows/NvrView.App/SelfTest.Recording.cs",
+        ROOT / "apps/windows/NvrView.App/SelfTest.Export.cs",
     ],
 }
 ALLOW = ROOT / "scripts/parity-allow.txt"

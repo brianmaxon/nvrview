@@ -102,6 +102,7 @@ internal static class Program
         ThumbnailDecodingTests.Run();
         RecordingsSoundTests.Run();
         EditPlanTests.Run();
+        ExportTests.Run();
         return T.Summary();
     }
 }

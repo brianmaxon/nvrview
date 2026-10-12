@@ -240,7 +240,7 @@ internal sealed partial class RecordingsWindow
         var header = new Grid();
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(new TextBlock { Text = d.FolderName(), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+        header.Children.Add(new TextBlock { Text = d.Title(), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
         var state = new TextBlock { Text = d.StateText(), Foreground = new SolidColorBrush(Muted) };
         Grid.SetColumn(state, 1);
         header.Children.Add(state);
@@ -290,6 +290,11 @@ internal sealed partial class RecordingsWindow
     public List<(string Id, string State)> DownloadCards() =>
         [.. _downloadsList.Children.OfType<Border>().Where(b => b.Tag is string).Select(b =>
             ((string)b.Tag, ((TextBlock)((Grid)((StackPanel)b.Child).Children[0]).Children[1]).Text))];
+
+    /// <summary>The downloads' titles as drawn (self-test): the folder's name, or "Range" and its times.</summary>
+    public List<string> DownloadCardTitles() =>
+        [.. _downloadsList.Children.OfType<Border>().Where(b => b.Tag is string).Select(b =>
+            ((TextBlock)((Grid)((StackPanel)b.Child).Children[0]).Children[0]).Text)];
 
     /// <summary>The downloads panel is shown instead of the player (self-test).</summary>
     public bool DownloadsShown => _downloadsPanel.Visibility == Visibility.Visible;

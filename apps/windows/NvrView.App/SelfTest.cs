@@ -742,6 +742,8 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             }
         }
 
+        await ExportSteps(w, fake, service);
+
         // parity: recordings-timeline-wheel-zoom
         // The lanes' wheel as the window gets it: a notch zooms around the pointer (its time stays under it), many
         // clamp at 48x, Shift and the wheel pans, and notches the other way go back to the whole day.
