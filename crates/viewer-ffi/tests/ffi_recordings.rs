@@ -22,6 +22,13 @@ struct Ctx {
     json: Mutex<Vec<String>>,
 }
 
+/// The callbacks' context, never freed. The core may call back until
+/// `nv_core_free` returns, and a failing assertion unwinds past that call:
+/// a context dropped then would be used after free by the core's threads.
+fn leaked_ctx() -> &'static Ctx {
+    Box::leak(Box::default())
+}
+
 unsafe extern "C" fn on_action(_: *mut c_void, _: u64, _: *const NvAction) {}
 
 unsafe extern "C" fn on_event(context: *mut c_void, json: *const c_char, len: usize) {
@@ -158,9 +165,9 @@ fn recordings_through_the_c_interface() {
         log_max_total_bytes: 0,
         data_dir: data_dir.as_ptr(),
     };
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let callbacks = NvCallbacks {
-        context: &*ctx as *const Ctx as *mut c_void,
+        context: ctx as *const Ctx as *mut c_void,
         on_action: Some(on_action),
         on_event: Some(on_event),
         on_audio_tap: None,
