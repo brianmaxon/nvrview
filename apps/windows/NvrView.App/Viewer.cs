@@ -199,7 +199,7 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     public volatile bool WantsFill;
 
     // Written by the render thread each frame, read by the UI thread: where
-    // the picture is drawn at 1x (the chrome sits on it), in panel units
+    // the picture is drawn at 1x, in panel units
     // (DIPs); the tile's whole area, which a zoomed picture grows into; and
     // the picture's size.
     public volatile float X;
@@ -211,6 +211,16 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     public volatile float ViewWidth;
     public volatile float ViewHeight;
     public volatile bool Visible;
+
+    /// <summary>Where the tile's chrome, outline and header go: the tile's whole area (its cell, or the stage in focus), not the fitted picture.</summary>
+    public float FrameX => ViewWidth > 0 ? ViewX : X;
+
+    public float FrameY => ViewWidth > 0 ? ViewY : Y;
+
+    public float FrameWidth => ViewWidth > 0 ? ViewWidth : Width;
+
+    public float FrameHeight => ViewWidth > 0 ? ViewHeight : Height;
+
     public volatile int PictureWidth;
     public volatile int PictureHeight;
 

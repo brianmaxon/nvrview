@@ -580,7 +580,7 @@ final class SelfTest {
         let grid = stage.grid
         grid.prepare?(grid.renderer, grid.drawableSize)
         do {
-            let z = stage.zoom(of: camera)
+            let z = stage.zoom(atTile: path)
             let source = stage.renderedSource(of: path)
             print(String(format: "zoom: %.2fx, source %@ (was %@)", z.scale, "\(source.map { "\($0)" } ?? "none")",
                 "\(before.map { "\($0)" } ?? "none")"))
@@ -655,7 +655,7 @@ final class SelfTest {
             let back = stage.chromeVisible
             advance(1)
             do {
-                let z = stage.zoom(of: camera)
+                let z = stage.zoom(atTile: path)
                 print("key 0: zoom \(String(format: "%.4f", z.scale))x, chrome back \(back)")
                 if z != .none || stage.isEasingZoom { problems.append("0 did not reset the zoom") }
                 if !back { problems.append("a key press did not bring the chrome back") }
@@ -705,9 +705,9 @@ final class SelfTest {
         }
         let fillsMenu = NSMenuItem(title: "Fill Tiles", action: #selector(ViewerWindowController.toggleFill(_:)), keyEquivalent: "")
         _ = window.validateMenuItem(fillsMenu)
-        let single = stage.fills(camera) && !stage.fills(otherCamera) && fillsMenu.state == .mixed
+        let single = stage.fills(atTile: path) && !stage.fills(atTile: other.path) && fillsMenu.state == .mixed
         let checked = stage.contextMenu(for: tile).items.first { $0.title == "Fill Tile" }?.state == .on
-        print("fill per tile: this tile fills \(stage.fills(camera)), another \(stage.fills(otherCamera)), Fill Tiles \(fillsMenu.state == .mixed ? "mixed" : "not mixed"), item checked \(checked)")
+        print("fill per tile: this tile fills \(stage.fills(atTile: path)), another \(stage.fills(atTile: other.path)), Fill Tiles \(fillsMenu.state == .mixed ? "mixed" : "not mixed"), item checked \(checked)")
         if !single { problems.append("Fill Tile on one tile did not fill only it, with Fill Tiles mixed") }
         if !checked { problems.append("Fill Tile is not checked on the tile that fills") }
         prepare()
@@ -723,7 +723,7 @@ final class SelfTest {
         let step = wide ? CGVector(dx: tile.rect.width / 8, dy: 0) : CGVector(dx: 0, dy: tile.rect.height / 8)
         stage.simulateDrag(from: middle, to: CGPoint(x: middle.x + step.dx, y: middle.y + step.dy))
         prepare()
-        let z = stage.zoom(of: camera)
+        let z = stage.zoom(atTile: path)
         let moved = stage.renderedSource(of: path)
         let v = z.visible(in: base)
         // The crop moved toward the picture's left (or top) by the drag, as TileZoom says.
@@ -738,9 +738,9 @@ final class SelfTest {
         // Far beyond the edge it stops there.
         stage.simulateDrag(from: middle, to: CGPoint(x: middle.x + step.dx * 40, y: middle.y + step.dy * 40))
         prepare()
-        let edge = stage.zoom(of: camera).visible(in: base)
+        let edge = stage.zoom(atTile: path).visible(in: base)
         let stopped = wide ? abs(edge.minX) < 1e-6 : abs(edge.minY) < 1e-6
-        let panned = stage.isPanned(path) && !stage.zoom(of: camera).isZoomed
+        let panned = stage.isPanned(path) && !stage.zoom(atTile: path).isZoomed
         let fittedSwaps = stage.dragKind(at: CGPoint(x: other.rect.midX, y: other.rect.midY + 20)) == "swap"
         print("fill pan drag: kind \(kind ?? "none"), crop followed \(followed), stopped at the edge \(stopped), panned \(panned), a fitted tile still swaps \(fittedSwaps)")
         if kind != "pan" { problems.append("a drag on a filled, cropped picture would not pan it") }
@@ -764,13 +764,13 @@ final class SelfTest {
             problems.append("no tiles to swap")
             return headerStep()
         }
-        let zoom = stage.zoom(of: camera)
+        let zoom = stage.zoom(atTile: path)
         stage.showHeader(path)
         let onHeader = CGPoint(x: tile.rect.midX, y: tile.rect.minY + 10)
         let kind = stage.dragKind(at: onHeader)
         stage.simulateDrag(from: onHeader, to: CGPoint(x: target.rect.midX, y: target.rect.midY))
         let swapped = window.state.tree[path]?.camera == otherCamera && window.state.tree[target.path]?.camera == camera
-        let kept = stage.zoom(of: camera) == zoom
+        let kept = stage.zoom(atTile: target.path) == zoom && stage.fills(atTile: target.path)
         // And back, the same way, from the tile it went to.
         if swapped, let there = stage.frames.leaf(target.path) {
             stage.showHeader(target.path)
@@ -786,17 +786,26 @@ final class SelfTest {
         fillPanRestoreStep(path, camera, otherCamera)
     }
 
-    /// The window's record keeps the crop, the zoom and the single tile's
-    /// Fill choice; a window restored from it shows the same part of the
-    /// picture. Then the window's switch sets every tile, and Reset
-    /// Position recenters.
+    /// The window's record keeps the tile's crop, zoom and Fill choice
+    /// under the tile's identity; a window restored from it shows the same
+    /// part of the picture in that tile. Then the window's switch sets
+    /// every tile, and Reset Position recenters.
     private func fillPanRestoreStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
-        guard let window, let saved = window.savedWindow else { return headerStep() }
+        guard let window, let saved = window.savedWindow,
+            let otherPath = window.state.tree.leaves.first(where: { $0.camera == otherCamera })?.path,
+            let key = window.state.viewKey(path), let otherKey = window.state.viewKey(otherPath)
+        else {
+            problems.append("no saved window or tiles for the restore step")
+            return headerStep()
+        }
         let stage = window.stage
         // parity: fill-pan-restore
         let record = (try? JSONEncoder().encode([saved])).flatMap { try? JSONDecoder().decode([SavedWindow].self, from: $0) }?.first
-        let zoom = stage.zoom(of: camera)
-        let readsBack = record.map { $0.views.zoom(camera) == zoom && $0.views.fills(camera) && !$0.views.fills(otherCamera) } == true
+        let zoom = stage.zoom(atTile: path)
+        let readsBack = record.map {
+            $0.views.zoom(key) == zoom && $0.views.fills(key) && !$0.views.fills(otherKey)
+                && $0.tileViews.contains { $0.key.tile == key.tile && $0.key.layout == window.state.viewsKey }
+        } == true
         stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
         let source = stage.renderedSource(of: path)
         guard let record, let restored = app.openWindow(window.state.content) else {
@@ -812,36 +821,183 @@ final class SelfTest {
         }, timeout: 2) { [self] in
             let rs = restored.stage
             rs.grid.prepare?(rs.grid.renderer, rs.grid.drawableSize)
-            let same = rs.zoom(of: camera) == zoom && rs.fills(camera) && !rs.fills(otherCamera)
+            let same = rs.zoom(atTile: path) == zoom && rs.fills(atTile: path) && !rs.fills(atTile: otherPath)
             let shown = rs.renderedSource(of: path)
             let sameCrop = source.flatMap { a in shown.map { b in abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 } } == true
             restored.close()
-            print("fill pan restore: record reads back \(readsBack), restored window same settings \(same), same crop \(sameCrop)")
-            if !readsBack { problems.append("the window's saved record lost the crop or the tile's Fill choice") }
-            if !same { problems.append("a window restored from the record did not get the crop and Fill choices back") }
+            print("fill pan restore: record reads back per tile \(readsBack), restored window same settings \(same), same crop \(sameCrop)")
+            if !readsBack { problems.append("the window's saved record lost the tile's crop or Fill choice") }
+            if !same { problems.append("a window restored from the record did not get the tile's crop and Fill choice back") }
             if !sameCrop { problems.append("a restored window does not show the same part of the picture") }
             // parity: fill-window-switch
             // The window's switch: every tile fills, then every tile fits.
             window.toggleFill(nil)
-            let allFill = stage.fills(camera) && stage.fills(otherCamera) && !window.state.views.mixed
+            let allFill = stage.fills(atTile: path) && stage.fills(atTile: otherPath) && !stage.fillMixed
             window.toggleFill(nil)
-            let allFit = !stage.fills(camera) && !stage.fills(otherCamera) && !window.state.views.mixed
-            // The crop stays with the camera; Reset Position recenters it.
-            stage.setFill(true, for: camera)
+            let allFit = !stage.fills(atTile: path) && !stage.fills(atTile: otherPath) && !stage.fillMixed
+            // The crop stays with the tile; Reset Position recenters it.
+            stage.setFill(true, atTile: path)
             var reset = false
             if let tile = stage.frames.leaf(path) {
                 let menu = stage.contextMenu(for: tile)
                 if let i = menu.items.firstIndex(where: { $0.title == "Reset Position" }) {
                     menu.performActionForItem(at: i)
-                    reset = stage.zoom(of: camera) == .none
+                    reset = stage.zoom(atTile: path) == .none
                 }
             }
             print("fill per tile: Fill Tiles fills every tile \(allFill), then fits every tile \(allFit); Reset Position \(reset)")
             if !allFill || !allFit { problems.append("Fill Tiles did not set every tile of the window") }
             if !reset { problems.append("Reset Position did not recenter the filled crop") }
-            stage.setFill(false, for: camera)
-            headerStep()
+            stage.setFill(false, atTile: path)
+            zoomPerTileStep(path, otherPath, camera, otherCamera)
         }
+    }
+
+    // MARK: Zoom per tile (docs/UX.md "Digital zoom")
+
+    /// Two tiles of one camera are independent views: Show Camera puts the
+    /// camera in a second tile at the default view; each tile zooms on its
+    /// own, focus keeps a tile's zoom, and resetting one leaves the other.
+    private func zoomPerTileStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        let grid = stage.grid
+        func middle(_ p: NodePath) -> CGPoint? { stage.frames.leaf(p).map { CGPoint(x: $0.rect.midX, y: $0.rect.midY) } }
+        // parity: zoom-per-tile
+        stage.assign(camera, at: second)
+        let fresh = window.state.tree[second]?.camera == camera && stage.zoom(atTile: second) == .none
+        guard let a = middle(path), let b = middle(second) else {
+            problems.append("no tiles to zoom one by one")
+            return headerStep()
+        }
+        stage.zoom(at: a, by: 2, eased: false)
+        stage.zoom(at: b, by: 3, eased: false)
+        grid.prepare?(grid.renderer, grid.drawableSize)
+        let za = stage.zoom(atTile: path).scale, zb = stage.zoom(atTile: second).scale
+        let sa = stage.renderedSource(of: path), sb = stage.renderedSource(of: second)
+        let independent = abs(za - 2) < 0.01 && abs(zb - 3) < 0.01 && sa != nil && sb != nil && sa != sb
+        stage.focus(second)
+        advance(StageView.focusDuration)
+        let focusKeeps = abs(stage.zoom(atTile: second).scale - 3) < 0.01
+        stage.unfocus()
+        advance(StageView.focusDuration)
+        let unfocusKeeps = abs(stage.zoom(atTile: second).scale - 3) < 0.01 && abs(stage.zoom(atTile: path).scale - 2) < 0.01
+        stage.resetZoom(at: second, eased: false)
+        let resetOne = stage.zoom(atTile: second) == .none && abs(stage.zoom(atTile: path).scale - 2) < 0.01
+        print(
+            String(format: "zoom per tile: one camera in two tiles at %.2fx and %.2fx, ", za, zb)
+                + "Show Camera starts at 1x \(fresh), sources differ \(sa != sb), focus keeps \(focusKeeps), "
+                + "unfocus keeps \(unfocusKeeps), reset one tile only \(resetOne)")
+        if !fresh { problems.append("Show Camera did not start the tile at the default view") }
+        if !independent { problems.append("two tiles of one camera did not zoom independently") }
+        if !focusKeeps || !unfocusKeeps { problems.append("focus lost a tile's own zoom") }
+        if !resetOne { problems.append("resetting one tile's zoom changed another tile of the same camera") }
+        zoomFollowsSwapStep(path, second, camera, otherCamera)
+    }
+
+    /// Swapping two tiles moves each view with its camera; the tiles keep
+    /// their identities. Then the layout is put back as it was.
+    private func zoomFollowsSwapStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        // parity: zoom-follows-swap
+        stage.assign(otherCamera, at: second)
+        let showReset = stage.zoom(atTile: second) == .none
+        if let b = stage.frames.leaf(second) {
+            stage.zoom(at: CGPoint(x: b.rect.midX, y: b.rect.midY), by: 3, eased: false)
+        }
+        let ids = (window.state.tree[path]?.tileID, window.state.tree[second]?.tileID)
+        stage.swapTiles(path, second)
+        let moved = window.state.tree[second]?.camera == camera && abs(stage.zoom(atTile: second).scale - 2) < 0.01
+            && window.state.tree[path]?.camera == otherCamera && abs(stage.zoom(atTile: path).scale - 3) < 0.01
+        let idsStay = window.state.tree[path]?.tileID == ids.0 && window.state.tree[second]?.tileID == ids.1 && ids.0 != nil
+        stage.swapTiles(second, path)
+        let back = window.state.tree[path]?.camera == camera && abs(stage.zoom(atTile: path).scale - 2) < 0.01
+            && abs(stage.zoom(atTile: second).scale - 3) < 0.01
+        stage.resetZoom(at: path, eased: false)
+        stage.resetZoom(at: second, eased: false)
+        let clean = stage.zoom(atTile: path) == .none && stage.zoom(atTile: second) == .none
+        print("zoom follows swap: Show Camera resets \(showReset), views moved with the cameras \(moved), tiles kept their identities \(idsStay), swapped back \(back), reset \(clean)")
+        if !showReset { problems.append("Show Camera did not reset the tile's view") }
+        if !moved { problems.append("a swap did not move each tile's zoom with its camera") }
+        if !idsStay { problems.append("a swap moved the tiles' identities") }
+        if !back || !clean { problems.append("swapping back did not bring the zooms back") }
+        // The zooms and the focus asked for main streams: wait until the
+        // tiles show their grid streams again before the next steps
+        // compare pictures.
+        guard let model = app.model else { return headerStep() }
+        when({
+            [camera, otherCamera].allSatisfy { c in
+                model.leases.tile(for: c).map { $0.tierState.shown == model.leases.tiers(for: c).grid } ?? true
+            }
+        }, timeout: 5) { [self] in panAndFrameStep(path, camera) }
+    }
+
+    /// A long drag on a zoomed picture pans it 1:1 with the pointer to the
+    /// release (through the mouse handlers, many small moves, the header
+    /// shown); the tile's frame (its chrome: outline and header) is the
+    /// tile's whole area at 1x, zoomed, and focused.
+    private func panAndFrameStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        func frameIsTile(_ rect: CGRect?) -> Bool {
+            guard let rect, let f = stage.chromes[path]?.frame else { return false }
+            return abs(f.minX - rect.minX) < 1 && abs(f.minY - rect.minY) < 1 && abs(f.width - rect.width) < 1
+                && abs(f.height - rect.height) < 1
+        }
+        guard let leaf = stage.frames.leaf(path), let picture = stage.pictureSizes[camera] else {
+            problems.append("no tile for the pan and frame steps")
+            return headerStep()
+        }
+        // parity: tile-frame-zoom
+        stage.relayoutChrome()
+        let at1x = frameIsTile(leaf.rect)
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 4, eased: false)
+        stage.relayoutChrome()
+        let zoomed = stage.zoom(atTile: path).scale > 3.9 && frameIsTile(leaf.rect)
+        print("tile frame zoom: frame is the tile at 1x \(at1x) and at 4x \(zoomed)")
+        if !at1x || !zoomed { problems.append("the tile's frame is not the tile's area") }
+
+        // parity: pan-continuous
+        let from = stage.zoom(atTile: path)
+        let fill = stage.fills(atTile: path)
+        // The whole picture's length in points at this zoom (it overflows
+        // the tile), so a change of center is a distance the picture moved.
+        let base = ZoomBase(picture: picture, tile: leaf.rect.size, fill: fill)
+        let length = CGSize(
+            width: from.scale * base.width * leaf.rect.width, height: from.scale * base.height * leaf.rect.height)
+        stage.showHeader(path)
+        let start = CGPoint(x: leaf.rect.midX, y: leaf.rect.midY)
+        let kind = stage.dragKind(at: start)
+        let travel = CGVector(dx: 30, dy: 15)
+        stage.simulateDrag(from: start, to: CGPoint(x: start.x + travel.dx, y: start.y + travel.dy), steps: 60)
+        let to = stage.zoom(atTile: path)
+        let moved = CGVector(
+            dx: (from.center.x - to.center.x) * length.width, dy: (from.center.y - to.center.y) * length.height)
+        let oneToOne = abs(moved.dx - travel.dx) < 0.5 && abs(abs(moved.dy) - travel.dy) < 0.5
+        print(String(format: "pan continuous: kind %@, 60 moves of %.1f,%.1f in all moved the picture %.2f,%.2f",
+            kind ?? "none", travel.dx, travel.dy, moved.dx, moved.dy))
+        if kind != "pan" || !oneToOne { problems.append("a long drag did not pan the picture 1:1 with the pointer") }
+
+        // parity: tile-frame-focus
+        stage.focus(path)
+        advance(StageView.focusDuration)
+        stage.relayoutChrome()
+        let focusFrame = frameIsTile(stage.bounds)
+        stage.unfocus()
+        advance(StageView.focusDuration)
+        stage.relayoutChrome()
+        let back = frameIsTile(stage.frames.leaf(path)?.rect)
+        stage.resetZoom(at: path, eased: false)
+        print("tile frame focus: frame is the whole stage \(focusFrame), back to the tile \(back)")
+        if !focusFrame { problems.append("a focused tile's frame is not the whole stage") }
+        if !back { problems.append("the tile's frame did not come back to its cell after focus") }
+        // The zoom and the focus asked for the main stream: back on the
+        // grid stream before the next steps compare pictures.
+        guard let model = app.model else { return headerStep() }
+        when({
+            model.leases.tile(for: camera).map { $0.tierState.shown == model.leases.tiers(for: camera).grid } ?? true
+        }, timeout: 5) { [self] in headerStep() }
     }
 
     // MARK: The tile header (docs/UX.md "Tile header")
@@ -999,7 +1155,10 @@ final class SelfTest {
             let (checked, matched) = PictureCheck.compare(
                 image, buffer: record.picture.pixelBuffer, color: record.color, region: record.region, tolerance: tolerance)
             print("\(what): \(matched) of \(checked) sampled pixels match the decoded picture")
-            if checked < 20 || matched * 100 < checked * 95 {
+            // JPEG's chroma subsampling can put a sample on a sharp color
+            // edge of the frame being saved far off; allow a few of those.
+            let share = ext == "jpg" ? 90 : 95
+            if checked < 20 || matched * 100 < checked * share {
                 problems.append("\(what): only \(matched) of \(checked) pixels match the decoded picture")
             }
         }
@@ -1615,7 +1774,7 @@ final class SelfTest {
         stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: false)
         stage.noteInteraction()
         draw(c)
-        let zoomed = stage.zoom(of: doorbell)
+        let zoomed = stage.zoom(atTile: leaf.path)
         let map = stage.zoomMapShown(leaf.path) == true
         let source = stage.renderedSource(of: leaf.path)
         let narrower = source.map { $0.width < full.width * 0.9 || $0.height < full.height * 0.9 } == true
@@ -1624,7 +1783,7 @@ final class SelfTest {
         stage.chromes[leaf.path]?.pressHeader(.resetZoom)
         advance(1)
         draw(c)
-        let back = stage.zoom(of: doorbell) == .none && !stage.isEasingZoom
+        let back = stage.zoom(atTile: leaf.path) == .none && !stage.isEasingZoom
         print(
             String(format: "call window tile: pinch to %.2fx, ", zoomed.scale)
                 + "zoom map \(map), source cropped \(narrower), main stream \(wantsMain), "

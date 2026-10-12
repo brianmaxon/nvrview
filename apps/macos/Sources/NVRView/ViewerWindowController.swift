@@ -203,7 +203,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
                 // every statistics event; following the stored tree then
                 // snapped a divider back mid-drag). The drag stores its
                 // result when it ends.
-                if !stage.isInteracting, l.root != state.tree || l.name != state.name {
+                if !stage.isInteracting, l.root.withTileIDs != state.tree || l.name != state.name {
                     state.tree = l.root
                     state.name = l.name
                     stage.reload()
@@ -212,7 +212,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
                 }
             } else {
                 // Deleted elsewhere: keep what is on screen, unsaved.
-                state.content = .scratch(name: state.name, root: state.tree)
+                state.rename(to: .scratch(name: state.name, root: state.tree))
                 sidebar.current = state.content
                 updateTitle()
             }
@@ -247,7 +247,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             l.name = state.name
             model.saveLayout(l)
         case .group, .scratch:
-            state.content = .scratch(name: state.name, root: tree)
+            state.rename(to: .scratch(name: state.name, root: tree))
             sidebar.current = state.content
             onChange()
         }
@@ -478,6 +478,8 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     @objc func saveAsLayout(_ sender: Any?) {
         askName("Save as Layout", initial: model.uniqueLayoutName(state.name)) { [weak self] name in
             guard let self, let id = model.createLayout(name: name, root: state.tree) else { return }
+            // The tiles keep their views in the saved layout.
+            state.views.rename(layout: state.viewsKey, to: TileKey.layoutKey(layout: id))
             show(.layout(id: id))
         }
     }
@@ -523,7 +525,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         switch state.content {
         case .layout(let id): model.renameLayout(id, to: name)
         case .group, .scratch:
-            state.content = .scratch(name: name, root: state.tree)
+            state.rename(to: .scratch(name: name, root: state.tree))
             onChange()
         }
         updateTitle()
@@ -556,7 +558,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case #selector(stopListening(_:)):
             return !model.audible.isEmpty
         case #selector(toggleFill(_:)):
-            item.state = state.views.mixed ? .mixed : state.fill ? .on : .off
+            item.state = stage.fillMixed ? .mixed : state.fill ? .on : .off
             return true
         case #selector(fullScreenKey(_:)):
             item.title = window?.styleMask.contains(.fullScreen) == true ? "Exit Full Screen" : "Enter Full Screen"
@@ -565,7 +567,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             item.title = sidebarItem.isCollapsed ? "Show Sidebar" : "Hide Sidebar"
             return true
         case #selector(resetZoomKey(_:)):
-            return stage.selectedCamera.map { stage.zoom(of: $0).isZoomed } == true
+            return stage.selectedPath.map { stage.zoom(atTile: $0).isZoomed } == true
         case #selector(selectLeft(_:)), #selector(selectRight(_:)), #selector(selectUp(_:)), #selector(selectDown(_:)):
             return state.tree.leafCount > 1
         default:
@@ -594,11 +596,19 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     /// Puts the alert insets where the user left them (a restored window).
     func restoreInsetAnchor(_ anchor: InsetAnchor?) { stage.insetAnchor = anchor }
 
-    /// Puts back the window's Fill Tiles and each camera's zoom, crop and
-    /// Fill choice (a restored window).
-    func restoreViews(_ views: TileViews<CameraRef>) {
+    /// Puts back the window's Fill Tiles and each tile's zoom, crop and Fill
+    /// choice (a restored window). A file from before views were per tile
+    /// has them per camera (`legacy`): each tile showing one of those
+    /// cameras gets its view, and the window is saved in the new form.
+    func restoreViews(_ views: TileViews<TileKey>, legacy: [LegacyTileView] = []) {
+        var views = views
+        if !legacy.isEmpty, views.count == 0 {
+            views.migrate(legacy, layout: state.viewsKey, tree: state.tree)
+        }
+        views.prune(layout: state.viewsKey, tree: state.tree)
         state.views = views
         stage.reload()
+        if !legacy.isEmpty { onChange() }
     }
 
     func windowDidMove(_ notification: Notification) { onChange() }
