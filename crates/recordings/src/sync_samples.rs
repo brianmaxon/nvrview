@@ -101,7 +101,11 @@ fn video_info(stsd: &[u8]) -> Option<VideoInfo> {
         b"hvc1" | b"hev1" => "h265",
         _ => return None,
     };
-    let at = |o: usize| entry.get(o..o + 2).map(|b| u32::from(b[0]) << 8 | u32::from(b[1]));
+    let at = |o: usize| {
+        entry
+            .get(o..o + 2)
+            .map(|b| u32::from(b[0]) << 8 | u32::from(b[1]))
+    };
     Some(VideoInfo {
         codec,
         width: at(32)?,
