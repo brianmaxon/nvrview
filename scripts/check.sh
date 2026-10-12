@@ -25,7 +25,7 @@ min_free_gb="${NVRVIEW_MIN_FREE_GB:-15}"
 free_kb=$(df -Pk . | awk 'NR == 2 { print $4 }')
 if [ "$free_kb" -lt $((min_free_gb * 1024 * 1024)) ]; then
   echo "check.sh: $((free_kb / 1024 / 1024)) GB free, needs $min_free_gb GB. Free space first:" >&2
-  echo "  remove merged worktrees (git worktree list) and old Docker volumes (scripts/clean-docker.sh)." >&2
+  echo "  remove merged worktrees (git worktree list) and old Docker volumes (scripts/clean-docker-volumes.sh)." >&2
   exit 1
 fi
 
