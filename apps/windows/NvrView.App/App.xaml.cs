@@ -243,6 +243,7 @@ public partial class App : Application
             CameraNamer = c => _viewer!.FindDevice(c.Device) is null ? null : _viewer.CameraName(new CameraRef(c.Device, c.Channel, c.Lens)),
         };
         _host.Recordings = Recordings;
+        RecordingsWindow.ExportSettingsPath = memoryOnly ? null : Path.Combine(dataDir, "export-settings.json");
         string downloads = o.DataDir is not null || o.SelfTest || o.StartupTest
             ? Path.Combine(dataDir, "Incidents")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "NvrView", "Incidents");

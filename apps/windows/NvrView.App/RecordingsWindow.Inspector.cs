@@ -291,6 +291,11 @@ internal sealed partial class RecordingsWindow
         [.. _downloadsList.Children.OfType<Border>().Where(b => b.Tag is string).Select(b =>
             ((string)b.Tag, ((TextBlock)((Grid)((StackPanel)b.Child).Children[0]).Children[1]).Text))];
 
+    /// <summary>The downloads' titles as drawn (self-test): the folder's name, or "Range" and its times.</summary>
+    public List<string> DownloadCardTitles() =>
+        [.. _downloadsList.Children.OfType<Border>().Where(b => b.Tag is string).Select(b =>
+            ((TextBlock)((Grid)((StackPanel)b.Child).Children[0]).Children[0]).Text)];
+
     /// <summary>The downloads panel is shown instead of the player (self-test).</summary>
     public bool DownloadsShown => _downloadsPanel.Visibility == Visibility.Visible;
 }

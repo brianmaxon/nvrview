@@ -57,6 +57,8 @@ internal sealed class ScrubBar : Canvas
     private List<TimeMark> _marks = [];
     private bool _drawnMarks;
     private bool _dragging;
+    private InOutPoints _points;
+    private PointHandle? _grab;
 
     public ScrubBar()
     {
@@ -67,7 +69,28 @@ internal sealed class ScrubBar : Canvas
         PointerPressed += OnPressed;
         PointerMoved += OnMoved;
         PointerReleased += OnReleased;
-        PointerCanceled += (_, _) => _dragging = false;
+        PointerCanceled += (_, _) =>
+        {
+            _dragging = false;
+            _grab = null;
+        };
+    }
+
+    /// <summary>The user dragged the in or out flag to a time (device-local milliseconds).</summary>
+    public event Action<PointHandle, long>? PointMoved;
+
+    /// <summary>The in and out points as set (self-test).</summary>
+    public (long? In, long? Out) PointsShown => (_points.InMs, _points.OutMs);
+
+    /// <summary>Shows the in and out points: a shaded span with a flag at each set end.</summary>
+    public void SetPoints(InOutPoints points)
+    {
+        if (points == _points)
+        {
+            return;
+        }
+        _points = points;
+        Redraw(true);
     }
 
     /// <summary>The user pointed at a time: the milliseconds, and whether this is the release (the exact picture).</summary>
@@ -117,12 +140,71 @@ internal sealed class ScrubBar : Canvas
                 SetTop(bar, h - 14);
                 Children.Add(bar);
             }
+            AddPoints(w, h);
             Children.Add(_head);
             _drawnMarks = true;
         }
         _head.Height = h;
         SetLeft(_head, Math.Clamp(XOf(_position) - 1, 0, Math.Max(w - 2, 0)));
         SetTop(_head, 0);
+    }
+
+    private static readonly Windows.UI.Color PointColor = Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xC1, 0x07);
+
+    // The span between the points (an unset one is the bar's end) and a flag with its letter at each set point.
+    private void AddPoints(double w, double h)
+    {
+        if (_points.IsEmpty)
+        {
+            return;
+        }
+        double x0 = _points.InMs is long a ? w * TransportState.Fraction(a, _start, _end) : 0;
+        double x1 = _points.OutMs is long b ? w * TransportState.Fraction(b, _start, _end) : w;
+        var band = new Rectangle
+        {
+            Width = Math.Max(x1 - x0, 1),
+            Height = h - 8,
+            Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x40, PointColor.R, PointColor.G, PointColor.B)),
+            IsHitTestVisible = false,
+        };
+        SetLeft(band, x0);
+        SetTop(band, 4);
+        Children.Add(band);
+        void Flag(double x, string letter, bool isIn)
+        {
+            var line = new Rectangle { Width = 2, Height = h, Fill = new SolidColorBrush(PointColor), IsHitTestVisible = false };
+            SetLeft(line, Math.Clamp(x - 1, 0, Math.Max(w - 2, 0)));
+            Children.Add(line);
+            var flag = new Border
+            {
+                Width = 14,
+                Height = 14,
+                Background = new SolidColorBrush(PointColor),
+                CornerRadius = new CornerRadius(2),
+                IsHitTestVisible = false,
+                Child = new TextBlock
+                {
+                    Text = letter,
+                    FontSize = 10,
+                    FontWeight = Microsoft.UI.Text.FontWeights.Bold,
+                    Foreground = new SolidColorBrush(Colors.Black),
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                },
+            };
+            // The in flag hangs to the right of its line, the out flag to the left.
+            SetLeft(flag, Math.Clamp(isIn ? x : x - 14, 0, Math.Max(w - 14, 0)));
+            SetTop(flag, 0);
+            Children.Add(flag);
+        }
+        if (_points.InMs is not null)
+        {
+            Flag(x0, "I", true);
+        }
+        if (_points.OutMs is not null)
+        {
+            Flag(x1, "O", false);
+        }
     }
 
     private long TimeAt(PointerRoutedEventArgs e) =>
@@ -132,6 +214,14 @@ internal sealed class ScrubBar : Canvas
     {
         if (_end <= _start)
         {
+            return;
+        }
+        double fraction = e.GetCurrentPoint(this).Position.X / Math.Max(ActualWidth, 1);
+        if (_points.HandleAt(fraction, _start, _end, 7 / Math.Max(ActualWidth, 1)) is { } handle)
+        {
+            _grab = handle;
+            _ = CapturePointer(e.Pointer);
+            e.Handled = true;
             return;
         }
         _dragging = true;
@@ -144,6 +234,11 @@ internal sealed class ScrubBar : Canvas
 
     private void OnMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (_grab is { } grabbed)
+        {
+            PointMoved?.Invoke(grabbed, TimeAt(e));
+            return;
+        }
         if (!_dragging)
         {
             return;
@@ -155,6 +250,14 @@ internal sealed class ScrubBar : Canvas
 
     private void OnReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (_grab is { } grabbed)
+        {
+            _grab = null;
+            ReleasePointerCapture(e.Pointer);
+            PointMoved?.Invoke(grabbed, TimeAt(e));
+            e.Handled = true;
+            return;
+        }
         if (!_dragging)
         {
             return;
@@ -200,6 +303,8 @@ internal sealed class LanesView : Grid
     private int _retries;
     private long? _playheadSec;
     private bool _drawn;
+    private InOutPoints _points;
+    private readonly Rectangle _band = new() { Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(0x30, 0xFF, 0xC1, 0x07)), IsHitTestVisible = false, Visibility = Visibility.Collapsed };
 
     public LanesView()
     {
@@ -368,9 +473,41 @@ internal sealed class LanesView : Grid
         Canvas.SetTop(legend, height - RecordingsPanes.LegendHeight);
         _labels.Add(legend);
         _canvas.Children.Add(legend);
+        _canvas.Children.Add(_band);
         _canvas.Children.Add(_head);
         PlaceLabels();
         PlaceHead();
+        PlaceBand();
+    }
+
+    /// <summary>Shows the in and out points as a shaded band over the lanes (an unset one is the day's edge).</summary>
+    public void SetPoints(InOutPoints points)
+    {
+        if (points == _points)
+        {
+            return;
+        }
+        _points = points;
+        PlaceBand();
+    }
+
+    private void PlaceBand()
+    {
+        if (_points.IsEmpty || !_drawn)
+        {
+            _band.Visibility = Visibility.Collapsed;
+            return;
+        }
+        double w = ContentWidth;
+        double x0 = _points.InMs is long a ? w * (a / 1000.0 - _day) / 86400.0 : 0;
+        double x1 = _points.OutMs is long b ? w * (b / 1000.0 - _day) / 86400.0 : w;
+        x0 = Math.Clamp(x0, 0, w);
+        x1 = Math.Clamp(x1, 0, w);
+        _band.Visibility = x1 > x0 ? Visibility.Visible : Visibility.Collapsed;
+        _band.Width = Math.Max(x1 - x0, 1);
+        _band.Height = _canvas.Height;
+        Canvas.SetLeft(_band, x0);
+        Canvas.SetTop(_band, 0);
     }
 
     // A lane's loudness strip: the loudest second of each bucket light, its average dark, from -80 dBFS (nothing)

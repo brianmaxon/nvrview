@@ -151,6 +151,7 @@ internal sealed partial class RecordingsWindow
         var transport = new StackPanel { Spacing = 4 };
         transport.Children.Add(controls);
         transport.Children.Add(more);
+        BuildExport(more, transport);
         Grid.SetRow(transport, 1);
         _playerColumn.Children.Add(transport);
 
@@ -269,6 +270,7 @@ internal sealed partial class RecordingsWindow
             : Browser.Player.Message is { } m ? m
             : Browser.Cameras.Count == 0 ? "Choose cameras to search, then pick an incident to play."
             : "Select an incident to play it, or click a camera's lane.";
+        RefreshExport();
         UpdateStage();
     }
 

@@ -75,8 +75,11 @@ internal sealed partial class RecordingsWindow
         Created++;
         Window = new Window { Title = "Recordings - nvrview" };
         AppWindow = Window.AppWindow;
-        Browser = new RecordingsBrowser(service);
+        var exportSettings = new ExportSettings(ExportSettingsPath);
+        exportSettings.Load();
+        Browser = new RecordingsBrowser(service, exportSettings);
 
+        AttachExport(host);
         BuildHeader(out Grid header);
         BuildSidebar();
         BuildPlayer();
@@ -139,7 +142,14 @@ internal sealed partial class RecordingsWindow
         _progress = _ui.CreateTimer();
         _progress.Interval = TimeSpan.FromMilliseconds(250);
         _progress.IsRepeating = true;
-        _progress.Tick += (_, _) => Service.FlushProgress();
+        _progress.Tick += (_, _) =>
+        {
+            Service.FlushProgress();
+            if (Browser.Export.Busy)
+            {
+                RefreshExport();
+            }
+        };
         _progress.Start();
         // Today's loudness now and then: live seconds arrive with no event (FFI-RECORDINGS.md section 2a, a pull API).
         _loudness = _ui.CreateTimer();
