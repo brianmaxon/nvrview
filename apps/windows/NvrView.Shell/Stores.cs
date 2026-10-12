@@ -187,9 +187,36 @@ public abstract record WindowContent
     }
 }
 
-/// <summary>One window as it is remembered between launches.</summary>
-public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0, double? InsetX = null, double? InsetY = null)
+/// <summary>
+/// A window's picture settings as saved (windows.json "tileViews", docs/UX.md "Fill Tiles"): each camera's zoom
+/// or crop position and own Fill choice, the one changed longest ago first. Compared by value.
+/// </summary>
+public sealed class SavedTileViews(IReadOnlyList<(CameraRef Camera, TileView View)> entries) : IEquatable<SavedTileViews>
 {
+    public IReadOnlyList<(CameraRef Camera, TileView View)> Entries { get; } = entries;
+
+    /// <summary>The window's settings to save.</summary>
+    public static SavedTileViews? Of(TileViews<CameraRef> views) =>
+        views.Count == 0 ? null : new SavedTileViews([.. views.Saved]);
+
+    /// <summary>The settings to restore, with the window's Fill Tiles switch (clamped and bounded).</summary>
+    public static TileViews<CameraRef> Restore(bool fill, SavedTileViews? saved) => new(fill, saved?.Entries ?? []);
+
+    public bool Equals(SavedTileViews? other) => other is not null && Entries.SequenceEqual(other.Entries);
+
+    public override bool Equals(object? obj) => Equals(obj as SavedTileViews);
+
+    public override int GetHashCode() => Entries.Count;
+
+    public override string ToString() => $"{Entries.Count} tile views";
+}
+
+/// <summary>One window as it is remembered between launches.</summary>
+public sealed record SavedWindow(WindowContent Content, Rect Frame, bool FullScreen = false, bool SidebarCollapsed = false, double SidebarWidth = 0, double? InsetX = null, double? InsetY = null, bool Fill = false, SavedTileViews? Views = null)
+{
+    /// <summary>The window's picture settings (Fill Tiles, and per camera the zoom, crop and Fill choice), clamped and bounded.</summary>
+    public TileViews<CameraRef> PictureViews => SavedTileViews.Restore(Fill, Views);
+
     /// <summary>
     /// Where to put a restored window (screen pixels, origin top left): its
     /// saved frame if enough of its title bar (the top 32 pixels, at least 80
@@ -247,6 +274,36 @@ public sealed class WindowStore(string? path)
                 // left out while they sit in the default corner. The macOS app's key.
                 o["insetAnchor"] = new JsonObject { ["x"] = ix, ["y"] = iy };
             }
+            if (w.Fill)
+            {
+                o["fill"] = true;
+            }
+            if (w.Views is { Entries.Count: > 0 } views)
+            {
+                // The macOS app's keys: each camera's zoom or crop (left out while 1x and centered) and own Fill choice.
+                var entries = new JsonArray();
+                foreach ((CameraRef camera, TileView view) in views.Entries)
+                {
+                    var cam = new JsonObject { ["device"] = camera.Device, ["channel"] = camera.Channel };
+                    if (camera.Lens != 0)
+                    {
+                        cam["lens"] = camera.Lens;
+                    }
+                    var e = new JsonObject { ["camera"] = cam };
+                    if (!view.Zoom.IsDefault)
+                    {
+                        e["scale"] = view.Zoom.Scale;
+                        e["x"] = view.Zoom.CenterX;
+                        e["y"] = view.Zoom.CenterY;
+                    }
+                    if (view.Fill is { } f)
+                    {
+                        e["fill"] = f;
+                    }
+                    entries.Add((JsonNode)e);
+                }
+                o["tileViews"] = entries;
+            }
             array.Add((JsonNode)o);
         }
         return array.ToJsonString(JsonFile.Pretty);
@@ -272,7 +329,35 @@ public sealed class WindowStore(string? path)
                 insetX = Math.Clamp(D(a["x"]), 0, 1);
                 insetY = Math.Clamp(D(a["y"]), 0, 1);
             }
-            list.Add(new SavedWindow(content, frame, B(o["fullScreen"]), B(o["sidebarCollapsed"]), double.IsFinite(width) ? width : 0, insetX, insetY));
+            bool fill = B(o["fill"]);
+            TileViews<CameraRef> views = new(fill, ReadTileViews(o["tileViews"]));
+            list.Add(new SavedWindow(content, frame, B(o["fullScreen"]), B(o["sidebarCollapsed"]), double.IsFinite(width) ? width : 0, insetX, insetY,
+                fill, SavedTileViews.Of(views)));
+        }
+        return list;
+    }
+
+    /// <summary>A window's "tileViews": entries that cannot be read are skipped; a member of the wrong type is the default.</summary>
+    private static List<(CameraRef, TileView)> ReadTileViews(JsonNode? node)
+    {
+        var list = new List<(CameraRef, TileView)>();
+        foreach (JsonNode? item in node as JsonArray ?? [])
+        {
+            if (item is not JsonObject e || e["camera"] is not JsonObject c
+                || c["device"] is not JsonValue dv || !dv.TryGetValue(out string? device) || device is null
+                || c["channel"] is not JsonValue cv || !cv.TryGetValue(out int channel))
+            {
+                continue;
+            }
+            int lens = 0;
+            if (c["lens"] is { } ln && (ln is not JsonValue lv || !lv.TryGetValue(out lens)))
+            {
+                continue;
+            }
+            static double Number(JsonNode? n, double fallback) => n is JsonValue v && v.TryGetValue(out double d) ? d : fallback;
+            bool? fill = e["fill"] is JsonValue fv && fv.TryGetValue(out bool b) ? b : null;
+            var zoom = new TileZoom(Number(e["scale"], 1), Number(e["x"], 0.5), Number(e["y"], 0.5));
+            list.Add((new CameraRef(device, channel, lens), new TileView(zoom.Sanitize(), fill)));
         }
         return list;
     }

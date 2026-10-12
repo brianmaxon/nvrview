@@ -23,7 +23,7 @@ extension StageView {
         return TileHeaderTile(
             audio: true, talk: info?.talk(lens: camera.lens) == true, doorbell: info?.doorbell == true,
             panTilt: ptz.panTilt, presets: ptz.presets, lens: ptz.zoomFocus, fisheye: model.isFisheye(camera),
-            picture: model.veil(for: camera) == nil, recording: false, zoomed: isZoomed(path),
+            picture: model.veil(for: camera) == nil, recording: false, zoomed: isZoomed(path), panned: isPanned(path),
             alert: alertActive(camera), listening: model.audible.contains(camera), conversation: call != nil,
             call: where_)
     }
@@ -66,8 +66,10 @@ extension StageView {
             dismissAlert(camera)
         case .conversation:
             if model.calls.call(for: camera.firstLens) == nil { startConversation(camera) } else { endConversation(camera) }
-        case .resetZoom:
+        case .resetZoom, .resetPosition:
             resetZoom(at: path)
+        case .fillTile:
+            setFill(!fills(camera), for: camera)
         case .pop:
             if fixedTile { model.popInCall(camera.firstLens) } else { model.popOutCall(camera.firstLens) }
             return
@@ -137,6 +139,11 @@ extension StageView {
         item.title = entry.label
         MenuKeyHint.apply(entry.macShortcut, to: item)
         switch entry.item {
+        case .fillTile:
+            item.state = fills(camera) ? .on : .off
+            item.toolTip = "Crop this camera's picture to fill its tile; drag the picture to choose the part shown"
+        case .resetPosition:
+            item.toolTip = "Show the middle of the filled picture again"
         case .entrance:
             item.state = model.cameraOptions(camera).entrance ? .on : .off
             item.toolTip = "A person on this camera opens an alert inset when it is not on screen"

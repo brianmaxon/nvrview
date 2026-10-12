@@ -159,9 +159,6 @@ internal sealed unsafe class StageRenderer : IDisposable
     /// <summary>The last error that stopped drawing, if any.</summary>
     public string? LastError { get; private set; }
 
-    /// <summary>Fill Tiles: pictures are cropped to fill their tiles instead of fitted (set by the UI thread).</summary>
-    public volatile bool Fill;
-
     public FocusAnimation? Focus
     {
         get => Volatile.Read(ref _focus);
@@ -420,7 +417,6 @@ internal sealed unsafe class StageRenderer : IDisposable
         int count = tiles.Length;
         double kx = layout.Width > 0 ? dipW / layout.Width : 1, ky = layout.Height > 0 ? dipH / layout.Height : 1;
         FocusAnimation? focus = Focus;
-        bool fillTiles = Fill;
         int focused = -1;
         float progress = 0;
         if (focus is not null)
@@ -450,8 +446,9 @@ internal sealed unsafe class StageRenderer : IDisposable
             var cell = new Rect(c.X * kx, c.Y * ky, c.Width * kx, c.Height * ky);
             // A dewarped view fills its whole cell (the views are laid out for its shape).
             FisheyeChoice? fisheye = pw > 0 && t.Fisheye is { } f && f.Mode.Dewarps() ? f : null;
-            // Filled, the tile's area is the picture's place (the part that overflows is cropped by the zoom rule).
-            bool fill = fillTiles && fisheye is null && pw > 0 && ph > 0;
+            // Filled (the camera's Fill tile choice, else Fill Tiles), the tile's area is the picture's place (the
+            // part that overflows is cropped by the zoom rule, at 1x where the crop was dragged).
+            bool fill = t.WantsFill && fisheye is null && pw > 0 && ph > 0;
             Rect dest = fisheye is null && !fill ? LayoutGeometry.Fit(pw, ph, cell) : cell;
             // The tile's area: a zoomed picture grows over its bars.
             Rect view = cell;

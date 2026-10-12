@@ -1,0 +1,733 @@
+{
+  "about": "Shared vectors for a window's picture settings per camera (docs/UX.md 'Fill Tiles'): read by apps/macos NVRCoreTests (TileViewsTests.swift) and apps/windows NvrView.Tiles.Tests (TileViewsTests.cs) and NvrView.Shell.Tests. 'pan': TileZoom at 1x on a filled picture: 'zoom' and 'result' are [scale, center x, center y] (fractions of the picture), 'drag' is in tile units (the picture follows), 'zoomTo' zooms around the tile's middle instead, 'visible' is the part of the picture shown [x, y, width, height]. 'fill': operations on an empty window ('window' sets the window's Fill Tiles, 'tile' a camera's own choice, 'zoom' a camera's [scale, x, y]), then each camera's effective fill, the choices kept, whether the switch is mixed, and how many cameras are kept. 'saved': windows.json members of one window, and what is read back: the window's fill and the entries, oldest first, as [device, channel, lens, scale, x, y, fill or null].",
+  "limit": 256,
+  "pan": [
+    {
+      "name": "a wide picture filling a square tile: a drag right shows more of its left",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        0.1,
+        0
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.44375,
+        0.5
+      ],
+      "visible": [
+        0.1625,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "dragged far right: stops at the picture's left edge",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        5,
+        0
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.28125,
+        0.5
+      ],
+      "visible": [
+        0.0,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "dragged far left: stops at the picture's right edge",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        -5,
+        0
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.71875,
+        0.5
+      ],
+      "visible": [
+        0.4375,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "across the axis the picture does not overflow nothing moves",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        0,
+        0.3
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.5,
+        0.5
+      ],
+      "visible": [
+        0.21875,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "fitted (letterboxed): nothing to pan at 1x",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": false,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        0.2,
+        0.2
+      ],
+      "canPan": false,
+      "result": [
+        1,
+        0.5,
+        0.5
+      ],
+      "visible": [
+        0.0,
+        0.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "filled, the tile's own shape: nothing hidden, nothing to pan",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        320,
+        180
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        0.2,
+        0.2
+      ],
+      "canPan": false,
+      "result": [
+        1,
+        0.5,
+        0.5
+      ],
+      "visible": [
+        0.0,
+        0.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "name": "a tall picture filling a wide tile pans up and down",
+      "picture": [
+        900,
+        1600
+      ],
+      "tile": [
+        800,
+        450
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.5,
+        0.5
+      ],
+      "drag": [
+        0,
+        -0.5
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.5,
+        0.658203125
+      ],
+      "visible": [
+        0.0,
+        0.5,
+        1.0,
+        0.31640625
+      ]
+    },
+    {
+      "name": "a saved off-center crop is clamped to the picture",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.05,
+        0.9
+      ],
+      "drag": [
+        0,
+        0
+      ],
+      "canPan": true,
+      "result": [
+        1,
+        0.28125,
+        0.5
+      ],
+      "visible": [
+        0.0,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "zooming back out to 1x keeps the crop where the zoom left it",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        2,
+        0.3,
+        0.5
+      ],
+      "zoomTo": 1,
+      "canPan": true,
+      "result": [
+        1,
+        0.3,
+        0.5
+      ],
+      "visible": [
+        0.01875,
+        0.0,
+        0.5625,
+        1.0
+      ]
+    },
+    {
+      "name": "a crop moved at 1x is where zooming in starts",
+      "picture": [
+        1600,
+        900
+      ],
+      "tile": [
+        300,
+        300
+      ],
+      "fill": true,
+      "zoom": [
+        1,
+        0.3,
+        0.5
+      ],
+      "zoomTo": 2,
+      "canPan": true,
+      "result": [
+        2,
+        0.3,
+        0.5
+      ],
+      "visible": [
+        0.159375,
+        0.25,
+        0.28125,
+        0.5
+      ]
+    }
+  ],
+  "fill": [
+    {
+      "name": "one tile filled in a fitted window",
+      "ops": [
+        [
+          "tile",
+          "a",
+          true
+        ]
+      ],
+      "fills": {
+        "a": true,
+        "b": false
+      },
+      "choices": {
+        "a": true
+      },
+      "mixed": true,
+      "count": 1
+    },
+    {
+      "name": "the window's switch clears the tiles' own choices",
+      "ops": [
+        [
+          "tile",
+          "a",
+          true
+        ],
+        [
+          "tile",
+          "b",
+          false
+        ],
+        [
+          "window",
+          true
+        ]
+      ],
+      "fills": {
+        "a": true,
+        "b": true,
+        "c": true
+      },
+      "choices": {},
+      "mixed": false,
+      "count": 0
+    },
+    {
+      "name": "one tile fitted in a filled window",
+      "ops": [
+        [
+          "window",
+          true
+        ],
+        [
+          "tile",
+          "b",
+          false
+        ]
+      ],
+      "fills": {
+        "a": true,
+        "b": false
+      },
+      "choices": {
+        "b": false
+      },
+      "mixed": true,
+      "count": 1
+    },
+    {
+      "name": "a choice equal to the window's is not kept",
+      "ops": [
+        [
+          "window",
+          true
+        ],
+        [
+          "tile",
+          "a",
+          true
+        ]
+      ],
+      "fills": {
+        "a": true
+      },
+      "choices": {},
+      "mixed": false,
+      "count": 0
+    },
+    {
+      "name": "choosing back the window's way forgets the choice",
+      "ops": [
+        [
+          "tile",
+          "a",
+          true
+        ],
+        [
+          "tile",
+          "a",
+          false
+        ]
+      ],
+      "fills": {
+        "a": false
+      },
+      "choices": {},
+      "mixed": false,
+      "count": 0
+    },
+    {
+      "name": "the switch keeps the cameras' positions",
+      "ops": [
+        [
+          "zoom",
+          "a",
+          1,
+          0.3,
+          0.5
+        ],
+        [
+          "tile",
+          "a",
+          true
+        ],
+        [
+          "window",
+          true
+        ],
+        [
+          "window",
+          false
+        ]
+      ],
+      "fills": {
+        "a": false
+      },
+      "choices": {},
+      "mixed": false,
+      "count": 1,
+      "zooms": {
+        "a": [
+          1,
+          0.3,
+          0.5
+        ]
+      }
+    },
+    {
+      "name": "back to 1x and centered with no choice forgets the camera",
+      "ops": [
+        [
+          "zoom",
+          "a",
+          2,
+          0.3,
+          0.5
+        ],
+        [
+          "zoom",
+          "a",
+          1,
+          0.5,
+          0.5
+        ]
+      ],
+      "fills": {
+        "a": false
+      },
+      "choices": {},
+      "mixed": false,
+      "count": 0
+    }
+  ],
+  "saved": [
+    {
+      "name": "a filled window with a zoom and a fitted tile",
+      "window": {
+        "fill": true,
+        "tileViews": [
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            },
+            "scale": 2,
+            "x": 0.25,
+            "y": 0.75
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 3,
+              "lens": 1
+            },
+            "fill": false
+          }
+        ]
+      },
+      "fill": true,
+      "entries": [
+        [
+          "nvr-a",
+          2,
+          0,
+          2,
+          0.25,
+          0.75,
+          null
+        ],
+        [
+          "nvr-a",
+          3,
+          1,
+          1,
+          0.5,
+          0.5,
+          false
+        ]
+      ]
+    },
+    {
+      "name": "values out of range are clamped",
+      "window": {
+        "tileViews": [
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 20,
+            "x": -1,
+            "y": 7
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "scale": 0.5,
+            "x": 0.2
+          }
+        ]
+      },
+      "fill": false,
+      "entries": [
+        [
+          "nvr-a",
+          0,
+          0,
+          8,
+          0,
+          1,
+          null
+        ],
+        [
+          "nvr-a",
+          1,
+          0,
+          1,
+          0.2,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "damaged entries are skipped or read as the default",
+      "window": {
+        "fill": true,
+        "tileViews": [
+          {
+            "scale": 2
+          },
+          {
+            "camera": "nvr-a",
+            "scale": 2
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": "big",
+            "x": 0.1
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "fill": "yes",
+            "scale": 3
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 2
+            }
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 3
+            },
+            "fill": true
+          },
+          7
+        ]
+      },
+      "fill": true,
+      "entries": [
+        [
+          "nvr-a",
+          0,
+          0,
+          1,
+          0.1,
+          0.5,
+          null
+        ],
+        [
+          "nvr-a",
+          1,
+          0,
+          3,
+          0.5,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "a camera listed twice: the later entry, in its place",
+      "window": {
+        "tileViews": [
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 2
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 1
+            },
+            "fill": true
+          },
+          {
+            "camera": {
+              "device": "nvr-a",
+              "channel": 0
+            },
+            "scale": 3
+          }
+        ]
+      },
+      "fill": false,
+      "entries": [
+        [
+          "nvr-a",
+          1,
+          0,
+          1,
+          0.5,
+          0.5,
+          true
+        ],
+        [
+          "nvr-a",
+          0,
+          0,
+          3,
+          0.5,
+          0.5,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "members of the wrong type are ignored",
+      "window": {
+        "fill": "yes",
+        "tileViews": {
+          "camera": {
+            "device": "nvr-a",
+            "channel": 0
+          }
+        }
+      },
+      "fill": false,
+      "entries": []
+    },
+    {
+      "name": "an old file without them",
+      "window": {},
+      "fill": false,
+      "entries": []
+    }
+  ]
+}

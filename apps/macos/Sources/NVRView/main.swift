@@ -348,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             reopened = true
             controller.restoreSidebar(collapsed: w.sidebarCollapsed)
             controller.restoreInsetAnchor(w.insetAnchor)
+            controller.restoreViews(w.views)
             if w.fullScreen, options.selfTestSeconds == nil { controller.window?.toggleFullScreen(nil) }
         }
         return reopened

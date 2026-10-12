@@ -545,6 +545,13 @@ final class TileChromeView: NSView {
     /// Whether the header is on screen now (for the self-test).
     var isHeaderShown: Bool { header.alphaValue > 0.01 }
 
+    /// The header's area in the superview's coordinates while it is shown
+    /// (a drag there swaps the tile), else nil.
+    var shownHeaderFrame: CGRect? {
+        guard header.alphaValue > 0.05, !header.isHidden, !isHidden else { return nil }
+        return convert(header.frame, to: superview)
+    }
+
     /// Fades the selection outline with the rest of the chrome (it stays
     /// while editing the layout).
     func setOutlineShown(_ shown: Bool) {

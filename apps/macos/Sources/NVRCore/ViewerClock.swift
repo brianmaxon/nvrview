@@ -102,11 +102,15 @@ public struct ZoomEasing<Key: Hashable & Sendable>: Sendable {
         public var unit: CGPoint
         /// The tile it was asked in, if any (its shape is used).
         public var tile: NodePath?
+        /// Easing back to 1x also brings the center back to the picture's
+        /// middle (Reset Zoom; a filled picture's crop recenters too).
+        public var recenter: Bool
 
-        public init(scale: Double, unit: CGPoint, tile: NodePath? = nil) {
+        public init(scale: Double, unit: CGPoint, tile: NodePath? = nil, recenter: Bool = false) {
             self.scale = scale
             self.unit = unit
             self.tile = tile
+            self.recenter = recenter
         }
     }
 
@@ -149,10 +153,16 @@ public struct ZoomEasing<Key: Hashable & Sendable>: Sendable {
             let z = current(key)
             let f = base(key, t)
             let scale = TileZoom.eased(from: z.scale, to: t.scale, dt: dt, timeConstant: timeConstant)
-            let next =
-                scale <= 1.0001
-                ? TileZoom.none
-                : z.zoomed(to: scale, keeping: z.picturePoint(atUnit: t.unit, in: f), atUnit: t.unit, in: f)
+            let next: TileZoom
+            if t.recenter, t.scale <= 1 {
+                // The center goes to the middle as the scale goes to 1 (in
+                // log space, like the scale), ending exactly unzoomed.
+                let k = z.scale > 1.0001 && scale > 1.0001 ? log(scale) / log(z.scale) : 0
+                let c = CGPoint(x: 0.5 + (z.center.x - 0.5) * k, y: 0.5 + (z.center.y - 0.5) * k)
+                next = k == 0 ? .none : TileZoom(scale: scale, center: c).clamped(in: f)
+            } else {
+                next = z.zoomed(to: scale, keeping: z.picturePoint(atUnit: t.unit, in: f), atUnit: t.unit, in: f)
+            }
             out.append((key, next))
             if scale == t.scale || (t.scale <= 1 && !next.isZoomed) { targets[key] = nil }
         }

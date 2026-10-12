@@ -14,6 +14,10 @@
 // - mouse wheel (or a touchpad pinch, which arrives as Ctrl+wheel) zooms
 //   around the pointer and dragging pans a zoomed tile: the picture grows
 //   over the tile's bars until it fills the tile, then crops (TileZoom);
+//   a drag on a filled picture with part hidden moves its crop, and a drag
+//   on a tile's shown header swaps it (docs/UX.md "Fill Tiles"); the zoom,
+//   crop and Fill choice are kept per camera in WindowState.Views and saved
+//   with the window;
 // - the tile features: the corner indicators and sound badges, the alert strip
 //   and its Dismiss (Enter), the Quality menu (kept in the layout leaf), M to
 //   listen, and, in full screen, the chrome and the pointer hiding 3 s after
@@ -55,8 +59,15 @@ internal sealed class WindowState(WindowContent content, string name, LayoutNode
 
     public bool Editing { get; set; }
 
-    /// <summary>Fill Tiles (docs/UX.md "Digital zoom"): pictures are cropped to fill their tiles instead of fitted. Per window, not kept.</summary>
-    public bool Fill { get; set; }
+    /// <summary>
+    /// The window's Fill Tiles switch, and per camera its digital zoom (at 1x, its filled crop's position) and
+    /// own Fill choice, in picture coordinates (docs/UX.md "Fill Tiles"). Keyed by camera, so tiles of the same
+    /// camera in one window share it. Saved with the window.
+    /// </summary>
+    public TileViews<CameraRef> Views { get; set; } = new();
+
+    /// <summary>Fill Tiles: tiles without a choice of their own crop their pictures to fill instead of fitting.</summary>
+    public bool Fill => Views.Fill;
 }
 
 internal sealed partial class StageView : UserControl
@@ -228,6 +239,9 @@ internal sealed partial class StageView : UserControl
     /// <summary>Selection, focus, or editing changed (the edit bar follows).</summary>
     public event Action? StateChanged;
 
+    /// <summary>A zoom, a crop or a Fill choice changed (the window saves its record).</summary>
+    public event Action? ViewsChanged;
+
     /// <summary>
     /// Called while a tile's context menu is built, after the tile's own
     /// entries (Listen, Focus, Reset zoom) and before the layout entries, so
@@ -286,13 +300,9 @@ internal sealed partial class StageView : UserControl
             }
             var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality) { FisheyeSetting = fisheye };
             t.Shared = leaf.Camera is { } c ? _viewer.Leases.Tile(c) : null;
-            // The zoom follows the camera through layout changes (docs/UX.md "Digital zoom").
-            if (old.FirstOrDefault(o => o.CameraOrNone is not null && o.CameraOrNone == leaf.Camera) is { } before)
-            {
-                t.Zoom = before.Zoom;
-                t.CenterX = before.CenterX;
-                t.CenterY = before.CenterY;
-            }
+            // The zoom, crop and Fill choice follow the camera through layout changes (docs/UX.md "Fill Tiles").
+            PublishView(t);
+            t.ZoomChanged = OnTileZoomChanged;
             PublishFisheye(t);
             next[i] = t;
             _viewer.UpdateDemand(t);
@@ -328,7 +338,6 @@ internal sealed partial class StageView : UserControl
         }
         if (Renderer is not null)
         {
-            Renderer.Fill = State.Fill;
             Renderer.Layout = new StageLayout(_tiles, cells, w, h);
         }
         PlaceOutlines();
@@ -569,12 +578,79 @@ internal sealed partial class StageView : UserControl
     public static void ZoomAround(StageTile t, double fx, double fy, double factor) =>
         t.DigitalZoom = t.DigitalZoom.ZoomedBy(factor, fx, fy, t.ZoomBase);
 
-    public static void ResetZoom(StageTile t)
+    /// <summary>Back to 1x and, for a filled picture, its crop back to the middle (Reset zoom, Reset position, 0).</summary>
+    public static void ResetZoom(StageTile t) => t.DigitalZoom = TileZoom.None;
+
+    /// <summary>Puts the window's zoom, crop and Fill choice for the tile's camera on the tile (what the render thread reads).</summary>
+    private void PublishView(StageTile t)
     {
-        t.Zoom = 1;
-        t.CenterX = 0.5f;
-        t.CenterY = 0.5f;
+        if (t.CameraOrNone is { } c)
+        {
+            t.LoadZoom(State.Views.Zoom(c));
+            t.WantsFill = State.Views.Fills(c);
+        }
     }
+
+    // A tile's zoom or crop changed (wheel, pinch, drag, reset): kept for its camera, shared with the
+    // window's other tiles of that camera, and saved.
+    private void OnTileZoomChanged(StageTile t)
+    {
+        if (t.CameraOrNone is not { } c)
+        {
+            return;
+        }
+        TileZoom z = t.DigitalZoom;
+        if (State.Views.Zoom(c) == z)
+        {
+            return;
+        }
+        State.Views.SetZoom(c, z);
+        foreach (StageTile o in _tiles)
+        {
+            if (o != t && o.CameraOrNone == c)
+            {
+                o.LoadZoom(z);
+            }
+        }
+        ViewsChanged?.Invoke();
+    }
+
+    /// <summary>Whether the tile's camera fills (its own Fill tile choice, else the window's Fill Tiles).</summary>
+    public bool Fills(StageTile t) => t.CameraOrNone is { } c ? State.Views.Fills(c) : State.Fill;
+
+    /// <summary>Fill tile (the tile's menu): this camera's tiles in the window fill, or fit.</summary>
+    public void SetTileFill(StageTile t, bool fill)
+    {
+        if (t.CameraOrNone is not { } c || State.Views.Fills(c) == fill)
+        {
+            return;
+        }
+        State.Views.SetFill(c, fill);
+        FillChanged();
+    }
+
+    private void FillChanged()
+    {
+        foreach (StageTile t in _tiles)
+        {
+            PublishView(t);
+        }
+        StateChanged?.Invoke();
+        ViewsChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Whether a plain drag on the tile's picture moves the picture (zoomed in, or a filled picture with part
+    /// hidden) instead of swapping the tile. A dewarped fisheye view turns instead.
+    /// </summary>
+    public static bool PicturePans(StageTile t) =>
+        !(t.Fisheye is { } fe && fe.Mode.Dewarps()) && t.PictureWidth > 0 && t.PictureHeight > 0 && t.ViewWidth > 0 && t.ViewHeight > 0
+        && t.DigitalZoom.CanPan(t.ZoomBase);
+
+    /// <summary>Whether the point is on the tile's shown hover header, where a drag swaps the tile.</summary>
+    private bool OnShownHeader(StageTile t, Point p) =>
+        ChromeFor(t) is { HeaderShown: true }
+        && p.X >= t.X && p.X < t.X + t.Width && p.Y >= t.Y && p.Y < t.Y + Math.Min(TileChrome.HeaderHeight, t.Height);
 
     // ---- pointer ----
 
@@ -605,9 +681,15 @@ internal sealed partial class StageView : UserControl
 
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
-        PointerPoint pp = e.GetCurrentPoint(this);
-        Point p = pp.Position;
+        Point p = e.GetCurrentPoint(this).Position;
         Interact();
+        PointerMovedTo(p);
+        UpdatePointerShape(p);
+    }
+
+    /// <summary>The pointer moved to <paramref name="p"/> (the pointer handler, and the self-test's simulated drags).</summary>
+    internal void PointerMovedTo(Point p)
+    {
         switch (_gesture)
         {
             case GestureKind.Divider when _frames.Dividers.FirstOrDefault(d => d.Path == _gesturePath) is { Region.Width: > 0 } d:
@@ -639,13 +721,20 @@ internal sealed partial class StageView : UserControl
                 drag.DigitalZoom = _panFrom.Panned(dx, dy, drag.ZoomBase);
                 break;
         }
+    }
+
+    // What the pointer is over when nothing is dragged: a divider (resize), a picture a drag pans (a hand,
+    // below the header), or anything else (the arrow).
+    private void UpdatePointerShape(Point p)
+    {
         _hovered = TileAt(p);
         if (_gesture == GestureKind.None)
         {
             DividerFrame? over = CanEditLayout ? _frames.DividerAt(p.X, p.Y, 8) : null;
+            bool pans = over is null && !State.Editing && _hovered is { } h && PicturePans(h) && !OnShownHeader(h, p);
             ProtectedCursor = over is { } dv
                 ? InputSystemCursor.Create(dv.Axis == SplitAxis.Row ? InputSystemCursorShape.SizeWestEast : InputSystemCursorShape.SizeNorthSouth)
-                : null;
+                : pans ? InputSystemCursor.Create(InputSystemCursorShape.Hand) : null;
         }
         UpdateHover();
     }
@@ -665,29 +754,43 @@ internal sealed partial class StageView : UserControl
         {
             return;
         }
-        Point p = pp.Position;
+        if (PointerPressedAt(pp.Position) != GestureKind.None)
+        {
+            _ = CapturePointer(e.Pointer);
+        }
+    }
+
+    /// <summary>
+    /// The left button went down at <paramref name="p"/> (the pointer handler, and the self-test's simulated
+    /// drags): which gesture a drag from there makes. On a tile's shown header, or a picture with nothing
+    /// hidden, or while editing the layout, the tile is dragged to swap; on a zoomed or filled-and-cropped
+    /// picture, the picture pans; in a dewarped fisheye view, the view turns.
+    /// </summary>
+    private GestureKind PointerPressedAt(Point p)
+    {
         _gestureFrom = p;
         _dragging = false;
+        _gesture = GestureKind.None;
         if (CanEditLayout && _frames.DividerAt(p.X, p.Y, 8) is { } d)
         {
             _gesture = GestureKind.Divider;
             _gesturePath = d.Path;
-            _ = CapturePointer(e.Pointer);
-            return;
+            return _gesture;
         }
         if (TileAt(p) is not { } t)
         {
-            return;
+            return _gesture;
         }
         Select(t.Path);
-        if (!State.Editing && t.Fisheye is { } fe && fe.Mode.Dewarps())
+        bool header = OnShownHeader(t, p);
+        if (!State.Editing && !header && t.Fisheye is { } fe && fe.Mode.Dewarps())
         {
             _gesture = GestureKind.Fisheye;
             _panTile = t;
             _fisheyeFrom = fe.Aim;
             _fisheyeZoom.Cancel(t);
         }
-        else if (t.Zoom > 1 && !State.Editing)
+        else if (!State.Editing && !header && PicturePans(t))
         {
             _gesture = GestureKind.Pan;
             _panTile = t;
@@ -698,24 +801,64 @@ internal sealed partial class StageView : UserControl
             _gesture = GestureKind.TileDrag;
             _gesturePath = t.Path;
         }
-        else
+        return _gesture;
+    }
+
+    /// <summary>What a plain drag starting at <paramref name="p"/> would do (self-test): "pan", "turn", "swap", or null.</summary>
+    internal string? DragKind(Point p)
+    {
+        if (TileAt(p) is not { } t)
+        {
+            return null;
+        }
+        bool header = OnShownHeader(t, p);
+        return !State.Editing && !header && t.Fisheye is { } fe && fe.Mode.Dewarps() ? "turn"
+            : !State.Editing && !header && PicturePans(t) ? "pan"
+            : CanEditLayout ? "swap" : null;
+    }
+
+    /// <summary>Drags from <paramref name="from"/> to <paramref name="to"/> through the pointer handlers' own steps (self-test).</summary>
+    internal void SimulateDrag(Point from, Point to, int steps = 4)
+    {
+        if (PointerPressedAt(from) == GestureKind.None)
         {
             return;
         }
-        _ = CapturePointer(e.Pointer);
+        int n = Math.Max(steps, 1);
+        for (int i = 1; i <= n; i++)
+        {
+            double k = i / (double)n;
+            PointerMovedTo(new Point(from.X + (to.X - from.X) * k, from.Y + (to.Y - from.Y) * k));
+        }
+        PointerReleasedAt(to);
     }
 
     protected override void OnPointerReleased(PointerRoutedEventArgs e)
     {
         Point p = e.GetCurrentPoint(this).Position;
+        // Read before releasing: losing capture resets the gesture state.
+        GestureKind gesture = _gesture;
+        bool dragged = _dragging;
+        StageTile? turned = _panTile;
+        NodePath dragFrom = _gesturePath;
+        _gesture = GestureKind.None;
+        ReleasePointerCapture(e.Pointer);
+        _gesture = gesture;
+        _dragging = dragged;
+        _panTile = turned;
+        _gesturePath = dragFrom;
+        PointerReleasedAt(p);
+    }
+
+    /// <summary>The left button went up at <paramref name="p"/>: the gesture ends (the pointer handler, and the self-test).</summary>
+    private void PointerReleasedAt(Point p)
+    {
         GestureKind gesture = _gesture;
         StageTile? turned = _panTile;
-        // Read before releasing: losing capture resets the gesture state.
         bool dragged = _dragging;
         NodePath dragFrom = _gesturePath;
         _gesture = GestureKind.None;
         _panTile = null;
-        ReleasePointerCapture(e.Pointer);
         switch (gesture)
         {
             case GestureKind.Fisheye when turned is not null:
@@ -970,6 +1113,14 @@ internal sealed partial class StageView : UserControl
             ToolTipService.SetToolTip(unmute, "When this camera rings, unmute it even if you are not listening");
             menu.Items.Add(unmute);
             Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
+            if (t.DigitalZoom.IsPanned && Fills(t) && !(t.Fisheye is { } dewarp && dewarp.Mode.Dewarps()))
+            {
+                Item(menu.Items, "Reset position", () => ResetZoom(t));
+            }
+            var fill = new ToggleMenuFlyoutItem { Text = "Fill tile", IsChecked = Fills(t) };
+            fill.Click += (_, _) => SetTileFill(t, fill.IsChecked);
+            ToolTipService.SetToolTip(fill, "Crop this camera's picture to fill its tile; drag the picture to choose the part shown");
+            menu.Items.Add(fill);
             menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
             if (_viewer.IsFisheye(camera))
             {
@@ -1396,16 +1547,18 @@ internal sealed partial class StageView : UserControl
         return n >= 0 ? _tiles[n] : null;
     }
 
-    /// <summary>Fill Tiles on or off for this window: pictures crop to fill their tiles, or fit with bars.</summary>
+    /// <summary>
+    /// Fill Tiles on or off for this window: pictures crop to fill their tiles, or fit with bars. Every tile
+    /// follows (the tiles' own Fill tile choices are cleared).
+    /// </summary>
     public void SetFill(bool fill)
     {
-        if (State.Fill == fill)
+        if (State.Fill == fill && !State.Views.Mixed)
         {
             return;
         }
-        State.Fill = fill;
-        Relayout();
-        StateChanged?.Invoke();
+        State.Views.SetWindowFill(fill);
+        FillChanged();
     }
 
     /// <summary>Whether the tiles show their diagnostics line.</summary>
@@ -1652,6 +1805,14 @@ internal sealed partial class StageView : UserControl
             _ => "?",
         };
         return $"{t.PictureWidth}x{t.PictureHeight} {s.ShownTier} · {kind} decode · {s.ReceivedRate:0.0} fps in";
+    }
+
+    /// <summary>Shows a tile's hover header as the pointer over it does (self-test).</summary>
+    internal void Hover(StageTile? t)
+    {
+        _hovered = t;
+        Interact();
+        UpdateHover();
     }
 
     private void UpdateHover()

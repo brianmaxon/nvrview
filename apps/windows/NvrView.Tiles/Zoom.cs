@@ -17,6 +17,12 @@
 // tile (0 .. 1), and the source the matching part of the picture, (d - u0) / L.
 // So zooming in grows the picture over the bars until it fills each axis,
 // then crops; at 1x the tile looks as it does unzoomed.
+//
+// At 1x a filled picture (Fill Tiles) is longer than the tile on one axis, so
+// the same rule places its crop: c is the crop's center, dragging moves it up
+// to the picture's edges (CanPan), and an unpanned crop is the centered one
+// (docs/UX.md "Fill Tiles"). On an axis the picture does not overflow, c is
+// always 0.5.
 
 namespace NvrView.Tiles;
 
@@ -56,6 +62,35 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
 
     public bool IsZoomed => Scale > 1.0001;
 
+    /// <summary>The center is the picture's middle (an unmoved crop).</summary>
+    public bool IsCentered => Math.Abs(CenterX - 0.5) < 1e-6 && Math.Abs(CenterY - 0.5) < 1e-6;
+
+    /// <summary>1x and centered: nothing to remember.</summary>
+    public bool IsDefault => !IsZoomed && IsCentered;
+
+    /// <summary>Moved at 1x: a filled picture's crop dragged off center.</summary>
+    public bool IsPanned => !IsZoomed && !IsCentered;
+
+    /// <summary>Whether a drag moves the picture: it is longer than the tile on some axis (zoomed in, or filled at 1x and of another shape).</summary>
+    public bool CanPan(ZoomBase b)
+    {
+        if (b.Width <= 0 || b.Height <= 0)
+        {
+            return false;
+        }
+        double s = Math.Clamp(Scale, 1, MaxScale);
+        return s * b.Width > 1.0001 || s * b.Height > 1.0001;
+    }
+
+    /// <summary>A value read from a file: the scale to 1..MaxScale, the center to the picture (0..1); what is not a number becomes the default.</summary>
+    public TileZoom Sanitize()
+    {
+        // A method, not a property: a record prints its properties, and this one is a TileZoom too.
+        double s = double.IsFinite(Scale) ? Math.Clamp(Scale, 1, MaxScale) : 1;
+        static double Unit(double v) => double.IsFinite(v) ? Math.Clamp(v, 0, 1) : 0.5;
+        return new(s <= 1.0001 ? 1 : s, Unit(CenterX), Unit(CenterY));
+    }
+
     // One axis: where the picture starts (tile units) and how long it is (tiles).
     private static (double Start, double Length) Span(double s, double b, double c)
     {
@@ -65,6 +100,13 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
             return ((1 - length) / 2, length);
         }
         return (Math.Min(Math.Max(0.5 - c * length, 1 - length), 0), length);
+    }
+
+    // One axis's center clamped: 0.5 where the picture does not overflow.
+    private static double ClampedCenter(double s, double b, double c)
+    {
+        (double start, double length) = Span(s, b, c);
+        return length > 1 ? (0.5 - start) / length : 0.5;
     }
 
     private ((double Start, double Length) X, (double Start, double Length) Y) Spans(ZoomBase b)
@@ -94,16 +136,22 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
         return new((d.X - x.Start) / x.Length, (d.Y - y.Start) / y.Length, d.Width / x.Length, d.Height / y.Length);
     }
 
-    /// <summary>The scale clamped to 1..MaxScale and the center to where the picture covers the tile (centered on an axis it does not fill).</summary>
+    /// <summary>
+    /// The scale clamped to 1..MaxScale and the center to where the picture covers the tile (centered on an
+    /// axis it does not fill). At 1x a filled picture keeps its crop's center on the axis it overflows.
+    /// </summary>
     public TileZoom Clamped(ZoomBase b)
     {
-        double s = Math.Clamp(Scale, 1, MaxScale);
-        if (s <= 1.0001 || b.Width <= 0 || b.Height <= 0)
+        double s = Math.Clamp(double.IsFinite(Scale) ? Scale : 1, 1, MaxScale);
+        if (s <= 1.0001)
+        {
+            s = 1;
+        }
+        if (b.Width <= 0 || b.Height <= 0 || !double.IsFinite(CenterX) || !double.IsFinite(CenterY))
         {
             return None;
         }
-        var (x, y) = (this with { Scale = s }).Spans(b);
-        return new(s, (0.5 - x.Start) / x.Length, (0.5 - y.Start) / y.Length);
+        return new(s, ClampedCenter(s, b.Width, CenterX), ClampedCenter(s, b.Height, CenterY));
     }
 
     /// <summary>The picture point (fraction of the full picture) under tile unit point (ux, uy); outside 0..1 over a bar.</summary>
@@ -120,12 +168,16 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
     /// <summary>
     /// Zoomed to <paramref name="newScale"/>, keeping picture point (qx, qy) under tile unit point
     /// (ux, uy) (zooming around the pointer), then clamped: on an axis the picture does not fill yet
-    /// it stays centered instead.
+    /// it stays centered instead. Back at 1x a filled picture's crop stays where the zoom left it.
     /// </summary>
     public TileZoom ZoomedTo(double newScale, double qx, double qy, double ux, double uy, ZoomBase b)
     {
         double s = Math.Clamp(newScale, 1, MaxScale);
-        if (s <= 1.0001 || b.Width <= 0 || b.Height <= 0)
+        if (s <= 1.0001)
+        {
+            s = 1;
+        }
+        if (b.Width <= 0 || b.Height <= 0)
         {
             return None;
         }
@@ -140,10 +192,13 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
         return ZoomedTo(Scale * factor, qx, qy, ux, uy, b);
     }
 
-    /// <summary>Panned so the picture follows a drag of (dx, dy) tile units (a drag to the right moves the picture right), clamped.</summary>
+    /// <summary>
+    /// Panned so the picture follows a drag of (dx, dy) tile units (a drag to the right moves the picture
+    /// right), clamped. Also at 1x, where a filled picture's crop moves.
+    /// </summary>
     public TileZoom Panned(double dx, double dy, ZoomBase b)
     {
-        if (!IsZoomed || b.Width <= 0 || b.Height <= 0)
+        if (!CanPan(b))
         {
             return this;
         }

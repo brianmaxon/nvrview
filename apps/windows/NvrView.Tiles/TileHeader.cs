@@ -37,6 +37,10 @@ public enum TileHeaderItem
     SaveOriginalFisheye,
     RecordMain,
     RecordSub,
+    /// <summary>Menus only: brings a filled picture's moved crop back to the middle.</summary>
+    ResetPosition,
+    /// <summary>The tile's own Fill choice (a checked item).</summary>
+    FillTile,
 }
 
 public static class TileHeaderItems
@@ -46,7 +50,7 @@ public static class TileHeaderItems
         "recording-pill", "title", "dismiss-alert", "speaker", "record", "save-picture", "conversation",
         "pan-tilt", "presets", "lens", "reset-zoom", "quality", "fisheye", "more", "pop", "allow-talk-back",
         "entrance", "calls-open-in", "save-picture-as", "save-zoomed-area", "save-original-fisheye",
-        "record-main", "record-sub",
+        "record-main", "record-sub", "reset-position", "fill-tile",
     ];
 
     /// <summary>The item's stable identifier ("save-picture").</summary>
@@ -93,6 +97,8 @@ public sealed record TileHeaderTile
     public bool Recording { get; init; }
     /// <summary>Zoomed past 1x, or a moved virtual camera.</summary>
     public bool Zoomed { get; init; }
+    /// <summary>At 1x, a filled picture's crop moved off center.</summary>
+    public bool Panned { get; init; }
     /// <summary>An active alert on the tile.</summary>
     public bool Alert { get; init; }
     /// <summary>The tile is audible (Speaker says Stop Listening).</summary>
@@ -223,6 +229,14 @@ public sealed class TileHeaderLayout
         if (tile.Fisheye)
         {
             m.Add(new(TileHeaderItem.Fisheye, "Fisheye View"));
+        }
+        if (tile.Panned && !tile.Zoomed)
+        {
+            m.Add(new(TileHeaderItem.ResetPosition, "Reset Position", "0", "0"));
+        }
+        if (!inWindow)
+        {
+            m.Add(new(TileHeaderItem.FillTile, "Fill Tile"));
         }
         if (tile.Call != TileHeaderCall.None)
         {
