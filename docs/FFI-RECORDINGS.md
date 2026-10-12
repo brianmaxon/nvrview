@@ -788,8 +788,9 @@ generation.
 **Synchronization (`sync`).** `wait` (default): while any camera is
 buffering at the clock's position, the clock waits for it, up to 2 s; then
 it goes on and the late camera catches up at its next keyframe
-(`playback_camera` `late`). `free`: the clock never waits; late cameras
-drop to their next keyframe. A camera with no recording at the position
+(`playback_camera` `late`), its play restarted alone at the position if it
+stays behind (the C10 clarifications, items 7 and 15). `free`: the clock
+never waits; late cameras drop to their next keyframe. A camera with no recording at the position
 gets `NV_ACTION_CLEAR` and `no_recording`, and starts again by itself where
 its recording resumes.
 
@@ -1756,7 +1757,14 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
    position per session (protocol.md, "Live view and plays on one
    session"), so the plays of one device are started as a group at one seek
    time: running ones stopped (7), every camera seeked to the same time
-   (123), about 0.5 s later all played (5). A seek, a rate change, a tier
+   (123), about 0.5 s later all played (5). For an exact seek (and the
+   rate changes and restarts after one) that time is the earliest target
+   less a lead of 2 s, kept inside the files that hold the targets: a
+   device may start a play at a keyframe up to a few seconds after the
+   seek time (protocol.md, "Rates, keyframes, and how a play ends"), and
+   the lead gives each camera a picture at or before its target; the
+   pictures before it are decoded and never shown. A keyframe seek has no
+   lead (it shows the keyframe the device starts at). A seek, a rate change, a tier
    switch, an offset change, and adding or removing a camera restart the
    device's group that way. Two cases start a group of one camera while the
    others run: a camera whose recording resumes after a gap (at the start
@@ -1800,9 +1808,13 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
    picture moves on to the position quickly). A camera with nothing at the
    position gets a generation that is shown at once with
    `NV_ACTION_CLEAR`.
-7. **Waiting.** With `wait` the clock holds for a camera that has nothing
-   at the position: up to 6 s after its play started (the first-media
-   limit), up to 2 s while playing (then `late`). A play that delivers
+7. **Waiting.** With `wait` the clock holds for a camera that is not
+   ready at the position: after a start (a seek, a rate change, a group
+   restart) until it holds media there and has decoded up to its target,
+   up to 6 s after its play started (the first-media limit); while
+   playing, until it holds media there again, up to 2 s (then `late`, and
+   the clock goes on). So cameras that start or decode at different
+   speeds after a seek all begin at the same moment. A play that delivers
    nothing within the first-media limit is stopped and its camera shows
    `no_recording`; it is not started again before its next file or a seek.
    With `free` the clock never holds. A camera without recording at the
@@ -1815,8 +1827,10 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
    margin.
 9. **Buffers.** Each camera holds at most 20 s of media ahead (times the
    rate above 1x) or 16 MB; then its play is stopped, and started again from
-   the newest second held once half has been played; pictures already held
-   are skipped, so the generation goes on without a gap or a repeat.
+   the newest picture held, less the 2 s lead (a picture's recorded time is
+   known to within a second, and the device may start at a later keyframe),
+   once half has been played; pictures already held are skipped, so the
+   generation goes on without a gap or a repeat.
 10. **Offsets** are nudges of a few seconds at most: a device's group is
     seeked to the earliest time any of its cameras needs (position plus
     offset), and cameras with larger offsets drop what comes before theirs.
@@ -1838,6 +1852,37 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
     `failed` (`session_closed`), and the app closes the playback. A camera of
     a device that is enabled but not added when the playback opens is
     `failed` (`session_closed`) until the playback is opened again.
+15. **Keeping cameras together** (added after a hardware run showed the
+    cameras of one playback seconds apart after seeks and rate changes).
+    The goal is that the same moment shows on every camera; the bounds:
+    - *A first picture after the target is not shown early.* When a play
+      begins at a keyframe after the target (despite the lead), that
+      picture is released when the clock reaches it while playing; until
+      then the tile keeps its previous generation's picture and the camera
+      is `buffering`. Paused, it is shown at once (the nearest picture
+      there is, for scrubbing). Before this, it was shown at once also
+      while playing, so one camera showed a moment up to a GOP ahead and
+      then froze until the others caught up.
+    - *A late camera is waited for, then brought back.* The clock waits up
+      to 2 s for a playing camera with nothing at the position (item 7).
+      When it turns `late` its play alone restarts at the position (a
+      group of one, with the lead) and it rejoins at its first keyframe
+      there; still behind 2 s later, it is restarted again, at most 3 times
+      a minute per camera (shared with restarts after stalls); after that
+      it stays `late` until its media reaches the position by itself. It
+      never holds the others while `late`, so a stall costs the others at
+      most 2 s. Before this, a late camera only dropped to its next
+      keyframe, which never came if its play ran behind the clock.
+    - *Fast rates.* From 8x only keyframes are shown, so a camera's picture
+      trails the position by up to the spacing of the keyframes it is sent
+      (the stream's GOP, times 2 at 8x and 4 at 16x on a main stream);
+      cameras are within that spacing of each other, not closer.
+    In simulated time against the mock (four cameras; one whose first media
+    comes 3 s late, one whose play begins 2 s after the target, one that
+    stalls 10 s mid-play) the cameras' shown pictures stayed within 250 ms
+    at 1x after a seek, 500 ms at 4x, and one 2 s keyframe interval plus a
+    few ticks at 16x after rate changes, outside the stalled camera's
+    `late` time of under a second.
 
 ## Clarifications from the implementation (F2, 2026-10-11)
 
