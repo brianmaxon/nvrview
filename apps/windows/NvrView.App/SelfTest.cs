@@ -123,6 +123,15 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         try
         {
+            // parity: updates-notes-scroll
+            _problems.AddRange(UpdateNotesSelfTest.Run());
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the update notes step threw: {e}");
+        }
+        try
+        {
             // parity: updates-bundled-defaults
             _problems.AddRange(UpdateDefaultsSelfTest.Run(app.Viewer!, line => Say(line)));
         }

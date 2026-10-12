@@ -165,6 +165,7 @@ started on that app.
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
+| Update prompt release notes: scrollable, selectable, wrapping, bounded height, buttons always visible | yes | yes | Self-test step `updates-notes-scroll`. macOS: alert accessory view; Windows: ScrollViewer in the dialog. |
 | Bundled update key and source (`update-defaults.json`; shown as "Bundled with this build" / "Bundled default") | yes | yes | Self-test step `updates-bundled-defaults`. macOS: in the signed bundle's Resources; Windows: next to the exe. |
 | Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
