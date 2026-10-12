@@ -401,7 +401,7 @@ final class StageView: NSView {
             indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
             alertLines: alertLines(for: camera),
             veil: model.veil(for: camera), retry: model.retryOffered(for: camera), hasCamera: true, audible: model.audible.contains(camera),
-            header: headerTile(camera, path: leaf.path),
+            header: headerTile(camera, path: leaf.path), recordingPill: model.capture.board.pill(for: camera),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
     }
 

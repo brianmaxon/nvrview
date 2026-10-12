@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         self.model = model
         model.openWindow = { [weak self] content in self?.openWindow(content) }
         startCallWindows(model)
+        startCapture(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
@@ -95,6 +96,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     static let selfTestDefaults = "nvrview-selftest"
+
+    // MARK: Recordings (capture)
+
+    /// Recordings' messages go to the viewer windows showing the camera
+    /// (else the active one). A self-test records into a throwaway folder.
+    private func startCapture(_ model: AppModel) {
+        RecordingsMenu.shared.model = model
+        if options.selfTestSeconds != nil {
+            model.recordingsFolder =
+                options.dataDirectory?.appendingPathComponent("Recordings", isDirectory: true)
+                ?? FileManager.default.temporaryDirectory.appendingPathComponent(
+                    "nvrview-selftest-recordings-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        }
+        model.capture.notice = { [weak self] text, camera, action in
+            guard let self else { return }
+            let showing = camera.map { c in
+                self.windows.filter { $0.stage.frames.leaves.contains { $0.camera == c } }
+            } ?? []
+            for w in showing.isEmpty ? Array(self.activeViewerWindow.map { [$0] } ?? []) : showing {
+                w.stage.showToast(text, action: action)
+            }
+        }
+    }
 
     /// The key viewer window, else the main one, else the first.
     var activeViewerWindow: ViewerWindowController? {

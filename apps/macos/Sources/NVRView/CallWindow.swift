@@ -342,7 +342,8 @@ final class CallWindowController: NSWindowController, NSWindowDelegate, StageDel
             InsetContent(
                 header: header, cameraName: name, critical: false, isReturn: false,
                 call: CallContent(
-                    call: call, microphoneOn: model.calls.isTalkingWithMicrophone(camera), note: model.calls.note(for: camera))))
+                    call: call, microphoneOn: model.calls.isTalkingWithMicrophone(camera), note: model.calls.note(for: camera)),
+                recording: model.capture.callRecording(camera).map { RecordingText.callPill(ms: $0.durationMs) }))
         if inset.videoRect != hadCall { window?.contentView?.needsLayout = true }
         let title = "\(call.origin == .press ? "Doorbell" : "Conversation") · \(name)"
         if window?.title != title { window?.title = title }

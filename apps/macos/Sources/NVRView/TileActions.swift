@@ -9,10 +9,10 @@ import NVRCore
 
 /// The header items whose action lands later.
 enum TileActionStub {
-    /// Recording and PTZ: not built yet (Save picture is built).
+    /// PTZ: not built yet (Save picture and recording are built).
     static func isPending(_ item: TileHeaderItem) -> Bool {
         switch item {
-        case .record, .panTilt, .presets, .lens, .recordMain, .recordSub:
+        case .panTilt, .presets, .lens:
             true
         default:
             false

@@ -41,7 +41,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     private let editBar: EditBar
     private let editItem = NSToolbarItem.Identifier("edit")
     private let fullScreenItem = NSToolbarItem.Identifier("fullscreen")
+    /// "● N recording" while recordings run (docs/CAPTURE.md "Indicators").
+    private let recordingItem = NSToolbarItem.Identifier("recording")
     private weak var editButton: NSButton?
+    private weak var recordingToolbarItem: NSToolbarItem?
     private let split = ViewerSplitViewController()
     private var sidebarItem: NSSplitViewItem!
     private var sidebarHost: NSView?
@@ -194,6 +197,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     }
 
     private func modelChanged() {
+        updateRecordingItem()
         switch state.content {
         case .layout(let id):
             if let l = model.layout(id) {
@@ -657,8 +661,33 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     // MARK: Toolbar
 
+    /// The toolbar's recordings item: shown while recordings run.
+    private func updateRecordingItem() {
+        guard let item = recordingToolbarItem else { return }
+        let count = model.capture.board.running.count
+        item.isHidden = count == 0
+        let title = "● \(count) recording"
+        if let button = item.view as? NSButton, button.title != title { button.title = title }
+    }
+
+    /// The toolbar item's text while it shows (self-test).
+    var recordingItemTitle: String? {
+        guard let item = recordingToolbarItem, !item.isHidden else { return nil }
+        return (item.view as? NSButton)?.title
+    }
+
+    @objc private func recordingItemClicked(_ sender: NSButton) {
+        let menu = NSMenu()
+        RecordingsMenu.shared.fill(menu)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Stop All Recordings", action: #selector(stopAllRecordings(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Open Recordings Folder", action: #selector(openRecordingsFolder(_:)), keyEquivalent: ""))
+        for i in menu.items { i.target = self }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, editItem, fullScreenItem]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, recordingItem, editItem, fullScreenItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -676,6 +705,15 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
             editButton = button
             item.view = button
             item.label = "Edit Layout"
+        case recordingItem:
+            let button = NSButton(title: "", target: self, action: #selector(recordingItemClicked(_:)))
+            button.bezelStyle = .toolbar
+            button.contentTintColor = .systemRed
+            item.view = button
+            item.label = "Recordings"
+            item.toolTip = "The recordings running now: stop one or all"
+            recordingToolbarItem = item
+            updateRecordingItem()
         case fullScreenItem:
             let button = NSButton(
                 image: NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Full Screen")!,

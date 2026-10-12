@@ -359,6 +359,8 @@ struct CameraSettingsView: View {
 /// Alert insets and doorbell call options.
 struct AlertSettingsView: View {
     let model: AppModel
+    /// The consent note shown the first time "Record calls" is turned on.
+    @State private var askingConsent = false
 
     var body: some View {
         Form {
@@ -405,9 +407,34 @@ struct AlertSettingsView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                HStack {
+                    Toggle(
+                        "Record calls",
+                        isOn: Binding(
+                            get: { model.recordCalls },
+                            set: { on in
+                                if on && !model.recordCallsConsentShown { askingConsent = true } else { model.recordCalls = on }
+                            }))
+                    Spacer()
+                    Button("Open Call Recordings Folder") { model.transcripts.openFolder() }
+                }
+                Text(
+                    "A call is recorded from the moment it opens: the doorbell's video and three sound tracks, the conversation, the visitor, and you. The call's Record button (⇧⌘R) starts or stops a recording at any time, with this on or off. Recordings go beside the transcripts, with the same name (the newest 100, at most 10 GB in all, are kept)."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+        .alert("Record calls?", isPresented: $askingConsent) {
+            Button("Record Calls") {
+                model.recordCallsConsentShown = true
+                model.recordCalls = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(AppModel.recordCallsConsent)
+        }
     }
 }
 

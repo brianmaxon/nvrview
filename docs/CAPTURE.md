@@ -11,12 +11,12 @@
 > ("Local captures and the NVR's recordings"); the PTZ commands in
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
-> macOS the header, its menus and keys (capture and PTZ actions say "coming
-> soon") and the call window's picture as a single fixed tile; in the core,
-> the pure base (`crates/capture`, K2) and the recorders behind a Rust API
-> (K4, below), and the C interface with its Swift and C# bindings (F5,
-> ABI 3 minor 9, below). The apps' AAC encoders and their use of it come
-> next (M5, W5).
+> macOS the header, its menus and keys (PTZ actions say "coming soon") and
+> the call window's picture as a single fixed tile; in the core, the pure
+> base (`crates/capture`, K2) and the recorders behind a Rust API (K4,
+> below), and the C interface with its Swift and C# bindings (F5, ABI 3
+> minor 9, below); on macOS, saving pictures, and live and call recording
+> with the app's AAC encoder (M5, below). Windows recording is next (W5).
 
 ## Implementation status (K2)
 
@@ -188,6 +188,68 @@ AudioSpecificConfig and priming from `open`, each encoded frame answered
 in order with `recordAudioEncoded`, the remaining output on a flushing
 `close`), `captureConfigure` at startup and on a settings change, and the
 UI that starts and stops recordings and shows the `recording` events.
+
+## Implementation status (M5)
+
+The macOS app records (UX.md "Recording", "Recording calls" have what the
+user sees). The pieces:
+
+- **Encoder.** `AACCaptureEncoder` (NVRCore) behind `CaptureEncoder`:
+  one `AVAudioConverter` (AudioToolbox's AudioConverter) per open track,
+  48 kHz mono float in, AAC-LC out at the nearest supported rate to the
+  one asked (96 kbps). `open` writes the two-byte AudioSpecificConfig from
+  the format (`0x11 0x88` at 48 kHz mono) and reports the converter's
+  `primeInfo.leadingFrames` as the priming (2112, measured: an impulse
+  comes back 2114 samples late, within the 48-sample tolerance). Each
+  frame is encoded on the recorder's thread that hands it over (well under
+  a millisecond), so the units go back with `recordAudioEncoded` in order
+  and no queue of its own is needed; the core bounds what waits for it.
+  Units are answered after the encoder's lock is released; at most 32
+  tracks are open at once. `close` with `flush` drains the converter. The
+  encoder holds the core it answers through; the core releases the encoder
+  when it is freed.
+- **App.** `CaptureController` (NVRView): installs the encoder and sends
+  `captureConfigure` when the app starts (after the self-test or the user's
+  settings are read, so the first configuration is the right one) and on
+  every change of the recordings folder, "Record from", the caps, or
+  "Share-safe names". Live starts pass the camera's name and the Mac's
+  current UTC offset. `RecordingBoard` (NVRCore, pure) keeps the running
+  recordings from the app's own starts and the events; ended ones are
+  logged to the event log and announced (`RecordingText`).
+- **Calls.** The call's recording and its transcript share a stem
+  (`CallTranscriptFile.sharedStem`: the transcript's name, numbered until
+  neither `.txt`, `.mp4` nor `.partial.mp4` is taken), reserved when the
+  recording starts and reused by the transcript when the call ends. The
+  recording ends with the call (the core sees the conversation close).
+  "Record calls" starts it as the call's tile opens. Call recordings in
+  the Transcripts folder are pruned to the newest 100 and 10 GB after each
+  one ends (`TranscriptStore.pruneRecordings`; partial files are never
+  touched).
+- **Not built:** the per-doorbell Default, Always, Never for "Record
+  calls"; the self-test steps `capture-record-cap`,
+  `capture-record-reconnect`, `capture-record-survives-tile-close` and
+  `capture-call-record-auto` (the core's tests cover caps, gaps and
+  lifetime).
+
+Tests: `AACCaptureEncoderTests` (a 1 kHz tone through the encoder, its
+units decoded by the system's AAC decoder as ADTS: the onset at the
+reported priming, the level and the pitch; the impulse priming; the track
+bound), `CaptureRecordingsTests` (the settings JSON with its clamps, the
+pills, every limit's and end's message, the board, the pill never
+overflowing the header, the shared stem). Self-test on the fake core:
+`capture-encoder-priming`, `capture-record-tile` (R, then the header's
+Stop), `capture-record-indicator` (the pill stays when the header fades
+and at 100 pt, the toolbar item, the Recordings submenu),
+`capture-record-disk-low`, `capture-record-main-limit` (the sub-stream
+offered and taken), `capture-call-record-button` (⇧⌘R in a call window:
+beside the transcripts under its stem, the call bar pill, the four tracks
+through the AAC encoder). With `scripts/macos-real-selftest.sh` (the mock
+now sends AAC audio): `capture-record-real-core` (a live tile for about
+3.5 s: one video and one AAC track, the duration within 0.5 s of the
+events', a keyframe first, the AAC decoding) and
+`capture-call-record-real-core` (a conversation's recording ended by the
+call: video and three audio tracks, only Conversation enabled, each
+decoding).
 
 ## Principles
 

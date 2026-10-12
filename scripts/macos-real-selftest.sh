@@ -1,8 +1,10 @@
 #!/bin/bash
 # Runs the macOS app's self-test on the real core (the Rust library through
 # NVRViewCore.xcframework) against a local tools/mock-nvr with three
-# channels and three days of recordings, so the recordings window's real-core
-# step runs too (SelfTest.swift, `recordings-real-core`). Never a real NVR:
+# channels, three days of recordings and AAC audio, so the recordings
+# window's and the capture's real-core steps run too (SelfTest.swift,
+# `recordings-real-core`, `capture-record-real-core`,
+# `capture-call-record-real-core`). Never a real NVR:
 # the device is the mock on 127.0.0.1, with made-up credentials, and the
 # app's data directory is a throwaway one.
 #
@@ -33,7 +35,7 @@ trap cleanup EXIT
 (cd apps/macos && NVRVIEW_REAL_CORE=1 swift build --scratch-path .build-real-core)
 
 MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 3 --recordings 3 \
-  --fixture "$root/fixtures/synthetic/h264-basic.h264" >"$work/mock.log" 2>&1 &
+  --audio "$root/fixtures/synthetic/aac-tone.aac" --fixture "$root/fixtures/synthetic/h264-basic.h264" >"$work/mock.log" 2>&1 &
 mock_pid=$!
 for _ in $(seq 1 100); do
   grep -q "listening on" "$work/mock.log" && break
