@@ -463,3 +463,71 @@ fn joined_download_bytes_are_unchanged() {
         ]
     );
 }
+
+/// Handler names in every `hdlr` box of a file (a byte scan, so nothing
+/// nested is missed).
+fn handler_names(d: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 4..d.len().saturating_sub(28) {
+        if &d[i..i + 4] != b"hdlr" {
+            continue;
+        }
+        let size = u32::from_be_bytes(d[i - 4..i].try_into().unwrap()) as usize;
+        let name = &d[i + 28..i - 4 + size];
+        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        out.push(String::from_utf8_lossy(&name[..end]).into_owned());
+    }
+    out
+}
+
+/// A recording with several audio tracks, cut short and recovered the way
+/// a download is, carries only allowed handler names.
+#[test]
+fn multi_track_recordings_carry_only_allowed_handler_names() {
+    use mp4_remux::{
+        AacConfig, AudioHandler, AudioTrackSpec, FileOptions, FragmentedFile, VideoCodec,
+        VideoFrame,
+    };
+    use recordings::export::handler_name_allowed;
+
+    let fx = Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
+    let cfg = AacConfig::from_raw_audio_specific_config(&[0x11, 0x88]).unwrap();
+    let tracks = [
+        (AudioHandler::Conversation, true),
+        (AudioHandler::Visitor, false),
+        (AudioHandler::You, false),
+    ]
+    .map(|(handler, enabled)| AudioTrackSpec {
+        handler,
+        enabled,
+        alternate_group: 1,
+        priming_samples: 2112,
+        ..AudioTrackSpec::new(cfg)
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let joined = dir.path().join(JOINED_NAME);
+    let mut w = FragmentedFile::new(
+        std::fs::File::create(&joined).unwrap(),
+        VideoCodec::H264,
+        FileOptions::default().with_audio_tracks(tracks.to_vec()),
+    );
+    for (i, f) in fx.frames().iter().enumerate() {
+        let t = i as i64 * 100_000;
+        w.push_video(VideoFrame::new(&f.data, f.keyframe, t))
+            .unwrap();
+        for k in 0..3 {
+            w.push_audio_raw(k, &[0, 0, 0, 7], Some(t)).unwrap();
+        }
+    }
+    w.finish().unwrap();
+    let frag = std::fs::read(&joined).unwrap();
+    let want = ["VideoHandler", "Conversation", "Visitor", "You"];
+    assert_eq!(handler_names(&frag), want);
+    // Cut it as a crash would, then recover.
+    std::fs::write(&joined, &frag[..frag.len() * 3 / 4]).unwrap();
+    let mp4 = dir.path().join("recovered.mp4");
+    recover_fragmented(&joined, &mp4, true).unwrap();
+    let names = handler_names(&std::fs::read(&mp4).unwrap());
+    assert_eq!(names, want);
+    assert!(names.iter().all(|n| handler_name_allowed(n)));
+}
