@@ -270,7 +270,7 @@ The release package is different: `scripts/windows-app.sh publish` (what
 projection, and TerraFX shrink; the app's own assemblies are kept whole), with
 no `.pdb` files and no debugger or crash-dump helpers (`mscordaccore*.dll`,
 `mscordbi.dll`, `createdump.exe`, `Microsoft.DiaSymReader.Native`). That is
-about 34 MB zipped and 84 MB in 316 files, against 101 MB and 266 MB in 613
+about 34 MB zipped and 85 MB in 318 files, against 101 MB and 266 MB in 613
 files before. The check script's app steps (`NVRVIEW_APP_SELFTEST=1`) run
 the plain start, the self-test, and the update test against this published
 build as well as the debug build, because trimming breaks things silently.

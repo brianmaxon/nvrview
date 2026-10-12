@@ -74,4 +74,13 @@
       <ResolvedFileToPublish Remove="@(_DebuggerFile)" />
     </ItemGroup>
   </Target>
+  <!-- `dotnet publish` of an unpackaged WinUI app leaves out the compiled XAML (App.xbf) and
+       the resource index (NvrView.App.pri) that the build puts next to the executable; without
+       them the app fails fast loading its resources at start. -->
+  <Target Name="IncludeXamlResourcesInPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <_XamlOutput Include="$(OutDir)App.xbf;$(OutDir)$(AssemblyName).pri" />
+      <ResolvedFileToPublish Include="@(_XamlOutput->'%(FullPath)')" RelativePath="%(Filename)%(Extension)" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
 </Project>
