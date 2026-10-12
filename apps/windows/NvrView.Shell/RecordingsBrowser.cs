@@ -57,11 +57,13 @@ public sealed class RecordingsBrowser
     private HashSet<string> _selection = [];
 
     /// <param name="model">The shared recordings model.</param>
-    public RecordingsBrowser(RecordingsService model)
+    /// <param name="exportSettings">What export keeps between launches (null: nothing is kept).</param>
+    public RecordingsBrowser(RecordingsService model, ExportSettings? exportSettings = null)
     {
         Model = model;
         HoldId = model.NewHold();
         Player = new RecordingsPlayer(model);
+        Export = new ExportController(this, exportSettings);
         long today = model.Today;
         Day = today;
         Month = DeviceTime.Month(today).Start;
@@ -71,6 +73,9 @@ public sealed class RecordingsBrowser
 
     /// <summary>The shared recordings model.</summary>
     public RecordingsService Model { get; }
+
+    /// <summary>Export from this window: in and out points, trims, range downloads, stills (docs/UX.md "Export").</summary>
+    public ExportController Export { get; }
 
     /// <summary>This window's <c>nv_recordings_hold_today</c> number.</summary>
     public ulong HoldId { get; }

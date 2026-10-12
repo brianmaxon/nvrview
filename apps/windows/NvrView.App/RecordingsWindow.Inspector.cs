@@ -240,7 +240,7 @@ internal sealed partial class RecordingsWindow
         var header = new Grid();
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(new TextBlock { Text = d.FolderName(), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+        header.Children.Add(new TextBlock { Text = d.Title(), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
         var state = new TextBlock { Text = d.StateText(), Foreground = new SolidColorBrush(Muted) };
         Grid.SetColumn(state, 1);
         header.Children.Add(state);
