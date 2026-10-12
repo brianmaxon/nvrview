@@ -185,19 +185,20 @@ public sealed partial class FakeRecordings
         {
             Configured(F);
             List<RecordingCamera> cameras = o["cameras"] is JsonArray list ? [.. list.Select(n => Camera(n, F))] : [.. _watched];
-            var lanes = new JsonArray();
-            foreach (RecordingCamera c in cameras)
+            JsonNode?[] Fill(bool heard, int value) =>
+                [.. Enumerable.Range(0, (int)count).Select(_ => heard ? (JsonNode?)JsonValue.Create(value) : null)];
+            var lanes = new JsonArray([.. cameras.Select(c =>
             {
                 bool heard = _watched.Contains(c) && Allowed(c);
-                lanes.Add(new JsonObject
+                return (JsonNode)new JsonObject
                 {
                     ["camera"] = CameraNode(c),
                     ["bucket_s"] = bucket,
                     ["start"] = start,
-                    ["peak_db"] = new JsonArray([.. Enumerable.Range(0, (int)count).Select(_ => heard ? (JsonNode?)JsonValue.Create(-40) : null)]),
-                    ["rms_db"] = new JsonArray([.. Enumerable.Range(0, (int)count).Select(_ => heard ? (JsonNode?)JsonValue.Create(-50) : null)]),
-                });
-            }
+                    ["peak_db"] = new JsonArray(Fill(heard, -40)),
+                    ["rms_db"] = new JsonArray(Fill(heard, -50)),
+                };
+            })]);
             return new JsonObject { ["revision"] = _revision, ["lanes"] = lanes }.ToJsonString();
         }
     }
