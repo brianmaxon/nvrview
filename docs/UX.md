@@ -1179,7 +1179,7 @@ The NVR's own recordings, found by what happened and played back
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
 (milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
 strips, sound events, listening for sounds) on both; the follow cut and
-grids on macOS (M3; Windows is W3). Exports (M4) come
+grids on both (M3 and W3). Exports (M4 and W4) come
 later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
@@ -1267,7 +1267,7 @@ later.
   incident with its margins (or the whole day, with the Incident and Day
   switch) with the events marked by kind; dragging shows keyframes, the
   release the exact picture.
-- **Follow and Grid** (macOS, M3): the view menu at the right of the
+- **Follow and Grid** (macOS M3, Windows W3): the view menu at the right of the
   transport switches the player between **Cameras** (the device playback
   above) and three views made of the incident's **downloaded** files:
   **Follow Cut** (one picture that cuts to the camera with the action, the
@@ -1294,6 +1294,28 @@ later.
   the cell clicked; at 1× only, as in Cameras. A file that cannot be opened
   draws black and the player says so. The same drawing serves exports (M4):
   `EditSession` renders any time of the edit offscreen at any size.
+  **On Windows** the view menu is a drop-down button in the second row of
+  the transport (Cameras, Follow Cut, 2-Up, 4-Up; the three disabled with
+  the same words until the incident has a finished download). The files are
+  decoded by Media Foundation (an `IMFSourceReader` per file on the shared
+  D3D11 device's DXGI manager, so on the GPU where it can, else on the CPU)
+  into the same kind of picture the live tiles use and drawn by the window's
+  own `StageRenderer` in place of its tiles, so the look matches the live
+  grid. The keyframes the seeks start from are read from the MP4's sample
+  tables (`Mp4Index`: sync samples, composition offsets, and the edit list,
+  the timeline the plan's `source_in_ms` uses); the decoding is the macOS
+  one (frame accurate from the keyframe at or before, keyframes only while
+  dragging and from 2×, the newest request winning on a pool thread per
+  file, at most the picture chosen and the one read past it held). The
+  sound is a Windows `MediaPlayer` per file, the audible one kept within
+  250 ms of the picture. Space plays and pauses what the player shows after
+  a click on it; clicking a grid's cell picks the cell whose sound plays.
+  Cuts are white ticks on the scrubber, labels are the shown camera's name
+  (and the time in the follow cut) with a speaker mark on the audible one,
+  and a cell without video says "No recording at this time" or "This file
+  could not be opened". The same drawing serves exports (W4):
+  `EditFiles.Render` draws any time of the edit into a `GridRenderer`'s
+  offscreen frame of any size.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the

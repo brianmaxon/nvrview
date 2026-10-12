@@ -33,7 +33,7 @@ public sealed class PlayerCell(RecordingCamera camera, ulong tile)
 }
 
 /// <summary>The player of one Recordings window (see the file comment).</summary>
-public sealed class RecordingsPlayer(RecordingsService model)
+public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
 {
     private PlayerGridMode _mode = PlayerGridMode.Tiled;
     private bool _muted;
@@ -131,6 +131,9 @@ public sealed class RecordingsPlayer(RecordingsService model)
 
     /// <summary>The transport's view.</summary>
     public TransportState Transport => new(StartMs, EndMs, PositionMs, State, Rate);
+
+    /// <inheritdoc/>
+    public bool CanPlay => Playback is not null;
 
     /// <summary>The cameras in the player, in order.</summary>
     public List<RecordingCamera> Cameras => [.. Cells.Select(c => c.Camera)];
