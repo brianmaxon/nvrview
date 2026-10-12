@@ -13,6 +13,7 @@ internal static class HeaderTests
         ("header: toggles read their on state", Toggles),
         ("header: app-wide titles are recognized, tile titles are not", AppWide),
         ("header: the recording spot is hidden until something records", Recording),
+        ("recording pill: the corner opposite the indicators, never the header's top right", PillCorner),
         ("settings: five sections in pane order", Sections),
         ("title bar: rectangles scale outward with the display scale", Scaling),
         ("title bar: passthrough regions are clipped and empty ones dropped", Passthrough),
@@ -49,7 +50,7 @@ internal static class HeaderTests
     {
         foreach (string t in new[] { "Settings…", "Keyboard shortcuts", "Full screen", "Leave full screen", "Fill tiles", "Hide diagnostics",
                      "Show sidebar", "New window", "Recordings", "Indicator corner", "Edit layout", "Done editing", "Save as layout…", "New layout…",
-                     "Check for updates…", "Update to 1.2.3…", "Switch to 1.2.3…", "Find devices" })
+                     "Check for updates…", "Update to 1.2.3…", "Switch to 1.2.3…", "Find devices", "Stop all recordings", "Open recordings folder" })
         {
             Check.True(HeaderActions.IsAppWideTitle(t), $"\"{t}\" is app-wide");
         }
@@ -66,6 +67,14 @@ internal static class HeaderTests
         Check.True(RecordingIndicator.Text(0) is null, "hidden at zero");
         Check.True(RecordingIndicator.Text(-1) is null, "hidden below zero");
         Check.Equal("● 3 recording", RecordingIndicator.Text(3)!, "text");
+    }
+
+    private static void PillCorner()
+    {
+        Check.Equal(ChromeCorner.BottomLeft, RecordingIndicator.PillCorner(ChromeCorner.TopRight), "indicators top right: bottom left");
+        Check.Equal(ChromeCorner.TopLeft, RecordingIndicator.PillCorner(ChromeCorner.BottomLeft), "indicators bottom left: the header's top right becomes top left");
+        Check.Equal(ChromeCorner.BottomRight, RecordingIndicator.PillCorner(ChromeCorner.TopLeft), "indicators top left: bottom right");
+        Check.Equal(ChromeCorner.TopLeft, RecordingIndicator.PillCorner(ChromeCorner.BottomRight), "indicators bottom right: top left");
     }
 
     private static void Sections()

@@ -20,6 +20,8 @@ public enum HeaderAction
     NewWindow,
     ToggleSidebar,
     Recordings,
+    StopAllRecordings,
+    OpenRecordingsFolder,
     Diagnostics,
     IndicatorCorner,
     KeyboardShortcuts,
@@ -64,6 +66,8 @@ public static class HeaderActions
         new(HeaderAction.Settings, HeaderZone.Right, "Settings", null, "Ctrl+,"),
         new(HeaderAction.NewWindow, HeaderZone.Overflow, "New window", null, "Ctrl+N"),
         new(HeaderAction.Recordings, HeaderZone.Overflow, "Recordings", null, "Ctrl+Alt+R"),
+        new(HeaderAction.StopAllRecordings, HeaderZone.Overflow, "Stop all recordings"),
+        new(HeaderAction.OpenRecordingsFolder, HeaderZone.Overflow, "Open recordings folder"),
         new(HeaderAction.ToggleSidebar, HeaderZone.Overflow, "Show sidebar", "Hide sidebar", "S"),
         new(HeaderAction.IndicatorCorner, HeaderZone.Overflow, "Indicator corner"),
         new(HeaderAction.Diagnostics, HeaderZone.Overflow, "Show diagnostics", "Hide diagnostics", "Ctrl+D"),
@@ -96,11 +100,21 @@ public static class HeaderActions
     }
 }
 
-/// <summary>The "● N recording" spot of the header: reserved, hidden until recording is reported.</summary>
+/// <summary>The "● N recording" spot of the header: hidden until something records.</summary>
 public static class RecordingIndicator
 {
     /// <summary>The indicator's words; null (hidden) when nothing records.</summary>
     public static string? Text(int recording) => recording > 0 ? $"● {recording} recording" : null;
+
+    /// <summary>
+    /// Where a tile's "● REC" pill sits (docs/UX.md "Recording"): the corner opposite the corner
+    /// indicators, except that the top right (where the header's buttons are) becomes the top left.
+    /// </summary>
+    public static ChromeCorner PillCorner(ChromeCorner indicators)
+    {
+        ChromeCorner opposite = indicators.Opposite();
+        return opposite == ChromeCorner.TopRight ? ChromeCorner.TopLeft : opposite;
+    }
 }
 
 /// <summary>The sections of the Settings window, in the order of its pane.</summary>
