@@ -54,7 +54,10 @@ impl crate::Core {
             let mut names: BTreeMap<CameraId, String> = BTreeMap::new();
             for c in &req.cameras {
                 sound::check_camera(&st, &c.camera.device, c.camera.local())?;
-                names.insert(c.camera.clone(), camera_name(&stores.groups, &reported, &c.camera));
+                names.insert(
+                    c.camera.clone(),
+                    camera_name(&stores.groups, &reported, &c.camera),
+                );
             }
             let job = plan_range(&req, &names, None).map_err(export_error)?;
             let mut events: Vec<CameraEvent> = Vec::new();
@@ -132,7 +135,8 @@ impl crate::Core {
                     tiles
                         .into_iter()
                         .map(|t| {
-                            let camera = CameraId::with_lens(&t.device, t.camera.channel, t.camera.lens);
+                            let camera =
+                                CameraId::with_lens(&t.device, t.camera.channel, t.camera.lens);
                             let name = st.stores.as_ref().map_or_else(
                                 || format!("Camera {}", u32::from(t.camera.channel) + 1),
                                 |s| camera_name(&s.groups, &reported, &camera),

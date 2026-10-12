@@ -820,10 +820,7 @@ impl Core {
     /// # Errors
     /// [`RecError::UnknownId`], [`RecError::Closed`], [`RecError::Limit`],
     /// [`RecError::Internal`].
-    pub(crate) fn playback_shown(
-        &self,
-        playback: u64,
-    ) -> Result<Vec<engine::ShownTile>, RecError> {
+    pub(crate) fn playback_shown(&self, playback: u64) -> Result<Vec<engine::ShownTile>, RecError> {
         let cmd = self.pb_cmd(playback)?;
         let (a, r) = oneshot::channel();
         cmd.try_send(Cmd::Shown(a)).map_err(|_| RecError::Limit)?;

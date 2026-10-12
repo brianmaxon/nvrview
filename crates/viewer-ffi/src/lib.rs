@@ -2176,7 +2176,15 @@ pub unsafe extern "C" fn nv_download_range(
     len: *mut usize,
 ) -> NvStatus {
     // SAFETY: per the caller.
-    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.download_range(arg(request)?)?)) }
+    unsafe {
+        rec_answer(
+            core,
+            out,
+            cap,
+            len,
+            |c| Ok(c.download_range(arg(request)?)?),
+        )
+    }
 }
 
 /// Plans still images and answers their sources and suggested files as JSON

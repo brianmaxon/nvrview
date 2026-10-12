@@ -249,7 +249,13 @@ fn export_through_the_c_interface() {
             {
                 let mut out = vec![0 as c_char; 64 * 1024];
                 let mut n = 0usize;
-                let s = f(core, c(&json.to_string()).as_ptr(), out.as_mut_ptr(), out.len(), &mut n);
+                let s = f(
+                    core,
+                    c(&json.to_string()).as_ptr(),
+                    out.as_mut_ptr(),
+                    out.len(),
+                    &mut n,
+                );
                 if s != NvStatus::NV_OK {
                     return Err(s);
                 }
@@ -301,7 +307,10 @@ fn export_through_the_c_interface() {
         let incidents = rig
             .answer(|o, n, l| nv_incidents_get(core, query.as_ptr(), o, n, l))
             .unwrap();
-        let incident = incidents["incidents"][0]["key"].as_str().unwrap().to_owned();
+        let incident = incidents["incidents"][0]["key"]
+            .as_str()
+            .unwrap()
+            .to_owned();
 
         // A destination that is not absolute is refused; one elsewhere
         // needs a data directory for the registry (this core has none).
@@ -334,7 +343,10 @@ fn export_through_the_c_interface() {
             call(nv_edit_compute, &r)
         };
         let plan = trim(json!({})).unwrap();
-        assert_eq!((plan["kind"].as_str(), plan["version"].as_i64()), (Some("trim"), Some(1)));
+        assert_eq!(
+            (plan["kind"].as_str(), plan["version"].as_i64()),
+            (Some("trim"), Some(1))
+        );
         assert_eq!(plan["download"], id.as_str());
         let outs = plan["outputs"].as_array().unwrap();
         assert_eq!(outs.len(), 2, "{plan}");
@@ -344,15 +356,18 @@ fn export_through_the_c_interface() {
             assert_eq!(o["copy_possible"], true);
             assert!(o["source_in_ms"].as_i64().unwrap() < o["source_out_ms"].as_i64().unwrap());
             let file = o["suggested_file"].as_str().unwrap();
-            assert!(file.starts_with(&folder) && file.ends_with(" trim.mp4"), "{file}");
+            assert!(
+                file.starts_with(&folder) && file.ends_with(" trim.mp4"),
+                "{file}"
+            );
         }
         // Exact cuts start at the point, and cannot be copied.
         let exact = trim(json!({"cut": "exact"})).unwrap();
         assert_eq!(exact["start_ms"], in_ms);
         assert_eq!(exact["outputs"][0]["copy_possible"], false);
         // A destination and share-safe names.
-        let safe = trim(json!({"dest": elsewhere.path().to_str().unwrap(), "share_safe": true}))
-            .unwrap();
+        let safe =
+            trim(json!({"dest": elsewhere.path().to_str().unwrap(), "share_safe": true})).unwrap();
         assert_eq!(safe["share_safe"], true);
         assert_eq!(safe["outputs"][0]["name"], "Camera A");
         assert_eq!(safe["outputs"][1]["name"], "Camera B");
@@ -409,7 +424,13 @@ fn export_through_the_c_interface() {
             &json!({"kind": "grid", "download": id, "in_ms": in_ms, "out_ms": out_ms}),
         )
         .unwrap();
-        assert_eq!((grid["start_ms"].as_i64().unwrap(), grid["end_ms"].as_i64().unwrap()), (in_ms, out_ms));
+        assert_eq!(
+            (
+                grid["start_ms"].as_i64().unwrap(),
+                grid["end_ms"].as_i64().unwrap()
+            ),
+            (in_ms, out_ms)
+        );
         assert_eq!(
             call(
                 nv_edit_compute,
@@ -458,7 +479,11 @@ fn export_through_the_c_interface() {
             .unwrap();
         assert!(ev["incident"].is_null(), "{ev}");
         assert_eq!(ev["range"], json!({"start": r0, "end": r1}));
-        assert!(std::path::Path::new(&rfolder).join("incident.json").is_file());
+        assert!(
+            std::path::Path::new(&rfolder)
+                .join("incident.json")
+                .is_file()
+        );
         // The same request (the name is not part of it) is the same download.
         let again = call(nv_download_range, &range_req(&[1, 0], r0, r1)).unwrap();
         assert_eq!(again["existing"], true);
@@ -468,7 +493,10 @@ fn export_through_the_c_interface() {
         safe_req["share_safe"] = json!(true);
         let safe_range = call(nv_download_range, &safe_req).unwrap();
         let sfolder = safe_range["folder"].as_str().unwrap();
-        assert!(!sfolder.contains("Walkway") && sfolder.contains("Camera A"), "{sfolder}");
+        assert!(
+            !sfolder.contains("Walkway") && sfolder.contains("Camera A"),
+            "{sfolder}"
+        );
         assert!(!std::path::Path::new(sfolder).join("incident.json").exists());
 
         // Trims work on a range download; edit lists need an incident.
@@ -516,14 +544,20 @@ fn export_through_the_c_interface() {
             Err(NvStatus::NV_ERR_INVALID_ARGUMENT)
         );
         assert_eq!(
-            call(nv_still_plan, &json!({"download": "nope", "camera": cam(0), "at_ms": at})),
+            call(
+                nv_still_plan,
+                &json!({"download": "nope", "camera": cam(0), "at_ms": at})
+            ),
             Err(NvStatus::NV_ERR_UNKNOWN_ID)
         );
         assert_eq!(
             call(nv_still_plan, &json!({"playback": 12_345})),
             Err(NvStatus::NV_ERR_UNKNOWN_ID)
         );
-        assert_eq!(call(nv_still_plan, &json!({})), Err(NvStatus::NV_ERR_INVALID_ARGUMENT));
+        assert_eq!(
+            call(nv_still_plan, &json!({})),
+            Err(NvStatus::NV_ERR_INVALID_ARGUMENT)
+        );
         assert_eq!(
             call(nv_still_plan, &json!({"playback": 1, "download": rid})),
             Err(NvStatus::NV_ERR_INVALID_ARGUMENT)
@@ -538,7 +572,14 @@ fn export_through_the_c_interface() {
         .to_string());
         let (mut pb, mut tiles, mut count) = (0u64, [0u64; 4], 0usize);
         assert_eq!(
-            nv_playback_open(core, req.as_ptr(), &mut pb, tiles.as_mut_ptr(), 4, &mut count),
+            nv_playback_open(
+                core,
+                req.as_ptr(),
+                &mut pb,
+                tiles.as_mut_ptr(),
+                4,
+                &mut count
+            ),
             NvStatus::NV_OK
         );
         assert_eq!(count, 2);
@@ -583,7 +624,13 @@ fn export_through_the_c_interface() {
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
         assert_eq!(
-            nv_still_plan(ptr::null_mut(), c("{}").as_ptr(), ptr::null_mut(), 0, &mut len),
+            nv_still_plan(
+                ptr::null_mut(),
+                c("{}").as_ptr(),
+                ptr::null_mut(),
+                0,
+                &mut len
+            ),
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
         let mut small = [0 as c_char; 8];

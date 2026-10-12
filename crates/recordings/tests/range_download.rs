@@ -14,8 +14,7 @@ use recordings::export::range::{RangeCameraRequest, RangeJob, RangeRequest, plan
 use recordings::finalize::Mp4Finalizer;
 use recordings::incident::CameraId;
 use recordings::scheduler::{
-    EnqueueError, Finalizer, IncidentProgress, MAX_DOWNLOADS, PARTS_DIR, Scheduler,
-    SchedulerConfig,
+    EnqueueError, Finalizer, IncidentProgress, MAX_DOWNLOADS, PARTS_DIR, Scheduler, SchedulerConfig,
 };
 use recordings::secs;
 use std::collections::BTreeMap;
@@ -119,7 +118,10 @@ async fn a_range_downloads_to_finished_files_and_the_same_request_is_the_same_do
         let p = sched.progress().borrow().clone();
         assert_eq!(p.len(), 1);
         // A range download has no incident behind it.
-        assert_eq!(p[0].range.map(|r| (r.start, r.end)), Some((job.start, job.end)));
+        assert_eq!(
+            p[0].range.map(|r| (r.start, r.end)),
+            Some((job.start, job.end))
+        );
         assert_eq!(p[0].key, job.id);
         for (c, j) in p[0].cameras.iter().zip(&job.cameras) {
             assert_eq!(c.output, a.folder.join(&j.file));
