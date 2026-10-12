@@ -38,6 +38,26 @@ import VideoKit
                 == .tileClosed(tile: 7, reason: "device_removed"))
     }
 
+    @Test func channelCapabilities() {
+        let doorbell = #"{"channel":6,"connected":true,"tiers":["main","sub"],"detects":[],"talk":true,"doorbell":true,"ptz":{"pan_tilt":false,"presets":false,"zoom_focus":false}}"#
+        let ptz = #"{"channel":7,"connected":true,"tiers":["main","sub"],"detects":[],"talk":false,"doorbell":false,"ptz":{"pan_tilt":true,"presets":true,"zoom_focus":true}}"#
+        let lenses = #"{"channel":2,"lenses":2,"lens_talk":[false,false],"lens_ptz":[{},{"pan_tilt":true,"zoom_focus":true}]}"#
+        guard case .channels(_, let list)? = parse(#"{"type":"channels","device":1,"channels":[\#(doorbell),\#(ptz),\#(lenses),{"channel":9}]}"#)
+        else {
+            Issue.record("no channels event")
+            return
+        }
+        #expect(list.count == 4)
+        #expect(list[0].talk && list[0].doorbell && list[0].ptz == .none)
+        #expect(!list[1].talk && !list[1].doorbell)
+        #expect(list[1].ptz == PTZCapabilities(panTilt: true, presets: true, zoomFocus: true))
+        #expect(list[2].ptz(lens: 0) == .none)
+        #expect(list[2].ptz(lens: 1) == PTZCapabilities(panTilt: true, zoomFocus: true))
+        #expect(!list[2].talk(lens: 1))
+        // Not known yet: all false.
+        #expect(!list[3].talk && !list[3].doorbell && list[3].ptz == .none && list[3].ptz(lens: 1) == .none)
+    }
+
     @Test func unknownTypesAndFieldsAreIgnored() {
         #expect(parse(#"{"type":"something_new","device":1}"#) == nil)
         #expect(

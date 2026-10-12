@@ -53,13 +53,17 @@ public struct FakeDeviceSpec: Sendable {
     /// Fisheye cameras (`fisheye` in `channels`): they play
     /// `FakeCore.Options.fisheyeClip` when one is set.
     public var fisheyeChannels: Set<Int>
+    /// Channels whose camera pans, tilts and zooms with presets (`ptz` in
+    /// `channels`). Nothing moves: the fake only reports the capability.
+    public var ptzChannels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
         detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
         multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = [],
-        fisheyeChannels: Set<Int> = []
+        fisheyeChannels: Set<Int> = [], ptzChannels: Set<Int> = []
     ) {
+        self.ptzChannels = ptzChannels
         self.fisheyeChannels = fisheyeChannels
         self.talkChannels = talkChannels
         self.multiLensChannels = multiLensChannels
@@ -331,7 +335,11 @@ public final class FakeCore: CoreAPI {
                 // only main and sub, and says how many lenses it has.
                 let lenses = spec.multiLensChannels.contains(c) ? #","lenses":2"# : ""
                 let fisheye = spec.fisheyeChannels.contains(c) ? #","fisheye":true"# : ""
-                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)}"#
+                // A talk-back channel is a doorbell here (the made-up one).
+                let talk = spec.talkChannels.contains(c)
+                let moves = spec.ptzChannels.contains(c)
+                let caps = #","talk":\#(talk),"doorbell":\#(talk),"ptz":{"pan_tilt":\#(moves),"presets":\#(moves),"zoom_focus":\#(moves)}"#
+                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)\#(caps)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
         }
