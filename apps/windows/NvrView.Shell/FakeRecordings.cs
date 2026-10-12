@@ -18,7 +18,7 @@ using NvrView.Interop;
 namespace NvrView.Shell;
 
 /// <summary>A made-up recording store answering <see cref="IRecordings"/>; events go to the sink as JSON.</summary>
-public sealed class FakeRecordings(Action<string> sink) : IRecordings
+public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, IEditSound
 {
     private const long Day = 86_400;
     private readonly object _gate = new();
@@ -27,6 +27,9 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
     // Allowed cameras per device key (null: every channel, first lens).
     private readonly Dictionary<string, List<RecordingCamera>?> _enabled = [];
     private readonly Dictionary<string, SortedSet<long>> _indexed = [];
+    // Days that show in the calendar (a month asked for alone adds only these).
+    private readonly Dictionary<string, SortedSet<long>> _calendar = [];
+    private int _monthRequests;
     private long _revision;
     private long _incidentsRevision;
     private readonly Dictionary<string, string> _names = [];
@@ -288,17 +291,54 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
         }
     }
 
+    /// <summary>How many months were asked for alone (tests).</summary>
+    public int MonthRequests
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _monthRequests;
+            }
+        }
+    }
+
+    private static long MonthStart(long s)
+    {
+        DateTime d = DateTimeOffset.FromUnixTimeSeconds(s).UtcDateTime;
+        return new DateTimeOffset(d.Year, d.Month, 1, 0, 0, 0, TimeSpan.Zero).ToUnixTimeSeconds();
+    }
+
+    private static long NextMonth(long monthStart) =>
+        new DateTimeOffset(DateTimeOffset.FromUnixTimeSeconds(monthStart).UtcDateTime.AddMonths(1), TimeSpan.Zero).ToUnixTimeSeconds();
+
+    private static (long Start, long End) Span(SortedSet<long> days, SortedSet<long> months)
+    {
+        long start = long.MaxValue, end = 0;
+        foreach (long d in days)
+        {
+            start = Math.Min(start, d);
+            end = Math.Max(end, d + Day - 1);
+        }
+        foreach (long m in months)
+        {
+            start = Math.Min(start, m);
+            end = Math.Max(end, NextMonth(m) - 1);
+        }
+        return (start, end);
+    }
+
     /// <inheritdoc/>
     public void RecordingsWant(string json)
     {
         const string F = "nv_recordings_want";
         JsonObject o = Object(json, F);
-        if (o["days"] is not JsonArray raw)
+        if (o["days"] is not JsonArray && o["months"] is not JsonArray)
         {
             throw Error(NvStatus.InvalidArgument, F);
         }
         var days = new SortedSet<long>();
-        foreach (JsonNode? n in raw)
+        foreach (JsonNode? n in o["days"] as JsonArray ?? [])
         {
             if (n is not JsonValue v || !v.TryGetValue(out long s) || s < 0)
             {
@@ -306,10 +346,30 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
             }
             days.Add(s - s % Day);
         }
-        if (days.Count > 31)
+        var months = new SortedSet<long>();
+        foreach (JsonNode? n in o["months"] as JsonArray ?? [])
+        {
+            if (n is not JsonValue v || !v.TryGetValue(out long s) || s < 0)
+            {
+                throw Error(NvStatus.InvalidArgument, F);
+            }
+            months.Add(MonthStart(s));
+        }
+        if (days.Count > 31 || months.Count > 12)
         {
             throw Error(NvStatus.Limit, F);
         }
+        // A day's month calendar comes with it, as on the core; months alone bring only their calendars.
+        long today = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / Day * Day;
+        var calendarDays = new SortedSet<long>();
+        foreach (long m in days.Select(MonthStart).Concat(months).Distinct())
+        {
+            for (long d = m; d < NextMonth(m) && d <= today; d += Day)
+            {
+                calendarDays.Add(d);
+            }
+        }
+        (long Start, long End) span = Span(days, months);
         var changed = new List<JsonObject[]>();
         long incidents;
         lock (_gate)
@@ -323,11 +383,17 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
                     _indexed[device] = set = [];
                 }
                 set.UnionWith(days);
+                if (!_calendar.TryGetValue(device, out SortedSet<long>? cal))
+                {
+                    _calendar[device] = cal = [];
+                }
+                cal.UnionWith(calendarDays);
+                _monthRequests += months.Count;
                 _revision++;
                 changed.Add(
                 [
                     new() { ["type"] = "recordings_index", ["device"] = device, ["state"] = "busy", ["pending_days"] = days.Count, ["revision"] = _revision - 1 },
-                    new() { ["type"] = "recordings_changed", ["device"] = device, ["revision"] = _revision, ["start"] = days.Min, ["end"] = days.Max + Day - 1 },
+                    new() { ["type"] = "recordings_changed", ["device"] = device, ["revision"] = _revision, ["start"] = span.Start, ["end"] = span.End },
                     new() { ["type"] = "recordings_index", ["device"] = device, ["state"] = "idle", ["pending_days"] = 0, ["revision"] = _revision },
                 ]);
             }
@@ -407,12 +473,13 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
         {
             Configured("nv_recordings_calendar");
             var lists = new List<JsonNode>();
-            foreach ((string device, SortedSet<long> days) in _indexed.OrderBy(p => p.Key, StringComparer.Ordinal))
+            foreach ((string device, SortedSet<long> indexed) in _indexed.OrderBy(p => p.Key, StringComparer.Ordinal))
             {
                 if (!_enabled.ContainsKey(device))
                 {
                     continue;
                 }
+                SortedSet<long> days = _calendar.TryGetValue(device, out SortedSet<long>? cal) ? [.. indexed.Union(cal)] : indexed;
                 foreach (RecordingCamera c in CamerasOf(device).Where(c => q.Cameras?.Contains(c) ?? true))
                 {
                     long[] inRange = [.. days.Where(d => d + Day - 1 >= q.Start && d <= q.End)];
@@ -998,6 +1065,7 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
                 d.State = "done";
                 EmitDownload(d);
             }
+            CompleteSoundAnalyses();
         }
     }
 }

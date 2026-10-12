@@ -314,6 +314,76 @@ static bool settled(const char *downloads) {
            strstr(downloads, "\"state\":\"failed\"") == NULL;
 }
 
+/* Edit lists and the rest of sound (minor 8) against the finished download
+ * and the mock's cameras. */
+static void edit_and_sound(NvCore *core, const char *key, const char *download, long long day) {
+    char json[1024], small[8];
+    size_t len = 0;
+    char *plan = malloc(1 << 20);
+    if (plan == NULL) {
+        problem("edit_and_sound: out of memory");
+        return;
+    }
+    snprintf(json, sizeof json, "{\"kind\":\"grid\",\"download\":\"%s\",\"layout\":\"2up\"}", download);
+    if (nv_edit_compute(core, json, small, sizeof small, &len) != NV_ERR_BUFFER_TOO_SMALL ||
+        len <= sizeof small || len >= (1 << 20) ||
+        nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_OK ||
+        strstr(plan, "\"kind\":\"grid\"") == NULL || strstr(plan, "\"cells\"") == NULL) {
+        problem("nv_edit_compute grid");
+    }
+    snprintf(json, sizeof json, "{\"kind\":\"follow\",\"download\":\"%s\"}", download);
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_OK ||
+        strstr(plan, "\"kind\":\"follow\"") == NULL || strstr(plan, "\"segments\"") == NULL) {
+        problem("nv_edit_compute follow");
+    }
+    snprintf(json, sizeof json, "{\"kind\":\"follow\",\"download\":\"%s\",\"in_ms\":1}", download);
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_ERR_UNSUPPORTED ||
+        nv_edit_compute(core, "{\"kind\":\"follow\",\"download\":\"nope\"}", plan, 1 << 20, &len) !=
+            NV_ERR_UNKNOWN_ID ||
+        nv_edit_compute(core, "{", plan, 1 << 20, &len) != NV_ERR_INVALID_ARGUMENT ||
+        nv_edit_compute(core, json, plan, 1 << 20, NULL) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_edit_compute status codes");
+    }
+
+    char camera[256];
+    snprintf(camera, sizeof camera, "{\"device\":\"%s\",\"channel\":0,\"lens\":0}", key);
+    if (nv_sound_watch(core, camera, true) != NV_OK || nv_sound_watch(core, camera, false) != NV_OK ||
+        nv_sound_watch(core, "{", true) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_sound_watch");
+    }
+    snprintf(json, sizeof json,
+             "{\"start\":%lld,\"end\":%lld,\"bucket_s\":60,\"cameras\":[{\"device\":\"%s\",\"channel\":0}]}",
+             day, day + 3599, key);
+    if (nv_recordings_loudness(core, json, plan, 1 << 20, &len) != NV_OK ||
+        strstr(plan, "\"lanes\"") == NULL || strstr(plan, "\"peak_db\"") == NULL ||
+        nv_recordings_loudness(core, "{", plan, 1 << 20, &len) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_recordings_loudness");
+    }
+    snprintf(json, sizeof json,
+             "{\"camera\":%s,\"analyzer\":\"soundanalysis-v1\",\"start\":%lld,\"end\":%lld,"
+             "\"labels\":[{\"kind\":\"dog_bark\",\"start\":%lld,\"end\":%lld,\"confidence\":0.9,"
+             "\"label\":\"dog_bark\"}]}",
+             camera, day, day + 600, day + 100, day + 105);
+    if (nv_sound_labels_put(core, json) != NV_OK ||
+        nv_sound_labels_put(core, "{") != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_sound_labels_put");
+    }
+    snprintf(json, sizeof json, "{\"camera\":%s,\"day\":%lld}", camera, day + 5);
+    char analysis[256];
+    if (nv_sound_analyze_day(core, json, analysis, sizeof analysis, &len) != NV_OK ||
+        strstr(analysis, "\"queued\"") == NULL ||
+        nv_sound_analyze_cancel(core, 987654321) != NV_ERR_UNKNOWN_ID) {
+        problem("nv_sound_analyze_day");
+    }
+    uint8_t peak[4], rms[4];
+    int64_t first = 0;
+    if (nv_tile_loudness(core, 987654321, peak, rms, sizeof peak, &first, &len) != NV_ERR_UNKNOWN_ID ||
+        nv_tile_loudness(core, 987654321, peak, rms, sizeof peak, NULL, &len) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_tile_loudness");
+    }
+    free(plan);
+}
+
 /* Configures recordings, asks for yesterday's index, queries it, edits and
  * locks an incident, fetches a thumbnail from pending to ready, downloads
  * an incident to the end, and hands it to the Trash, with the events of
@@ -353,7 +423,15 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     for (int i = 0; i < 2000; i++) {
         free(events);
         events = query_json(core, nv_recordings_events, query);
-        if (events != NULL && strstr(events, "\"kind\"") != NULL &&
+        /* Done once the index is complete (both cameras' events, no day
+         * pending, the lane idle), not at the first event: playback and
+         * the incident list below rely on all of it. */
+        char *status = query_json(core, status_fn, NULL);
+        bool filled = status != NULL && strstr(status, "\"state\":\"idle\"") != NULL &&
+                      strstr(status, "\"pending_days\":0") != NULL;
+        free(status);
+        if (filled && events != NULL && strstr(events, "\"kind\"") != NULL &&
+            strstr(events, "\"channel\":0") != NULL && strstr(events, "\"channel\":1") != NULL &&
             atomic_load(&g_rec_changed) > 0) {
             break;
         }
@@ -394,7 +472,17 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     }
 
     /* Incidents: the newest, renamed, then locked. */
-    char *incidents = query_json(core, nv_incidents_get, query);
+    char *incidents = NULL;
+    /* Incidents are grouped after the index settles and announced by an
+     * event, so ask until the list has one. */
+    for (int i = 0; i < 2000; i++) {
+        free(incidents);
+        incidents = query_json(core, nv_incidents_get, query);
+        if (incidents != NULL && strstr(incidents, "\"key\"") != NULL) {
+            break;
+        }
+        sleep_ms(10);
+    }
     if (incidents == NULL || !string_member(incidents, "key", incident, sizeof incident)) {
         problem("nv_incidents_get");
         free(incidents);
@@ -472,6 +560,7 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     if (!done) {
         problem("the download did not finish");
     }
+    edit_and_sound(core, key, download, day);
     if (nv_incident_lock(core, incident, true, answer, sizeof answer, &len) != NV_OK ||
         strstr(answer, "\"existing\"") == NULL || strstr(answer, download) == NULL) {
         problem("nv_incident_lock");

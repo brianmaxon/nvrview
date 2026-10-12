@@ -49,6 +49,22 @@ import Testing
 
     private let cam = RecordingCamera(device: "d-3f9a0c1b7e2d4a65", channel: 3)
 
+    @Test func soundEvents() {
+        #expect(
+            parse(
+                #"{"type":"sound_watch","camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"state":"refused","reason":"no_audio"}"#
+            ) == .soundWatch(camera: cam, state: "refused", reason: "no_audio"))
+        #expect(
+            parse(
+                #"{"type":"sound_analyze","request":4,"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"day":1791590400,"state":"done","seconds":86000,"labels":3}"#
+            ) == .soundAnalyze(
+                request: 4, camera: cam, day: 1_791_590_400, state: "done", reason: nil, seconds: 86_000, labels: 3))
+        // Missing what they cannot do without.
+        #expect(parse(#"{"type":"sound_analyze","state":"done"}"#) == nil)
+        #expect(parse(#"{"type":"sound_watch","state":"watching"}"#) == nil)
+        #expect(TileLoudness.decibels(0) == nil && TileLoudness.decibels(1) == -127 && TileLoudness.decibels(128) == 0)
+    }
+
     @Test func indexEvents() {
         #expect(
             parse(
@@ -236,6 +252,47 @@ private final class EventLog: CoreSink, @unchecked Sendable {
         #expect(progress.map(\.state) == ["queued", "running", "done"])
         #expect(progress.last?.cameras.first?.output != nil)
         #expect(DownloadList.parse(try core.downloadsGet())?.map(\.download) == [id])
+        // Edit lists over the finished download, and sound (minor 8).
+        #expect(throws: CoreStatus.unknownID) { try core.editCompute(json: #"{"kind":"follow","download":"nope"}"#) }
+        #expect(throws: CoreStatus.unsupported) { try core.editCompute(json: #"{"kind":"trim","download":"\#(id)"}"#) }
+        #expect(throws: CoreStatus.unsupported) {
+            try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","in_ms":1}"#)
+        }
+        #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: #"{"kind":"nonsense","download":"\#(id)"}"#) }
+        let follow = try object(try core.editCompute(json: #"{"kind":"follow","download":"\#(id)"}"#))
+        #expect(follow["kind"] as? String == "follow" && (follow["segments"] as? [[String: Any]])?.count == 1)
+        let grid = try object(try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","layout":"4up"}"#))
+        #expect(grid["layout"] as? String == "4up" && (grid["cells"] as? [Any])?.count == 1)
+
+        let cam1 = #"{"device":"\#(device)","channel":1,"lens":0}"#
+        try core.soundWatch(camera: cam1, enabled: true)
+        try core.soundWatch(camera: cam1, enabled: true)
+        try core.soundWatch(camera: cam1, enabled: false)
+        let sound = log.take().compactMap { e -> String? in
+            if case .soundWatch(_, let state, _) = e { state } else { nil }
+        }
+        #expect(sound == ["watching", "stopped"])
+        let lanes = try object(try core.recordingsLoudness(query: #"{"start":\#(day),"end":\#(day + 119),"bucket_s":60}"#))
+        #expect((lanes["lanes"] as? [Any])?.isEmpty == true)
+        #expect(throws: CoreStatus.limit) {
+            try core.recordingsLoudness(query: #"{"start":0,"end":200000,"bucket_s":1}"#)
+        }
+        try core.soundLabelsPut(
+            json: #"{"camera":\#(cam1),"analyzer":"soundanalysis-v1","start":\#(day),"end":\#(day + 600),"labels":[{"kind":"dog_bark","start":\#(day + 100),"end":\#(day + 105)}]}"#)
+        #expect(throws: CoreStatus.invalidArgument) {
+            try core.soundLabelsPut(
+                json: #"{"camera":\#(cam1),"analyzer":"pattern-v1","start":\#(day),"end":\#(day + 600),"labels":[]}"#)
+        }
+        let analysis = try object(try core.soundAnalyzeDay(json: #"{"camera":\#(cam1),"day":\#(day)}"#))
+        let request = try #require(analysis["request"] as? Int)
+        fake.completeRecordingWork()
+        let states = log.take().compactMap { e -> String? in
+            if case .soundAnalyze(let r, _, _, let state, _, _, _) = e, r == UInt64(request) { state } else { nil }
+        }
+        #expect(states == ["queued", "running", "done"])
+        #expect(throws: CoreStatus.unknownID) { try core.soundAnalyzeCancel(UInt64(request)) }
+        #expect(throws: CoreStatus.unknownID) { try core.tileLoudness(987_654_321, capacity: 8) }
+
         let locked = try object(try core.incidentLock(key: incident, locked: true))
         #expect(locked["download_status"] as? String == "existing" && locked["download"] as? String == id)
         #expect(throws: CoreStatus.unknownID) { try core.downloadPause("no-such-download", camera: nil, paused: true) }

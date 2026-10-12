@@ -45,6 +45,10 @@ import VideoKit
         return done()
     }
 
+    private func object(_ s: String) throws -> [String: Any] {
+        try #require(try JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any])
+    }
+
     private func recordings(_ events: Box<[CoreEvent]>) -> [RecordingsEvent] {
         events.get().compactMap { if case .recordings(let r) = $0 { r } else { nil } }
     }
@@ -147,6 +151,31 @@ import VideoKit
         print("real core: download \(done.stateText), \(done.outputs.count) files")
         #expect(!done.outputs.isEmpty && done.outputs.allSatisfy { FileManager.default.fileExists(atPath: $0) })
         #expect(DownloadList.parse(try core.downloadsGet())?.contains { $0.download == id } == true)
+
+        // Edit lists over the finished download, and the rest of sound
+        // (minor 8): the contract's shapes and status codes.
+        let grid = try object(try core.editCompute(json: #"{"kind":"grid","download":"\#(id)","layout":"2up"}"#))
+        #expect(grid["kind"] as? String == "grid" && (grid["cells"] as? [Any])?.isEmpty == false)
+        let follow = try object(try core.editCompute(json: #"{"kind":"follow","download":"\#(id)"}"#))
+        #expect(follow["kind"] as? String == "follow" && (follow["segments"] as? [Any])?.isEmpty == false)
+        #expect(throws: CoreStatus.unknownID) { try core.editCompute(json: #"{"kind":"follow","download":"nope"}"#) }
+        #expect(throws: CoreStatus.unsupported) {
+            try core.editCompute(json: #"{"kind":"follow","download":"\#(id)","out_ms":1}"#)
+        }
+        #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: "{") }
+        let cam0 = cams[0].json
+        try core.soundWatch(camera: cam0, enabled: true)
+        try core.soundWatch(camera: cam0, enabled: false)
+        let loud = try object(try core.recordingsLoudness(
+            query: #"{"start":\#(yesterday),"end":\#(yesterday + 3599),"bucket_s":60,"cameras":[\#(cam0)]}"#))
+        #expect((loud["lanes"] as? [[String: Any]])?.first?["peak_db"] as? [Any] != nil)
+        try core.soundLabelsPut(
+            json: #"{"camera":\#(cam0),"analyzer":"soundanalysis-v1","start":\#(yesterday),"end":\#(yesterday + 600),"labels":[{"kind":"dog_bark","start":\#(yesterday + 100),"end":\#(yesterday + 105),"confidence":0.9,"label":"dog_bark"}]}"#)
+        #expect(throws: CoreStatus.invalidArgument) { try core.soundLabelsPut(json: "{") }
+        let analysis = try object(try core.soundAnalyzeDay(json: #"{"camera":\#(cam0),"day":\#(yesterday + 5)}"#))
+        #expect(analysis["state"] as? String == "queued" && analysis["request"] as? Int != nil)
+        #expect(throws: CoreStatus.unknownID) { try core.soundAnalyzeCancel(987_654_321) }
+        #expect(throws: CoreStatus.unknownID) { try core.tileLoudness(987_654_321, capacity: 8) }
         let unlocked = try #require(LockAnswer.parse(answer: try core.incidentLock(key: first.key, locked: false)))
         #expect(unlocked.keys == [first.key] && unlocked.download == nil)
 

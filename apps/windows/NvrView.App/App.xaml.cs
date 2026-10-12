@@ -8,6 +8,7 @@
 using Microsoft.UI.Xaml;
 using NvrView.Interop;
 using NvrView.Shell;
+using NvrView.Tiles;
 
 namespace NvrView.App;
 
@@ -45,6 +46,19 @@ public partial class App : Application
     internal static App Instance => (App)Current;
 
     internal Viewer? Viewer => _viewer;
+
+    /// <summary>The recordings model (docs/UX.md "Recordings"), shared by the Recordings window; null before start.</summary>
+    internal RecordingsService? Recordings { get; private set; }
+
+    /// <summary>Opens the Recordings window, or brings the open one forward (null when the core has no recordings).</summary>
+    internal RecordingsWindow? OpenRecordings()
+    {
+        if (_viewer is null || _host is null || Recordings is not { Available: true } recordings)
+        {
+            return null;
+        }
+        return RecordingsWindow.Open(_viewer, _host, recordings, Program.Options.Background);
+    }
 
     /// <summary>Self-update (docs/UPDATES.md); automatic checks are off in development and test runs.</summary>
     internal Updater? Updater { get; private set; }
@@ -114,6 +128,7 @@ public partial class App : Application
             new GroupStore(memoryOnly ? null : Path.Combine(dataDir, "groups.json")));
         _viewer.Transcripts = new TranscriptStore(Path.Combine(dataDir, "Transcripts"));
         _viewer.CallWindows = new CallWindows(_viewer, _host, () => ActiveViewerWindow, o.Background);
+        StartRecordings(ui, o, dataDir, memoryOnly);
         _windowStore = new WindowStore(memoryOnly ? null : Path.Combine(dataDir, "windows.json"));
         Updater = new Updater(
             _viewer, ui, memoryOnly ? null : Path.Combine(dataDir, "update-settings.json"),
@@ -208,6 +223,32 @@ public partial class App : Application
         }
     }
 
+    // Recordings (minor 5 and 6): configured at each launch so the cameras the user chose are searched again and
+    // unfinished downloads resume; downloads go to Videos\NvrView\Incidents (Incidents in --data-dir).
+    private void StartRecordings(Microsoft.UI.Dispatching.DispatcherQueue ui, AppOptions o, string dataDir, bool memoryOnly)
+    {
+        Recordings = new RecordingsService(
+            _host!.Core, new CorePlaybackHost(_host),
+            memoryOnly ? null : new RecordingsEnablementStore(Path.Combine(dataDir, "recordings-cameras.json")))
+        {
+            Post = a => _ = ui.TryEnqueue(() => a()),
+            Trasher = path =>
+            {
+                if (!SystemActions.MoveToRecycleBin(path))
+                {
+                    AppLog.Warn("a download could not be moved to the Recycle Bin");
+                }
+            },
+            Revealer = SystemActions.ShowInExplorer,
+            CameraNamer = c => _viewer!.FindDevice(c.Device) is null ? null : _viewer.CameraName(new CameraRef(c.Device, c.Channel, c.Lens)),
+        };
+        _host.Recordings = Recordings;
+        string downloads = o.DataDir is not null || o.SelfTest || o.StartupTest
+            ? Path.Combine(dataDir, "Incidents")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyVideos), "NvrView", "Incidents");
+        Recordings.Start(downloads);
+    }
+
     /// <summary>Opens a window with its own content (behind the others and never activated in the self-tests).</summary>
     internal ViewerWindow OpenWindow(WindowContent content, SavedWindow? restore = null)
     {
@@ -272,6 +313,8 @@ public partial class App : Application
         Updater?.Stop();
         // The Settings window goes with the app, then the call windows (their renderers and leases), then the viewer windows.
         SettingsWindow.CloseCurrent();
+        RecordingsWindow.CloseCurrent();
+        Recordings?.Shutdown();
         _viewer?.CallWindows?.CloseAll();
         foreach (ViewerWindow w in _windows.ToArray())
         {
