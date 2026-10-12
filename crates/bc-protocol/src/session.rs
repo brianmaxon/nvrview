@@ -420,6 +420,8 @@ const READS_REMEMBERED: usize = 64;
 struct PtzFacts {
     /// Per channel, from the latest 199 reply; `None` until one arrived.
     caps: Option<HashMap<u8, PtzCaps>>,
+    /// Per channel, how many lenses its 199 item lists (sub-items).
+    lens_counts: HashMap<u8, usize>,
     /// Per channel, from the latest 294 reply.
     lens: HashMap<Cam, ZoomFocus>,
     /// Per channel, from the latest 190 reply.
@@ -1025,6 +1027,8 @@ impl Session {
                 if let Ok(items) = crate::detection::parse_channel_ai(xml_text) {
                     self.ptz.caps =
                         Some(items.iter().map(|i| (i.channel, PtzCaps::of(i))).collect());
+                    self.ptz.lens_counts =
+                        items.iter().map(|i| (i.channel, i.lenses.len())).collect();
                 }
             }
             (Command::PtzZoomFocus, Some(ch)) => {
@@ -1053,6 +1057,21 @@ impl Session {
             .caps
             .as_ref()
             .map(|c| c.get(&channel).copied().unwrap_or_default())
+    }
+
+    /// The camera a request for `cam` means on this device: a second lens
+    /// is kept only where the latest 199 reply lists two lenses for the
+    /// channel (a tile on the `extern` stream can also be the middle
+    /// quality of a single-lens camera, which has no second lens to
+    /// address). Unchanged before 199 was read.
+    pub fn ptz_resolve(&self, cam: Cam) -> Cam {
+        if cam.lens > 0
+            && self.ptz.caps.is_some()
+            && self.ptz.lens_counts.get(&cam.channel).copied().unwrap_or(0) < 2
+        {
+            return Cam::new(cam.channel);
+        }
+        cam
     }
 
     /// A camera's lens ranges, from the latest 294 reply on this session.

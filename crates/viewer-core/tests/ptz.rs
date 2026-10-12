@@ -283,6 +283,9 @@ fn a_second_lens_is_addressed_with_the_sub_channel() {
         .unwrap();
     let second = core.open_tile(dev, 1, StreamTier::Extern).unwrap();
     let plain = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
+    // The extern stream of a single-lens camera is its middle quality, not a
+    // second lens: its tile steers the first lens.
+    let middle = core.open_tile(dev, 0, StreamTier::Extern).unwrap();
 
     // The second lens's tile reads and moves lens 1.
     let info: serde_json::Value =
@@ -301,8 +304,13 @@ fn a_second_lens_is_addressed_with_the_sub_channel() {
     core.ptz_move(plain, PtzDirection::Left, 20, MotionOrigin::Manual)
         .unwrap();
     core.ptz_stop(plain, MotionOrigin::Manual).unwrap();
+    core.ptz_move(middle, PtzDirection::Up, 20, MotionOrigin::Manual)
+        .unwrap();
+    core.ptz_stop(middle, MotionOrigin::Manual).unwrap();
     sim_until(&sim, &core, "stopped and recalled", 5, || {
-        summary(&rec, plain).len() == 2 && summary(&rec, second).len() == 3
+        summary(&rec, plain).len() == 2
+            && summary(&rec, middle).len() == 2
+            && summary(&rec, second).len() == 3
     });
     assert!(nvr.ptz_state(Cam::with_lens(1, 0)).is_none());
     assert_eq!(

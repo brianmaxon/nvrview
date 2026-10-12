@@ -152,7 +152,19 @@ impl PtzHub {
                 let Some(state) = state.upgrade() else {
                     return;
                 };
-                let tile = lock(&state).movers.remove(&(device, n.cam)).map(|m| m.tile);
+                // A second-lens request on a single-lens camera was sent to
+                // the first lens (the session resolves it): the same mover.
+                let tile = {
+                    let mut st = lock(&state);
+                    let found = st.movers.remove(&(device, n.cam));
+                    let found = found.or_else(|| {
+                        let other = Cam::with_lens(n.cam.channel, 1);
+                        (n.cam.lens == 0)
+                            .then(|| st.movers.remove(&(device, other)))
+                            .flatten()
+                    });
+                    found.map(|m| m.tile)
+                };
                 if let Some(tile) = tile {
                     events.send(
                         event(tile, "stop", "sent")

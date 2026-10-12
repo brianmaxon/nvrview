@@ -952,7 +952,8 @@ impl Ptz {
         }
         // Requests in order; one waiting for a read holds back the ones
         // behind it, so a channel's commands never overtake each other.
-        while let Some(r) = self.queue.pop_front() {
+        while let Some(mut r) = self.queue.pop_front() {
+            r.cam = session.ptz_resolve(r.cam);
             let abandoned = r.reply.as_ref().is_some_and(oneshot::Sender::is_closed);
             if abandoned && r.op != Op::Stop {
                 continue;
