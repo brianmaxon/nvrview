@@ -121,15 +121,26 @@ self-test parity check, and the secret scan, and says so. Any other change, or
 stamp (stamps come only from full runs on a clean tree; `scripts/release.sh`
 needs them).
 
+**Test result cache.** Both checks skip a suite (one crate's tests, the Swift
+tests, a Windows app self-test, ...) whose inputs, as committed or staged,
+have a clean pass on that platform from the last 72 hours, print it as
+`cached pass ...`, and end with a table of what ran. Rust reruns only the
+changed crates and the crates above them. `NVRVIEW_FULL_CHECK=1` and the
+release scripts run everything, as does the first run after 72 hours without
+a full pass. A stamp with cached suites serves merges, never a release. Rules
+and inputs: `scripts/suite-cache.py` and the README ("Test result cache");
+tested by `scripts/test-suite-cache.sh`.
+
 **Windows check and merging.** Run the final
 `NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh` on a *clean committed tree*
 (commit first): only then does it leave a stamp (shared through the common git
 directory) that `scripts/merge-branch.sh` can reuse, so the merge does not run
 the Windows check again. Commit nothing after it that touches code; a later
 change means a new Windows run. The lead merges with
-`scripts/merge-branch.sh <branch> "<message>"`: merge without committing, full
-Mac check, then the Windows check only when the branch's stamp does not cover
-the result (rules in the script header; every 5th merge always runs it). To
+`scripts/merge-branch.sh <branch> "<message>"`: merge without committing, Mac
+check (cached suites allowed and listed), then the Windows check only when the
+branch's stamp does not cover the result or no full Windows run passed in 72
+hours (rules in the script header). To
 check Mac and Windows together, use `scripts/release-check.sh`.
 `scripts/test-stamps.sh` tests these rules with fake checks (part of
 `scripts/check.sh`).

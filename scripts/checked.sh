@@ -4,9 +4,13 @@
 #   scripts/checked.sh [--mac] [--windows]
 #       Exits 0 if HEAD's tree has every requested stamp (both when none is
 #       named); otherwise prints what is missing and exits 1.
-#   scripts/checked.sh --record mac|windows SECONDS "STEPS"
+#   scripts/checked.sh --record mac|windows SECONDS "STEPS" ["CACHED"]
 #       Writes a stamp for HEAD's tree. Called by scripts/check.sh and
-#       scripts/windows-check.sh, only after a full pass on a clean tree.
+#       scripts/windows-check.sh, only after a pass on a clean tree. CACHED
+#       lists the suites taken from the test result cache
+#       (scripts/suite-cache.py); "none" or empty makes it a full stamp
+#       (full=yes). A stamp with cached suites (full=no) serves merges;
+#       scripts/release.sh needs a full one.
 #       The kind windows-reused is written by scripts/merge-branch.sh for a
 #       merge accepted on a branch's earlier Windows result; --windows and
 #       scripts/release.sh never count it. Rules: scripts/stamps-lib.sh.
@@ -25,12 +29,22 @@ if [ "${1:-}" = "--record" ]; then
   kind="${2:?usage: $0 --record mac|windows SECONDS STEPS}"
   case "$kind" in mac | windows | windows-reused) ;; *) echo "unknown stamp kind: $kind" >&2; exit 2 ;; esac
   mkdir -p "$dir"
+  # A run with cached suites never replaces a full stamp of the same tree.
+  if [ "${5:-none}" != none ] && [ -n "${5:-}" ] && [ -f "$dir/$tree.$kind" ] &&
+    ! grep -q '^full=no$' "$dir/$tree.$kind"; then
+    echo "check stamp kept: $dir/$tree.$kind is from a full run"
+    exit 0
+  fi
   {
     printf 'date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'duration=%ss\n' "${3:-unknown}"
     printf 'commit=%s\n' "$(git rev-parse HEAD)"
     printf 'tree=%s\n' "$tree"
     printf 'steps=%s\n' "${4:-}"
+    case "${5:-none}" in
+      none | '') printf 'full=yes\n' ;;
+      *) printf 'full=no\ncached=%s\n' "$5" ;;
+    esac
   } >"$dir/$tree.$kind"
   echo "check stamp written: $dir/$tree.$kind"
   exit 0
@@ -54,7 +68,8 @@ missing=0
 report() {
   kind="$1"
   if [ -f "$dir/$tree.$kind" ]; then
-    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind"))"
+    cached=$(sed -n 's/^cached=//p' "$dir/$tree.$kind")
+    echo "$kind: checked ($(sed -n 's/^date=//p' "$dir/$tree.$kind"), $(sed -n 's/^duration=//p' "$dir/$tree.$kind")${cached:+; cached suites: $cached})"
   else
     echo "$kind: NOT checked for tree $tree" >&2
     missing=1

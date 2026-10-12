@@ -86,8 +86,9 @@ if [ "$skip_windows" != 1 ]; then
 fi
 if [ "$full_check" = 1 ]; then
   echo "== fresh checks (--full-check)"
+  # Full runs: nothing is taken from the test result cache.
   if [ "$skip_windows" = 1 ]; then
-    scripts/check.sh || die "the Mac check failed"
+    NVRVIEW_FULL_CHECK=1 scripts/check.sh || die "the Mac check failed"
   else
     scripts/release-check.sh || die "the checks failed"
   fi

@@ -15,6 +15,17 @@ has_stamp() { # KIND TREE
   [ -f "$(stamp_dir)/$2.$1" ]
 }
 
+# A stamp from a run that took nothing from the test result cache
+# (scripts/suite-cache.py). Stamps written before the cache are full.
+full_stamp() { # KIND TREE
+  has_stamp "$1" "$2" && ! grep -q '^full=no$' "$(stamp_dir)/$2.$1"
+}
+
+# The suites a stamp took from the cache, or nothing.
+stamp_cached() { # KIND TREE
+  sed -n 's/^cached=//p' "$(stamp_dir)/$2.$1" 2>/dev/null || true
+}
+
 # Succeeds when the only file that differs between the two trees is VERSION.
 version_only_diff() { # TREE_A TREE_B
   [ "$(git diff --name-only "$1" "$2")" = "VERSION" ]
@@ -22,15 +33,17 @@ version_only_diff() { # TREE_A TREE_B
 
 # Prints the tree whose stamp of KIND counts for TREE and why, and succeeds:
 # the tree itself, or (the version-only rule) a stamped tree that differs from
-# it in VERSION alone. Fails, printing nothing, when there is none.
+# it in VERSION alone. Only full stamps count (nothing taken from the test
+# result cache). Fails, printing nothing, when there is none.
 release_stamp_tree() { # KIND TREE
-  if has_stamp "$1" "$2"; then
+  if full_stamp "$1" "$2"; then
     printf '%s exact\n' "$2"
     return 0
   fi
   for f in "$(stamp_dir)"/*."$1"; do
     [ -f "$f" ] || continue
     t=$(basename "$f" ".$1")
+    full_stamp "$1" "$t" || continue
     if git cat-file -e "$t^{tree}" 2>/dev/null && version_only_diff "$t" "$2"; then
       printf '%s version-only\n' "$t"
       return 0
