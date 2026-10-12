@@ -5,6 +5,7 @@
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes FILE
 #       [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows]
+#       [--full-check]
 #
 #   --notes FILE      the release notes (plain text) shown by the apps; required
 #   --key-file PATH   the secret signing key (default ~/.config/nvrview-signing/update.key);
@@ -20,16 +21,27 @@
 #   --skip-windows    build only the macOS package (the result is labeled
 #                     macOS only and is not a complete release)
 #
+#   --full-check      run both checks fresh first (scripts/release-check.sh,
+#                     Mac and Windows in parallel) instead of looking for stamps
+#
 # Refuses unless the working tree is clean and the full checks already
 # passed for HEAD's tree (scripts/checked.sh --mac --windows; the stamps come
-# from scripts/check.sh and NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh).
-# It does not rerun them.
+# from scripts/check.sh and NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh,
+# or both at once from scripts/release-check.sh). Without --full-check it does
+# not rerun them. Version-only rule: stamps of another tree are accepted when
+# the only file that differs between that tree and HEAD's is VERSION (a
+# version bump after a full check); the output says so. A stamp written for a
+# merge that skipped its Windows run (scripts/merge-branch.sh) never counts
+# for Windows. The packages are always built and signed fresh, and the Windows
+# package reuses the publish output the Windows check tested when it is the
+# same tree (scripts/windows-check.sh --package).
 #
 # The macOS package is signed for local use (scripts/package-macos.sh).
 # Distributing the macOS app beyond this Mac needs a Developer ID signature
 # and notarization, which this script does not do.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
+. scripts/stamps-lib.sh
 if [ -d /opt/homebrew/opt/rustup/bin ]; then
   PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 fi
@@ -45,6 +57,7 @@ key="$HOME/.config/nvrview-signing/update.key"
 out=""
 update_source=""
 skip_windows=0
+full_check=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) notes="${2:?--notes needs a file}"; shift 2 ;;
@@ -52,7 +65,8 @@ while [ $# -gt 0 ]; do
     --out) out="${2:?--out needs a directory}"; shift 2 ;;
     --update-source) update_source="${2:?--update-source needs a folder path or URL}"; shift 2 ;;
     --skip-windows) skip_windows=1; shift ;;
-    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows]" >&2; exit 2 ;;
+    --full-check) full_check=1; shift ;;
+    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows] [--full-check]" >&2; exit 2 ;;
   esac
 done
 [ -n "$notes" ] || die "--notes FILE is required"
@@ -67,13 +81,32 @@ if [ -d "$out" ] && [ -n "$(ls -A "$out")" ]; then
 fi
 
 [ -z "$(git status --porcelain)" ] || die "the working tree is not clean; commit or remove changes first"
-if [ "$skip_windows" = 1 ]; then
-  scripts/checked.sh --mac || die "the checks have not passed for HEAD's tree"
-else
-  scripts/checked.sh --mac --windows || die "the checks have not passed for HEAD's tree"
+if [ "$skip_windows" != 1 ]; then
   [ -n "${NVRVIEW_WINDOWS_HOST:-}" ] || die "set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer"
 fi
+if [ "$full_check" = 1 ]; then
+  echo "== fresh checks (--full-check)"
+  if [ "$skip_windows" = 1 ]; then
+    scripts/check.sh || die "the Mac check failed"
+  else
+    scripts/release-check.sh || die "the checks failed"
+  fi
+fi
+# Each requested stamp must exist for HEAD's tree or, by the version-only
+# rule, for a tree that differs from it in VERSION alone.
 head_tree=$(git rev-parse 'HEAD^{tree}')
+kinds="mac"
+if [ "$skip_windows" != 1 ]; then kinds="mac windows"; fi
+for kind in $kinds; do
+  if found=$(release_stamp_tree "$kind" "$head_tree"); then
+    case "$found" in
+      *" version-only") echo "$kind check: accepted by the version-only rule: tree ${found% *} passed it and differs from HEAD's tree only in VERSION" ;;
+      *) echo "$kind check: passed for HEAD's tree" ;;
+    esac
+  else
+    die "the $kind check has not passed for HEAD's tree (run scripts/release-check.sh, or use --full-check)"
+  fi
+done
 
 start=$(date +%s)
 # The public key, derived from the secret one (only the public line is kept in
