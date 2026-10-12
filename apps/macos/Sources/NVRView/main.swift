@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Calls shown in their own windows (not viewer windows).
     private(set) var callWindows: CallWindows?
     private var settings: SettingsWindowController?
+    /// Open recordings windows (docs/UX.md "Recordings").
+    private(set) var recordingsWindows: [RecordingsWindowController] = []
     /// With `--selftest`: AppKit's warnings on standard error, counted.
     let logWatch: LogWatch?
     /// With `--selftest`: the viewer's clock, moved only by the self-test
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         model.openWindow = { [weak self] content in self?.openWindow(content) }
         startCallWindows(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
+        model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
         if options.fake { seedFakeLayouts(model) }
 
@@ -167,6 +170,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             ]
             // The self-test sends its own detections and alarms, at known times.
             o.detectionDemo = options.selfTestSeconds == nil ? 12 : nil
+            // The self-test finishes thumbnail fetches and downloads itself.
+            o.recordingWorkIsManual = options.selfTestSeconds != nil
             let box = FakeBox()
             let credentials = MemoryCredentials()
             let model = try AppModel(
@@ -193,6 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             cameraFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("cameras.json")
                     ?? JSONFileStore<CameraOptions>.appSupport("cameras.json")),
+            recordingsFile: JSONFileStore(
+                file: options.dataDirectory?.appendingPathComponent("recordings-cameras.json")
+                    ?? JSONFileStore<RecordingsEnablement>.appSupport("recordings-cameras.json")),
             clock: testClock ?? SystemViewerClock(),
             callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }
@@ -231,6 +239,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             root: .split(
                 .row, ratio: 0.62, a: .leaf(a[0]),
                 b: .split(.col, ratio: 0.34, a: .leaf(b[1]), b: .split(.col, ratio: 0.5, a: .leaf(a[2]), b: .leaf(b[3])))))
+    }
+
+    // MARK: Recordings
+
+    /// Where downloaded incidents go: `~/Movies/NVRView/Incidents`; with
+    /// `--data-dir`, its `Incidents` folder; with `--fake` or `--selftest`
+    /// otherwise, a folder of its own under the temporary directory.
+    private func recordingsDownloads() -> URL {
+        if let data = options.dataDirectory { return data.appendingPathComponent("Incidents", isDirectory: true) }
+        if options.fake || options.selfTestSeconds != nil {
+            return FileManager.default.temporaryDirectory
+                .appendingPathComponent("nvrview-fake-incidents-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+        }
+        return FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("NVRView/Incidents", isDirectory: true)
+    }
+
+    /// Window > Recordings: brings the open recordings window forward, or
+    /// opens one.
+    @objc func showRecordings(_ sender: Any?) {
+        if let open = recordingsWindows.first {
+            open.showWindow(nil)
+            open.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        openRecordingsWindow()?.showWindow(nil)
+    }
+
+    /// Opens a recordings window (behind the others, never key, in a self-test).
+    @discardableResult
+    func openRecordingsWindow() -> RecordingsWindowController? {
+        guard let model, model.recordings.available else { return nil }
+        let controller = RecordingsWindowController(model: model.recordings)
+        controller.onClose = { [weak self] c in self?.recordingsWindows.removeAll { $0 === c } }
+        recordingsWindows.append(controller)
+        if options.selfTestSeconds != nil {
+            controller.window?.orderBack(nil)
+        } else if let window = controller.window, window.frame.origin == .zero {
+            window.center()
+        }
+        return controller
     }
 
     // MARK: Windows
@@ -360,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func toggleHideOffline(_ sender: Any?) { model?.hideOfflineChannels.toggle() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(showRecordings(_:)) { return model?.recordings.available == true }
         if item.action == #selector(checkForUpdates(_:)) {
             item.title = model?.updater?.menuTitle ?? "Check for Updates…"
             return model?.updater != nil
@@ -478,6 +528,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ])
         let window = NSMenu(title: "Window")
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
+        window.addItem(.separator())
+        window.addItem(item("Recordings", #selector(showRecordings(_:)), "r", [.command, .option]))
         let windowItem = NSMenuItem()
         windowItem.submenu = window
         main.addItem(windowItem)
