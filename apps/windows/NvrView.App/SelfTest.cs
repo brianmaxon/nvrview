@@ -1121,7 +1121,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             {
                 foreach ((string file, int source, long ms) in files)
                 {
-                    SyntheticRecording.Write(new SyntheticRecording.Spec(Frames: (int)(ms / 100) + 1, Color: source, Sound: true), file);
+                    SyntheticRecording.Write(new SyntheticRecording.Spec(Frames: (int)(ms / 100) + 1, Color: source), file);
                 }
             });
         }
@@ -1264,8 +1264,6 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             Expect(first == 0 && second == 1, $"edits: the grid's sound came from {first?.ToString() ?? "none"}, then {second?.ToString() ?? "none"}");
         }
 
-        await ExportEditSteps(w, b, fake, d.Download, s);
-
         // parity: edit-back-to-cameras
         long at = ep.PositionMs;
         ep.Now = realClock;
@@ -1277,6 +1275,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             Expect(p.PositionMs == at, $"edits: the cameras continue at {p.PositionMs}, not the edit's {at}");
         }
+
+        // The edit is closed, so its files can be written again: with sound for the export steps, then as they were.
+        await ExportEditSteps(w, b, fake, d.Download, s, files);
         try
         {
             if (d.Folder is { } folder)

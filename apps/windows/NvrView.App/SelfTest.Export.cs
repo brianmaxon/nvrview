@@ -44,8 +44,34 @@ internal sealed partial class SelfTest
     // (W3's EditFrameRenderer behind ExportWriters.EditFrames), read back with Media Foundation: the length, the size,
     // which camera and frame sample times show, and the sound (the synthetic files carry a silent AAC track) placed
     // where the player's rules put it (AudioPiece.Of).
-    private async Task ExportEditSteps(RecordingsWindow w, RecordingsBrowser b, FakeRecordings fake, string download, long s)
+    private async Task ExportEditSteps(
+        RecordingsWindow w, RecordingsBrowser b, FakeRecordings fake, string download, long s, List<(string File, int Source, long DurationMs)> files)
     {
+        // The download's files carry a silent sound track while these steps run, and none afterwards, as the later sound
+        // analysis steps expect of a download.
+        async Task<string?> Rewrite(bool sound)
+        {
+            try
+            {
+                await Task.Run(() =>
+                {
+                    foreach ((string file, int source, long ms) in files)
+                    {
+                        SyntheticRecording.Write(new SyntheticRecording.Spec(Frames: (int)(ms / 100) + 1, Color: source, Sound: sound), file);
+                    }
+                });
+                return null;
+            }
+            catch (Exception e) when (e is VideoException or IOException or UnauthorizedAccessException)
+            {
+                return e.Message;
+            }
+        }
+        if (await Rewrite(sound: true) is { } notWritten)
+        {
+            _problems.Add($"export: the edit's files could not be written with sound ({notWritten})");
+            return;
+        }
         ExportController export = b.Export;
         string dir = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-export-edit-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
@@ -172,6 +198,10 @@ internal sealed partial class SelfTest
         }
         finally
         {
+            if (await Rewrite(sound: false) is { } notRestored)
+            {
+                _problems.Add($"export: the edit's files could not be written back without sound ({notRestored})");
+            }
             export.Dialogs = realDialogs;
             export.ShareSafe = wasShareSafe;
             export.Codec = wasCodec;

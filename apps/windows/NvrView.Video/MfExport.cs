@@ -421,6 +421,15 @@ public static unsafe class MfExport
             Ok(reader->GetNativeMediaType(FirstVideo, 0, &native), "GetNativeMediaType");
             uint w = 0, h = 0;
             _ = MFGetAttributeSize((IMFAttributes*)native, Ref(in MF_MT_FRAME_SIZE), &w, &h);
+            // The frame size is the coded one (a multiple of 8 or 16 for HEVC); the picture shown is the display aperture.
+            MFVideoArea area;
+            uint got;
+            if ((int)native->GetBlob(Ref(in MF_MT_MINIMUM_DISPLAY_APERTURE), (byte*)&area, (uint)sizeof(MFVideoArea), &got) >= 0
+                && got == sizeof(MFVideoArea) && area.Area.cx > 0 && area.Area.cy > 0)
+            {
+                w = (uint)area.Area.cx;
+                h = (uint)area.Area.cy;
+            }
             PROPVARIANT duration = default;
             Ok(reader->GetPresentationAttribute(0xFFFFFFFF, Ref(in MF_PD_DURATION), &duration), "GetPresentationAttribute");
             return (duration.uhVal.QuadPart / (ulong)HundredNs > long.MaxValue ? 0 : (long)(duration.uhVal.QuadPart / (ulong)HundredNs), (int)w, (int)h);
