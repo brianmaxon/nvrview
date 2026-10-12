@@ -97,6 +97,8 @@ pub enum EdlError {
     NoCoverage,
     /// The canvas is empty or beyond [`MAX_CANVAS`].
     InvalidCanvas,
+    /// `in_ms` is not before `out_ms`.
+    InvalidWindow,
 }
 
 impl fmt::Display for EdlError {
@@ -107,6 +109,7 @@ impl fmt::Display for EdlError {
             EdlError::NoKeyframes => "no source has a keyframe to cut on",
             EdlError::NoCoverage => "no source has video where the incident happened",
             EdlError::InvalidCanvas => "the canvas size is not usable",
+            EdlError::InvalidWindow => "the in point is not before the out point",
         })
     }
 }
@@ -208,6 +211,14 @@ pub struct FollowRequest {
     /// Captions.
     #[serde(default)]
     pub labels: Labels,
+    /// Trim the cut to start here (device-local milliseconds). With a
+    /// `keyframe` cut the start moves back to the keyframe at or before it
+    /// (never before the shot's own start).
+    #[serde(default)]
+    pub in_ms: Option<i64>,
+    /// Trim the cut to end here (exclusive; exact in both cuts).
+    #[serde(default)]
+    pub out_ms: Option<i64>,
 }
 
 impl Default for FollowRequest {
@@ -218,6 +229,8 @@ impl Default for FollowRequest {
             cut: Cut::Keyframe,
             priority: Vec::new(),
             labels: Labels::default(),
+            in_ms: None,
+            out_ms: None,
         }
     }
 }
@@ -293,6 +306,12 @@ pub struct GridRequest {
     /// Clock corrections; they replace the sources' own `offset_ms`.
     #[serde(default)]
     pub offsets_ms: Vec<CameraOffset>,
+    /// Trim the grid to start here (device-local milliseconds).
+    #[serde(default)]
+    pub in_ms: Option<i64>,
+    /// Trim the grid to end here (exclusive).
+    #[serde(default)]
+    pub out_ms: Option<i64>,
 }
 
 /// A source as the plan lists it.
@@ -527,6 +546,7 @@ pub fn plan_follow(
     req: &FollowRequest,
 ) -> Result<FollowPlan, EdlError> {
     let keyed = req.cut == Cut::Keyframe;
+    let window = window(req.in_ms, req.out_ms)?;
     let srcs = prepare(sources, keyed, &[])?;
     if inc.events.is_empty() {
         return Err(EdlError::NoEvents);
@@ -590,6 +610,7 @@ pub fn plan_follow(
         snap_to_keyframes(&mut shots, &srcs);
     }
     shots.retain(|s| s.src.is_some() && s.a < s.b);
+    clip_shots(&mut shots, &srcs, window, keyed);
     if shots.is_empty() {
         return Err(EdlError::NoCoverage);
     }
@@ -644,6 +665,41 @@ pub fn plan_follow(
         sources: plan_sources(&used),
         segments,
     })
+}
+
+/// The `[in, out)` window of a request, `i64::MIN..i64::MAX` when open.
+fn window(in_ms: Option<i64>, out_ms: Option<i64>) -> Result<(i64, i64), EdlError> {
+    let (a, b) = (in_ms.unwrap_or(i64::MIN), out_ms.unwrap_or(i64::MAX));
+    if a >= b {
+        return Err(EdlError::InvalidWindow);
+    }
+    Ok((a, b))
+}
+
+/// Cuts shots to the window. A `keyed` shot whose start is cut moves back
+/// to the last keyframe of its source at or before the window's start,
+/// but never before the shot's own start (which is itself a keyframe).
+fn clip_shots(shots: &mut Vec<Shot>, srcs: &[Src], (lo, hi): (i64, i64), keyed: bool) {
+    if lo == i64::MIN && hi == i64::MAX {
+        return;
+    }
+    shots.retain_mut(|s| {
+        let mut a = s.a.max(lo);
+        if keyed
+            && a > s.a
+            && let Some(i) = s.src
+        {
+            let keys = &srcs[i].keys;
+            let k = keys.partition_point(|&k| k <= a);
+            if let Some(&key) = k.checked_sub(1).and_then(|k| keys.get(k)) {
+                a = key.max(s.a);
+            }
+        }
+        let b = s.b.min(hi);
+        s.a = a;
+        s.b = b;
+        a < b
+    });
 }
 
 fn plan_sources(used: &[&Src]) -> Vec<PlanSource> {
@@ -798,6 +854,7 @@ pub fn plan_grid(
     if c.width == 0 || c.height == 0 || c.width > MAX_CANVAS || c.height > MAX_CANVAS {
         return Err(EdlError::InvalidCanvas);
     }
+    let (win_a, win_b) = window(req.in_ms, req.out_ms)?;
     if inc.events.is_empty() {
         return Err(EdlError::NoEvents);
     }
@@ -839,8 +896,15 @@ pub fn plan_grid(
         .map(|s| s.start)
         .min()
         .unwrap_or(0)
-        .max(want_a);
-    let hi = chosen.iter().map(|s| s.end).max().unwrap_or(0).min(want_b);
+        .max(want_a)
+        .max(win_a);
+    let hi = chosen
+        .iter()
+        .map(|s| s.end)
+        .max()
+        .unwrap_or(0)
+        .min(want_b)
+        .min(win_b);
     if lo >= hi {
         return Err(EdlError::NoCoverage);
     }
@@ -1373,5 +1437,95 @@ mod tests {
         let inc = incident(vec![ev(0, 0, 10)]);
         assert_eq!(fallback_file_start_ms(&inc, &cam(0)), Some(TM - 5000));
         assert_eq!(fallback_file_start_ms(&inc, &cam(1)), None);
+    }
+
+    #[test]
+    fn in_and_out_trim_a_follow_cut() {
+        // Camera 0 from 0 to 10 s, camera 1 from 5 s to 15 s: shots
+        // 0..4 s (camera 0) and 4..15 s (camera 1), keyframes every second.
+        let inc = incident(vec![ev(0, 0, 10), ev(1, 5, 15)]);
+        let files = [file(0, 0, 30_000, 1000), file(1, 0, 30_000, 1000)];
+        let mut req = follow(2000, 1000);
+        // Out only: exact, and camera 1 is dropped when the cut ends first.
+        req.out_ms = Some(TM + 3500);
+        let p = plan_follow("d", &inc, &files, &req).unwrap();
+        assert_eq!(seg(&p), vec![(0, 3500, 0)]);
+        assert_eq!(p.sources.len(), 1);
+        // In inside the second shot: a keyframe cut starts on the keyframe
+        // at or before it, not before the shot began; the first source is
+        // gone.
+        req.out_ms = None;
+        req.in_ms = Some(TM + 6400);
+        let p = plan_follow("d", &inc, &files, &req).unwrap();
+        assert_eq!(seg(&p), vec![(6000, 15_000, 0)]);
+        assert_eq!(p.sources[0].camera, cam(1));
+        assert_eq!(p.segments[0].source_in_ms, 6000);
+        assert!(p.copy_possible);
+        // A frame cut starts exactly at the in point.
+        req.cut = Cut::Frame;
+        let p = plan_follow("d", &inc, &files, &req).unwrap();
+        assert_eq!(seg(&p), vec![(6400, 15_000, 0)]);
+        assert_eq!(p.suggested_file.split(' ').nth(1), Some("07.42.06"));
+        // A window across the switch keeps both shots, clipped.
+        req.cut = Cut::Keyframe;
+        req.in_ms = Some(TM + 2500);
+        req.out_ms = Some(TM + 8000);
+        let p = plan_follow("d", &inc, &files, &req).unwrap();
+        assert_eq!(seg(&p), vec![(2000, 4000, 0), (4000, 8000, 1)]);
+    }
+
+    #[test]
+    fn a_window_outside_the_cut_or_backwards_is_an_error() {
+        let inc = incident(vec![ev(0, 0, 10)]);
+        let files = [file(0, 0, 30_000, 1000)];
+        let mut req = follow(2000, 1000);
+        req.in_ms = Some(TM + 20_000);
+        assert_eq!(
+            plan_follow("d", &inc, &files, &req).unwrap_err(),
+            EdlError::NoCoverage
+        );
+        req.in_ms = Some(TM + 5000);
+        req.out_ms = Some(TM + 5000);
+        assert_eq!(
+            plan_follow("d", &inc, &files, &req).unwrap_err(),
+            EdlError::InvalidWindow
+        );
+        let g = GridRequest {
+            in_ms: Some(TM + 9),
+            out_ms: Some(TM + 3),
+            ..GridRequest::default()
+        };
+        assert_eq!(
+            plan_grid("d", &inc, &files, &g).unwrap_err(),
+            EdlError::InvalidWindow
+        );
+    }
+
+    #[test]
+    fn in_and_out_trim_a_grid() {
+        let inc = incident(vec![ev(0, 0, 10), ev(1, 0, 10)]);
+        let files = [file(0, 0, 30_000, 1000), file(1, 0, 30_000, 1000)];
+        let full = plan_grid("d", &inc, &files, &GridRequest::default()).unwrap();
+        let g = GridRequest {
+            in_ms: Some(TM + 2000),
+            out_ms: Some(TM + 6000),
+            ..GridRequest::default()
+        };
+        let p = plan_grid("d", &inc, &files, &g).unwrap();
+        assert_eq!((p.start_ms, p.end_ms), (TM + 2000, TM + 6000));
+        assert!(p.start_ms > full.start_ms && p.end_ms < full.end_ms);
+        assert!(
+            p.cells
+                .iter()
+                .all(|c| c.present == vec![[TM + 2000, TM + 6000]])
+        );
+        let g = GridRequest {
+            in_ms: Some(TM + 100_000),
+            ..GridRequest::default()
+        };
+        assert_eq!(
+            plan_grid("d", &inc, &files, &g).unwrap_err(),
+            EdlError::NoCoverage
+        );
     }
 }
