@@ -138,6 +138,10 @@ if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
 
   step "Windows side-by-side update, end to end, trimmed release build (interactive session)"
   NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh update
+
+  # Everything on the publish output passed: a later `windows-check.sh
+  # --package` for the same tree ships exactly these files.
+  scripts/windows-app.sh mark-tested
 fi
 
 now=$(date +%s)
