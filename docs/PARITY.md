@@ -174,6 +174,12 @@ Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
 | Lock and unlock (the video is downloaded; says when it is not kept) | yes | yes | ID `recordings-lock`. |
 | Downloads panel: progress, pause, resume, retry, Show in Finder, forget, Move to Trash | yes | yes | Trash through `NSWorkspace.recycle` after `download_removed`; Windows: the Recycle Bin (FFI-RECORDINGS.md section 12). ID `recordings-downloads`. Retry is not in the self-test. |
 | Camera groups for incidents | yes | yes | ID `recordings-groups`. |
+| In and out points (I and O, draggable flags on the scrubber, a band over the lanes), shown in the cameras view and the follow cut and grids | yes | no (planned, W4) | UX.md "Recordings", "Export". |
+| Trim to in and out: keyframe copy or exact re-encode, from the incident's download or a range downloaded first | yes | no (planned, W4) | IDs `export-trim`, `export-real-core`; Windows: Media Foundation. |
+| Export follow cut, 2-up, 4-up to an MP4 (H.264 or HEVC, progress and cancel, sound per the live rules) | yes | no (planned, W4) | IDs `export-follow-cut`, `export-grid`. |
+| Range download of chosen cameras for a time range; Downloads shows its range | yes | no (planned, W4) | ID `export-range-download`. |
+| Still pictures: current picture or one per camera, PNG or JPEG | yes | no (planned, W4) | ID `export-stills`; Windows: WIC. |
+| Share-safe switch on every export (neutral names, no metadata of the app's own) | yes | no (planned, W4) | ID `export-share-safe`. |
 
 ### Devices, settings, and updates
 

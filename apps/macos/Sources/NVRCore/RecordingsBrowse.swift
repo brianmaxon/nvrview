@@ -628,6 +628,11 @@ extension DownloadProgress {
         }
     }
 
+    /// "07:42:05 to 07:47:05" for a range download.
+    public var rangeText: String? {
+        range.map { "\(TransportState.clock($0.start * 1000)) to \(TransportState.clock($0.end * 1000))" }
+    }
+
     /// Whether some job may still write (forget needs a pause first).
     public var isWorking: Bool { (state == "queued" || state == "running" || state == "finalizing") && !paused }
 

@@ -1085,7 +1085,10 @@ extension FakeCore {
             }
             return plan
         }
-        return Self.json(Self.finish(plan, window: (inMs, outMs), dest: dest, shareSafe: shareSafe))
+        let cut = Self.finish(plan, window: (inMs, outMs), dest: dest, shareSafe: shareSafe)
+        // A window that leaves nothing is refused, as the core does.
+        if let a = cut["start_ms"] as? Int64, let b = cut["end_ms"] as? Int64, b <= a { throw .invalidArgument }
+        return Self.json(cut)
     }
 
     // MARK: Export (minor 10)
