@@ -667,7 +667,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             p.Skip(TransportState.SkipMs);
             Expect(p.PositionMs == Math.Min(before + TransportState.SkipMs, p.EndMs), "recordings: +10 s moved somewhere else");
             p.SetRate(4);
-            Expect(PlaybackSpeed.Hint(p.Rate) == "Keyframes only, no sound" && host.Audio.Values.All(a => !a.Audible), "recordings: at 4x the hint or the sound is wrong");
+            Expect(PlaybackSpeed.Hint(p.Rate) == "Keyframes only, no sound" && p.Cells.All(c => !host.Audio.TryGetValue(c.Tile, out var a) || !a.Audible), "recordings: at 4x the hint or the sound is wrong");
             w.Refresh();
             Expect(w.TransportShown().Hint == "Keyframes only, no sound" && w.TransportShown().Speed == "4×", "recordings: the transport does not show the speed and its hint");
             p.SetRate(1);
@@ -687,7 +687,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(emphasis.Equals(new PlayerGridMode.Emphasis(1)) && single.Equals(new PlayerGridMode.Single(1)) && p.Mode.Equals(PlayerGridMode.Tiled), "recordings: the grid did not go large, single, and back");
             Expect(afterClick.SequenceEqual([false, true, false]), "recordings: the large camera's sound did not play");
             p.Muted = true;
-            Expect(host.Audio.Values.All(a => !a.Audible), "recordings: muted, a camera is audible");
+            Expect(p.Cells.All(c => !host.Audio.TryGetValue(c.Tile, out var a) || !a.Audible), "recordings: muted, a camera is audible");
             p.Muted = false;
             w.Refresh();
             await Until(() => w.CellRects.Count(r => r is not null) == 3, 5);
