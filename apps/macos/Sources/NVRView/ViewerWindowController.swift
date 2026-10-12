@@ -110,6 +110,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         }
         stage.delegate = self
         stage.onInsetAnchorChange = { [weak self] in self?.onChange() }
+        stage.onViewsChanged = { [weak self] in self?.onChange() }
         editBar.controller = self
         token = model.subscribe { [weak self] in self?.modelChanged() }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -467,8 +468,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
 
     @objc func stopListening(_ sender: Any?) { model.stopListening() }
 
+    /// Fill Tiles: every tile of the window fills, or fits (a tile's own
+    /// Fill Tile choice is cleared). Mixed in the menu while tiles differ.
     @objc func toggleFill(_ sender: Any?) {
-        state.fill.toggle()
+        stage.setWindowFill(!state.fill)
         stage.reload()
     }
 
@@ -553,7 +556,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case #selector(stopListening(_:)):
             return !model.audible.isEmpty
         case #selector(toggleFill(_:)):
-            item.state = state.fill ? .on : .off
+            item.state = state.views.mixed ? .mixed : state.fill ? .on : .off
             return true
         case #selector(fullScreenKey(_:)):
             item.title = window?.styleMask.contains(.fullScreen) == true ? "Exit Full Screen" : "Enter Full Screen"
@@ -584,11 +587,19 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         let fullScreen = window.styleMask.contains(.fullScreen)
         return SavedWindow(
             content: content, frame: (fullScreen ? windowedFrame : nil) ?? window.frame, fullScreen: fullScreen,
-            sidebarCollapsed: sidebarCollapsedPreference, insetAnchor: stage.insetAnchor)
+            sidebarCollapsed: sidebarCollapsedPreference, insetAnchor: stage.insetAnchor, fill: state.views.fill,
+            tileViews: state.views.savedEntries)
     }
 
     /// Puts the alert insets where the user left them (a restored window).
     func restoreInsetAnchor(_ anchor: InsetAnchor?) { stage.insetAnchor = anchor }
+
+    /// Puts back the window's Fill Tiles and each camera's zoom, crop and
+    /// Fill choice (a restored window).
+    func restoreViews(_ views: TileViews<CameraRef>) {
+        state.views = views
+        stage.reload()
+    }
 
     func windowDidMove(_ notification: Notification) { onChange() }
     func windowDidEndLiveResize(_ notification: Notification) { onChange() }

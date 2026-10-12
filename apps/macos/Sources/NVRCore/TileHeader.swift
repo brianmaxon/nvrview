@@ -25,12 +25,16 @@ public enum TileHeaderItem: String, CaseIterable, Sendable {
     case presets
     case lens
     case resetZoom = "reset-zoom"
+    /// Menus only: brings a filled picture's moved crop back to the middle.
+    case resetPosition = "reset-position"
     case quality
     case fisheye
     /// The "…" button.
     case more
     // The long tail: menus only.
     case pop
+    /// The tile's own Fill choice (a checked item).
+    case fillTile = "fill-tile"
     case allowTalkBack = "allow-talk-back"
     case entrance
     case callsOpenIn = "calls-open-in"
@@ -75,6 +79,8 @@ public struct TileHeaderTile: Equatable, Sendable {
     public var recording = false
     /// Zoomed past 1x, or a moved virtual camera.
     public var zoomed = false
+    /// At 1x, a filled picture's crop moved off center.
+    public var panned = false
     /// An active alert on the tile.
     public var alert = false
     /// The tile is audible (Speaker says Stop Listening).
@@ -86,8 +92,8 @@ public struct TileHeaderTile: Equatable, Sendable {
     public init(
         audio: Bool = false, talk: Bool = false, doorbell: Bool = false, panTilt: Bool = false,
         presets: Bool = false, lens: Bool = false, fisheye: Bool = false, picture: Bool = true,
-        recording: Bool = false, zoomed: Bool = false, alert: Bool = false, listening: Bool = false,
-        conversation: Bool = false, call: TileHeaderCall = .noCall
+        recording: Bool = false, zoomed: Bool = false, panned: Bool = false, alert: Bool = false,
+        listening: Bool = false, conversation: Bool = false, call: TileHeaderCall = .noCall
     ) {
         self.audio = audio
         self.talk = talk
@@ -99,6 +105,7 @@ public struct TileHeaderTile: Equatable, Sendable {
         self.picture = picture
         self.recording = recording
         self.zoomed = zoomed
+        self.panned = panned
         self.alert = alert
         self.listening = listening
         self.conversation = conversation
@@ -221,6 +228,8 @@ public struct TileHeaderLayout: Equatable, Sendable {
         if tile.zoomed { m.append(.init(.resetZoom, "Reset Zoom", mac: "0", windows: "0")) }
         m.append(.init(.quality, "Quality"))
         if tile.fisheye { m.append(.init(.fisheye, "Fisheye View")) }
+        if tile.panned && !tile.zoomed { m.append(.init(.resetPosition, "Reset Position", mac: "0", windows: "0")) }
+        if !inWindow { m.append(.init(.fillTile, "Fill Tile")) }
         switch tile.call {
         case .noCall: break
         case .inset: m.append(.init(.pop, "Pop Out Call"))

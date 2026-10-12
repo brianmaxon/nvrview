@@ -22,7 +22,7 @@ internal static class TileHeaderTests
     private static readonly string[] TileKeys =
     [
         "audio", "talk", "doorbell", "panTilt", "presets", "lens", "fisheye", "picture", "recording", "zoomed",
-        "alert", "listening", "conversation", "call",
+        "alert", "listening", "conversation", "call", "panned",
     ];
 
     private static TileHeaderTile Tile(JsonElement json)
@@ -45,6 +45,7 @@ internal static class TileHeaderTests
             Picture = Flag("picture", true),
             Recording = Flag("recording"),
             Zoomed = Flag("zoomed"),
+            Panned = Flag("panned"),
             Alert = Flag("alert"),
             Listening = Flag("listening"),
             Conversation = Flag("conversation"),
@@ -125,13 +126,13 @@ internal static class TileHeaderTests
     /// <summary>Rules every layout keeps, over a sweep of widths and capabilities.</summary>
     private static void Invariants()
     {
-        for (int mask = 0; mask < 1 << 11; mask++)
+        for (int mask = 0; mask < 1 << 12; mask++)
         {
             bool Bit(int b) => (mask & (1 << b)) != 0;
             var tile = new TileHeaderTile
             {
                 Audio = Bit(0), Talk = Bit(1), Doorbell = Bit(2), PanTilt = Bit(3), Presets = Bit(4), Lens = Bit(5),
-                Fisheye = Bit(6), Picture = Bit(7), Recording = Bit(8), Zoomed = Bit(9), Alert = Bit(10),
+                Fisheye = Bit(6), Picture = Bit(7), Recording = Bit(8), Zoomed = Bit(9), Alert = Bit(10), Panned = Bit(11),
             };
             List<TileHeaderItem> menu = [.. TileHeaderLayout.Menu(tile).Select(e => e.Item)];
             for (double width = 40; width <= 640; width += 30)

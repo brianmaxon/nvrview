@@ -83,6 +83,7 @@ using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
+using Point = Windows.Foundation.Point;
 
 namespace NvrView.App;
 
@@ -365,6 +366,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await CheckZoomFillsTile();
         await CheckZoomChrome();
         await CheckFillTiles();
+        await CheckFillPan();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -1732,6 +1734,128 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(crop && tileArea, $"Fill Tiles did not crop the picture to the tile (base {b.Width:0.00}x{b.Height:0.00}, tile area {tileArea})");
         Expect(zoomedFilled is >= 0.5 && reaches, "zooming from the filled crop lost the picture");
         Expect(fittedAgain is < 0.02 && !boxed.Fill, "turning Fill Tiles off did not fit the picture again");
+    }
+
+    // Fill per tile, the filled crop's pan, the header swap, and the window's record (docs/UX.md "Fill
+    // Tiles"): a letterboxed tile gets its own Fill tile (the others stay fitted); a drag on its picture
+    // moves the crop and stops at the picture's edge; a drag on its shown header swaps it; the record
+    // brings the crop and the single tile's choice back in a new window; Fill Tiles then sets every tile.
+    private async Task CheckFillPan()
+    {
+        StageView stage = app.Stage!;
+        ViewerWindow window = app.Windows.First(w => w.Stage == stage);
+        StageTile? boxed = Tiles.FirstOrDefault(t => !(t.Fisheye is { } f && f.Mode.Dewarps()) && ZoomBar(t) is not null);
+        StageTile? other = boxed is null ? null : Tiles.FirstOrDefault(t => t.CameraOrNone != boxed.CameraOrNone && !(t.Fisheye is { } f && f.Mode.Dewarps()));
+        if (boxed?.CameraOrNone is not { } camera || other?.CameraOrNone is not { } otherCamera)
+        {
+            _problems.Add("no letterboxed tile and second camera for the Fill pan checks");
+            return;
+        }
+
+        // parity: fill-per-tile
+        var menu = stage.BuildTileMenu(boxed);
+        var fillItem = menu?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault(i => i.Text == "Fill tile");
+        bool offAtFirst = fillItem is { IsChecked: false };
+        stage.SetTileFill(boxed, true);
+        bool published = await Until(() => boxed.Fill, 5);
+        bool single = stage.Fills(boxed) && !stage.Fills(other) && stage.State.Views.Mixed && !other.WantsFill;
+        bool checkedNow = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().Any(i => i.Text == "Fill tile" && i.IsChecked) == true;
+        Say($"fill per tile: menu item {(fillItem is null ? "missing" : "present")}, this tile fills {stage.Fills(boxed)} (drawn {published}), another {stage.Fills(other)}, mixed {stage.State.Views.Mixed}, checked {checkedNow}");
+        Expect(offAtFirst, "the tile menu has no unchecked Fill tile on a fitted tile");
+        Expect(published && single, "Fill tile on one tile did not fill only it");
+        Expect(checkedNow, "Fill tile is not checked on the tile that fills");
+
+        // parity: fill-pan-drag
+        ZoomBase b = boxed.ZoomBase;
+        bool wide = b.Width > 1;
+        var middle = new Point(boxed.ViewX + boxed.ViewWidth / 2, boxed.ViewY + boxed.ViewHeight / 2 + 20);
+        string? kind = stage.DragKind(middle);
+        double step = wide ? boxed.ViewWidth / 8 : boxed.ViewHeight / 8;
+        stage.SimulateDrag(middle, wide ? new Point(middle.X + step, middle.Y) : new Point(middle.X, middle.Y + step));
+        TileZoom want = TileZoom.None.Panned(wide ? 0.125 : 0, wide ? 0 : 0.125, b);
+        TileZoom got = boxed.DigitalZoom;
+        bool followed = Math.Abs(got.CenterX - want.CenterX) < 1e-4 && Math.Abs(got.CenterY - want.CenterY) < 1e-4 && got.IsPanned;
+        stage.SimulateDrag(middle, wide ? new Point(middle.X + step * 40, middle.Y) : new Point(middle.X, middle.Y + step * 40));
+        UnitRect edge = boxed.DigitalZoom.Visible(b);
+        bool stopped = wide ? Math.Abs(edge.X) < 1e-4 : Math.Abs(edge.Y) < 1e-4;
+        bool fittedSwaps = stage.DragKind(new Point(other.ViewX + other.ViewWidth / 2, other.ViewY + other.ViewHeight / 2 + 20)) == "swap";
+        bool shared = stage.State.Views.Zoom(camera) == boxed.DigitalZoom;
+        Say($"fill pan drag: kind {kind}, crop followed {followed} ({got.CenterX:0.0000},{got.CenterY:0.0000} for {want.CenterX:0.0000},{want.CenterY:0.0000}), stopped at the edge {stopped}, kept for the camera {shared}, a fitted tile swaps {fittedSwaps}");
+        Expect(kind == "pan", "a drag on a filled, cropped picture would not pan it");
+        Expect(followed, "dragging the filled picture did not move the crop with the drag");
+        Expect(stopped, "panning the filled picture did not stop at its edge");
+        Expect(shared, "the crop was not kept for the camera");
+        Expect(fittedSwaps, "a drag on a fitted tile's picture no longer swaps it");
+        // Back from the edge to a position of its own, for the restore check.
+        stage.SimulateDrag(middle, wide ? new Point(middle.X - step * 2, middle.Y) : new Point(middle.X, middle.Y - step * 2));
+        TileZoom crop = boxed.DigitalZoom;
+
+        // parity: fill-pan-header-swap
+        NodePath from = boxed.Path, to = other.Path;
+        stage.Hover(boxed);
+        var onHeader = new Point(boxed.X + boxed.Width / 2, boxed.Y + 10);
+        string? headerKind = stage.DragKind(onHeader);
+        stage.SimulateDrag(onHeader, new Point(other.ViewX + other.ViewWidth / 2, other.ViewY + other.ViewHeight / 2));
+        bool swapped = stage.State.Tree[from] is LayoutLeaf { Cam: { } a } && a == otherCamera && stage.State.Tree[to] is LayoutLeaf { Cam: { } c2 } && c2 == camera;
+        StageTile? moved = stage.Tiles.FirstOrDefault(t => t.CameraOrNone == camera);
+        bool kept = moved is not null && moved.DigitalZoom == crop;
+        if (swapped && moved is not null)
+        {
+            await Until(() => moved.Visible && moved.Width > 1, 5);
+            StageTile back = stage.Tiles.First(t => t.Path == from);
+            await Until(() => back.Visible && back.ViewWidth > 1, 5);
+            stage.Hover(moved);
+            stage.SimulateDrag(new Point(moved.X + moved.Width / 2, moved.Y + 10), new Point(back.ViewX + back.ViewWidth / 2, back.ViewY + back.ViewHeight / 2));
+        }
+        bool swappedBack = stage.State.Tree[from] is LayoutLeaf { Cam: { } a2 } && a2 == camera;
+        Say($"fill pan header swap: kind {headerKind}, swapped {swapped}, crop kept with the camera {kept}, swapped back {swappedBack}");
+        Expect(headerKind == "swap", "a drag on the header of a panning tile would not swap it");
+        Expect(swapped, "dragging a tile's header onto another did not swap them");
+        Expect(kept, "the crop did not follow the camera through the swap");
+        Expect(swappedBack, "dragging the header back did not swap the tiles back");
+
+        // The tiles were made anew by the swaps.
+        boxed = stage.Tiles.First(t => t.CameraOrNone == camera);
+        other = stage.Tiles.First(t => t.CameraOrNone == otherCamera);
+        StageTile b2 = boxed, o2 = other;
+        await Until(() => b2.Visible && b2.Fill && o2.Visible, 5);
+
+        // parity: fill-pan-restore
+        SavedWindow record = WindowStore.FromJson(System.Text.Json.Nodes.JsonNode.Parse(WindowStore.ToJson([window.ToSaved()])))[0];
+        TileViews<CameraRef> saved = record.PictureViews;
+        bool readsBack = saved.Zoom(camera) == crop && saved.Fills(camera) && !saved.Fills(otherCamera);
+        ViewerWindow second = app.OpenWindow(window.State.Content, record);
+        bool same = false;
+        try
+        {
+            StageTile? there = null;
+            bool drawn = await Until(() => (there = second.Stage.Tiles.FirstOrDefault(t => t.CameraOrNone == camera)) is { Fill: true, PictureWidth: > 0 }, 10);
+            StageTile? fitted = second.Stage.Tiles.FirstOrDefault(t => t.CameraOrNone == otherCamera);
+            same = drawn && there!.DigitalZoom == crop && second.Stage.Fills(there) && fitted is not null && !second.Stage.Fills(fitted) && !fitted.WantsFill;
+        }
+        finally
+        {
+            second.Window.Close();
+            await Until(() => app.Windows.Count == 1, 5);
+        }
+        Say($"fill pan restore: record reads back {readsBack}, a window opened from it has the crop and the single tile's Fill {same}");
+        Expect(readsBack, "the window's saved record lost the crop or the tile's Fill choice");
+        Expect(same, "a window opened from the record did not get the crop and Fill choices back");
+
+        // parity: fill-window-switch
+        // The window's switch sets every tile; the crop stays with the camera; Reset position recenters it.
+        stage.SetFill(true);
+        bool allFill = stage.Fills(boxed) && stage.Fills(other) && !stage.State.Views.Mixed;
+        stage.SetFill(false);
+        bool allFit = !stage.Fills(boxed) && !stage.Fills(other) && !stage.State.Views.Mixed;
+        stage.SetTileFill(boxed, true);
+        bool offered = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Any(i => i.Text == "Reset position") == true;
+        StageView.ResetZoom(boxed);
+        bool reset = boxed.DigitalZoom == TileZoom.None && stage.State.Views.Zoom(camera) == TileZoom.None;
+        stage.SetTileFill(boxed, false);
+        Say($"fill per tile: Fill Tiles fills every tile {allFill}, then fits every tile {allFit}; Reset position offered {offered}, recenters {reset}");
+        Expect(allFill && allFit, "Fill Tiles did not set every tile of the window");
+        Expect(offered && reset, "Reset position was not offered or did not recenter the filled crop");
     }
 
     // One of a tile's bars at 1x (DIPs, a unit in from its edges), or null if the picture fills it.

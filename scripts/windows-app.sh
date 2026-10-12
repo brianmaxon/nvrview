@@ -10,6 +10,8 @@
 #   scripts/windows-app.sh startup [SECONDS]  runs `NvrView.App.exe --startup-test`: the plain
 #                                             start (as a double-click) on an empty data
 #                                             directory, idling SECONDS (default 5)
+#   scripts/windows-app.sh publish            the trimmed release layout in target/dotnet/publish (startup, selftest, and
+#                                             update run against it with NVRVIEW_APP_PUBLISHED=1)
 #   scripts/windows-app.sh package            builds, then zips the app as target/dotnet/package/NvrView-<version>-win-x64.zip
 #   scripts/windows-app.sh update             the side-by-side update end to end
 #                                             (docs/UPDATES.md): packages the built app as
@@ -33,12 +35,30 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 out=target/dotnet
 exe="$out/bin/NvrView.App/release_win-x64/NvrView.App.exe"
+# NVRVIEW_APP_PUBLISHED=1 makes startup, selftest, update, and package use the
+# trimmed `publish` output (what the release ships) instead of the build output.
+if [ "${NVRVIEW_APP_PUBLISHED:-0}" = 1 ]; then
+  exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
+fi
 
 build() {
   cargo build --release -p viewer-ffi -p mock-nvr
   dotnet build apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo
   # The app finds nvrview.dll next to itself.
   cp target/release/nvrview.dll "$(dirname "$exe")/"
+  ls -l "$exe"
+}
+
+# The release layout: the trimmed, self-contained publish output without
+# debug symbols, with nvrview.dll next to the executable.
+publish() {
+  cargo build --release -p viewer-ffi -p mock-nvr
+  rm -rf "$out/publish"
+  dotnet publish apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo \
+    -p:DebugType=none -p:DebugSymbols=false
+  cp target/release/nvrview.dll "$(dirname "$exe")/"
+  find "$(dirname "$exe")" -type f | wc -l
+  du -sk "$(dirname "$exe")"
   ls -l "$exe"
 }
 
@@ -137,7 +157,9 @@ make_zip() {
 package() {
   local version
   version="$(tr -d '[:space:]' <VERSION)"
-  build
+  NVRVIEW_APP_PUBLISHED=1
+  exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
+  publish
   rm -rf "$out/package"
   make_zip "$PWD/$out/package/NvrView-$version-win-x64.zip"
   ls -l "$out/package"
@@ -182,12 +204,13 @@ update() {
 
 case "${1:-}" in
   build) build ;;
+  publish) NVRVIEW_APP_PUBLISHED=1; exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"; publish ;;
   package) package ;;
   update) update ;;
   selftest) shift; selftest "$@" ;;
   startup) shift; startup "$@" ;;
   *)
-    echo "usage: $0 build | package | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
+    echo "usage: $0 build | publish | package | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
     exit 2
     ;;
 esac

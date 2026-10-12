@@ -1,14 +1,29 @@
 {
   "about": "Shared vectors for TileHeaderLayout (docs/UX.md 'Tile header', docs/CAPTURE.md 'The header model'), read by apps/macos NVRCoreTests (TileHeaderTests.swift) and apps/windows NvrView.Tiles.Tests (TileHeaderTests.cs). Each case starts with no previous result; each step passes the previous step's result (hysteresis). A step's 'tile' replaces the case's tile from that step on. 'menu' is the right-click menu as [id, label, macOS key hint, Windows key hint]; 'moreMenu' the ids of the '…' menu.",
-  "metrics": { "icon": 26, "titleMin": 48, "pill": 64, "padding": 8, "hysteresis": 8, "narrow": 120 },
+  "metrics": {
+    "icon": 26,
+    "titleMin": 48,
+    "pill": 64,
+    "padding": 8,
+    "hysteresis": 8,
+    "narrow": 120
+  },
   "cases": [
     {
       "name": "every PTZ capability: wide, medium, narrow",
-      "tile": { "audio": true, "talk": true, "panTilt": true, "presets": true, "lens": true },
+      "tile": {
+        "audio": true,
+        "talk": true,
+        "panTilt": true,
+        "presets": true,
+        "lens": true
+      },
       "titleWidth": 100,
       "steps": [
         {
-          "width": 600, "anchor": 600, "titleTruncated": false,
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
           "visible": ["title", "speaker", "record", "save-picture", "conversation", "pan-tilt", "presets", "lens", "quality"],
           "overflow": [],
           "menu": [
@@ -20,32 +35,41 @@
             ["presets", "Presets", "⌥1–9", "Alt+1–9"],
             ["lens", "Zoom and Focus…", "⌥= ⌥-", "Alt+= Alt+-"],
             ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
             ["record-main", "Record Main Stream", "", ""],
             ["record-sub", "Record Sub-stream", "", ""]
           ],
-          "moreMenu": ["allow-talk-back", "entrance", "save-picture-as", "record-main", "record-sub"]
+          "moreMenu": ["fill-tile", "allow-talk-back", "entrance", "save-picture-as", "record-main", "record-sub"]
         },
         {
-          "width": 200, "anchor": 200, "titleTruncated": true,
+          "width": 200,
+          "anchor": 200,
+          "titleTruncated": true,
           "visible": ["title", "speaker", "record", "save-picture", "conversation", "more"],
           "overflow": ["pan-tilt", "presets", "lens", "quality"],
-          "moreMenu": ["pan-tilt", "presets", "lens", "quality", "allow-talk-back", "entrance", "save-picture-as", "record-main", "record-sub"]
+          "moreMenu": ["pan-tilt", "presets", "lens", "quality", "fill-tile", "allow-talk-back", "entrance", "save-picture-as", "record-main", "record-sub"]
         },
         {
-          "width": 100, "anchor": 100, "titleTruncated": true,
+          "width": 100,
+          "anchor": 100,
+          "titleTruncated": true,
           "visible": ["title", "more"],
           "overflow": ["speaker", "record", "save-picture", "conversation", "pan-tilt", "presets", "lens", "quality"]
         },
         {
-          "width": 300, "anchor": 300, "titleTruncated": true,
+          "width": 300,
+          "anchor": 300,
+          "titleTruncated": true,
           "visible": ["title", "speaker", "record", "save-picture", "conversation", "pan-tilt", "presets", "lens", "quality"],
           "overflow": []
         },
         {
-          "width": 250, "anchor": 250, "titleTruncated": true,
+          "width": 250,
+          "anchor": 250,
+          "titleTruncated": true,
           "visible": ["title", "speaker", "record", "save-picture", "conversation", "pan-tilt", "presets", "more"],
           "overflow": ["lens", "quality"]
         }
@@ -53,50 +77,152 @@
     },
     {
       "name": "hysteresis while a divider is dragged",
-      "tile": { "audio": true },
+      "tile": {
+        "audio": true
+      },
       "titleWidth": 60,
       "steps": [
-        { "width": 168, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 163, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 161, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 160, "anchor": 160, "titleTruncated": false, "visible": ["title", "speaker", "record", "more"], "overflow": ["save-picture", "quality"] },
-        { "width": 167, "anchor": 160, "titleTruncated": false, "visible": ["title", "speaker", "record", "more"], "overflow": ["save-picture", "quality"] },
-        { "width": 168, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 300, "anchor": 168, "titleTruncated": false, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 161, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
-        { "width": 140, "anchor": 140, "titleTruncated": false, "visible": ["title", "speaker", "more"], "overflow": ["record", "save-picture", "quality"] }
+        {
+          "width": 168,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 163,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 161,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 160,
+          "anchor": 160,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "more"],
+          "overflow": ["save-picture", "quality"]
+        },
+        {
+          "width": 167,
+          "anchor": 160,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "more"],
+          "overflow": ["save-picture", "quality"]
+        },
+        {
+          "width": 168,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 300,
+          "anchor": 168,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 161,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 140,
+          "anchor": 140,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "more"],
+          "overflow": ["record", "save-picture", "quality"]
+        }
       ]
     },
     {
       "name": "a change of the tile's state reflows at once",
-      "tile": { "audio": true },
+      "tile": {
+        "audio": true
+      },
       "titleWidth": 60,
       "steps": [
-        { "width": 168, "anchor": 168, "titleTruncated": true, "visible": ["title", "speaker", "record", "save-picture", "quality"], "overflow": [] },
         {
-          "width": 165, "tile": { "audio": true, "zoomed": true }, "anchor": 165, "titleTruncated": false,
-          "visible": ["title", "speaker", "record", "more"], "overflow": ["save-picture", "reset-zoom", "quality"]
+          "width": 168,
+          "anchor": 168,
+          "titleTruncated": true,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": []
+        },
+        {
+          "width": 165,
+          "tile": {
+            "audio": true,
+            "zoomed": true
+          },
+          "anchor": 165,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "more"],
+          "overflow": ["save-picture", "reset-zoom", "quality"]
         }
       ]
     },
     {
       "name": "recording: the pill below 120 pt, across 120 pt, and wide",
-      "tile": { "audio": true, "recording": true },
+      "tile": {
+        "audio": true,
+        "recording": true
+      },
       "titleWidth": 100,
       "steps": [
-        { "width": 119, "anchor": 119, "titleTruncated": true, "visible": ["recording-pill", "title", "more"], "overflow": ["speaker", "record", "save-picture", "quality"] },
-        { "width": 120, "anchor": 119, "titleTruncated": true, "visible": ["recording-pill", "title", "more"], "overflow": ["speaker", "record", "save-picture", "quality"] },
-        { "width": 127, "anchor": 119, "titleTruncated": true, "visible": ["recording-pill", "title", "more"], "overflow": ["speaker", "record", "save-picture", "quality"] },
-        { "width": 200, "anchor": 200, "titleTruncated": true, "visible": ["recording-pill", "title", "speaker", "more"], "overflow": ["record", "save-picture", "quality"] },
         {
-          "width": 400, "anchor": 400, "titleTruncated": false,
-          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "quality"], "overflow": [],
+          "width": 119,
+          "anchor": 119,
+          "titleTruncated": true,
+          "visible": ["recording-pill", "title", "more"],
+          "overflow": ["speaker", "record", "save-picture", "quality"]
+        },
+        {
+          "width": 120,
+          "anchor": 119,
+          "titleTruncated": true,
+          "visible": ["recording-pill", "title", "more"],
+          "overflow": ["speaker", "record", "save-picture", "quality"]
+        },
+        {
+          "width": 127,
+          "anchor": 119,
+          "titleTruncated": true,
+          "visible": ["recording-pill", "title", "more"],
+          "overflow": ["speaker", "record", "save-picture", "quality"]
+        },
+        {
+          "width": 200,
+          "anchor": 200,
+          "titleTruncated": true,
+          "visible": ["recording-pill", "title", "speaker", "more"],
+          "overflow": ["record", "save-picture", "quality"]
+        },
+        {
+          "width": 400,
+          "anchor": 400,
+          "titleTruncated": false,
+          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "quality"],
+          "overflow": [],
           "menu": [
             ["speaker", "Listen", "M", "M"],
             ["record", "Stop Recording", "R", "R"],
             ["save-picture", "Save Picture", "P", "P"],
             ["conversation", "Start Conversation", "T", "T"],
             ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"]
@@ -109,17 +235,33 @@
       "tile": {},
       "titleWidth": 40,
       "steps": [
-        { "width": 120, "anchor": 120, "titleTruncated": false, "visible": ["title", "record", "more"], "overflow": ["save-picture", "quality"] }
+        {
+          "width": 120,
+          "anchor": 120,
+          "titleTruncated": false,
+          "visible": ["title", "record", "more"],
+          "overflow": ["save-picture", "quality"]
+        }
       ]
     },
     {
       "name": "veil without a picture: only the title and the more button",
-      "tile": { "audio": true, "talk": true, "panTilt": true, "picture": false, "recording": true, "alert": true },
+      "tile": {
+        "audio": true,
+        "talk": true,
+        "panTilt": true,
+        "picture": false,
+        "recording": true,
+        "alert": true
+      },
       "titleWidth": 100,
       "steps": [
         {
-          "width": 600, "anchor": 600, "titleTruncated": false,
-          "visible": ["title", "more"], "overflow": ["speaker", "record", "conversation", "pan-tilt", "quality"],
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "more"],
+          "overflow": ["speaker", "record", "conversation", "pan-tilt", "quality"],
           "menu": [
             ["dismiss-alert", "Dismiss Alert", "↩", "Enter"],
             ["speaker", "Listen", "M", "M"],
@@ -127,12 +269,19 @@
             ["conversation", "Start Conversation", "T", "T"],
             ["pan-tilt", "Pan and Tilt…", "⌥ arrows", "Alt+arrows"],
             ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""]
           ],
-          "moreMenu": ["dismiss-alert", "speaker", "record", "conversation", "pan-tilt", "quality", "allow-talk-back", "entrance"]
+          "moreMenu": ["dismiss-alert", "speaker", "record", "conversation", "pan-tilt", "quality", "fill-tile", "allow-talk-back", "entrance"]
         },
-        { "width": 100, "anchor": 600, "titleTruncated": true, "visible": ["title", "more"], "overflow": ["speaker", "record", "conversation", "pan-tilt", "quality"] }
+        {
+          "width": 100,
+          "anchor": 600,
+          "titleTruncated": true,
+          "visible": ["title", "more"],
+          "overflow": ["speaker", "record", "conversation", "pan-tilt", "quality"]
+        }
       ]
     },
     {
@@ -141,13 +290,17 @@
       "titleWidth": 100,
       "steps": [
         {
-          "width": 600, "anchor": 600, "titleTruncated": false,
-          "visible": ["title", "record", "save-picture", "quality"], "overflow": [],
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "record", "save-picture", "quality"],
+          "overflow": [],
           "menu": [
             ["record", "Start Recording", "R", "R"],
             ["save-picture", "Save Picture", "P", "P"],
             ["conversation", "Start Conversation", "T", "T"],
             ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
@@ -159,26 +312,44 @@
     },
     {
       "name": "a camera with talk-back: Start Conversation in the header",
-      "tile": { "talk": true },
+      "tile": {
+        "talk": true
+      },
       "titleWidth": 100,
       "steps": [
-        { "width": 600, "anchor": 600, "titleTruncated": false, "visible": ["title", "record", "save-picture", "conversation", "quality"], "overflow": [] }
+        {
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "record", "save-picture", "conversation", "quality"],
+          "overflow": []
+        }
       ]
     },
     {
       "name": "a doorbell in a call shown in the insets",
-      "tile": { "doorbell": true, "audio": true, "listening": true, "conversation": true, "call": "inset" },
+      "tile": {
+        "doorbell": true,
+        "audio": true,
+        "listening": true,
+        "conversation": true,
+        "call": "inset"
+      },
       "titleWidth": 100,
       "steps": [
         {
-          "width": 600, "anchor": 600, "titleTruncated": false,
-          "visible": ["title", "speaker", "record", "save-picture", "conversation", "quality"], "overflow": [],
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "save-picture", "conversation", "quality"],
+          "overflow": [],
           "menu": [
             ["speaker", "Stop Listening", "M", "M"],
             ["record", "Start Recording", "R", "R"],
             ["save-picture", "Save Picture", "P", "P"],
             ["conversation", "End Conversation", "T", "T"],
             ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["pop", "Pop Out Call", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""],
@@ -192,12 +363,21 @@
     },
     {
       "name": "the call window's tile, recording the call",
-      "tile": { "doorbell": true, "audio": true, "conversation": true, "recording": true, "call": "window" },
+      "tile": {
+        "doorbell": true,
+        "audio": true,
+        "conversation": true,
+        "recording": true,
+        "call": "window"
+      },
       "titleWidth": 100,
       "steps": [
         {
-          "width": 360, "anchor": 360, "titleTruncated": false,
-          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "conversation", "quality"], "overflow": [],
+          "width": 360,
+          "anchor": 360,
+          "titleTruncated": false,
+          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "conversation", "quality"],
+          "overflow": [],
           "menu": [
             ["speaker", "Listen", "M", "M"],
             ["record", "Stop Recording Call", "⇧⌘R", "Ctrl+Shift+R"],
@@ -212,19 +392,30 @@
           ]
         },
         {
-          "width": 240, "anchor": 240, "titleTruncated": true,
-          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "more"], "overflow": ["conversation", "quality"]
+          "width": 240,
+          "anchor": 240,
+          "titleTruncated": true,
+          "visible": ["recording-pill", "title", "speaker", "record", "save-picture", "more"],
+          "overflow": ["conversation", "quality"]
         }
       ]
     },
     {
       "name": "zoomed fisheye with an alert: wide, medium, narrow",
-      "tile": { "audio": true, "fisheye": true, "zoomed": true, "alert": true },
+      "tile": {
+        "audio": true,
+        "fisheye": true,
+        "zoomed": true,
+        "alert": true
+      },
       "titleWidth": 100,
       "steps": [
         {
-          "width": 600, "anchor": 600, "titleTruncated": false,
-          "visible": ["title", "dismiss-alert", "speaker", "record", "save-picture", "reset-zoom", "quality", "fisheye"], "overflow": [],
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "dismiss-alert", "speaker", "record", "save-picture", "reset-zoom", "quality", "fisheye"],
+          "overflow": [],
           "menu": [
             ["dismiss-alert", "Dismiss Alert", "↩", "Enter"],
             ["speaker", "Listen", "M", "M"],
@@ -234,6 +425,7 @@
             ["reset-zoom", "Reset Zoom", "0", "0"],
             ["quality", "Quality", "", ""],
             ["fisheye", "Fisheye View", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
             ["allow-talk-back", "Allow talk-back", "", ""],
             ["entrance", "Entrance", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
@@ -244,23 +436,100 @@
           ]
         },
         {
-          "width": 180, "anchor": 180, "titleTruncated": true,
-          "visible": ["title", "dismiss-alert", "speaker", "record", "more"], "overflow": ["save-picture", "reset-zoom", "quality", "fisheye"],
-          "moreMenu": ["save-picture", "conversation", "reset-zoom", "quality", "fisheye", "allow-talk-back", "entrance", "save-picture-as", "save-zoomed-area", "save-original-fisheye", "record-main", "record-sub"]
+          "width": 180,
+          "anchor": 180,
+          "titleTruncated": true,
+          "visible": ["title", "dismiss-alert", "speaker", "record", "more"],
+          "overflow": ["save-picture", "reset-zoom", "quality", "fisheye"],
+          "moreMenu": ["save-picture", "conversation", "reset-zoom", "quality", "fisheye", "fill-tile", "allow-talk-back", "entrance", "save-picture-as", "save-zoomed-area", "save-original-fisheye", "record-main", "record-sub"]
         },
         {
-          "width": 110, "anchor": 110, "titleTruncated": true,
-          "visible": ["title", "more"], "overflow": ["speaker", "record", "save-picture", "reset-zoom", "quality", "fisheye"],
-          "moreMenu": ["dismiss-alert", "speaker", "record", "save-picture", "conversation", "reset-zoom", "quality", "fisheye", "allow-talk-back", "entrance", "save-picture-as", "save-zoomed-area", "save-original-fisheye", "record-main", "record-sub"]
+          "width": 110,
+          "anchor": 110,
+          "titleTruncated": true,
+          "visible": ["title", "more"],
+          "overflow": ["speaker", "record", "save-picture", "reset-zoom", "quality", "fisheye"],
+          "moreMenu": ["dismiss-alert", "speaker", "record", "save-picture", "conversation", "reset-zoom", "quality", "fisheye", "fill-tile", "allow-talk-back", "entrance", "save-picture-as", "save-zoomed-area", "save-original-fisheye", "record-main", "record-sub"]
         }
       ]
     },
     {
       "name": "lens only (ptzType 1)",
-      "tile": { "lens": true },
+      "tile": {
+        "lens": true
+      },
       "titleWidth": 100,
       "steps": [
-        { "width": 600, "anchor": 600, "titleTruncated": false, "visible": ["title", "record", "save-picture", "lens", "quality"], "overflow": [] }
+        {
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "record", "save-picture", "lens", "quality"],
+          "overflow": []
+        }
+      ]
+    },
+    {
+      "name": "a filled picture's crop moved at 1x: Reset Position in the menus only",
+      "tile": {
+        "audio": true,
+        "panned": true
+      },
+      "titleWidth": 80,
+      "steps": [
+        {
+          "width": 400,
+          "anchor": 400,
+          "titleTruncated": false,
+          "visible": ["title", "speaker", "record", "save-picture", "quality"],
+          "overflow": [],
+          "menu": [
+            ["speaker", "Listen", "M", "M"],
+            ["record", "Start Recording", "R", "R"],
+            ["save-picture", "Save Picture", "P", "P"],
+            ["conversation", "Start Conversation", "T", "T"],
+            ["quality", "Quality", "", ""],
+            ["reset-position", "Reset Position", "0", "0"],
+            ["fill-tile", "Fill Tile", "", ""],
+            ["allow-talk-back", "Allow talk-back", "", ""],
+            ["entrance", "Entrance", "", ""],
+            ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
+            ["record-main", "Record Main Stream", "", ""],
+            ["record-sub", "Record Sub-stream", "", ""]
+          ],
+          "moreMenu": ["conversation", "reset-position", "fill-tile", "allow-talk-back", "entrance", "save-picture-as", "record-main", "record-sub"]
+        }
+      ]
+    },
+    {
+      "name": "zoomed and panned: Reset Zoom covers both",
+      "tile": {
+        "zoomed": true,
+        "panned": true
+      },
+      "titleWidth": 80,
+      "steps": [
+        {
+          "width": 400,
+          "anchor": 400,
+          "titleTruncated": false,
+          "visible": ["title", "record", "save-picture", "reset-zoom", "quality"],
+          "overflow": [],
+          "menu": [
+            ["record", "Start Recording", "R", "R"],
+            ["save-picture", "Save Picture", "P", "P"],
+            ["conversation", "Start Conversation", "T", "T"],
+            ["reset-zoom", "Reset Zoom", "0", "0"],
+            ["quality", "Quality", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
+            ["allow-talk-back", "Allow talk-back", "", ""],
+            ["entrance", "Entrance", "", ""],
+            ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
+            ["save-zoomed-area", "Save Zoomed Area", "", ""],
+            ["record-main", "Record Main Stream", "", ""],
+            ["record-sub", "Record Sub-stream", "", ""]
+          ]
+        }
       ]
     }
   ]

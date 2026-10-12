@@ -23,21 +23,45 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     /// insets"); nil: the default corner. Left out of the file while nil;
     /// files without it (or with a value that cannot be read) load as nil.
     public var insetAnchor: InsetAnchor?
+    /// The window's Fill Tiles switch (docs/UX.md "Fill Tiles"). Left out
+    /// while off.
+    public var fill: Bool
+    /// Each camera's zoom or crop position and own Fill choice in this
+    /// window (`TileViews`), the one changed longest ago first. Left out
+    /// while empty; entries that cannot be read are skipped, values are
+    /// clamped, and at most `TileViews.limit` are kept.
+    public var tileViews: [SavedTileView]
 
     public init(
         content: Content, frame: CGRect, fullScreen: Bool = false, sidebarCollapsed: Bool = false,
-        insetAnchor: InsetAnchor? = nil
+        insetAnchor: InsetAnchor? = nil, fill: Bool = false, tileViews: [SavedTileView] = []
     ) {
         self.content = content
         self.frame = frame
         self.fullScreen = fullScreen
         self.sidebarCollapsed = sidebarCollapsed
         self.insetAnchor = insetAnchor
+        self.fill = fill
+        self.tileViews = tileViews
     }
 
     private enum CodingKeys: String, CodingKey {
-        case content, frame, fullScreen, sidebarCollapsed, insetAnchor
+        case content, frame, fullScreen, sidebarCollapsed, insetAnchor, fill, tileViews
     }
+
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(content, forKey: .content)
+        try c.encode(frame, forKey: .frame)
+        try c.encode(fullScreen, forKey: .fullScreen)
+        try c.encode(sidebarCollapsed, forKey: .sidebarCollapsed)
+        try c.encodeIfPresent(insetAnchor, forKey: .insetAnchor)
+        if fill { try c.encode(true, forKey: .fill) }
+        if !tileViews.isEmpty { try c.encode(tileViews, forKey: .tileViews) }
+    }
+
+    /// The window's picture settings as saved (clamped and bounded).
+    public var views: TileViews<CameraRef> { TileViews(fill: fill, savedEntries: tileViews) }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -46,6 +70,11 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         fullScreen = try c.decode(Bool.self, forKey: .fullScreen)
         sidebarCollapsed = try c.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed) ?? false
         insetAnchor = (try? c.decodeIfPresent(InsetAnchor.self, forKey: .insetAnchor)) ?? nil
+        fill = ((try? c.decodeIfPresent(Bool.self, forKey: .fill)) ?? nil) ?? false
+        let entries = ((try? c.decodeIfPresent([Lossy<SavedTileView>].self, forKey: .tileViews)) ?? nil) ?? []
+        // Read through the model: clamped, without empty entries or
+        // repeats, and bounded.
+        tileViews = TileViews(fill: fill, savedEntries: entries.compactMap(\.value)).savedEntries
     }
 
     /// Where to put a restored window: its saved frame if enough of it is on

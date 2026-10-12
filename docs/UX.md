@@ -150,7 +150,7 @@ the edge. Both apps compute it with the same model and test vectors
 | 9 | Reset zoom | a tile zoomed past 1x (or a moved virtual camera) |
 | 10 | Quality | every camera (the menu of "Stream quality per tile") |
 | 11 | Fisheye view | a fisheye camera |
-| | "…" | whenever anything is hidden; also holds the long tail: Pop Out or Pop In, Allow talk-back, Entrance, Calls open in, Save Picture As…, Save Zoomed Area, Save Original Fisheye Picture, Record Main Stream, Record Sub-stream |
+| | "…" | whenever anything is hidden; also holds the long tail: Reset Position (a filled picture's crop moved at 1x), Fill Tile (checked while the tile fills; not in the call window), Pop Out or Pop In, Allow talk-back, Entrance, Calls open in, Save Picture As…, Save Zoomed Area, Save Original Fisheye Picture, Record Main Stream, Record Sub-stream |
 
 - Items are placed by priority until the width runs out; once one is
   hidden, room for "…" is kept. A change of under 8 pt does not reflow it,
@@ -227,7 +227,7 @@ in either case.
 | S | Show or hide the sidebar. |
 | Arrow keys | Move the selection to the neighboring tile in that direction, by position in the layout (nearest tile whose center lies in that direction), not by list order. In focus, switch the focused camera to the neighbor in that direction. |
 | Space | Toggle the selected tile between focus (it fills the stage) and the grid it came from, as a continuous animation (see "Full screen and focus"). Combined with F, Space gives full-screen video of one camera and back. |
-| 0 | Reset digital zoom on the selected tile. |
+| 0 | Reset digital zoom on the selected tile, and bring a filled picture's crop back to the middle. |
 | M | Listen to the selected tile, or mute it if it is the one playing (⌘L / Ctrl+L does the same). |
 
 Selection is visible as a thin outline that fades with the other chrome, and
@@ -381,10 +381,11 @@ look at a detail.
 - The zoom belongs to the tile: it survives layout changes and focus, and
   when focus switches the camera to the main stream the same region is
   shown, now with the main stream's detail (the region is kept in picture
-  coordinates, independent of resolution).
+  coordinates, independent of resolution). It is saved with the window
+  (see "Fill Tiles").
 - Double-click keeps its meaning (focus); 0 or a small reset control in the
-  hover header returns to 1x; zoom never changes what is recorded or
-  streamed.
+  hover header returns to 1x (and a filled picture's crop to the middle);
+  zoom never changes what is recorded or streamed.
 - Zooming in uses the whole tile: the picture grows over the letterbox or
   pillarbox bars, and as soon as it is larger than the tile on an axis it
   fills that axis (cropping), so the bars shrink and then disappear. The
@@ -409,8 +410,10 @@ look at a detail.
 
 Details settled while building it (macOS):
 
-- A plain drag in a tile zoomed past 1x pans its picture. At 1x, and always
-  while editing the layout, a drag drags the tile to swap, as before.
+- A plain drag on the picture of a tile zoomed past 1x pans its picture, as
+  does one on a filled picture with part hidden (see "Fill Tiles"). On other
+  tiles, on a tile's shown hover header, and always while editing the
+  layout, a drag drags the tile to swap.
 - A mouse wheel (line-based scrolling) zooms, each notch 1.25x, eased over
   the next refreshes. Precise scrolling (trackpad, Magic Mouse) pans a zoomed
   tile and does nothing at 1x; with Option held it zooms instead, for devices
@@ -421,6 +424,58 @@ Details settled while building it (macOS):
 - The inset map is an outline of the whole picture with the visible region
   marked, drawn as overlay layers (no second picture, so no extra drawing or
   texture work), in the bottom left corner of the picture as drawn.
+
+## Fill Tiles
+
+A tile normally fits its picture (letterbox or pillarbox bars where the
+shapes differ). Filled, the picture covers the whole tile and the part that
+does not fit is cropped.
+
+- **Fill Tiles** (macOS: the Layout menu; Windows: the header's "Fill tiles"
+  toggle) sets every tile of the window at once: turning it on or off
+  clears the tiles' own choices, so all tiles follow it.
+- **Fill Tile** in a tile's menu (macOS: the right-click menu and the
+  header's "…"; Windows: the right-click menu, "Fill tile") fills or fits
+  that camera's tiles in this window only, checked while it fills. While
+  some tiles differ from the window's switch, the macOS menu item shows a
+  mixed state; the Windows toggle shows the window's own setting.
+- **Choosing the part shown**: on a filled tile whose picture is partly
+  hidden, a plain drag on the picture moves the crop, stopping at the
+  picture's edges (nothing beyond the picture shows). It is the digital
+  zoom's own rule at 1x (`TileZoom`): the crop's center is the zoom's
+  center, so zooming in starts from the part shown and zooming back out to
+  1x leaves the crop where the zoom ended.
+- **Swapping moves to the header**: on such a tile a drag on the picture
+  pans, so a drag on the tile's hover header swaps it with the tile it is
+  dropped on. A drag on the shown header swaps on every tile, so the
+  gesture is the same everywhere; tiles with nothing hidden still swap when
+  dragged by the picture, and while editing the layout a drag anywhere
+  swaps. A zoomed tile pans, as before.
+- **Pointer**: over a picture a drag pans (below the header strip), the
+  pointer is an open hand (macOS; a closed hand while dragging) or the hand
+  pointer (Windows, which has no closed-hand system pointer).
+- **Reset**: "Reset Position" ("Reset position" on Windows) in the tile's
+  menu, shown while a filled crop is moved at 1x, brings it back to the
+  middle; 0 and the header's reset control (shown while zoomed) also
+  recenter it.
+- **Remembered**: the window's switch, and per camera its zoom (scale and
+  center), crop position and own Fill choice, are saved with the window
+  and restored on relaunch (windows.json, `fill` and `tileViews`, written
+  only when not the default). They are per camera within a window, so the
+  same camera in two tiles of one window shares them and they follow the
+  camera through swaps and layout changes; the same camera in another
+  window has its own. Positions are fractions of the picture, so the
+  sub-stream and the main stream show the same part. A window keeps at
+  most 256 cameras (the one changed longest ago is dropped first); saved
+  values are clamped when read, and entries that cannot be read are
+  skipped. The rule and its vectors (`TileViews`,
+  `fixtures/synthetic/tile-views.json`) are shared by both apps.
+- **Fisheye and multi-lens cameras**: each lens of a multi-lens camera is a
+  camera of its own here (its own zoom, crop and Fill choice). A fisheye
+  tile in Original fills, pans and zooms like any tile; a dewarped view
+  (Panorama, Double panorama, Quad, Virtual PTZ) always covers its tile and
+  a drag turns the view instead (see "Fisheye cameras"), so its Fill choice
+  and crop apply again only once it is back in Original.
 
 ## Fisheye cameras
 
@@ -1285,7 +1340,8 @@ with Windows conventions:
   (the field of view is divided by it, 120° to 20°, each step bounded); on
   other tiles it zooms the digital zoom around the point between the
   fingers, with the same bounded steps.
-- Fill Tiles is the header's "Fill tiles" toggle (per window, not kept).
+- Fill Tiles is the header's "Fill tiles" toggle; each tile's menu has
+  "Fill tile", "Reset position" and "Reset zoom" (see "Fill Tiles").
   The zoom map sits in the tile's chrome and the reset control is a
   magnifier button at the right of the hover header, shown while the tile
   is zoomed (or a virtual camera was moved).

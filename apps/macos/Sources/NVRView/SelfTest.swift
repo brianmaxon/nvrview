@@ -669,8 +669,177 @@ final class SelfTest {
                 stage.fullScreen = false
                 stage.chromeHideDelay = 3
                 stage.alertActive = { [weak model] in model?.alerts.isActive($0) == true }
-                headerStep()
+                fillPanStep(path, camera)
             }
+        }
+    }
+
+    // MARK: Fill Tiles: per tile, panned, saved (docs/UX.md "Fill Tiles")
+
+    /// The letterboxed tile at `path` gets its own Fill Tile from its menu
+    /// (the others stay fitted and the window's switch shows mixed); a drag
+    /// on its picture moves the crop, stopping at the picture's edge; a
+    /// drag on its header swaps it; the window's record restores the crop
+    /// and the single tile's choice; the window's switch then sets every
+    /// tile.
+    private func fillPanStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        let grid = stage.grid
+        func prepare() { grid.prepare?(grid.renderer, grid.drawableSize) }
+        func leaf(_ p: NodePath) -> LeafFrame? { stage.frames.leaf(p) }
+        guard let tile = leaf(path), let other = stage.frames.leaves.first(where: { $0.camera != nil && $0.camera != camera }),
+            let otherCamera = other.camera
+        else {
+            problems.append("no two cameras for the Fill Tiles steps")
+            return headerStep()
+        }
+        // parity: fill-per-tile
+        let menu = stage.contextMenu(for: tile)
+        if let i = menu.items.firstIndex(where: { $0.title == "Fill Tile" }) {
+            if menu.items[i].state != .off { problems.append("Fill Tile was checked on a fitted tile") }
+            menu.performActionForItem(at: i)
+        } else {
+            problems.append("the tile menu has no Fill Tile")
+        }
+        let fillsMenu = NSMenuItem(title: "Fill Tiles", action: #selector(ViewerWindowController.toggleFill(_:)), keyEquivalent: "")
+        _ = window.validateMenuItem(fillsMenu)
+        let single = stage.fills(camera) && !stage.fills(otherCamera) && fillsMenu.state == .mixed
+        let checked = stage.contextMenu(for: tile).items.first { $0.title == "Fill Tile" }?.state == .on
+        print("fill per tile: this tile fills \(stage.fills(camera)), another \(stage.fills(otherCamera)), Fill Tiles \(fillsMenu.state == .mixed ? "mixed" : "not mixed"), item checked \(checked)")
+        if !single { problems.append("Fill Tile on one tile did not fill only it, with Fill Tiles mixed") }
+        if !checked { problems.append("Fill Tile is not checked on the tile that fills") }
+        prepare()
+        guard let picture = stage.pictureSizes[camera], let before = stage.renderedSource(of: path) else {
+            problems.append("no picture to pan")
+            return headerStep()
+        }
+        let base = ZoomBase(picture: picture, tile: tile.rect.size, fill: true)
+        let wide = base.width > 1
+        // parity: fill-pan-drag
+        let middle = CGPoint(x: tile.rect.midX, y: tile.rect.midY + 20)
+        let kind = stage.dragKind(at: middle)
+        let step = wide ? CGVector(dx: tile.rect.width / 8, dy: 0) : CGVector(dx: 0, dy: tile.rect.height / 8)
+        stage.simulateDrag(from: middle, to: CGPoint(x: middle.x + step.dx, y: middle.y + step.dy))
+        prepare()
+        let z = stage.zoom(of: camera)
+        let moved = stage.renderedSource(of: path)
+        let v = z.visible(in: base)
+        // The crop moved toward the picture's left (or top) by the drag, as TileZoom says.
+        let followed = moved.map { m -> Bool in
+            if wide {
+                let offset = before.minX - (1 - v.width) / 2 * picture.width
+                return abs(m.minX - (offset + v.minX * picture.width)) < 1.5 && m.minX < before.minX
+            }
+            let offset = before.minY - (1 - v.height) / 2 * picture.height
+            return abs(m.minY - (offset + v.minY * picture.height)) < 1.5 && m.minY < before.minY
+        } == true
+        // Far beyond the edge it stops there.
+        stage.simulateDrag(from: middle, to: CGPoint(x: middle.x + step.dx * 40, y: middle.y + step.dy * 40))
+        prepare()
+        let edge = stage.zoom(of: camera).visible(in: base)
+        let stopped = wide ? abs(edge.minX) < 1e-6 : abs(edge.minY) < 1e-6
+        let panned = stage.isPanned(path) && !stage.zoom(of: camera).isZoomed
+        let fittedSwaps = stage.dragKind(at: CGPoint(x: other.rect.midX, y: other.rect.midY + 20)) == "swap"
+        print("fill pan drag: kind \(kind ?? "none"), crop followed \(followed), stopped at the edge \(stopped), panned \(panned), a fitted tile still swaps \(fittedSwaps)")
+        if kind != "pan" { problems.append("a drag on a filled, cropped picture would not pan it") }
+        if !followed { problems.append("dragging the filled picture did not move the crop with the drag") }
+        if !stopped { problems.append("panning the filled picture did not stop at its edge") }
+        if !panned { problems.append("the tile is not marked panned at 1x") }
+        if !fittedSwaps { problems.append("a drag on a fitted tile's picture no longer swaps it") }
+        // Back from the edge to a position of its own, for the restore check.
+        stage.simulateDrag(from: middle, to: CGPoint(x: middle.x - step.dx * 2, y: middle.y - step.dy * 2))
+        fillPanHeaderSwapStep(path, camera, otherCamera)
+    }
+
+    /// A drag on the shown header of a tile whose picture pans swaps the
+    /// tiles; the crop goes with the camera.
+    private func fillPanHeaderSwapStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        // parity: fill-pan-header-swap
+        guard let tile = stage.frames.leaf(path), let target = stage.frames.leaves.first(where: { $0.camera == otherCamera })
+        else {
+            problems.append("no tiles to swap")
+            return headerStep()
+        }
+        let zoom = stage.zoom(of: camera)
+        stage.showHeader(path)
+        let onHeader = CGPoint(x: tile.rect.midX, y: tile.rect.minY + 10)
+        let kind = stage.dragKind(at: onHeader)
+        stage.simulateDrag(from: onHeader, to: CGPoint(x: target.rect.midX, y: target.rect.midY))
+        let swapped = window.state.tree[path]?.camera == otherCamera && window.state.tree[target.path]?.camera == camera
+        let kept = stage.zoom(of: camera) == zoom
+        // And back, the same way, from the tile it went to.
+        if swapped, let there = stage.frames.leaf(target.path) {
+            stage.showHeader(target.path)
+            stage.simulateDrag(
+                from: CGPoint(x: there.rect.midX, y: there.rect.minY + 10), to: CGPoint(x: tile.rect.midX, y: tile.rect.midY))
+        }
+        let back = window.state.tree[path]?.camera == camera
+        print("fill pan header swap: kind \(kind ?? "none"), swapped \(swapped), crop kept with the camera \(kept), swapped back \(back)")
+        if kind != "swap" { problems.append("a drag on the header of a panning tile would not swap it") }
+        if !swapped { problems.append("dragging a tile's header onto another did not swap them") }
+        if !kept { problems.append("the crop did not follow the camera through the swap") }
+        if !back { problems.append("dragging the header back did not swap the tiles back") }
+        fillPanRestoreStep(path, camera, otherCamera)
+    }
+
+    /// The window's record keeps the crop, the zoom and the single tile's
+    /// Fill choice; a window restored from it shows the same part of the
+    /// picture. Then the window's switch sets every tile, and Reset
+    /// Position recenters.
+    private func fillPanRestoreStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+        guard let window, let saved = window.savedWindow else { return headerStep() }
+        let stage = window.stage
+        // parity: fill-pan-restore
+        let record = (try? JSONEncoder().encode([saved])).flatMap { try? JSONDecoder().decode([SavedWindow].self, from: $0) }?.first
+        let zoom = stage.zoom(of: camera)
+        let readsBack = record.map { $0.views.zoom(camera) == zoom && $0.views.fills(camera) && !$0.views.fills(otherCamera) } == true
+        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
+        let source = stage.renderedSource(of: path)
+        guard let record, let restored = app.openWindow(window.state.content) else {
+            problems.append("could not open a window to restore into")
+            return headerStep()
+        }
+        restored.window?.setFrame(window.window?.frame ?? .zero, display: false)
+        restored.window?.contentView?.layoutSubtreeIfNeeded()
+        restored.restoreViews(record.views)
+        when({
+            restored.stage.grid.prepare?(restored.stage.grid.renderer, restored.stage.grid.drawableSize)
+            return restored.stage.pictureSizes[camera] != nil
+        }, timeout: 2) { [self] in
+            let rs = restored.stage
+            rs.grid.prepare?(rs.grid.renderer, rs.grid.drawableSize)
+            let same = rs.zoom(of: camera) == zoom && rs.fills(camera) && !rs.fills(otherCamera)
+            let shown = rs.renderedSource(of: path)
+            let sameCrop = source.flatMap { a in shown.map { b in abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 } } == true
+            restored.close()
+            print("fill pan restore: record reads back \(readsBack), restored window same settings \(same), same crop \(sameCrop)")
+            if !readsBack { problems.append("the window's saved record lost the crop or the tile's Fill choice") }
+            if !same { problems.append("a window restored from the record did not get the crop and Fill choices back") }
+            if !sameCrop { problems.append("a restored window does not show the same part of the picture") }
+            // parity: fill-window-switch
+            // The window's switch: every tile fills, then every tile fits.
+            window.toggleFill(nil)
+            let allFill = stage.fills(camera) && stage.fills(otherCamera) && !window.state.views.mixed
+            window.toggleFill(nil)
+            let allFit = !stage.fills(camera) && !stage.fills(otherCamera) && !window.state.views.mixed
+            // The crop stays with the camera; Reset Position recenters it.
+            stage.setFill(true, for: camera)
+            var reset = false
+            if let tile = stage.frames.leaf(path) {
+                let menu = stage.contextMenu(for: tile)
+                if let i = menu.items.firstIndex(where: { $0.title == "Reset Position" }) {
+                    menu.performActionForItem(at: i)
+                    reset = stage.zoom(of: camera) == .none
+                }
+            }
+            print("fill per tile: Fill Tiles fills every tile \(allFill), then fits every tile \(allFit); Reset Position \(reset)")
+            if !allFill || !allFit { problems.append("Fill Tiles did not set every tile of the window") }
+            if !reset { problems.append("Reset Position did not recenter the filled crop") }
+            stage.setFill(false, for: camera)
+            headerStep()
         }
     }
 

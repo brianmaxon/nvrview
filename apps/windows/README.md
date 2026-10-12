@@ -130,8 +130,8 @@ other candidate; it wraps every COM pointer in a managed object, so the
 per-frame path (`GetBufferByIndex`, `QueryInterface` for the DXGI buffer,
 `GetResource`) would allocate a wrapper per call, against the rule of no
 per-frame allocations. The cost of TerraFX is `unsafe` code and a large
-assembly (28 MB; trimming at publish should cut most of it, not measured
-yet).
+assembly (28 MB built; the trimmed release package keeps 84 KB of it, the
+parts the app calls).
 
 ### Decoding
 
@@ -263,6 +263,21 @@ That builds `nvrview.dll` and mock-nvr (release) and the app into
 next to `NvrView.App.exe`. The folder is self-contained (the .NET runtime
 and the Windows App SDK are inside it, about 250 MB unpublished); nothing is
 installed, and it runs from wherever it is copied.
+
+The release package is different: `scripts/windows-app.sh publish` (what
+`package` zips) is `dotnet publish` output, partially trimmed
+(`PublishTrimmed`, `TrimMode` `partial`: the .NET libraries, the Windows SDK
+projection, and TerraFX shrink; the app's own assemblies are kept whole), with
+no `.pdb` files and no debugger or crash-dump helpers (`mscordaccore*.dll`,
+`mscordbi.dll`, `createdump.exe`, `Microsoft.DiaSymReader.Native`). That is
+about 34 MB zipped and 85 MB in 318 files, against 101 MB and 266 MB in 613
+files before. The check script's app steps (`NVRVIEW_APP_SELFTEST=1`) run
+the plain start, the self-test, and the update test against this published
+build as well as the debug build, because trimming breaks things silently.
+The largest files left are WinUI itself (`Microsoft.ui.xaml.dll`, 15 MB),
+`nvrview.dll` (10.6 MB), `Microsoft.UI.Xaml.Controls.dll`, and `coreclr.dll`.
+ReadyToRun is off: it makes the files larger, and startup is not slow enough
+to need it.
 
 - **Against mock-nvr** (nothing is stored; the password is the mock's,
   `example-password` unless `NVRVIEW_TEST_PASSWORD` says otherwise):
@@ -496,9 +511,15 @@ search to loopback.)
 
 ### Windows App SDK
 
-WinUI 3 comes from the Windows App SDK, pinned at **1.8.260921001**
-(`Microsoft.WindowsAppSDK`, a metapackage that pins each component package
-to an exact version). Unpackaged (`WindowsPackageType` `None`) and
+WinUI 3 comes from the Windows App SDK, pinned at **1.8.260921001**. The
+app references the component packages it uses (Base, Foundation,
+InteractiveExperiences, WinUI) at the exact versions that release's
+`Microsoft.WindowsAppSDK` metapackage pins, not the metapackage, so Windows ML
+(`Microsoft.WindowsAppSDK.ML`: `onnxruntime.dll` and `DirectML.dll`, about
+40 MB) and the AI, Widgets, and DWrite components are not deployed. Nothing in
+the app runs a model today; Windows ML comes back (referenced again) with the
+first feature that does, and moving to a new Windows App SDK release means
+moving those four pins together. Unpackaged (`WindowsPackageType` `None`) and
 self-contained (`WindowsAppSDKSelfContained`): the SDK's files are copied
 next to the executable, so there is no installer, no framework package, and
 no bootstrapper. It is **not** under an open-source license: the NuGet
