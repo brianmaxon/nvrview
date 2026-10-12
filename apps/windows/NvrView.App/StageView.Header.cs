@@ -18,11 +18,10 @@ namespace NvrView.App;
 /// <summary>The header items whose action lands later: their buttons, menu items and keys are in place and say so.</summary>
 internal static class TileActionStub
 {
-    /// <summary>Save picture, recording, and PTZ: not built yet.</summary>
-    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.Record or TileHeaderItem.SavePicture
-        or TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens or TileHeaderItem.SavePictureAs
-        or TileHeaderItem.SaveZoomedArea or TileHeaderItem.SaveOriginalFisheye or TileHeaderItem.RecordMain
-        or TileHeaderItem.RecordSub;
+    /// <summary>Recording and PTZ: not built yet.</summary>
+    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.Record
+        or TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens
+        or TileHeaderItem.RecordMain or TileHeaderItem.RecordSub;
 
     /// <summary>"Save Picture is coming soon".</summary>
     public static string Message(string label) => $"{label.TrimEnd('…')} is coming soon";
@@ -34,6 +33,7 @@ internal sealed partial class StageView
     public const double ToastSeconds = 2.5;
 
     private double? _toastHideAt;
+    private Action? _toastAction;
 
     /// <summary>What the header model needs to know about a tile: its camera's capabilities (the channels event) and its state. Null for an empty tile.</summary>
     internal TileHeaderTile? HeaderTileOf(StageTile t)
@@ -94,6 +94,18 @@ internal sealed partial class StageView
         }
         switch (item)
         {
+            case TileHeaderItem.SavePicture:
+                _ = SavePictureAsync(t, PictureKind.View, ask: false);
+                break;
+            case TileHeaderItem.SavePictureAs:
+                _ = SavePictureAsync(t, PictureKind.View, ask: true);
+                break;
+            case TileHeaderItem.SaveZoomedArea:
+                _ = SavePictureAsync(t, PictureKind.ZoomedArea, ask: false);
+                break;
+            case TileHeaderItem.SaveOriginalFisheye:
+                _ = SavePictureAsync(t, PictureKind.OriginalFisheye, ask: false);
+                break;
             case TileHeaderItem.Speaker:
                 bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
                 _viewer.ToggleListening(camera, ctrl && from is not null);
@@ -339,13 +351,21 @@ internal sealed partial class StageView
     // ---- the short message over the stage ----
 
     /// <summary>Shows <paramref name="text"/> over the stage for a few seconds (on the viewer's clock).</summary>
-    public void ShowToast(string text)
+    public void ShowToast(string text, string? actionTitle = null, Action? action = null)
     {
         _toastText.Text = text;
         AutomationProperties.SetName(_toast, text);
+        _toastAction = action;
+        _toastButton.Content = actionTitle;
+        _toastButton.Visibility = actionTitle is not null && action is not null ? Visibility.Visible : Visibility.Collapsed;
+        // A message with a button takes the pointer and stays longer.
+        _toast.IsHitTestVisible = _toastButton.Visibility == Visibility.Visible;
         _toast.Visibility = Visibility.Visible;
-        _toastHideAt = _viewer.Clock.Now + ToastSeconds;
+        _toastHideAt = _viewer.Clock.Now + (_toast.IsHitTestVisible ? ActionToastSeconds : ToastSeconds);
     }
+
+    /// <summary>The title of the button on the message now, null when it has none (self-test).</summary>
+    public string? ToastActionTitle => _toast.Visibility == Visibility.Visible && _toastButton.Visibility == Visibility.Visible ? _toastButton.Content as string : null;
 
     /// <summary>What the message says now, null when none shows (self-test).</summary>
     public string? ToastText => _toast.Visibility == Visibility.Visible ? _toastText.Text : null;
