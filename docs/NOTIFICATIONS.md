@@ -538,6 +538,47 @@ all), `events-log-filter` (filters and opening a trace), `events-log-jump`
   acknowledged, at most 5 times.
 - Delivery results go into the trace (`delivery` steps).
 
+### Home Assistant output
+
+`crates/ha-output` drives Home Assistant's REST API from decisions. It is a
+separate crate; the core hosts it (directly or on its bounded-queue worker)
+and records each result as a `delivery` step such as "Home Assistant:
+`input_boolean.example_alert` pulsed (200)".
+
+- **Helper entity pulse** (for voice-assistant routines that trigger on a
+  helper turning on): read `GET /api/states/<entity_id>`; if the state is
+  already `on`, turn it off first; `POST /api/services/input_boolean/turn_on`;
+  after the pulse gap (default 2 s) `turn_off`. The reset exists because a
+  routine fires on an off-to-on change: a helper left on (a failed earlier
+  turn-off, or someone toggling it) would swallow the next alert. Success is
+  HTTP 200 with a JSON list. If the final turn-off fails, the result says the
+  entity may be left on, and the next pulse resets it.
+- **Other actions:** plain `turn_on` (left on), `script.turn_on` with the facts
+  as script variables, and `notify.<service>` with a message from a template.
+  Templates use only `{camera}`, `{class}`, `{time}`, `{severity}`, and
+  `{explanation}`, filled in one pass from typed alert facts (control
+  characters removed, 200 characters at most), so no trigger payload text is
+  ever sent, spoken, or executed. Entity ids and service names are validated
+  before they reach a request path.
+- **Mapping** (settings): rules match on class, trigger source id, camera,
+  minimum severity, and decision (alerts only by default) and name an action.
+  The mode is first match (default) or all matches (one call per distinct
+  target). Each target has a cooldown (default 30 s, overridable per rule)
+  so one event does not speak twice; a repeat inside it reports "skipped
+  (cooldown)". Updates of an alert (revision above 1) are not sent again.
+- **Reliability:** each request has a timeout (5 s) and, on network errors and
+  5xx, up to 3 tries with doubling backoff from 500 ms (waits go through the
+  injected clock). 4xx is never retried: 401 or 403 reads "token rejected",
+  404 "entity not found". Error lines in the log are limited to 5 a minute with
+  a count of the rest. Delivery runs on a worker with a bounded queue; a full
+  queue drops the alert and the host records a failed delivery.
+- **Address and token:** `https://` anywhere with certificate checks; plain
+  `http://` only for hosts on the local network (the same rule as the
+  picture warning above). Redirects are never followed. The long-lived access
+  token comes from the host's keychain on each start, is sent only as
+  `Authorization: Bearer`, is never stored or logged by the crate, and prints
+  as redacted.
+
 ## Feedback and learning
 
 - **Collection:** useful or not useful on the notification, in the event log,

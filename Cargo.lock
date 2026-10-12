@@ -360,6 +360,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ha-output"
+version = "0.1.0"
+dependencies = [
+ "alerts",
+ "rustls-graviola",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
