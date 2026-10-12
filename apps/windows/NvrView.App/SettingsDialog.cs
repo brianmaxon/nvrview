@@ -359,6 +359,16 @@ internal static class SettingsDialog
             HorizontalAlignment = HorizontalAlignment.Left,
             HorizontalContentAlignment = HorizontalAlignment.Left,
         };
+        // "Unmute on ring even when not listening", per doorbell (docs/UX.md "Doorbell calls").
+        var unmuteRows = new StackPanel { Spacing = 6 };
+        var unmuteExpander = new Expander
+        {
+            Header = "Unmute on ring even when not listening, per doorbell",
+            Content = unmuteRows,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+        };
+        var unmuteBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var callPickers = new List<(CameraRef Camera, string Label, ComboBox Picker)>();
         bool buildingCalls = false;
         bool lastCallsGlobal = viewer.Settings.CallsOpenInWindow;
@@ -396,6 +406,28 @@ internal static class SettingsDialog
                     callRows.Children.Add(picker);
                 }
             }
+            if (unmuteBoxes.Count != cameras.Count || !unmuteBoxes.Select(r => (r.Camera, r.Label)).SequenceEqual(cameras))
+            {
+                unmuteBoxes.Clear();
+                unmuteRows.Children.Clear();
+                foreach ((CameraRef camera, string label) in cameras)
+                {
+                    var box = new CheckBox { Content = label };
+                    CameraRef cam = camera;
+                    box.Click += (_, _) => viewer.Settings.SetUnmuteOnRing(cam, box.IsChecked == true);
+                    unmuteBoxes.Add((camera, label, box));
+                    unmuteRows.Children.Add(box);
+                }
+            }
+            foreach ((CameraRef camera, _, CheckBox box) in unmuteBoxes)
+            {
+                bool on = viewer.Settings.UnmuteOnRing(camera);
+                if (box.IsChecked != on)
+                {
+                    box.IsChecked = on;
+                }
+            }
+            unmuteExpander.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             bool rebuild = firstCallBuild || global != lastCallsGlobal;
             firstCallBuild = false;
             lastCallsGlobal = global;
@@ -436,6 +468,7 @@ internal static class SettingsDialog
         callSettings.Children.Add(corners);
         callSettings.Children.Add(windowRow);
         callSettings.Children.Add(callExpander);
+        callSettings.Children.Add(unmuteExpander);
         callSettings.Children.Add(transcriptRow);
         callSettings.Children.Add(transcriptNote);
 
