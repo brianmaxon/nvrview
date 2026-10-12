@@ -1196,9 +1196,11 @@ fn cameras_stay_together_after_seeks_and_rate_changes_despite_late_and_stalled_p
         let generation = generation(&rig, pb, 0);
         let w = watch_sync(&rig, pb, &tiles, generation, target, 16);
         let log = nvr.play_log();
-        // The four started as a group, then channel 3 once more, alone.
-        let again: Vec<u8> = log[plays + 4..].iter().map(|l| l.channel).collect();
-        assert_eq!(again, vec![3], "{rate}x: {log:?}");
+        // The four started as a group, then channel 2 (its play began after
+        // the target) and channel 3 (stalled) once more each, alone.
+        let mut again: Vec<u8> = log[plays + 4..].iter().map(|l| l.channel).collect();
+        again.sort_unstable();
+        assert_eq!(again, vec![2, 3], "{rate}x: {log:?}");
         assert!(w.samples > 250, "{rate}x: {w:?}");
         assert!(w.spread_ms <= bound_ms, "{rate}x: {w:?}");
         // After the clock waited 2 s for it, late for at most 0.8 s, and
@@ -1220,6 +1222,67 @@ fn cameras_stay_together_after_seeks_and_rate_changes_despite_late_and_stalled_p
             states.iter().all(|s| s == "\"playing\""),
             "{rate}x: {states:?}"
         );
+    }
+    rig.core.playback_close(pb).unwrap();
+    rig.sim.settle();
+    assert_eq!(nvr.active_plays(), 0);
+}
+
+/// Hardware showed two cases still drifting: the first 1x play after a
+/// paused exact-seek open, and the return to 1x after 16x (where only
+/// keyframes are shown). With cameras whose keyframes are spaced
+/// differently, on the main stream (thinned by the device at 16x), both
+/// stages stay within the bounds of a seek at 1x.
+#[test]
+fn cameras_stay_together_on_the_first_play_and_back_from_16x() {
+    let rig = Rig::new();
+    use mock_nvr::archive::PlayFaultKind::{FirstKeyframeAfter, FirstMediaAfter};
+    let faults = mock_nvr::archive::PlayFaults::default();
+    let f2 = faults.clone();
+    let nvr = archive_mock(&rig.sim, 4, move |a| {
+        a.gop_by_channel = vec![(0, 1), (1, 2), (2, 3), (3, 3)];
+        a.play_faults = f2;
+    });
+    // One camera's play begins at a keyframe 4 s after the seek time, 2 s
+    // after the target: later than the seek lead covers.
+    faults.add(2, FirstKeyframeAfter(4));
+
+    let (_dev, key) = rig.add(&nvr, &[0, 1, 2, 3]);
+    let (pb, tiles) = rig.open(json!({
+        "start_ms": ms(8, 9, 0, 0), "end_ms": ms(8, 13, 0, 0), "position_ms": ms(8, 10, 0, 10),
+        "cameras": cams(&key, &[0, 1, 2, 3], "sub"),
+    }));
+    rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
+    // The late camera's play was asked again, earlier, once.
+    let opened: Vec<u8> = nvr.play_log().iter().map(|l| l.channel).collect();
+    assert_eq!(opened.iter().filter(|c| **c == 2).count(), 2, "{opened:?}");
+    // Paused for a while, as when the user looks at the incident first.
+    rig.sim.advance(Duration::from_secs(5));
+    let target = rig.position(pb).0;
+    rig.core.playback_play(pb).unwrap();
+    let g = generation(&rig, pb, 0);
+    let w = watch_sync(&rig, pb, &tiles, g, target, 10);
+    assert!(w.spread_ms <= 250, "first play: {w:?}");
+    assert!(w.samples > 150, "first play: {w:?}");
+    assert!(w.spread_ms <= 250, "first play: {w:?}");
+
+    rig.core.playback_set_rate(pb, 16.0).unwrap();
+    let p = rig.position(pb).0;
+    let g = generation(&rig, pb, 0);
+    let w = watch_sync(&rig, pb, &tiles, g, p, 6);
+    assert!(w.spread_ms <= 2_000 + 16 * 50, "16x: {w:?}");
+    faults.add(2, FirstKeyframeAfter(4));
+    faults.add(1, FirstMediaAfter(Duration::from_secs(1)));
+    rig.core.playback_set_rate(pb, 1.0).unwrap();
+    let p = rig.position(pb).0;
+    let g = generation(&rig, pb, 0);
+    let w = watch_sync(&rig, pb, &tiles, g, p, 10);
+    assert!(w.samples > 150, "back to 1x: {w:?}");
+    assert!(w.spread_ms <= 250, "back to 1x: {w:?}");
+    assert!(w.late_samples <= 40, "back to 1x: {w:?}");
+    assert!(w.spread_late_ms <= 750, "back to 1x: {w:?}");
+    for lag in &w.first_lag_ms {
+        assert!(*lag >= -125, "back to 1x: {w:?}");
     }
     rig.core.playback_close(pb).unwrap();
     rig.sim.settle();
