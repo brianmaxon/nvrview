@@ -84,6 +84,7 @@ else
   echo "== Windows package (built on $NVRVIEW_WINDOWS_HOST)"
   scripts/windows-check.sh --package "$out"
   [ -s "$out/$win_zip" ] || die "the Windows package $win_zip was not fetched"
+  chmod 644 "$out/$win_zip"
   packages="$packages $out/$win_zip"
 fi
 
