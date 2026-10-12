@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """Convert RT-DETR (Apache-2.0 code and weights) to a Core ML package.
 
-Usage: python3 -I convert-rtdetr.py OUTPUT.mlpackage [--model PekingU/rtdetr_r18vd] [--size 640]
+Usage: python3 -I convert-rtdetr.py OUTPUT.mlpackage [--size 640]
+       [--model PekingU/rtdetr_r18vd --revision COMMIT --sha256 HEX]
 
-Needs torch, transformers and coremltools. Downloads the weights from Hugging
-Face (about 80 MB for rtdetr_r18vd) into the usual Hugging Face cache. Write
-the output outside the repository (for example under captures/, which is
-git-ignored): models are never committed.
+Needs the packages pinned in convert-requirements.txt (the versions the
+published numbers were measured with). Downloads the weights from Hugging
+Face (about 80 MB for rtdetr_r18vd) into the usual Hugging Face cache, at the
+pinned commit, and refuses to convert weights whose SHA-256 differs from the
+pinned one. Write the output outside the repository (for example under
+captures/, which is git-ignored): models are never committed. Next to the
+package it writes OUTPUT.manifest.json (source, revision, weights hash,
+converter versions, preprocessing).
+
+Preprocessing (what the host must do before the package): the picture, or a
+crop of it, is stretched (not letterboxed; the Hugging Face processor does the
+same) to SIZE x SIZE with bilinear resampling and given as RGB. The package
+itself scales 0..255 to 0..1 (`scale=1/255`); there is no mean or standard
+deviation normalization (`do_normalize` is false in the model's
+preprocessor_config.json).
 
 The package takes a SIZE x SIZE RGB image and returns the decoder's raw
 outputs: `logits` (1, queries, classes) and `pred_boxes` (1, queries, 4;
@@ -16,7 +28,9 @@ model's metadata under `labels`, comma-separated.
 """
 
 import argparse
+import hashlib
 import json
+import sys
 
 import coremltools as ct
 import numpy as np
@@ -25,6 +39,12 @@ from transformers import RTDetrForObjectDetection
 from transformers.models.rt_detr import modeling_rt_detr
 
 F = torch.nn.functional
+
+# Pinned source: the commit of the Hugging Face repository and the SHA-256 of
+# its model.safetensors (Apache-2.0 on the model card at that commit).
+DEFAULT_MODEL = "PekingU/rtdetr_r18vd"
+PINNED_REVISION = "ac77a11ff0170a41b771c03264987f8ce2b0d753"
+PINNED_SHA256 = "fe87a5a30f5daf298d10794c7682a63b6107986f97d6a770ba948d89e4340093"
 
 
 def deformable_attention_rank5(
@@ -83,15 +103,24 @@ class Wrapper(torch.nn.Module):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("output")
-    ap.add_argument("--model", default="PekingU/rtdetr_r18vd")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--revision", default=PINNED_REVISION)
+    ap.add_argument("--sha256", default=PINNED_SHA256,
+                    help="expected SHA-256 of model.safetensors (the default fits the default model)")
     ap.add_argument("--size", type=int, default=640)
     ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     args = ap.parse_args()
 
     # A fixed anchor size makes the model precompute its anchors instead of
     # building them with in-place writes, which the converter cannot handle.
+    from huggingface_hub import hf_hub_download
+    weights = hf_hub_download(args.model, "model.safetensors", revision=args.revision)
+    with open(weights, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    if digest != args.sha256:
+        raise SystemExit(f"model.safetensors hashes to {digest}, expected {args.sha256}")
     model = RTDetrForObjectDetection.from_pretrained(
-        args.model, anchor_image_size=[args.size, args.size]).eval()
+        args.model, revision=args.revision, anchor_image_size=[args.size, args.size]).eval()
     labels = [model.config.id2label[i] for i in range(len(model.config.id2label))]
     example = torch.rand(1, 3, args.size, args.size)
     with torch.no_grad():
@@ -116,8 +145,23 @@ def main():
     mlmodel.short_description = f"{args.model} converted with coremltools; raw DETR outputs"
     mlmodel.license = "Apache-2.0 (RT-DETR code and weights)"
     mlmodel.user_defined_metadata["labels"] = ",".join(labels)
-    mlmodel.user_defined_metadata["source"] = args.model
+    mlmodel.user_defined_metadata["source"] = f"{args.model}@{args.revision}"
     mlmodel.save(args.output)
+    import transformers
+    manifest = {
+        "source": args.model, "revision": args.revision, "weights_sha256": digest,
+        "license": "Apache-2.0",
+        "input": {"name": "image", "size": args.size, "color": "RGB", "resize": "stretch",
+                  "scale": "1/255", "normalize": False},
+        "outputs": {"logits": [1, int(reference[0].shape[1]), len(labels)],
+                    "pred_boxes": [1, int(reference[1].shape[1]), 4]},
+        "precision": args.precision, "labels": labels,
+        "versions": {"python": sys.version.split()[0], "torch": torch.__version__,
+                     "transformers": transformers.__version__, "coremltools": ct.__version__,
+                     "numpy": np.__version__},
+    }
+    with open(args.output.rstrip("/") + ".manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
     print(json.dumps({"saved": args.output, "classes": len(labels)}))
 
 

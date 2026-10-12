@@ -89,3 +89,4 @@ recordings-analyze-real-core macos    gap: the Windows recordings steps run on t
 playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
 export-real-core            macos    gap: the Windows playback steps run on the fakes only (playback-real-core); a keyframe trim and a range download against the mock are not driven on Windows yet
+alerts-detector-benchmark macos    gap: Windows detector is planned (Windows ML)
