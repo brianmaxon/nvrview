@@ -20,6 +20,9 @@ internal static class ZoomTests
         ("zoom: near an edge it stays inside the picture", NearAnEdge),
         ("zoom: panning follows the drag and is clamped", Panning),
         ("zoom: fill zooms from the crop and pans to the picture's edges", Fill),
+        ("zoom: fill at 1x crops the picture to the tile", FillOneX),
+        ("zoom: the map sits in the picture's bottom left corner", MapFrame),
+        ("zoom: the map marks the visible region", MapRegion),
     ];
 
     private static readonly ZoomBase WideInTall = ZoomBase.Of(1600, 900, 400, 400);
@@ -135,5 +138,36 @@ internal static class ZoomTests
         Close(new(0.21875, 0, 0.28125, 0.5), z.Visible(Filled), "2x at the corner");
         Close(new(0, 0, 1, 1), z.Destination(Filled), "the whole tile");
         Close(new(0, 0, 0.28125, 0.5), z.Panned(100, 0, Filled).Visible(Filled), "panned to the picture's left edge");
+    }
+
+    private static void FillOneX()
+    {
+        // A 16:9 picture filled into a square tile: all of the height, the middle 9/16 of the width.
+        Close(new(0, 0, 1, 1), TileZoom.None.Destination(Filled), "covers the tile");
+        Close(new(0.21875, 0, 0.5625, 1), TileZoom.None.Visible(Filled), "the middle of the picture");
+        // Fitted, the same picture leaves bars.
+        Close(new(0, 0.21875, 1, 0.5625), TileZoom.None.Destination(ZoomBase.Of(1600, 900, 300, 300)), "fitted has bars");
+        // A tile of the picture's own shape is the same either way.
+        Check.Equal(ZoomBase.Of(1600, 900, 1600, 900), ZoomBase.Of(1600, 900, 1600, 900, fill: true), "same shape");
+    }
+
+    private static void MapFrame()
+    {
+        // An 800x450 picture: a quarter of its width is 200, capped at 96; the height follows the shape.
+        UnitRect f = ZoomMap.Frame(new(10, 20, 800, 450), 16.0 / 9);
+        Close(new(18, 20 + 450 - 8 - 54, 96, 54), f, "wide picture", 1.01);
+        // A short picture: the third of its height wins.
+        UnitRect g = ZoomMap.Frame(new(0, 0, 400, 60), 16.0 / 9);
+        Check.True(g.Height <= 21 && g.Width <= 38 && g.X == 8, $"a short picture caps the map by its height: {g}");
+        // A tiny one: a quarter of the width.
+        Check.True(ZoomMap.Frame(new(0, 0, 40, 40), 1).Width <= 11, "a tiny picture caps the map by its width");
+        Check.Equal(new UnitRect(0, 0, 0, 0), ZoomMap.Frame(new(0, 0, 0, 10), 1), "no picture");
+        Check.Equal(new UnitRect(0, 0, 0, 0), ZoomMap.Frame(new(0, 0, 100, 100), 0), "no shape");
+    }
+
+    private static void MapRegion()
+    {
+        Close(new(24, 13.5, 48, 27), ZoomMap.Region(new(0.25, 0.25, 0.5, 0.5), 96, 54), "half the picture");
+        Close(new(0, 0, 2, 2), ZoomMap.Region(new(0, 0, 0.001, 0.001), 96, 54), "at least two units");
     }
 }
