@@ -13,7 +13,7 @@
 
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
-use bc_protocol::ptz::{LensRange, MAX_SPEED, MIN_SPEED};
+use bc_protocol::ptz::{Cam, LensRange, MAX_SPEED, MIN_SPEED};
 use bc_session::{
     DeviceSession, MotionOrigin, PtzCommand, PtzInfo, PtzOutcome, PtzRefusal, StopCause,
 };
@@ -42,8 +42,8 @@ struct Mover {
 
 #[derive(Default)]
 struct State {
-    /// By (device, channel).
-    movers: HashMap<(u64, u8), Mover>,
+    /// By (device, camera).
+    movers: HashMap<(u64, Cam), Mover>,
     /// One task per device reporting the session's own stops.
     watchers: HashMap<u64, JoinHandle<()>>,
 }
@@ -152,10 +152,7 @@ impl PtzHub {
                 let Some(state) = state.upgrade() else {
                     return;
                 };
-                let tile = lock(&state)
-                    .movers
-                    .remove(&(device, n.channel))
-                    .map(|m| m.tile);
+                let tile = lock(&state).movers.remove(&(device, n.cam)).map(|m| m.tile);
                 if let Some(tile) = tile {
                     events.send(
                         event(tile, "stop", "sent")
@@ -175,7 +172,7 @@ impl PtzHub {
         &self,
         tile: u64,
         device: u64,
-        channel: u8,
+        cam: Cam,
         session: &Arc<DeviceSession>,
         command: PtzCommand,
         origin: MotionOrigin,
@@ -186,7 +183,7 @@ impl PtzHub {
             match command {
                 PtzCommand::Move { .. } => {
                     st.movers.insert(
-                        (device, channel),
+                        (device, cam),
                         Mover {
                             tile,
                             session: Arc::downgrade(session),
@@ -194,14 +191,14 @@ impl PtzHub {
                     );
                 }
                 PtzCommand::Stop => {
-                    st.movers.remove(&(device, channel));
+                    st.movers.remove(&(device, cam));
                 }
                 PtzCommand::Preset { .. } | PtzCommand::Lens { .. } => {}
             }
         }
         let pending = {
             let _rt = self.runtime.enter();
-            session.ptz_send(channel, command, origin)
+            session.ptz_send(cam, command, origin)
         };
         let events = self.events.clone();
         let action = command.action();
@@ -214,9 +211,9 @@ impl PtzHub {
 
     /// A tile closed: a move it started is stopped.
     pub(crate) fn tile_closed(&self, tile: u64) {
-        let stops: Vec<(u8, Weak<DeviceSession>)> = {
+        let stops: Vec<(Cam, Weak<DeviceSession>)> = {
             let mut st = lock(&self.state);
-            let keys: Vec<(u64, u8)> = st
+            let keys: Vec<(u64, Cam)> = st
                 .movers
                 .iter()
                 .filter(|(_, m)| m.tile == tile)
@@ -226,11 +223,16 @@ impl PtzHub {
                 .filter_map(|k| st.movers.remove(&k).map(|m| (k.1, m.session)))
                 .collect()
         };
-        for (channel, session) in stops {
+        for (cam, session) in stops {
             if let Some(s) = session.upgrade() {
-                debug!(tile, channel, "tile closed: stopping its camera");
+                debug!(
+                    tile,
+                    channel = cam.channel,
+                    lens = cam.lens,
+                    "tile closed: stopping its camera"
+                );
                 let _rt = self.runtime.enter();
-                s.ptz_stop_now(channel, MotionOrigin::Manual);
+                s.ptz_stop_now(cam, MotionOrigin::Manual);
             }
         }
     }

@@ -22,6 +22,36 @@
 use crate::xml::{self, XML_DECLARATION, XmlError};
 use std::fmt;
 
+/// A camera: a channel and the lens on it (0, the first or only lens, or
+/// 1, a multi-lens camera's second lens). The lens is addressed in the
+/// request extension, never in a body (protocol.md, "Camera motion
+/// control", observed (second capture)).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Cam {
+    /// The channel.
+    pub channel: u8,
+    /// The lens on it: 0, or 1 for the second lens.
+    pub lens: u8,
+}
+
+impl Cam {
+    /// A channel's first lens.
+    pub const fn new(channel: u8) -> Cam {
+        Cam { channel, lens: 0 }
+    }
+
+    /// A channel's lens.
+    pub const fn with_lens(channel: u8, lens: u8) -> Cam {
+        Cam { channel, lens }
+    }
+}
+
+impl From<u8> for Cam {
+    fn from(channel: u8) -> Cam {
+        Cam::new(channel)
+    }
+}
+
 /// Slowest move speed.
 pub const MIN_SPEED: u8 = 1;
 /// Fastest move speed (the official client's slider runs 1 to 64).
@@ -161,17 +191,35 @@ fn wrap(inner: &str) -> String {
 }
 
 /// Extension of a motion command (18, 19, 295): the channel only, so the
-/// body goes in the payload (protocol.md, "Request shapes").
-pub fn command_extension(channel: u8) -> String {
-    xml::channel_extension(channel)
+/// body goes in the payload (protocol.md, "Request shapes"). A second
+/// lens adds `subChannel` 1, as the official client did (observed (second
+/// capture)); the first lens is the plain form.
+pub fn command_extension(cam: impl Into<Cam>) -> String {
+    let cam = cam.into();
+    if cam.lens == 0 {
+        return xml::channel_extension(cam.channel);
+    }
+    format!(
+        "{XML_DECLARATION}\n<Extension version=\"1.1\">\n<channelId>{}</channelId>\n\
+         <subChannel>{}</subChannel>\n</Extension>\n",
+        cam.channel, cam.lens
+    )
 }
 
 /// Extension of a read-only PTZ query (294, 190, 340): the channel and
-/// `chnType` 0, no body.
-pub fn query_extension(channel: u8) -> String {
+/// `chnType` 0, no body; a second lens adds `subChannel` after `chnType`
+/// (observed (second capture)).
+pub fn query_extension(cam: impl Into<Cam>) -> String {
+    let cam = cam.into();
+    let lens = if cam.lens == 0 {
+        String::new()
+    } else {
+        format!("<subChannel>{}</subChannel>\n", cam.lens)
+    };
     format!(
-        "{XML_DECLARATION}\n<Extension version=\"1.1\">\n<channelId>{channel}</channelId>\n\
-         <chnType>0</chnType>\n</Extension>\n"
+        "{XML_DECLARATION}\n<Extension version=\"1.1\">\n<channelId>{}</channelId>\n\
+         <chnType>0</chnType>\n{lens}</Extension>\n",
+        cam.channel
     )
 }
 
@@ -380,6 +428,23 @@ mod tests {
         // The motion extension has no chnType (the body is the payload).
         assert!(!command_extension(3).contains("chnType"));
         assert!(query_extension(3).contains("<chnType>0</chnType>"));
+        assert!(!query_extension(3).contains("subChannel"));
+    }
+
+    #[test]
+    fn a_second_lens_is_addressed_in_the_extension_only() {
+        let c = command_extension(Cam::with_lens(3, 1));
+        assert!(c.contains("<channelId>3</channelId>\n<subChannel>1</subChannel>"));
+        assert!(!c.contains("chnType"));
+        let q = query_extension(Cam::with_lens(3, 1));
+        assert!(q.contains("<chnType>0</chnType>\n<subChannel>1</subChannel>"));
+        // The first lens is the plain form.
+        assert_eq!(
+            command_extension(Cam::with_lens(3, 0)),
+            command_extension(3)
+        );
+        // The body names the plain channel, never the lens.
+        assert!(!move_body(3, Direction::Left, 5).contains("subChannel"));
     }
 
     #[test]
