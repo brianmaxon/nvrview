@@ -627,9 +627,9 @@ The `channels` event gains, without an ABI change, from each channel's
 > `ptz_info`, `ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset` (each
 > taking a `MotionOrigin`; the C functions will pass `Manual`) and
 > `set_motion_grant`, with the `ptz` events below. The C functions are
-> not exported yet: other branches in flight take minors 7 and 8, and
-> minors are numbered in the order they land, so they come with the apps'
-> PTZ controls (Z2) on the next free minor. As built, beyond the shapes
+> not exported yet: minors are numbered in the order they land and other
+> additions in flight are taking the next ones, so they come with the
+> apps' PTZ controls (Z2) on the next free minor then. As built, beyond the shapes
 > below: a renewal sends nothing and reports nothing; a lens move's `sent`
 > event carries the clamped `position`; `refused` (the core's rules:
 > `not_granted`, `user_steering`, `rate_limited` with `retry_after_ms`,
