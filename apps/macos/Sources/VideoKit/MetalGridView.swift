@@ -105,7 +105,12 @@ public final class MetalGridView: NSView {
         drawableResizes += 1
     }
 
+    /// Time spent in refreshes on the main thread (preparing and drawing), µs.
+    public private(set) var refreshBusyMicros: Int64 = 0
+
     fileprivate func refresh(_ drawable: any CAMetalDrawable) {
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { refreshBusyMicros += Int64((DispatchTime.now().uptimeNanoseconds - started) / 1000) }
         refreshes += 1
         // Takes effect from the next drawable; this one is still presented.
         if let apply = sizePolicy.tick(now: CACurrentMediaTime()) { setDrawableSize(apply) }

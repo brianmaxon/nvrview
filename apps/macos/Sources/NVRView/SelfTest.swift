@@ -271,7 +271,62 @@ final class SelfTest {
             if model.fake != nil, abs((tile.deviceRate ?? 0) - 20) > 1 { problems.append("device rate not measured") }
             if shown == nil { problems.append("shown rate not measured") }
         }
-        capture("grid") { [self] in resizeStep() }
+        capture("grid") { [self] in livePacing { [self] in resizeStep() } }
+    }
+
+    /// Live pacing (docs/RENDERING.md "Playback pacing"): for five seconds
+    /// every live tile of the first window notes when each picture reaches
+    /// the app, and the window's renderer counts the pictures it draws for
+    /// the first time; together the tiles must draw at least 90% of the
+    /// pictures delivered (what the header's "Device" and "Shown" rates
+    /// compare). Real time on purpose: it measures the real display refresh
+    /// and decoders.
+    private func livePacing(then next: @escaping @MainActor () -> Void) {
+        // parity: live-pacing
+        guard let model = app.model, let window else { return next() }
+        let tiles = window.state.tree.cameras.compactMap { model.leases.tile(for: $0) }
+        let renderer = window.stage.grid.renderer
+        var shown = 0
+        renderer.onNewPicture = { _, _, _ in shown += 1 }
+        for t in tiles {
+            t.pacing.reset()
+            t.pacing.enabled = true
+        }
+        // A window behind others gets few display refreshes: in front (not
+        // activated) while measuring, then behind again.
+        window.window?.orderFrontRegardless()
+        let refreshes = window.stage.grid.refreshes
+        // How busy the main thread is (the display link runs on it): a 100 Hz timer's longest gap.
+        var lastTick = CACurrentMediaTime(), longest = 0.0, ticks = 0
+        let probe = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                let now = CACurrentMediaTime()
+                longest = max(longest, now - lastTick)
+                lastTick = now
+                ticks += 1
+            }
+        }
+        RunLoop.main.add(probe, forMode: .common)
+        after(5) { [self] in
+            probe.invalidate()
+            print(String(format: "live pacing: main thread %d timer ticks of 500, longest gap %.0f ms; window visible %@", ticks, longest * 1000,
+                         window.window?.occlusionState.contains(.visible) == true ? "yes" : "no"))
+            window.window?.orderBack(nil)
+            renderer.onNewPicture = nil
+            let reports = tiles.map { t in
+                t.pacing.enabled = false
+                return t.pacing.report()
+            }
+            let arrived = reports.map(\.released.pictures).reduce(0, +)
+            let ratio = arrived > 0 ? Double(shown) / Double(arrived) : 0
+            let made = window.stage.grid.refreshes - refreshes
+            let first = reports.first.map { String(describing: $0) } ?? "none"
+            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in 5 s; first tile: \(first)")
+            if ratio < Self.pacingShownRatio {
+                problems.append("live pacing: \(shown) of \(arrived) delivered pictures were drawn")
+            }
+            next()
+        }
     }
 
     /// Resizes the window in a burst of steps, one per run-loop turn (each

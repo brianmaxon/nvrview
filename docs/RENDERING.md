@@ -177,6 +177,44 @@ and measurements (no per-frame allocations, presentation during resizes,
 device-loss recovery, decoder memory settings that did not help) are in
 [apps/windows/README.md](../apps/windows/README.md), "The app".
 
+## Pacing (shared)
+
+Each app shows the newest decoded picture of a tile at every display
+refresh. That shows every picture only if pictures are decoded about as
+evenly as their timestamps say; two pictures decoded within one refresh show
+as one. The core is what keeps them even:
+
+- **Recorded playback.** The engine releases each picture when the playback
+  clock reaches its recorded time (docs/PLAYBACK.md). The recorded time comes
+  from the keyframes' UTC seconds plus the device's UTC offset; apps pass the
+  computer's offset, and a device on another offset put every picture hours
+  before its seek target, so the engine released each arriving group of
+  pictures at once (the mock sends two seconds at a time): about one picture
+  in eight was drawn. The buffer now takes the device's offset from a fresh
+  play's first keyframe when the given one is half a quarter hour or more off
+  (FFI-RECORDINGS.md section 1). Measured on the mock (one-camera incident,
+  1x, 10 fps, macOS self-test `playback-pacing`): before, 12 of 100 released
+  pictures drawn, shown jitter p95 1361 ms; after, 101 of 101, released
+  jitter p95 9.6 ms, shown jitter p95 0.5 ms.
+- **Live.** Devices deliver live pictures unevenly (protocol.md, "Live
+  view"). The tile thread holds a live stream's pictures until their
+  timestamp on the arrival clock plus a small delay: the 90th percentile of
+  how late recent pictures came relative to the earliest, at most 200 ms, and
+  none for an evenly sent stream (`live_pacer.rs`). Measured on macOS with
+  nine sub-stream tiles at 15 fps from a mock sending pictures in pairs
+  (`--video-burst 2`): the 0.4.0 release read "Device 15.0 fps, Shown 7.5
+  fps" on a 60 Hz display; with pacing every delivered picture was drawn
+  (135 per second of 135). On nine tiles replaying a recorded 20 fps
+  sub-stream with its real arrival times, 71 to 78% of the pictures were
+  drawn before (the same in the 0.3.2 and 0.4.0 releases: not a regression)
+  and 96 to 98% after, the readout "Device 20.0 fps, Shown 20.2 fps".
+
+The trace (`NVRVIEW_PACING_TRACE=1`, off by default) records per picture when
+its Decode reached the app, when it was answered decoded, and when a frame
+first drew it, and summarizes intervals against timestamp spacing (jitter
+p50, p95, max) every ten seconds. The `live-pacing` and `playback-pacing`
+self-test steps run the same measurement on both apps.
+
 ## Fisheye dewarping
 
 A fisheye camera (docs/protocol.md, "Fisheye cameras"; `fisheye` in the

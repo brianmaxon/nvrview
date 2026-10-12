@@ -26,6 +26,33 @@ internal sealed partial class SelfTest
 
     private static double ShownRatio(PacingReport r) => r.Released.Pictures > 0 ? (double)r.Shown.Pictures / r.Released.Pictures : 0;
 
+    /// <summary>
+    /// Live pacing: for five seconds every live tile of the first window traces its pictures; together the tiles
+    /// must draw at least <see cref="PacingShownRatio"/> of the pictures delivered (the mock sends them in pairs,
+    /// as devices bunch them; the core paces them to their timestamps). Real time on purpose, like the playback step.
+    /// </summary>
+    private async Task LivePacingStep(StageRenderer r)
+    {
+        // parity: live-pacing
+        (VideoTile Video, PacingTrace Trace)[] traces = [.. Tiles.Where(t => t.Video is not null).Select(t => (t.Video!, new PacingTrace()))];
+        foreach ((VideoTile video, PacingTrace trace) in traces)
+        {
+            video.Pacing = trace;
+        }
+        long frames = r.Frames;
+        await Task.Delay(5000);
+        foreach ((VideoTile video, _) in traces)
+        {
+            video.Pacing = null;
+        }
+        PacingReport[] reports = [.. traces.Select(t => t.Trace.Report())];
+        int delivered = reports.Sum(x => x.Released.Pictures), shown = reports.Sum(x => x.Shown.Pictures);
+        double ratio = delivered > 0 ? (double)shown / delivered : 0;
+        Say($"live pacing: {traces.Length} tiles, {delivered} pictures delivered, {shown} drawn ({ratio:0.00}), {r.Frames - frames} frames in 5 s; " +
+            $"first tile: {(reports.Length > 0 ? reports[0].ToString() : "none")}");
+        Expect(ratio >= PacingShownRatio, $"live pacing: {shown} of {delivered} delivered pictures were drawn");
+    }
+
     private async Task PlaybackPacingStep(Viewer v)
     {
         // parity: playback-pacing
@@ -46,7 +73,9 @@ internal sealed partial class SelfTest
         Incident? incident = b.DayIncidents.Where(i => !i.Growing).OrderBy(i => i.Start).FirstOrDefault();
         if (!listed || incident is null)
         {
-            _problems.Add($"playback pacing: the mock's day listed no finished incident ({b.DayIncidents.Count} incidents)");
+            _problems.Add($"playback pacing: the mock's day listed no finished incident ({b.DayIncidents.Count} incidents; day {b.Day}, " +
+                $"holding {b.Holding}, searching {service.Searching}, lanes {string.Join(", ", b.Lanes.Select(l => $"{l.Camera.Device}/{l.Camera.Channel}: {l.Spans.Count} spans, {l.Events.Count} events, failed {l.Failed}"))}; " +
+                $"enabled {string.Join(", ", service.EnabledCameras)})");
             w.Close();
             await Until(() => w.IsClosed, 5);
             return;

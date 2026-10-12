@@ -31,10 +31,13 @@ public final class PacingRecorder: Sendable {
         var shown: [(at: Int64, pts: Int64)] = []
     }
 
+    /// Whether NVRVIEW_PACING_TRACE=1 asks for traces (a summary in the log every ten seconds).
+    public static let traceFromEnvironment = ProcessInfo.processInfo.environment["NVRVIEW_PACING_TRACE"] == "1"
+
     private let on = Atomic<Bool>(false)
     private let stages = Mutex(Stages())
 
-    public init() {}
+    public init() { enabled = Self.traceFromEnvironment }
 
     /// Whether the stages are recorded.
     public var enabled: Bool {
