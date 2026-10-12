@@ -59,6 +59,9 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - **Measure; do not infer.** Confirm protocol behavior on hardware or with a
   test before building on it. Before claiming something builds, works, or is
   fixed, run it, and say exactly what was and was not checked.
+- Tests wait on conditions, simulated or paused clocks, or frame and event counts,
+  never on guessed real-time delays; a fixed sleep needs a reason (for example
+  proving that nothing happens).
 - Keyframe gating, bounded queues, rate-limited error logs, and log rotation
   capped by count and size are requirements, not polish.
 - Keep the Rust core free of platform frameworks; Apple and Windows APIs live in

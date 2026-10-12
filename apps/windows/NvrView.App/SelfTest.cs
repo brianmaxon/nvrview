@@ -174,7 +174,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: render-no-alloc
         // Steady state: the render thread allocates nothing per frame.
         long bytes = r.AllocatedBytes, framesBefore = r.Frames;
-        await Task.Delay(1000);
+        await Until(() => r.Frames - framesBefore >= 30, 10);
         long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
         Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
         if (allocated > 0)
@@ -217,7 +217,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             var hooks = new SettingsDialogHooks();
             var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true, hooks);
             _ = dialog.ShowAsync();
-            await Task.Delay(500);
+            await Until(() => dialog.IsLoaded, 5);
             bool shown = dialog.IsLoaded;
             Say($"settings dialog shown: {shown}");
             if (!shown)
@@ -300,7 +300,10 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add("the core never started playing the audible tile");
         }
-        await Task.Delay(300);
+        if (app.Audio is { Problem: null })
+        {
+            await Until(() => app.Audio.FramesRendered > rendered, 3);
+        }
         long renderedNow = app.Audio?.FramesRendered ?? 0;
         string audio = app.Audio is null ? "off (--no-audio)" :
             app.Audio.Problem is { } why ? $"no output ({why})" : $"{app.Audio.SampleRate} Hz, {renderedNow - rendered} frames rendered";
@@ -1256,7 +1259,10 @@ internal sealed class SelfTest(App app, AppOptions options)
                     peak = Math.Max(peak, Math.Abs(x));
                 }
             });
-            await Task.Delay(700);
+            if (problem is null)
+            {
+                await Until(() => Volatile.Read(ref blocks) >= 5, 3);
+            }
             mic.Stop();
             Say($"calls: microphone {(problem is null ? $"opened: {blocks} blocks, {samplesSeen} samples at 16 kHz, peak {peak:0.000}" : $"not available: {problem}")}");
             // What Windows reports about its echo canceller for this microphone and the output that plays.
@@ -1621,7 +1627,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         var mountHooks = new SettingsDialogHooks();
         var mountDialog = SettingsDialog.Create(stage.XamlRoot, v, development: true, mountHooks);
         _ = mountDialog.ShowAsync();
-        await Task.Delay(300);
+        await Until(() => mountDialog.IsLoaded, 5);
         var pickers = mountHooks.Mounts();
         Expect(pickers.Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Ceiling), "Settings does not list the fisheye camera with the default ceiling mount");
         Expect(pickers.All(m => v.IsFisheye(m.Camera)), "Settings lists a camera that is not a fisheye camera");
@@ -1789,11 +1795,12 @@ internal sealed class SelfTest(App app, AppOptions options)
             // Changing the content while a tile is focused ends the focus only: the renderer keeps presenting.
             StageTile focusTile = Tiles[0];
             stage.FocusOn(focusTile);
-            await Task.Delay(400);
+            long focusFrames = r.Frames;
+            await Until(() => r.Frames - focusFrames >= 5, 5);
             int chains = r.SwapChains;
             long frames = r.Frames;
             w1.Show(new WindowContent.Layout(id));
-            await Task.Delay(500);
+            await Until(() => r.Frames - frames > 12, 5);
             Say($"content changed while focused: focus {(r.Focus is null ? "ended" : "kept")}, swap chains {chains} -> {r.SwapChains}, frames +{r.Frames - frames}");
             Expect(r.Focus is null && !focusTile.Focused, "changing the content did not end the focus");
             Expect(r.SwapChains == chains && r.Frames - frames > 10, "changing the content while focused disturbed the renderer");
@@ -1826,7 +1833,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             // Closing it gives its leases back; the first window keeps playing.
             int before = v.Leases.LeaseCount(sample);
             w2.Window.Close();
-            await Task.Delay(300);
+            await Until(() => app.Windows.Count == 1, 3);
             Say($"second window closed: windows {app.Windows.Count}, leases of {sample} {before} -> {v.Leases.LeaseCount(sample)}");
             Expect(app.Windows.Count == 1 && v.Leases.LeaseCount(sample) == before - t2.Count(t => t.Camera == sample), "closing a window did not give its leases back");
 
@@ -1848,7 +1855,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             w1.TickReveal();
             bool shownNow = w1.RevealShown;
             long frames2 = r.Frames;
-            await Task.Delay(600);
+            await Until(() => r.Frames - frames2 > 5, 5);
             Say($"reveal: after 0.10 s {early}, after 0.15 s {shownNow}; buffers {bw}x{bh} -> {r.BufferSize.Width}x{r.BufferSize.Height}, resizes +{r.TotalResizes - resizes}, frames +{r.Frames - frames2}");
             Expect(!early && shownNow, "the edge reveal did not wait about 150 ms and then show");
             Expect(r.TotalResizes == resizes && r.BufferSize == (bw, bh) && !w1.SidebarDocked, "revealing the sidebar resized the stage");

@@ -427,11 +427,19 @@ fn a_slow_tile_does_not_stall_another() {
         rec.decodes(slow) >= 1 && rec.decodes(fast) >= 1
     });
     let (s0, f0) = (rec.decodes(slow), rec.decodes(fast));
-    std::thread::sleep(Duration::from_secs(3));
+    // Run until the fast tile has decoded enough, not for a guessed time, and
+    // bound the slow tile by the time that actually passed.
+    let started = std::time::Instant::now();
+    wait_until("the fast tile keeps decoding", 10, || {
+        rec.decodes(fast) - f0 >= 50
+    });
+    let elapsed = started.elapsed();
     let (s1, f1) = (rec.decodes(slow) - s0, rec.decodes(fast) - f0);
     // The mock sends 25 pictures a second per stream.
-    assert!(f1 >= 50, "fast tile decoded only {f1} in 3 s");
-    assert!(s1 <= 13, "slow tile cannot keep up: {s1}");
+    assert!(f1 >= 50, "fast tile decoded only {f1} in {elapsed:?}");
+    // The slow tile takes 250 ms a picture.
+    let most = (elapsed.as_millis() / 250) as usize + 2;
+    assert!(s1 <= most, "slow tile cannot keep up: {s1} in {elapsed:?}");
     check_protocol(&rec.seen(slow));
     check_protocol(&rec.seen(fast));
     let fast_stats = rec
