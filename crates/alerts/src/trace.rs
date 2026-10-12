@@ -161,6 +161,10 @@ pub enum StepKind {
         output: u32,
         kind: OutputKind,
         ok: bool,
+        /// A short, generic result line from the output ("Home Assistant:
+        /// `input_boolean.example_alert` pulsed (200)"), when it gave one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
     },
     /// Steps left out over the budget.
     Omitted { steps: u32 },

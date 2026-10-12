@@ -50,6 +50,30 @@ impl fmt::Display for AlertError {
 
 impl std::error::Error for AlertError {}
 
+/// A credential the app read from its keychain (an MQTT password, a Home
+/// Assistant token) and passed with the settings: held in memory only,
+/// never written to settings files, logs, events, or the alert log. `Debug`
+/// is redacted and there is no `Display` or `Serialize`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(Arc<str>);
+
+impl Secret {
+    pub fn new(value: &str) -> Secret {
+        Secret(Arc::from(value))
+    }
+
+    /// The credential's text, for the one place that sends it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([redacted])")
+    }
+}
+
 /// One delivery from an external source (a sensor through MQTT or a
 /// webhook). Payload fields are data only: the kind is normalized by the
 /// engine (unknown names pass through as "other" and never reach an
@@ -114,13 +138,28 @@ impl fmt::Debug for ExternalTriggers {
 }
 
 /// What an input module gets when it is built.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct InputContext {
     /// The core's runtime, for the input's tasks. Tasks must end when the
     /// input is stopped.
     pub runtime: tokio::runtime::Handle,
     /// Where to send what it receives.
     pub triggers: ExternalTriggers,
+    /// The credential the app passed for this input (`secrets[<id>]` of
+    /// the settings, keyed by the entry's `id`), if any.
+    pub secret: Option<Secret>,
+    /// Sends an event of the input's own to the app (a status change),
+    /// as `{"type":"alerts_input_status","index":..,"kind":..,"status":..}`
+    /// with this object as `status`. Never put secrets or payload text in.
+    pub status_events: Arc<dyn Fn(serde_json::Value) + Send + Sync>,
+}
+
+impl fmt::Debug for InputContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InputContext")
+            .field("secret", &self.secret)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A running trigger input (an MQTT subscription, for example). Stopped
@@ -129,6 +168,12 @@ pub trait AlertInput: Send + 'static {
     /// Stops receiving, closes connections, and ends the input's tasks.
     /// Called once; must not block for long.
     fn stop(&mut self);
+    /// The input's current status for `alerts_get` (connection state and
+    /// counters). Must be quick, and must not contain secrets or payload
+    /// text.
+    fn status(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// Builds an input from its settings entry (the whole JSON object of one
@@ -143,6 +188,9 @@ pub type InputFactory = Arc<
 pub struct OutputContext {
     /// The core's runtime, for the output's requests.
     pub runtime: tokio::runtime::Handle,
+    /// The credential the app passed for this output (`secrets[<id>]` of
+    /// the settings, keyed by the entry's `id`, else its `kind`), if any.
+    pub secret: Option<Secret>,
 }
 
 /// Builds an output from its settings entry (the whole JSON object of one
@@ -183,6 +231,12 @@ pub struct AlertNotice {
     pub alert_id: u64,
     pub rev: u32,
     pub camera: Option<CameraId>,
+    /// The camera's display name from the settings.
+    pub camera_name: String,
+    /// The key of the configured external source that triggered it, if any.
+    pub source: Option<String>,
+    /// The computer's offset from UTC in minutes, for local times.
+    pub utc_offset_min: i32,
     pub class: Class,
     /// `None` for [`NoticeState::Settled`].
     pub severity: Option<Severity>,
@@ -202,21 +256,31 @@ pub struct AlertNotice {
     pub snapshot: Option<Arc<[u8]>>,
 }
 
+/// The core's callback for one delivery's result and its summary line.
+pub(crate) type Report = Box<dyn FnOnce(bool, Option<String>) + Send>;
+
 /// Reports one delivery's result. Dropping it without [`DeliveryDone::finish`]
 /// reports a failure; a result that never comes is recorded as a failure
 /// after the delivery timeout.
 pub struct DeliveryDone {
-    pub(crate) report: Option<Box<dyn FnOnce(bool) + Send>>,
+    pub(crate) report: Option<Report>,
     pub(crate) done: Arc<AtomicBool>,
 }
 
 impl DeliveryDone {
     /// Records the result as a `delivery` step of the alert's trace.
-    pub fn finish(mut self, ok: bool) {
+    pub fn finish(self, ok: bool) {
+        self.finish_with(ok, None);
+    }
+
+    /// Like [`DeliveryDone::finish`], with a short generic result line for
+    /// the step (at most 200 characters are kept; no secrets, no payload
+    /// text).
+    pub fn finish_with(mut self, ok: bool, summary: Option<String>) {
         if let Some(r) = self.report.take()
             && !self.done.swap(true, Ordering::SeqCst)
         {
-            r(ok);
+            r(ok, summary);
         }
     }
 }
@@ -226,7 +290,7 @@ impl Drop for DeliveryDone {
         if let Some(r) = self.report.take()
             && !self.done.swap(true, Ordering::SeqCst)
         {
-            r(false);
+            r(false, None);
         }
     }
 }

@@ -19,6 +19,10 @@ mp4-remux = { path = "../mp4" }
 discovery = { path = "../discovery" }
 # Recorded video: index, incidents, thumbnails, downloads (src/recordings_owner).
 recordings = { path = "../recordings" }
+# Smart alerts modules: the MQTT trigger input and the Home Assistant
+# output (src/alerts_owner/modules).
+mqtt-triggers = { path = "../mqtt-triggers" }
+ha-output = { path = "../ha-output" }
 # Update checks and downloads (src/update.rs).
 updates = { path = "../updates" }
 crossbeam-queue = "0.3.8"
@@ -48,6 +52,11 @@ tokio = { version = "1", features = ["test-util"] }
 # its few small events by hand (see src/json.rs).
 serde_json = "1"
 tempfile = "3"
+# The MQTT broker used by the tests is the one of crates/mqtt-triggers
+# (included by path), which makes its own certificate authority.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+graviola = "0.4"
+rustls-graviola = "0.4"
 viewer-log = { path = "../viewer-log" }
 
 [lints]
