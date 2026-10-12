@@ -527,6 +527,7 @@ async fn run_request(
             files
         }
     };
+    let from_files = explicit.is_none();
     let (device, camera, day) = (req.device.clone(), req.camera, req.day);
     let flag = cancel.clone();
     let done =
@@ -545,6 +546,10 @@ async fn run_request(
         .map_err(Failure::Reason)?;
     if cancel.load(Ordering::SeqCst) || h.closing.load(Ordering::SeqCst) {
         return Err(Failure::Canceled);
+    }
+    if from_files && done.span.is_none() {
+        // The downloaded files had no readable audio in the day.
+        return Err(Failure::Reason("no_audio"));
     }
     store_analysis(h, req, done)
 }
