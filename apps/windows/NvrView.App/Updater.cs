@@ -25,13 +25,16 @@ internal sealed class Updater
     private string? _pending;
     private bool _dialogOpen;
 
-    public Updater(Viewer viewer, DispatcherQueue ui, string? settingsFile, bool automaticAllowed)
+    public Updater(Viewer viewer, DispatcherQueue ui, string? settingsFile, bool automaticAllowed, BundledUpdateDefaults? bundled = null, string? appDir = null)
     {
         _viewer = viewer;
         _file = settingsFile;
+        AppDir = appDir ?? AppContext.BaseDirectory;
         Settings = UpdateSettings.Load(settingsFile);
+        // What the build bundles (docs/UPDATES.md, "Bundled defaults"): read
+        // from the app folder on every start, never from the user's file.
+        Settings.Bundled = bundled ?? BundledUpdateDefaults.Load(AppDir);
         Current = typeof(Updater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
-        AppDir = AppContext.BaseDirectory;
         viewer.UpdateReceived += Handle;
         // Only where an earlier download made the folder: with updates off,
         // nothing is created next to the app folder.
@@ -109,7 +112,13 @@ internal sealed class Updater
         }
         using JsonDocument d = JsonDocument.Parse(json);
         string key = d.RootElement.GetProperty("key").GetString()!;
-        if (!Settings.Keys.Contains(key))
+        if (Settings.Bundled.Keys.Contains(key))
+        {
+            // Adding a bundled key again turns it back on.
+            Settings.SetBundledKey(key, true);
+            Save();
+        }
+        else if (!Settings.Keys.Contains(key))
         {
             Settings.Keys.Add(key);
             Save();
@@ -117,9 +126,16 @@ internal sealed class Updater
         return null;
     }
 
+    /// <summary>Removes a key the user added. A bundled key cannot be deleted, only turned off (<see cref="SetBundledKey"/>).</summary>
     public void RemoveKey(string key)
     {
         Settings.Keys.Remove(key);
+        Save();
+    }
+
+    public void SetBundledKey(string key, bool on)
+    {
+        Settings.SetBundledKey(key, on);
         Save();
     }
 

@@ -45,10 +45,13 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - Never change device configuration: the session layer has a command
   allowlist, and nothing that changes device settings goes on it.
 - The one exception is **camera motion control** (PTZ preset recall and moves,
-  focus, a doorbell's speaker): a separate allowlist tier, off by default,
-  enabled per camera by the user, rate-limited, and logged. Never send it
-  automatically unless the user enabled automatic correction for that camera.
-  See "Device commands" in docs/ARCHITECTURE.md.
+  focus, a doorbell's speaker): a separate allowlist tier, rate-limited (well
+  above any human pace, so manual use never notices) and logged. The user's
+  own manual PTZ controls work without a prior enable; talk-back still needs
+  the camera's permission (the "Allow talk-back?" prompt). Nothing automated
+  (the local API, automatic correction) sends motion commands unless the user
+  granted that client or feature for that camera. See "Device commands" in
+  docs/ARCHITECTURE.md.
 - One session per device carrying all channels; close it on every exit path.
   NVRs allow only a few logins, and exhausting them locks out other clients.
 - Tests and development run against `tools/mock-nvr`, not real hardware, unless
@@ -59,6 +62,9 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - **Measure; do not infer.** Confirm protocol behavior on hardware or with a
   test before building on it. Before claiming something builds, works, or is
   fixed, run it, and say exactly what was and was not checked.
+- Tests wait on conditions, simulated or paused clocks, or frame and event counts,
+  never on guessed real-time delays; a fixed sleep needs a reason (for example
+  proving that nothing happens).
 - Keyframe gating, bounded queues, rate-limited error logs, and log rotation
   capped by count and size are requirements, not polish.
 - Keep the Rust core free of platform frameworks; Apple and Windows APIs live in
@@ -75,9 +81,17 @@ failure. Run it before every commit.
 | --- | --- |
 | sanitization, whole tree | `python3 -I scripts/check-sanitized.py --all` |
 | self-test parity (both apps' step IDs) | `python3 -I scripts/check-parity.py` (`--list` prints the matrix) |
-| Rust core | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` |
+| Rust core | `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace && cargo test --workspace --doc` |
 | Windows portability (from macOS) | `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc` |
 | macOS app | `cd apps/macos && swift test` |
+
+Docs-only fast path: when every change being checked is a `*.md` file (staged,
+unstaged, and untracked changes, plus commits not yet on the upstream if the
+branch has one), `scripts/check.sh` runs only the sanitization check, the
+self-test parity check, and the secret scan, and says so. Any other change, or
+`NVRVIEW_FULL_CHECK=1`, runs everything. The fast path never writes a check
+stamp (stamps come only from full runs on a clean tree; `scripts/release.sh`
+needs them).
 
 When chaining checks in a shell, make failures stop the chain (`set -e`, and
 `set -o pipefail` when piping output); a filtered pipeline can otherwise hide

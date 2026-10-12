@@ -12,5 +12,7 @@
   <ItemGroup>
     <!-- CameraRef and the clock come from the tile features' logic. -->
     <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+    <!-- IRecordings, which FakeRecordings answers like the core. -->
+    <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
   </ItemGroup>
 </Project>

@@ -7,7 +7,7 @@
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> [NVRVIEW_WINDOWS_WORKER=<name>] \
 #     scripts/windows-check.sh
 #
-# A finished worker's folder (about 5 GB of build output) is deleted with
+# A finished worker's folder, its target\ build output included, is deleted with
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
 #
@@ -27,11 +27,42 @@ cd "$(git rev-parse --show-toplevel)"
 
 host="${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
 clean=0
+package_to=""
+defaults_args=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
+elif [ "${1:-}" = "--package" ]; then
+  # Builds the release app on the Windows computer instead of running the
+  # checks, and fetches NvrView-<version>-win-x64.zip into the directory.
+  # Used by scripts/release.sh.
+  package_to="${2:?usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]}"
+  shift 2
+  # Bundled update defaults (docs/UPDATES.md, "Bundled defaults"): validated
+  # now, before the build, and added to the fetched zip as update-defaults.json
+  # at its top, next to the executable. Never committed, never sent to the
+  # Windows side. Kept as one argument per line.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --trusted-key-file | --update-source)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        defaults_args="$defaults_args
+$1
+$2"
+        shift 2 ;;
+      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]" >&2; exit 2 ;;
+    esac
+  done
+  if [ -n "$defaults_args" ]; then
+    oldifs=$IFS
+    IFS='
+'
+    # shellcheck disable=SC2086 # split on newlines only
+    python3 -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
+    IFS=$oldifs
+  fi
 elif [ $# -gt 0 ]; then
-  echo "usage: $0 [--clean <worker name>]" >&2
+  echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
@@ -69,6 +100,8 @@ if [ -n "$free" ] && [ "$free" -lt 10 ]; then
   echo "         Delete finished workers with: $0 --clean <name>" >&2
 fi
 
+tree_sent=$(git rev-parse 'HEAD^{tree}')
+if [ -n "$(git status --porcelain)" ]; then tree_sent="dirty"; fi
 echo "sending the working tree to $host (worker $worker)"
 # cmd.exe on the far side: recreate src, keep target (a directory junction
 # inside src points at it; the junction alone is removed first, with a plain
@@ -88,6 +121,27 @@ git ls-files -z --cached --others --exclude-standard -- . \
 sent=$(date +%s)
 printf '   (sync: %ss)\n' "$((sent - check_start))"
 
+if [ -n "$package_to" ]; then
+  version=$(tr -d '[:space:]' <VERSION)
+  zip="NvrView-$version-win-x64.zip"
+  echo "building the Windows app package on $host"
+  # shellcheck disable=SC2086,SC2029
+  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && scripts/windows-app.sh package\""
+  mkdir -p "$package_to"
+  # scp reads the Windows path relative to the home directory.
+  # shellcheck disable=SC2086
+  scp $ssh_opts "$host:nvrview/worker/$worker/src/target/dotnet/package/$zip" "$package_to/$zip"
+  if [ -n "$defaults_args" ]; then
+    oldifs=$IFS; IFS='
+'
+    # shellcheck disable=SC2086
+    python3 -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
+    IFS=$oldifs
+  fi
+  ls -l "$package_to/$zip"
+  exit 0
+fi
+
 echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
 # The worker's options travel as variables set in that script.
@@ -105,4 +159,13 @@ done
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""
 now=$(date +%s)
+# A full pass (app self-tests included) on a clean tree, i.e. exactly the
+# tree of HEAD, leaves a stamp that scripts/checked.sh --windows and
+# scripts/release.sh look for.
+if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
+  [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests; worker $worker"
+else
+  echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
+fi
 printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"

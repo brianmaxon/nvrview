@@ -31,7 +31,8 @@ Already in `crates/recordings` (with end-to-end tests against
 | Mock device: 142, 14–16, 272–274, 298, 143/144 with stall and disconnect faults | `mock-nvr::archive` | done; no playback (123/5/7) |
 
 `viewer-core` holds it through the recordings owner (C11, below); the C
-interface has no recordings functions yet (F1).
+interface wraps sections 1 to 5 of it (F1, minor 5) and its playback,
+section 6 (F2, minor 6).
 
 ## Facts: what each slice may rely on
 
@@ -81,19 +82,19 @@ fact the slice needs is observed or reported; seams for the rest are named.
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| F1 | Minor 5, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | contract reviewed (decisions of 2026-10-11); unblocked once C11, C13, and C15 land | Opus for the contract, Sonnet for shaping JSON |
-| F2 | Minor 5, part 2: recorded playback (section 6) | C10, F1 | unblocked (C10 done) | Opus |
+| F1 | Minor 5, part 1: configuration (with the optional `background` block), index and search with on-demand requests (`nv_recordings_want`, `nv_recordings_hold_today`), incidents and edits, locks (`nv_incident_lock`), camera groups, thumbnails, downloads with key dedupe and `nv_download_trash`, `nv_sound_configure` (sections 1–5, 8, 9, 13) with the C smoke test and cbindgen header | C11, C13, C15 | done (minor 5: the 24 functions of FFI.md, "Recordings (minor 5)", `NvThumbKind`/`NvThumbnail`, `NV_ERR_UNSUPPORTED` -8, `NV_ERR_NOT_CONFIGURED` -9, `NV_PENDING` 1, `device_info.recordings`; Rust tests through the C functions against the mock with a recording store; the C smoke test, also under ASan, goes from configure to the Trash; bindings: Swift `CoreAPI` over `CCore` with `FakeCore`'s made-up recording store and the parsed events, C# `IRecordings` on `NvCore` with `FakeRecordings` and `RecordingsEvent` in `NvrView.Shell`, and the C# smoke test against the mock's recordings; no views yet, M1/W1). Clarifications in FFI-RECORDINGS.md, "Clarifications from the implementation (F1)". Deferred: the rest of sound (2a) to F3 | Opus |
+| F2 | Recorded playback (section 6), minor 6 (F1 shipped alone as minor 5) | C10, F1 | done (minor 6: the eleven functions of FFI.md, "Recorded playback (minor 6)", with `nv_playback_status` added and `nv_playback_step` left out; `NvSeekMode`, `NvPlaybackState`; nothing about a playback or an added camera's tile is delivered before the call writes its IDs (`playback_add_camera_deferred` added to the core), and adding a camera already in the playback is refused; Rust tests through the C functions against the mock on a simulated clock; the C smoke test, also under ASan, plays two cameras beside the live tile; bindings: Swift `CoreAPI`/`CCore`, `PlaybackEvent`, `FakeCore`'s playback model; C# `IPlayback` on `NvCore`, `PlaybackEvent` and `FakePlayback` in `NvrView.Shell`, and the C# smoke test against the mock). Clarifications in FFI-RECORDINGS.md, "Clarifications from the implementation (F2)". Deferred: `nv_playback_step` (a later minor); the fakes do not model a seek's new generation in the pictures | Opus |
 | F3 | Edit lists (section 7) and sound (section 2a) | C8, C12, F1 | unblocked | Sonnet |
 | F4 | Export (section 7a): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` in `nv_edit_compute`, `dest` and `share_safe` on every export request | C14, F1, F3 (F2 for stills from a playback) | unblocked except stills from a playback | Sonnet |
 
-F1 and F2 ship in one minor if they land together; otherwise F2 takes the
-next minor, and F3 and F4 likewise.
+F1 and F2 shipped as separate minors (5 and 6); F3 and F4 each take the
+next free minor.
 
 ### Apps
 
 | ID | Slice | Depends on | Status | Agent tier |
 | --- | --- | --- | --- | --- |
-| M1 | macOS: incident list, timeline lanes, calendar, filters (an "animal" filter matches every animal kind), thumbnails (decode, shrink, put back), download panel; views ask for their days and hold today; lock and unlock an incident (and say when its video is not being kept); move a download to the Trash; first against `FakeCore`, then the real core | contract frozen (FakeCore); F1 (real) | unblocked | Sonnet |
+| M1 | macOS: incident list, timeline lanes, calendar, filters (an "animal" filter matches every animal kind), thumbnails (decode, shrink, put back), download panel; views ask for their days and hold today; lock and unlock an incident (and say when its video is not being kept); move a download to the Trash; first against `FakeCore`, then the real core | contract frozen (FakeCore); F1 (real) | done (the Recordings window, Window > Recordings, docs/UX.md "Recordings": cameras to search kept between launches, calendar, timeline lanes, incident list with kind, camera or group, and Locked filters, the selected incident with rename, merge, split, add and remove a camera, revert, lock and download, thumbnails decoded with VideoToolbox, shrunk to 320 points and put back as JPEG, the downloads panel with pause, resume, retry, Show in Finder, forget, and the Trash after `download_removed`, camera groups; days asked as shown, today held per window. Self-test steps `recordings-*` on `FakeCore` (which gained incidents with groups and every edit, an animal event, and a decodable cover keyframe) and `recordings-real-core` on the real core against the mock (`scripts/macos-real-selftest.sh`); `RealCoreRecordingsTests` runs the same calls through `CCore`. Not built: the loudness lanes (they need F3's `nv_recordings_loudness`), a calendar-only request, the failed-day mark in a self-test) | Sonnet |
 | M2 | macOS: playback tiles, scrubber, step, offsets | F2 | unblocked at 1× | Sonnet |
 | M3 | macOS: follow cut and 2-up/4-up rendering with Metal and VideoToolbox | F3 | unblocked | Opus (first platform renderer) |
 | M4 | macOS: export. In and out points on the scrubber and in the incident view, trim as a keyframe copy (passthrough remux) or exact (VideoToolbox), range download of chosen cameras, still images of the current picture or one per camera (ImageIO, PNG or JPEG), a save panel per export with a security-scoped bookmark, a share-safe switch that writes no metadata of the app's own | F4, M2, M3 | after F4 | Sonnet |

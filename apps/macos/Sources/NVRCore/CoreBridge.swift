@@ -327,6 +327,12 @@ public final class CoreBridge: Sendable {
         try live().talkSetConversation(tile.id, open: open)
     }
 
+    /// The core, for the recordings calls (minor 5; docs/FFI-RECORDINGS.md):
+    /// they answer from memory and never wait on a device, so the main
+    /// thread may make them. Not from inside a callback. `.closed` after
+    /// `shutdown`.
+    public func recordings() throws(CoreStatus) -> any CoreAPI { try live() }
+
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 

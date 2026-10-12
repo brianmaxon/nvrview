@@ -14,7 +14,17 @@ audio-output-renders        windows  n/a: checks the WASAPI render; the macOS se
 call-desktop-recognizer     windows  n/a: the Windows desktop recognizer (System.Speech); the macOS self-test uses a fake engine and never prompts
 call-microphone             windows  n/a: opens the real WASAPI microphone with --mic-test; the macOS self-test uses a fake microphone, no permission prompt
 call-system-voice           windows  n/a: renders a sentence with the Windows voice; the macOS self-test uses a fake voice
+header-actions              windows  n/a: the Windows header replaces the title bar and the context menu's app-wide items; macOS keeps its menu bar (docs/PARITY.md)
+header-fullscreen-reveal    windows  n/a: the Windows header slides over the stage from the top edge in full screen; macOS reveals its menu bar itself
+header-layout-picker        windows  n/a: the Windows header's layout picker; macOS switches layouts from the sidebar and its menu bar
+header-present              windows  n/a: the Windows header is the title bar; macOS keeps its menu bar
 render-no-alloc             windows  n/a: counts .NET allocations on the render thread; Swift has no equivalent counter
+settings-window-closes-with-app windows  n/a: the Windows Settings window is a window of its own; macOS Settings is a panel
+settings-window-frame-remembered windows  n/a: the Windows Settings window is a resizable window of its own
+settings-window-scrolls     windows  n/a: the Windows Settings window replaced a dialog that could not scroll
+settings-window-sections    windows  n/a: the Windows Settings window has a pane of sections; macOS Settings has its own layout
+settings-window-single-instance windows  n/a: the Windows Settings window is one instance brought to the front
+tile-menu-no-app-wide       windows  n/a: only the Windows context menu held app-wide items; on macOS they are in the menu bar
 
 # ---- on Windows only, macOS self-test lacks the check -----------------------
 alert-dismiss-enter         windows  gap: the macOS self-test never raises a tile alert end to end (AlertCenter has unit tests; the smoke inset step dismisses with Esc)
@@ -33,6 +43,7 @@ credential-store            windows  gap: the macOS self-test does not exercise 
 decode-failures             windows  gap: the macOS self-test does not count decode failures
 detection-events            windows  gap: the macOS self-test does not check that detections arrive
 device-loss                 windows  gap: no macOS step simulating a lost GPU device and checking every tile plays again (unverified whether the Metal renderer needs one)
+fill-tiles                  windows  gap: the macOS self-test does not turn Fill Tiles on and read the former letterbox bar
 fisheye-mount-settings      windows  gap: the macOS Settings > Cameras mount picker exists but the self-test does not drive it
 fisheye-pinch               windows  gap: the macOS pinch (magnify) path into the virtual camera is not in the self-test
 fisheye-view-saved          windows  gap: the macOS self-test does not read the view back from the layout leaf
@@ -52,19 +63,40 @@ settings-dialog-opens       windows  gap: the macOS self-test opens Settings onl
 settings-save-remove        windows  gap: saving and removing a device is not in the macOS self-test
 third-party-channel         windows  gap: the macOS fake core does not model a channel waiting for a third-party camera
 tile-reconnect-text         windows  gap: the macOS self-test does not check the reconnecting wording on tiles (StatusTests covers it as a unit)
+unmute-on-ring              windows  gap: the macOS self-test does not ring a doorbell with its unmute-on-ring option on (CallAudio.decide is unit-tested)
 window-restore              windows  gap: the restore record is unit-tested on macOS (WindowRestoreTests), not in the self-test
 wrong-password              windows  gap: the macOS self-test does not log in with a wrong password (StatusTests covers the wording)
+zoom-map                    windows  gap: the macOS self-test does not check the zoom map (ZoomInsetView) while a tile is zoomed
+zoom-reset-control          windows  gap: the macOS self-test does not press the header reset-zoom button
+zoom-touch-pinch            windows  gap: the macOS self-test does not send a magnify gesture to a digitally zoomed tile
 
 # ---- on macOS only ----------------------------------------------------------
 alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one
 alert-inset-swap            macos    gap: Windows call cards do not swap with the stage
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
+call-window-tile-menu       macos    gap: the Windows call window still draws its own picture, not a tile with the header model's menu
+call-window-tile-zoom       macos    gap: the Windows call window still draws its own picture, without digital zoom
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
+header-overflow-menu        macos    gap: the Windows tile header does not use TileHeaderLayout yet, so no "…" menu or model-built tile menu
+header-priority-narrow      macos    gap: the Windows tile header does not use TileHeaderLayout yet (the model and its vectors are tested)
 inset-drag-multi            macos    gap: Windows call cards cannot be moved yet (docs/UX.md "Alert insets", "Moving them")
 inset-drag-resize           macos    gap: Windows call cards cannot be moved yet, so no position kept across a resize
 inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window
 inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
+recordings-animal-filter    macos    gap: the Windows recordings screens are not built yet (MILESTONE-P.md W1); the animal filter groups every animal kind
+recordings-calendar-lanes   macos    gap: the Windows recordings screens are not built yet (W1): calendar days and timeline lanes from the index
+recordings-downloads        macos    gap: the Windows recordings screens are not built yet (W1): downloads panel, pause, resume, forget, Recycle Bin
+recordings-edits            macos    gap: the Windows recordings screens are not built yet (W1): rename, merge, split, add and remove a camera, revert
+recordings-enable           macos    gap: the Windows recordings screens are not built yet (W1): choosing the cameras to search
+recordings-groups           macos    gap: the Windows recordings screens are not built yet (W1): camera groups join incidents
+recordings-hold-today       macos    gap: the Windows recordings screens are not built yet (W1): a window holds today under its own hold
+recordings-lock             macos    gap: the Windows recordings screens are not built yet (W1): lock queues the download and says so
+recordings-navigate-day     macos    gap: the Windows recordings screens are not built yet (W1): another day is asked for, not held
+recordings-real-core        macos    gap: the Windows recordings screens are not built yet (W1); the macOS self-test also runs them on the real core against tools/mock-nvr
+recordings-thumbnail        macos    gap: the Windows recordings screens are not built yet (W1): keyframe decoded with Media Foundation and WIC, put back
+recordings-window-close     macos    gap: the Windows recordings screens are not built yet (W1): closing the window releases its hold
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
+sidebar-system-peek         macos    n/a: guards against AppKit's own peek of a collapsed NSSplitView sidebar; the Windows sidebar is the app's own layout
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0

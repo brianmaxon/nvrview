@@ -14,9 +14,13 @@ name = "nvrview"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
+# The JSON of nv_playback_open's request and answer.
+serde_json = "1"
 viewer-core = { path = "../viewer-core" }
 
 [dev-dependencies]
+# Recording-store times and answers for the recordings functions' tests.
+bc-protocol = { path = "../bc-protocol" }
 mock-nvr = { path = "../../tools/mock-nvr" }
 simtime = { path = "../../tools/simtime" }
 tempfile = "3"

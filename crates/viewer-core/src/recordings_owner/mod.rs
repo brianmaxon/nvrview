@@ -2,7 +2,7 @@
 //! to 5 and 8; docs/MILESTONE-P.md, slice C11).
 //!
 //! It holds everything `crates/recordings` provides, for every device, and
-//! is what the C interface's recordings functions will wrap (slice F1):
+//! is what the C interface's recordings functions wrap (slice F1):
 //!
 //! - per device key: the [`DeviceIndex`] (opened when the app enables the
 //!   device, so queries answer from it before the device is even added) and,
@@ -82,8 +82,8 @@ use tracing::{info, warn};
 pub use recordings::thumbs::{ThumbKind, Thumbnail};
 
 /// Why a recordings call failed. The values map onto `NvStatus` in the C
-/// interface (minor 4): the first five as for [`crate::CoreError`], then
-/// `NV_ERR_NOT_CONFIGURED` and `NV_ERR_UNSUPPORTED`.
+/// interface (minor 5): the first five as for [`crate::CoreError`], then
+/// `NV_ERR_NOT_CONFIGURED` (-9) and `NV_ERR_UNSUPPORTED` (-8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RecError {
     /// An argument is invalid, or the call was made from inside a callback.

@@ -1,10 +1,14 @@
-# C interface for recordings, ABI 3 minor 5 (proposal for milestone P)
+# C interface for recordings, ABI 3 minor 5 (contract for milestone P)
 
-> **Proposal, not implemented.** This is the contract for review before
-> the core and the apps are built in parallel, as [FFI-ABI3.md](FFI-ABI3.md)
-> was for M3. Everything in [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h)
-> still holds; on implementation this moves into FFI.md and the header as
-> **ABI 3, minor 5**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` becomes 5
+> **Sections 1 to 5, 8, 9, and `nv_sound_configure` are implemented**
+> (slice F1: FFI.md, "Recordings (minor 5)", and the header), and so is
+> **section 6, recorded playback, as minor 6** (slice F2: FFI.md, "Recorded
+> playback (minor 6)"; without `nv_playback_step`); the rest is still a
+> proposal (edit lists and sound F3, export F4). This
+> was the contract for review before the core and the apps were built in
+> parallel, as [FFI-ABI3.md](FFI-ABI3.md) was for M3. Everything in
+> [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h) still holds; the additions
+> are **ABI 3, minor 5**: `NV_ABI_VERSION` stays 3 and `NV_ABI_MINOR` is 5
 > (minors 1 to 4 are discovery, updates, `nv_tile_retry`, and
 > `nv_talk_set_conversation`; FFI.md, "Versioning"). Requirements come from
 > [PLAYBACK.md](PLAYBACK.md), [UX.md](UX.md), and
@@ -1106,7 +1110,10 @@ above was silent or loose, they do this:
   handler names `VideoHandler` and `SoundHandler`, so share-safe finalized
   files already comply. `export::mp4_metadata(share_safe, creation)` is the
   one place that rule lives, so recording a creation time later is gated on
-  `share_safe`.
+  `share_safe`. Files with several audio tracks (call recordings) title
+  them from a fixed set of generic words (`Conversation`, `Visitor`,
+  `You`); `export::ALLOWED_HANDLER_NAMES` lists every name the core's
+  writer can produce, and none needs a share-safe replacement.
 
 ## 8. Event summary
 
@@ -1288,8 +1295,8 @@ or a counted drop, never growth):
 8. **The recordings owner in `viewer-core`** is done (MILESTONE-P.md,
    C11): sections 1 to 5 and the events of section 8 have a Rust API on
    `viewer_core::Core` (JSON in, JSON out, `RecError` for the new
-   statuses) that the C functions (F1) wrap; locks (C13) and export (C14)
-   are not in it yet. mock-nvr serves playback (123/5/7) at 1× with the
+   statuses), with locks (C13), that the C functions of F1 wrap; export
+   (C14) has planners but no C functions yet (F4). mock-nvr serves playback (123/5/7) at 1× with the
    observed burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
@@ -1704,6 +1711,36 @@ where section 3, "Locked incidents", was silent.
     prunes its index then (days past the age or size limit, which locks
     now exempt), and incidents in dropped days disappear.
 
+## Clarifications from the implementation (F1, 2026-10-11)
+
+What wrapping sections 1 to 5 in C functions (MILESTONE-P.md, F1)
+settled where the text above was silent.
+
+1. **Calls that change state answer once.** `nv_incident_edit`,
+   `nv_incident_lock`, `nv_download_incident`, and `nv_download_trash`
+   make their change even when the answer does not fit `cap`; then
+   `NV_ERR_BUFFER_TOO_SMALL` (with `*len` set) says only that the answer
+   was not written. Calling again would apply the change again, so the
+   bindings pass a 64 KiB buffer to these four. `len` is checked first: a
+   NULL `len` changes nothing.
+2. **Thumbnail bytes** have no terminator: `nv_thumbnail_get` fits when
+   `cap` >= `*len` (not `>`), fills `*info` and `*len` also when it returns
+   `NV_ERR_BUFFER_TOO_SMALL`, and sets `*len` to 0 with `NV_PENDING`.
+   `NvThumbnail.kind` is read as an integer and checked (an unknown kind,
+   and a negative `pts_us`, is `NV_ERR_INVALID_ARGUMENT`), so a bad value
+   from an app is an error, never an invalid enum in the core.
+3. **Callbacks.** These functions return `NV_ERR_INVALID_ARGUMENT` when
+   called from inside a callback, as the core's other calls that are not
+   allowed there (FFI.md, "Threads").
+4. **`device_info.recordings`** is sent for every device, all four flags
+   true for Baichuan devices.
+5. **Sound in F1** is `nv_sound_configure` only; `nv_sound_watch`,
+   `nv_recordings_loudness`, `nv_sound_labels_put`, the proposed
+   `nv_sound_analyze_day` and `nv_sound_analyze_cancel`, and
+   `nv_tile_loudness` are F3, with the `sound_watch` and `sound_analyze`
+   events (the core already sends those events if the Rust calls are used,
+   but no C function starts them yet).
+
 ## Clarifications from the implementation (C10, 2026-10-11)
 
 What building the playback engine (MILESTONE-P.md, C10;
@@ -1801,3 +1838,43 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
     `failed` (`session_closed`), and the app closes the playback. A camera of
     a device that is enabled but not added when the playback opens is
     `failed` (`session_closed`) until the playback is opened again.
+
+## Clarifications from the implementation (F2, 2026-10-11)
+
+What wrapping section 6 in C functions (MILESTONE-P.md, F2) settled.
+
+1. **Minor 6, not 5.** F1 shipped as minor 5 on its own, so the playback
+   functions, `NvSeekMode`, `NvPlaybackState`, and the four playback events
+   are minor 6 (FFI.md, "Versioning"). Section 13's list of minor 5
+   additions is to be read without `nv_playback_*`, `NvSeekMode`, and
+   `NvPlaybackState`.
+2. **`nv_playback_step` is not exported** in minor 6 (C10 did not build
+   stepping); it takes a later minor.
+3. **`nv_playback_status`** is added: `(core, playback, out, cap, len)`
+   with the out-buffer rules, answering the engine's details (state,
+   position, rate, sync, range, and per camera its tile, camera, tier,
+   offset, state, reason, and shown generation). Never from a callback.
+4. **`nv_playback_open` and a small `tile_cap`.** The cameras are counted
+   before anything opens (an incident's as it is at the call), so a
+   `tile_cap` below the count returns `NV_ERR_BUFFER_TOO_SMALL` with
+   `*tile_count` set and opens nothing. Only an incident that gains a
+   camera between the count and the open is opened and closed again; its
+   `tile_closed` and `playback_closed` for IDs never handed out may then
+   arrive and are ignored like any unknown ID. A request naming more than
+   4 cameras is `NV_ERR_LIMIT` whatever `tile_cap` is. NULL `out_playback`
+   or `tile_count` is `NV_ERR_INVALID_ARGUMENT`.
+5. **Nothing before the IDs.** The tiles' actions and the playback's
+   events are held back until `nv_playback_open` has written the IDs
+   (`playback_open_deferred` and `PlaybackPending::publish`), and a new
+   tile's actions until `nv_playback_add_camera` has written its ID
+   (`playback_add_camera_deferred`, added with F2), as `nv_tile_open` does
+   for a live tile.
+6. **Adding a camera already in the playback** is
+   `NV_ERR_INVALID_ARGUMENT`, as section 6's open rule says for a camera
+   twice; C10 had not checked it on add (fixed in the core with F2).
+7. **Threads.** Only `nv_playback_position` may be called inside a
+   callback; every other playback function returns
+   `NV_ERR_INVALID_ARGUMENT` there. `nv_playback_remove_camera` and
+   `nv_playback_close` wait (bounded, about 10 s) for the engine; the
+   others return at once, and `NV_ERR_LIMIT` means 64 requests already wait
+   for that playback's engine.

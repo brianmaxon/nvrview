@@ -6,3 +6,5 @@
 da9a3bd2bfd62cac2c740a08c8667f5eef1b9907:apps/windows/NvrView.Shell.Tests/LayoutTests.cs:generic-api-key:370
 # The same example incident key, after the contract update (2026-10-11):
 a2483754073e955f57ea03802585007670dc8816:docs/FFI-RECORDINGS.md:generic-api-key:317
+# The same example incident key in the macOS recordings tests:
+2d465da3f2f63ca75f28b16704f42dfa6e84cdcf:apps/macos/Tests/NVRCoreTests/RecordingsBrowseTests.swift:generic-api-key:54

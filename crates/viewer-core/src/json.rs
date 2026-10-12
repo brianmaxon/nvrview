@@ -72,6 +72,27 @@ impl Object {
         self
     }
 
+    /// Adds a nested object member.
+    pub(crate) fn object(mut self, key: &str, value: Object) -> Object {
+        self.key(key);
+        self.buf.push_str(&value.finish());
+        self
+    }
+
+    /// Adds an array of booleans.
+    pub(crate) fn bools(mut self, key: &str, values: impl IntoIterator<Item = bool>) -> Object {
+        self.key(key);
+        self.buf.push('[');
+        for (i, v) in values.into_iter().enumerate() {
+            if i > 0 {
+                self.buf.push(',');
+            }
+            self.buf.push_str(if v { "true" } else { "false" });
+        }
+        self.buf.push(']');
+        self
+    }
+
     /// Adds an array of strings.
     pub(crate) fn strs<'a>(
         mut self,

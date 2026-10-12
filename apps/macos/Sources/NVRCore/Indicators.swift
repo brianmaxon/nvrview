@@ -51,7 +51,7 @@ public enum IndicatorKind: Hashable, Sendable, CaseIterable {
         case DetectionEvent.motionKind: self = .motion
         case "people", "person": self = .person
         case "vehicle": self = .vehicle
-        case "dog_cat", "animal": self = .animal
+        case let k where IndicatorKind.isAnimal(k): self = .animal
         case "face": self = .face
         case "package": self = .package
         case "visitor": self = .visitor

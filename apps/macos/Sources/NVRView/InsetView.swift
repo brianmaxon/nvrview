@@ -72,9 +72,10 @@ protocol CallControlsDelegate: AnyObject {
 /// focus, except its reply field when the user clicks into it.
 ///
 /// The same view hosts a call in its own window (`Host.window`, docs/UX.md
-/// "A call in its own window"): it fills the window, a click does not swap,
-/// and its header has Pop In and the pin (on top) instead of Pop Out and
-/// the close control (the window's own close button ends the call).
+/// "A call in its own window"): it fills the window around the call's tile
+/// (a `StageView` below it, which takes the clicks on the picture), its
+/// header is the call bar with the pin (on top), Pop In and close, and the
+/// captions come before the Talk row.
 @MainActor
 final class InsetView: NSView, CallControlsDelegate {
     static let callHeight: CGFloat = 118
@@ -158,7 +159,6 @@ final class InsetView: NSView, CallControlsDelegate {
         close.action = #selector(closeClicked)
         close.toolTip = "Close (Esc)"
         close.refusesFirstResponder = true
-        close.isHidden = host == .window
         let popSymbol = host == .stage ? "arrow.up.forward.app" : "arrow.down.backward.square"
         let popTitle = host == .stage ? "Pop Out Call" : "Pop In Call"
         pop.image = NSImage(systemSymbolName: popSymbol, accessibilityDescription: popTitle)
@@ -202,6 +202,7 @@ final class InsetView: NSView, CallControlsDelegate {
         addSubview(unmute)
 
         callPanel.delegate = self
+        callPanel.captionsFirst = host == .window
         callPanel.isHidden = true
         addSubview(callPanel)
         layer?.addSublayer(border)
@@ -271,9 +272,11 @@ final class InsetView: NSView, CallControlsDelegate {
     }
 
     /// The header's labels take no clicks of their own: a press on them is
-    /// a press on the inset (a click swaps, a drag moves the column).
+    /// a press on the inset (a click swaps, a drag moves the column). In a
+    /// call window the picture area is the tile's, below this view.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let hit = super.hitTest(point)
+        if host == .window, hit === self { return nil }
         return hit === header || hit === title || hit === name ? self : hit
     }
 
@@ -383,6 +386,11 @@ final class InsetView: NSView, CallControlsDelegate {
 @MainActor
 final class CallPanelView: NSView, NSTextFieldDelegate {
     weak var delegate: CallControlsDelegate?
+    /// The captions above the Talk row (a call window: docs/CAPTURE.md);
+    /// an inset keeps Talk first.
+    var captionsFirst = false {
+        didSet { needsLayout = true }
+    }
 
     private let talk = PushToTalkButton()
     private let keep = NSButton(checkboxWithTitle: "Keep talking", target: nil, action: nil)
@@ -465,10 +473,11 @@ final class CallPanelView: NSView, NSTextFieldDelegate {
     override func layout() {
         super.layout()
         let w = bounds.width, pad: CGFloat = 8
-        talk.frame = CGRect(x: pad, y: 6, width: 70, height: 22)
-        keep.frame = CGRect(x: pad + 76, y: 8, width: 104, height: 18)
-        status.frame = CGRect(x: pad + 184, y: 9, width: max(w - pad * 2 - 184, 0), height: 14)
-        transcript.frame = CGRect(x: pad, y: 32, width: w - pad * 2, height: 50)
+        let talkY: CGFloat = captionsFirst ? 60 : 6
+        talk.frame = CGRect(x: pad, y: talkY, width: 70, height: 22)
+        keep.frame = CGRect(x: pad + 76, y: talkY + 2, width: 104, height: 18)
+        status.frame = CGRect(x: pad + 184, y: talkY + 3, width: max(w - pad * 2 - 184, 0), height: 14)
+        transcript.frame = CGRect(x: pad, y: captionsFirst ? 6 : 32, width: w - pad * 2, height: 50)
         reply.frame = CGRect(x: pad, y: 88, width: max(w - pad * 3 - 52, 0), height: 22)
         send.frame = CGRect(x: w - pad - 52, y: 88, width: 52, height: 22)
     }

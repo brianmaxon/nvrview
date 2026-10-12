@@ -231,7 +231,7 @@ internal sealed class ViewerCalls
             _viewer.RaiseCallsChanged();
             return;
         }
-        CallAudioDecision decision = CallAudio.Press(camera, _viewer.AudibleCameras);
+        CallAudioDecision decision = CallAudio.Press(camera, _viewer.AudibleCameras, _viewer.Settings.UnmuteOnRing(camera));
         Open(camera, at, decision, CallOrigin.Press, Resolve(camera));
         AppLog.Info($"Doorbell call: channel {camera.Channel + 1}, {(decision.Audible ? "audible" : "muted (Unmute shown)")}");
         _viewer.RaiseCallsChanged();

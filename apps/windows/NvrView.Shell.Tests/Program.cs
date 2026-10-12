@@ -93,6 +93,8 @@ internal static class Program
         LayoutTemplateTests.Run();
         DiscoveryTests.Run();
         UpdateTests.Run();
+        RecordingsTests.Run();
+        PlaybackTests.Run();
         return T.Summary();
     }
 }

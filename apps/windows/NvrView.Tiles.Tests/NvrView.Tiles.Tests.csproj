@@ -9,4 +9,8 @@
   <ItemGroup>
     <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Vectors shared with the Mac app's tests, beside the test binary. -->
+    <None Include="../../../fixtures/synthetic/tile-header.json" Link="tile-header.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -270,7 +270,8 @@ public partial class App : Application
         _shutDown = true;
         _saveTimer?.Stop();
         Updater?.Stop();
-        // The call windows go first (their renderers and leases), then the viewer windows.
+        // The Settings window goes with the app, then the call windows (their renderers and leases), then the viewer windows.
+        SettingsWindow.CloseCurrent();
         _viewer?.CallWindows?.CloseAll();
         foreach (ViewerWindow w in _windows.ToArray())
         {

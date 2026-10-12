@@ -230,9 +230,23 @@ pub struct Mp4Metadata {
 
 /// The generic handler names the writer uses (the values most muxers write,
 /// naming no product or installation).
-pub const GENERIC_VIDEO_HANDLER: &str = "VideoHandler";
+pub const GENERIC_VIDEO_HANDLER: &str = mp4_remux::VIDEO_HANDLER_NAME;
 /// See [`GENERIC_VIDEO_HANDLER`].
-pub const GENERIC_AUDIO_HANDLER: &str = "SoundHandler";
+pub const GENERIC_AUDIO_HANDLER: &str = mp4_remux::AudioHandler::Sound.name();
+
+/// Every handler name a file the core writes may carry, with or without
+/// `share_safe`: the two generic names above, and the fixed words that
+/// title a call recording's audio tracks (`Conversation`, `Visitor`, `You`,
+/// from [`mp4_remux::AudioHandler`]). They name no product, device,
+/// person, or installation, so they need no share-safe replacement. The
+/// writer takes names only from this set (an enum, not text), and reading
+/// a file back maps any other name to `SoundHandler`.
+pub const ALLOWED_HANDLER_NAMES: [&str; 5] = mp4_remux::HANDLER_NAMES;
+
+/// Whether `name` is one of [`ALLOWED_HANDLER_NAMES`].
+pub fn handler_name_allowed(name: &str) -> bool {
+    ALLOWED_HANDLER_NAMES.contains(&name)
+}
 
 /// The metadata to write. Normally the creation time asked for (0 when the
 /// caller has none) and the generic handler names; with `share_safe` always
@@ -240,9 +254,11 @@ pub const GENERIC_AUDIO_HANDLER: &str = "SoundHandler";
 ///
 /// **Today's writer already complies**: `Mp4Finalizer` never sets a
 /// creation time, so its headers carry the 1904 epoch, and the handler names
-/// are the two constants above in every file. This function is the one
-/// place that rule lives, so a later change that records a creation time (or
-/// tags) is gated on `share_safe` here, and the tests pin it.
+/// are the two constants above in every download (a recording with several
+/// audio tracks uses names from [`ALLOWED_HANDLER_NAMES`] only). This
+/// function is the one place that rule lives, so a later change that records
+/// a creation time (or tags) is gated on `share_safe` here, and the tests
+/// pin it.
 pub fn mp4_metadata(share_safe: bool, creation_unix_secs: u64) -> Mp4Metadata {
     Mp4Metadata {
         creation_unix_secs: if share_safe { 0 } else { creation_unix_secs },
@@ -362,6 +378,31 @@ mod tests {
         assert_eq!(mp4_metadata(false, 0).creation_unix_secs, 0);
         // The same call gives the same answer.
         assert_eq!(mp4_metadata(true, 5), mp4_metadata(true, 99));
+    }
+
+    #[test]
+    fn handler_names_are_a_fixed_set_of_generic_words() {
+        assert_eq!(
+            ALLOWED_HANDLER_NAMES,
+            [
+                "VideoHandler",
+                "SoundHandler",
+                "Conversation",
+                "Visitor",
+                "You"
+            ]
+        );
+        for share_safe in [false, true] {
+            let m = mp4_metadata(share_safe, 1_790_000_000);
+            assert!(handler_name_allowed(m.video_handler));
+            assert!(handler_name_allowed(m.audio_handler));
+        }
+        for h in mp4_remux::AudioHandler::ALL {
+            assert!(handler_name_allowed(h.name()), "{h:?}");
+        }
+        assert!(handler_name_allowed(mp4_remux::VIDEO_HANDLER_NAME));
+        assert!(!handler_name_allowed("Camera 1"));
+        assert!(!handler_name_allowed(""));
     }
 
     #[test]

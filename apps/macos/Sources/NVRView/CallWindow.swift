@@ -5,9 +5,10 @@ import VideoKit
 // A doorbell call in its own window (docs/UX.md "A call in its own window").
 // The call stays in the model (`DoorbellCalls`); its `presentation` says
 // where it shows. `CallWindows` opens and closes the windows from it; each
-// `CallWindowController` is one more renderer drawing the doorbell's shared
-// tile (the same decoded pictures as every viewer window), with the inset's
-// header and call controls around it.
+// `CallWindowController` shows the doorbell's shared tile (the same decoded
+// pictures as every viewer window) as a regular tile: the viewer's own
+// `StageView` in its single fixed tile mode, with the call bar above and the
+// call's controls below (docs/CAPTURE.md "The call window is a regular tile").
 
 /// The app's call windows, one per call shown in a window. Not viewer
 /// windows: not saved in windows.json, not counted when the last viewer
@@ -184,18 +185,26 @@ final class CallWindows {
     }
 }
 
-/// One call's window: an `NSPanel` that floats while pinned, the doorbell's
-/// picture drawn by its own renderer from the shared tile, and the inset's
-/// header and call controls. It holds its own lease on the doorbell and asks
-/// for its stream like a tile on Auto (the main stream when the picture is
-/// drawn wider than the sub-stream's).
+/// One call's window: an `NSPanel` that floats while pinned. Top to bottom:
+/// the call bar (the call, its elapsed time, the pin, Pop In, close), the
+/// doorbell's tile (a `StageView` in single fixed tile mode: its hover
+/// header, menus, digital zoom and zoom map, fisheye views and Quality work
+/// as in the grid), the captions, the Talk row, and the reply. It holds its
+/// own lease on the doorbell; the tile asks for its stream like a tile on
+/// Auto (the main stream when the picture is drawn, zoom included, wider
+/// than the sub-stream's: `CallWindowQuality`).
 @MainActor
-final class CallWindowController: NSWindowController, NSWindowDelegate {
+final class CallWindowController: NSWindowController, NSWindowDelegate, StageDelegate {
     let camera: CameraRef
     private let model: AppModel
-    let grid: MetalGridView
+    /// The doorbell's tile.
+    let stage: StageView
+    /// The call bar, the Unmute cover and the call's controls around the tile.
     let inset = InsetView(host: .window)
     private let keepsBehind: Bool
+    /// The call bar's elapsed time, the tile's veils and countdowns, and
+    /// its time step while the window gets few display refreshes.
+    private var timer: Timer?
 
     var onCloseRequest: () -> Void = {}
     var onPopIn: () -> Void = {}
@@ -203,18 +212,11 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
     /// The user moved or resized the window (its AppKit frame).
     var onMoved: (NSRect) -> Void = { _ in }
 
-    private struct DemandOwner: Hashable { let window: ObjectIdentifier }
-    private var demandOwner: DemandOwner { DemandOwner(window: ObjectIdentifier(self)) }
-    /// What the window asked for last (main stream or not).
-    private var askedMain = false
-    /// The sub-stream's picture width, once the tile showed it.
-    private var subWidth: Double?
-    private var lastKey: [AnyHashable]?
     /// Set while the window is moved by the app (not remembered).
     private var placing = false
     private var released = false
-    /// The header, made again only when the call's start or presses change
-    /// (the model notifies often).
+    /// The call bar's text, made again only when the call's start, presses
+    /// or elapsed seconds change (the model notifies often).
     private var header: (key: [Double], text: String)?
     private let controls: Controls
 
@@ -243,7 +245,11 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
         self.model = model
         self.camera = camera
         self.keepsBehind = keepsBehind
-        grid = MetalGridView(renderer: renderer)
+        let name = model.name(of: camera)
+        stage = StageView(
+            model: model,
+            state: WindowState(content: .scratch(name: name, root: .leaf(camera)), name: name, tree: .leaf(camera)),
+            renderer: renderer, fixedTile: true)
         controls = Controls(model: model, camera: camera)
         let panel = CallPanel(
             contentRect: NSRect(x: 0, y: 0, width: CallWindowPlacement.defaultWidth, height: CallWindowPlacement.defaultHeight),
@@ -260,19 +266,23 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
         panel.delegate = self
         panel.onEscape = { [weak self] in self?.onCloseRequest() }
         panel.onCloseRequest = { [weak self] in self?.onCloseRequest() }
+        panel.onInteraction = { [weak self] in self?.stage.noteInteraction() }
 
-        let content = FlippedView(frame: panel.contentLayoutRect)
+        let content = CallWindowContent(frame: panel.contentLayoutRect, stage: stage, inset: inset)
         content.wantsLayer = true
         content.layer?.backgroundColor = NSColor.black.cgColor
-        grid.frame = content.bounds
-        grid.autoresizingMask = [.width, .height]
         inset.frame = content.bounds
         inset.autoresizingMask = [.width, .height]
-        content.addSubview(grid)
+        stage.frame = inset.videoRect
+        // The tile under the call bar and controls; the inset lets clicks
+        // on the picture through to it.
+        content.addSubview(stage)
         content.addSubview(inset)
         panel.contentView = content
+        stage.delegate = self
 
         inset.callDelegate = controls
+        inset.onClose = { [weak self] in self?.onCloseRequest() }
         inset.onHover = { [weak self] _ in
             // Using the window is using the call.
             guard let self else { return }
@@ -285,11 +295,16 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
         }
         applyPinned(pinned)
 
-        // The doorbell's tile stays open while the window shows it.
+        // The doorbell's tile stays open while the window shows it; the
+        // stage then asks for its stream (Auto).
         model.leases.acquire(camera)
-        model.leases.setDemand(owner: demandOwner, camera: camera, quality: .auto, focused: false, zoomScale: 1)
-        grid.prepare = { [weak self] renderer, size in
-            MainActor.assumeIsolated { self?.prepare(renderer: renderer, drawable: size) }
+        stage.reload()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.released else { return }
+                self.refresh()
+                self.stage.tick()
+            }
         }
     }
 
@@ -313,80 +328,58 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
         placing = false
     }
 
-    /// Shows the call as it is now.
+    /// Shows the call as it is now (and the tile's chrome).
     func refresh() {
-        guard let call = model.calls.call(for: camera) else { return }
+        guard let call = model.calls.call(for: camera), !released else { return }
         let name = model.name(of: camera)
-        let key = [call.startedAt.timeIntervalSince1970, Double(call.presses)]
-        if header?.key != key { header = (key, Self.header(call, now: Date())) }
+        let now = Date()
+        let elapsed = max(0, now.timeIntervalSince(call.startedAt)).rounded(.down)
+        let key = [call.startedAt.timeIntervalSince1970, Double(call.presses), elapsed]
+        if header?.key != key { header = (key, Self.header(call, now: now)) }
         let header = header?.text ?? ""
+        let hadCall = inset.videoRect
         inset.apply(
             InsetContent(
                 header: header, cameraName: name, critical: false, isReturn: false,
                 call: CallContent(
                     call: call, microphoneOn: model.calls.isTalkingWithMicrophone(camera), note: model.calls.note(for: camera))))
+        if inset.videoRect != hadCall { window?.contentView?.needsLayout = true }
         let title = "\(call.origin == .press ? "Doorbell" : "Conversation") · \(name)"
         if window?.title != title { window?.title = title }
+        stage.refreshChrome()
     }
 
-    /// "Doorbell · 14:02:11 · 2 presses".
+    /// The call bar: "Doorbell · 14:02:11 · 2 presses · 0:42".
     static func header(_ call: DoorbellCall, now: Date) -> String {
         let f = DateFormatter()
         f.timeStyle = .medium
         f.dateStyle = Calendar.current.isDate(call.startedAt, inSameDayAs: now) ? .none : .medium
         var text = "\(call.origin == .press ? "Doorbell" : "Conversation") · \(f.string(from: call.startedAt))"
         if call.presses > 1 { text += " · \(call.presses) presses" }
-        return text
+        return text + " · " + elapsedText(now.timeIntervalSince(call.startedAt))
     }
 
-    // MARK: Drawing (every display refresh)
-
-    /// Draws exactly the doorbell's shared tile into the inset's picture
-    /// area, and keeps the stream demand in step with the drawn size.
-    private func prepare(renderer: GridRenderer, drawable: CGSize) {
-        let points = inset.bounds
-        guard points.width > 0, points.height > 0, let tile = model.leases.tile(for: camera) else {
-            if !renderer.tiles.isEmpty {
-                renderer.tiles = []
-                lastKey = nil
-            }
-            return
-        }
-        let scaleX = drawable.width / points.width, scaleY = drawable.height / points.height
-        let rect = inset.videoRect
-        let snapshot = tile.snapshot
-        let picture = tile.latestPicture()
-        let size = picture.map { PixelSize(width: UInt32($0.width), height: UInt32($0.height)) }
-        let mapping = PictureMapping(snapshot: snapshot, pictureSize: size)
-        let pictureSize = CGSize(width: Int(mapping.layoutSize.width), height: Int(mapping.layoutSize.height))
-        let matrix = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
-            ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
-        let placed = TilePlacement.place(
-            rect: rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
-            offset: CGPoint(x: CGFloat(mapping.offset.x), y: CGFloat(mapping.offset.y)), fill: false, zoom: .none)
-        if pictureSize.width > 0, tile.tierState.shown == model.leases.tiers(for: camera).grid {
-            subWidth = Double(pictureSize.width)
-        }
-        updateDemand(drawnWidth: Double(rect.width * scaleX))
-        let key: [AnyHashable] = [
-            ObjectIdentifier(tile), placed.destination.debugDescription, snapshot.version, pictureSize.debugDescription,
-        ]
-        guard key != lastKey || renderer.tiles.count != 1 else { return }
-        lastKey = key
-        renderer.tiles = [GridTile(picture: tile, color: matrix, destination: placed.destination, source: placed.source)]
+    /// "0:42", "12:05", "1:02:03".
+    static func elapsedText(_ seconds: Double) -> String {
+        let s = Int(max(0, seconds))
+        let (h, m, r) = (s / 3600, s / 60 % 60, s % 60)
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, r) : String(format: "%d:%02d", m, r)
     }
 
-    /// Auto for the window: the main stream while the picture area is wider
-    /// than the sub-stream's pictures.
-    private func updateDemand(drawnWidth: Double) {
-        let main = CallWindowQuality.wantsMain(drawnWidth: drawnWidth, subWidth: subWidth, wasMain: askedMain)
-        guard main != askedMain, !released else { return }
-        askedMain = main
-        model.leases.setDemand(owner: demandOwner, camera: camera, quality: .auto, focused: main, zoomScale: 1)
-    }
+    /// Whether the tile asks for the main stream now (self-test).
+    var asksForMainStream: Bool { stage.fixedAsksMain }
 
-    /// Whether the window asks for the main stream now (self-test).
-    var asksForMainStream: Bool { askedMain }
+    // MARK: The tile
+
+    /// Quality and fisheye views chosen on the tile stay with this window
+    /// (it is not a layout).
+    func stage(_ stage: StageView, didEdit tree: LayoutNode) {}
+    func stageDidChangeState(_ stage: StageView) {}
+
+    /// ⇧⌘P and ⇧⌘R (the Camera menu's hidden items): Save Picture and
+    /// Record Call on the call's tile.
+    @objc func captureSavePicture(_ sender: Any?) { stage.performOnSelected(.savePicture) }
+    @objc func captureRecord(_ sender: Any?) { stage.performOnSelected(.record) }
 
     // MARK: Window
 
@@ -401,11 +394,34 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !released else { return }
         released = true
-        grid.prepare = nil
-        // Stops the display link.
-        grid.removeFromSuperview()
-        model.leases.clearDemands(owner: demandOwner)
+        timer?.invalidate()
+        timer = nil
+        // Withdraws the tile's stream demand and stops the display link.
+        stage.tearDown()
+        stage.grid.removeFromSuperview()
         model.leases.release(camera)
+    }
+}
+
+/// The call window's content: the tile placed in the inset's picture area.
+@MainActor
+final class CallWindowContent: FlippedView {
+    private unowned let stage: StageView
+    private unowned let inset: InsetView
+
+    init(frame: NSRect, stage: StageView, inset: InsetView) {
+        self.stage = stage
+        self.inset = inset
+        super.init(frame: frame)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layout() {
+        super.layout()
+        let rect = inset.convert(inset.videoRect, to: self)
+        if stage.frame != rect { stage.frame = rect }
     }
 }
 
@@ -417,6 +433,8 @@ final class CallWindowController: NSWindowController, NSWindowDelegate {
 final class CallPanel: NSPanel {
     var onEscape: () -> Void = {}
     var onCloseRequest: () -> Void = {}
+    /// A pointer move, click, scroll or key (the tile's chrome comes back).
+    var onInteraction: () -> Void = {}
 
     override var canBecomeKey: Bool { true }
 
@@ -424,6 +442,12 @@ final class CallPanel: NSPanel {
     override func performClose(_ sender: Any?) { onCloseRequest() }
 
     override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .mouseMoved, .leftMouseDown, .rightMouseDown, .leftMouseDragged, .scrollWheel, .magnify, .keyDown:
+            onInteraction()
+        default:
+            break
+        }
         if event.type == .keyDown {
             let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
             if event.keyCode == ViewerKeys.escape, flags.isEmpty {
@@ -445,6 +469,6 @@ final class CallPanel: NSPanel {
 
 /// A plain view with a top-left origin.
 @MainActor
-final class FlippedView: NSView {
+class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

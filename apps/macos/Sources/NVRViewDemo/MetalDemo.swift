@@ -87,15 +87,21 @@ final class MetalGrid {
 final class MetalSelfTest {
     private let grid: MetalGrid
     private let seconds: Double
+    private let untilFrames: Int?
     private var earlier: [(image: RenderedImage, tiles: [GridTile], decoded: [Int])] = []
     private var finished = false
 
-    init(grid: MetalGrid, seconds: Double) {
+    init(grid: MetalGrid, seconds: Double, untilFrames: Int? = nil) {
         self.grid = grid
         self.seconds = seconds
+        self.untilFrames = untilFrames
     }
 
     func start(window: NSWindow) {
+        if let frames = untilFrames {
+            startUntilFrames(window: window, frames: frames)
+            return
+        }
         for delay in [seconds / 2, seconds / 2 + 0.12] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [self] in
                 grid.view.captureNextFrame { [self] image in
@@ -106,14 +112,40 @@ final class MetalSelfTest {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [self] in
             grid.view.captureNextFrame { [self] image in finish(window: window, image: image) }
         }
-        // If the view never draws (not on screen), fail instead of hanging.
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 5) { [self] in
+        failIfNoFrame(after: seconds + 5)
+    }
+
+    /// If the view never draws (not on screen), fail instead of hanging.
+    private func failIfNoFrame(after limit: Double) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + limit) { [self] in
             if !finished {
                 print("selftest: no frame was drawn")
                 print("selftest: FAIL")
                 exit(1)
             }
         }
+    }
+
+    /// The same checks driven by the pipeline instead of the clock: a frame
+    /// is captured once every tile has decoded `frames`, then `frames + 3`,
+    /// and the last at `2 * frames`. `seconds` only limits a stalled run.
+    private func startUntilFrames(window: NSWindow, frames: Int) {
+        let targets = [frames, frames + 3, 2 * frames]
+        func poll(_ stage: Int) {
+            guard decodedCounts().allSatisfy({ $0 >= targets[stage] }) else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { MainActor.assumeIsolated { poll(stage) } }
+                return
+            }
+            grid.view.captureNextFrame { [self] image in
+                MainActor.assumeIsolated {
+                    if stage == targets.count - 1 { return finish(window: window, image: image) }
+                    earlier.append((image, grid.view.renderer.tiles, decodedCounts()))
+                    poll(stage + 1)
+                }
+            }
+        }
+        poll(0)
+        failIfNoFrame(after: seconds)
     }
 
     private func decodedCounts() -> [Int] { grid.core.tiles.map { $0.decoder.stats.decoded } }

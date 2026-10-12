@@ -231,7 +231,7 @@ internal sealed unsafe class Dispatcher(NvCoreCallbacks callbacks)
 /// A running nvrview core (docs/FFI.md). Dispose it (never from a callback)
 /// to stop every session; no callback runs after Dispose returns.
 /// </summary>
-public sealed unsafe class NvCore : IDisposable
+public sealed unsafe partial class NvCore : IDisposable
 {
     private readonly Dispatcher _dispatcher;
     private NvCoreHandle? _handle;

@@ -58,7 +58,9 @@ pub mod naming;
 pub mod recorded_time;
 pub mod scheduler;
 pub mod sound;
-mod store;
+/// Small file helpers (crash-safe writes, bounded JSON reads), shared with
+/// the capture crate.
+pub mod store;
 pub mod sync_samples;
 pub mod thumbs;
 

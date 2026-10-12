@@ -53,13 +53,17 @@ public struct FakeDeviceSpec: Sendable {
     /// Fisheye cameras (`fisheye` in `channels`): they play
     /// `FakeCore.Options.fisheyeClip` when one is set.
     public var fisheyeChannels: Set<Int>
+    /// Channels whose camera pans, tilts and zooms with presets (`ptz` in
+    /// `channels`). Nothing moves: the fake only reports the capability.
+    public var ptzChannels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
         detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
         multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = [],
-        fisheyeChannels: Set<Int> = []
+        fisheyeChannels: Set<Int> = [], ptzChannels: Set<Int> = []
     ) {
+        self.ptzChannels = ptzChannels
         self.fisheyeChannels = fisheyeChannels
         self.talkChannels = talkChannels
         self.multiLensChannels = multiLensChannels
@@ -188,6 +192,13 @@ public final class FakeCore: CoreAPI {
         public var discoveryDuration: Duration?
         /// What update checks find (`FakeUpdates.swift`); nil: up to date.
         public var updateOffer: FakeUpdateOffer?
+        /// Thumbnail fetches and downloads finish only on
+        /// `completeRecordingWork()` (tests); off, shortly after the call
+        /// that queued them (`FakeRecordings.swift`).
+        public var recordingWorkIsManual = false
+        /// The clock (nanoseconds) a playback's position runs on
+        /// (`FakePlayback.swift`): the host clock, or a test's manual one.
+        public var playbackClock: @Sendable () -> UInt64 = { HostClock.nowNanos() }
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -221,11 +232,15 @@ public final class FakeCore: CoreAPI {
         var rejected: Set<UInt64> = []
         /// Every `tileRetry` so far.
         var retries: [UInt64] = []
+        /// Tiles of playbacks (`FakePlayback.swift`): `closeTile` refuses them.
+        var playbackTiles: Set<UInt64> = []
     }
 
     let options: Options
     let discovery = FakeDiscoveryState()
     let updates = FakeUpdateState()
+    let recordings = FakeRecordingsState()
+    let playbackWorld = FakePlaybackState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()
@@ -248,6 +263,9 @@ public final class FakeCore: CoreAPI {
         self.sink = sink
         layouts = FakeLayouts(file: options.layoutsFile, limit: options.maxLayouts)
     }
+
+    /// Whether `free` ran.
+    var isFreed: Bool { world.withLock { $0.freed } }
 
     /// Everything the app did wrong so far (empty when all is well).
     public var violations: [String] { problems.withLock { $0 } }
@@ -323,7 +341,11 @@ public final class FakeCore: CoreAPI {
                 // only main and sub, and says how many lenses it has.
                 let lenses = spec.multiLensChannels.contains(c) ? #","lenses":2"# : ""
                 let fisheye = spec.fisheyeChannels.contains(c) ? #","fisheye":true"# : ""
-                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)}"#
+                // A talk-back channel is a doorbell here (the made-up one).
+                let talk = spec.talkChannels.contains(c)
+                let moves = spec.ptzChannels.contains(c)
+                let caps = #","talk":\#(talk),"doorbell":\#(talk),"ptz":{"pan_tilt":\#(moves),"presets":\#(moves),"zoom_focus":\#(moves)}"#
+                return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)\#(caps)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
         }
@@ -390,6 +412,7 @@ public final class FakeCore: CoreAPI {
 
     public func closeTile(_ tile: UInt64) throws(CoreStatus) {
         requireOutsideCallback("nv_tile_close")
+        if world.withLock({ $0.playbackTiles.contains(tile) }) { throw .invalidArgument }
         guard let t = detach(tile) else { throw .unknownID }
         // Joins the playback thread and waits out any pump: no action for the
         // tile runs after this returns.
@@ -832,6 +855,63 @@ public final class FakeCore: CoreAPI {
 
     /// The tier a tile shows now.
     public func shownTier(tile: UInt64) -> StreamTier? { world.withLock { $0.tiles[tile] }?.shownTier }
+
+    // MARK: Playback tiles (FakePlayback.swift)
+
+    /// A new ID from the space tiles and playbacks share.
+    func newID() throws(CoreStatus) -> UInt64 {
+        try world.withLock { w throws(CoreStatus) in
+            if w.freed { throw .closed }
+            let id = w.nextID
+            w.nextID += 1
+            return id
+        }
+    }
+
+    /// Opens a playback tile: a tile like a live one, playing the channel's
+    /// clip, on the added device with this key. Without such a device the
+    /// tile gets an ID but no stream (`false`). It stays still until
+    /// `startPlaybackTile`.
+    func openPlaybackTile(deviceKey: String, channel: UInt8, tier: StreamTier) throws(CoreStatus) -> (UInt64, Bool) {
+        guard !options.clips.isEmpty else { throw .invalidArgument }
+        return try world.withLock { w throws(CoreStatus) in
+            if w.freed { throw .closed }
+            let id = w.nextID
+            w.nextID += 1
+            w.playbackTiles.insert(id)
+            guard let (device, d) = w.devices.first(where: { $0.value.key == deviceKey }), !d.failed else {
+                return (id, false)
+            }
+            let tile = FakeTile(
+                id: id, device: device, channel: channel, tier: tier, detects: [], silent: false,
+                hasAudio: !d.spec.channelsWithoutAudio.contains(Int(channel)),
+                fisheye: d.spec.fisheyeChannels.contains(Int(channel)), owner: self)
+            w.devices[device]?.tiles.append(id)
+            w.tiles[id] = tile
+            return (id, true)
+        }
+    }
+
+    /// Starts a playback tile's stream (real-time pacing; with manual pacing
+    /// `pump` drives it).
+    func startPlaybackTile(_ id: UInt64) {
+        guard case .realtime(let fps) = options.pacing, let t = world.withLock({ $0.tiles[id] }) else { return }
+        t.start(fps: fps)
+    }
+
+    /// Ends a playback tile: no action for it runs after this returns; then
+    /// `tile_closed`.
+    func closePlaybackTile(_ id: UInt64, reason: String) {
+        _ = world.withLock { $0.playbackTiles.remove(id) }
+        if let t = detach(id) {
+            t.stop()
+            endTalk(t)
+        }
+        emitEvent(#"{"type":"tile_closed","tile":\#(id),"reason":"\#(reason)"}"#)
+    }
+
+    /// Whether `requireOutsideCallback` would object (for the playback calls).
+    func checkOutsideCallback(_ what: String) { requireOutsideCallback(what) }
 
     // MARK: Internals
 

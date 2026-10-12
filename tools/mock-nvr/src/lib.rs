@@ -168,6 +168,17 @@ pub struct Config {
     /// Channels with a speaker (`ipcAudioTalk` 1): they answer the talk
     /// ability (10) and accept talk-back ([`talk`]). Others answer 400.
     pub talk_channels: Vec<u8>,
+    /// Channels whose 199 item says `channelType` `Doorbell` (a doorbell
+    /// also needs to be in [`Config::talk_channels`] to talk).
+    pub doorbell_channels: Vec<u8>,
+    /// By channel, the 199 `ptzType` (3 pan/tilt/zoom, 1 zoom and focus;
+    /// docs/protocol.md, "Camera motion control"); missing: 0.
+    pub ptz_types: Vec<u32>,
+    /// By channel, the 199 `ptzPreset` bitmask; missing: 0.
+    pub ptz_presets: Vec<u32>,
+    /// By channel and lens (parallel to [`Config::lens_aitypes`]), the
+    /// sub-item's `ptzType`; missing: no `ptzType` element.
+    pub lens_ptz_types: Vec<Vec<u32>>,
     /// If set, these channels are fisheye cameras.
     pub fisheye: Option<FisheyeConfig>,
 }
@@ -276,6 +287,10 @@ impl Config {
             extern_modes: Vec::new(),
             uids: Vec::new(),
             talk_channels: Vec::new(),
+            doorbell_channels: Vec::new(),
+            ptz_types: Vec::new(),
+            ptz_presets: Vec::new(),
+            lens_ptz_types: Vec::new(),
             fisheye: None,
         }
     }
@@ -1210,18 +1225,29 @@ impl Conn {
             let talk = u8::from(cfg.talk_channels.contains(&c));
             let (kind, fisheye) = if cfg.fisheye_of(c).is_some() {
                 ("fisheye_ipc", 1)
+            } else if cfg.doorbell_channels.contains(&c) {
+                ("Doorbell", 0)
             } else {
                 ("ipc", 0)
             };
+            let ptz = cfg.ptz_types.get(usize::from(c)).copied().unwrap_or(0);
+            let preset = cfg.ptz_presets.get(usize::from(c)).copied().unwrap_or(0);
             s.push_str(&format!(
                 "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n\
                  <ipcAudioTalk>{talk}</ipcAudioTalk>\n<channelType>{kind}</channelType>\n\
-                 <fishEye>{fisheye}</fishEye>\n"
+                 <fishEye>{fisheye}</fishEye>\n<ptzType>{ptz}</ptzType>\n\
+                 <ptzPreset>{preset}</ptzPreset>\n"
             ));
             let lenses = cfg.lens_aitypes.get(usize::from(c));
             for (lens, ai) in lenses.into_iter().flatten().enumerate() {
+                let ptz = cfg
+                    .lens_ptz_types
+                    .get(usize::from(c))
+                    .and_then(|l| l.get(lens))
+                    .map(|t| format!("<ptzType>{t}</ptzType>\n"))
+                    .unwrap_or_default();
                 s.push_str(&format!(
-                    "<subItem>\n<chnID>{lens}</chnID>\n<aitype>{ai}</aitype>\n</subItem>\n"
+                    "<subItem>\n<chnID>{lens}</chnID>\n<aitype>{ai}</aitype>\n{ptz}</subItem>\n"
                 ));
             }
             s.push_str("</item>\n");

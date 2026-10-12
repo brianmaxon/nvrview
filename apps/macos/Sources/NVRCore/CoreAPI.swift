@@ -139,6 +139,95 @@ public protocol CoreAPI: Sendable {
     /// permission and are logged.
     func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus)
 
+    // MARK: Recordings, part 1 (minor 5; docs/FFI.md "Recordings (minor 5)")
+    //
+    // JSON in and out as the contract shapes it (docs/FFI-RECORDINGS.md);
+    // none of these waits on the network. Not from inside a callback.
+
+    /// `nv_recordings_configure`: the recordings settings (JSON).
+    func recordingsConfigure(json: String) throws(CoreStatus)
+    /// `nv_recordings_enable`: allows (`json`) or stops (nil) indexing a device by its key.
+    func recordingsEnable(deviceKey: String, json: String?) throws(CoreStatus)
+    /// `nv_recordings_calendar`: days with recordings per camera.
+    func recordingsCalendar(query: String) throws(CoreStatus) -> String
+    /// `nv_recordings_spans`: recording spans per camera.
+    func recordingsSpans(query: String) throws(CoreStatus) -> String
+    /// `nv_recordings_events`: events matching the query.
+    func recordingsEvents(query: String) throws(CoreStatus) -> String
+    /// `nv_recordings_want`: asks for days to be indexed; returns at once.
+    func recordingsWant(json: String) throws(CoreStatus)
+    /// `nv_recordings_hold_today`: keeps today fresh for a window's cameras; nil releases.
+    func recordingsHoldToday(_ hold: UInt64, json: String?) throws(CoreStatus)
+    /// `nv_recordings_status`: the index state of every enabled device.
+    func recordingsStatus() throws(CoreStatus) -> String
+    /// `nv_incidents_get`: incidents overlapping the query's range, newest first.
+    func incidentsGet(query: String) throws(CoreStatus) -> String
+    /// `nv_incident_get`: one incident by key.
+    func incidentGet(key: String) throws(CoreStatus) -> String
+    /// `nv_incident_edit`: applies and stores one edit (made once, even if
+    /// the answer were lost).
+    func incidentEdit(json: String) throws(CoreStatus) -> String
+    /// `nv_incident_lock`: locks (and downloads) or unlocks an incident.
+    func incidentLock(key: String, locked: Bool) throws(CoreStatus) -> String
+    /// `nv_camera_groups_get`.
+    func cameraGroupsGet() throws(CoreStatus) -> String
+    /// `nv_camera_groups_put`: replaces the groups and name overrides.
+    func cameraGroupsPut(json: String) throws(CoreStatus)
+    /// `nv_thumbnail_get`: a cached cover thumbnail, or `.pending` (a
+    /// `thumbnail` event follows).
+    func thumbnailGet(key: String) throws(CoreStatus) -> ThumbnailResult
+    /// `nv_thumbnail_put`: replaces the cached entry (usually the app's small image).
+    func thumbnailPut(key: String, thumbnail: Thumbnail) throws(CoreStatus)
+    /// `nv_thumbnail_cancel`: drops queued fetches of a key, or all (nil).
+    func thumbnailCancel(key: String?) throws(CoreStatus)
+    /// `nv_download_incident`: queues an incident's download.
+    func downloadIncident(json: String) throws(CoreStatus) -> String
+    /// `nv_download_pause`: a whole download (camera nil) or one camera (JSON camera).
+    func downloadPause(_ download: String, camera: String?, paused: Bool) throws(CoreStatus)
+    /// `nv_download_retry`: failed cameras again (camera nil: all).
+    func downloadRetry(_ download: String, camera: String?) throws(CoreStatus)
+    /// `nv_download_forget`: a download with no job running.
+    func downloadForget(_ download: String, deletePartial: Bool) throws(CoreStatus)
+    /// `nv_download_trash`: `{"folder":...}` to move to the Trash after its
+    /// `download_removed` event.
+    func downloadTrash(_ download: String) throws(CoreStatus) -> String
+    /// `nv_downloads_get`: every known download.
+    func downloadsGet() throws(CoreStatus) -> String
+    /// `nv_sound_configure`: live sound settings (JSON).
+    func soundConfigure(json: String) throws(CoreStatus)
+
+    // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
+    //
+    // A playback's tiles deliver actions to the sink like live tiles and are
+    // answered the same way; `closeTile` refuses them. Not from inside a
+    // callback, except `playbackPosition`.
+
+    /// `nv_playback_open` (`PlaybackRequest` builds the JSON): opened paused
+    /// at the request's position; no action or event about it arrives before
+    /// this returns.
+    func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback
+    /// `nv_playback_add_camera` (`PlaybackCamera.json`): joins at the current position.
+    func playbackAddCamera(_ playback: UInt64, json: String) throws(CoreStatus) -> UInt64
+    /// `nv_playback_remove_camera`: its tile closes (`tile_closed`).
+    func playbackRemoveCamera(_ playback: UInt64, tile: UInt64) throws(CoreStatus)
+    /// `nv_playback_play`.
+    func playbackPlay(_ playback: UInt64) throws(CoreStatus)
+    /// `nv_playback_pause`.
+    func playbackPause(_ playback: UInt64) throws(CoreStatus)
+    /// `nv_playback_seek`: returns at once; `playback_seek` events follow.
+    func playbackSeek(_ playback: UInt64, positionMs: Int64, mode: SeekMode) throws(CoreStatus)
+    /// `nv_playback_set_rate`: 0.25, 0.5, 1, 2, 4, 8, or 16.
+    func playbackSetRate(_ playback: UInt64, rate: Double) throws(CoreStatus)
+    /// `nv_playback_set_offset`: this camera shows position + `offsetMs`.
+    func playbackSetOffset(_ playback: UInt64, tile: UInt64, offsetMs: Int64) throws(CoreStatus)
+    /// `nv_playback_position`: for the scrubber, at display rate; any thread,
+    /// also inside callbacks.
+    func playbackPosition(_ playback: UInt64) throws(CoreStatus) -> PlaybackPosition
+    /// `nv_playback_status`: the playback's details (JSON).
+    func playbackStatus(_ playback: UInt64) throws(CoreStatus) -> String
+    /// `nv_playback_close`: every tile closes, then `playback_closed`.
+    func playbackClose(_ playback: UInt64) throws(CoreStatus)
+
     /// `nv_audio_render` and its context, for the real-time callback. Valid
     /// until `free`; stop rendering before that.
     var audioRenderHook: AudioRenderHook { get }

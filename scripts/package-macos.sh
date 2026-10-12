@@ -6,6 +6,16 @@
 #   scripts/package-macos.sh              real Rust core (builds the XCFramework)
 #   scripts/package-macos.sh --fake-only  without the core (only `--fake` works)
 #
+#   --trusted-key-file FILE   public key line(s) (`nvrview-ed25519-pub ...`) the
+#                             app trusts out of the box; repeatable
+#   --update-source SOURCE    the update source the app uses until the user sets
+#                             one (an absolute folder path or an http(s) URL)
+#
+# With either, Contents/Resources/update-defaults.json is written before code
+# signing, so the signature covers it (docs/UPDATES.md, "Bundled defaults").
+# Neither is ever committed; without them nothing changes and the app trusts
+# nothing until the user adds a key.
+#
 # This signing is for local use. Distributing the app needs a Developer ID
 # signature and notarization, which this script does not do.
 set -eu
@@ -15,11 +25,36 @@ if [ -d /opt/homebrew/opt/rustup/bin ]; then
 fi
 
 real=1
-case "${1:-}" in
-  "") ;;
-  --fake-only) real=0 ;;
-  *) echo "usage: $0 [--fake-only]" >&2; exit 2 ;;
-esac
+key_files=""
+update_source=""
+usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE]"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --fake-only) real=0; shift ;;
+    --trusted-key-file)
+      [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+      [ -f "$2" ] || { echo "package-macos: the key file $2 does not exist" >&2; exit 2; }
+      key_files="$key_files
+$2"
+      shift 2 ;;
+    --update-source)
+      [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+      update_source="$2"; shift 2 ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+done
+# Validate before the long build: a bad key file or source stops here.
+if [ -n "$key_files" ] || [ -n "$update_source" ]; then
+  check_out=$(mktemp)
+  set -- --out "$check_out"
+  oldifs=$IFS; IFS='
+'
+  for f in $key_files; do if [ -n "$f" ]; then set -- "$@" --trusted-key-file "$f"; fi; done
+  IFS=$oldifs
+  if [ -n "$update_source" ]; then set -- "$@" --update-source "$update_source"; fi
+  python3 -I scripts/update-defaults.py "$@"
+  rm -f "$check_out"
+fi
 
 pack=apps/macos/Packaging
 version=$(tr -d "[:space:]" <VERSION)
@@ -58,6 +93,18 @@ set_icon 256 256x256;  set_icon 512 "256x256${at}2x"
 set_icon 512 512x512;  set_icon 1024 "512x512${at}2x"
 iconutil -c icns "$work/AppIcon.iconset" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$work"
+
+# The bundled update public key(s) and source, inside the bundle before it is
+# signed (docs/UPDATES.md, "Bundled defaults").
+if [ -n "$key_files" ] || [ -n "$update_source" ]; then
+  set -- --out "$app/Contents/Resources/update-defaults.json"
+  oldifs=$IFS; IFS='
+'
+  for f in $key_files; do if [ -n "$f" ]; then set -- "$@" --trusted-key-file "$f"; fi; done
+  IFS=$oldifs
+  if [ -n "$update_source" ]; then set -- "$@" --update-source "$update_source"; fi
+  python3 -I scripts/update-defaults.py "$@"
+fi
 
 # Sign with a stable identity when one is available, so the Keychain keeps
 # trusting the app across rebuilds (an ad hoc signature changes with every

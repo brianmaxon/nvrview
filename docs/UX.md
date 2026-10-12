@@ -124,6 +124,75 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 - Measured against the budgets in ARCHITECTURE.md: the interface must never
   cost frames. Overlays are lightweight layers above the Metal surface.
 
+## Tile header
+
+> **Built on macOS** (the header, its "…" menu, the right-click menu and
+> the keys); planned on Windows. Save picture, recording and PTZ are not
+> built yet: their buttons and menu items are in place and say so (below).
+
+Every tile's hover header carries its actions as buttons, in an order that
+survives narrow tiles: what does not fit moves into a "…" menu, never off
+the edge. Both apps compute it with the same model and test vectors
+(`TileHeaderLayout`).
+
+| Priority | Item | Shown for |
+| --- | --- | --- |
+| 0 | Recording pill ("● REC 1:23") | a recorded camera; an indicator, never in the overflow, visible without hover |
+| 0 | Alert strip and Dismiss | an active alert (see "Alerts"); never in the overflow |
+| 1 | Title (camera name) | every tile; truncated before it is dropped |
+| 2 | Speaker (listen or mute) | a camera with audio |
+| 3 | Record or Stop | every camera |
+| 4 | Save picture | a tile with a picture |
+| 5 | Start or End Conversation | a doorbell, or a camera with talk-back (`ipcAudioTalk` 1); for other cameras it is in the menu only |
+| 6 | PTZ pad | a pan-and-tilt camera (`ptzType` 3) |
+| 7 | Presets | a camera with presets (`ptzPreset` bit 0) |
+| 8 | Lens zoom and focus | `ptzType` 1 or 3, when the camera reports ranges |
+| 9 | Reset zoom | a tile zoomed past 1x (or a moved virtual camera) |
+| 10 | Quality | every camera (the menu of "Stream quality per tile") |
+| 11 | Fisheye view | a fisheye camera |
+| | "…" | whenever anything is hidden; also holds the long tail: Pop Out or Pop In, Allow talk-back, Entrance, Calls open in, Save Picture As…, Save Zoomed Area, Save Original Fisheye Picture, Record Main Stream, Record Sub-stream |
+
+- Items are placed by priority until the width runs out; once one is
+  hidden, room for "…" is kept. A change of under 8 pt does not reflow it,
+  so dragging a divider does not make buttons flicker. Below 120 pt only the
+  recording pill, the title and "…" show.
+- Under a no-picture message ("Connecting", "Reconnecting") the header
+  shows only the title and "…"; Retry stays in the message (see "Tiles
+  without a picture").
+- The right-click menu is the full list, in the same order, so nothing is
+  only in the header.
+- Corner indicators are unchanged and do not compete for header space.
+
+Details settled while building it (macOS):
+
+- The buttons sit together at the header's right end in priority order;
+  the title takes what is left from the left edge. Quality, Fisheye View
+  and "…" open their menus under the button; the Speaker button still
+  listens to several cameras with Option-click.
+- **Not built yet:** Save Picture, Record, the PTZ pad, Presets, Lens, and
+  the long tail's save and record items are shown in their final places
+  (so the layout and the overflow are the final ones), dimmed, with "coming
+  soon" in the tooltip. A click, the key (P, Shift+P, R) or the menu item
+  shows "Save Picture is coming soon" (and so on) over the stage for
+  2.5 s and does nothing else. Hiding them behind a flag was rejected: the
+  narrow-tile behavior would change again when they land.
+- The alert's Dismiss stays in the alert strip under the title, beside
+  the alert's lines; the right-click and "…" menus list "Dismiss Alert"
+  first.
+- Fisheye View's submenu also holds the camera's mount (Ceiling, Wall,
+  Desk).
+- In a viewer window the right-click menu goes on, after a separator, with
+  the layout's own items: Focus, Split Side by Side, Split Stacked, Remove
+  Tile, Clear Tile, Show Camera.
+- A grid tile whose camera's call is in its own window offers "Pop Out
+  Call", which brings that window forward; "Pop In Call" is in the call
+  window's own tile.
+- Every camera tile has the Speaker button (as before; the apps learn
+  whether a camera sends audio only once it plays).
+- Start Conversation and the PTZ buttons follow the `talk`, `doorbell` and
+  `ptz` fields of the `channels` event (docs/FFI.md), per lens for a
+  multi-lens camera.
+
 ## Tiles without a picture
 
 A tile that has no picture says why in words over the tile: "Connecting",
@@ -164,6 +233,40 @@ in either case.
 Selection is visible as a thin outline that fades with the other chrome, and
 follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
+
+### Capture and camera keys
+
+> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
+> the others say "… is coming soon" until capture lands, and the Option
+> keys come with PTZ. **Windows:** planned. They act on the selected tile,
+> never while text is edited, and toggles ignore key repeat.
+
+| Key | Action |
+| --- | --- |
+| P | Save picture (see "Save picture"). |
+| Shift+P | Save Picture As… (choose the place and format). |
+| R | Start or stop recording the selected tile's camera (from the "Record from" setting). |
+| T | Start or End Conversation. |
+| Option+arrows (macOS), Alt+arrows (Windows) | Move a PTZ camera while held; it stops when the key is released. |
+| Option or Alt with = and - | Lens zoom in and out. |
+| Option or Alt with 1 to 9 | Recall preset 1 to 9 (the order of the camera's list). |
+| ⇧⌘P / Ctrl+Shift+P | Save picture in a call window, where P may be typed into the reply (also accepted in viewer windows). |
+| ⇧⌘R / Ctrl+Shift+R | Start or stop the call recording in a call window (also accepted in viewer windows, for the selected tile). |
+
+The keys are read by key position, not by the character typed, so Option
+with = or a digit works on every keyboard layout that has those keys.
+
+- **macOS:** a new **Camera** menu lists them: Save Picture, Save Picture
+  As…, Start Recording (Stop Recording while recording), Start
+  Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
+  of the running recordings, each with Stop), Stop All Recordings, Open
+  Pictures Folder, Open Recordings Folder. Until capture and PTZ land,
+  Presets and Recordings hold a disabled placeholder, Stop All Recordings
+  is disabled, and the other items say "coming soon". Pan and Tilt… is
+  enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
+  so they also work in a call window.
+- **Windows:** the F1 help overlay lists them, and the keys are mapped in
+  one place (`TileKeyMap`) as the other tile keys are.
 
 ### Start Conversation (no press)
 
@@ -402,6 +505,90 @@ tier switch, so the picture sharpens in place without a gap. A tile not on
 Auto shows its quality in its hover header, and the menu notes that the main
 stream on many tiles costs the device and this computer much more.
 
+## Save picture
+
+> **Planned** (CAPTURE.md, "Save picture"; not built yet).
+
+- **Where:** the header's camera button, the right-click menu, P (and
+  Shift+P for Save Picture As…), the call window's tile, and later playback
+  tiles.
+- **What:** the full frame of the stream the tile shows, at its own size
+  (the menu says the pixel size), whatever the zoom. While zoomed, "Save
+  Zoomed Area" saves only the visible region, at the source's resolution,
+  never enlarged. A fisheye tile saves its current view (dewarped), and
+  "Save Original Fisheye Picture" the circle as the camera sends it.
+- **Files:** PNG by default, or JPEG (Settings); to `~/Pictures/NVRView` or
+  `Pictures\NvrView` ("Save pictures to"), named
+  `2026-10-11 17.02.03.250 Camera 1.png`; with "Share-safe names" the
+  camera is `Camera A`. No metadata; an optional time and name label burned
+  in, off by default.
+- **Feedback:** a brief shutter flash on the tile and a "Picture saved"
+  toast with Show in Finder or Show in Explorer. A failure names the file,
+  not the folder path.
+
+## Recording
+
+> **Planned** (CAPTURE.md, "Live recording"; not built yet).
+
+Recording saves a camera's live stream on this computer as an MP4 (video
+as received, the camera's audio).
+
+- **Start and stop:** the header's Record button, R, the right-click menu,
+  or the Camera menu (macOS). The recording starts at the next keyframe
+  (usually within a second or two) and records the camera, not the tile: it
+  keeps going if the tile closes, the layout changes, or the tile's quality
+  changes. Stop with the same button (it becomes Stop), R, the window's
+  recording list, or Stop All.
+- **Stream:** Settings, **"Record from"**: Main stream (the default) or
+  Sub-stream. The Record menu and the overflow also offer "Record Main
+  Stream" and "Record Sub-stream" for one recording. A device records from
+  its main stream at most twice at a time; a third is refused with an offer
+  to record the sub-stream instead.
+- **Indicators:** while a camera is recorded, every tile showing it (every
+  window, full screen too) shows a "● REC 1:23" pill, always visible, in the
+  corner opposite the corner indicators. On Windows the window's header
+  shows "● N recording" with the list, Stop and Stop All; on macOS a
+  toolbar item and the Camera menu's Recordings submenu.
+- **Limits:** a recording stops by itself after 60 minutes or 4 GB (both in
+  Settings), when free disk space runs low (it does not start with under
+  2 GB free), when the device is removed, or at quit. At most four live
+  recordings at a time. A short reconnect keeps the same file (the last
+  picture holds through the gap); a long one, or a change of resolution,
+  continues in `… (part 2).mp4`.
+- **Files:** `~/Movies/NVRView` or `Videos\NvrView` ("Save recordings to"),
+  named `2026-10-11 17.02.03 Camera 1.mp4` (`Camera A` with share-safe
+  names). A file is always playable, even after a crash; an unfinished one
+  is completed at the next launch.
+- These are this computer's recordings of what it received, gaps included,
+  not the NVR's own recordings (PLAYBACK.md, "Local captures and the NVR's
+  recordings").
+
+## Pan, tilt, and zoom
+
+> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"; not built yet).
+
+Steering a camera that can move is the user's own action and needs no
+enable step (camera motion control, docs/ARCHITECTURE.md "Device
+commands"); every command is still rate-limited (far above what hands can
+do) and logged.
+
+- **Pan and tilt** (`ptzType` 3): the header's PTZ button opens a popover
+  with a pad of four directions (diagonals only once observed on a camera).
+  Press and hold to move; letting go stops it. A speed slider runs 1 to 64,
+  default 20. When the camera reports lens ranges, zoom − and + and focus −
+  and + sit below the pad.
+- **Presets** (`ptzPreset` bit 0): a popover listing the camera's presets
+  by name, with the 1 to 9 key hint; a click recalls one. Saving or
+  deleting presets is a device setting and is not offered.
+- **Lens only** (`ptzType` 1): a popover with zoom and focus sliders. A
+  drag sends a position at most five times a second and once when it ends,
+  within the range the camera reported.
+- The positions are read again about 6 s after a zoom or a preset recall
+  (when the camera has settled), as the official client does.
+- Errors and refusals show in the popover, with the camera's name. There is
+  no permission prompt; automation (the local API, automatic correction)
+  needs its own per-camera grant.
+
 ## Alerts
 
 Some detections matter enough that the tile must not let them pass unseen:
@@ -604,8 +791,7 @@ Details settled while building it (macOS):
   speaks, except for 0.15 s after the doorbell is very loud (a peak over
   0.5). Without voice processing it is not captioned while the doorbell's
   audio is audible and carrying sound (and 0.4 s after). Voice processing
-  is prepared when a call opens and stays on for 2 minutes after Talk (or
-  until the call ends), so pressing Talk again does not interrupt the
+  is prepared when a call opens and stays on after Talk until the call ends, so pressing Talk again does not interrupt the
   doorbell's audio; meanwhile the system shows the microphone in use,
   though nothing is taken from it or sent. Switching to
   it and back each interrupts the doorbell's audio briefly (AUDIO.md, "Echo
@@ -701,6 +887,33 @@ Details settled while building it (Windows):
 - Not on Windows yet: a per-doorbell "unmute on ring" (a press unmutes only
   if the user was already listening, else Unmute shows).
 
+### Recording calls
+
+> **Planned** (CAPTURE.md, "Recording calls"; not built yet).
+
+- **Setting:** Settings > Alerts > Doorbell calls, **"Record calls"**, off
+  by default, and per doorbell Default, Always, or Never. Turning it on the
+  first time shows: "Recording a conversation may need the other person's
+  consent where you live. The visitor is not told that the call is
+  recorded." Nothing is announced to the visitor (that would be talk-back
+  the user did not ask for).
+- **When:** with the setting on for the doorbell, recording starts when the
+  call opens (a press or Start Conversation). The call's Record button (and
+  ⇧⌘R or Ctrl+Shift+R) starts or stops it at any time, with or without the
+  setting; starting again in the same call continues in `(part 2)`.
+- **What:** the doorbell's video and three audio tracks: "Conversation"
+  (both sides mixed, the one players play), "Visitor", and "You" (exactly
+  what was sent through the doorbell's speaker, where it played). The
+  visitor's track may hold an echo of the user's words from the doorbell's
+  speaker (AUDIO.md, "Recording calls"). The stream follows "Record from".
+- **Where:** beside the call transcripts, with the transcript's name
+  (`2026-10-11 17.02.03 Camera 1.mp4` next to `... Camera 1.txt`). The
+  folder keeps the newest 100 recordings and at most 10 GB of them; "Open
+  Call Recordings Folder" sits next to the setting. Share-safe names do not
+  apply here.
+- **Shown:** the call bar's "● Recording 0:42" pill, and the "● REC" pill on
+  the doorbell's tiles everywhere.
+
 ### A call in its own window
 
 A call can leave the viewer windows and live in a small call window of its
@@ -765,6 +978,31 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
+- **Layout (built on macOS, planned on Windows; CAPTURE.md "The call
+  window is a regular tile"):**
+  the picture becomes the viewer's own tile in a single-tile mode (no
+  layout editing, split, swap, focus, Show Camera, Remove or Clear; the
+  window keeps its own lease), so zoom, the zoom map, fisheye views,
+  Quality, Save picture and Record behave as in the grid. Top to bottom: a
+  call bar (camera name, a press or a conversation, elapsed time, the
+  "● Recording" pill, pin, Pop In, close); the tile with its hover header
+  (Save picture, Record, Speaker or Unmute, PTZ, Quality, "…") and the
+  Unmute cover as a veil inside it; the captions; the Talk row (Talk, Keep
+  talking, the echo status); the reply field and Send. Record there is the
+  call recording. Insets and call cards keep their drawing for now, with
+  the same header buttons.
+  - macOS: the tile is the viewer's `StageView` in a single fixed tile
+    mode, under the call bar ("Doorbell · 14:02:11 · 0:42", the pin, Pop
+    In, close) and above the captions, the Talk row and the reply. Wheel
+    and pinch zoom, the zoom map, Reset Zoom (the header button or the
+    menu), fisheye views and Quality work as in the grid; Quality and views
+    chosen there stay with that window. Its right-click menu is the header
+    model's list for a call window (Pop In Call, End Conversation, Record
+    Call, Save Picture with ⇧⌘R and ⇧⌘P), with no layout items; focus,
+    split and dropping a camera do nothing. The tile asks for the main
+    stream while its picture, zoom included, is drawn wider than the
+    sub-stream's (`CallWindowQuality`). Save Picture and Record Call say
+    "coming soon" until capture lands; no recording pill yet.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows),
@@ -783,6 +1021,81 @@ example to keep it beside other work. Both apps follow these rules.
   has "Calls open in" too. The frame (physical pixels, a virtual-screen
   origin), the placement, the pin, and the choices are kept in
   `view-settings.json`; call windows are not in `windows.json`.
+
+## Recordings
+
+The NVR's own recordings, found by what happened ([PLAYBACK.md](PLAYBACK.md),
+"Finding"; the calls are [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1
+to 5). Built on macOS (milestone P, M1); the Windows app follows (W1).
+Playing recordings (M2), the sound lanes (M3), and exports (M4) come later.
+
+- **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
+  brings it forward. It is a window of its own, not a sidebar section:
+  live view stays as it is while recordings are searched, and the window can
+  sit on another screen. The menu item is disabled with a core that has no
+  recordings. Proposed for the Windows app (W1): the right-click menu and
+  Ctrl+Alt+R.
+- **Layout:** a sidebar with the month's calendar, the search state, and
+  the cameras to search; in the middle the shown day ("Today, Sunday,
+  October 11, 2026" style, with previous and next day) and Incidents,
+  Timeline, or Downloads (with their count); on the right the selected
+  incident. A message line at the bottom says what a request answered when
+  it was refused or needs the user (for example that a locked incident's
+  video is not being kept).
+- **Cameras to search:** nothing is searched until the user chooses
+  cameras, per device (one checkbox for all its cameras) or per camera (each
+  lens of a multi-lens camera on its own). The choice is kept between
+  launches (`recordings-cameras.json` in the app's data folder) and given to
+  the core again at each launch; removing a device stops searching it.
+- **Days:** times are the device's own wall-clock time, as burned into the
+  picture (the computer's time zone stands in for the device's until the
+  core reads it). Showing a day asks the device for it; the window holds
+  today (its own hold) only while it shows today, and lets go when it shows
+  another day or closes. The calendar marks the days with recordings that
+  are known: a month's days arrive with the first day asked for in it. The
+  refresh button searches the shown day again. A day the device could not
+  search shows a warning on its lanes and is not asked again by itself.
+- **Incidents:** newest first, filtered by kind (People, Vehicles,
+  Animals, Motion, Other; none chosen shows all; Animals matches every
+  animal kind a device reports, `dog_cat` today and finer kinds later), by
+  cameras (all, a camera group, or one camera), and Locked. Each row shows
+  the cover thumbnails of up to four of its cameras, its name (or its time
+  and kinds), its time span, the kinds as the live detection badges, its
+  cameras, and marks for locked and downloaded. A click selects one, ⌘-click
+  adds or removes one, and with several selected, Merge joins them.
+- **The selected incident:** its name (Rename; an empty name goes back to
+  time and kinds), time span and date, badges, and camera group; Locked
+  (locking keeps it: its video is downloaded and nothing about it expires;
+  the message line says when its video is not being kept because there is no
+  downloads folder or too many downloads; unlocking never touches files);
+  Download; Revert Edits when edited; each camera with a large thumbnail and
+  Remove (not the last); Add Camera from the searched cameras; and Split,
+  at a time chosen on a slider.
+- **Timeline:** one lane per camera for the day, recording spans in gray,
+  events as bars colored by kind with the kind's symbol when there is room,
+  an hour ruler, and zoom from the whole day to 48×. A click within a few
+  points of an event selects its incident (a generous target).
+- **Thumbnails:** asked for as rows appear; a spinner until the device's
+  keyframe arrives, which the app decodes (VideoToolbox), shrinks to 320
+  points, and gives back to the core's cache as a JPEG, so the next time it
+  is read as is. A crossed-out camera means no recording in the range. The
+  window keeps at most 512 in memory; queued fetches are dropped when it
+  shows another day or closes.
+- **Downloads:** every download with its folder's name, state (Queued,
+  Waiting for the device, Downloading, Paused, Finishing, Done, Failed with
+  the reason), progress, and each camera's chunks; Pause or Resume, Retry
+  (failed), Show in Finder (the files, or the folder until they exist),
+  Forget (not while running; files stay), and Move to Trash (the core stops
+  writing first, then the folder goes to the Trash; nothing is deleted
+  permanently). Progress redraws at most four times a second. Downloads go
+  to `~/Movies/NVRView/Incidents` (`Incidents` in `--data-dir`).
+- **Camera groups:** "Camera Groups…" edits the groups whose cameras cover
+  the same area, so their events join one incident; it says that changing a
+  group changes its incidents.
+- **Never in the way:** every query reads the core's memory; device work
+  (searches, thumbnails, downloads) reports by events; decoding runs off the
+  main thread. Self-test steps `recordings-*` (the fake core) and
+  `recordings-real-core` (`scripts/macos-real-selftest.sh`, against the mock).
 
 ## Finding devices
 
@@ -833,7 +1146,61 @@ user types a password instead of an address. The core does the searching
   resized or redrawn. It slides away about half a second after the pointer
   leaves it; clicking or dragging cameras from it works as usual. S, or a pin
   control in the overlay, docks it again (which resizes the stage as before).
-  The same works in full screen.
+  The same works in full screen. On macOS the system's own peek of a
+  collapsed sidebar (macOS 26 opens it into the window when the pointer rests
+  near the edge, pushing the stage aside) is turned off; the edge reveal
+  takes its place.
+
+## Windows header
+
+On Windows the window's title bar is a header the app draws
+(`ExtendsContentIntoTitleBar`; the system's minimize, maximize, and close
+buttons stay, and so do the snap layouts on the maximize button). It takes the
+system's title bar height and display scale, and tells the system which of its
+controls take the pointer; everything else drags the window. macOS keeps its
+menu bar (docs/PARITY.md): this is a Windows-only part.
+
+- **Left.** The app name and the window's current layout with a picker: the
+  layouts, All Cameras, and the groups to switch to, then New layout, New
+  layout from template, and Save as layout (an unsaved arrangement only).
+- **Middle.** The app-wide quick actions: Find devices (opens Settings on
+  Devices and searches the network), Edit layout (Ctrl+E, a toggle), Fill
+  tiles (a toggle, per window, not kept), and Full screen (F).
+- **Right.** A spot reserved for a future "N recording" indicator (hidden until
+  recording is reported), Settings (Ctrl+,), and a "…" menu with the rest:
+  New window (Ctrl+N), Show or Hide sidebar (S), Indicator corner, Show or
+  Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
+- **Full screen.** The header is hidden and slides over the stage from the top
+  edge like the sidebar does from the left: resting the pointer in a thin strip
+  at the top for about 150 ms reveals it as an overlay (the stage is not
+  resized); it slides away about half a second after the pointer leaves it,
+  unless a menu of the header is open. The timing is the sidebar's
+  (`SidebarReveal`; `HeaderChrome` adds the full screen switch).
+- **The tile menu** (right-click) holds only what concerns the tile under the
+  pointer: Focus, Listen, Start or End Conversation, Pop Out Call, Calls open
+  in, Allow talk-back, Unmute on ring, Reset zoom, Quality, Fisheye view and
+  mount, Dismiss alert, and, outside focus, the layout actions for that tile
+  (split, remove, clear, Show camera, Layout preset). Nothing under the pointer:
+  no menu. Every app-wide item it once held is in the header.
+
+## Settings window
+
+Settings (Windows) is a resizable window of its own, not a dialog, so a tall
+section scrolls. It opens from the header, Ctrl+, , a device row's menu, or
+Find devices; there is one instance, brought to the front (on the section
+asked for) if it is already open. It remembers its size and position, closes
+with the app, and stops the device search when it closes or when the Devices
+section is left. A pane lists the sections, each in a scrolling page:
+
+- **Devices.** The device list and the add or edit form, with Find Devices on
+  This Network ("Finding devices").
+- **Cameras.** Per camera: where its calls open, unmute on ring, allow
+  talk-back (off until allowed; every use is logged), and for fisheye cameras
+  the mount.
+- **Alerts & calls.** The corner of the detection symbols and of the call cards,
+  calls in their own window and where those open, and saved transcripts.
+- **Updates.** The update source, trusted keys, automatic checks, Check now.
+- **About.** The version and license.
 
 ## Windows notes
 
@@ -842,27 +1209,36 @@ with Windows conventions:
 
 - Ctrl takes the place of ⌘ (Ctrl+L listens, Ctrl+, opens Settings), and
   Ctrl+click on a speaker listens to several tiles.
-- Shortcuts are listed in a help overlay (F1) and in the right-click menu,
-  which also carries Settings, full screen, and diagnostics (Ctrl+D).
+- Shortcuts are listed in a help overlay (F1), opened from the header's "…"
+  menu, which also has diagnostics (Ctrl+D). Settings and full screen are
+  buttons in the header ("Windows header").
 - Full screen is the window's own full-screen presenter (F, and Esc after
   leaving focus).
 - A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel
   (digital zoom, or the field of view of a Virtual PTZ tile). A touch
   screen's two-finger pinch zooms a Virtual PTZ tile by the pinch's scale
-  (the field of view is divided by it, 120° to 20°, each step bounded); it
-  does not zoom a tile's digital zoom yet.
-- Settings lists each fisheye camera with a Mount picker (Ceiling, Wall,
-  Desk; default Ceiling), kept with the other view settings like the
+  (the field of view is divided by it, 120° to 20°, each step bounded); on
+  other tiles it zooms the digital zoom around the point between the
+  fingers, with the same bounded steps.
+- Fill Tiles is the header's "Fill tiles" toggle (per window, not kept).
+  The zoom map sits in the tile's chrome and the reset control is a
+  magnifier button at the right of the hover header, shown while the tile
+  is zoomed (or a virtual camera was moved).
+- Settings > Cameras lists "Unmute on ring even when not listening" with a
+  check box per camera (the macOS Settings > Cameras option), kept with the
+  other view settings; the tile menu has the same toggle.
+- Settings > Cameras lists each fisheye camera with a Mount picker (Ceiling,
+  Wall, Desk; default Ceiling), kept with the other view settings like the
   right-click menu's Fisheye mount, and tiles in every window follow it at
   once.
 - Corner indicators use Segoe Fluent Icons (a vector paw for animals); the
-  corner is chosen in Settings or the right-click menu. A sound alarm also
+  corner is chosen in Settings > Alerts & calls or the header's "…" menu. A sound alarm also
   shows as a slate badge at the bottom left. Alerts, the Quality submenu, M,
   and the full screen idle hiding of the chrome and the pointer follow the
   sections above; the red border is steady when Windows' "Show animations" is
   off, as Reduce Motion is on the Mac.
 - Layouts, groups, and windows follow the sections above. Edit Layout is
-  Ctrl+E or the right-click menu (the edit bar holds the name, split, remove,
+  Ctrl+E or the header's Edit layout button (the edit bar holds the name, split, remove,
   presets, and Save as layout); Ctrl+N opens a new window. Layouts are the
   same documents the macOS app stores. The edge reveal, its timing, and its
   pin are as described under "Sidebar"; the sidebar's width is remembered

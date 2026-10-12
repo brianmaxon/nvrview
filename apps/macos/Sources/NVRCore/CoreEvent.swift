@@ -31,13 +31,35 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
     /// A fisheye (360°) camera sending its raw circle (`fisheye`; absent
     /// means false): the app can dewarp it (docs/RENDERING.md).
     public var fisheye: Bool
+    /// The channel's item has talk-back (`talk`, `ipcAudioTalk` 1; absent
+    /// means false until the capabilities are read).
+    public var talk: Bool
+    /// A doorbell (`doorbell`, `channelType` Doorbell).
+    public var doorbell: Bool
+    /// What the channel's item can move (`ptz`).
+    public var ptz: PTZCapabilities
+    /// Per lens of a multi-lens camera, lens 0 first (`lens_talk`,
+    /// `lens_ptz`); nil when the core sent none.
+    public var lensTalk: [Bool]?
+    public var lensPTZ: [PTZCapabilities]?
 
-    private enum CodingKeys: String, CodingKey { case channel, connected, tiers, name, model, detects, lenses, fisheye }
+    private enum CodingKeys: String, CodingKey {
+        case channel, connected, tiers, name, model, detects, lenses, fisheye, talk, doorbell, ptz
+        case lensTalk = "lens_talk"
+        case lensPTZ = "lens_ptz"
+    }
 
     public init(
         channel: Int, connected: Bool = false, tiers: [String] = [], name: String? = nil,
-        model: String? = nil, detects: [String] = [], lenses: Int = 1, fisheye: Bool = false
+        model: String? = nil, detects: [String] = [], lenses: Int = 1, fisheye: Bool = false,
+        talk: Bool = false, doorbell: Bool = false, ptz: PTZCapabilities = .none,
+        lensTalk: [Bool]? = nil, lensPTZ: [PTZCapabilities]? = nil
     ) {
+        self.talk = talk
+        self.doorbell = doorbell
+        self.ptz = ptz
+        self.lensTalk = lensTalk
+        self.lensPTZ = lensPTZ
         self.fisheye = fisheye
         self.lenses = lenses
         self.channel = channel
@@ -58,10 +80,60 @@ public struct ChannelInfo: Sendable, Equatable, Codable {
         detects = (try? c.decodeIfPresent([String].self, forKey: .detects)) ?? []
         lenses = max((try? c.decodeIfPresent(Int.self, forKey: .lenses)) ?? 1, 1)
         fisheye = (try? c.decodeIfPresent(Bool.self, forKey: .fisheye)) ?? false
+        talk = (try? c.decodeIfPresent(Bool.self, forKey: .talk)) ?? false
+        doorbell = (try? c.decodeIfPresent(Bool.self, forKey: .doorbell)) ?? false
+        ptz = (try? c.decodeIfPresent(PTZCapabilities.self, forKey: .ptz)) ?? .none
+        lensTalk = try? c.decodeIfPresent([Bool].self, forKey: .lensTalk)
+        lensPTZ = try? c.decodeIfPresent([PTZCapabilities].self, forKey: .lensPTZ)
     }
 
     /// Whether the camera has a second lens the app can show.
     public var isMultiLens: Bool { lenses >= 2 }
+
+    /// Talk-back of one lens: its own entry when the core listed lenses,
+    /// else the channel's item (docs/FFI.md, "channels").
+    public func talk(lens: Int) -> Bool {
+        if let lensTalk, lens < lensTalk.count { return lensTalk[lens] }
+        return lens == 0 ? talk : false
+    }
+
+    /// What one lens can move, by the same rule.
+    public func ptz(lens: Int) -> PTZCapabilities {
+        if let lensPTZ, lens < lensPTZ.count { return lensPTZ[lens] }
+        return lens == 0 ? ptz : .none
+    }
+}
+
+/// A camera's motion capabilities (`ptz` in the `channels` event): what it
+/// has, not what the user allowed.
+public struct PTZCapabilities: Sendable, Equatable, Codable {
+    /// `ptzType` 3.
+    public var panTilt: Bool
+    /// `ptzPreset` bit 0.
+    public var presets: Bool
+    /// `ptzType` 1 or 3.
+    public var zoomFocus: Bool
+
+    public static let none = PTZCapabilities()
+
+    private enum CodingKeys: String, CodingKey {
+        case panTilt = "pan_tilt"
+        case presets
+        case zoomFocus = "zoom_focus"
+    }
+
+    public init(panTilt: Bool = false, presets: Bool = false, zoomFocus: Bool = false) {
+        self.panTilt = panTilt
+        self.presets = presets
+        self.zoomFocus = zoomFocus
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        panTilt = (try? c.decodeIfPresent(Bool.self, forKey: .panTilt)) ?? false
+        presets = (try? c.decodeIfPresent(Bool.self, forKey: .presets)) ?? false
+        zoomFocus = (try? c.decodeIfPresent(Bool.self, forKey: .zoomFocus)) ?? false
+    }
 }
 
 public struct TileStats: Sendable, Equatable {
@@ -116,6 +188,10 @@ public enum CoreEvent: Sendable, Equatable {
     case discoveryDone(DiscoveryEnd)
     /// Minor 2: an update check or download progressed or ended.
     case update(UpdateEvent)
+    /// Minor 5: recordings (index, incidents, groups, thumbnails, downloads).
+    case recordings(RecordingsEvent)
+    /// Minor 6: recorded playback (state, cameras, seeks, closed).
+    case playback(PlaybackEvent)
 
     /// The `discovered` event's own shape (its `channels` is a number, unlike
     /// the `channels` event's list).
@@ -202,7 +278,18 @@ public enum CoreEvent: Sendable, Equatable {
 
     /// Nil for malformed JSON, an unknown type, or a known type missing the
     /// fields it cannot do without.
+    private struct TypeWire: Decodable { var type: String }
+
     public static func parse(_ json: Data) -> CoreEvent? {
+        // Recordings events name devices by key (a string), not by ID.
+        if let t = try? JSONDecoder().decode(TypeWire.self, from: json) {
+            if RecordingsEvent.types.contains(t.type) {
+                return RecordingsEvent.parse(json).map(CoreEvent.recordings)
+            }
+            if PlaybackEvent.types.contains(t.type) {
+                return PlaybackEvent.parse(json).map(CoreEvent.playback)
+            }
+        }
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
         switch w.type {
         case "update":

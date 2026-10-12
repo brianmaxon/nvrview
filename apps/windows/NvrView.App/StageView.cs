@@ -54,6 +54,9 @@ internal sealed class WindowState(WindowContent content, string name, LayoutNode
     public NodePath? Selected { get; set; }
 
     public bool Editing { get; set; }
+
+    /// <summary>Fill Tiles (docs/UX.md "Digital zoom"): pictures are cropped to fill their tiles instead of fitted. Per window, not kept.</summary>
+    public bool Fill { get; set; }
 }
 
 internal sealed partial class StageView : UserControl
@@ -156,7 +159,7 @@ internal sealed partial class StageView : UserControl
                     "F                            full screen",
                     "S                            show or hide the sidebar",
                     "Esc                          leave focus, editing, then full screen",
-                    "Mouse wheel, drag            digital zoom and pan; 0 resets",
+                    "Wheel, pinch, drag           digital zoom and pan; 0 or the header's button resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
@@ -216,13 +219,8 @@ internal sealed partial class StageView : UserControl
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
 
-    /// <summary>The Settings dialog opener (set by the window).</summary>
+    /// <summary>The Settings window opener (set by the window).</summary>
     public Action? SettingsRequested { get; set; }
-
-    /// <summary>The update menu item's title and action (set by the window); no item when null.</summary>
-    public Func<string>? UpdateTitle { get; set; }
-
-    public Action? UpdateRequested { get; set; }
 
     /// <summary>The tree changed by a finished gesture or command (the window stores it).</summary>
     public event Action<LayoutNode>? Edited;
@@ -330,6 +328,7 @@ internal sealed partial class StageView : UserControl
         }
         if (Renderer is not null)
         {
+            Renderer.Fill = State.Fill;
             Renderer.Layout = new StageLayout(_tiles, cells, w, h);
         }
         PlaceOutlines();
@@ -806,6 +805,12 @@ internal sealed partial class StageView : UserControl
             _gesture = GestureKind.None;
             _panTile = null;
         }
+        // The same for a digital zoom's pan: the pinch's zoom must not be overwritten by the drag's starting zoom.
+        else if (_gesture == GestureKind.Pan)
+        {
+            _gesture = GestureKind.None;
+            _panTile = null;
+        }
     }
 
     protected override void OnManipulationDelta(ManipulationDeltaRoutedEventArgs e)
@@ -816,6 +821,26 @@ internal sealed partial class StageView : UserControl
             e.Handled = true;
             Interact();
         }
+        else if (TileAt(e.Position) is { } t && !(t.Fisheye is { } fe && fe.Mode.Dewarps()))
+        {
+            PinchDigital(t, e.Position.X, e.Position.Y, e.Delta.Scale);
+            e.Handled = true;
+            Interact();
+        }
+    }
+
+    /// <summary>
+    /// One pinch step on a touch screen zooms the tile's digital zoom around the point between the fingers
+    /// (<paramref name="x"/>, <paramref name="y"/> in the stage's units), as the wheel does around the pointer.
+    /// </summary>
+    public void PinchDigital(StageTile t, double x, double y, double scale)
+    {
+        if (t.ViewWidth <= 0 || t.ViewHeight <= 0 || t.PictureWidth <= 0)
+        {
+            return;
+        }
+        double fx = Math.Clamp((x - t.ViewX) / t.ViewWidth, 0, 1), fy = Math.Clamp((y - t.ViewY) / t.ViewHeight, 0, 1);
+        ZoomAround(t, fx, fy, FisheyePinch.Factor(scale));
     }
 
     /// <summary>One pinch step on a tile (<paramref name="scale"/> above 1 spreads: zooms in); only Virtual PTZ zooms.</summary>
@@ -912,6 +937,21 @@ internal sealed partial class StageView : UserControl
         {
             Select(t.Path);
         }
+        // The menu holds actions of the tile under the pointer only; the app-wide actions are in the
+        // window's header (docs/UX.md "Windows header"). Nothing under the pointer: no menu.
+        if (t is not null && BuildTileMenu(t) is { } menu)
+        {
+            menu.ShowAt(this, at);
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// The context menu of a tile: its camera's actions (focus, listen, conversation, zoom, quality, fisheye,
+    /// dismiss), its layout actions while editing, and what other features add; null when it would be empty.
+    /// </summary>
+    internal MenuFlyout? BuildTileMenu(StageTile t)
+    {
         var menu = new MenuFlyout();
         MenuFlyoutItem Item(IList<MenuFlyoutItemBase> into, string text, Action action, bool enabled = true)
         {
@@ -925,6 +965,10 @@ internal sealed partial class StageView : UserControl
             Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the grid" : "Focus", () => ToggleFocus(t), !State.Editing);
             Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
             AddConversationItems(menu, camera);
+            var unmute = new ToggleMenuFlyoutItem { Text = "Unmute on ring", IsChecked = _viewer.Settings.UnmuteOnRing(camera) };
+            unmute.Click += (_, _) => _viewer.Settings.SetUnmuteOnRing(camera, unmute.IsChecked);
+            ToolTipService.SetToolTip(unmute, "When this camera rings, unmute it even if you are not listening");
+            menu.Items.Add(unmute);
             Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
             menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
             if (_viewer.IsFisheye(camera))
@@ -937,13 +981,13 @@ internal sealed partial class StageView : UserControl
                 Item(menu.Items, "Dismiss alert", () => _viewer.DismissAlert(camera));
             }
         }
-        if (t is not null)
+        TileMenuOpening?.Invoke(menu, t, this);
+        if (CanEditLayout)
         {
-            TileMenuOpening?.Invoke(menu, t, this);
-            menu.Items.Add(new MenuFlyoutSeparator());
-        }
-        if (t is not null && CanEditLayout)
-        {
+            if (menu.Items.Count > 0)
+            {
+                menu.Items.Add(new MenuFlyoutSeparator());
+            }
             Item(menu.Items, "Split side by side", () => Split(SplitAxis.Row), CanSplit);
             Item(menu.Items, "Split stacked", () => Split(SplitAxis.Col), CanSplit);
             Item(menu.Items, "Remove tile", RemoveSelected, State.Tree.LeafCount > 1 || !t.IsEmpty);
@@ -979,20 +1023,8 @@ internal sealed partial class StageView : UserControl
                 Item(presets.Items, preset.Title(), () => ApplyPreset(preset));
             }
             menu.Items.Add(presets);
-            menu.Items.Add(new MenuFlyoutSeparator());
         }
-        WindowMenu?.Invoke(menu);
-        menu.Items.Add(IndicatorCornerMenu());
-        Item(menu.Items, IsFullScreen ? "Leave full screen" : "Full screen", ToggleFullScreen);
-        Item(menu.Items, _diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
-        Item(menu.Items, "Keyboard shortcuts", ToggleHelp);
-        Item(menu.Items, "Settings…", () => SettingsRequested?.Invoke());
-        if (UpdateTitle?.Invoke() is { } updateTitle)
-        {
-            Item(menu.Items, updateTitle, () => UpdateRequested?.Invoke());
-        }
-        menu.ShowAt(this, at);
-        e.Handled = true;
+        return menu.Items.Count > 0 ? menu : null;
     }
 
     // ---- conversations (docs/UX.md "Doorbell calls") ----
@@ -1188,7 +1220,7 @@ internal sealed partial class StageView : UserControl
     public bool IsEasingFisheyeZoom => _fisheyeZoom.IsEasing;
 
     /// <summary>The "Indicator corner" submenu: where the tiles' symbols sit (a setting, saved).</summary>
-    private MenuFlyoutSubItem IndicatorCornerMenu()
+    internal MenuFlyoutSubItem IndicatorCornerMenu()
     {
         var sub = new MenuFlyoutSubItem { Text = "Indicator corner" };
         foreach (ChromeCorner corner in Enum.GetValues<ChromeCorner>())
@@ -1226,9 +1258,6 @@ internal sealed partial class StageView : UserControl
             return TileQuality.Auto;
         }
     }
-
-    /// <summary>The window's own entries for the context menu (Edit Layout, Save as Layout, sidebar, new window).</summary>
-    public Action<MenuFlyout>? WindowMenu { get; set; }
 
     // ---- keys (from the window) ----
 
@@ -1367,13 +1396,29 @@ internal sealed partial class StageView : UserControl
         return n >= 0 ? _tiles[n] : null;
     }
 
-    private void ToggleDiagnostics()
+    /// <summary>Fill Tiles on or off for this window: pictures crop to fill their tiles, or fit with bars.</summary>
+    public void SetFill(bool fill)
+    {
+        if (State.Fill == fill)
+        {
+            return;
+        }
+        State.Fill = fill;
+        Relayout();
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>Whether the tiles show their diagnostics line.</summary>
+    public bool Diagnostics => _diagnostics;
+
+    public void ToggleDiagnostics()
     {
         _diagnostics = !_diagnostics;
         RefreshAll();
+        StateChanged?.Invoke();
     }
 
-    private void ToggleHelp() =>
+    public void ToggleHelp() =>
         _help.Visibility = _help.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
 
     // ---- chrome ----
@@ -1396,7 +1441,7 @@ internal sealed partial class StageView : UserControl
         _chromes.Clear();
         foreach (StageTile t in _tiles)
         {
-            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked };
+            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked, ResetClicked = ResetTile };
             chrome.Speaker.Visibility = t.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
@@ -1516,6 +1561,16 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>The Retry button was pressed (or invoked by the self-test).</summary>
+    // The header's reset control: a moved virtual camera goes back to its default, else the digital zoom to 1x.
+    private void ResetTile(StageTile tile)
+    {
+        if (!ResetFisheye(tile))
+        {
+            ResetZoom(tile);
+        }
+        Interact();
+    }
+
     private void RetryClicked(StageTile tile)
     {
         _retryWatch.Restart(tile, _viewer.Clock.Now);
@@ -1610,6 +1665,7 @@ internal sealed partial class StageView : UserControl
             // The outline fades with the chrome, but stays while editing the layout.
             bool isSelected = c.Tile.Path == selected && (recent || State.Editing);
             c.SetHover(header, isSelected);
+            c.SetMapShown(recent);
         }
     }
 

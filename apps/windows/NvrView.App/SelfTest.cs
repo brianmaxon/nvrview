@@ -61,6 +61,12 @@
 //    "Open calls in their own window" routing are remembered. Then, on the real computer: the
 //    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
 //    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
+// 11c. the header and the Settings window (docs/UX.md "Windows header", "Settings window"): the
+//    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
+//    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
+//    manual clock; the tile menu holds none of the app-wide items; Settings is one window of its own
+//    with a pane of five sections, a section taller than the window scrolls to its last control, a
+//    second open brings the same window forward, its size is remembered, and it closes with the app;
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
@@ -113,6 +119,15 @@ internal sealed class SelfTest(App app, AppOptions options)
         catch (Exception e)
         {
             _problems.Add($"self-test threw: {e}");
+        }
+        try
+        {
+            // parity: updates-bundled-defaults
+            _problems.AddRange(UpdateDefaultsSelfTest.Run(app.Viewer!, line => Say(line)));
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the bundled update defaults step threw: {e}");
         }
         Finish(_problems);
     }
@@ -174,7 +189,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: render-no-alloc
         // Steady state: the render thread allocates nothing per frame.
         long bytes = r.AllocatedBytes, framesBefore = r.Frames;
-        await Task.Delay(1000);
+        await Until(() => r.Frames - framesBefore >= 30, 10);
         long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
         Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
         if (allocated > 0)
@@ -196,7 +211,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             v.Disconnect(wrong);
 
             // parity: settings-save-remove
-            // What the Settings dialog does on Save and Remove (in memory in
+            // What the Settings window does on Save and Remove (in memory in
             // this mode): a second device connects, then goes away.
             var saved = new DeviceConfig { Name = "second", Host = mock.Host, Port = mock.Port, User = "example-user" };
             v.SaveDevice(saved, Environment.GetEnvironmentVariable("NVRVIEW_TEST_PASSWORD") ?? "example-password");
@@ -210,31 +225,32 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
 
             // parity: settings-dialog-opens
-            // The dialog itself opens and closes. Its device search is real but
+            // The window itself opens and closes. Its device search is real but
             // limited to loopback (nothing answers there); the answers are made up
             // and fed in as the core's events.
             v.DiscoveryRequest = "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}";
-            var hooks = new SettingsDialogHooks();
-            var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true, hooks);
-            _ = dialog.ShowAsync();
-            await Task.Delay(500);
-            bool shown = dialog.IsLoaded;
-            Say($"settings dialog shown: {shown}");
+            var hooks = new SettingsPagesHooks();
+            SettingsWindow settings = SettingsWindow.Open(v, development: true, SettingsSection.Devices, hooks: hooks, background: true);
+            await Until(() => settings.IsLoaded, 5);
+            bool shown = settings.IsLoaded;
+            Say($"settings window shown: {shown}");
             if (!shown)
             {
-                _problems.Add("the Settings dialog did not open");
+                _problems.Add("the Settings window did not open");
             }
             await FindDevices(v, hooks, mock);
             // parity: discovery-stop-on-close
-            dialog.Hide();
+            settings.Close();
             bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
-            Say($"find devices: search stopped when the dialog closed: {stopped}");
+            Say($"find devices: search stopped when the window closed: {stopped}");
             if (!stopped)
             {
                 _problems.Add("closing Settings did not stop the device search");
             }
             v.DiscoveryRequest = null;
         }
+
+        await HeaderAndSettings(v);
 
         // parity: resize
         // 2. Live resize.
@@ -300,7 +316,10 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add("the core never started playing the audible tile");
         }
-        await Task.Delay(300);
+        if (app.Audio is { Problem: null })
+        {
+            await Until(() => app.Audio.FramesRendered > rendered, 3);
+        }
         long renderedNow = app.Audio?.FramesRendered ?? 0;
         string audio = app.Audio is null ? "off (--no-audio)" :
             app.Audio.Problem is { } why ? $"no output ({why})" : $"{app.Audio.SampleRate} Hz, {renderedNow - rendered} frames rendered";
@@ -344,6 +363,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         StageView.ResetZoom(zoomed);
         await CheckZoomFillsTile();
+        await CheckZoomChrome();
+        await CheckFillTiles();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -671,6 +692,39 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.Calls.End(camera, "closed");
         Expect(v.Calls.CallFor(camera) is null && !v.IsAudible(camera), "closing the call did not end it and mute the camera");
         Expect(ringCaptioned && v.Transcripts.Names().Length == 1, "a call with saving off wrote a transcript file");
+
+        // parity: unmute-on-ring
+        // The doorbell's "Unmute on ring even when not listening": with it on, a press plays the doorbell at once
+        // (no Unmute control); it is a view setting that reads back from view-settings.json.
+        v.Settings.SetUnmuteOnRing(camera, true);
+        v.Apply(Alarm(device, 0, "visitor", true));
+        Call? loud = v.Calls.CallFor(camera);
+        bool loudAudible = loud is { ShowsUnmute: false, Audible: true } && v.IsAudible(camera);
+        v.Calls.End(camera, "closed");
+        bool loudEnded = v.Calls.CallFor(camera) is null && !v.IsAudible(camera);
+        v.Apply(Alarm(device, 0, "visitor", false));
+        v.Settings.SetUnmuteOnRing(camera, false);
+        v.Apply(Alarm(device, 0, "visitor", true));
+        bool quietAgain = v.Calls.CallFor(camera) is { ShowsUnmute: true, Audible: false } && !v.IsAudible(camera);
+        v.Calls.End(camera, "closed");
+        v.Apply(Alarm(device, 0, "visitor", false));
+        string unmuteFile = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-settings-{Guid.NewGuid():N}.json");
+        bool unmuteSaved;
+        try
+        {
+            new ViewSettings(unmuteFile).SetUnmuteOnRing(camera, true);
+            var reread = new ViewSettings(unmuteFile);
+            unmuteSaved = reread.UnmuteOnRing(camera) && !reread.UnmuteOnRing(new CameraRef(camera.Device, camera.Channel + 1));
+        }
+        finally
+        {
+            File.Delete(unmuteFile);
+        }
+        Say($"calls: unmute on ring: audible at once {loudAudible}, ended {loudEnded}, silent again when off {quietAgain}, setting reads back {unmuteSaved}");
+        Expect(loudAudible, "with Unmute on ring on, a press did not play the doorbell at once");
+        Expect(loudEnded, "ending the unmuted call left the doorbell audible");
+        Expect(quietAgain, "with Unmute on ring off again, a press did not open a silent call");
+        Expect(unmuteSaved, "the unmute-on-ring setting did not read back from view-settings.json");
         try
         {
             Directory.Delete(transcriptFolder, recursive: true);
@@ -1096,6 +1150,121 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(after is < 0.02, "back at 1x, the letterbox bar is not black");
     }
 
+    // parity: zoom-map
+    // parity: zoom-reset-control
+    // parity: zoom-touch-pinch
+    // The zoom map and the header's reset control follow a tile's zoom, and a touch screen's pinch zooms
+    // the digital zoom around the point between the fingers.
+    private async Task CheckZoomChrome()
+    {
+        StageView stage = app.Stage!;
+        StageTile? t = Tiles.FirstOrDefault(x => !(x.Fisheye is { } f && f.Mode.Dewarps()) && x.PictureWidth > 0 && x.ViewWidth > 0 && x.ZoomBase.Width > 0.99);
+        TileChrome? chrome = t is null ? null : stage.ChromeFor(t);
+        if (t is null || chrome is null)
+        {
+            _problems.Add("no ordinary tile to check the zoom map on");
+            return;
+        }
+        StageView.ResetZoom(t);
+        stage.Interact();
+        stage.Tick();
+        await Task.Delay(100);
+        bool idleHidden = !chrome.MapShown && !chrome.ResetShown;
+        // The pinch: spreading zooms in around the point between the fingers; closing zooms back out; junk changes nothing.
+        double cx = t.ViewX + t.ViewWidth * 0.25, cy = t.ViewY + t.ViewHeight * 0.25;
+        stage.PinchDigital(t, cx, cy, 2);
+        bool pinchedIn = Math.Abs(t.Zoom - 2) < 0.01;
+        double pointX = t.CenterX;
+        stage.PinchDigital(t, cx, cy, double.NaN);
+        bool junkIgnored = Math.Abs(t.Zoom - 2) < 0.01;
+        for (int i = 0; i < 8; i++)
+        {
+            stage.PinchDigital(t, cx, cy, 2);
+        }
+        bool bounded = Math.Abs(t.Zoom - TileZoom.MaxScale) < 0.01;
+        for (int i = 0; i < 8; i++)
+        {
+            stage.PinchDigital(t, cx, cy, 0.5);
+        }
+        bool pinchedOut = t.Zoom <= 1.0001f;
+        Say($"zoom touch pinch: in {pinchedIn} (center x {pointX:0.00}), junk ignored {junkIgnored}, bounded at {TileZoom.MaxScale:0}x {bounded}, back out {pinchedOut}");
+        Expect(pinchedIn && pointX < 0.5, $"a pinch spread did not zoom in around the fingers (zoom {t.Zoom:0.00}, center x {pointX:0.00})");
+        Expect(junkIgnored, "a pinch step of NaN changed the zoom");
+        Expect(bounded, $"pinching past the limit did not stop at the maximum zoom ({t.Zoom:0.00})");
+        Expect(pinchedOut, $"pinching closed did not return to 1x ({t.Zoom:0.00})");
+
+        // The map and the reset control, zoomed.
+        StageView.ZoomAround(t, 0.25, 0.25, 2);
+        stage.Interact();
+        stage.Tick();
+        bool shown = await Until(() => chrome.MapShown && chrome.ResetShown, 3);
+        (UnitRect frame, UnitRect visible) = chrome.MapGeometry;
+        TileZoom zoom = t.DigitalZoom;
+        UnitRect d = zoom.Destination(t.ZoomBase);
+        double left = t.ViewX + d.X * t.ViewWidth, bottom = t.ViewY + (d.Y + d.Height) * t.ViewHeight;
+        bool corner = Math.Abs(frame.X - left - ZoomMap.Margin) < 1.5 && Math.Abs(bottom - ZoomMap.Margin - (frame.Y + frame.Height)) < 1.5;
+        bool shape = frame.Height > 0 && Math.Abs(frame.Width / frame.Height - t.PictureWidth / (double)t.PictureHeight) < 0.1;
+        UnitRect want = zoom.Visible(t.ZoomBase);
+        bool region = Math.Abs(visible.X - want.X) < 1e-6 && Math.Abs(visible.Width - want.Width) < 1e-6 && visible.Width < 1;
+        Say($"zoom map: shown {shown}, frame {frame.Width:0}x{frame.Height:0}, bottom left corner {corner}, picture shape {shape}, marks the visible region {region}");
+        Expect(shown, "zoomed and active, the tile shows no zoom map or no reset control");
+        Expect(corner && shape && region, $"the zoom map is misplaced or marks the wrong region: frame {frame}, visible {visible}, wanted corner at {left:0},{bottom:0}");
+
+        // It fades with the chrome (a few idle seconds) and returns with the pointer.
+        bool faded = await Until(() =>
+        {
+            stage.Tick();
+            return !chrome.MapShown;
+        }, ChromeIdle.HideAfterSeconds + 4);
+        stage.Interact();
+        stage.Tick();
+        bool back = await Until(() => chrome.MapShown, 3);
+        Say($"zoom map: fades with the chrome {faded}, returns with the pointer {back}, hidden at 1x before {idleHidden}");
+        Expect(faded && back, "the zoom map did not fade with the chrome and return with the pointer");
+        Expect(idleHidden, "at 1x the tile showed a zoom map or a reset control");
+
+        // The header's reset control returns the tile to 1x and takes the map and itself away.
+        chrome.PressReset();
+        bool reset = t.Zoom <= 1.0001f && t.CenterX == 0.5f && t.CenterY == 0.5f;
+        bool gone = await Until(() => !chrome.MapShown && !chrome.ResetShown, 3);
+        Say($"zoom reset control: back to 1x {reset}, control and map gone {gone}");
+        Expect(reset, $"the reset control did not return the tile to 1x ({t.Zoom:0.00})");
+        Expect(gone, "after the reset the tile still shows the reset control or the zoom map");
+    }
+
+    // parity: fill-tiles
+    // Fill Tiles crops the picture to fill its tile (the former letterbox bar shows picture) and
+    // turning it off fits it again; a zoom still works from the crop.
+    private async Task CheckFillTiles()
+    {
+        StageView stage = app.Stage!;
+        StageRenderer r = app.Renderer!;
+        StageTile? boxed = Tiles.FirstOrDefault(t => !(t.Fisheye is { } f && f.Mode.Dewarps()) && ZoomBar(t) is not null);
+        if (boxed is null || ZoomBar(boxed) is not { } bar)
+        {
+            _problems.Add("no letterboxed tile to check Fill Tiles on");
+            return;
+        }
+        double? fitted = await BarLit(r, bar);
+        stage.SetFill(true);
+        double? filled = await BarLit(r, bar);
+        ZoomBase b = boxed.ZoomBase;
+        bool crop = boxed.Fill && Math.Max(b.Width, b.Height) > 1.01 && Math.Min(b.Width, b.Height) > 0.999;
+        bool tileArea = Near(boxed.X, boxed.ViewX) && Near(boxed.Width, boxed.ViewWidth) && Near(boxed.Y, boxed.ViewY) && Near(boxed.Height, boxed.ViewHeight);
+        StageView.ZoomAround(boxed, 0.5, 0.5, 2);
+        double? zoomedFilled = await BarLit(r, bar);
+        bool reaches = boxed.DigitalZoom.Visible(boxed.ZoomBase).Width < 1;
+        StageView.ResetZoom(boxed);
+        stage.SetFill(false);
+        double? fittedAgain = await BarLit(r, bar);
+        Say($"fill tiles: bar lit {fitted:0.00} fitted, {filled:0.00} filled, {zoomedFilled:0.00} filled and zoomed, {fittedAgain:0.00} fitted again; base {b.Width:0.00}x{b.Height:0.00}, tile area {tileArea}");
+        Expect(fitted is < 0.02, "the letterbox bar was not black before Fill Tiles");
+        Expect(filled is >= 0.5, "with Fill Tiles the former letterbox bar still shows no picture");
+        Expect(crop && tileArea, $"Fill Tiles did not crop the picture to the tile (base {b.Width:0.00}x{b.Height:0.00}, tile area {tileArea})");
+        Expect(zoomedFilled is >= 0.5 && reaches, "zooming from the filled crop lost the picture");
+        Expect(fittedAgain is < 0.02 && !boxed.Fill, "turning Fill Tiles off did not fit the picture again");
+    }
+
     // One of a tile's bars at 1x (DIPs, a unit in from its edges), or null if the picture fills it.
     private static Rect? ZoomBar(StageTile t)
     {
@@ -1256,7 +1425,10 @@ internal sealed class SelfTest(App app, AppOptions options)
                     peak = Math.Max(peak, Math.Abs(x));
                 }
             });
-            await Task.Delay(700);
+            if (problem is null)
+            {
+                await Until(() => Volatile.Read(ref blocks) >= 5, 3);
+            }
             mic.Stop();
             Say($"calls: microphone {(problem is null ? $"opened: {blocks} blocks, {samplesSeen} samples at 16 kHz, peak {peak:0.000}" : $"not available: {problem}")}");
             // What Windows reports about its echo canceller for this microphone and the output that plays.
@@ -1284,13 +1456,213 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
     }
 
+    // 11c. The header, the trimmed tile menu, and the Settings window (docs/UX.md "Windows header", "Settings window").
+    private async Task HeaderAndSettings(Viewer v)
+    {
+        ViewerWindow w = app.Windows[0];
+        StageView stage = w.Stage;
+        HeaderBar header = w.Header;
+        IViewerClock realClock = w.RevealClock;
+
+        // parity: header-present
+        // The header is the title bar: it draws into it, keeps room for the caption buttons, hands the system its
+        // controls, and shows the quick actions, Settings, and the reserved recording spot.
+        var buttons = header.Buttons();
+        Say($"header: {string.Join(" / ", buttons.Select(b => b.Name))}; layout \"{header.LayoutLabel}\"; recording spot reserved {header.HasRecordingSpot}, shown {header.RecordingSpotVisible}");
+        Expect(w.ExtendsIntoTitleBar, "the window does not extend its content into the title bar");
+        HeaderAction[] expected = [HeaderAction.FindDevices, HeaderAction.EditLayout, HeaderAction.FillTiles, HeaderAction.FullScreen, HeaderAction.Settings];
+        Expect(expected.All(a => buttons.Any(b => b.Action == a && b.Enabled && b.Visible && b.Name.Length > 0)), "the header lacks a quick action or Settings");
+        Expect(header.LayoutLabel == w.ContentTitle && w.DockedHeaderShown, "the header does not show the current layout");
+        Expect(header.HasRecordingSpot && !header.RecordingSpotVisible, "the recording spot is not reserved, or shows before anything records");
+        Expect(Math.Abs(header.Root.ActualHeight - header.Root.Height) < 1 && header.Root.ActualHeight >= 32, "the header does not have the title bar's height");
+        bool regions = await Until(() => w.PassthroughRegions >= buttons.Count, 5);
+        Say($"header: {w.PassthroughRegions} interactive regions handed to the system");
+        Expect(regions, "the header's controls were not given to the system as interactive regions");
+
+        // parity: header-actions
+        // The actions do what the menu items did.
+        header.Press(HeaderAction.EditLayout);
+        bool editing = stage.State.Editing;
+        string editName = header.Buttons().First(b => b.Action == HeaderAction.EditLayout).Name;
+        header.Press(HeaderAction.EditLayout);
+        Expect(editing && editName == "Done editing" && !stage.State.Editing, "Edit layout in the header did not toggle editing");
+        header.Press(HeaderAction.FillTiles);
+        bool filled = stage.State.Fill;
+        header.Press(HeaderAction.FillTiles);
+        Expect(filled && !stage.State.Fill, "Fill tiles in the header did not toggle");
+        stage.FullScreenOverride = true;
+        header.Update();
+        string fullName = header.Buttons().First(b => b.Action == HeaderAction.FullScreen).Name;
+        stage.FullScreenOverride = null;
+        header.Update();
+        Expect(fullName == "Leave full screen" && header.Buttons().First(b => b.Action == HeaderAction.FullScreen).Name == "Full screen", "the Full screen button does not say what it does");
+        List<string> overflow = Texts(header.BuildOverflow().Items);
+        Say($"header: overflow {string.Join(" / ", overflow)}");
+        string[] rest = ["New window", w.SidebarDocked ? "Hide sidebar" : "Show sidebar", "Indicator corner", "Show diagnostics", "Keyboard shortcuts"];
+        Expect(rest.All(overflow.Contains) && overflow.Any(t => t == "Check for updates…" || t.StartsWith("Update to ", StringComparison.Ordinal) || t.StartsWith("Switch to ", StringComparison.Ordinal)),
+            "the overflow menu lacks an app-wide item that left the tile menu");
+        // The same arrangement saved as a layout, so no camera loses its lease while the window switches.
+        WindowContent before = w.State.Content;
+        string? layoutId = v.CreateLayout("Header test", w.State.Tree);
+        List<string> picker = Texts(header.BuildLayoutMenu().Items);
+        Say($"header: layout picker {string.Join(" / ", picker)}");
+        Expect(layoutId is not null && picker.Contains("All Cameras") && picker.Contains("Header test") && picker.Contains("New layout…")
+            && picker.Contains("New layout from template") && picker.Contains("Save as layout…"), "the layout picker lacks a layout or a layout action");
+        // parity: header-layout-picker
+        // Choosing a layout in the picker shows it in the window, and the header follows.
+        if (layoutId is not null)
+        {
+            w.Show(new WindowContent.Layout(layoutId));
+            Expect(header.LayoutLabel == "Header test" && Texts(header.BuildLayoutMenu().Items).Contains("Header test")
+                && !Texts(header.BuildLayoutMenu().Items).Contains("Save as layout…"), "the header did not follow the layout shown");
+            w.Show(before);
+            v.DeleteLayout(layoutId);
+        }
+        Expect(header.LayoutLabel == w.ContentTitle, "the header did not return to the arrangement shown");
+
+        // parity: header-fullscreen-reveal
+        // In full screen the header is hidden and slides in from the top edge on the sidebar's timing (manual clock).
+        var clock = new ManualViewerClock(5000);
+        w.RevealClock = clock;
+        w.SimulateHeaderFullScreen(true);
+        Expect(!w.HeaderVisible && !w.DockedHeaderShown && !w.HeaderOverlayInteractive, "the header is not hidden in full screen");
+        w.HeaderPointerAt(inEdge: true, inHeader: false);
+        clock.Advance(0.1);
+        w.TickHeader();
+        Expect(!w.HeaderVisible, "a pass over the top edge revealed the header");
+        clock.Advance(0.06);
+        w.TickHeader();
+        Expect(w.HeaderVisible && w.HeaderOverlayShown && w.HeaderOverlayInteractive, "resting at the top edge did not reveal the header");
+        w.HeaderPointerAt(inEdge: false, inHeader: true);
+        clock.Advance(5);
+        w.TickHeader();
+        Expect(w.HeaderVisible, "the header slid away while the pointer was on it");
+        w.HeaderPointerAt(inEdge: false, inHeader: false);
+        clock.Advance(0.49);
+        w.TickHeader();
+        bool stillThere = w.HeaderVisible;
+        clock.Advance(0.02);
+        w.TickHeader();
+        Say($"header: full screen reveal: hidden {!w.HeaderOverlayShown}, held until half a second after the pointer left {stillThere}");
+        Expect(stillThere && !w.HeaderVisible && !w.HeaderOverlayInteractive, "the header did not slide away half a second after the pointer left");
+        w.SimulateHeaderFullScreen(null);
+        w.RevealClock = realClock;
+        Expect(w.HeaderVisible && w.DockedHeaderShown, "leaving full screen did not dock the header again");
+
+        // parity: tile-menu-no-app-wide
+        // The right-click menu holds the tile's own actions and none of the app-wide ones.
+        StageTile tile = Tiles[0];
+        Microsoft.UI.Xaml.Controls.MenuFlyout? tileMenu = stage.BuildTileMenu(tile);
+        List<string> tileItems = tileMenu is null ? [] : Texts(tileMenu.Items);
+        Say($"tile menu: {string.Join(" / ", tileItems)}");
+        string[] own = ["Focus", "Listen", "Start conversation", "Allow talk-back", "Unmute on ring", "Calls open in", "Quality"];
+        Expect(own.All(tileItems.Contains), "the tile menu lost one of the tile's own actions");
+        Expect(!tileItems.Any(HeaderActions.IsAppWideTitle), $"the tile menu still holds an app-wide item: {string.Join(", ", tileItems.Where(HeaderActions.IsAppWideTitle))}");
+        stage.SetEditing(true);
+        List<string> editItems = Texts(stage.BuildTileMenu(tile)!.Items);
+        stage.SetEditing(false);
+        Expect(editItems.Contains("Split side by side") && editItems.Contains("Show camera") && !editItems.Any(HeaderActions.IsAppWideTitle),
+            "the tile menu while editing lacks a layout action or holds an app-wide item");
+
+        await SettingsWindowSteps(v, w);
+    }
+
+    private async Task SettingsWindowSteps(Viewer v, ViewerWindow w)
+    {
+        v.DiscoveryRequest = "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}";
+
+        // parity: settings-window-sections
+        // Settings opens as a window of its own with a pane of sections, from the header (Find devices opens it on Devices).
+        int made = SettingsWindow.Created;
+        w.Header.Press(HeaderAction.FindDevices);
+        SettingsWindow? sw = SettingsWindow.Current;
+        Expect(sw is not null && SettingsWindow.Created == made + 1, "Find devices in the header did not open the Settings window");
+        if (sw is null)
+        {
+            return;
+        }
+        await Task.Delay(500);
+        bool searching = await Until(() => v.Discovery.IsSearching, 5);
+        Say($"settings window: sections {string.Join(" / ", sw.SectionTitles)}; on {sw.Section.Title()}, searching {searching}");
+        Expect(sw.IsLoaded && sw.Section == SettingsSection.Devices && searching, "Find devices did not show the Devices section and start the search");
+        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list the five sections");
+        foreach (SettingsSection section in SettingsSections.All)
+        {
+            sw.Show(section);
+            Expect(sw.Section == section && ReferenceEquals(sw.ShownScroller, sw.ScrollerOf(section)), $"the {section.Title()} section was not shown in its scroller");
+        }
+        sw.Show(SettingsSection.Cameras);
+        bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
+        Expect(stopped, "leaving the Devices section did not stop the search");
+
+        // parity: settings-window-scrolls
+        // A section taller than the window scrolls to its last control.
+        sw.ResizeTo(520, 240);
+        sw.Show(SettingsSection.AlertsAndCalls);
+        Microsoft.UI.Xaml.Controls.ScrollViewer sc = sw.ScrollerOf(SettingsSection.AlertsAndCalls);
+        Microsoft.UI.Xaml.FrameworkElement last = sw.LastElementOf(SettingsSection.AlertsAndCalls);
+        bool tall = await Until(() => sc.ViewportHeight > 0 && sc.ViewportHeight < 240 && sc.ExtentHeight > sc.ViewportHeight, 5);
+        double Bottom() => last.TransformToVisual(sc).TransformBounds(new Windows.Foundation.Rect(0, 0, last.ActualWidth, last.ActualHeight)).Bottom;
+        double before = Bottom();
+        double viewport = sc.ViewportHeight;
+        sc.ChangeView(null, sc.ScrollableHeight, null, true);
+        bool scrolled = await Until(() => Math.Abs(sc.VerticalOffset - sc.ScrollableHeight) < 1, 5);
+        double after = Bottom();
+        Say($"settings window: Alerts & calls extent {sc.ExtentHeight:0} in a viewport of {viewport:0}; last control bottom {before:0} -> {after:0}");
+        Expect(tall && before > viewport + 1, "the Alerts & calls section is not taller than the small window, or its last control is already visible");
+        Expect(scrolled && after <= sc.ViewportHeight + 1, "scrolling did not bring the section's last control into view");
+
+        // parity: settings-window-single-instance
+        // Opening Settings again (the header, Ctrl+,) brings the same window to the front on the section asked for.
+        SettingsWindow again = w.OpenSettings(SettingsSection.Updates);
+        w.Header.Press(HeaderAction.Settings);
+        w.Stage.HandleKey((Windows.System.VirtualKey)188, true, false);
+        Say($"settings window: windows made {SettingsWindow.Created - made}, on {again.Section.Title()}");
+        Expect(ReferenceEquals(again, sw) && ReferenceEquals(SettingsWindow.Current, sw) && SettingsWindow.Created == made + 1, "opening Settings again made a second window");
+        Expect(again.Section == SettingsSection.Updates, "the open Settings window did not keep or take a section");
+
+        // parity: settings-window-frame-remembered
+        // The window comes back at the size the user left it.
+        sw.AppWindow.Resize(new Windows.Graphics.SizeInt32(700, 480));
+        bool pending = await Until(() => sw.FramePending, 5);
+        sw.FlushFrame();
+        WindowRect? saved = v.Settings.SettingsWindowFrame;
+        Say($"settings window: remembered {saved?.Width:0}x{saved?.Height:0}");
+        Expect(pending && saved is { } sf && Math.Abs(sf.Width - 700) <= 2 && Math.Abs(sf.Height - 480) <= 2, "the Settings window's size was not remembered");
+        sw.Close();
+        bool closed = await Until(() => SettingsWindow.Current is null, 5);
+        SettingsWindow reopened = SettingsWindow.Open(v, development: true, background: true);
+        await Task.Delay(300);
+        WindowRect frame = reopened.CurrentFrame;
+        Say($"settings window: reopened at {frame.Width:0}x{frame.Height:0}");
+        Expect(closed && Math.Abs(frame.Width - 700) <= 2 && Math.Abs(frame.Height - 480) <= 2, "the Settings window did not reopen at its remembered size");
+
+        // parity: settings-window-closes-with-app
+        // Closing the app closes it (Shutdown), and the device search with it.
+        SettingsWindow.CloseCurrent();
+        bool gone = await Until(() => SettingsWindow.Current is null, 5);
+        Expect(gone && !v.Discovery.IsSearching, "the Settings window stayed open when the app closed it");
+        v.DiscoveryRequest = null;
+    }
+
+    /// <summary>The texts of a menu's items (submenus by their own text), top level only.</summary>
+    private static List<string> Texts(IList<Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase> items) =>
+    [
+        .. items.Select(i => i switch
+        {
+            Microsoft.UI.Xaml.Controls.MenuFlyoutItem m => m.Text,
+            Microsoft.UI.Xaml.Controls.MenuFlyoutSubItem sub => sub.Text,
+            _ => "",
+        }).Where(t => t.Length > 0),
+    ];
+
     // 10. The tile features.
     /// <summary>
     /// The add-device screen's "Find Devices on This Network" list (docs/UX.md,
     /// "Finding devices"): it searches when shown, fills from the core's
     /// events, marks added devices, and a click fills the form.
     /// </summary>
-    private async Task FindDevices(Viewer v, SettingsDialogHooks hooks, (string Host, ushort Port) mock)
+    private async Task FindDevices(Viewer v, SettingsPagesHooks hooks, (string Host, ushort Port) mock)
     {
         static CoreEvent Event(string json) =>
             new() { Type = "discovered", Discovery = DiscoveryEvent.Parse(System.Text.Encoding.UTF8.GetBytes(json)) };
@@ -1618,10 +1990,9 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // parity: fisheye-mount-settings
         // Settings > fisheye mount (the picker, not the menu), then a synthetic pinch on the Virtual PTZ view.
-        var mountHooks = new SettingsDialogHooks();
-        var mountDialog = SettingsDialog.Create(stage.XamlRoot, v, development: true, mountHooks);
-        _ = mountDialog.ShowAsync();
-        await Task.Delay(300);
+        var mountHooks = new SettingsPagesHooks();
+        SettingsWindow mountWindow = SettingsWindow.Open(v, development: true, SettingsSection.Cameras, hooks: mountHooks, background: true);
+        await Until(() => mountWindow.IsLoaded, 5);
         var pickers = mountHooks.Mounts();
         Expect(pickers.Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Ceiling), "Settings does not list the fisheye camera with the default ceiling mount");
         Expect(pickers.All(m => v.IsFisheye(m.Camera)), "Settings lists a camera that is not a fisheye camera");
@@ -1653,7 +2024,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(pinchSaved.Aim is { } pa && Math.Abs(pa.Fov - FisheyeAim.MinFov) < 1e-9, "the pinched view was not saved with the layout");
         mountHooks.ChooseMount(f.Camera.ChannelKey, FisheyeMount.Ceiling);
         Expect(v.Settings.Mount(f.Camera) == FisheyeMount.Ceiling, "choosing Ceiling in Settings did not restore the default mount");
-        mountDialog.Hide();
+        mountWindow.Close();
         stage.Select(f.Path);
         stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
         Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera after the pinch");
@@ -1789,11 +2160,12 @@ internal sealed class SelfTest(App app, AppOptions options)
             // Changing the content while a tile is focused ends the focus only: the renderer keeps presenting.
             StageTile focusTile = Tiles[0];
             stage.FocusOn(focusTile);
-            await Task.Delay(400);
+            long focusFrames = r.Frames;
+            await Until(() => r.Frames - focusFrames >= 5, 5);
             int chains = r.SwapChains;
             long frames = r.Frames;
             w1.Show(new WindowContent.Layout(id));
-            await Task.Delay(500);
+            await Until(() => r.Frames - frames > 12, 5);
             Say($"content changed while focused: focus {(r.Focus is null ? "ended" : "kept")}, swap chains {chains} -> {r.SwapChains}, frames +{r.Frames - frames}");
             Expect(r.Focus is null && !focusTile.Focused, "changing the content did not end the focus");
             Expect(r.SwapChains == chains && r.Frames - frames > 10, "changing the content while focused disturbed the renderer");
@@ -1826,7 +2198,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             // Closing it gives its leases back; the first window keeps playing.
             int before = v.Leases.LeaseCount(sample);
             w2.Window.Close();
-            await Task.Delay(300);
+            await Until(() => app.Windows.Count == 1, 3);
             Say($"second window closed: windows {app.Windows.Count}, leases of {sample} {before} -> {v.Leases.LeaseCount(sample)}");
             Expect(app.Windows.Count == 1 && v.Leases.LeaseCount(sample) == before - t2.Count(t => t.Camera == sample), "closing a window did not give its leases back");
 
@@ -1848,7 +2220,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             w1.TickReveal();
             bool shownNow = w1.RevealShown;
             long frames2 = r.Frames;
-            await Task.Delay(600);
+            await Until(() => r.Frames - frames2 > 5, 5);
             Say($"reveal: after 0.10 s {early}, after 0.15 s {shownNow}; buffers {bw}x{bh} -> {r.BufferSize.Width}x{r.BufferSize.Height}, resizes +{r.TotalResizes - resizes}, frames +{r.Frames - frames2}");
             Expect(!early && shownNow, "the edge reveal did not wait about 150 ms and then show");
             Expect(r.TotalResizes == resizes && r.BufferSize == (bw, bh) && !w1.SidebarDocked, "revealing the sidebar resized the stage");

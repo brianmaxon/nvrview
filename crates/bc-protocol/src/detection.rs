@@ -89,6 +89,53 @@ pub struct ChannelAi {
     /// item's `fishEye` is 1 or its `channelType` is `fisheye_ipc`
     /// (docs/protocol.md, "Fisheye cameras").
     pub fisheye: bool,
+    /// The item's own talk-back and motion capabilities (not its lenses').
+    pub caps: Caps,
+}
+
+/// What a channel item (or a lens `subItem`) of the capabilities reply (199)
+/// says about talk-back and camera motion (docs/protocol.md, "Camera motion
+/// control"). Fields the item lacks read as absent: `false` or 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Caps {
+    /// `ipcAudioTalk` is 1: talk-back is supported (observed).
+    pub talk: bool,
+    /// `channelType` is `Doorbell` (observed). Only items carry it.
+    pub doorbell: bool,
+    /// `ptzType`: 3 pan/tilt/zoom, 1 zoom and focus only (inferred); 0 or
+    /// absent none.
+    pub ptz_type: u32,
+    /// `ptzPreset`: bit 0 set means presets (reported by the official
+    /// client).
+    pub ptz_preset: u32,
+}
+
+impl Caps {
+    /// The camera can pan and tilt (`ptzType` 3; inferred).
+    pub fn pan_tilt(&self) -> bool {
+        self.ptz_type == 3
+    }
+
+    /// The camera has presets (`ptzPreset` bit 0).
+    pub fn presets(&self) -> bool {
+        self.ptz_preset & 1 != 0
+    }
+
+    /// The camera has a motorized zoom and focus (`ptzType` 1 or 3;
+    /// inferred).
+    pub fn zoom_focus(&self) -> bool {
+        matches!(self.ptz_type, 1 | 3)
+    }
+
+    fn read(f: &[(String, String)]) -> Caps {
+        let num = |name| field(f, name).and_then(|v| v.parse().ok()).unwrap_or(0);
+        Caps {
+            talk: field(f, "ipcAudioTalk").is_some_and(|v| v == "1"),
+            doorbell: field(f, "channelType").is_some_and(|v| v.eq_ignore_ascii_case("doorbell")),
+            ptz_type: num("ptzType"),
+            ptz_preset: num("ptzPreset"),
+        }
+    }
 }
 
 /// One lens of a multi-lens camera in the capabilities reply (199).
@@ -99,6 +146,8 @@ pub struct LensAi {
     pub lens: u8,
     /// The lens's `aitype`.
     pub aitype: u32,
+    /// The lens's own capabilities (`channelType` is not read here).
+    pub caps: Caps,
 }
 
 type Fields = Vec<(String, String)>;
@@ -173,6 +222,7 @@ fn channel_ai(item: &[(String, String)], subs: &[Fields]) -> Option<ChannelAi> {
             Some(LensAi {
                 lens: field(s, "chnID")?.parse().ok()?,
                 aitype: field(s, "aitype")?.parse().ok()?,
+                caps: Caps::read(s),
             })
         })
         .collect();
@@ -185,6 +235,7 @@ fn channel_ai(item: &[(String, String)], subs: &[Fields]) -> Option<ChannelAi> {
         aitype: field(item, "aitype")?.parse().ok()?,
         lenses,
         fisheye,
+        caps: Caps::read(item),
     })
 }
 
@@ -272,18 +323,32 @@ mod tests {
                     aitype: 0,
                     lenses: vec![],
                     fisheye: false,
+                    caps: Caps::default(),
                 },
                 ChannelAi {
                     channel: 1,
                     aitype: 7,
                     lenses: vec![],
                     fisheye: false,
+                    caps: Caps::default(),
                 },
                 ChannelAi {
                     channel: 2,
                     aitype: 23,
-                    lenses: vec![LensAi { lens: 0, aitype: 7 }, LensAi { lens: 1, aitype: 1 }],
+                    lenses: vec![
+                        LensAi {
+                            lens: 0,
+                            aitype: 7,
+                            caps: Caps::default()
+                        },
+                        LensAi {
+                            lens: 1,
+                            aitype: 1,
+                            caps: Caps::default()
+                        }
+                    ],
                     fisheye: false,
+                    caps: Caps::default(),
                 },
             ]
         );
@@ -341,5 +406,32 @@ mod tests {
             ai.iter().map(|c| c.fisheye).collect::<Vec<_>>(),
             vec![true, true, false]
         );
+    }
+
+    #[test]
+    fn channel_caps() {
+        let xml = "<body><Support><channelNum>5</channelNum>\
+            <item><chnID>0</chnID><aitype>0</aitype><channelType>ipc</channelType>\
+            <ipcAudioTalk>0</ipcAudioTalk><ptzType>0</ptzType><ptzPreset>0</ptzPreset></item>\
+            <item><chnID>1</chnID><aitype>0</aitype><channelType>Doorbell</channelType>\
+            <ipcAudioTalk>1</ipcAudioTalk></item>\
+            <item><chnID>2</chnID><aitype>0</aitype><ptzType>3</ptzType><ptzPreset>3</ptzPreset></item>\
+            <item><chnID>3</chnID><aitype>0</aitype><ptzType>1</ptzType><ptzPreset>0</ptzPreset></item>\
+            <item><chnID>4</chnID><aitype>0</aitype>\
+            <subItem><chnID>0</chnID><aitype>0</aitype></subItem>\
+            <subItem><chnID>1</chnID><aitype>0</aitype><ptzType>3</ptzType>\
+            <ptzPreset>1</ptzPreset><ipcAudioTalk>1</ipcAudioTalk></subItem></item>\
+            </Support></body>";
+        let ai = parse_channel_ai(xml).unwrap();
+        let c = |i: usize| ai[i].caps;
+        assert_eq!(c(0), Caps::default());
+        assert!(c(1).doorbell && c(1).talk && !c(1).pan_tilt());
+        assert!(c(2).pan_tilt() && c(2).presets() && c(2).zoom_focus() && !c(2).talk);
+        assert!(!c(3).pan_tilt() && !c(3).presets() && c(3).zoom_focus());
+        // Only the item's own fields count for the channel; lenses have theirs.
+        assert_eq!(c(4), Caps::default());
+        assert_eq!(ai[4].lenses[0].caps, Caps::default());
+        let l = ai[4].lenses[1].caps;
+        assert!(l.pan_tilt() && l.presets() && l.zoom_focus() && l.talk && !l.doorbell);
     }
 }

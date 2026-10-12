@@ -4,7 +4,8 @@
 // generation 0 inline and later generations from a decoder thread), switches
 // it to main and back, renders and taps its audio, reads its level, round-
 // trips layouts and device keys (also across a second core on the same data
-// directory), and checks the guarantees of docs/FFI.md along the way.
+// directory), goes through the recordings calls (minor 5) against the mock's
+// recordings, and checks the guarantees of docs/FFI.md along the way.
 //
 // usage: NvrView.Smoke [--mock-nvr EXE --fixtures DIR | --host H --port N]
 //                      [--layout FILE] [--header FILE] [--lib PATH]
@@ -152,6 +153,12 @@ internal sealed class FakeApp : NvCoreCallbacks
     }
 
     public ulong Device;
+    /// <summary>The live tile; set after nv_tile_open returns.</summary>
+    public ulong MainTile;
+    /// <summary>Set before a playback opens: tiles other than the live one are its tiles.</summary>
+    public volatile bool PlaybackPhase;
+    public long PlaybackDecodes;
+    public long PlaybackTilesClosed;
     public volatile bool CloseReturned;
     public volatile bool TileClosedSeen;
     public volatile bool Connected;
@@ -226,6 +233,16 @@ internal sealed class FakeApp : NvCoreCallbacks
     {
         Interlocked.Increment(ref Callbacks);
         Interlocked.Increment(ref Actions);
+        if (PlaybackPhase && tile != Volatile.Read(ref MainTile))
+        {
+            // A playback tile (the only other tiles): recorded video
+            // arrives like live video and is answered the same way.
+            if (action.Kind == NvActionKind.Decode && core.Decoded(tile, action.Generation, action.Decode.PtsUs) == NvStatus.Ok)
+            {
+                Interlocked.Increment(ref PlaybackDecodes);
+            }
+            return;
+        }
         if (CloseReturned)
         {
             Problem("on_action after nv_tile_close returned");
@@ -439,6 +456,11 @@ internal sealed class FakeApp : NvCoreCallbacks
                 {
                     Volatile.Write(ref KeyFromEvent, key.GetString());
                 }
+                if (!e.TryGetProperty("recordings", out JsonElement rec) || !rec.GetProperty("search").GetBoolean() ||
+                    !rec.GetProperty("download").GetBoolean() || !rec.GetProperty("thumbnails").GetBoolean())
+                {
+                    Problem("device_info without the recordings flags");
+                }
                 break;
             case "tile_tier":
                 lock (_gate)
@@ -458,6 +480,9 @@ internal sealed class FakeApp : NvCoreCallbacks
                 {
                     _layoutRevisions.Add(e.GetProperty("revision").GetUInt64());
                 }
+                break;
+            case "tile_closed" when PlaybackPhase && e.GetProperty("tile").GetUInt64() != Volatile.Read(ref MainTile):
+                Interlocked.Increment(ref PlaybackTilesClosed);
                 break;
             case "tile_closed":
                 if (TileClosedSeen)
@@ -630,7 +655,7 @@ internal sealed class Smoke(Options options)
         };
         foreach (string a in new[]
         {
-            "--port", "0", "--channels", "2",
+            "--port", "0", "--channels", "2", "--recordings", "2",
             "--fixture", Path.Combine(fixtures, "h264-basic.h264"),
             "--audio", Path.Combine(fixtures, "aac-tone.aac"),
         })
@@ -707,6 +732,7 @@ internal sealed class Smoke(Options options)
             return 1;
         }
         ulong tile = core.OpenTile(device, 0, NvStreamTier.Sub);
+        Volatile.Write(ref _app.MainTile, tile);
         if (tile == 0)
         {
             Problem("tile ID 0");
@@ -746,6 +772,8 @@ internal sealed class Smoke(Options options)
         SwitchTier(core, tile, NvStreamTier.Sub, "sub", 2);
 
         string key = CheckLayouts(core, device, dataDir);
+        CheckRecordings(core, key, dataDir);
+        CheckPlayback(core, key);
         CheckDiscovery(core);
         CheckUpdates(core);
         CheckGrid();
@@ -1030,6 +1058,185 @@ internal sealed class Smoke(Options options)
         return key;
     }
 
+    // Recordings (minor 5) through the bindings, against mock-nvr's two days
+    // of recordings: configuration, yesterday's index, an incident edited and
+    // locked, a thumbnail from pending to ready, a download to the end, and
+    // the Recycle Bin hand-off, with the events of each step.
+    private void CheckRecordings(NvCore core, string key, string dataDir)
+    {
+        IRecordings rec = core;
+        string downloads = Path.Combine(dataDir, "downloads");
+        string channels = """{"channels":[{"channel":0},{"channel":1}]}""";
+        if (StatusOf(() => rec.RecordingsEnable(key, channels)) != NvStatus.NotConfigured)
+        {
+            Problem("nv_recordings_enable before nv_recordings_configure");
+        }
+        rec.RecordingsConfigure(JsonSerializer.Serialize(new Dictionary<string, object> { ["downloads_dir"] = downloads }));
+        rec.RecordingsEnable(key, channels);
+        rec.SoundConfigure("""{"alarms":true}""");
+
+        long day = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 86400 - 1) * 86400;
+        string cams = $$"""[{"device":"{{key}}","channel":0},{"device":"{{key}}","channel":1}]""";
+        rec.RecordingsWant($$"""{"cameras":{{cams}},"days":[{{day}}]}""");
+        string query = $$"""{"start":{{day}},"end":{{day + 86399}}}""";
+        JsonElement firstEvent = default;
+        if (!WaitUntil(() =>
+            {
+                using JsonDocument doc = JsonDocument.Parse(rec.RecordingsEvents(query));
+                JsonElement list = doc.RootElement.GetProperty("events");
+                if (list.GetArrayLength() == 0 || _app.EventCount("recordings_changed") == 0)
+                {
+                    return false;
+                }
+                firstEvent = list[0].Clone();
+                return true;
+            }, 20_000))
+        {
+            Problem("no events indexed, or no recordings_changed");
+            return;
+        }
+        if (!rec.RecordingsCalendar(query).Contains("\"days\"", StringComparison.Ordinal) ||
+            !rec.RecordingsSpans(query).Contains("\"causes\"", StringComparison.Ordinal) ||
+            !rec.RecordingsStatus().Contains(key, StringComparison.Ordinal))
+        {
+            Problem("calendar, spans, or status");
+        }
+        rec.RecordingsHoldToday(1, $$"""{"cameras":{{cams}}}""");
+        rec.RecordingsHoldToday(1, null);
+
+        string incident;
+        using (JsonDocument doc = JsonDocument.Parse(rec.IncidentsGet(query)))
+        {
+            incident = doc.RootElement.GetProperty("incidents")[0].GetProperty("key").GetString()!;
+        }
+        if (StatusOf(() => rec.IncidentGet("i-unknown")) != NvStatus.UnknownId ||
+            !rec.IncidentEdit($$"""{"op":"rename","key":"{{incident}}","name":"Delivery"}""").Contains(incident, StringComparison.Ordinal))
+        {
+            Problem("nv_incident_get or nv_incident_edit");
+        }
+        rec.CameraGroupsPut("""{"groups":[]}""");
+        _ = rec.CameraGroupsGet();
+
+        // A thumbnail of the first event: pending, then ready.
+        string thumb = $$"""{"camera":{{firstEvent.GetProperty("camera").GetRawText()}},"tier":"sub","start":{{firstEvent.GetProperty("start").GetInt64()}},"end":{{firstEvent.GetProperty("end").GetInt64()}}}""";
+        if (rec.ThumbnailGet(thumb) is not null)
+        {
+            Problem("a thumbnail not cached yet was not pending");
+        }
+        RecordedThumbnail? t = null;
+        if (!WaitUntil(() => _app.EventCount("thumbnail") > 0 && (t = rec.ThumbnailGet(thumb)) is not null, 20_000) ||
+            t!.Kind != NvThumbKind.H264Keyframe || t.Data.Length < 5 || t.Data[0] != 0 || t.Data[1] != 0)
+        {
+            Problem("thumbnail from pending to ready");
+        }
+        var image = new RecordedThumbnail(NvThumbKind.Image, 64, 36, 0, [0xff, 0xd8, 0xff, 0xd9]);
+        rec.ThumbnailPut(thumb, image);
+        if (rec.ThumbnailGet(thumb) is not { Kind: NvThumbKind.Image } back || !back.Data.SequenceEqual(image.Data))
+        {
+            Problem("nv_thumbnail_put");
+        }
+        rec.ThumbnailCancel(null);
+
+        // A download to the end, a lock that returns it, and the Recycle Bin.
+        string id;
+        using (JsonDocument doc = JsonDocument.Parse(rec.DownloadIncident($$"""{"incident":"{{incident}}"}""")))
+        {
+            id = doc.RootElement.GetProperty("download").GetString()!;
+        }
+        if (!WaitUntil(() =>
+            {
+                using JsonDocument doc = JsonDocument.Parse(rec.DownloadsGet());
+                return doc.RootElement.GetProperty("downloads").EnumerateArray()
+                    .Any(d => d.GetProperty("download").GetString() == id && d.GetProperty("state").GetString() == "done");
+            }, 30_000))
+        {
+            Problem("the download did not finish");
+        }
+        string locked = rec.IncidentLock(incident, true);
+        if (!locked.Contains("\"existing\"", StringComparison.Ordinal) || !locked.Contains(id, StringComparison.Ordinal))
+        {
+            Problem($"nv_incident_lock: {locked}");
+        }
+        if (StatusOf(() => rec.DownloadPause("no-such-download", null, true)) != NvStatus.UnknownId)
+        {
+            Problem("nv_download_pause accepted an unknown download");
+        }
+        rec.DownloadRetry(id, null);
+        if (!rec.DownloadTrash(id).Contains("\"folder\"", StringComparison.Ordinal) ||
+            !WaitUntil(() => _app.EventCount("download_removed") > 0, 10_000) ||
+            StatusOf(() => rec.DownloadForget(id, false)) != NvStatus.UnknownId)
+        {
+            Problem("nv_download_trash and download_removed");
+        }
+        if (_app.EventCount("download") == 0 || _app.EventCount("incidents_changed") == 0)
+        {
+            Problem("no download or incidents_changed events");
+        }
+    }
+
+    // Recorded playback (minor 6): two cameras of yesterday's recordings
+    // (indexed by CheckRecordings) beside the live tile: open, play, seek,
+    // 4x, status, close, with the events and status codes.
+    private void CheckPlayback(NvCore core, string key)
+    {
+        IPlayback pb = core;
+        long day = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 86400 - 1) * 86400;
+        long start = (day + 10 * 3600) * 1000, p0 = start + 30_000;
+        string request = $$"""{"start_ms":{{start}},"end_ms":{{start + 600_000}},"position_ms":{{p0}},"cameras":[{"camera":{"device":"{{key}}","channel":0},"tier":"sub"},{"camera":{"device":"{{key}}","channel":1},"tier":"sub"}]}""";
+        _app.PlaybackPhase = true;
+        if (StatusOf(() => pb.PlaybackOpen("{\"start_ms\":0}")) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackPlay(999_999)) != NvStatus.UnknownId)
+        {
+            Problem("playback refusals");
+        }
+        OpenedPlayback opened = pb.PlaybackOpen(request);
+        if (opened.Tiles.Count != 2 || opened.Playback == 0)
+        {
+            Problem("nv_playback_open");
+            return;
+        }
+        if (!WaitUntil(() => _app.EventCount("playback_seek") >= 2 && Interlocked.Read(ref _app.PlaybackDecodes) > 0, 20_000))
+        {
+            Problem("the opening seek did not show pictures");
+        }
+        if (pb.PlaybackPosition(opened.Playback) != (p0, NvPlaybackState.Paused))
+        {
+            Problem("not paused at the opening position");
+        }
+        if (StatusOf(() => core.CloseTile(opened.Tiles[0])) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackSetRate(opened.Playback, 3)) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackSeek(opened.Playback, p0, (NvSeekMode)9)) != NvStatus.InvalidArgument)
+        {
+            Problem("playback tile refusals");
+        }
+        pb.PlaybackPlay(opened.Playback);
+        if (!WaitUntil(() => pb.PlaybackPosition(opened.Playback) is { State: NvPlaybackState.Playing } p && p.PositionMs > p0 + 500, 10_000))
+        {
+            Problem("the playback did not play");
+        }
+        int seeks = _app.EventCount("playback_seek");
+        pb.PlaybackSeek(opened.Playback, p0 + 30_000, NvSeekMode.Exact);
+        if (!WaitUntil(() => _app.EventCount("playback_seek") >= seeks + 2, 20_000) ||
+            pb.PlaybackPosition(opened.Playback).PositionMs < p0 + 30_000)
+        {
+            Problem("nv_playback_seek");
+        }
+        pb.PlaybackSetRate(opened.Playback, 4);
+        pb.PlaybackSetOffset(opened.Playback, opened.Tiles[1], 0);
+        if (!WaitUntil(() => pb.PlaybackStatus(opened.Playback).Contains("\"rate\":4.0", StringComparison.Ordinal), 5_000))
+        {
+            Problem("nv_playback_set_rate or nv_playback_status");
+        }
+        pb.PlaybackPause(opened.Playback);
+        pb.PlaybackClose(opened.Playback);
+        if (!WaitUntil(() => _app.EventCount("playback_closed") == 1 && Interlocked.Read(ref _app.PlaybackTilesClosed) == 2, 5_000) ||
+            StatusOf(() => pb.PlaybackClose(opened.Playback)) != NvStatus.UnknownId)
+        {
+            Problem("nv_playback_close");
+        }
+        _app.PlaybackPhase = false;
+    }
+
     private static (ulong Revision, JsonElement? Layout) ReadLayout(NvCore core, string id, int initialCapacity)
     {
         using JsonDocument doc = JsonDocument.Parse(core.LayoutsJson(initialCapacity));
@@ -1102,9 +1309,10 @@ internal sealed class Smoke(Options options)
         {
             Problem($"actions for {_app.ActionTiles.Count} tiles");
         }
-        if (_app.EventCount("tile_closed") != 1)
+        // The playback's two tiles closed with it (CheckPlayback).
+        if (_app.EventCount("tile_closed") - Interlocked.Read(ref _app.PlaybackTilesClosed) != 1)
         {
-            Problem("expected exactly one tile_closed");
+            Problem("expected exactly one tile_closed for the live tile");
         }
         if (_app.EventCount("tile_stats") == 0)
         {

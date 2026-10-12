@@ -6,7 +6,8 @@ today. The rule (CLAUDE.md, "Engineering habits"): a user-visible feature lands
 on both apps, or this table says why not, and the table is updated in the same
 change.
 
-Values: `yes`, `no`, `partial (what is missing)`, `n/a (why)`. Each cell was
+Values: `yes`, `no`, `no (planned)` (designed, not started), `partial (what
+is missing)`, `n/a (why)`. Each cell was
 read from the code on 2026-10-11 (menus, settings, gesture handlers, the call
 and alert code), not only from the docs; "Notes" says where a cell rests on
 less than that. Nothing here was run on a Windows machine.
@@ -31,8 +32,8 @@ less than that. Nothing here was run on a Windows machine.
 | Sidebar: devices, channels, detection symbols per camera | yes | yes | |
 | Sidebar collapse and edge reveal with pin | yes | yes | Same timing (`SidebarReveal` on both). |
 | Hide offline channels | yes | yes | macOS: View menu; Windows: checkbox in the sidebar. |
-| Fill Tiles (picture fills the tile instead of fitting) | yes | no | macOS Layout menu, `state.fill`. Windows has no equivalent. |
-| Menu bar | yes | n/a (Windows uses the right-click menu and a help overlay) | UX.md "Windows notes". |
+| Fill Tiles (picture fills the tile instead of fitting) | yes | yes | Per window, not kept. macOS: Layout menu, `state.fill`. Windows: the header's "Fill tiles" toggle (`WindowState.Fill`, `StageRenderer.Fill`); the 1x crop is `ZoomBase.Of(..., fill: true)` drawn through the zoom rule. Windows self-test step `fill-tiles` (the macOS self-test has none). |
+| Menu bar | yes | n/a (Windows draws a header in its title bar, with a trimmed right-click menu and a help overlay) | Platform difference by owner decision: macOS keeps its menu bar; Windows has the header (layout picker, quick actions, Settings, a "…" menu) and a separate Settings window. UX.md "Windows header", "Settings window". Windows self-test steps `header-*`, `settings-window-*`, `tile-menu-no-app-wide` are allowlisted as n/a. |
 | Keyboard shortcut help | yes | yes | macOS lists keys in the menus; Windows has the F1 overlay. |
 
 ### Stage, focus, and listening
@@ -50,10 +51,10 @@ less than that. Nothing here was run on a Windows machine.
 | Tile status in words (connecting, reconnecting with countdown, waiting) | yes | yes | |
 | Frame rate display | yes | partial (diagnostics overlay, Ctrl+D) | macOS: View > Show Frame Rates; the Windows overlay is a different readout. |
 | Digital zoom: mouse wheel, drag to pan | yes | yes | |
-| Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Windows has no Fill Tiles, so only the fitted case applies there. |
-| Trackpad or touchpad pinch zooms | yes | partial (touchpad pinch arrives as Ctrl+wheel and works; a touch screen's two-finger pinch does not zoom digital zoom) | UX.md "Windows notes". |
-| Zoom map (outline of the visible region) | yes | no | `ZoomInsetView` exists on macOS only. |
-| Reset zoom control in the tile header | yes | partial (0 key and the right-click "Reset zoom" item only) | |
+| Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Fill Tiles uses the same rule from the filled base on both. |
+| Trackpad or touchpad pinch zooms | yes | yes | Windows: a touchpad pinch arrives as Ctrl+wheel; a touch screen's two-finger pinch zooms around the point between the fingers (`StageView.PinchDigital`, steps bounded as the Virtual PTZ pinch is). Windows self-test step `zoom-touch-pinch`. |
+| Zoom map (outline of the visible region) | yes | yes | macOS `ZoomInsetView`; Windows a map in `TileChrome` placed by `ZoomMap.Frame` (same rule: bottom left of the zoomed picture as drawn, at most 96 wide, a quarter of its width, a third of its height), fading with the chrome. Windows self-test step `zoom-map`. |
+| Reset zoom control in the tile header | yes | yes | A magnifier button at the header's right, shown while the tile is zoomed (or a virtual camera moved); also resets the virtual camera, as 0 does. Windows self-test step `zoom-reset-control`. |
 | Quality per tile: Auto, Clear, Fluent, Balanced; saved in the layout | yes | yes | Auto follows zoom past 2x on both. |
 | Second lens of a multi-lens camera as its own tile | yes | yes | |
 
@@ -64,7 +65,7 @@ less than that. Nothing here was run on a Windows machine.
 | Views: Original, Panorama, Double panorama, Quad, Virtual PTZ | yes | yes | Saved in the layout leaf on both. |
 | Image circle found automatically | yes | yes | Both self-tests check it within 1% of the synthetic fixture. |
 | Mount (ceiling, wall, desk) in the tile menu | yes | yes | |
-| Mount picker in Settings | yes | yes | macOS: Settings > Cameras; Windows: Settings dialog, "Fisheye cameras". |
+| Mount picker in Settings | yes | yes | macOS: Settings > Cameras; Windows: Settings window, Cameras section. |
 | Drag aims or turns the view | yes | yes | |
 | Wheel or pinch zooms the Virtual PTZ view | yes | yes | Windows also pinches with two fingers on a touch screen. |
 | Trackpad two-finger scroll turns the view | yes | n/a (no precise-scroll gesture on Windows) | |
@@ -75,7 +76,7 @@ less than that. Nothing here was run on a Windows machine.
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
 | Corner indicators per tile, with 2 s hold | yes | yes | |
-| Indicator corner setting | yes | yes | macOS: Detection Indicators menu; Windows: Settings and right-click menu. |
+| Indicator corner setting | yes | yes | macOS: Detection Indicators menu; Windows: Settings > Alerts & calls and the header's "…" menu. |
 | Indicator symbols on sidebar rows | yes | yes | |
 | Device detections (motion, person, vehicle, animal, face, package, visitor) | yes | yes | From the core. |
 | Local sound detection (smoke and CO alarm) badge | yes | yes | Sound analysis is in the core (`viewer-core`); Windows shows a slate badge at the bottom left as well. |
@@ -99,18 +100,50 @@ less than that. Nothing here was run on a Windows machine.
 | Talk (hold or Keep talking), microphone through the camera speaker | yes | yes | Rate limited and logged by the core on both. Letting go drains: the core sends a 1.5 s silent tail before closing, so the last words play. |
 | Echo cancellation while talking (full duplex), "Echo cancellation on" / "No echo cancellation" in the call, half-duplex caption gate as the fallback | yes | yes | AUDIO.md "Echo cancellation". macOS: voice processing on the playback engine; Windows: communications capture with the canceller's reference set to the playback device, confirmed through the effects list. Shared rules in `EchoCancellation` (NVRCore, NvrView.Tiles) with the same test vectors. Self-test step `call-echo-cancellation` checks the configuration with a fake microphone (macOS also the captions with a fake doorbell level); whether echo is really removed was not verified by ear. |
 | No talk-back limit while a call is open (20 starts a minute otherwise) | yes | yes | Both apps call `nv_talk_set_conversation` when the call opens (and on each start) and when it ends. Self-test step `call-talk-conversation`. |
-| Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu. |
+| Allow talk-back per camera (off by default) | yes | yes | macOS: Settings > Cameras; Windows: tile menu and Settings > Cameras. |
 | "Allow talk-back for <camera>?" prompt on Talk or Send when it is off (Allow saves and continues, Cancel sends nothing and keeps the typed text) | yes | yes | Self-test step `call-talk-permission-prompt`. macOS: alert sheet; Windows: ContentDialog. |
 | Typed reply spoken by the system voice | yes | yes | |
 | Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
 | Caption echo filter: the visitor caption that repeats our own talk-back or typed reply (the doorbell hears its speaker) is hidden, not saved, not activity | yes | yes | UX.md "Captions and echo". Pure `CaptionEcho` (NVRCore) and `CaptionEcho` (NvrView.Tiles) with the same test vectors; self-test step `call-caption-echo`. |
 | Call ends after 60 s of inactivity, gives audio back | yes | yes | |
-| Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
+| Unmute on ring even when not listening (per doorbell) | yes | yes | macOS: Settings > Cameras (`CameraOptions.unmuteOnRing`). Windows: Settings, "Unmute on ring even when not listening, per doorbell" (a check box per camera), kept in `view-settings.json` as `unmuteOnRing`; `CallAudio.Press`. Windows self-test step `unmute-on-ring`. |
 | Save call transcripts (event log and one text file per call, bounded folder, Open Transcripts Folder) | yes | yes | UX.md "Transcript files". macOS: Settings > Alerts; Windows: Settings. Pure naming, text and pruning in `CallTranscriptFile` (NVRCore) and `TranscriptFiles` (NvrView.Tiles) with the same test vectors. Self-test step `call-transcript-file`. |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
 | Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | yes | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin. Windows: a WinUI window with its own swap chain and `StageRenderer` (joins device-loss recovery; checked after a simulated loss), always on top while pinned, shown without activation for a ring. Self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popin-new-window`, `call-popout-end` on both. A call in its own window never ends by inactivity; Pop In restarts the minute. Unverified on Windows: real multi-monitor placement, focus behavior of a real ring, and always-on-top over a full-screen app. |
-| Open calls in their own window: global setting and per-doorbell choice | yes | yes | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"). Windows: Settings (the checkbox and an expander with a picker per channel) and the tile menu ("Calls open in"), kept in `view-settings.json`. `CallPresentation.resolve` / `CallPresentations.Resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
+| Open calls in their own window: global setting and per-doorbell choice | yes | yes | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"). Windows: Settings (Alerts & calls: the checkbox; Cameras: a picker per channel) and the tile menu ("Calls open in"), kept in `view-settings.json`. `CallPresentation.resolve` / `CallPresentations.Resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
 | Call window placement (where I left it, or top right of the active screen) | yes | yes | Settings > "Open call windows" on both; `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. Windows keeps the frame in physical pixels. |
+
+### Tile header, capture, and camera motion
+
+Planned in [CAPTURE.md](CAPTURE.md). `no (planned)` means designed and not
+started on that app.
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Responsive tile header: priorities, "…" overflow, right-click menu from the same model | yes | no (planned) | UX.md "Tile header"; shared `TileHeaderLayout` with test vectors. macOS: `TileChromeView`, with Save picture, Record and the PTZ buttons in place but saying "coming soon"; Start Conversation and PTZ buttons from the `channels` capabilities. Self-test IDs `header-priority-narrow`, `header-overflow-menu` (macOS only for now). |
+| Call window picture as a regular tile (zoom, menu, header) | yes | no (planned) | UX.md "A call in its own window". macOS: `StageView` in single fixed tile mode inside the call window. IDs `call-window-tile-zoom`, `call-window-tile-menu` (macOS only for now). |
+| Keys P, Shift+P, R, T, Option/Alt+arrows, Option/Alt with = - and 1–9 | partly | no (planned) | UX.md "Capture and camera keys". macOS: P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu (T works; the others say "coming soon"; no Option keys yet); Windows: the F1 overlay. |
+| Save picture (full frame, zoomed area, fisheye view or original circle; PNG or JPEG; toast) | no (planned) | no (planned) | UX.md "Save picture". IDs `capture-picture-tile`, `capture-picture-zoomed`, `capture-picture-fisheye`, `capture-picture-call`, `capture-picture-text-field`. |
+| Live recording to MP4 (Record from Main or Sub-stream, caps, disk guard, segments, recovery) | no (planned) | no (planned) | UX.md "Recording". IDs `capture-record-tile`, `capture-record-cap`, `capture-record-disk-low`, `capture-record-reconnect`, `capture-record-survives-tile-close`. |
+| Recording indicators (tile pill, call bar pill, window list) | no (planned) | no (planned) | macOS: toolbar item and Camera > Recordings; Windows: "● N recording" in the window header. ID `capture-record-indicator`. |
+| Recording calls (Conversation, Visitor, You tracks; consent note; beside the transcript) | no (planned) | no (planned) | UX.md "Recording calls", AUDIO.md "Recording calls". IDs `capture-call-record-button`, `capture-call-record-auto`, `capture-encoder-priming`. |
+| PTZ pad (press and hold, speed), presets, lens zoom and focus | no (planned) | no (planned) | UX.md "Pan, tilt, and zoom". IDs `ptz-pad-hold`, `ptz-deadman`, `ptz-preset-recall`, `ptz-lens-clamp`. |
+
+### Recordings (milestone P)
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Recordings window (Window > Recordings, ⌥⌘R) | yes | no (planned) | UX.md "Recordings"; Windows is W1 (MILESTONE-P.md). The macOS self-test runs it on the fake core and, with `scripts/macos-real-selftest.sh`, on the real core against the mock (`recordings-real-core`). |
+| Cameras to search, per device and per camera, kept between launches | yes | no (planned) | ID `recordings-enable`. |
+| Days asked for as shown; today held per window while shown, released on another day or close | yes | no (planned) | IDs `recordings-hold-today`, `recordings-navigate-day`, `recordings-window-close`. |
+| Calendar of days with recordings; refresh; a failed day marked | yes | no (planned) | ID `recordings-calendar-lanes`. The failed-day mark is not in the self-test. |
+| Timeline lanes per camera (spans, events by kind with badges, zoom, click selects the incident) | yes | no (planned) | ID `recordings-calendar-lanes`. |
+| Incident list with kind filters (Animals matches every animal kind), camera or group scope, Locked | yes | no (planned) | ID `recordings-animal-filter`. |
+| Cover thumbnails: keyframe decoded, shrunk, put back into the core's cache | yes | no (planned) | VideoToolbox and ImageIO; Windows: Media Foundation and WIC. ID `recordings-thumbnail`. |
+| Incident edits: rename, merge, split, add and remove a camera, revert | yes | no (planned) | ID `recordings-edits`. |
+| Lock and unlock (the video is downloaded; says when it is not kept) | yes | no (planned) | ID `recordings-lock`. |
+| Downloads panel: progress, pause, resume, retry, Show in Finder, forget, Move to Trash | yes | no (planned) | Trash through `NSWorkspace.recycle` after `download_removed`; Windows: the Recycle Bin (FFI-RECORDINGS.md section 12). ID `recordings-downloads`. Retry is not in the self-test. |
+| Camera groups for incidents | yes | no (planned) | ID `recordings-groups`. |
 
 ### Devices, settings, and updates
 
@@ -120,14 +153,15 @@ less than that. Nothing here was run on a Windows machine.
 | Reconnect a device | yes | yes | |
 | Find Devices on This Network (list, Added, Not supported yet, Search Again) | yes | yes | Windows may raise a Firewall prompt. |
 | Settings: Devices | yes | yes | |
-| Settings: Cameras (per-camera options) | yes | partial (fisheye mount only; talk-back is in the tile menu) | |
+| Settings: Cameras (per-camera options) | yes | yes (calls open in, unmute on ring, talk-back, fisheye mount) | Windows: Settings window, Cameras section. |
 | Settings: Alerts (inset corner, save transcripts, call windows) | yes | yes (in the Devices dialog: the call cards' corner, saving transcripts, calls in their own window and where they open) | |
 | Settings: Updates (source, trusted keys, automatic checks, Check Now) | yes | yes | |
 | Check for Updates in a menu | yes | yes | |
 | Self-update from a signed folder or server | yes | yes | Windows unpacks into a new folder next to the running one. |
+| Bundled update key and source (`update-defaults.json`; shown as "Bundled with this build" / "Bundled default") | yes | yes | Self-test step `updates-bundled-defaults`. macOS: in the signed bundle's Resources; Windows: next to the exe. |
 | Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
-| Recorded-video playback | no | no | Out of scope for now (ARCHITECTURE.md); [PLAYBACK.md](PLAYBACK.md) is the design. |
+| Recorded-video playback (synchronized cameras, scrubber) | no (planned) | no (planned) | Milestone P, M2 and W2; [PLAYBACK.md](PLAYBACK.md) is the design. Finding and downloading recordings is under "Recordings". |
 
 ## Open gaps
 
@@ -135,9 +169,6 @@ What the table shows that is not just a platform difference:
 
 - Windows insets are call cards only: no smoke, CO or entrance insets, no
   swap with the stage, and no Entrance option.
-- Windows lacks "unmute on ring".
-- Windows has no zoom map, no header reset-zoom control, no Fill Tiles, and
-  digital zoom does not follow a touch screen's pinch.
 - The layout preset lists on the two apps were not compared.
 - Windows' captions use an older engine than the Mac's.
 

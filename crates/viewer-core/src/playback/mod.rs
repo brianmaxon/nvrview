@@ -129,6 +129,7 @@ impl PbShared {
 struct PbTile {
     id: u64,
     device: String,
+    camera: DeviceCamera,
     handle: TileHandle,
 }
 
@@ -542,6 +543,7 @@ impl Core {
             tiles.push(PbTile {
                 id: tile,
                 device: c.device.clone(),
+                camera: c.camera,
                 handle,
             });
             gates.push(gate);
@@ -615,11 +617,33 @@ impl Core {
     /// camera already in the playback), [`RecError::Limit`] beyond
     /// [`MAX_CAMERAS`], [`RecError::Closed`].
     pub fn playback_add_camera(&self, playback: u64, json: &str) -> Result<u64, RecError> {
+        let (tile, pending) = self.playback_add_camera_deferred(playback, json)?;
+        pending.publish();
+        Ok(tile)
+    }
+
+    /// [`Core::playback_add_camera`], holding back the new tile's actions
+    /// until the returned [`PlaybackPending`] is published (the C function
+    /// writes the tile's ID first).
+    ///
+    /// # Errors
+    /// As [`Core::playback_add_camera`].
+    pub fn playback_add_camera_deferred(
+        &self,
+        playback: u64,
+        json: &str,
+    ) -> Result<(u64, PlaybackPending), RecError> {
         let cmd = self.pb_cmd(playback)?;
         let c = cam_req(&Value::Object(object(json)?), Tier::Sub)?;
         {
             let pbs = lock(&self.playback.core.playbacks);
             let p = pbs.get(&playback).ok_or(RecError::UnknownId)?;
+            if p.tiles
+                .iter()
+                .any(|t| t.device == c.device && t.camera == c.camera)
+            {
+                return Err(RecError::InvalidArgument);
+            }
             if p.tiles.len() >= MAX_CAMERAS {
                 return Err(RecError::Limit);
             }
@@ -641,17 +665,26 @@ impl Core {
             self.end_tiles(vec![(tile, handle)], CloseReason::Closed);
             return Err(RecError::UnknownId);
         };
+        if p.tiles
+            .iter()
+            .any(|t| t.device == c.device && t.camera == c.camera)
+        {
+            // Added by another call meanwhile.
+            drop(pbs);
+            self.end_tiles(vec![(tile, handle)], CloseReason::Closed);
+            return Err(RecError::InvalidArgument);
+        }
         p.tiles.push(PbTile {
             id: tile,
             device: c.device,
+            camera: c.camera,
             handle,
         });
         drop(pbs);
         if cmd.try_send(Cmd::Add(setup, Some(dev))).is_err() {
             warn!(playback, "playback busy: camera not added");
         }
-        let _ = gate.send(());
-        Ok(tile)
+        Ok((tile, PlaybackPending { gates: vec![gate] }))
     }
 
     /// `nv_playback_remove_camera`: removes one camera; its tile closes

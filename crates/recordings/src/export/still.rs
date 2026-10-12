@@ -192,7 +192,10 @@ pub struct PlaybackStillPlan {
     pub share_safe: bool,
 }
 
-fn still_name(position_ms: i64, name: &str, format: StillFormat) -> String {
+/// A still image's file name: the millisecond stamp, a space, and the camera
+/// name, sanitized, with the format's extension (also the rule of live
+/// pictures, docs/CAPTURE.md "Save picture").
+pub fn still_name(position_ms: i64, name: &str, format: StillFormat) -> String {
     format!(
         "{}.{}",
         sanitize(&format!("{} {name}", millis_stamp(position_ms))),

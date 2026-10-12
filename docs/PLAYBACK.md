@@ -298,6 +298,29 @@ Camera names are the user's own channel names; the pattern is configurable.
   the app encodes and writes with the platform's APIs
   ([FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 7a).
 
+## Local captures and the NVR's recordings
+
+nvrview has two kinds of recorded video, and they are kept apart:
+
+| | The NVR's recordings | Local captures |
+| --- | --- | --- |
+| Made by | the NVR, on its own disks, by its own schedule and detections | this computer, when the user records a tile or a call (CAPTURE.md) |
+| Content | the camera's streams as the NVR stored them | the live stream as it arrived here: what the network delivered, with gaps where the connection dropped (counted, and visible as a held picture) |
+| Found through | the index, incidents, and search on this page | the recordings and call recordings folders (Finder, Explorer) |
+| Kept until | the NVR overwrites them, unless downloaded | the user deletes them (call recordings: newest 100, at most 10 GB) |
+| Names | incident folders ("Output") | `YYYY-MM-DD HH.MM.SS <camera>.mp4`, or the call transcript's name |
+
+- A local capture is not a substitute for the NVR's recording of the same
+  time: the NVR records even when no viewer is open, and its copy has no
+  network gaps. When both exist, the NVR's is the better source.
+- Local captures are not indexed into incidents in this version and do not
+  appear in search. Pictures saved from live tiles (CAPTURE.md, "Save
+  picture") are likewise plain files.
+- Both use the same file conventions (sanitized names, ` (2)` when taken,
+  share-safe names for pictures and live recordings, no metadata of the
+  app's own) and the same crash-safe
+  finalizing, so a capture plays in the same players as a download.
+
 ## Ready-made edits
 
 Built from the downloaded files, on the GPU, with the hardware encoder:

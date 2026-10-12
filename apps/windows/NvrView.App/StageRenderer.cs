@@ -159,6 +159,9 @@ internal sealed unsafe class StageRenderer : IDisposable
     /// <summary>The last error that stopped drawing, if any.</summary>
     public string? LastError { get; private set; }
 
+    /// <summary>Fill Tiles: pictures are cropped to fill their tiles instead of fitted (set by the UI thread).</summary>
+    public volatile bool Fill;
+
     public FocusAnimation? Focus
     {
         get => Volatile.Read(ref _focus);
@@ -417,6 +420,7 @@ internal sealed unsafe class StageRenderer : IDisposable
         int count = tiles.Length;
         double kx = layout.Width > 0 ? dipW / layout.Width : 1, ky = layout.Height > 0 ? dipH / layout.Height : 1;
         FocusAnimation? focus = Focus;
+        bool fillTiles = Fill;
         int focused = -1;
         float progress = 0;
         if (focus is not null)
@@ -446,17 +450,19 @@ internal sealed unsafe class StageRenderer : IDisposable
             var cell = new Rect(c.X * kx, c.Y * ky, c.Width * kx, c.Height * ky);
             // A dewarped view fills its whole cell (the views are laid out for its shape).
             FisheyeChoice? fisheye = pw > 0 && t.Fisheye is { } f && f.Mode.Dewarps() ? f : null;
-            Rect dest = fisheye is null ? LayoutGeometry.Fit(pw, ph, cell) : cell;
+            // Filled, the tile's area is the picture's place (the part that overflows is cropped by the zoom rule).
+            bool fill = fillTiles && fisheye is null && pw > 0 && ph > 0;
+            Rect dest = fisheye is null && !fill ? LayoutGeometry.Fit(pw, ph, cell) : cell;
             // The tile's area: a zoomed picture grows over its bars.
             Rect view = cell;
             if (k == focused)
             {
                 Rect stage = new(0, 0, dipW, dipH);
-                dest = Rect.Lerp(dest, fisheye is null ? LayoutGeometry.Fit(pw, ph, stage) : stage, progress);
+                dest = Rect.Lerp(dest, fisheye is null && !fill ? LayoutGeometry.Fit(pw, ph, stage) : stage, progress);
                 view = Rect.Lerp(cell, stage, progress);
             }
             bool hidden = focused >= 0 && k != focused && progress >= 1;
-            Draw(ref _draws[n], t, dest, fisheye is null ? view : null, pw, ph, hidden, bx, by);
+            Draw(ref _draws[n], t, dest, fisheye is null ? view : null, pw, ph, hidden, bx, by, fill);
             _draws[n].Dewarp = false;
             if (fisheye is not null && !hidden)
             {
@@ -478,7 +484,7 @@ internal sealed unsafe class StageRenderer : IDisposable
             int pw = p is { HasPicture: true } ? (int)p.PictureSize.Width : 0, ph = p is { HasPicture: true } ? (int)p.PictureSize.Height : 0;
             t.PictureWidth = pw;
             t.PictureHeight = ph;
-            Draw(ref _draws[n], t, LayoutGeometry.Fit(pw, ph, o.Rect), null, pw, ph, false, bx, by);
+            Draw(ref _draws[n], t, LayoutGeometry.Fit(pw, ph, o.Rect), null, pw, ph, false, bx, by, false);
             _draws[n].Dewarp = false;
             n++;
         }
@@ -524,7 +530,7 @@ internal sealed unsafe class StageRenderer : IDisposable
 
     // dest: the picture at 1x (DIPs). view: the tile's area when it has a
     // digital zoom (not a dewarped view or a call card's picture).
-    private static void Draw(ref TileDraw d, StageTile t, Rect dest, Rect? view, int pw, int ph, bool hidden, float bx, float by)
+    private static void Draw(ref TileDraw d, StageTile t, Rect dest, Rect? view, int pw, int ph, bool hidden, float bx, float by, bool fill)
     {
         d.Tile = hidden ? null : t.Video;
         d.Tag = t;
@@ -537,9 +543,10 @@ internal sealed unsafe class StageRenderer : IDisposable
         // bars until it fills the tile, then crops; the source is the part
         // of the picture under the destination.
         TileZoom zoom = t.DigitalZoom;
-        if (view is { } v && zoom.IsZoomed && pw > 0 && ph > 0)
+        t.Fill = fill;
+        if (view is { } v && (zoom.IsZoomed || fill) && pw > 0 && ph > 0)
         {
-            ZoomBase b = ZoomBase.Of(pw, ph, v.Width, v.Height);
+            ZoomBase b = ZoomBase.Of(pw, ph, v.Width, v.Height, fill);
             UnitRect u = zoom.Destination(b), s = zoom.Visible(b);
             drawn = new Rect(v.X + u.X * v.Width, v.Y + u.Y * v.Height, u.Width * v.Width, u.Height * v.Height);
             d.SrcX = (float)(s.X * pw);

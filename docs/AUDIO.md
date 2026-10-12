@@ -263,10 +263,11 @@ ducking); automatic gain control is left on. Measured on one Mac (macOS 26;
 
 So the switches happen where they hurt least: the voice-processing engine is
 built (not started) when a call opens, if the microphone is already allowed;
-Talk only switches to it; after Talk it lingers for 2 minutes with nothing
+Talk only switches to it; after Talk it stays until the call ends with nothing
 taken from the microphone (the system shows the microphone in use), so
 pressing Talk again is instant; playback goes back to a plain engine when
-the call ends or the linger runs out. The slow work runs on a queue of its
+the call ends (switching back drops about a second of audio, so it is not
+done between Talks). The slow work runs on a queue of its
 own, never on the main thread, and never two render blocks on the core at
 once. A device change while voice processing runs rebuilds it (at most 5
 times in 30 s); when that fails the player goes back to plain playback, the
@@ -295,6 +296,47 @@ reported, what the call shows and logs, and which caption rule runs (on
 macOS also the captions themselves with a fake doorbell level). Whether the
 echo is actually removed needs a person, a doorbell, and speakers: real echo
 cannot be produced or judged in a self-test.
+
+## Recording calls
+
+> **Planned** (CAPTURE.md, "Recording calls"; FFI.md, "Capture"; not built
+> yet).
+
+A recorded call holds the doorbell's video and three audio tracks in one
+alternate group, so a player plays one of them: **Conversation** (enabled,
+first), **Visitor** and **You** (both disabled, for listening to one side).
+
+- **Visitor** is the camera's audio as received: AAC passed through
+  untouched, placed on the video's time line by the same timeline that
+  places it for playout (`audio-pipeline`). Audio in other codecs
+  (reported only) is decoded and encoded by the app's AAC encoder.
+- **You** is exactly what the doorbell got: the 16 kHz PCM the talk sender
+  encodes to IMA ADPCM, one 1024-sample record at a time, the silent tail
+  included, each stamped with the instant it went out on the core's clock.
+  The talk sender hands these to a bounded observer (keyed by device and
+  channel) that drops its oldest records rather than delay talk-back. The
+  microphone audio in it has already been through the system's echo
+  cancellation ("Echo cancellation"); a typed reply is the synthesized
+  voice.
+- **Placing You.** The recorder keeps its own presentation map for the
+  camera, the median of host arrival time minus camera timestamp over the
+  recent video, and maps each send instant to camera time with it. So the
+  user's words sit in the file where the doorbell received them, within
+  ±40 ms (checked on a simulated clock). The doorbell plays them about a
+  second later; the file does not model that delay.
+- **Conversation** is Visitor and You at unity gain through a soft limiter,
+  resampled to 48 kHz with the playout resampler, in 1024-sample frames,
+  and silence where nobody talks. The app encodes it, and You (and Visitor
+  when it is not AAC), as AAC-LC 48 kHz mono at 96 kbps; the encoder's
+  priming becomes an edit list.
+- **Echo is left in.** The doorbell's microphone hears its own speaker, so
+  the Visitor track (and the mix) can hold the user's words again about a
+  second after they were said. The recording keeps what was heard; only the
+  captions are filtered ("Echo in the captions", under "Talk-back
+  (sending)").
+- **Bounds.** At most 10 s of PCM waits for the encoder per track; beyond
+  that the track gets silence and `encode_dropped_ms` counts it. A call
+  recording stops at 2 hours or 2 GB.
 
 ## Speech recognition (later)
 

@@ -55,6 +55,8 @@ final class AppModel {
     @ObservationIgnored private let deviceFile: JSONFileStore<DeviceConfig>
     @ObservationIgnored private let groupFile: JSONFileStore<CameraGroup>
     @ObservationIgnored private let cameraFile: JSONFileStore<CameraOptions>
+    /// The recordings screens' state (docs/UX.md "Recordings").
+    @ObservationIgnored private(set) var recordings: RecordingsModel!
     /// Doorbell calls in progress (docs/UX.md "Doorbell calls").
     @ObservationIgnored private(set) var calls: DoorbellCalls!
     @ObservationIgnored private let taps = TapRouter()
@@ -214,6 +216,7 @@ final class AppModel {
         factory: CoreFactory, fakeBox: FakeBox?, credentials: any CredentialStore,
         deviceFile: JSONFileStore<DeviceConfig>, groupFile: JSONFileStore<CameraGroup>,
         cameraFile: JSONFileStore<CameraOptions> = JSONFileStore(file: nil),
+        recordingsFile: JSONFileStore<RecordingsEnablement> = JSONFileStore(file: nil),
         clock: any ViewerClock = SystemViewerClock(), callServices: CallServices? = nil
     ) throws {
         self.clock = clock
@@ -233,7 +236,9 @@ final class AppModel {
         self.deviceFile = deviceFile
         self.groupFile = groupFile
         self.cameraFile = cameraFile
+        recordings = RecordingsModel(bridge: bridge, enablementFile: recordingsFile)
         target.model = self
+        recordings.app = self
         calls = DoorbellCalls(model: self, services: callServices ?? .system(player: { [weak self] in self?.player }), taps: taps)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
@@ -308,6 +313,7 @@ final class AppModel {
         player?.stop()
         player = nil
         leases.closeAll()
+        recordings.shutdown()
         bridge.shutdown()
         for i in devices.indices { devices[i].deviceID = nil }
     }
@@ -510,6 +516,7 @@ final class AppModel {
         }
         cameraFile.save(cameraSettings)
         audible = Set(audible.map { $0.device == old ? $0.rekeyed(to: coreKey) : $0 })
+        recordings.rekey(old, to: coreKey)
         for layout in layouts where layout.root.cameras.contains(where: { $0.device == old }) {
             var l = layout
             l.root = layout.root.rekeying(device: old, to: coreKey)
@@ -566,6 +573,7 @@ final class AppModel {
         if transient.removeValue(forKey: d.config.key) == nil { credentials.deletePassword(for: d.config.key) }
         deviceFile.save(devices.filter { transient[$0.config.key] == nil }.map(\.config))
         let key = d.key
+        recordings.deviceRemoved(key)
         for i in groups.indices { groups[i].cameras.removeAll { $0.device == key } }
         groupFile.save(groups)
         audible = audible.filter { $0.device != key }
@@ -888,6 +896,14 @@ final class AppModel {
         case .update(let u):
             updater?.handle(u)
         case .tileTier, .audioStats, .tileStats:
+            break
+        case .recordings(let e):
+            // The recordings screens observe their own model; live view
+            // need not hear of every download step.
+            recordings.apply(e)
+            return
+        case .playback:
+            // No playback views yet (milestone P, M2).
             break
         }
         notify()

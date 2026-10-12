@@ -20,8 +20,50 @@ pub struct AacConfig {
 }
 
 impl AacConfig {
-    /// The 2-byte AudioSpecificConfig for this stream.
-    pub(crate) fn audio_specific_config(&self) -> [u8; 2] {
+    /// Reads a raw AudioSpecificConfig (ISO/IEC 14496-3), as an AAC
+    /// encoder reports it, for audio that arrives as raw access units rather
+    /// than ADTS frames (for example AAC-LC, 48 kHz, mono is `11 88`).
+    ///
+    /// Only the two-byte form a sample entry built by this crate can carry
+    /// is accepted: object types 1 to 4 (those ADTS can also describe), a
+    /// sample rate from the table (no explicit 24-bit rate), channel
+    /// configurations 1 to 7, 1024-sample frames, no core coder, and no
+    /// extension flag or trailing extension bytes.
+    pub fn from_raw_audio_specific_config(asc: &[u8]) -> Result<Self> {
+        let [a, b] = asc else {
+            return Err(Error::InvalidAudioConfig("not two bytes long"));
+        };
+        let v = u16::from_be_bytes([*a, *b]);
+        let object_type = (v >> 11) as u8;
+        let sample_rate_index = ((v >> 7) & 0xf) as u8;
+        let channels = ((v >> 3) & 0xf) as u8;
+        if !(1..=4).contains(&object_type) {
+            return Err(Error::InvalidAudioConfig("unsupported audio object type"));
+        }
+        let sample_rate = *RATES
+            .get(usize::from(sample_rate_index))
+            .ok_or(Error::InvalidAudioConfig("unsupported sample rate index"))?;
+        if !(1..=7).contains(&channels) {
+            return Err(Error::InvalidAudioConfig(
+                "unsupported channel configuration",
+            ));
+        }
+        if v & 7 != 0 {
+            return Err(Error::InvalidAudioConfig(
+                "960-sample frames, core coder, or extension flag",
+            ));
+        }
+        Ok(Self {
+            object_type,
+            sample_rate_index,
+            sample_rate,
+            channels,
+        })
+    }
+
+    /// The 2-byte AudioSpecificConfig for this stream, as written into the
+    /// sample entry.
+    pub fn audio_specific_config(&self) -> [u8; 2] {
         let v = (u16::from(self.object_type) << 11)
             | (u16::from(self.sample_rate_index) << 7)
             | (u16::from(self.channels) << 3);
@@ -140,6 +182,33 @@ mod tests {
         assert_eq!(c.adts_frame(p), f);
         let back = AacConfig::from_audio_specific_config(c.audio_specific_config()).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn raw_audio_specific_config() {
+        // AAC-LC, 48 kHz, mono: what an app's encoder reports.
+        let c = AacConfig::from_raw_audio_specific_config(&[0x11, 0x88]).unwrap();
+        assert_eq!((c.object_type, c.sample_rate, c.channels), (2, 48000, 1));
+        assert_eq!(c.sample_rate_index, 3);
+        assert_eq!(c.audio_specific_config(), [0x11, 0x88]);
+        // The ADTS form of the same stream gives the same config.
+        let (from_adts, _) = parse_adts(&c.adts_frame(&[1, 2])).unwrap();
+        assert_eq!(from_adts, c);
+        for bad in [
+            &[][..],
+            &[0x11],
+            &[0x11, 0x88, 0x56], // trailing extension bytes
+            &[0x29, 0x88],       // object type 5 (SBR)
+            &[0x17, 0x08],       // sample rate index 14
+            &[0x11, 0x80],       // channel configuration 0
+            &[0x11, 0x8c],       // 960-sample frames
+            &[0x00, 0x08],       // object type 0
+        ] {
+            assert!(
+                AacConfig::from_raw_audio_specific_config(bad).is_err(),
+                "{bad:02x?}"
+            );
+        }
     }
 
     #[test]

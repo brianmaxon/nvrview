@@ -509,8 +509,9 @@ camera that frames its circle differently still works.
 Commands that move a camera, change its focus, or play sound through its
 speaker. Each is marked with its tier (docs/ARCHITECTURE.md, "Device
 commands"): **viewing** (read-only, always allowed), **motion** (camera
-motion control, only where the user enabled it), or **configuration**
-(changes settings; never sent). Unless marked observed, everything here is
+motion control: the user's own controls, talk-back with the camera's
+permission, automation only with a per-camera grant; rate-limited and
+logged), or **configuration** (changes settings; never sent). Unless marked observed, everything here is
 reported (client). Observed facts come from the client capture described at
 the top: a PTZ lens of a multi-lens camera, a camera with a motorized zoom
 and focus lens (no pan or tilt), and a camera with a speaker, all behind one
@@ -622,6 +623,36 @@ only the body's `command` tells them apart:
 **Configuration in this area (never sent):** 19 with `setPos` or `delPos`,
 20 (set patrol), 331, 225 (turn continuous autofocus on or off), 708
 (autofocus mode), 34 (PTZ serial settings).
+
+### What nvrview will send
+
+> **Planned, not yet implemented** (docs/CAPTURE.md, "Pan, tilt, and zoom";
+> docs/FFI.md, "Camera motion (PTZ)"). None of these commands is on the
+> allowlist yet; each joins it with a fixed template and an allowlist test.
+
+Only the forms observed above, each built by the core from a fixed
+template:
+
+| Command | What nvrview sends | Tier | Based on |
+| --- | --- | --- | --- |
+| 18 | `PtzControl` with `command` `left`, `right`, `up` or `down` and a `speed` of 1 to 64, then `stop` (with `speed` 1, as the client did). One move per press; nothing repeated while it is held. | motion | observed |
+| 19 | `PtzPreset` with one `preset` whose `command` is `toPos` (recall), with the `id` from 190 and the other fields as the client sent them. Never `setPos` or `delPos`. | motion | observed |
+| 295 | `StartZoomFocus` with `zoomPos` or `focusPos` and a `movePos` clamped to the `minPos`–`maxPos` of the last 294 reply. | motion | observed |
+| 294 | read zoom and focus ranges and positions: when the PTZ controls open, and about 6 s after a zoom move or a preset recall, as the client did | viewing | observed |
+| 190 | read the preset list when the presets open | viewing | observed |
+| 340 | read the pan and tilt self-test state with 294 on a pan-and-tilt camera | viewing | observed |
+
+- **Stop.** Because a move is one command and the camera presumably keeps
+  moving until `stop` (not measured), the core sends `stop` on every path
+  (release, error, timeout, disconnect, tile close, session drop), 1 s
+  after the app stops renewing a held move, and after 30 s of holding.
+- **Not sent until observed:** the diagonals (`leftUp`, `leftDown`,
+  `rightUp`, `rightDown`), 18 `zoomInc`/`zoomDec` and
+  `focusInc`/`focusDec`, `auto`, patrols, 433, 468, 445, 545, 709, and
+  autofocus.
+- Which controls a channel gets comes from 199 (`ptzType`, `ptzPreset`;
+  see "Capabilities"), so a channel without them is never sent a motion
+  command.
 
 ### Talk-back (motion)
 

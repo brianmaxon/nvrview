@@ -58,6 +58,9 @@ internal sealed class TileChrome
     private readonly TextBlock _diagnostics;
     private readonly Border _outline;
     private readonly Grid _header;
+    private readonly Button _reset;
+    private readonly Border _map;
+    private readonly Border _mapRegion;
     private readonly IndicatorStrip _indicators = new();
     private readonly Border _alertBorder;
     private readonly Grid _alertStrip;
@@ -69,6 +72,10 @@ internal sealed class TileChrome
     private ChromeCorner _corner = ChromeCorners.Default;
     private string? _alertKey;
     private bool _blinking;
+    private bool _zoomed, _mapShown;
+    private double _reserve;
+    private double _mapX = double.NaN, _mapY, _mapW, _mapH;
+    private UnitRect _mapVisible;
 
     /// <summary>Height of the pinned alert strip (four lines and padding).</summary>
     public const double AlertStripHeight = 4 * 15 + 14;
@@ -113,6 +120,7 @@ internal sealed class TileChrome
         };
         _header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _speakerIcon = new FontIcon { Glyph = "", FontSize = 14, Foreground = White };
         Speaker = new Button
         {
@@ -135,7 +143,49 @@ internal sealed class TileChrome
         };
         Grid.SetColumn(_title, 1);
         _header.Children.Add(_title);
+        // The reset-zoom control (docs/UX.md "Digital zoom"): shown while the tile is zoomed, or its virtual camera moved.
+        _reset = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE71E", FontSize = 14, Foreground = White },
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(8, 4, 8, 4),
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed,
+        };
+        ToolTipService.SetToolTip(_reset, "Reset zoom (0)");
+        AutomationProperties.SetName(_reset, "Reset zoom");
+        _reset.Click += (_, _) => ResetClicked?.Invoke(Tile);
+        Grid.SetColumn(_reset, 2);
+        _header.Children.Add(_reset);
         Root.Children.Add(_header);
+
+        // The zoom map: the whole picture's outline with the visible region marked, in the bottom left of
+        // the zoomed picture (it can lie outside the 1x picture's rectangle, so it is moved, not clipped).
+        _mapRegion = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF)),
+            BorderBrush = White,
+            BorderThickness = new Thickness(1.5),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+        };
+        _map = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(0x73, 0, 0, 0)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x8C, 0xFF, 0xFF, 0xFF)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(2),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            IsHitTestVisible = false,
+            Opacity = 0,
+            Visibility = Visibility.Collapsed,
+            Child = new Canvas { IsHitTestVisible = false, Children = { _mapRegion } },
+            OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) },
+        };
+        AutomationProperties.SetName(_map, "Zoom map");
+        Root.Children.Add(_map);
 
         _alertText = new TextBlock
         {
@@ -281,6 +331,34 @@ internal sealed class TileChrome
     /// <summary>The symbols now shown in the corner.</summary>
     public IReadOnlyList<IndicatorItem> Indicators => _indicators.Items;
 
+    /// <summary>Raised when the header's reset-zoom control is clicked.</summary>
+    public Action<StageTile>? ResetClicked { get; set; }
+
+    /// <summary>Whether the header's reset-zoom control shows.</summary>
+    public bool ResetShown => _reset.Visibility == Visibility.Visible;
+
+    /// <summary>Presses the reset-zoom control as a click would (the self-test).</summary>
+    public void PressReset()
+    {
+        if (ResetShown)
+        {
+            ResetClicked?.Invoke(Tile);
+        }
+    }
+
+    /// <summary>Whether the zoom map is on screen (zoomed, and the chrome up).</summary>
+    public bool MapShown => _zoomed && _mapShown && _map.Visibility == Visibility.Visible;
+
+    /// <summary>The zoom map's frame in the stage's units (empty when it is not up) and the region it marks, for the self-test.</summary>
+    public (UnitRect Frame, UnitRect Visible) MapGeometry => (new UnitRect(_mapX, _mapY, _mapW, _mapH), _mapVisible);
+
+    /// <summary>The map follows the chrome: shown while the pointer is active, faded out with it.</summary>
+    public void SetMapShown(bool shown)
+    {
+        _mapShown = shown;
+        _map.Opacity = _zoomed && shown ? 1 : 0;
+    }
+
     public StageTile Tile { get; }
 
     public Grid Root { get; }
@@ -317,6 +395,61 @@ internal sealed class TileChrome
             Root.Height = h;
             _w = w;
             _h = h;
+        }
+        PlaceZoom(t);
+    }
+
+    // The reset control and the zoom map follow the tile's zoom. Per frame; allocation-free.
+    private void PlaceZoom(StageTile t)
+    {
+        bool dewarped = t.Fisheye is { } fe && fe.Mode.Dewarps();
+        bool moved = dewarped && t.FisheyeSetting.Aim is not null;
+        bool zoomed = !dewarped && t.Zoom > 1.0001f && t.PictureWidth > 0 && t.PictureHeight > 0 && t.ViewWidth > 0 && t.ViewHeight > 0;
+        Visibility reset = zoomed || moved ? Visibility.Visible : Visibility.Collapsed;
+        if (_reset.Visibility != reset)
+        {
+            _reset.Visibility = reset;
+            UpdateHeaderMargins();
+        }
+        if (!zoomed)
+        {
+            if (_zoomed)
+            {
+                _zoomed = false;
+                _map.Opacity = 0;
+                _map.Visibility = Visibility.Collapsed;
+                _mapX = double.NaN;
+            }
+            return;
+        }
+        TileZoom zoom = t.DigitalZoom;
+        ZoomBase b = t.ZoomBase;
+        UnitRect d = zoom.Destination(b);
+        // In the picture as drawn zoomed (it grows over the bars), in the stage's units.
+        var picture = new UnitRect(t.ViewX + d.X * t.ViewWidth, t.ViewY + d.Y * t.ViewHeight, d.Width * t.ViewWidth, d.Height * t.ViewHeight);
+        UnitRect frame = ZoomMap.Frame(picture, t.PictureWidth / (double)t.PictureHeight);
+        UnitRect visible = zoom.Visible(b);
+        if (!_zoomed)
+        {
+            _zoomed = true;
+            _map.Visibility = Visibility.Visible;
+            _map.Opacity = _mapShown ? 1 : 0;
+        }
+        if (frame.X != _mapX || frame.Y != _mapY || frame.Width != _mapW || frame.Height != _mapH || visible != _mapVisible)
+        {
+            _mapX = frame.X;
+            _mapY = frame.Y;
+            _mapW = frame.Width;
+            _mapH = frame.Height;
+            _mapVisible = visible;
+            _map.Width = Math.Max(frame.Width, 0);
+            _map.Height = Math.Max(frame.Height, 0);
+            _map.Translation = new Vector3((float)(frame.X - t.X), (float)(frame.Y - t.Y), 0);
+            UnitRect r = ZoomMap.Region(visible, Math.Max(frame.Width - 2, 0), Math.Max(frame.Height - 2, 0));
+            _mapRegion.Width = r.Width;
+            _mapRegion.Height = r.Height;
+            Canvas.SetLeft(_mapRegion, r.X);
+            Canvas.SetTop(_mapRegion, r.Y);
         }
     }
 
@@ -444,10 +577,23 @@ internal sealed class TileChrome
             PlaceIndicators();
         }
         double reserve = _corner == ChromeCorner.TopRight ? _indicators.OccupiedWidth + 8 : 0;
-        Thickness m = _title.Margin;
-        if (Math.Abs(m.Right - (8 + reserve)) > 0.5)
+        _reserve = reserve;
+        UpdateHeaderMargins();
+    }
+
+    // The top right indicators sit over the header: the reset control (or the title, without it) ends before them.
+    private void UpdateHeaderMargins()
+    {
+        Thickness m = _reset.Margin;
+        if (Math.Abs(m.Right - _reserve) > 0.5)
         {
-            _title.Margin = new Thickness(2, 0, 8 + reserve, 0);
+            _reset.Margin = new Thickness(0, 0, _reserve, 0);
+        }
+        Thickness tm = _title.Margin;
+        double titleRight = 8 + (_reset.Visibility == Visibility.Visible ? 0 : _reserve);
+        if (Math.Abs(tm.Right - titleRight) > 0.5)
+        {
+            _title.Margin = new Thickness(2, 0, titleRight, 0);
         }
     }
 

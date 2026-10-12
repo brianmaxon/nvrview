@@ -176,6 +176,8 @@ change.
 {"type":"channels","device":1,"channels":[{"channel":3,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"]}]}
 {"type":"channels","device":1,"channels":[{"channel":4,"connected":true,"tiers":["main","sub"],"detects":["people","vehicle","dog_cat"],"lenses":2,"lens_detects":[["people","vehicle"],["dog_cat"]]}]}
 {"type":"channels","device":1,"channels":[{"channel":5,"connected":true,"tiers":["main","sub"],"detects":["people"],"fisheye":true}]}
+{"type":"channels","device":1,"channels":[{"channel":6,"connected":true,"tiers":["main","sub"],"detects":[],"talk":true,"doorbell":true,"ptz":{"pan_tilt":false,"presets":false,"zoom_focus":false}}]}
+{"type":"channels","device":1,"channels":[{"channel":7,"connected":true,"tiers":["main","sub"],"detects":[],"talk":false,"doorbell":false,"ptz":{"pan_tilt":true,"presets":true,"zoom_focus":true}}]}
 {"type":"detection","device":1,"channel":3,"kind":"people","state":"start","source":"device","at_ns":123}
 {"type":"detection","device":1,"channel":3,"lens":1,"kind":"people","state":"stop","source":"device","at_ns":456}
 {"type":"detection","device":1,"channel":2,"kind":"smoke_alarm","state":"start","source":"local_audio","at_ns":457}
@@ -303,6 +305,32 @@ change.
   It is an added event field: no header change and no ABI number (apps
   ignore fields they do not know). The core does nothing else for such a
   camera; dewarping is drawing (docs/RENDERING.md, "Fisheye dewarping").
+- `talk`, `doorbell` and `ptz` say what a channel's camera can do, read
+  from the same capabilities reply (199) and present, like `detects`, once
+  it is known (a later `channels` event than the slot list; all three
+  together, `false` values included). They are added event fields: no
+  header change and no ABI number. They describe the device, not what the
+  user allowed: nothing here enables talk-back or motion.
+  - `talk` is `true` when the channel's item has `ipcAudioTalk` 1
+    (observed: the official client asked for the talk ability of exactly
+    those channels). The same test gates `nv_talk_start` (see "Talk-back").
+  - `doorbell` is `true` when the item's `channelType` is `Doorbell`
+    (observed; compared without regard to case).
+  - `ptz` is `{"pan_tilt","presets","zoom_focus"}`, all booleans.
+    `pan_tilt` is `ptzType` 3 and `zoom_focus` is `ptzType` 1 or 3 (the
+    meanings of the values are inferred from which controls the official
+    client offered, not documented by the vendor); `presets` is `ptzPreset`
+    bit 0 (reported by the official client). Missing fields read as
+    `false`. These only say what the camera has; nvrview sends no motion
+    commands for them yet.
+  - Only the item's own fields count for the channel (the same rule as
+    talk-back). For a multi-lens camera (`lenses`) the capabilities of a
+    lens sit in its `subItem`, so `lens_talk` (booleans) and `lens_ptz`
+    (objects as `ptz`) list them, lens 0 first, parallel to
+    `lens_detects`; a lens that moves while the channel's item says
+    nothing is normal (observed: a pan-tilt-zoom lens as the second lens of
+    a two-lens camera). `lens_talk` and `lens_ptz` are present only with
+    `lenses` from the capabilities, never for a probed second lens.
 - `timing`: `first_picture` is the time from `nv_core_new` to the first
   `nv_tile_decoded` of any tile (sent once; the app adds its own
   launch-to-`nv_core_new` time); `tier_switch` is the time from
@@ -474,6 +502,164 @@ NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open); /* mi
   after it (0 unless the talk drained), `dropped_ms` the audio dropped.
 - The core logs every start, stop and refusal with its reason (refusals
   at most one line every few seconds).
+
+## Capture
+
+> **Proposed, not yet implemented.** The contract for
+> [CAPTURE.md](CAPTURE.md) (live recordings and call recordings; pictures
+> are rendered and written by the apps and need nothing here). It takes the
+> next free minor when it lands ("Versioning").
+
+```c
+NvStatus nv_capture_configure(NvCore *core, const char *json);
+
+typedef struct NvAudioEncoder {
+    void *context;
+    /* Opens an AAC-LC encoder for one track of a recording. Writes the
+     * AudioSpecificConfig into asc (asc_len bytes, at most asc_cap) and the
+     * encoder's priming in frames. Returns false if it cannot. */
+    bool (*open)(void *context, uint64_t recording, uint32_t track,
+                 uint32_t sample_rate, uint32_t channels, uint32_t bit_rate,
+                 uint8_t *asc, size_t asc_cap, size_t *asc_len,
+                 uint32_t *priming_frames);
+    /* One frame of 1024 mono float samples, on the recorder's thread. */
+    void (*encode)(void *context, uint64_t recording, uint32_t track,
+                   const float *pcm, size_t frames);
+    /* Ends the track; with flush, the encoder's remaining output first. */
+    void (*close)(void *context, uint64_t recording, uint32_t track, bool flush);
+} NvAudioEncoder;
+
+NvStatus nv_capture_set_encoder(NvCore *core, const NvAudioEncoder *encoder);
+NvStatus nv_record_audio_encoded(NvCore *core, uint64_t recording, uint32_t track,
+                                 const uint8_t *data, size_t len);
+
+NvStatus nv_record_start(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+NvStatus nv_record_stop(NvCore *core, uint64_t recording);
+NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
+```
+
+1. **Configure.** `nv_capture_configure(core, json)` sets the limits and
+   the live recordings' folder, and recovers partial files left by a crash
+   (CAPTURE.md, "Crash safety"; event `recovered` for each):
+
+   ```json
+   {"live_dir": "<absolute directory>", "max_duration_s": 3600, "max_bytes": 4000000000,
+    "min_free_bytes": 2000000000, "stop_free_bytes": 1000000000,
+    "max_live": 4, "max_calls": 2, "quality": "main", "share_safe": false}
+   ```
+
+   `quality` is the "Record from" setting (`main` or `sub`); `share_safe`
+   the "Share-safe names" setting. Every field but `live_dir` is optional
+   with the defaults shown. Calling it again changes the settings for
+   recordings started afterwards.
+2. **Encoder.** `nv_capture_set_encoder(core, encoder)` installs the app's
+   AAC encoder (NULL removes it; the struct is copied). The core calls
+   `open` once per track that needs encoding, `encode` with 1024 frames at a
+   time on the recorder's own thread, and `close` at the end. The app
+   answers each encoded frame with `nv_record_audio_encoded(core,
+   recording, track, data, len)`: one raw AAC access unit, in order, from
+   any thread, until `close` returns. The core keeps at most 10 s of PCM
+   per track waiting for the encoder; beyond that it encodes silence and
+   counts `encode_dropped_ms`. Without an encoder, a live recording whose
+   camera audio is not AAC is video only (`audio` `unsupported`), and a
+   call recording cannot start.
+3. **Start.** `nv_record_start(core, request, out, cap, len)`:
+
+   ```json
+   {"kind": "live", "tile": 7, "quality": "sub", "name": "Camera 1", "share_safe": false}
+   {"kind": "call", "tile": 7, "file": "<absolute path>.mp4"}
+   ```
+
+   A live recording records the tile's camera (device, channel, lens) on
+   its own subscription; `quality` overrides the configured tier, `name` is
+   the camera name for the file, `share_safe` overrides the setting. A call
+   recording writes to the path the app reserved beside the transcript.
+   The answer: `{"recording": 12, "file": "<absolute path>",
+   "state": "waiting_keyframe"}`. Errors: `NV_ERR_LIMIT` (the count limits,
+   at most 2 main-stream recorders per device, or under `min_free_bytes`
+   free; the answer then holds `{"limit": "live"|"calls"|"main_streams"|"disk_low"}`),
+   `NV_ERR_NOT_CONFIGURED` (the status the recordings minor adds; no
+   `live_dir`, or a call without an encoder),
+   `NV_ERR_UNKNOWN_ID` (no such tile), `NV_ERR_INVALID_ARGUMENT`.
+4. **Stop and status.** `nv_record_stop(core, recording)` stops and
+   finalizes (state `finalizing`, then `finished`). `nv_record_status`
+   answers `{"recordings": [...]}`, each entry shaped like the event below.
+   A recording outlives its tile; it ends on stop, a cap, low disk, the
+   device's removal, a refused login, or `nv_core_free` (which stops and
+   finalizes what it can within 5 s; the rest is recovered at the next
+   `nv_capture_configure`).
+
+```json
+{"type":"recording","recording":12,"kind":"live","device":1,"channel":3,"lens":0,"tier":"main",
+ "state":"recording","file":"<absolute path>","segment":1,"bytes":10485760,"duration_ms":83000,
+ "gaps":0,"audio":"passthrough","tracks":["video","audio"],"encode_dropped_ms":0}
+{"type":"recording","recording":12,"kind":"live","device":1,"channel":3,"lens":0,"tier":"main",
+ "state":"finished","reason":"max_duration","file":"<absolute path>","segment":1,
+ "bytes":1048576000,"duration_ms":3600000,"gaps":1,"audio":"passthrough","tracks":["video","audio"],
+ "encode_dropped_ms":0}
+```
+
+- `state`: `waiting_keyframe`, `recording`, `segment` (a new part started;
+  `file` and `segment` name it), `finalizing`, `finished`, `failed`,
+  `recovered`. Sent at once on a change and about once a second while
+  recording.
+- `audio`: `passthrough`, `encoded`, `none` (the camera sends no audio),
+  `unsupported` (not AAC and no encoder). A call recording's `tracks` are
+  `video`, `Conversation`, `Visitor`, `You`.
+- `reason` (with `finished` or `failed`): `stopped`, `max_duration`,
+  `max_size`, `disk_low`, `device_removed`, `login_failed`,
+  `core_shutdown`, `write_failed`, `encoder_failed`, `no_video`,
+  `format_changed`, `long_gap`.
+
+The `channels` event gains, without an ABI change, from each channel's
+`Support` item: `"talk": true` (`ipcAudioTalk` 1), `"doorbell": true`
+(`channelType` "Doorbell"), and `"ptz": {"pan_tilt": true, "presets": true,
+"zoom_focus": true}` (CAPTURE.md, "Capabilities").
+
+## Camera motion (PTZ)
+
+> **Proposed, not yet implemented.** Pan, tilt, lens zoom and focus, and
+> preset recall for [CAPTURE.md](CAPTURE.md) "Pan, tilt, and zoom"; the
+> commands are in protocol.md, "What nvrview will send". Its own minor,
+> the next free one when it lands ("Versioning").
+
+```c
+NvStatus nv_ptz_info(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+NvStatus nv_ptz_move(NvCore *core, uint64_t tile, const char *direction, uint32_t speed);
+NvStatus nv_ptz_stop(NvCore *core, uint64_t tile);
+NvStatus nv_ptz_lens(NvCore *core, uint64_t tile, const char *what, int32_t position);
+NvStatus nv_ptz_preset(NvCore *core, uint64_t tile, uint32_t id);
+NvStatus nv_motion_grant(NvCore *core, uint64_t device, uint8_t channel,
+                         const char *client, bool granted);
+```
+
+- `nv_ptz_info(core, "{\"tile\":7}", ...)` reads 199, 294 and 190 (viewing
+  tier) for the tile's camera: `{"pan_tilt": true, "zoom": {"min": 0,
+  "max": 28, "cur": 11} | null, "focus": {...} | null, "presets": [{"id": 0,
+  "name": "Preset 1"}], "speeds": [1, 64]}`.
+- `nv_ptz_move(core, tile, "left"|"right"|"up"|"down", speed)` (speed 1 to
+  64) starts a move, and renews it: the app calls it again at least every
+  500 ms while the control is held. The core sends the move once and `stop`
+  1 s after the last renewal (dead-man), or after 30 s of holding;
+  renewals are not sent and not counted. `nv_ptz_stop` stops at once.
+- `nv_ptz_lens(core, tile, "zoom"|"focus", position)` sends 295, clamped to
+  the range 294 reported.
+- `nv_ptz_preset(core, tile, id)` recalls a preset (19 with `toPos` only).
+- The app's own calls are the user's manual control and need no enable.
+  `nv_motion_grant(core, device, channel, client, granted)` grants
+  automation (a local API client, or `"auto_correction"`) motion control on
+  one camera for this run of the core; the app passes the user's grants
+  after each `nv_device_add`. Talk-back keeps `nv_talk_set_permission`.
+- Limits per camera: moves and lens commands 20 per second, bursts of 40;
+  preset recalls 5 per second. `stop` is sent on every path (release,
+  error, timeout, disconnect, tile close, session drop) and is never
+  limited. Every command is logged with its origin.
+
+```json
+{"type":"ptz","tile":7,"action":"move","state":"sent"}
+{"type":"ptz","tile":7,"action":"preset","state":"refused","reason":"rate_limited"}
+{"type":"ptz","tile":7,"action":"lens","state":"failed","reason":"device_refused"}
+```
 
 ## Layouts
 
@@ -711,6 +897,194 @@ Events (ignore unknown types and fields, as always):
 - The core logs one line per outcome with its reason; sources and messages
   only at debug level.
 
+## Recordings (minor 5)
+
+Part 1 of the recordings interface (slice F1 of
+[MILESTONE-P.md](MILESTONE-P.md)): configuration, the index and its
+on-demand requests, incidents with the user's edits and locks, camera
+groups, cover thumbnails, downloads with the Trash, and
+`nv_sound_configure`. [FFI-RECORDINGS.md](FFI-RECORDINGS.md) is the
+contract (sections 1 to 5, 8, 9, and 13, with its decisions and
+clarifications); the core side is `viewer_core::recordings_owner` (C11,
+C13, C15). Recorded playback (section 6, F2) is minor 6 ("Recorded
+playback (minor 6)"); edit lists and the rest of
+sound (sections 2a and 7, F3: `nv_sound_watch`, `nv_recordings_loudness`,
+`nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
+`nv_tile_loudness`), and export (section 7a, F4) come later; an app checks
+the minor before each group.
+
+```c
+NvStatus nv_recordings_configure(NvCore *core, const char *json);
+NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *json);
+NvStatus nv_recordings_calendar(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_spans(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_events(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_recordings_want(NvCore *core, const char *json);
+NvStatus nv_recordings_hold_today(NvCore *core, uint64_t hold, const char *json);
+NvStatus nv_recordings_status(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_incidents_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_get(NvCore *core, const char *key, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_edit(NvCore *core, const char *edit, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_lock(NvCore *core, const char *key, bool locked, char *out, size_t cap,
+                          size_t *len);
+NvStatus nv_camera_groups_get(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_camera_groups_put(NvCore *core, const char *json);
+NvStatus nv_thumbnail_get(NvCore *core, const char *key, NvThumbnail *info, uint8_t *out,
+                          size_t cap, size_t *len);
+NvStatus nv_thumbnail_put(NvCore *core, const char *key, const NvThumbnail *info,
+                          const uint8_t *data, size_t len);
+NvStatus nv_thumbnail_cancel(NvCore *core, const char *key);
+NvStatus nv_download_incident(NvCore *core, const char *request, char *out, size_t cap,
+                              size_t *len);
+NvStatus nv_download_pause(NvCore *core, const char *download, const char *camera, bool paused);
+NvStatus nv_download_retry(NvCore *core, const char *download, const char *camera);
+NvStatus nv_download_forget(NvCore *core, const char *download, bool delete_partial);
+NvStatus nv_download_trash(NvCore *core, const char *download, char *out, size_t cap,
+                           size_t *len);
+NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_sound_configure(NvCore *core, const char *json);
+```
+
+- **Status codes.** Three are new, and only these functions return them:
+  `NV_ERR_UNSUPPORTED` (-8, the device's backend cannot do this),
+  `NV_ERR_NOT_CONFIGURED` (-9, `nv_recordings_configure` was not called,
+  or a download needs `downloads_dir`), and `NV_PENDING` (1, the first
+  positive status: accepted, the answer arrives as an event; only
+  `nv_thumbnail_get` returns it). The core's `RecError` maps one to one:
+  `InvalidArgument` -1, `UnknownId` -2, `Closed` -3, `Limit` -4,
+  `Internal` -5, `Unsupported` -8, `NotConfigured` -9. A NULL `core`, a
+  required string that is NULL or not UTF-8, and a NULL `len` or `info`
+  are `NV_ERR_INVALID_ARGUMENT`.
+- **Threads.** Every one of these answers from memory under short locks and
+  never waits on the network or a device permit; searches, thumbnail
+  fetches, and downloads run on core threads and report by event. Call
+  them from any thread but never from inside a callback (there they return
+  `NV_ERR_INVALID_ARGUMENT`). After `nv_core_free` returns, no search,
+  fetch, or download runs (job files keep the progress).
+- **JSON in and out.** Arguments are UTF-8, NUL-terminated, and copied
+  before the call returns; cameras are `{"device": "<device key>",
+  "channel": 3, "lens": 0}` (lens optional), times device-local seconds.
+  Answers follow the out-buffer rules of "Layouts". Queries may change
+  between two calls (the index fills meanwhile), so bindings loop until the
+  answer fits.
+- **Calls that change state answer once.** `nv_incident_edit`,
+  `nv_incident_lock`, `nv_download_incident`, and `nv_download_trash` make
+  their change even when the answer does not fit: `NV_ERR_BUFFER_TOO_SMALL`
+  (with `*len` set) then only says the answer was not written, and calling
+  again would apply the change again (or report `NV_ERR_UNKNOWN_ID` for a
+  download already trashed). Bindings pass a large buffer (64 KiB) for
+  these; `len` is checked before anything changes.
+- **Thumbnails.** `NvThumbnail.kind` is an `NvThumbKind`, received as an
+  integer and validated (`NV_ERR_INVALID_ARGUMENT` for other values), and
+  `pts_us` must not be negative. The bytes are binary, without a
+  terminator: `nv_thumbnail_get` returns `NV_ERR_BUFFER_TOO_SMALL` when
+  `out` is NULL or `cap` < `*len`, with `*info` and `*len` filled, and
+  `NV_PENDING` with `*len` 0. A fetch for a device that is not enabled and
+  added answers `NV_PENDING` and a `thumbnail` event `failed`.
+- **`device_info`** gains `"recordings": {"search": true, "playback":
+  true, "download": true, "thumbnails": true}`, what the device's backend
+  can do (all four for Baichuan devices).
+
+Events (FFI-RECORDINGS.md, section 8; ignore unknown types and fields):
+
+```json
+{"type":"recordings_index","device":"d-3f9a0c1b7e2d4a65","state":"busy","pending_days":11,"revision":40}
+{"type":"recordings_day_failed","device":"d-3f9a0c1b7e2d4a65","camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"day":1791504000,"reason":"session closed during the search"}
+{"type":"recordings_changed","device":"d-3f9a0c1b7e2d4a65","revision":41,"start":1791590400,"end":1791676799}
+{"type":"incidents_changed","revision":12}
+{"type":"camera_groups_changed","revision":3}
+{"type":"thumbnail","key":{"camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"tier":"sub","start":1791618125,"end":1791618141},"state":"ready"}
+{"type":"download","download":"1791618125-9c1e5a2b7d40f316","state":"running","cameras":[]}
+{"type":"download_removed","download":"1791618125-9c1e5a2b7d40f316","trash":true,"folder":"/abs/downloads/2026-10-10 07.42 vehicle — Camera 1"}
+```
+
+The C smoke test (`scripts/test-c-ffi.sh`, also under AddressSanitizer)
+goes through configure, enable, want, the queries, an edit, a thumbnail from
+pending to ready and back as an image, a download to the end, a lock that
+returns it, and the Trash, against mock-nvr with two days of recordings.
+
+## Recorded playback (minor 6)
+
+Part 2 of the recordings interface (slice F2 of
+[MILESTONE-P.md](MILESTONE-P.md)): playbacks of up to four cameras on one
+shared clock. [FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 6, is the
+contract, with its C10 and F2 clarifications; the core side is
+`viewer_core::playback` (C10).
+
+```c
+typedef enum NvSeekMode { NV_SEEK_KEYFRAME = 0, NV_SEEK_EXACT = 1 } NvSeekMode;
+typedef enum NvPlaybackState {
+    NV_PLAYBACK_BUFFERING = 0, NV_PLAYBACK_PLAYING = 1, NV_PLAYBACK_PAUSED = 2,
+    NV_PLAYBACK_ENDED = 3, NV_PLAYBACK_FAILED = 4,
+} NvPlaybackState;
+
+NvStatus nv_playback_open(NvCore *core, const char *json, uint64_t *out_playback,
+                          uint64_t *out_tiles, size_t tile_cap, size_t *tile_count);
+NvStatus nv_playback_add_camera(NvCore *core, uint64_t playback, const char *json,
+                                uint64_t *out_tile);
+NvStatus nv_playback_remove_camera(NvCore *core, uint64_t playback, uint64_t tile);
+NvStatus nv_playback_play(NvCore *core, uint64_t playback);
+NvStatus nv_playback_pause(NvCore *core, uint64_t playback);
+NvStatus nv_playback_seek(NvCore *core, uint64_t playback, int64_t position_ms, NvSeekMode mode);
+NvStatus nv_playback_set_rate(NvCore *core, uint64_t playback, double rate);
+NvStatus nv_playback_set_offset(NvCore *core, uint64_t playback, uint64_t tile,
+                                int64_t offset_ms);
+NvStatus nv_playback_position(NvCore *core, uint64_t playback, int64_t *position_ms,
+                              NvPlaybackState *state);
+NvStatus nv_playback_status(NvCore *core, uint64_t playback, char *out, size_t cap,
+                            size_t *len);
+NvStatus nv_playback_close(NvCore *core, uint64_t playback);
+```
+
+- **Playback tiles are tiles.** Their IDs come from the same space as live
+  tiles, and their media arrives through `on_action` with the same actions,
+  generations, and answering rules (`nv_tile_decoded`,
+  `nv_tile_decode_failed`), so an app's tile view shows recorded video as
+  it shows live video. `nv_tile_set_tier`, the audio calls, `tile_stats`,
+  and `tile_closed` work on them; `nv_tile_close` returns
+  `NV_ERR_INVALID_ARGUMENT` (use `nv_playback_remove_camera` or
+  `nv_playback_close`). Generation 0 of each tile is an empty placeholder
+  ended by a final Reset; every seek or rate change is a new generation.
+- **Opening.** The request is section 6's JSON (a camera list with a range,
+  or `{"incident": "<key>"}`); the cameras' devices must be enabled with
+  `nv_recordings_enable` and their days in the index (`nv_recordings_want`),
+  or the camera shows `no_recording`. Nothing about the playback or its
+  tiles (no action, no event) is delivered before `nv_playback_open`
+  returns its IDs. When `tile_cap` is smaller than the number of cameras,
+  nothing is opened: `NV_ERR_BUFFER_TOO_SMALL` with `*tile_count` set (4 is
+  always enough).
+- **Status codes** are the recordings' (`RecError` as in "Recordings"):
+  `NV_ERR_NOT_CONFIGURED` before `nv_recordings_configure`;
+  `NV_ERR_INVALID_ARGUMENT` for invalid JSON, a rate other than 0.25, 0.5,
+  1, 2, 4, 8, or 16, a seek mode that is not an `NvSeekMode`, a camera
+  twice (also when adding), a camera of a device not enabled, an offset
+  beyond 24 hours, or a NULL out pointer; `NV_ERR_UNKNOWN_ID` for an
+  unknown playback, tile, or incident; `NV_ERR_LIMIT` beyond 8 playbacks, 4
+  cameras per playback, a 24-hour range, the core's tile limit, or a full
+  command queue (64 waiting requests); `NV_ERR_CLOSED` while the core shuts
+  down.
+- **Threads.** Every call returns at once, except `nv_playback_remove_camera`
+  and `nv_playback_close`, which wait (at most about 10 s) for the
+  playback's engine to stop the plays. Any thread, never inside a callback
+  (there they return `NV_ERR_INVALID_ARGUMENT`), except
+  `nv_playback_position`, which takes one brief lock and is meant for the
+  scrubber, from any thread including callbacks.
+- **Not in minor 6:** `nv_playback_step` (section 6) is not implemented
+  yet and not exported; it takes a later minor.
+
+Events (FFI-RECORDINGS.md, sections 6 and 8):
+
+```json
+{"type":"playback_state","playback":3,"state":"playing","position_ms":1791618127000,"rate":1.0}
+{"type":"playback_camera","playback":3,"tile":11,"state":"buffering"}
+{"type":"playback_seek","playback":3,"position_ms":1791618130000,"generation":4,"state":"active"}
+{"type":"playback_closed","playback":3,"reason":"closed"}
+```
+
+The C smoke test opens a two-camera playback of the mock's recordings,
+plays it, seeks, changes the rate to 4x, and closes it, also under
+AddressSanitizer.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
@@ -748,6 +1122,14 @@ symbol at all, so a bound app checks first):
 | 2 | updates (`nv_update_check`, `nv_update_download`, `nv_update_cancel`, `nv_update_parse_key`, `nv_update_parse_source`, the `update` event) |
 | 3 | `nv_tile_retry` (the Retry button of a tile without a picture) |
 | 4 | `nv_talk_set_conversation` (no per-minute talk-back limit while the user has a call open; see "Talk-back") |
+| 5 | recordings, part 1 (see "Recordings"): `nv_recordings_*`, `nv_incident*`, `nv_camera_groups_*`, `nv_thumbnail_*`, `nv_download*`, `nv_sound_configure`, `NvThumbKind`, `NvThumbnail`, `NV_ERR_UNSUPPORTED`, `NV_ERR_NOT_CONFIGURED`, `NV_PENDING`, and the recordings events; `device_info.recordings` |
+| 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
+
+Later minors are taken in the order the additions land; this table is the
+source of truth. Edit lists and export (F3, F4) and stepping a playback
+(`nv_playback_step`) take the next free minors. Capture ("Capture") and camera motion ("Camera motion
+(PTZ)") are proposed and take the next free minors when they land, each its
+own.
 
 ## Builds
 
