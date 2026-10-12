@@ -23,6 +23,7 @@ struct PlayerColumn: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
+                if let job = browser.export.job { ExportStrip(job: job, export: browser.export) }
                 TransportBar(browser: browser, player: browser.player)
                     .frame(height: RecordingsPanes.transportHeight)
                 Divider()
@@ -79,6 +80,14 @@ struct PlayerArea: View {
         .focused($focused)
         .onKeyPress(.space) {
             player.togglePlay()
+            return .handled
+        }
+        .onKeyPress("i") {
+            browser.markIn()
+            return .handled
+        }
+        .onKeyPress("o") {
+            browser.markOut()
             return .handled
         }
     }
@@ -240,6 +249,7 @@ struct TransportBar: View {
                     }
                 }
                 .disabled(!d.canPlay)
+                ExportMenu(browser: browser)
                 PlayerViewMenu(browser: browser)
             }
             .buttonStyle(.borderless)
@@ -297,6 +307,9 @@ struct Scrubber: View {
     let browser: RecordingsBrowser
     let driver: any PlayerTransportDriver
     @State private var lastSent = Date.distantPast
+    /// The point a press on the scrubber grabbed, if it did.
+    @State private var grabbed: InOutPoints.Handle?
+    @State private var pressed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -304,10 +317,28 @@ struct Scrubber: View {
             let events = scrubEvents
             let cuts = browser.playerView == .follow ? browser.editPlayer.cuts : []
             let position = driver.transport.positionMs
+            let points = browser.points
             Canvas { ctx, size in
                 let track = CGRect(x: 0, y: size.height / 2 - 4, width: size.width, height: 8)
                 ctx.fill(Path(roundedRect: track, cornerRadius: 4), with: .color(.secondary.opacity(0.18)))
                 guard let range else { return }
+                if !points.isEmpty {
+                    let x0 = points.inMs.map { TransportState.fraction($0, from: range.start, to: range.end) * size.width } ?? 0
+                    let x1 = points.outMs.map { TransportState.fraction($0, from: range.start, to: range.end) * size.width } ?? size.width
+                    ctx.fill(Path(CGRect(x: x0, y: track.minY - 2, width: max(x1 - x0, 1), height: track.height + 4)), with: .color(.accentColor.opacity(0.28)))
+                    var flags: [(CGFloat, CGFloat)] = []
+                    if points.inMs != nil { flags.append((x0, 6)) }
+                    if points.outMs != nil { flags.append((x1, -6)) }
+                    for (x, dx) in flags {
+                        var flag = Path()
+                        flag.move(to: CGPoint(x: x, y: 1))
+                        flag.addLine(to: CGPoint(x: x, y: size.height - 1))
+                        flag.addLine(to: CGPoint(x: x + dx, y: size.height - 1))
+                        flag.addLine(to: CGPoint(x: x + dx, y: 1))
+                        flag.closeSubpath()
+                        ctx.fill(flag, with: .color(.accentColor))
+                    }
+                }
                 for e in events {
                     let x0 = TransportState.fraction(e.start * 1000, from: range.start, to: range.end) * size.width
                     let x1 = TransportState.fraction((e.end + 1) * 1000, from: range.start, to: range.end) * size.width
@@ -330,6 +361,16 @@ struct Scrubber: View {
                     .onChanged { v in
                         guard let range else { return }
                         let ms = TransportState.time(atFraction: v.location.x / geo.size.width, from: range.start, to: range.end)
+                        if !pressed {
+                            pressed = true
+                            grabbed = points.handle(
+                                atFraction: v.startLocation.x / max(geo.size.width, 1), range: range.start...range.end,
+                                tolerance: 8 / max(geo.size.width, 1))
+                        }
+                        if let grabbed {
+                            browser.movePoint(grabbed, to: ms)
+                            return
+                        }
                         // A seek at most every 0.1 s while dragging (the core
                         // coalesces them too); keyframes are enough there.
                         if Date().timeIntervalSince(lastSent) >= 0.1 {
@@ -338,7 +379,11 @@ struct Scrubber: View {
                         }
                     }
                     .onEnded { v in
-                        guard let range else { return }
+                        defer {
+                            pressed = false
+                            grabbed = nil
+                        }
+                        guard let range, grabbed == nil else { return }
                         lastSent = .distantPast
                         driver.seek(to: TransportState.time(atFraction: v.location.x / geo.size.width, from: range.start, to: range.end), exact: true)
                     })
@@ -349,7 +394,8 @@ struct Scrubber: View {
     private func scrubHelp(range: (start: Int64, end: Int64)?, cuts: Int) -> String {
         guard let range else { return "" }
         let span = "\(TransportState.clock(range.start))–\(TransportState.clock(range.end))"
-        return cuts > 0 ? "\(span); white marks are the follow cut's cuts" : span
+        let marks = browser.points.isEmpty ? "" : "; in and out: " + browser.points.text(clock: TransportState.clock)
+        return (cuts > 0 ? "\(span); white marks are the follow cut's cuts" : span) + marks
     }
 
     /// The events the scrubber marks: the incident's, or the day's of the
@@ -428,6 +474,11 @@ struct TimelineLanes: View {
                                     }
                                     LoudnessLegend().frame(height: RecordingsPanes.legendHeight)
                                 }
+                                InOutBand(browser: browser, zoom: zoom, start: start)
+                                    .frame(
+                                        width: viewport,
+                                        height: RecordingsPanes.rulerHeight + CGFloat(browser.lanes.count) * rowHeight)
+                                    .allowsHitTesting(false)
                                 Playhead(browser: browser, zoom: zoom, start: start)
                                     .frame(
                                         width: viewport,
@@ -813,5 +864,152 @@ struct LoudnessLegend: View {
         .font(.system(size: 9))
         .foregroundStyle(.secondary)
         .padding(.top, 2)
+    }
+}
+
+
+// MARK: Export
+
+/// The in and out points over the timeline lanes.
+struct InOutBand: View {
+    let browser: RecordingsBrowser
+    let zoom: Double
+    let start: Double
+
+    var body: some View {
+        let points = browser.points
+        Canvas { ctx, size in
+            guard browser.player.playback != nil || browser.playerView != .cameras, !points.isEmpty else { return }
+            let map = TimelineMap(day: browser.day, zoom: zoom, start: start, width: size.width)
+            let x0 = points.inMs.map { map.x(ms: $0) } ?? 0, x1 = points.outMs.map { map.x(ms: $0) } ?? size.width
+            ctx.fill(Path(CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: size.height)), with: .color(.accentColor.opacity(0.12)))
+            var edges: [CGFloat] = []
+            if points.inMs != nil { edges.append(x0) }
+            if points.outMs != nil { edges.append(x1) }
+            for x in edges {
+                ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: size.height)), with: .color(.accentColor))
+            }
+        }
+    }
+}
+
+/// The export menu: in and out points, trim, follow cut and grid, range
+/// download, pictures, and the share-safe switch.
+struct ExportMenu: View {
+    @Bindable var browser: RecordingsBrowser
+
+    var body: some View {
+        let export = browser.export
+        let hasPoints = browser.pointsWindow != nil
+        Menu {
+            Button("Set In Point (I)") { browser.markIn() }
+            Button("Set Out Point (O)") { browser.markOut() }
+            Button("Clear In and Out") { browser.clearPoints() }.disabled(browser.points.isEmpty)
+            Divider()
+            Menu("Trim to In and Out") {
+                Button("All Cameras") { browser.trim(cameras: nil) }
+                Divider()
+                ForEach(browser.trimCameras, id: \.self) { c in
+                    Button(browser.cameraName(c)) { browser.trim(cameras: [c]) }
+                }
+            }
+            .disabled(!hasPoints)
+            Toggle("Exact Trim (Re-Encodes)", isOn: Bindable(export).trimExact)
+            Divider()
+            Button("Export Follow Cut…") { browser.exportEdit(.follow) }.disabled(browser.editable == nil)
+            Button("Export 2-Up…") { browser.exportEdit(.grid2) }.disabled(browser.editable == nil)
+            Button("Export 4-Up…") { browser.exportEdit(.grid4) }.disabled(browser.editable == nil)
+            Picker("Video", selection: Bindable(export).codec) {
+                Text("H.264").tag(ExportCodec.h264)
+                Text("HEVC").tag(ExportCodec.hevc)
+            }
+            Divider()
+            Button("Download Range…") { browser.beginRangeDownload() }
+            Divider()
+            Button("Save Picture…") { browser.saveStills(eachCamera: false) }
+            Button("Save a Picture of Each Camera…") { browser.saveStills(eachCamera: true) }
+            Divider()
+            Toggle("Share-Safe (No Names or Metadata)", isOn: Bindable(export).shareSafe)
+        } label: {
+            Label(hasPoints ? "Export (In/Out)" : "Export", systemImage: "square.and.arrow.up")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Export: in and out points (I and O), trim, follow cut or grid, range download, pictures")
+    }
+}
+
+extension RecordingsBrowser {
+    /// The cameras a trim can name: the playing ones, or the edit's.
+    var trimCameras: [RecordingCamera] {
+        playerView == .cameras ? player.cameras : (editPlayer.plan?.sources.map(\.camera) ?? [])
+    }
+}
+
+/// A running or just-ended export: progress, cancel, and what was written.
+struct ExportStrip: View {
+    let job: ExportJob
+    let export: ExportModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if job.running {
+                Text(job.title).font(.caption)
+                ProgressView(value: job.fraction).progressViewStyle(.linear).frame(maxWidth: 260)
+                Button("Cancel") { job.cancel() }.buttonStyle(.link).font(.caption)
+            } else {
+                Text(job.result ?? "Done").font(.caption).lineLimit(1)
+                if !job.files.isEmpty {
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting(job.files) }.buttonStyle(.link).font(.caption)
+                }
+                Button("Dismiss") { export.dismissJob() }.buttonStyle(.link).font(.caption)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12).padding(.vertical, 4)
+        .background(.quaternary.opacity(0.4))
+    }
+}
+
+/// The range download sheet: cameras, the range, an optional name and folder.
+struct RangeDownloadSheet: View {
+    let browser: RecordingsBrowser
+    @State var request: RangeDownloadRequest
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Download Range").font(.title3.weight(.semibold))
+            Text("\(TransportState.clock(request.startMs)) to \(TransportState.clock(request.endMs)) on \(browser.dayTitle)")
+                .font(.callout).foregroundStyle(.secondary)
+            ForEach(browser.cameras, id: \.self) { c in
+                Toggle(browser.cameraName(c), isOn: Binding(
+                    get: { request.cameras.contains(c) },
+                    set: { on in if on { request.cameras.insert(c) } else { request.cameras.remove(c) } }))
+                .toggleStyle(.checkbox)
+            }
+            TextField("Name (optional)", text: $request.name).textFieldStyle(.roundedBorder)
+            HStack {
+                Text(request.folder?.path ?? "Downloads folder").font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Button("Choose Folder…") {
+                    if let f = browser.export.chooseFolder("Choose where to download", request.folder) { request.folder = f }
+                }
+                if request.folder != nil { Button("Default") { request.folder = nil } }
+            }
+            if browser.export.shareSafe { Text("Share-safe: neutral camera names, no incident.json").font(.caption).foregroundStyle(.secondary) }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Download") {
+                    browser.downloadRange(request)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(request.cameras.isEmpty)
+            }
+        }
+        .padding(16)
+        .frame(width: 400)
     }
 }

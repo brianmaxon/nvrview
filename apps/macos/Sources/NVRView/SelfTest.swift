@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import QuartzCore
 import Foundation
 import FakeCore
@@ -3047,7 +3048,7 @@ final class SelfTest {
             }
             let s = incident.start * 1000
             print("edits: follow cut \(plan.segments.map { "\($0.source)@\($0.startMs - s)" }), cuts \(ep.cuts.map { $0 - s }), frames drawn \(b.editStage?.framesDrawn ?? 0)")
-            if b.playerView != .follow || b.player.transport.isPlaying { problems.append("edits: the device playback still plays under the follow cut") }
+            if b.playerView != .follow { problems.append("edits: the follow cut is not shown") }
             if !session.failures.isEmpty { problems.append("edits: files not opened: \(session.failures)") }
             if ep.cuts != [s + 1000, s + 2000] || plan.segments.map(\.source) != [0, 1, 2] {
                 problems.append("edits: the follow cut cuts at \(ep.cuts.map { $0 - s }) to \(plan.segments.map(\.source))")
@@ -3102,6 +3103,8 @@ final class SelfTest {
     private func editGrid(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
         // parity: edit-grid
         let ep = b.editPlayer
+        // The core's pause event arrives some moments after the request, so this waits until here.
+        if b.player.transport.isPlaying { problems.append("edits: the device playback still plays under the follow cut") }
         b.show(view: .grid4)
         when({ ep.session != nil && ep.plan?.kind == .grid }, timeout: 5) { [self] in
             guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
@@ -3125,8 +3128,323 @@ final class SelfTest {
             ep.pause()
             ep.gridSound = 0
             if first != 0 || second != 1 { problems.append("edits: the grid's sound came from \(String(describing: first)), then \(String(describing: second))") }
-            editBack(b, fake, folder: folder)
+            exportTrim(b, fake, folder: folder)
         }
+    }
+
+    // MARK: Export
+
+    /// The files an export step writes and the switches it restores.
+    private final class ExportRun {
+        let dir: URL
+        let shareSafe: Bool
+        let folder: ExportFolder
+        init(shareSafe: Bool, folder: ExportFolder) {
+            dir = FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-selftest-\(UUID().uuidString)")
+            self.shareSafe = shareSafe
+            self.folder = folder
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+    }
+
+    private final class Box<T>: @unchecked Sendable {
+        var value: T?
+    }
+
+    /// Runs async work and continues on the main actor when it is done.
+    private func awaiting<T: Sendable>(_ work: @escaping @Sendable () async -> T, then next: @escaping @MainActor (T) -> Void) {
+        let box = Box<T>()
+        Task { box.value = await work() }
+        when({ box.value != nil }, timeout: 60) { next(box.value!) }
+    }
+
+    /// What a picture of a synthetic export at `ms` shows.
+    private nonisolated static func lookFile(_ url: URL, at ms: Int64) async -> (color: Int?, frame: Int)? {
+        guard let file = try? await RecordedFileSource.open(url) else { return nil }
+        defer { file.close() }
+        file.show(ms)
+        guard let picture = file.latestPicture(),
+            let image = await PictureRenderer().render(
+                PictureRender(
+                    picture: picture, color: file.info.color, source: CGRect(x: 0, y: 0, width: picture.width, height: picture.height),
+                    width: 320, height: 180))
+        else { return nil }
+        return SyntheticRecording.read(image, picture: CGRect(x: 0, y: 0, width: 320, height: 180))
+    }
+
+    private func exportTrim(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
+        // parity: export-trim
+        guard let plan = b.editPlayer.plan, let source = plan.sources.first else { return editBack(b, fake, folder: folder) }
+        let suite = UserDefaults(suiteName: "nvrview.selftest.export") ?? .standard
+        suite.removePersistentDomain(forName: "nvrview.selftest.export")
+        let run = ExportRun(shareSafe: b.export.shareSafe, folder: b.export.folder)
+        b.export.folder = ExportFolder(defaults: suite)
+        b.export.saveURL = { name, _, _ in run.dir.appendingPathComponent(name) }
+        b.export.chooseFolder = { _, _ in run.dir }
+        b.export.shareSafe = false
+        b.export.trimExact = false
+        let s = plan.startMs
+        b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
+        b.trim(cameras: [source.camera])
+        when({ b.export.job?.running == false }, timeout: 60) { [self] in
+            guard let job = b.export.job, job.files.count == 1, let url = job.files.first else {
+                problems.append("export: the trim wrote \(b.export.job?.files.count ?? 0) files (\(b.export.job?.result ?? b.message ?? "no message"))")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            // The core's own plan for the same trim says where it starts and ends.
+            let request = ExportRequest.trim(
+                download: plan.download, cameras: [source.camera], inMs: s + 2_500, outMs: s + 5_000, exact: false, options: .init())
+            guard let trim = (try? fake.editCompute(json: request)).flatMap(TrimPlan.parse), let out = trim.outputs.first else {
+                problems.append("export: the fake planned no trim")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            awaiting({ () async -> (Double, Int, Int, (color: Int?, frame: Int)?)? in
+                let asset = AVURLAsset(url: url)
+                guard let d = try? await asset.load(.duration).seconds,
+                    let track = try? await asset.loadTracks(withMediaType: .video).first,
+                    let size = try? await track.load(.naturalSize)
+                else { return nil }
+                return (d, Int(size.width), Int(size.height), await Self.lookFile(url, at: 0))
+            }) { [self] got in
+                let want = Double(out.sourceOutMs - out.sourceInMs) / 1000
+                print("export: trim \(url.lastPathComponent) \(got.map { "\($0.0) s, \($0.1)×\($0.2), first \(String(describing: $0.3))" } ?? "unreadable"), expected \(want) s from file ms \(out.sourceInMs)")
+                if let g = got {
+                    if abs(g.0 - want) > 0.25 { problems.append("export: the trim lasts \(g.0) s, expected \(want)") }
+                    if g.1 != 640 || g.2 != 360 { problems.append("export: the trim is \(g.1)×\(g.2), expected 640×360") }
+                    let expectedSource = plan.sources.first { $0.file == out.file }?.source
+                    if g.3?.color != expectedSource || g.3?.frame != Int(out.sourceInMs / 100) {
+                        problems.append("export: the trim starts at \(String(describing: g.3)), expected camera \(String(describing: expectedSource)) frame \(out.sourceInMs / 100)")
+                    }
+                } else {
+                    problems.append("export: the trimmed file could not be read")
+                }
+                if !out.copyPossible { problems.append("export: a keyframe trim should be a copy") }
+                exportShareSafe(b, fake, run, plan: plan, source: source, folder: folder)
+            }
+        }
+    }
+
+    private func exportShareSafe(
+        _ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, plan: EditPlan, source: EditPlan.Source, folder: String?
+    ) {
+        // parity: export-share-safe
+        b.export.shareSafe = true
+        b.export.dismissJob()
+        let s = plan.startMs
+        b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
+        b.trim(cameras: [source.camera])
+        when({ b.export.job?.running == false }, timeout: 60) { [self] in
+            guard let url = b.export.job?.files.first else {
+                problems.append("export: the share-safe trim wrote nothing (\(b.export.job?.result ?? "no message"))")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            let bytes = (try? Data(contentsOf: url)) ?? Data()
+            let leaks = ["Core Media", "udta", "meta"].filter { bytes.range(of: Data($0.utf8)) != nil }
+            print("export: share-safe trim \(url.lastPathComponent), \(bytes.count) bytes, leaks \(leaks)")
+            if bytes.isEmpty || !leaks.isEmpty { problems.append("export: the share-safe trim holds \(leaks)") }
+            if url.lastPathComponent.contains("Camera 1") || url.lastPathComponent.contains("Camera 2") || url.lastPathComponent.contains("Camera 3") {
+                problems.append("export: the share-safe file is named \(url.lastPathComponent)")
+            }
+            b.export.shareSafe = false
+            b.export.dismissJob()
+            exportFollow(b, fake, run, folder: folder)
+        }
+    }
+
+    private func exportFollow(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
+        // parity: export-follow-cut
+        guard let plan = b.editPlayer.plan, let incident = b.editable?.incident else { return exportFinish(b, fake, run, folder: folder) }
+        let s = incident.start * 1000
+        b.export.points = InOutPoints(inMs: s + 500, outMs: s + 2_500)
+        b.export.codec = .hevc
+        b.exportEdit(.follow)
+        when({ b.export.job?.running == false }, timeout: 90) { [self] in
+            guard let url = b.export.job?.files.first else {
+                problems.append("export: the follow cut wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            let request = ExportRequest.edit(grid: nil, download: plan.download, window: (s + 500, s + 2_500), options: .init())
+            guard let cut = (try? fake.editCompute(json: request)).flatMap(EditPlan.parse) else {
+                problems.append("export: the fake planned no follow cut")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            let samples: [Int64] = [0, 400, 600, 1_100, 1_400, 1_900]
+            awaiting({ () async -> (Double, Int, Int, [(color: Int?, frame: Int)?])? in
+                let asset = AVURLAsset(url: url)
+                guard let d = try? await asset.load(.duration).seconds,
+                    let track = try? await asset.loadTracks(withMediaType: .video).first,
+                    let size = try? await track.load(.naturalSize)
+                else { return nil }
+                var looks: [(color: Int?, frame: Int)?] = []
+                for t in samples { looks.append(await Self.lookFile(url, at: t)) }
+                return (d, Int(size.width), Int(size.height), looks)
+            }) { [self] got in
+                guard let g = got else {
+                    problems.append("export: the follow cut file could not be read")
+                    return exportFinish(b, fake, run, folder: folder)
+                }
+                let length = Double(cut.endMs - cut.startMs) / 1000
+                print("export: follow cut \(url.lastPathComponent) \(g.0) s of \(length), \(g.1)×\(g.2), cuts \(EditTimeline.cuts(cut).map { $0 - s })")
+                if abs(g.0 - length) > 0.25 { problems.append("export: the follow cut lasts \(g.0) s, expected \(length)") }
+                if g.1 != 640 || g.2 != 360 { problems.append("export: the follow cut is \(g.1)×\(g.2), expected 640×360") }
+                for (t, look) in zip(samples, g.3) {
+                    guard let shot = EditTimeline.shot(cut, at: cut.startMs + t) else { continue }
+                    let frame = Int(shot.filePositionMs / 100)
+                    if look?.color != shot.source || abs((look?.frame ?? -9) - frame) > 1 {
+                        problems.append("export: the follow cut at \(t) ms shows \(String(describing: look)), expected camera \(shot.source) frame \(frame)")
+                    }
+                }
+                b.export.dismissJob()
+                exportGrid(b, fake, run, folder: folder)
+            }
+        }
+    }
+
+    private func exportGrid(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
+        // parity: export-grid
+        guard let plan = b.editPlayer.plan, let incident = b.editable?.incident else { return exportFinish(b, fake, run, folder: folder) }
+        let s = incident.start * 1000
+        b.export.points = InOutPoints(inMs: s, outMs: s + 2_000)
+        b.export.codec = .h264
+        b.exportEdit(.grid4)
+        when({ b.export.job?.running == false }, timeout: 90) { [self] in
+            guard let url = b.export.job?.files.first else {
+                problems.append("export: the grid wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            let request = ExportRequest.edit(grid: "4up", download: plan.download, window: (s, s + 2_000), options: .init())
+            guard let grid = (try? fake.editCompute(json: request)).flatMap(EditPlan.parse) else {
+                problems.append("export: the fake planned no grid")
+                return exportFinish(b, fake, run, folder: folder)
+            }
+            let samples: [Int64] = [200, 1_000, 1_800]
+            let bounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+            awaiting({ () async -> (Double, Int, Int, [[(color: Int?, frame: Int)]])? in
+                let asset = AVURLAsset(url: url)
+                guard let d = try? await asset.load(.duration).seconds,
+                    let track = try? await asset.loadTracks(withMediaType: .video).first,
+                    let size = try? await track.load(.naturalSize),
+                    let file = try? await RecordedFileSource.open(url)
+                else { return nil }
+                defer { file.close() }
+                var all: [[(color: Int?, frame: Int)]] = []
+                for t in samples {
+                    file.show(t)
+                    guard let picture = file.latestPicture(),
+                        let image = await PictureRenderer().render(
+                            PictureRender(
+                                picture: picture, color: file.info.color,
+                                source: CGRect(x: 0, y: 0, width: picture.width, height: picture.height), width: 1920, height: 1080))
+                    else { return nil }
+                    all.append(
+                        EditComposition.cellRects(grid, in: bounds).map { cell in
+                            let fit = PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination
+                            return SyntheticRecording.read(image, picture: fit)
+                        })
+                }
+                return (d, Int(size.width), Int(size.height), all)
+            }) { [self] got in
+                guard let g = got else {
+                    problems.append("export: the grid file could not be read")
+                    return exportFinish(b, fake, run, folder: folder)
+                }
+                print("export: grid \(url.lastPathComponent) \(g.0) s, \(g.1)×\(g.2), \(grid.cells.count) cells")
+                if abs(g.0 - 2.0) > 0.25 { problems.append("export: the grid lasts \(g.0) s, expected 2") }
+                if g.1 != 1920 || g.2 != 1080 { problems.append("export: the grid is \(g.1)×\(g.2), expected 1920×1080") }
+                for (t, cells) in zip(samples, g.3) {
+                    for (i, look) in cells.enumerated() where i < grid.cells.count {
+                        guard let p = EditTimeline.cellPosition(grid, cell: i, at: s + t) else { continue }
+                        if look.color != grid.cells[i].source || abs(look.frame - Int(p / 100)) > 1 {
+                            problems.append("export: the grid at \(t) ms cell \(i) shows camera \(String(describing: look.color)) frame \(look.frame), expected \(grid.cells[i].source) frame \(p / 100)")
+                        }
+                    }
+                }
+                b.export.dismissJob()
+                exportRange(b, fake, run, folder: folder)
+            }
+        }
+    }
+
+    private func exportRange(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
+        // parity: export-range-download
+        guard let plan = b.editPlayer.plan, let rec = Optional(b.model) else { return exportFinish(b, fake, run, folder: folder) }
+        let s = plan.startMs
+        b.export.points = InOutPoints(inMs: s + 1_000, outMs: s + 4_200)
+        b.beginRangeDownload()
+        guard var request = b.export.rangeRequest else {
+            problems.append("export: the range sheet did not open")
+            return exportFinish(b, fake, run, folder: folder)
+        }
+        if request.cameras.count != plan.sources.count { problems.append("export: the range sheet offers \(request.cameras.count) cameras, expected \(plan.sources.count)") }
+        request.cameras = [plan.sources[0].camera, plan.sources[1].camera]
+        b.downloadRange(request)
+        let wantStart = Int64((Double(s + 1_000) / 1000).rounded(.down)), wantEnd = Int64((Double(s + 4_200) / 1000).rounded(.up))
+        when({
+            fake.completeRecordingWork()
+            return rec.downloads.contains { $0.range != nil && $0.state == "done" }
+        }, timeout: 5) { [self] in
+            let d = rec.downloads.last { $0.range != nil }
+            print("export: range download \(d?.rangeText ?? "none"), \(d?.cameras.count ?? 0) cameras, \(d?.state ?? "?")")
+            if d?.range != DownloadRange(start: wantStart, end: wantEnd) || d?.cameras.count != 2 || d?.state != "done" {
+                problems.append("export: the range download is \(String(describing: d?.range)) with \(d?.cameras.count ?? 0) cameras (\(d?.state ?? "none"), \(rec.notice ?? "")), expected \(wantStart)–\(wantEnd) with 2")
+            }
+            if b.center != .downloads { problems.append("export: a range download did not show the downloads") }
+            b.center = .player
+            exportStills(b, fake, run, folder: folder)
+        }
+    }
+
+    private func exportStills(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
+        // parity: export-stills
+        guard let plan = b.editPlayer.plan else { return exportFinish(b, fake, run, folder: folder) }
+        b.editPlayer.pause()
+        b.editPlayer.seek(to: plan.startMs + 2_500)
+        b.saveStills(eachCamera: false)
+        when({ b.export.job?.running == false }, timeout: 30) { [self] in
+            let one = b.export.job?.files ?? []
+            print("export: current picture \(one.map(\.lastPathComponent))")
+            if one.count != 1 {
+                problems.append("export: the current picture wrote \(one.count) files (\(b.export.job?.result ?? "no message"))")
+            } else if let data = try? Data(contentsOf: one[0]), let image = PictureEncoder.decode(data) {
+                let size = ExportGeometry.outputSize(plan)
+                // The grid's four cells: the first camera's color in its cell.
+                let cell = EditComposition.cellRects(plan, in: CGRect(x: 0, y: 0, width: image.width, height: image.height)).first ?? .zero
+                let got = SyntheticRecording.read(image, picture: PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination)
+                if image.width != size.width || image.height != size.height { problems.append("export: the picture is \(image.width)×\(image.height), expected \(size)") }
+                if got.color != plan.cells.first?.source { problems.append("export: the picture's first cell shows camera \(String(describing: got.color))") }
+            } else {
+                problems.append("export: the picture could not be read back")
+            }
+            b.export.dismissJob()
+            b.saveStills(eachCamera: true)
+            when({ b.export.job?.running == false }, timeout: 30) { [self] in
+                let many = b.export.job?.files ?? []
+                print("export: a picture per camera \(many.map(\.lastPathComponent))")
+                if many.count != plan.sources.count || Set(many.map(\.lastPathComponent)).count != many.count {
+                    problems.append("export: a picture per camera wrote \(many.count) files, expected \(plan.sources.count) (\(b.export.job?.result ?? "no message"))")
+                }
+                for url in many {
+                    if let data = try? Data(contentsOf: url), let image = PictureEncoder.decode(data) {
+                        if image.width != 640 || image.height != 360 { problems.append("export: \(url.lastPathComponent) is \(image.width)×\(image.height)") }
+                    } else {
+                        problems.append("export: \(url.lastPathComponent) could not be read back")
+                    }
+                }
+                b.export.dismissJob()
+                exportFinish(b, fake, run, folder: folder)
+            }
+        }
+    }
+
+    private func exportFinish(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
+        b.export.points.clear()
+        b.export.shareSafe = run.shareSafe
+        b.export.folder = run.folder
+        b.export.saveURL = ExportPanels.save
+        b.export.chooseFolder = ExportPanels.folder
+        try? FileManager.default.removeItem(at: run.dir)
+        b.export.dismissJob()
+        editBack(b, fake, folder: folder)
     }
 
     /// Back to the cameras: the edit closes, the device playback continues from its position.
@@ -3439,11 +3757,62 @@ final class SelfTest {
                 }
                 print("recordings (real core): lock \(rec.notice ?? ""), download \(d.stateText), \(d.outputs.count) files")
                 if d.state != "done" || d.outputs.isEmpty { problems.append("recordings: the download ended \(d.stateText)") }
-                rec.trash(d.download)
-                when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
-                    if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
-                    b.setLocked(incident.key, false)
-                    recordingsRealClose(b)
+                recordingsRealExport(rec, incident: incident, download: d) { [self] in
+                    rec.trash(d.download)
+                    when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
+                        if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
+                        b.setLocked(incident.key, false)
+                        recordingsRealClose(b)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Export on the real core: a keyframe trim of the finished download's
+    /// first camera (planned by the core, copied by `TrimExporter`, read back),
+    /// then a range download of that camera, planned and finished by the core
+    /// against the mock, whose `download` event carries its range.
+    private func recordingsRealExport(
+        _ rec: RecordingsModel, incident: Incident, download d: DownloadProgress, then next: @escaping @MainActor () -> Void
+    ) {
+        // parity: export-real-core
+        guard let camera = d.cameras.first?.camera else { return next() }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-real-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let from = incident.start * 1000 + 500, to = from + 2_000
+        let request = ExportRequest.trim(download: d.download, cameras: [camera], inMs: from, outMs: to, exact: false, options: .init())
+        switch rec.trimPlan(json: request) {
+        case .failure(let refusal):
+            problems.append("export: the real core planned no trim (\(refusal.text))")
+            try? FileManager.default.removeItem(at: dir)
+            return next()
+        case .success(let plan):
+            let out = plan.outputs[0]
+            let target = dir.appendingPathComponent("trim.mp4")
+            awaiting({ () async -> (ExportOutcome, Double)? in
+                let outcome = await TrimExporter.export(out, exact: false, to: target, shareSafe: true, control: ExportControl())
+                guard let seconds = try? await AVURLAsset(url: target).load(.duration).seconds else { return nil }
+                return (outcome, seconds)
+            }) { [self] got in
+                let want = Double(out.sourceOutMs - out.sourceInMs) / 1000
+                print("export (real core): trim \(out.sourceInMs)–\(out.sourceOutMs) ms, copy \(out.copyPossible), wrote \(got.map { "\($0.0.result) \($0.1) s" } ?? "nothing"), expected \(want) s")
+                if got?.0.result != .done || abs((got?.1 ?? 0) - want) > 0.5 || !out.copyPossible {
+                    problems.append("export: the real core's trim wrote \(String(describing: got?.0.result)) lasting \(got?.1 ?? 0) s, expected \(want) s")
+                }
+                try? FileManager.default.removeItem(at: dir)
+                let queued = rec.downloadRange(cameras: [camera], startMs: from, endMs: to, name: nil, options: .init())
+                guard let id = queued?.download else {
+                    problems.append("export: the real core refused the range download (\(rec.notice ?? "no message"))")
+                    return next()
+                }
+                when({ rec.downloads.first { $0.download == id }.map { $0.state == "done" || $0.state == "failed" } == true }, timeout: 60) { [self] in
+                    let r = rec.downloads.first { $0.download == id }
+                    print("export (real core): range download \(r?.rangeText ?? "none"), \(r?.stateText ?? "?"), \(r?.outputs.count ?? 0) files")
+                    if r?.state != "done" || r?.range != DownloadRange(start: from / 1000, end: (to + 999) / 1000) || r?.outputs.count != 1 {
+                        problems.append("export: the real core's range download is \(String(describing: r?.range)) \(r?.stateText ?? "missing")")
+                    }
+                    next()
                 }
             }
         }

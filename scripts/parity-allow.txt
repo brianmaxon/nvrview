@@ -95,3 +95,10 @@ edit-download                macos    gap: Windows follow cut and grids are W3
 edit-follow-cut              macos    gap: Windows follow cut and grids are W3
 edit-grid                    macos    gap: Windows follow cut and grids are W3
 edit-back-to-cameras         macos    gap: Windows follow cut and grids are W3
+export-trim                  macos    gap: Windows export is W4
+export-share-safe            macos    gap: Windows export is W4
+export-follow-cut            macos    gap: Windows export is W4
+export-grid                  macos    gap: Windows export is W4
+export-range-download        macos    gap: Windows export is W4
+export-stills                macos    gap: Windows export is W4
+export-real-core             macos    gap: Windows export is W4

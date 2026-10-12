@@ -151,8 +151,10 @@ public struct DownloadProgress: Sendable, Equatable, Decodable {
     public var state: String
     public var paused: Bool
     public var cameras: [DownloadCamera]
+    /// A range download's time range (seconds, device-local); nil for an incident's.
+    public var range: DownloadRange?
 
-    private enum CodingKeys: String, CodingKey { case download, incident, folder, state, paused, cameras }
+    private enum CodingKeys: String, CodingKey { case download, incident, folder, state, paused, cameras, range }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -162,6 +164,18 @@ public struct DownloadProgress: Sendable, Equatable, Decodable {
         state = try c.decode(String.self, forKey: .state)
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         cameras = try c.decodeIfPresent([DownloadCamera].self, forKey: .cameras) ?? []
+        range = try c.decodeIfPresent(DownloadRange.self, forKey: .range)
+    }
+}
+
+/// The `range` member of a range download's `download` event.
+public struct DownloadRange: Sendable, Equatable, Decodable {
+    public var start: Int64
+    public var end: Int64
+
+    public init(start: Int64, end: Int64) {
+        self.start = start
+        self.end = end
     }
 }
 

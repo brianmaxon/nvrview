@@ -531,6 +531,50 @@ final class RecordingsModel {
         }
     }
 
+    /// Queues a range download of `cameras` (`nv_download_range`); nil with
+    /// `notice` set when it was refused.
+    @discardableResult
+    func downloadRange(
+        cameras: [RecordingCamera], startMs: Int64, endMs: Int64, name: String?, options: ExportOptions
+    ) -> QueuedDownload? {
+        guard let core = core() else { return nil }
+        do throws(CoreStatus) {
+            let json = ExportRequest.range(startMs: startMs, endMs: endMs, cameras: cameras, name: name, options: options)
+            let answer = QueuedDownload.parse(answer: try core.downloadRange(json: json))
+            notice = answer?.existing == true ? "Already downloaded or downloading" : nil
+            return answer
+        } catch {
+            notice = switch error {
+            case .notConfigured: options.dest == nil ? "There is no downloads folder" : "That folder cannot be used for downloads"
+            case .limit: "At most 16 cameras, 24 hours, and 1000 downloads"
+            case .invalidArgument: "That range or those cameras cannot be downloaded"
+            case .unsupported: "This version of the core cannot download a range"
+            default: "Could not download (status \(error.code))"
+            }
+            return nil
+        }
+    }
+
+    /// Runs `body` once, on the main actor, when download `id` is done or failed
+    /// (at once if it already is).
+    func whenFinished(_ id: String, _ body: @escaping (DownloadProgress) -> Void) {
+        if let d = downloads.first(where: { $0.download == id }), d.state == "done" || d.state == "failed" {
+            body(d)
+        } else {
+            finishWaiters[id, default: []].append(body)
+        }
+    }
+
+    @ObservationIgnored private var finishWaiters: [String: [(DownloadProgress) -> Void]] = [:]
+
+    private func runWaiters() {
+        for (id, bodies) in finishWaiters {
+            guard let d = board.byID[id], d.state == "done" || d.state == "failed" else { continue }
+            finishWaiters[id] = nil
+            for body in bodies { body(d) }
+        }
+    }
+
     func pause(_ id: String, _ paused: Bool) {
         guard let core = core() else { return }
         do throws(CoreStatus) { try core.downloadPause(id, camera: nil, paused: paused) } catch {
@@ -579,6 +623,7 @@ final class RecordingsModel {
     private func publishDownloads() {
         publishScheduled = false
         downloads = board.downloads
+        runWaiters()
     }
 
     // MARK: Edit lists (minor 8)
@@ -587,6 +632,51 @@ final class RecordingsModel {
     /// cut or a grid is made from.
     func finishedDownload(of incident: String) -> DownloadProgress? {
         downloads.last { $0.incident == incident && $0.state == "done" }
+    }
+
+    /// `nv_edit_compute` of kind `trim`.
+    func trimPlan(json: String) -> Result<TrimPlan, EditPlanRefusal> {
+        guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
+        do throws(CoreStatus) {
+            guard let plan = TrimPlan.parse(try core.editCompute(json: json)) else {
+                return .failure(.init(text: "The core's trim could not be read"))
+            }
+            return .success(plan)
+        } catch {
+            return .failure(.init(text: Self.exportRefusal(error, none: "No camera has video between the in and out points")))
+        }
+    }
+
+    /// `nv_still_plan`.
+    func stillPlan(json: String) -> Result<StillPlan, EditPlanRefusal> {
+        guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
+        do throws(CoreStatus) {
+            guard let plan = StillPlan.parse(try core.stillPlan(json: json)) else {
+                return .failure(.init(text: "The core's picture plan could not be read"))
+            }
+            return .success(plan)
+        } catch {
+            return .failure(.init(text: Self.exportRefusal(error, none: "There is no picture to save yet")))
+        }
+    }
+
+    private static func exportRefusal(_ error: CoreStatus, none: String) -> String {
+        switch error {
+        case .unknownID: "The download or playback is gone"
+        case .notConfigured: "There is no downloads folder"
+        case .invalidArgument: none
+        case .unsupported: "This version of the core cannot export"
+        default: "Could not plan the export (status \(error.code))"
+        }
+    }
+
+    /// The newest finished range download that holds `camera` for the whole
+    /// of `startMs...endMs`.
+    func finishedRange(covering camera: RecordingCamera, startMs: Int64, endMs: Int64) -> DownloadProgress? {
+        downloads.last { d in
+            guard d.state == "done", let r = d.range, r.start * 1000 <= startMs, endMs <= r.end * 1000 else { return false }
+            return d.cameras.contains { $0.camera == camera && $0.output != nil }
+        }
     }
 
     /// `nv_edit_compute`: the plan, or why there is none.

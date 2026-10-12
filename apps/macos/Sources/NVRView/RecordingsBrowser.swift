@@ -80,6 +80,8 @@ final class RecordingsBrowser {
     let player: RecordingsPlayer
     /// The follow cut and grids of a downloaded incident.
     let editPlayer: EditPlayer
+    /// In and out points, the export switches, and the running export.
+    let export = ExportModel()
     /// What the player shows.
     private(set) var playerView = PlayerView.cameras
     /// The follow cut's and grid's picture view, once shown (the self-test).
