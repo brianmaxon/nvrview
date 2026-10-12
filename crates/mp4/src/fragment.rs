@@ -10,14 +10,16 @@ use crate::error::{Error, Result};
 use crate::nal::{
     NalKind, ParamSets, VideoCodec, classify, parse_h264_sps, parse_h265_sps, split_annexb,
 };
+use crate::track::{AudioTrackSpec, VIDEO_HANDLER_NAME};
 use crate::writer::{
-    EPOCH_1904, MATRIX, TIMESCALE, TrackInfo, VideoEntry, VideoFrame, build_entry, trak,
-    us_to_ticks,
+    EPOCH_1904, Edit, MATRIX, TIMESCALE, TrackInfo, VideoEntry, VideoFrame, build_entry,
+    check_raw_au, check_track_count, trak, us_to_ticks,
 };
 
 /// Track ID of the video track in every init and media segment.
 pub const VIDEO_TRACK_ID: u32 = 1;
-/// Track ID of the audio track.
+/// Track ID of the first audio track; further audio tracks follow (3, 4,
+/// ...) in declaration order.
 pub const AUDIO_TRACK_ID: u32 = 2;
 
 /// Sample flags (ISO/IEC 14496-12, sample flags): depends on no other sample.
@@ -26,7 +28,8 @@ const FLAGS_SYNC: u32 = 0x0200_0000;
 const FLAGS_NON_SYNC: u32 = 0x0101_0000;
 /// Duration assumed for a lone final video sample (25 fps).
 const DEFAULT_SAMPLE_TICKS: u32 = TIMESCALE / 25;
-/// Most audio bytes held while waiting for video to cut a fragment.
+/// Most audio bytes held (all tracks together) while waiting for video to
+/// cut a fragment.
 const MAX_AUDIO_BYTES: usize = 1 << 20;
 
 /// Where audio goes.
@@ -63,9 +66,15 @@ pub struct FragmentOptions {
     pub max_fragment_us: i64,
     /// A fragment is also closed when its video data reaches this many bytes.
     pub max_fragment_bytes: usize,
-    /// Audio format; `None` means no audio track. Audio frames pushed while
-    /// this is `None` are ignored.
+    /// Audio format of the first audio track, as [`AudioTrackSpec::new`]
+    /// (the single-track API); `None` means no such track. ADTS frames
+    /// pushed while there is no audio track at all are ignored.
     pub audio: Option<AacConfig>,
+    /// Further audio tracks, declared up front: they follow the `audio`
+    /// track if there is one (track IDs continue from it) and are fed with
+    /// [`Fragmenter::push_audio_raw`] by index. At most
+    /// [`MAX_AUDIO_TRACKS`](crate::MAX_AUDIO_TRACKS) audio tracks in all.
+    pub audio_tracks: Vec<AudioTrackSpec>,
     pub audio_layout: AudioLayout,
     pub on_change: ChangePolicy,
     /// Creation time for the headers, seconds since the Unix epoch.
@@ -79,6 +88,7 @@ impl Default for FragmentOptions {
             max_fragment_us: 500_000,
             max_fragment_bytes: 4 << 20,
             audio: None,
+            audio_tracks: Vec::new(),
             audio_layout: AudioLayout::Muxed,
             on_change: ChangePolicy::NewInit,
             creation_unix_secs: 0,
@@ -150,9 +160,13 @@ pub struct Segment {
     /// segments are always true.
     pub starts_with_keyframe: bool,
     /// Media: `tfdt` base decode times (video in 90 kHz ticks, audio in
-    /// sample-rate ticks) of the track fragments present.
+    /// sample-rate ticks) of the track fragments present. `audio_tfdt` is
+    /// the first audio track's ([`AUDIO_TRACK_ID`]).
     pub video_tfdt: Option<u64>,
     pub audio_tfdt: Option<u64>,
+    /// Media: (track ID, `tfdt`) of every audio track fragment present, in
+    /// the order of the `traf` boxes.
+    pub audio_tfdts: Vec<(u32, u64)>,
     /// Init only.
     pub init: Option<InitInfo>,
 }
@@ -184,10 +198,19 @@ struct ASample {
     size: u32,
 }
 
+/// Audio of one track waiting for video to cut a fragment.
+#[derive(Default)]
+struct AState {
+    samples: Vec<ASample>,
+    data: Vec<u8>,
+    /// Sample time where the next frame is expected.
+    next: Option<u64>,
+}
+
 /// Cuts a stream of access units and ADTS frames into fragments.
 ///
 /// At most one fragment of video (see [`FragmentOptions`]) and up to 1 MiB
-/// of audio are held at any time.
+/// of audio (all tracks together) are held at any time.
 pub struct Fragmenter {
     codec: VideoCodec,
     opts: FragmentOptions,
@@ -204,14 +227,21 @@ pub struct Fragmenter {
     vdata: Vec<u8>,
     last_dts: i64,
     last_delta: u32,
-    asamples: Vec<ASample>,
-    adata: Vec<u8>,
-    audio_next: Option<u64>,
+    /// Every audio track: `opts.audio` first, then `opts.audio_tracks`.
+    tracks: Vec<AudioTrackSpec>,
+    audio: Vec<AState>,
     stats: FragmentStats,
 }
 
 impl Fragmenter {
     pub fn new(codec: VideoCodec, opts: FragmentOptions) -> Self {
+        let tracks: Vec<AudioTrackSpec> = opts
+            .audio
+            .map(AudioTrackSpec::new)
+            .into_iter()
+            .chain(opts.audio_tracks.iter().copied())
+            .collect();
+        let audio = tracks.iter().map(|_| AState::default()).collect();
         Self {
             codec,
             opts,
@@ -227,15 +257,19 @@ impl Fragmenter {
             vdata: Vec::new(),
             last_dts: 0,
             last_delta: 0,
-            asamples: Vec::new(),
-            adata: Vec::new(),
-            audio_next: None,
+            tracks,
+            audio,
             stats: FragmentStats::default(),
         }
     }
 
     pub fn stats(&self) -> FragmentStats {
         self.stats
+    }
+
+    /// Every audio track, in track order (IDs from [`AUDIO_TRACK_ID`]).
+    pub fn audio_tracks(&self) -> &[AudioTrackSpec] {
+        &self.tracks
     }
 
     /// The init segment(s) in effect (one, or two for separate audio), for
@@ -275,6 +309,7 @@ impl Fragmenter {
         let mut out = Vec::new();
         let mut cut_done = false;
         if !self.started {
+            check_track_count(self.tracks.len())?;
             if !f.keyframe {
                 self.stats.leading_skipped += 1;
                 return Ok(out);
@@ -357,23 +392,42 @@ impl Fragmenter {
         self.audio_frame(adts, Some(ts_us))
     }
 
+    /// Adds one raw AAC access unit to audio track `track` (an index into
+    /// [`audio_tracks`](Self::audio_tracks)), with a time on the video clock
+    /// (microseconds) or, with `None`, right after the track's previous
+    /// frame. Duplicates and gaps are handled per track as in
+    /// [`push_audio_at`](Self::push_audio_at). Returns whether it was kept.
+    pub fn push_audio_raw(&mut self, track: usize, au: &[u8], ts_us: Option<i64>) -> Result<bool> {
+        if track >= self.tracks.len() {
+            return Err(Error::InvalidTrack("audio track not declared"));
+        }
+        check_raw_au(au)?;
+        self.audio_payload(track, au, ts_us)
+    }
+
     fn audio_frame(&mut self, adts: &[u8], ts_us: Option<i64>) -> Result<bool> {
-        let Some(cfg) = self.opts.audio else {
+        let Some(spec) = self.tracks.first() else {
             self.stats.audio_dropped += 1;
             return Ok(false);
         };
         let (got, payload) = parse_adts(adts)?;
-        if got != cfg {
+        if got != spec.config {
             return Err(Error::AudioConfigChanged);
         }
-        if !self.started || self.adata.len() >= MAX_AUDIO_BYTES {
+        self.audio_payload(0, payload, ts_us)
+    }
+
+    fn audio_payload(&mut self, track: usize, payload: &[u8], ts_us: Option<i64>) -> Result<bool> {
+        let buffered: usize = self.audio.iter().map(|a| a.data.len()).sum();
+        if !self.started || buffered >= MAX_AUDIO_BYTES {
             self.stats.audio_dropped += 1;
             return Ok(false);
         }
-        let rate = i64::from(cfg.sample_rate);
+        let rate = i64::from(self.tracks[track].config.sample_rate);
         let half = i64::from(SAMPLES_PER_FRAME) / 2;
         let to_samples = |us: i64| us * rate / 1_000_000;
-        let start = match (ts_us, self.audio_next) {
+        let st = &mut self.audio[track];
+        let start = match (ts_us, st.next) {
             (Some(ts), expected) => {
                 let rel = to_samples(ts - self.origin_us);
                 if rel < -half {
@@ -396,16 +450,16 @@ impl Fragmenter {
                 now.max(0) as u64
             }
         };
-        if let Some(prev) = self.asamples.last_mut() {
+        if let Some(prev) = st.samples.last_mut() {
             prev.dur = u32::try_from(start - prev.start).map_err(|_| Error::TooLarge)?;
         }
-        self.adata.extend_from_slice(payload);
-        self.asamples.push(ASample {
+        st.data.extend_from_slice(payload);
+        st.samples.push(ASample {
             start,
             dur: SAMPLES_PER_FRAME,
             size: payload.len() as u32,
         });
-        self.audio_next = Some(start + u64::from(SAMPLES_PER_FRAME));
+        st.next = Some(start + u64::from(SAMPLES_PER_FRAME));
         self.stats.audio_samples += 1;
         Ok(true)
     }
@@ -449,10 +503,13 @@ impl Fragmenter {
 
     fn build_inits(&self, reset: bool) -> Vec<Segment> {
         let entry = self.entry.as_ref().expect("entry");
-        let audio_cs = self
-            .opts
-            .audio
-            .map(|a| format!("mp4a.40.{}", a.object_type));
+        let mut audio_cs: Vec<String> = Vec::new();
+        for t in &self.tracks {
+            let c = format!("mp4a.40.{}", t.config.object_type);
+            if !audio_cs.contains(&c) {
+                audio_cs.push(c);
+            }
+        }
         let mk = |track: SegmentTrack, video: bool, audio: bool| {
             let mut cs = Vec::new();
             if video {
@@ -472,7 +529,7 @@ impl Fragmenter {
                 generation: self.generation,
                 data: init_segment(
                     video.then_some(entry),
-                    audio.then_some(self.opts.audio).flatten(),
+                    if audio { &self.tracks } else { &[] },
                     self.opts.creation_unix_secs,
                 ),
                 start_us: 0,
@@ -480,6 +537,7 @@ impl Fragmenter {
                 starts_with_keyframe: false,
                 video_tfdt: None,
                 audio_tfdt: None,
+                audio_tfdts: Vec::new(),
                 init: Some(InitInfo {
                     mime,
                     width: if video { entry.width } else { 0 },
@@ -488,7 +546,7 @@ impl Fragmenter {
                 }),
             }
         };
-        match (self.opts.audio.is_some(), self.opts.audio_layout) {
+        match (!self.tracks.is_empty(), self.opts.audio_layout) {
             (false, _) => vec![mk(SegmentTrack::Muxed, true, false)],
             (true, AudioLayout::Muxed) => vec![mk(SegmentTrack::Muxed, true, true)],
             (true, AudioLayout::Separate) => vec![
@@ -517,27 +575,42 @@ impl Fragmenter {
             });
         }
         let vtfdt = vs[0].dts as u64;
-        let rate = self.opts.audio.map_or(1, |a| u64::from(a.sample_rate));
-        let take = if all_audio {
-            self.asamples.len()
-        } else {
-            let end = end as u64;
-            self.asamples
-                .partition_point(|a| a.start * u64::from(TIMESCALE) / rate < end)
-        };
-        let asel: Vec<ASample> = self.asamples.drain(..take).collect();
-        let abytes: usize = asel.iter().map(|a| a.size as usize).sum();
-        let adata: Vec<u8> = self.adata.drain(..abytes).collect();
-        let arecs: Vec<SampleRec> = asel
-            .iter()
-            .map(|a| SampleRec {
-                dur: a.dur,
-                size: a.size,
-                flags: FLAGS_SYNC,
-                cto: 0,
-            })
-            .collect();
-        let atfdt = asel.first().map(|a| a.start);
+        let mut audio_parts: Vec<AudioPart> = Vec::new();
+        for (i, (spec, st)) in self.tracks.iter().zip(&mut self.audio).enumerate() {
+            let rate = u64::from(spec.config.sample_rate);
+            let take = if all_audio {
+                st.samples.len()
+            } else {
+                let end = end as u64;
+                st.samples
+                    .partition_point(|a| a.start * u64::from(TIMESCALE) / rate < end)
+            };
+            if take == 0 {
+                continue;
+            }
+            let asel: Vec<ASample> = st.samples.drain(..take).collect();
+            let abytes: usize = asel.iter().map(|a| a.size as usize).sum();
+            let adata: Vec<u8> = st.data.drain(..abytes).collect();
+            let arecs: Vec<SampleRec> = asel
+                .iter()
+                .map(|a| SampleRec {
+                    dur: a.dur,
+                    size: a.size,
+                    flags: FLAGS_SYNC,
+                    cto: 0,
+                })
+                .collect();
+            let tfdt = asel[0].start;
+            let total: u64 = arecs.iter().map(|r| u64::from(r.dur)).sum();
+            audio_parts.push(AudioPart {
+                track_id: AUDIO_TRACK_ID + i as u32,
+                recs: arecs,
+                data: adata,
+                tfdt,
+                start_us: (tfdt * 1_000_000 / rate) as i64,
+                duration_us: (total * 1_000_000 / rate) as i64,
+            });
+        }
         let starts_key = vs[0].key;
         let start_us = vtfdt as i64 * 1_000_000 / i64::from(TIMESCALE);
         let duration_us = (end - vs[0].dts) * 1_000_000 / i64::from(TIMESCALE);
@@ -549,19 +622,23 @@ impl Fragmenter {
             cto: vrecs.iter().any(|r| r.cto != 0),
             flags: true,
         };
-        let audio = atfdt.map(|t| TrafSpec {
-            track_id: AUDIO_TRACK_ID,
-            tfdt: t,
-            samples: &arecs,
-            data: &adata,
-            cto: false,
-            flags: false,
-        });
+        let audio: Vec<TrafSpec<'_>> = audio_parts
+            .iter()
+            .map(|p| TrafSpec {
+                track_id: p.track_id,
+                tfdt: p.tfdt,
+                samples: &p.recs,
+                data: &p.data,
+                cto: false,
+                flags: false,
+            })
+            .collect();
+        let generation = self.generation;
         let seg = |track, trafs: &[&TrafSpec<'_>], seq, start_us, duration_us, key| {
             Ok::<_, Error>(Segment {
                 kind: SegmentKind::Media,
                 track,
-                generation: self.generation,
+                generation,
                 data: media_segment(seq, trafs)?,
                 start_us,
                 duration_us,
@@ -574,24 +651,30 @@ impl Fragmenter {
                     .iter()
                     .find(|t| t.track_id == AUDIO_TRACK_ID)
                     .map(|t| t.tfdt),
+                audio_tfdts: trafs
+                    .iter()
+                    .filter(|t| t.track_id != VIDEO_TRACK_ID)
+                    .map(|t| (t.track_id, t.tfdt))
+                    .collect(),
                 init: None,
             })
         };
-        match (&audio, self.opts.audio_layout) {
-            (Some(a), AudioLayout::Muxed) => {
+        match (audio.is_empty(), self.opts.audio_layout) {
+            (false, AudioLayout::Muxed) => {
                 self.seq += 1;
+                let trafs: Vec<&TrafSpec<'_>> = std::iter::once(&video).chain(&audio).collect();
                 out.push(seg(
                     SegmentTrack::Muxed,
-                    &[&video, a],
+                    &trafs,
                     self.seq,
                     start_us,
                     duration_us,
                     starts_key,
                 )?);
             }
-            (a, layout) => {
+            (_, layout) => {
                 self.seq += 1;
-                let track = if self.opts.audio.is_some() && layout == AudioLayout::Separate {
+                let track = if !self.tracks.is_empty() && layout == AudioLayout::Separate {
                     SegmentTrack::Video
                 } else {
                     SegmentTrack::Muxed
@@ -604,15 +687,24 @@ impl Fragmenter {
                     duration_us,
                     starts_key,
                 )?);
-                if let Some(a) = a {
+                if !audio.is_empty() {
                     self.seq += 1;
-                    let total: u64 = arecs.iter().map(|r| u64::from(r.dur)).sum();
+                    // The span of the audio track fragments.
+                    let (a_start, a_dur) = if let [one] = &audio_parts[..] {
+                        (one.start_us, one.duration_us)
+                    } else {
+                        let first = audio_parts.iter().map(|p| p.start_us).min();
+                        let last = audio_parts.iter().map(|p| p.start_us + p.duration_us).max();
+                        let first = first.unwrap_or(0);
+                        (first, last.unwrap_or(0) - first)
+                    };
+                    let trafs: Vec<&TrafSpec<'_>> = audio.iter().collect();
                     out.push(seg(
                         SegmentTrack::Audio,
-                        &[a],
+                        &trafs,
                         self.seq,
-                        (a.tfdt * 1_000_000 / rate) as i64,
-                        (total * 1_000_000 / rate) as i64,
+                        a_start,
+                        a_dur,
                         true,
                     )?);
                 }
@@ -650,6 +742,17 @@ fn hevc_codec_string(s: &crate::nal::H265Sps) -> String {
 
 // ---- box construction -------------------------------------------------------
 
+/// One audio track's part of a fragment.
+struct AudioPart {
+    track_id: u32,
+    recs: Vec<SampleRec>,
+    data: Vec<u8>,
+    tfdt: u64,
+    /// Start and length in microseconds.
+    start_us: i64,
+    duration_us: i64,
+}
+
 struct SampleRec {
     dur: u32,
     size: u32,
@@ -671,7 +774,7 @@ struct TrafSpec<'a> {
 /// `ftyp` + `moov` with `mvex`; no samples.
 pub(crate) fn init_segment(
     video: Option<&VideoEntry>,
-    audio: Option<AacConfig>,
+    audio: &[AudioTrackSpec],
     creation_unix_secs: u64,
 ) -> Vec<u8> {
     let created = if creation_unix_secs == 0 {
@@ -688,7 +791,10 @@ pub(crate) fn init_segment(
         }
     });
     let vstsd = video.map(|v| stsd(std::slice::from_ref(&v.sample_entry)));
-    let astsd = audio.map(|a| stsd(&[mp4a_entry(&a, 0, 0)]));
+    let astsd: Vec<Vec<u8>> = audio
+        .iter()
+        .map(|a| stsd(&[mp4a_entry(&a.config, 0, 0)]))
+        .collect();
     bx(&mut out, b"moov", |b| {
         full(b, b"mvhd", 0, 0, |b| {
             put_u32(b, created as u32);
@@ -702,7 +808,11 @@ pub(crate) fn init_segment(
                 put_u32(b, m);
             }
             b.extend_from_slice(&[0; 24]);
-            put_u32(b, AUDIO_TRACK_ID + 1);
+            // next_track_ID (3 with or without one audio track).
+            put_u32(
+                b,
+                (AUDIO_TRACK_ID + audio.len() as u32).max(AUDIO_TRACK_ID + 1),
+            );
         });
         if let (Some(v), Some(s)) = (video, &vstsd) {
             trak(
@@ -710,31 +820,41 @@ pub(crate) fn init_segment(
                 &TrackInfo {
                     id: VIDEO_TRACK_ID,
                     kind: b"vide",
-                    handler_name: b"VideoHandler",
+                    handler_name: VIDEO_HANDLER_NAME.as_bytes(),
                     timescale: TIMESCALE,
                     media_duration: 0,
                     edits: &[],
                     width: v.width,
                     height: v.height,
                     volume: 0,
+                    flags: 3,
+                    alternate_group: 0,
                     tables: empty_tables(s),
                 },
                 created,
             );
         }
-        if let (Some(a), Some(s)) = (audio, &astsd) {
+        for (i, (a, s)) in audio.iter().zip(&astsd).enumerate() {
+            // Encoder delay: the whole track (an edit of duration 0 extends
+            // over every fragment) starts this many samples in.
+            let priming = [Edit {
+                duration: 0,
+                media_time: i64::from(a.priming_samples),
+            }];
             trak(
                 b,
                 &TrackInfo {
-                    id: AUDIO_TRACK_ID,
+                    id: AUDIO_TRACK_ID + i as u32,
                     kind: b"soun",
-                    handler_name: b"SoundHandler",
-                    timescale: a.sample_rate,
+                    handler_name: a.handler.name().as_bytes(),
+                    timescale: a.config.sample_rate,
                     media_duration: 0,
-                    edits: &[],
+                    edits: if a.priming_samples > 0 { &priming } else { &[] },
                     width: 0,
                     height: 0,
                     volume: 0x0100,
+                    flags: a.tkhd_flags(),
+                    alternate_group: a.alternate_group,
                     tables: empty_tables(s),
                 },
                 created,
@@ -753,8 +873,8 @@ pub(crate) fn init_segment(
             if video.is_some() {
                 trex(b, VIDEO_TRACK_ID, FLAGS_NON_SYNC);
             }
-            if audio.is_some() {
-                trex(b, AUDIO_TRACK_ID, FLAGS_SYNC);
+            for i in 0..audio.len() {
+                trex(b, AUDIO_TRACK_ID + i as u32, FLAGS_SYNC);
             }
         });
     });

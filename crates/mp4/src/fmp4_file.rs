@@ -10,6 +10,7 @@ use crate::fragment::{
     VIDEO_TRACK_ID,
 };
 use crate::nal::VideoCodec;
+use crate::track::AudioTrackSpec;
 use crate::writer::VideoFrame;
 
 /// Options for [`FragmentedFile`].
@@ -37,6 +38,13 @@ impl FileOptions {
         self.fragment.audio = audio;
         self
     }
+
+    /// With these audio tracks declared (after the `with_audio` track, if
+    /// any), fed with [`FragmentedFile::push_audio_raw`].
+    pub fn with_audio_tracks(mut self, tracks: Vec<AudioTrackSpec>) -> Self {
+        self.fragment.audio_tracks = tracks;
+        self
+    }
 }
 
 /// What a finished file contains.
@@ -45,6 +53,7 @@ pub struct FileSummary {
     pub file_size: u64,
     pub fragments: u64,
     pub video_samples: u64,
+    /// Audio samples in all audio tracks.
     pub audio_samples: u64,
     pub has_mfra: bool,
 }
@@ -53,7 +62,8 @@ struct IndexEntry {
     moof_offset: u64,
     video_tfdt: Option<u64>,
     video_sync: bool,
-    audio_tfdt: Option<u64>,
+    /// (track ID, `tfdt`) of each audio `traf`, in `traf` order.
+    audio: Vec<(u32, u64)>,
 }
 
 /// Writes a fragmented MP4 file progressively to any `Write` sink (no seeking).
@@ -74,18 +84,22 @@ pub struct FragmentedFile<W: Write> {
     pos: u64,
     mfra: bool,
     index: Vec<IndexEntry>,
+    audio_tracks: u32,
 }
 
 impl<W: Write> FragmentedFile<W> {
     pub fn new(out: W, codec: VideoCodec, mut opts: FileOptions) -> Self {
         opts.fragment.audio_layout = AudioLayout::Muxed;
         opts.fragment.on_change = ChangePolicy::Reject;
+        let frag = Fragmenter::new(codec, opts.fragment);
+        let audio_tracks = frag.audio_tracks().len() as u32;
         Self {
             out,
-            frag: Fragmenter::new(codec, opts.fragment),
+            frag,
             pos: 0,
             mfra: opts.mfra,
             index: Vec::new(),
+            audio_tracks,
         }
     }
 
@@ -119,6 +133,13 @@ impl<W: Write> FragmentedFile<W> {
         self.frag.push_audio_at(adts, ts_us)
     }
 
+    /// Adds one raw AAC access unit to audio track `track` (see
+    /// [`Fragmenter::push_audio_raw`]). Audio never completes a fragment by
+    /// itself.
+    pub fn push_audio_raw(&mut self, track: usize, au: &[u8], ts_us: Option<i64>) -> Result<bool> {
+        self.frag.push_audio_raw(track, au, ts_us)
+    }
+
     /// Writes the last fragment, the `mfra` index if enabled, and flushes.
     pub fn finish(self) -> Result<(W, FileSummary)> {
         let Self {
@@ -127,13 +148,14 @@ impl<W: Write> FragmentedFile<W> {
             mut pos,
             mfra: want_mfra,
             mut index,
+            audio_tracks,
         } = self;
         let stats = frag.stats();
         let segs = frag.finish()?;
         emit(&mut out, &mut pos, &mut index, segs)?;
         let has_mfra = want_mfra && !index.is_empty();
         if has_mfra {
-            let m = mfra(&index);
+            let m = mfra(&index, audio_tracks);
             out.write_all(&m)?;
             pos += m.len() as u64;
         }
@@ -168,7 +190,7 @@ fn emit<W: Write>(
                 moof_offset: *pos,
                 video_tfdt: s.video_tfdt,
                 video_sync: s.starts_with_keyframe,
-                audio_tfdt: s.audio_tfdt,
+                audio: s.audio_tfdts,
             });
             wrote_media = true;
         }
@@ -181,8 +203,9 @@ fn emit<W: Write>(
     Ok(wrote_media)
 }
 
-/// `mfra` with one `tfra` per track and the closing `mfro`.
-fn mfra(index: &[IndexEntry]) -> Vec<u8> {
+/// `mfra` with one `tfra` per track that has fragments, and the closing
+/// `mfro`.
+fn mfra(index: &[IndexEntry], audio_tracks: u32) -> Vec<u8> {
     let tfra = |b: &mut Vec<u8>, id: u32, entries: Vec<(u64, u64, u8)>| {
         if entries.is_empty() {
             return;
@@ -209,14 +232,20 @@ fn mfra(index: &[IndexEntry]) -> Vec<u8> {
                 .filter_map(|e| Some((e.video_tfdt?, e.moof_offset, 1)))
                 .collect(),
         );
-        tfra(
-            b,
-            AUDIO_TRACK_ID,
-            index
-                .iter()
-                .filter_map(|e| Some((e.audio_tfdt?, e.moof_offset, 2)))
-                .collect(),
-        );
+        for id in AUDIO_TRACK_ID..AUDIO_TRACK_ID + audio_tracks {
+            // The video traf is first in every fragment of a file.
+            tfra(
+                b,
+                id,
+                index
+                    .iter()
+                    .filter_map(|e| {
+                        let k = e.audio.iter().position(|&(t, _)| t == id)?;
+                        Some((e.audio[k].1, e.moof_offset, 2 + k as u8))
+                    })
+                    .collect(),
+            );
+        }
         full(b, b"mfro", 0, 0, |b| put_u32(b, 0));
     });
     let n = out.len() as u32;

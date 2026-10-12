@@ -1108,7 +1108,10 @@ above was silent or loose, they do this:
   handler names `VideoHandler` and `SoundHandler`, so share-safe finalized
   files already comply. `export::mp4_metadata(share_safe, creation)` is the
   one place that rule lives, so recording a creation time later is gated on
-  `share_safe`.
+  `share_safe`. Files with several audio tracks (call recordings) title
+  them from a fixed set of generic words (`Conversation`, `Visitor`,
+  `You`); `export::ALLOWED_HANDLER_NAMES` lists every name the core's
+  writer can produce, and none needs a share-safe replacement.
 
 ## 8. Event summary
 

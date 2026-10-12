@@ -13,17 +13,20 @@
 //!   or `hvcC` (sample entry `avc1` / `hvc1`, which QuickTime accepts).
 //! * Audio samples are the raw AAC payloads of the ADTS frames, 1024 samples
 //!   each, with an `esds` built from the first ADTS header.
+//! * Several audio tracks (see "Audio tracks" below) can be declared up
+//!   front and fed raw access units by index.
 //! * Timing: video uses a 90 kHz media timescale; each frame's duration is
 //!   the difference of its (rounded) timestamp and the next one's, so
 //!   irregular camera frame rates are kept exactly. The last frame repeats
 //!   the previous duration. Audio uses its sample rate as timescale. Decode
 //!   and presentation times may differ (`ctts`) but never go backward from
 //!   decode to presentation; cameras send no B-frames, so they are equal.
-//! * Alignment: both tracks share one clock (the video timestamps' clock). The
-//!   audio start is `Options::audio_start_us` (or the first
-//!   `write_audio_at` timestamp, or the first video frame). The difference
-//!   becomes an empty edit at the start of whichever track starts later, so
-//!   players show them aligned.
+//! * Alignment: all tracks share one clock (the video timestamps' clock). An
+//!   audio track's start is its first `write_audio_at` (or
+//!   `write_audio_raw_at`) timestamp, or `Options::audio_start_us`, or the
+//!   first video frame. The difference becomes an empty edit at the start
+//!   of each track that starts later than the earliest, so players show
+//!   them aligned.
 //! * Offsets: `mdat` uses a 64-bit size; chunk offsets are `stco` unless the
 //!   file needs `co64` (any offset above 4 GiB, chosen automatically).
 //!   `Options::faststart` puts `moov` first by shifting the media data once
@@ -53,13 +56,40 @@
 //!
 //! # Limitations
 //!
-//! * Audio has no encoder-delay (priming) edit; the first 1024 AAC samples of
-//!   a stream from an encoder that primes play as decoded.
 //! * Gaps in audio are filled with silent frames only for mono AAC-LC.
 //! * Timestamps must increase by at least one 90 kHz tick (11 µs).
 //! * [`Mp4Writer`] does not produce fragmented MP4; a crash before `finish`
 //!   leaves a file without `moov`. Use the fragmented API below where that
 //!   matters.
+//!
+//! # Audio tracks
+//!
+//! The single-track API (an ADTS stream, or [`FragmentOptions::audio`]) makes
+//! one audio track, `SoundHandler`, enabled, no alternate group; its output
+//! is unchanged by everything below (the `compat` tests pin its bytes).
+//!
+//! For more, declare each track up front as an [`AudioTrackSpec`]
+//! ([`Options::audio_tracks`], [`FragmentOptions::audio_tracks`],
+//! [`FileOptions::with_audio_tracks`]; at most [`MAX_AUDIO_TRACKS`]) and push
+//! raw AAC access units by track index
+//! ([`Mp4Writer::write_audio_raw_at`], [`Fragmenter::push_audio_raw`],
+//! [`FragmentedFile::push_audio_raw`]). Track IDs are 1 for video, then 2,
+//! 3, ... in declaration order. Each declaration carries:
+//!
+//! * the format, from an ADTS header ([`parse_adts`]) or from an encoder's
+//!   AudioSpecificConfig ([`AacConfig::from_raw_audio_specific_config`]);
+//! * the handler name, from a fixed set ([`AudioHandler`], all names in
+//!   [`HANDLER_NAMES`]), so no free text reaches the file;
+//! * the track header's enabled flag and `alternate_group` (players play
+//!   one track of a group, normally the enabled one);
+//! * the encoder delay ([`AudioTrackSpec::priming_samples`]): an edit list
+//!   that starts the track that many samples in. The fragmented init's
+//!   `moov` has one edit of duration 0 (over all fragments) at that media
+//!   time; the finished file has the usual edit of the presented duration
+//!   at that media time, after any empty edit for a late start.
+//!
+//! Declared tracks are written even when they received no samples, so a
+//! file always has the tracks it declared.
 //!
 //! # Fragmented MP4
 //!
@@ -87,15 +117,17 @@
 //!   `0x02000000`, non-sync `0x01010000`); composition offsets are written
 //!   only when presentation differs from decode time. Audio is timed by
 //!   sample count; gaps extend the previous frame's duration, duplicates are
-//!   dropped, no silence is made. There is no edit list: audio and video are
-//!   aligned by their `tfdt`.
+//!   dropped, no silence is made. Audio and video are aligned by their
+//!   `tfdt`; the only edit list is a track's encoder delay.
 //! * **Audio.** The AAC format is declared up front
-//!   ([`FragmentOptions::audio`], from [`parse_adts`]) so the init can carry
-//!   it. [`AudioLayout::Muxed`] (default) puts both tracks in one init and one
-//!   `moof` per fragment (video `traf`, then audio `traf`; one MSE
-//!   `SourceBuffer`). [`AudioLayout::Separate`] makes a video stream and an
-//!   audio stream with their own inits and one-track fragments (CMAF style;
-//!   two `SourceBuffer`s; route by [`Segment::track`]).
+//!   ([`FragmentOptions::audio`], from [`parse_adts`], and any further
+//!   [`FragmentOptions::audio_tracks`]) so the init can carry it.
+//!   [`AudioLayout::Muxed`] (default) puts all tracks in one init and one
+//!   `moof` per fragment (video `traf`, then a `traf` per audio track with
+//!   samples in that fragment; one MSE `SourceBuffer`).
+//!   [`AudioLayout::Separate`] makes a video stream and an audio stream
+//!   (every audio track) with their own inits and fragments (CMAF style for
+//!   one audio track; two `SourceBuffer`s; route by [`Segment::track`]).
 //! * **Codec strings** for `addSourceBuffer` come with each init
 //!   ([`InitInfo::mime`]): `avc1.PPCCLL` (profile, constraint flags, level from
 //!   the SPS) and `hvc1.<profile>.<compat>.<L|H><level>[.<constraints>]`
@@ -114,8 +146,8 @@
 //!   the codec string changed (a resolution change usually changes the
 //!   level); otherwise appending the init is enough.
 //! * **Memory.** One fragment of video (bounded by time and bytes) and up to
-//!   1 MiB of audio waiting for video; segments are handed to the caller and
-//!   not kept (only the current init is).
+//!   1 MiB of audio (all tracks together) waiting for video; segments are
+//!   handed to the caller and not kept (only the current init is).
 //!
 //! ## Files and downloads
 //!
@@ -149,6 +181,7 @@ mod finalize;
 mod fmp4_file;
 mod fragment;
 mod nal;
+mod track;
 mod writer;
 
 pub use adts::{AacConfig, SAMPLES_PER_FRAME, parse_adts};
@@ -161,4 +194,7 @@ pub use fragment::{
     InitInfo, Segment, SegmentKind, SegmentTrack, VIDEO_TRACK_ID,
 };
 pub use nal::VideoCodec;
+pub use track::{
+    AudioHandler, AudioTrackSpec, HANDLER_NAMES, MAX_AUDIO_TRACKS, VIDEO_HANDLER_NAME,
+};
 pub use writer::{Mp4Writer, Options, Summary, TIMESCALE, VideoFrame, us_to_ticks};
