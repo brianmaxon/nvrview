@@ -369,6 +369,10 @@ and 15):
   before the target (inside the file that holds it), because a device may
   start a play at a keyframe a few seconds after the seek time; the pictures
   before the target are decoded and never shown.
+  If a camera's play still begins more than 250 ms after the target, it is
+  started once more, earlier by how late it was, so every camera has a
+  picture at the target (also on the first play after opening an incident
+  paused, and when returning to 1x from a fast rate).
 - **Start together.** After a seek or a rate change the shared clock waits
   until every camera has decoded up to the target, up to 6 s; a camera that
   delivers nothing by then is shown as without recording, and the others

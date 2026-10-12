@@ -2040,6 +2040,10 @@ impl Conn {
             return Ok(());
         }
         let faults = cfg.play_faults.take(ch);
+        let mut cfg = cfg;
+        if let Some((_, g)) = cfg.gop_by_channel.iter().find(|(c, _)| *c == ch) {
+            cfg.gop_secs = *g;
+        }
         let thin = PlayPace {
             speed: speed.filter(|s| [1, 2, 4, 8, 16].contains(s)).unwrap_or(1),
             main: matches!(stream, Some(StreamTier::Main | StreamTier::Extern)),

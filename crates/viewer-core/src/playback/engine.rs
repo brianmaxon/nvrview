@@ -13,7 +13,8 @@
 //! 2 s, kept inside the file that holds the target): devices may start a
 //! play at a keyframe after the seek time (docs/protocol.md, "Rates,
 //! keyframes, and how a play ends"), and with the lead a camera nearly
-//! always has a picture at the target. A seek, a rate
+//! always has a picture at the target (a camera whose first picture is still
+//! more than 250 ms after it is started once more, earlier). A seek, a rate
 //! change, a tier switch, an offset change, and adding or removing a camera
 //! restart the device's group that way. A camera whose recording does not
 //! hold the time is not started; it shows `no_recording` and starts again
@@ -354,6 +355,11 @@ struct Cam {
     /// Its first picture of the generation lies after the target (the play
     /// began at a later keyframe): held until the clock reaches it.
     ahead: bool,
+    /// Its play was already started again for that, once (per generation).
+    retried: bool,
+    /// Where its play should start again, set by a release that found the
+    /// first picture well after the target.
+    retry_from: Option<i64>,
     /// When its play started (for the first-media limit).
     started: Option<Instant>,
     /// Since when it has had nothing at the position.
@@ -576,6 +582,8 @@ impl Engine {
             last_released_pts: None,
             dropping: false,
             ahead: false,
+            retried: false,
+            retry_from: None,
             started: None,
             behind_since: None,
             suspended: false,
@@ -991,6 +999,8 @@ impl Engine {
             c.last_released_pts = None;
             c.dropping = false;
             c.ahead = false;
+            c.retried = false;
+            c.retry_from = None;
             c.started = None;
             c.behind_since = None;
             c.suspended = false;
@@ -1254,6 +1264,28 @@ impl Engine {
             self.release(i, pos, running, rate);
         }
         let c = &mut self.cams[i];
+        // The play began at a keyframe well after the target although the
+        // seek lead was asked for: once, it starts again earlier, so the
+        // camera shows the target like the others (paused, or playing).
+        if let Some(from) = c.retry_from.take()
+            && c.state.active()
+            && !c.pending
+            && !self.ended
+        {
+            if let Some(r) = c.reader.take()
+                && let Some(d) = self.devices.get_mut(&c.device)
+            {
+                d.stopping.push(r);
+            }
+            info!(
+                playback = self.id,
+                tile = c.tile,
+                "play began after the target; it starts again earlier"
+            );
+            self.start_single(i, from.div_euclid(1000), false);
+            return;
+        }
+        let c = &mut self.cams[i];
         // The camera's own end.
         if c.state.active() && c.end_ms().is_some_and(|e| at >= e) && lock(&c.buf).is_empty() {
             if let Some(r) = c.reader.take() {
@@ -1379,6 +1411,7 @@ impl Engine {
         let mode = self.mode;
         let late_ms = (self.tuning.late_ms as f64 * rate.max(1.0)) as i64;
         let preroll = self.tuning.preroll_backlog;
+        let lead = self.seek_lead_ms();
         let c = &mut self.cams[i];
         let Some(feed) = c.feed.as_ref() else {
             return;
@@ -1427,6 +1460,24 @@ impl Engine {
                         feed.set_target(pts);
                     }
                     continue;
+                }
+                if lead > 0
+                    && !c.retried
+                    && c.last_released_pts.is_none()
+                    && rec > c.target_ms + 250
+                {
+                    // The play began at a keyframe well after the target: ask
+                    // again from as much earlier as it was late.
+                    c.retried = true;
+                    let floor = c
+                        .file_at(c.target_ms.div_euclid(1000))
+                        .map_or(i64::MIN, |f| f.start * 1000);
+                    let late = (rec - c.target_ms + 999) / 1000 * 1000;
+                    let from = (c.target_ms - lead - late).max(floor);
+                    if from.div_euclid(1000) < (c.target_ms - lead).max(floor).div_euclid(1000) {
+                        c.retry_from = Some(from);
+                        break;
+                    }
                 }
                 if playing && rec > due && c.last_released_pts.is_none() {
                     // The first picture lies after the target (the play
