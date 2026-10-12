@@ -6,6 +6,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use crate::adts::AacConfig;
 use crate::error::{Error, Result};
 use crate::nal::VideoCodec;
+use crate::track::{AudioHandler, AudioTrackSpec};
 use crate::writer::{Mp4Writer, Options, Summary, TIMESCALE, VideoFrame};
 
 fn bad(why: &'static str) -> Error {
@@ -53,7 +54,12 @@ struct VideoInfo {
 struct Init {
     video_id: u32,
     video: VideoInfo,
-    audio: Option<(u32, AacConfig)>,
+    /// (track ID, declaration) of every audio track, in file order.
+    audio: Vec<(u32, AudioTrackSpec)>,
+    /// The audio tracks go to the writer as declared tracks. False for no
+    /// audio or one plain track ([`AudioTrackSpec::new`]), which take the
+    /// single-track path so its output stays as it was.
+    declared: bool,
 }
 
 fn annexb(out: &mut Vec<u8>, nal: &[u8]) {
@@ -126,9 +132,44 @@ fn parse_hvcc(p: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The handler name in a `hdlr` payload (after the 24-byte header, up to
+/// the terminating zero).
+fn handler_name(hdlr: &[u8]) -> &[u8] {
+    let name = hdlr.get(24..).unwrap_or_default();
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    &name[..end]
+}
+
+/// Media time of the first non-empty edit (the encoder delay this crate
+/// writes for an audio track), or 0.
+fn first_media_time(trak: &[([u8; 4], &[u8])]) -> Result<u32> {
+    let Some(edts) = find(trak, b"edts") else {
+        return Ok(0);
+    };
+    let kids = children(edts)?;
+    let Some(elst) = find(&kids, b"elst") else {
+        return Ok(0);
+    };
+    let big = elst.first() == Some(&1);
+    let n = u32at(elst, 4)? as usize;
+    let step = if big { 20 } else { 12 };
+    for k in 0..n.min(64) {
+        let at = 8 + k * step;
+        let media_time = if big {
+            u64at(elst, at + 8)? as i64
+        } else {
+            i64::from(u32at(elst, at + 4)? as i32)
+        };
+        if media_time >= 0 {
+            return u32::try_from(media_time).map_err(|_| bad("edit beyond the track"));
+        }
+    }
+    Ok(0)
+}
+
 fn parse_moov(moov: &[u8]) -> Result<Init> {
     let mut video = None;
-    let mut audio = None;
+    let mut audio = Vec::new();
     for (ty, trak) in children(moov)? {
         if &ty != b"trak" {
             continue;
@@ -171,16 +212,42 @@ fn parse_moov(moov: &[u8]) -> Result<Init> {
                     .ok_or_else(|| bad("no AudioSpecificConfig"))?;
                 let cfg = AacConfig::from_audio_specific_config([asc[0], asc[1]])
                     .ok_or_else(|| bad("unsupported audio config"))?;
-                audio = Some((id, cfg));
+                let flags = u32at(tkhd, 0)? & 0xff_ffff;
+                let group_at = if tkhd.first() == Some(&1) { 46 } else { 34 };
+                let group = tkhd
+                    .get(group_at..group_at + 2)
+                    .ok_or_else(|| bad("short tkhd"))?;
+                // Names are only ever ours; anything else reads as the
+                // generic one, so no other text can reach the output.
+                let handler = std::str::from_utf8(handler_name(hdlr))
+                    .ok()
+                    .and_then(AudioHandler::from_name)
+                    .unwrap_or_default();
+                audio.push((
+                    id,
+                    AudioTrackSpec {
+                        config: cfg,
+                        handler,
+                        enabled: flags & 1 != 0,
+                        alternate_group: u16::from_be_bytes([group[0], group[1]]),
+                        priming_samples: first_media_time(&t)?,
+                    },
+                ));
             }
             _ => {}
         }
     }
     let (video_id, video) = video.ok_or_else(|| bad("no video track"))?;
+    let declared = match &audio[..] {
+        [] => false,
+        [(_, s)] => *s != AudioTrackSpec::new(s.config),
+        _ => true,
+    };
     Ok(Init {
         video_id,
         video,
         audio,
+        declared,
     })
 }
 
@@ -275,6 +342,12 @@ fn ticks_to_us(t: u64, rate: u64) -> i64 {
 /// `default-base-is-moof` fragments, and per-sample durations and sizes.
 /// Audio gaps between fragments become silence only for mono AAC-LC (as in
 /// [`Mp4Writer::write_audio_at`]).
+///
+/// Every audio track is kept, in order, with its handler name, enabled
+/// flag, alternate group, and encoder-delay edit (see [`AudioTrackSpec`]);
+/// `opts.audio_tracks` is replaced by the file's tracks. A file with one
+/// plain audio track ([`AudioTrackSpec::new`]) is remuxed exactly as the
+/// single-track API always has.
 pub fn finalize_to_mp4<R: Read + Seek, W: Read + Write + Seek>(
     mut src: R,
     out: W,
@@ -286,6 +359,7 @@ pub fn finalize_to_mp4<R: Read + Seek, W: Read + Write + Seek>(
     let mut writer: Option<Mp4Writer<W>> = None;
     let mut out = Some(out);
     let mut opts = opts;
+    opts.audio_tracks.clear();
     while pos + 8 <= len {
         let mut head = [0u8; 8];
         src.seek(SeekFrom::Start(pos))?;
@@ -302,7 +376,11 @@ pub fn finalize_to_mp4<R: Read + Seek, W: Read + Write + Seek>(
             b"moov" => {
                 let mut buf = vec![0u8; size as usize - 8];
                 src.read_exact(&mut buf)?;
-                init = Some(parse_moov(&buf)?);
+                let ini = parse_moov(&buf)?;
+                if ini.declared {
+                    opts.audio_tracks = ini.audio.iter().map(|(_, s)| *s).collect();
+                }
+                init = Some(ini);
             }
             b"moof" => {
                 let ini = init.as_ref().ok_or_else(|| bad("moof before moov"))?;
@@ -328,9 +406,11 @@ pub fn finalize_to_mp4<R: Read + Seek, W: Read + Write + Seek>(
                 let mdat_start = mpos + 8;
                 if writer.is_none() {
                     // The audio start is the first audio fragment's time.
-                    if let Some((aid, cfg)) = ini.audio
+                    if !ini.declared
+                        && let Some(&(aid, spec)) = ini.audio.first()
                         && let Some(r) = runs.iter().find(|r| r.track == aid)
                     {
+                        let cfg = spec.config;
                         opts.audio_start_us = Some(ticks_to_us(r.tfdt, u64::from(cfg.sample_rate)));
                     }
                     writer = Some(Mp4Writer::new(
@@ -374,12 +454,14 @@ pub fn finalize_to_mp4<R: Read + Seek, W: Read + Write + Seek>(
                                 dts_us: dts,
                                 pts_us: pts,
                             })?;
-                        } else if let Some((aid, cfg)) = ini.audio
-                            && r.track == aid
-                        {
-                            let frame = cfg.adts_frame(data);
+                        } else if let Some(k) = ini.audio.iter().position(|a| a.0 == r.track) {
+                            let cfg = ini.audio[k].1.config;
                             let ts = ticks_to_us(t, u64::from(cfg.sample_rate));
-                            w.write_audio_at(&frame, ts)?;
+                            if ini.declared {
+                                w.write_audio_payload_at(k, data, ts)?;
+                            } else {
+                                w.write_audio_at(&cfg.adts_frame(data), ts)?;
+                            }
                         }
                         t += u64::from(dur);
                         at += i64::from(sz);

@@ -2,7 +2,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::adts::{AacConfig, SAMPLES_PER_FRAME, parse_adts};
+use crate::adts::{SAMPLES_PER_FRAME, parse_adts};
 use crate::boxes::{
     ChunkRec, Tables, avc1_entry, bx, full, hvc1_entry, mp4a_entry, put_u16, put_u32, put_u64,
     stbl, stsd,
@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::nal::{
     NalKind, ParamSets, VideoCodec, classify, parse_h264_sps, parse_h265_sps, split_annexb,
 };
+use crate::track::{AudioTrackSpec, MAX_AUDIO_TRACKS, VIDEO_HANDLER_NAME};
 
 /// Movie and video media timescale: ticks per second.
 pub const TIMESCALE: u32 = 90_000;
@@ -40,6 +41,33 @@ pub struct Options {
     /// Presentation time (µs, same clock as the video timestamps) of the
     /// first audio frame. `None` aligns it with the first video frame.
     pub audio_start_us: Option<i64>,
+    /// Audio tracks declared up front, in track order (IDs 2, 3, ...), fed
+    /// with [`Mp4Writer::write_audio_raw_at`] by index; ADTS frames from
+    /// [`Mp4Writer::write_audio`] go to index 0. Every declared track is
+    /// written, even one that received no samples. Empty (the default): one
+    /// audio track is made from the first ADTS frame, as
+    /// [`AudioTrackSpec::new`], and left out if it has no samples.
+    pub audio_tracks: Vec<AudioTrackSpec>,
+}
+
+/// Largest raw AAC access unit accepted (far above AAC's 6144 bits per
+/// channel).
+pub(crate) const MAX_RAW_AU: usize = 1 << 16;
+
+/// Checks a raw access unit's size.
+pub(crate) fn check_raw_au(au: &[u8]) -> Result<()> {
+    if au.is_empty() || au.len() > MAX_RAW_AU {
+        return Err(Error::InvalidTrack("empty or oversized access unit"));
+    }
+    Ok(())
+}
+
+/// Checks the number of declared audio tracks.
+pub(crate) fn check_track_count(n: usize) -> Result<()> {
+    if n > MAX_AUDIO_TRACKS {
+        return Err(Error::InvalidTrack("too many audio tracks"));
+    }
+    Ok(())
 }
 
 /// One video access unit.
@@ -72,7 +100,10 @@ impl<'a> VideoFrame<'a> {
 pub struct Summary {
     pub file_size: u64,
     pub video_samples: u64,
+    /// Audio samples in all audio tracks.
     pub audio_samples: u64,
+    /// Audio samples per audio track written, in track order.
+    pub audio_track_samples: Vec<u64>,
     /// Number of video sample descriptions (more than one means the
     /// parameter sets, and possibly the resolution, changed mid-stream).
     pub video_entries: usize,
@@ -134,7 +165,11 @@ fn push_run(runs: &mut Vec<(u32, u32)>, value: u32) {
 }
 
 struct AudioTrack {
-    config: AacConfig,
+    spec: AudioTrackSpec,
+    /// Declared in [`Options::audio_tracks`] (written even when empty).
+    declared: bool,
+    /// The first frame was seen (and `start_us` set from it).
+    begun: bool,
     sizes: Vec<u32>,
     chunks: Vec<ChunkRec>,
     pending: Pending,
@@ -151,8 +186,27 @@ const SILENT_AAC_LC_MONO: [u8; 4] = [0, 0, 0, 7];
 const MAX_GAP_FRAMES: i64 = 56_250;
 
 impl AudioTrack {
+    fn new(spec: AudioTrackSpec, declared: bool) -> Self {
+        Self {
+            spec,
+            declared,
+            begun: false,
+            sizes: Vec::new(),
+            chunks: Vec::new(),
+            pending: Pending::new(),
+            start_us: None,
+            total_bytes: 0,
+            max_frame: 0,
+        }
+    }
+
+    /// Whether the track goes into the file.
+    fn written(&self) -> bool {
+        self.declared || !self.sizes.is_empty()
+    }
+
     fn push<W: Write>(&mut self, out: &mut W, pos: &mut u64, payload: &[u8]) -> Result<()> {
-        let rate = i64::from(self.config.sample_rate);
+        let rate = i64::from(self.spec.config.sample_rate);
         let total = self.sizes.len() as i64 * i64::from(SAMPLES_PER_FRAME);
         if self.pending.samples == 0 {
             self.pending.first_ticks = total * i64::from(TIMESCALE) / rate;
@@ -178,13 +232,19 @@ pub struct Mp4Writer<W: Read + Write + Seek> {
     pos: u64,
     mdat_start: u64,
     video: Option<VideoTrack>,
-    audio: Option<AudioTrack>,
+    audio: Vec<AudioTrack>,
     codec: VideoCodec,
 }
 
 impl<W: Read + Write + Seek> Mp4Writer<W> {
     /// Starts a file at the sink's position 0.
     pub fn new(mut out: W, codec: VideoCodec, opts: Options) -> Result<Self> {
+        check_track_count(opts.audio_tracks.len())?;
+        let audio = opts
+            .audio_tracks
+            .iter()
+            .map(|s| AudioTrack::new(*s, true))
+            .collect();
         out.seek(SeekFrom::Start(0))?;
         let mut head = Vec::new();
         bx(&mut head, b"ftyp", |b| {
@@ -206,7 +266,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
             pos: head.len() as u64,
             mdat_start,
             video: None,
-            audio: None,
+            audio,
             codec,
         })
     }
@@ -358,21 +418,63 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
         self.audio_frame(adts, Some(ts_us))
     }
 
+    /// Appends one raw AAC access unit to declared audio track `track`
+    /// (an index into [`Options::audio_tracks`]), timed by sample count
+    /// right after the track's previous frame.
+    pub fn write_audio_raw(&mut self, track: usize, au: &[u8]) -> Result<()> {
+        self.raw_frame(track, au, None).map(|_| ())
+    }
+
+    /// Appends one raw AAC access unit to declared audio track `track` with
+    /// a presentation time (µs, video clock). Duplicates and gaps are
+    /// handled as in [`write_audio_at`](Self::write_audio_at), per track.
+    /// Returns whether the frame was stored.
+    pub fn write_audio_raw_at(&mut self, track: usize, au: &[u8], ts_us: i64) -> Result<bool> {
+        self.raw_frame(track, au, Some(ts_us))
+    }
+
+    fn raw_frame(&mut self, track: usize, au: &[u8], ts_us: Option<i64>) -> Result<bool> {
+        if track >= self.audio.len() || !self.audio[track].declared {
+            return Err(Error::InvalidTrack("audio track not declared"));
+        }
+        check_raw_au(au)?;
+        self.audio_payload(track, au, ts_us)
+    }
+
+    /// [`write_audio_raw_at`](Self::write_audio_raw_at) without the size
+    /// check, for samples read back from a file this crate wrote.
+    pub(crate) fn write_audio_payload_at(
+        &mut self,
+        track: usize,
+        payload: &[u8],
+        ts_us: i64,
+    ) -> Result<bool> {
+        if track >= self.audio.len() {
+            return Err(Error::InvalidTrack("audio track not declared"));
+        }
+        self.audio_payload(track, payload, Some(ts_us))
+    }
+
     fn audio_frame(&mut self, adts: &[u8], ts_us: Option<i64>) -> Result<bool> {
         let (cfg, payload) = parse_adts(adts)?;
-        let default_start = self.opts.audio_start_us;
-        let a = self.audio.get_or_insert_with(|| AudioTrack {
-            config: cfg,
-            sizes: Vec::new(),
-            chunks: Vec::new(),
-            pending: Pending::new(),
-            start_us: ts_us.or(default_start),
-            total_bytes: 0,
-            max_frame: 0,
-        });
-        if a.config != cfg {
+        if self.audio.is_empty() {
+            self.audio
+                .push(AudioTrack::new(AudioTrackSpec::new(cfg), false));
+        }
+        if self.audio[0].spec.config != cfg {
             return Err(Error::AudioConfigChanged);
         }
+        self.audio_payload(0, payload, ts_us)
+    }
+
+    fn audio_payload(&mut self, track: usize, payload: &[u8], ts_us: Option<i64>) -> Result<bool> {
+        let default_start = self.opts.audio_start_us;
+        let a = &mut self.audio[track];
+        if !a.begun {
+            a.begun = true;
+            a.start_us = ts_us.or(default_start);
+        }
+        let cfg = a.spec.config;
         let rate = i64::from(cfg.sample_rate);
         let frame_us = i64::from(SAMPLES_PER_FRAME) * 1_000_000 / rate;
         let total = a.sizes.len() as i64 * i64::from(SAMPLES_PER_FRAME);
@@ -408,14 +510,14 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
             &mut video.pending,
             &mut video.chunks,
         )?;
-        if let Some(a) = &mut self.audio {
+        for a in &mut self.audio {
             flush(&mut self.out, &mut self.pos, &mut a.pending, &mut a.chunks)?;
         }
         if video.sizes.len() == 1 {
             video.last_delta = DEFAULT_SAMPLE_TICKS;
         }
         push_run(&mut video.stts, video.last_delta);
-        let plan = Plan::new(&video, self.audio.as_ref(), &self.opts)?;
+        let plan = Plan::new(&video, &self.audio);
 
         // mdat size
         let mdat_len = self.pos - self.mdat_start;
@@ -433,7 +535,7 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
         let mut moov;
         let mut rounds = 0;
         loop {
-            moov = build_moov(&video, self.audio.as_ref(), &plan, &self.opts, shift, co64);
+            moov = build_moov(&video, &self.audio, &plan, &self.opts, shift, co64);
             let new_shift = if self.opts.faststart {
                 moov.len() as u64
             } else {
@@ -473,7 +575,13 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
         let summary = Summary {
             file_size: end + moov.len() as u64,
             video_samples: video.sizes.len() as u64,
-            audio_samples: self.audio.as_ref().map_or(0, |a| a.sizes.len() as u64),
+            audio_samples: self.audio.iter().map(|a| a.sizes.len() as u64).sum(),
+            audio_track_samples: self
+                .audio
+                .iter()
+                .filter(|a| a.written())
+                .map(|a| a.sizes.len() as u64)
+                .collect(),
             video_entries: video.entries.len(),
             uses_co64: co64,
             moov_size: moov.len() as u64,
@@ -536,13 +644,14 @@ pub(crate) struct Edit {
 
 struct Plan {
     video_edits: Vec<Edit>,
-    audio_edits: Vec<Edit>,
+    /// Per audio track (all of them, written or not).
+    audio_edits: Vec<Vec<Edit>>,
     video_media_duration: u64,
-    audio_media_duration: u64,
+    audio_media_duration: Vec<u64>,
 }
 
 impl Plan {
-    fn new(video: &VideoTrack, audio: Option<&AudioTrack>, _opts: &Options) -> Result<Self> {
+    fn new(video: &VideoTrack, audio: &[AudioTrack]) -> Self {
         let video_media_duration =
             (video.last_dts_ticks - video.first_dts_ticks) as u64 + u64::from(video.last_delta);
         let media_time = video.min_pts_ticks - video.first_dts_ticks;
@@ -551,13 +660,21 @@ impl Plan {
         // when presentation offsets exceed the media duration.)
         let video_presented =
             (video.max_pts_ticks - video.min_pts_ticks) as u64 + u64::from(video.last_delta);
-        let mut audio_media_duration = 0;
-        let mut audio_start = None;
-        if let Some(a) = audio {
-            audio_media_duration = a.sizes.len() as u64 * u64::from(SAMPLES_PER_FRAME);
-            audio_start = Some(us_to_ticks(a.start_us.unwrap_or(video.min_pts_us)));
-        }
-        let t0 = video.min_pts_ticks.min(audio_start.unwrap_or(i64::MAX));
+        let audio_media_duration: Vec<u64> = audio
+            .iter()
+            .map(|a| a.sizes.len() as u64 * u64::from(SAMPLES_PER_FRAME))
+            .collect();
+        // Start (movie ticks) of each audio track that has samples.
+        let audio_start: Vec<Option<i64>> = audio
+            .iter()
+            .map(|a| {
+                (!a.sizes.is_empty()).then(|| us_to_ticks(a.start_us.unwrap_or(video.min_pts_us)))
+            })
+            .collect();
+        let t0 = audio_start
+            .iter()
+            .flatten()
+            .fold(video.min_pts_ticks, |m, &s| m.min(s));
         let mut video_edits = Vec::new();
         if video.min_pts_ticks > t0 {
             video_edits.push(Edit {
@@ -569,26 +686,37 @@ impl Plan {
             duration: video_presented,
             media_time,
         });
-        let mut audio_edits = Vec::new();
-        if let Some(start) = audio_start {
-            if start > t0 {
-                audio_edits.push(Edit {
-                    duration: (start - t0) as u64,
-                    media_time: -1,
+        let audio_edits = audio
+            .iter()
+            .zip(&audio_start)
+            .zip(&audio_media_duration)
+            .map(|((a, start), &media)| {
+                let mut edits = Vec::new();
+                let Some(start) = *start else {
+                    return edits;
+                };
+                if start > t0 {
+                    edits.push(Edit {
+                        duration: (start - t0) as u64,
+                        media_time: -1,
+                    });
+                }
+                // Priming samples are decoded but not presented.
+                let skip = u64::from(a.spec.priming_samples).min(media);
+                let rate = u64::from(a.spec.config.sample_rate);
+                edits.push(Edit {
+                    duration: (media - skip) * u64::from(TIMESCALE) / rate,
+                    media_time: skip as i64,
                 });
-            }
-            let rate = u64::from(audio.map_or(1, |a| a.config.sample_rate));
-            audio_edits.push(Edit {
-                duration: audio_media_duration * u64::from(TIMESCALE) / rate,
-                media_time: 0,
-            });
-        }
-        Ok(Plan {
+                edits
+            })
+            .collect();
+        Plan {
             video_edits,
             audio_edits,
             video_media_duration,
             audio_media_duration,
-        })
+        }
     }
 }
 
@@ -626,6 +754,9 @@ pub(crate) struct TrackInfo<'a> {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) volume: u16,
+    /// Track header flags (3: enabled and in movie).
+    pub(crate) flags: u32,
+    pub(crate) alternate_group: u16,
     pub(crate) tables: Tables<'a>,
 }
 
@@ -634,7 +765,7 @@ pub(crate) fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
     let big = track_dur > u64::from(u32::MAX) || t.media_duration > u64::from(u32::MAX);
     let v = u8::from(big);
     bx(buf, b"trak", |b| {
-        full(b, b"tkhd", v, 3, |b| {
+        full(b, b"tkhd", v, t.flags, |b| {
             if big {
                 put_u64(b, created);
                 put_u64(b, created);
@@ -650,7 +781,7 @@ pub(crate) fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
             }
             put_u64(b, 0);
             put_u16(b, 0); // layer
-            put_u16(b, 0); // alternate group
+            put_u16(b, t.alternate_group);
             put_u16(b, t.volume);
             put_u16(b, 0);
             for m in MATRIX {
@@ -705,7 +836,7 @@ pub(crate) fn trak(buf: &mut Vec<u8>, t: &TrackInfo<'_>, created: u64) {
 
 fn build_moov(
     video: &VideoTrack,
-    audio: Option<&AudioTrack>,
+    audio: &[AudioTrack],
     plan: &Plan,
     opts: &Options,
     shift: u64,
@@ -727,13 +858,15 @@ fn build_moov(
     let vtrack = TrackInfo {
         id: 1,
         kind: b"vide",
-        handler_name: b"VideoHandler",
+        handler_name: VIDEO_HANDLER_NAME.as_bytes(),
         timescale: TIMESCALE,
         media_duration: plan.video_media_duration,
         edits: &plan.video_edits,
         width: first.width,
         height: first.height,
         volume: 0,
+        flags: 3,
+        alternate_group: 0,
         tables: Tables {
             stsd: &vstsd,
             stts: &video.stts,
@@ -745,46 +878,70 @@ fn build_moov(
             co64,
         },
     };
-    let audio = audio.filter(|a| !a.sizes.is_empty());
-    let audio_stsd = audio.map(|a| {
-        let secs =
-            (a.sizes.len() as f64 * f64::from(SAMPLES_PER_FRAME)) / f64::from(a.config.sample_rate);
-        let avg = (a.total_bytes as f64 * 8.0 / secs) as u32;
-        let max = (f64::from(a.max_frame) * 8.0 * f64::from(a.config.sample_rate)
-            / f64::from(SAMPLES_PER_FRAME)) as u32;
-        stsd(&[mp4a_entry(&a.config, avg, max)])
-    });
-    let audio_stts = audio.map(|a| [(a.sizes.len() as u32, SAMPLES_PER_FRAME)]);
-    let atrack = audio.map(|a| TrackInfo {
-        id: 2,
-        kind: b"soun",
-        handler_name: b"SoundHandler",
-        timescale: a.config.sample_rate,
-        media_duration: plan.audio_media_duration,
-        edits: &plan.audio_edits,
-        width: 0,
-        height: 0,
-        volume: 0x0100,
-        tables: Tables {
-            stsd: audio_stsd.as_deref().expect("audio entry"),
-            stts: audio_stts.as_ref().expect("audio stts"),
-            ctts: None,
-            sizes: &a.sizes,
-            sync: None,
-            chunks: &a.chunks,
-            shift,
-            co64,
-        },
-    });
-    let movie_dur = [
-        Some(&plan.video_edits),
-        atrack.as_ref().map(|_| &plan.audio_edits),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|e| e.iter().map(|x| x.duration).sum::<u64>())
-    .max()
-    .unwrap_or(0);
+    let kept: Vec<usize> = (0..audio.len()).filter(|&i| audio[i].written()).collect();
+    let audio_stsd: Vec<Vec<u8>> = kept
+        .iter()
+        .map(|&i| {
+            let a = &audio[i];
+            let rate = a.spec.config.sample_rate;
+            let (avg, max) = if a.sizes.is_empty() {
+                (0, 0)
+            } else {
+                let secs = (a.sizes.len() as f64 * f64::from(SAMPLES_PER_FRAME)) / f64::from(rate);
+                let avg = (a.total_bytes as f64 * 8.0 / secs) as u32;
+                let max = (f64::from(a.max_frame) * 8.0 * f64::from(rate)
+                    / f64::from(SAMPLES_PER_FRAME)) as u32;
+                (avg, max)
+            };
+            stsd(&[mp4a_entry(&a.spec.config, avg, max)])
+        })
+        .collect();
+    let audio_stts: Vec<Vec<(u32, u32)>> = kept
+        .iter()
+        .map(|&i| {
+            let n = audio[i].sizes.len() as u32;
+            if n == 0 {
+                Vec::new()
+            } else {
+                vec![(n, SAMPLES_PER_FRAME)]
+            }
+        })
+        .collect();
+    let atracks: Vec<TrackInfo<'_>> = kept
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| {
+            let a = &audio[i];
+            TrackInfo {
+                id: 2 + k as u32,
+                kind: b"soun",
+                handler_name: a.spec.handler.name().as_bytes(),
+                timescale: a.spec.config.sample_rate,
+                media_duration: plan.audio_media_duration[i],
+                edits: &plan.audio_edits[i],
+                width: 0,
+                height: 0,
+                volume: 0x0100,
+                flags: a.spec.tkhd_flags(),
+                alternate_group: a.spec.alternate_group,
+                tables: Tables {
+                    stsd: &audio_stsd[k],
+                    stts: &audio_stts[k],
+                    ctts: None,
+                    sizes: &a.sizes,
+                    sync: None,
+                    chunks: &a.chunks,
+                    shift,
+                    co64,
+                },
+            }
+        })
+        .collect();
+    let movie_dur = std::iter::once(&plan.video_edits)
+        .chain(kept.iter().map(|&i| &plan.audio_edits[i]))
+        .map(|e| e.iter().map(|x| x.duration).sum::<u64>())
+        .max()
+        .unwrap_or(0);
     let big = movie_dur > u64::from(u32::MAX);
     let mut out = Vec::new();
     bx(&mut out, b"moov", |b| {
@@ -807,10 +964,10 @@ fn build_moov(
                 put_u32(b, m);
             }
             b.extend_from_slice(&[0; 24]);
-            put_u32(b, if atrack.is_some() { 3 } else { 2 }); // next_track_ID
+            put_u32(b, 2 + atracks.len() as u32); // next_track_ID
         });
         trak(b, &vtrack, created);
-        if let Some(a) = &atrack {
+        for a in &atracks {
             trak(b, a, created);
         }
     });
