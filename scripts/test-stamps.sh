@@ -11,6 +11,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 failures=0
+# The Windows lock of these tests lives in the work directory.
+export NVRVIEW_WINDOWS_LOCK="$work/windows.lock" NVRVIEW_LOCK_POLL=0.2
 pass() { echo "ok   $1"; }
 fail() { echo "FAIL $1" >&2; failures=$((failures + 1)); }
 expect() { # NAME CMD...  (the command must succeed)
@@ -25,7 +27,7 @@ expect_not() { # NAME CMD...  (the command must fail)
 # A fresh repository with the scripts under test, main holding a few files.
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$here/windows-lock.sh" "$here/branch-ready.sh" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .

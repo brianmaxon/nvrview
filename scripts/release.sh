@@ -82,7 +82,10 @@ fi
 
 [ -z "$(git status --porcelain)" ] || die "the working tree is not clean; commit or remove changes first"
 if [ "$skip_windows" != 1 ]; then
-  [ -n "${NVRVIEW_WINDOWS_HOST:-}" ] || die "set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer"
+  [ -n "${NVRVIEW_WINDOWS_HOSTS:-${NVRVIEW_WINDOWS_HOST:-}}" ] || die "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer"
+  # Releases get the Windows computer before agents' checks.
+  NVRVIEW_WINDOWS_PRIORITY=merge
+  export NVRVIEW_WINDOWS_PRIORITY
 fi
 if [ "$full_check" = 1 ]; then
   echo "== fresh checks (--full-check)"
@@ -140,7 +143,7 @@ packages="$out/$mac_zip"
 if [ "$skip_windows" = 1 ]; then
   echo "== Windows package skipped (--skip-windows): this is a macOS-only result"
 else
-  echo "== Windows package (built on $NVRVIEW_WINDOWS_HOST)"
+  echo "== Windows package (built on the Windows computer)"
   if [ -n "$update_source" ]; then
     scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source"
   else
