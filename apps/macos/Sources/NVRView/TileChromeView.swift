@@ -18,14 +18,18 @@ struct TileChromeContent: Equatable {
     var retry = false
     var hasCamera: Bool
     var audible: Bool
+    /// What the hover header shows (docs/UX.md "Tile header"); nil for a
+    /// tile without a camera.
+    var header: TileHeaderTile?
     var selected: Bool
     var editing: Bool
     var dropTarget: Bool
 }
 
 /// The lightweight layer above one tile of the Metal surface (docs/UX.md
-/// "Chrome"): a header with the camera's name and a speaker button that
-/// fades in at once on hover and out a few seconds after the pointer stops
+/// "Chrome"): a header with the camera's name and its buttons, laid out by
+/// `TileHeaderLayout` (what does not fit goes into "…"), that fades in at
+/// once on hover and out a few seconds after the pointer stops
 /// or leaves; corner indicators; a thin level meter along the top
 /// (`LevelMeterMode`: green and always shown while the camera is audible,
 /// monochrome with the header while it is muted); and words over the
@@ -38,10 +42,12 @@ final class TileChromeView: NSView {
     static let fadeOutDelay: TimeInterval = 2.5
     static let fadeOutAfterExit: TimeInterval = 0.8
 
-    var onSpeaker: (_ additive: Bool) -> Void = { _ in }
+    /// A header button was clicked: the item and the button (menus pop up
+    /// under it).
+    var onItem: (TileHeaderItem, NSView) -> Void = { _, _ in }
     var onDismissAlert: () -> Void = {}
-    /// The header's reset-zoom control (shown while the tile is zoomed).
-    var onResetZoom: () -> Void = {}
+    /// Items whose action is not built yet (drawn dimmed; a click says so).
+    var isPending: (TileHeaderItem) -> Bool = { _ in false }
     /// The veil's Retry button.
     var onRetry: () -> Void = {}
 
@@ -50,9 +56,13 @@ final class TileChromeView: NSView {
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
     private let rates = NSTextField(labelWithString: "")
-    private let speaker = NSButton()
+    /// The header's buttons, made when first shown.
+    private var buttons: [TileHeaderItem: NSButton] = [:]
+    /// The header as last laid out (kept for the model's hysteresis).
+    private(set) var headerLayout: TileHeaderLayout?
+    /// The title's natural width, for the string it was measured for.
+    private var titleMeasure: (text: String, width: Double)?
     private let cornerView = CornerIndicatorView()
-    private let resetZoom = NSButton()
     /// The alert's red border (blinks, or stays steady with Reduce Motion).
     private let alertBorder = CALayer()
     private let alertStrip = NSView()
@@ -123,29 +133,7 @@ final class TileChromeView: NSView {
         header.addSubview(subtitle)
         header.addSubview(rates)
 
-        speaker.isBordered = false
-        speaker.bezelStyle = .shadowlessSquare
-        speaker.imagePosition = .imageOnly
-        speaker.contentTintColor = .white
-        speaker.target = self
-        speaker.action = #selector(speakerClicked(_:))
-        speaker.toolTip = "Listen (Option-click to listen to several)"
-        speaker.setAccessibilityLabel("Listen")
-        header.addSubview(speaker)
-
         addSubview(cornerView)
-        resetZoom.isBordered = false
-        resetZoom.bezelStyle = .shadowlessSquare
-        resetZoom.imagePosition = .imageOnly
-        resetZoom.contentTintColor = .white
-        resetZoom.image = NSImage(systemSymbolName: "1.magnifyingglass", accessibilityDescription: "Reset Zoom")
-            ?? NSImage(systemSymbolName: "minus.magnifyingglass", accessibilityDescription: "Reset Zoom")
-        resetZoom.target = self
-        resetZoom.action = #selector(resetZoomClicked(_:))
-        resetZoom.toolTip = "Reset Zoom (0)"
-        resetZoom.setAccessibilityLabel("Reset zoom")
-        resetZoom.isHidden = true
-        header.addSubview(resetZoom)
 
         veil.wantsLayer = true
         veil.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.055, blue: 0.063, alpha: 0.78).cgColor
@@ -237,7 +225,8 @@ final class TileChromeView: NSView {
             return retryButton
         }
         guard header.alphaValue > 0.05, !header.isHidden else { return nil }
-        for button in [speaker, resetZoom, alertDismiss] where !button.isHidden && (button !== alertDismiss || !alertStrip.isHidden) {
+        for button in Array(buttons.values) + [alertDismiss]
+        where !button.isHidden && (button !== alertDismiss || !alertStrip.isHidden) {
             if button.convert(button.bounds, to: self).contains(p) { return button }
         }
         return nil
@@ -257,11 +246,6 @@ final class TileChromeView: NSView {
             rates.isHidden = c.rates == nil
             needsLayout = true
         }
-        speaker.isHidden = !c.hasCamera
-        speaker.image = NSImage(
-            systemSymbolName: c.audible ? "speaker.wave.2.fill" : "speaker.slash.fill",
-            accessibilityDescription: c.audible ? "Listening" : "Muted")
-        speaker.setAccessibilityLabel(c.audible ? "Stop listening" : "Listen")
         cornerView.corner = c.corner
         setAlert(c.alertLines)
         cornerView.set(active: c.indicators)
@@ -332,16 +316,12 @@ final class TileChromeView: NSView {
         layoutMeters()
         outline.frame = bounds
         CATransaction.commit()
-        let button: CGFloat = 26
-        speaker.frame = CGRect(x: w - button - 6, y: 4, width: button, height: 22)
         cornerView.frame = bounds
-        let buttonsLeft = speaker.isHidden ? w - 4 : speaker.frame.minX
-        resetZoom.frame = CGRect(x: buttonsLeft - button - 2, y: 4, width: button, height: 22)
+        let buttonsLeft = layoutHeaderButtons(width: w)
         // The title keeps clear of the indicators when they share its edge.
         let taken = cornerView.occupiedWidth()
         let titleLeft: CGFloat = 10 + (cornerView.corner == .topLeft ? taken : 0)
-        let titleRight = (resetZoom.isHidden ? buttonsLeft : resetZoom.frame.minX) - 4
-            - (cornerView.corner == .topRight ? taken : 0) - 6
+        let titleRight = buttonsLeft - 4 - (cornerView.corner == .topRight ? taken : 0)
         title.frame = CGRect(x: titleLeft, y: 7, width: max(titleRight - titleLeft, 0), height: 16)
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
         rates.frame = CGRect(x: 10, y: subtitle.isHidden ? 22 : 36, width: max(w - 20, 0), height: 14)
@@ -363,6 +343,121 @@ final class TileChromeView: NSView {
             x: (w - retryWidth) / 2, y: h / 2 + (veilDetail.isHidden ? 6 : 24), width: retryWidth, height: 22)
         emptyHint.frame = CGRect(x: 8, y: h / 2 - 8, width: max(w - 16, 0), height: 16)
         drop.frame = bounds
+    }
+
+    // MARK: Header buttons (docs/UX.md "Tile header")
+
+    /// Lays the header out with the shared model at width `w` and places
+    /// the visible buttons at the right edge, in display order. Returns
+    /// where the buttons begin (the title ends before it).
+    private func layoutHeaderButtons(width w: CGFloat) -> CGFloat {
+        guard let tile = content?.header else {
+            headerLayout = nil
+            for b in buttons.values { b.isHidden = true }
+            return w - 4
+        }
+        let text = title.stringValue
+        if titleMeasure?.text != text {
+            titleMeasure = (text, Double(ceil(title.attributedStringValue.size().width)))
+        }
+        let layout = TileHeaderLayout.compute(
+            width: Double(w), titleWidth: titleMeasure?.width ?? 0, tile: tile, previous: headerLayout)
+        headerLayout = layout
+        let shown = layout.visible.filter(Self.isButton)
+        let menu = TileHeaderLayout.menu(for: tile)
+        let icon = CGFloat(layout.metrics.icon)
+        var x = w - CGFloat(layout.metrics.padding) - icon * CGFloat(shown.count)
+        let left = x
+        for item in shown {
+            let b = button(for: item)
+            style(b, item, tile, menu.first { $0.item == item })
+            b.frame = CGRect(x: x, y: 4, width: icon, height: 22)
+            b.isHidden = false
+            x += icon
+        }
+        for (item, b) in buttons where !shown.contains(item) { b.isHidden = true }
+        return left
+    }
+
+    /// The pill, the title and Dismiss are not buttons of the row: the
+    /// alert's Dismiss stays in its strip below the title, and nothing is
+    /// recorded yet, so there is no pill.
+    private static func isButton(_ item: TileHeaderItem) -> Bool {
+        switch item {
+        case .recordingPill, .title, .dismissAlert: false
+        default: true
+        }
+    }
+
+    private func button(for item: TileHeaderItem) -> NSButton {
+        if let b = buttons[item] { return b }
+        let b = HeaderButton(item: item)
+        b.isBordered = false
+        b.bezelStyle = .shadowlessSquare
+        b.imagePosition = .imageOnly
+        b.contentTintColor = .white
+        b.target = self
+        b.action = #selector(headerButtonClicked(_:))
+        b.isHidden = true
+        header.addSubview(b)
+        buttons[item] = b
+        return b
+    }
+
+    /// The symbol, label and tooltip of a header button in the tile's state.
+    private func style(_ b: NSButton, _ item: TileHeaderItem, _ tile: TileHeaderTile, _ entry: TileHeaderMenuEntry?) {
+        let label = entry?.label ?? (item == .more ? "More" : "")
+        let symbol: String
+        switch item {
+        case .speaker: symbol = tile.listening ? "speaker.wave.2.fill" : "speaker.slash.fill"
+        case .record: symbol = tile.recording ? "stop.circle" : "record.circle"
+        case .savePicture: symbol = "camera"
+        case .conversation: symbol = tile.conversation ? "phone.down.fill" : "phone"
+        case .panTilt: symbol = "arrow.up.and.down.and.arrow.left.and.right"
+        case .presets: symbol = "list.number"
+        case .lens: symbol = "camera.aperture"
+        case .resetZoom: symbol = "1.magnifyingglass"
+        case .quality: symbol = "slider.horizontal.3"
+        case .fisheye: symbol = "pano"
+        default: symbol = "ellipsis.circle"
+        }
+        let pending = isPending(item)
+        let hint = entry?.macShortcut ?? ""
+        var tip = hint.isEmpty ? label : "\(label) (\(hint))"
+        if item == .speaker { tip += " · Option-click to listen to several" }
+        if pending { tip += " · coming soon" }
+        guard b.toolTip != tip || (b as? HeaderButton)?.symbol != symbol else { return }
+        (b as? HeaderButton)?.symbol = symbol
+        b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            ?? NSImage(systemSymbolName: "circle", accessibilityDescription: label)
+        b.alphaValue = pending ? 0.45 : 1
+        b.toolTip = tip
+        b.setAccessibilityLabel(item == .speaker ? (tile.listening ? "Stop listening" : "Listen") : label)
+    }
+
+    @objc private func headerButtonClicked(_ sender: NSButton) {
+        guard let item = (sender as? HeaderButton)?.item else { return }
+        onItem(item, sender)
+        showChrome()
+    }
+
+    /// The header items shown as buttons, left to right (self-test).
+    var shownHeaderButtons: [TileHeaderItem] {
+        buttons.filter { !$0.value.isHidden }.sorted { $0.value.frame.minX < $1.value.frame.minX }.map(\.key)
+    }
+
+    /// The buttons' frames, in this view's coordinates (self-test).
+    var headerButtonFrames: [TileHeaderItem: CGRect] {
+        buttons.filter { !$0.value.isHidden }.mapValues { header.convert($0.frame, to: self) }
+    }
+
+    /// The title's frame, in this view's coordinates (self-test).
+    var titleFrame: CGRect { header.convert(title.frame, to: self) }
+
+    /// Clicks a header button as the pointer would (self-test).
+    func pressHeader(_ item: TileHeaderItem) {
+        guard let b = buttons[item], !b.isHidden else { return }
+        b.performClick(nil)
     }
 
     /// One tracking area for the view's life: `.inVisibleRect` follows the
@@ -431,13 +526,6 @@ final class TileChromeView: NSView {
     }
 
     // MARK: Stage-driven state (zoom, alerts, auto-hide)
-
-    /// Shows the reset-zoom control while the tile is zoomed.
-    func setZoomed(_ zoomed: Bool) {
-        guard resetZoom.isHidden == zoomed else { return }
-        resetZoom.isHidden = !zoomed
-        needsLayout = true
-    }
 
     /// Keeps the header shown whatever the hover and auto-hide say (a tile
     /// with an active alert); releasing it lets it fade as usual.
@@ -518,14 +606,20 @@ final class TileChromeView: NSView {
     /// Whether the alert strip is showing (for the self-test).
     var isAlertShown: Bool { !alertStrip.isHidden }
 
-    @objc private func resetZoomClicked(_ sender: NSButton) {
-        onResetZoom()
-        showChrome()
+}
+
+/// A header button that knows its item.
+@MainActor
+private final class HeaderButton: NSButton {
+    let item: TileHeaderItem
+    /// The symbol it shows now.
+    var symbol = ""
+
+    init(item: TileHeaderItem) {
+        self.item = item
+        super.init(frame: .zero)
     }
 
-    @objc private func speakerClicked(_ sender: NSButton) {
-        let additive = NSEvent.modifierFlags.contains(.option) || NSEvent.modifierFlags.contains(.command)
-        onSpeaker(additive)
-        showChrome()
-    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("not used") }
 }

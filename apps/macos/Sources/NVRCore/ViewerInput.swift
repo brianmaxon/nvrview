@@ -79,6 +79,14 @@ public enum ViewerShortcut: Sendable, Equatable {
     /// Return or Enter: dismisses the selected tile's alert if it has one,
     /// else toggles focus (as before).
     case confirm
+    /// P: save the selected tile's picture (docs/UX.md "Capture and camera keys").
+    case savePicture
+    /// Shift+P: Save Picture As….
+    case savePictureAs
+    /// R: start or stop recording the selected tile's camera.
+    case toggleRecording
+    /// T: start or end a conversation with the selected tile's camera.
+    case toggleConversation
 }
 
 /// Where the keyboard focus is in the window, as far as shortcuts care.
@@ -161,6 +169,10 @@ public enum ViewerKeys {
         case "s": return .toggleSidebar
         case "0": return .resetZoom
         case "m": return .toggleListening
+        // Shift picks Save Picture As; Caps Lock (no Shift) does not.
+        case "p": return modifiers.contains(.shift) ? .savePictureAs : .savePicture
+        case "r": return .toggleRecording
+        case "t": return .toggleConversation
         default: return nil
         }
     }

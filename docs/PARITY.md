@@ -115,14 +115,14 @@ less than that. Nothing here was run on a Windows machine.
 
 ### Tile header, capture, and camera motion
 
-Planned in [CAPTURE.md](CAPTURE.md); nothing here is built yet. `no
-(planned)` means designed and not started on that app.
+Planned in [CAPTURE.md](CAPTURE.md). `no (planned)` means designed and not
+started on that app.
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Responsive tile header: priorities, "…" overflow, right-click menu from the same model | no (planned) | no (planned) | UX.md "Tile header"; shared `TileHeaderLayout` with test vectors. Self-test IDs `header-priority-narrow`, `header-overflow-menu`. |
-| Call window picture as a regular tile (zoom, menu, header) | no (planned) | no (planned) | UX.md "A call in its own window". IDs `call-window-tile-zoom`, `call-window-tile-menu`. |
-| Keys P, Shift+P, R, T, Option/Alt+arrows, Option/Alt with = - and 1–9 | no (planned) | no (planned) | UX.md "Capture and camera keys". macOS: a Camera menu; Windows: the F1 overlay. |
+| Responsive tile header: priorities, "…" overflow, right-click menu from the same model | yes | no (planned) | UX.md "Tile header"; shared `TileHeaderLayout` with test vectors. macOS: `TileChromeView`, with Save picture, Record and the PTZ buttons in place but saying "coming soon"; Start Conversation and PTZ buttons from the `channels` capabilities. Self-test IDs `header-priority-narrow`, `header-overflow-menu` (macOS only for now). |
+| Call window picture as a regular tile (zoom, menu, header) | yes | no (planned) | UX.md "A call in its own window". macOS: `StageView` in single fixed tile mode inside the call window. IDs `call-window-tile-zoom`, `call-window-tile-menu` (macOS only for now). |
+| Keys P, Shift+P, R, T, Option/Alt+arrows, Option/Alt with = - and 1–9 | partly | no (planned) | UX.md "Capture and camera keys". macOS: P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu (T works; the others say "coming soon"; no Option keys yet); Windows: the F1 overlay. |
 | Save picture (full frame, zoomed area, fisheye view or original circle; PNG or JPEG; toast) | no (planned) | no (planned) | UX.md "Save picture". IDs `capture-picture-tile`, `capture-picture-zoomed`, `capture-picture-fisheye`, `capture-picture-call`, `capture-picture-text-field`. |
 | Live recording to MP4 (Record from Main or Sub-stream, caps, disk guard, segments, recovery) | no (planned) | no (planned) | UX.md "Recording". IDs `capture-record-tile`, `capture-record-cap`, `capture-record-disk-low`, `capture-record-reconnect`, `capture-record-survives-tile-close`. |
 | Recording indicators (tile pill, call bar pill, window list) | no (planned) | no (planned) | macOS: toolbar item and Camera > Recordings; Windows: "● N recording" in the window header. ID `capture-record-indicator`. |

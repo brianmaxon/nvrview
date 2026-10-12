@@ -10,7 +10,9 @@
 > difference from the NVR's own recordings in [PLAYBACK.md](PLAYBACK.md)
 > ("Local captures and the NVR's recordings"); the PTZ commands in
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
-> [PARITY.md](PARITY.md).
+> [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
+> macOS the header, its menus and keys (capture and PTZ actions say "coming
+> soon") and the call window's picture as a single fixed tile.
 
 ## Principles
 
@@ -79,8 +81,8 @@ model.
 - **Right-click menu** = the full overflow list from the same model, so
   everything in the header is also in the menu, in the same order.
 
-Details settled with the model (`TileHeader.swift`, `TileHeader.cs`; no
-view uses it yet):
+Details settled with the model (`TileHeader.swift`, `TileHeader.cs`; the
+macOS tile chrome lays its header out with it, UX.md "Tile header"):
 
 - The padding (8) is the header's inset at each end; items sit side by side.
   The title gets what the buttons leave, at least 48; `titleTruncated`

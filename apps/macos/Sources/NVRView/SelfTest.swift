@@ -605,9 +605,107 @@ final class SelfTest {
                 stage.fullScreen = false
                 stage.chromeHideDelay = 3
                 stage.alertActive = { [weak model] in model?.alerts.isActive($0) == true }
-                insetStep()
+                headerStep()
             }
         }
+    }
+
+    // MARK: The tile header (docs/UX.md "Tile header")
+
+    /// A tile's header laid out by the shared model at a narrow, a middle
+    /// and a wide width: the buttons on screen are the model's, in its
+    /// order, inside the tile and clear of the title; "…" holds the rest
+    /// and the right-click menu is the model's list. Capabilities from the
+    /// `channels` event put Start Conversation in a doorbell's header and
+    /// the PTZ buttons in a moving camera's. Save picture and recording are
+    /// not built yet: their button and keys say "coming soon".
+    private func headerStep() {
+        guard let model = app.model, let window else { return insetStep() }
+        let stage = window.stage
+        // The chrome as the model says now (the step before faked an alert).
+        stage.refreshChrome()
+        guard let leaf = stage.frames.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera,
+            let chrome = stage.chromes[leaf.path], let tile = stage.headerTile(camera, path: leaf.path)
+        else {
+            problems.append("no tile with a header")
+            return insetStep()
+        }
+        let saved = chrome.frame
+        let buttons = TileHeaderLayout.buttons(for: tile)
+        let m = TileHeaderMetrics.standard
+        /// Lays the header out `width` points wide: the buttons shown, and
+        /// whether they sit inside the tile, apart, and right of the title.
+        func at(_ width: CGFloat) -> (shown: [TileHeaderItem], layout: TileHeaderLayout?, placed: Bool) {
+            chrome.frame = CGRect(x: saved.minX, y: saved.minY, width: width, height: saved.height)
+            chrome.layoutSubtreeIfNeeded()
+            let frames = chrome.headerButtonFrames.values.sorted { $0.minX < $1.minX }
+            let apart = zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX + 0.5 }
+            let inside = frames.allSatisfy { $0.minX >= 0 && $0.maxX <= width + 0.5 }
+            let clear = frames.first.map { chrome.titleFrame.maxX <= $0.minX } ?? true
+            return (chrome.shownHeaderButtons, chrome.headerLayout, apart && inside && clear)
+        }
+        // parity: header-priority-narrow
+        let narrow = at(110)
+        // One point short of every button: some go into "…".
+        let width = CGFloat(2 * m.padding + m.titleMin + m.icon * Double(buttons.count) - 1)
+        let fit = Int((Double(width) - 2 * m.padding - m.titleMin - m.icon) / m.icon)
+        let middle = at(width)
+        let nudged = at(width + 5)
+        let wide = at(1000)
+        let narrowOK = narrow.shown == [.more] && narrow.layout?.visible == [.title, .more] && narrow.placed
+        let middleOK = middle.shown == Array(buttons.prefix(fit)) + [.more]
+            && middle.layout?.visible.filter({ $0 != .title }) == middle.shown && middle.placed
+        let wideOK = wide.shown == buttons && wide.layout?.showsMore == false && wide.placed
+        let steady = nudged.shown == middle.shown
+        // Capabilities: the doorbell and the moving camera of the fake NVR.
+        let doorbell = CameraRef(device: camera.device, channel: 3, lens: 0)
+        let mover = CameraRef(device: camera.device, channel: 1, lens: 0)
+        let doorbellButtons = stage.headerTile(doorbell, path: leaf.path).map(TileHeaderLayout.buttons(for:)) ?? []
+        let moverButtons = stage.headerTile(mover, path: leaf.path).map(TileHeaderLayout.buttons(for:)) ?? []
+        let plainTalk = model.channelInfo(camera)?.talk == true || model.channelInfo(camera)?.doorbell == true
+        let caps = doorbellButtons.contains(.conversation) && !moverButtons.contains(.conversation)
+            && [TileHeaderItem.panTilt, .presets, .lens].allSatisfy(moverButtons.contains)
+            && !doorbellButtons.contains(.panTilt) && (plainTalk || !buttons.contains(.conversation))
+        print(
+            "header: 110 pt \(narrow.shown.map(\.rawValue)), \(Int(width)) pt \(middle.shown.map(\.rawValue)), "
+                + "5 pt wider unchanged \(steady), 1000 pt \(wide.shown.map(\.rawValue)); "
+                + "doorbell \(doorbellButtons.map(\.rawValue)), pan-tilt camera \(moverButtons.map(\.rawValue))")
+        if !narrowOK { problems.append("below 120 pt the header did not show only the title and …") }
+        if !middleOK { problems.append("one point short of every button, the header did not show the model's first \(fit) buttons and …") }
+        if !wideOK { problems.append("a wide header did not show every button without …") }
+        if !steady { problems.append("a 5 pt width change reflowed the header") }
+        if !caps { problems.append("the channels event's talk, doorbell and PTZ capabilities did not reach the header") }
+        // parity: header-overflow-menu
+        _ = at(width)
+        let more = stage.moreMenu(leaf.path)?.items.map(\.title) ?? []
+        let wantMore = chrome.headerLayout?.moreMenu.map(\.label) ?? ["?"]
+        let context = stage.contextMenu(for: leaf).items.map(\.title)
+        let wantContext = TileHeaderLayout.menu(for: tile).map(\.label)
+        let menusOK = more == wantMore && Array(context.prefix(wantContext.count)) == wantContext
+            && context.contains("Split Side by Side") && more.contains("Entrance") && !more.contains("Listen")
+        print("header menus: … \(more), right-click starts with the model's \(wantContext.count) items \(menusOK)")
+        if !menusOK { problems.append("the … or right-click menu is not the header model's list (\(more) vs \(wantMore))") }
+        // A button whose action is not built yet says so; so do P and R.
+        _ = at(1000)
+        chrome.pressHeader(.savePicture)
+        let clicked = stage.toastText
+        advance(ToastView.duration + 0.1)
+        let gone = stage.toastText == nil
+        window.window?.makeFirstResponder(stage)
+        window.state.selected = leaf.path
+        press("p", keyCode: 35)
+        let keyP = stage.toastText
+        press("r", keyCode: 15)
+        let keyR = stage.toastText
+        advance(ToastView.duration + 0.1)
+        chrome.frame = saved
+        stage.relayoutChrome()
+        print("header stubs: click \(clicked ?? "nothing"), gone after \(ToastView.duration) s \(gone), P \(keyP ?? "nothing"), R \(keyR ?? "nothing")")
+        if clicked != "Save Picture is coming soon" || !gone { problems.append("Save Picture's button did not say it is coming soon") }
+        if keyP != "Save Picture is coming soon" || keyR != "Start Recording is coming soon" {
+            problems.append("P or R did not reach the header's actions")
+        }
+        insetStep()
     }
 
     // MARK: Alert insets and doorbell calls
@@ -1060,7 +1158,7 @@ final class SelfTest {
                     && !stage.insetBoard.shown.contains { $0.camera == doorbell }
             }
             draw(c)
-            let drawn = c.grid.renderer.tiles
+            let drawn = c.stage.grid.renderer.tiles
             let exact = drawn.count == 1 && drawn.first.map { ObjectIdentifier($0.picture as AnyObject) } == ObjectIdentifier(tile)
             let after = model.calls.call(for: doorbell)
             let same = after?.startedAt == before.startedAt && after?.presses == before.presses
@@ -1086,17 +1184,83 @@ final class SelfTest {
                 problems.append("the call window's stream demand did not reach the leases (\(tier.name))")
             }
             if c.window?.isKeyWindow == true || NSApp.isActive { problems.append("the call window took the focus in the self-test") }
-            popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
+            callTileStep(doorbell, c) { [self] in
+                popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
+            }
         }
+    }
+
+    /// The call window's picture is a regular tile (docs/CAPTURE.md "The
+    /// call window is a regular tile"): a pinch zooms it, the zoom map
+    /// shows, the renderer samples the zoomed region, Auto asks for the
+    /// main stream, and the header's Reset Zoom eases it back; its menu is
+    /// the header model's (Pop In, End Conversation, Record Call) with no
+    /// layout items, and focus and split do nothing there.
+    private func callTileStep(_ doorbell: CameraRef, _ c: CallWindowController, then next: @escaping @MainActor () -> Void) {
+        guard let model = app.model else { return next() }
+        let stage = c.stage
+        draw(c)
+        guard stage.fixedTile, stage.frames.leaves.count == 1, let leaf = stage.frames.leaves.first,
+            leaf.camera == doorbell, let full = stage.renderedSource(of: leaf.path)
+        else {
+            problems.append("the call window's picture is not one tile of the doorbell")
+            return next()
+        }
+        // parity: call-window-tile-zoom
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: false)
+        stage.noteInteraction()
+        draw(c)
+        let zoomed = stage.zoom(of: doorbell)
+        let map = stage.zoomMapShown(leaf.path) == true
+        let source = stage.renderedSource(of: leaf.path)
+        let narrower = source.map { $0.width < full.width * 0.9 || $0.height < full.height * 0.9 } == true
+        let wantsMain = c.asksForMainStream && model.leases.wantedTier(doorbell) == model.leases.tiers(for: doorbell).focus
+        let resetShown = stage.chromes[leaf.path]?.shownHeaderButtons.contains(.resetZoom) == true
+        stage.chromes[leaf.path]?.pressHeader(.resetZoom)
+        advance(1)
+        draw(c)
+        let back = stage.zoom(of: doorbell) == .none && !stage.isEasingZoom
+        print(
+            String(format: "call window tile: pinch to %.2fx, ", zoomed.scale)
+                + "zoom map \(map), source cropped \(narrower), main stream \(wantsMain), "
+                + "header Reset Zoom shown \(resetShown) and back to 1x \(back)")
+        if abs(zoomed.scale - 2) > 0.01 { problems.append("a pinch did not zoom the call window's tile") }
+        if !map { problems.append("the call window's zoomed tile showed no zoom map") }
+        if !narrower { problems.append("the call window's renderer did not sample the zoomed region") }
+        if !wantsMain { problems.append("the zoomed call window tile did not ask for the main stream") }
+        if !resetShown || !back { problems.append("the call window's header did not offer Reset Zoom or did not reset") }
+        // parity: call-window-tile-menu
+        let menu = stage.contextMenu(for: leaf).items.map(\.title)
+        let want = stage.headerTile(doorbell, path: leaf.path).map { TileHeaderLayout.menu(for: $0).map(\.label) } ?? []
+        let callItems = ["Pop In Call", "End Conversation", "Record Call", "Save Picture"].allSatisfy(menu.contains)
+        let layoutItems = ["Focus", "Split Side by Side", "Remove Tile", "Clear Tile", "Show Camera", "Record Main Stream"]
+            .filter(menu.contains)
+        stage.toggleFocus()
+        stage.split(.row)
+        let fixed = stage.state.focused == nil && stage.state.tree.leafCount == 1 && stage.selectedPath == leaf.path
+        let header = stage.chromes[leaf.path]?.shownHeaderButtons ?? []
+        c.captureRecord(nil)
+        let toast = stage.toastText
+        advance(ToastView.duration + 0.1)
+        print(
+            "call window tile menu: the model's \(want.count) items \(menu == want), call items \(callItems), "
+                + "layout items \(layoutItems), focus and split ignored \(fixed), header \(header.map(\.rawValue)), ⇧⌘R \(toast ?? "nothing")")
+        if menu != want || !callItems { problems.append("the call window tile's menu is not the header model's call menu: \(menu)") }
+        if !layoutItems.isEmpty { problems.append("the call window tile's menu offers \(layoutItems)") }
+        if !fixed { problems.append("focus or split changed the call window's single tile") }
+        if !header.contains(.conversation) { problems.append("the doorbell's call window header has no conversation button") }
+        if toast != "Record Call is coming soon" { problems.append("⇧⌘R in the call window did not reach Record Call") }
+        next()
     }
 
     /// Lays out a call window and runs one display refresh's preparation
     /// (a window behind the others gets few refreshes).
     private func draw(_ c: CallWindowController) {
         c.window?.contentView?.layoutSubtreeIfNeeded()
+        let grid = c.stage.grid
         let scale = c.window?.backingScaleFactor ?? 1
-        let b = c.grid.bounds
-        c.grid.prepare?(c.grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
+        let b = grid.bounds
+        grid.prepare?(grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
     }
 
     /// Talk with "Keep talking" and a typed draft survives popping in and

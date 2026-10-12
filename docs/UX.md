@@ -126,8 +126,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 
 ## Tile header
 
-> **Planned** (CAPTURE.md, "The tile header"; not built yet). Today's
-> headers keep their current buttons until then.
+> **Built on macOS** (the header, its "…" menu, the right-click menu and
+> the keys); planned on Windows. Save picture, recording and PTZ are not
+> built yet: their buttons and menu items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -161,6 +162,36 @@ the edge. Both apps compute it with the same model and test vectors
 - The right-click menu is the full list, in the same order, so nothing is
   only in the header.
 - Corner indicators are unchanged and do not compete for header space.
+
+Details settled while building it (macOS):
+
+- The buttons sit together at the header's right end in priority order;
+  the title takes what is left from the left edge. Quality, Fisheye View
+  and "…" open their menus under the button; the Speaker button still
+  listens to several cameras with Option-click.
+- **Not built yet:** Save Picture, Record, the PTZ pad, Presets, Lens, and
+  the long tail's save and record items are shown in their final places
+  (so the layout and the overflow are the final ones), dimmed, with "coming
+  soon" in the tooltip. A click, the key (P, Shift+P, R) or the menu item
+  shows "Save Picture is coming soon" (and so on) over the stage for
+  2.5 s and does nothing else. Hiding them behind a flag was rejected: the
+  narrow-tile behavior would change again when they land.
+- The alert's Dismiss stays in the alert strip under the title, beside
+  the alert's lines; the right-click and "…" menus list "Dismiss Alert"
+  first.
+- Fisheye View's submenu also holds the camera's mount (Ceiling, Wall,
+  Desk).
+- In a viewer window the right-click menu goes on, after a separator, with
+  the layout's own items: Focus, Split Side by Side, Split Stacked, Remove
+  Tile, Clear Tile, Show Camera.
+- A grid tile whose camera's call is in its own window offers "Pop Out
+  Call", which brings that window forward; "Pop In Call" is in the call
+  window's own tile.
+- Every camera tile has the Speaker button (as before; the apps learn
+  whether a camera sends audio only once it plays).
+- Start Conversation and the PTZ buttons follow the `talk`, `doorbell` and
+  `ptz` fields of the `channels` event (docs/FFI.md), per lens for a
+  multi-lens camera.
 
 ## Tiles without a picture
 
@@ -205,8 +236,10 @@ overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
 
-> **Planned** with the tile header (CAPTURE.md). They act on the selected
-> tile, never while text is edited, and toggles ignore key repeat.
+> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
+> the others say "… is coming soon" until capture lands, and the Option
+> keys come with PTZ. **Windows:** planned. They act on the selected tile,
+> never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
 | --- | --- |
@@ -227,7 +260,11 @@ with = or a digit works on every keyboard layout that has those keys.
   As…, Start Recording (Stop Recording while recording), Start
   Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
   of the running recordings, each with Stop), Stop All Recordings, Open
-  Pictures Folder, Open Recordings Folder.
+  Pictures Folder, Open Recordings Folder. Until capture and PTZ land,
+  Presets and Recordings hold a disabled placeholder, Stop All Recordings
+  is disabled, and the other items say "coming soon". Pan and Tilt… is
+  enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
+  so they also work in a call window.
 - **Windows:** the F1 help overlay lists them, and the keys are mapped in
   one place (`TileKeyMap`) as the other tile keys are.
 
@@ -941,7 +978,8 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
-- **Layout (planned, CAPTURE.md "The call window is a regular tile"):**
+- **Layout (built on macOS, planned on Windows; CAPTURE.md "The call
+  window is a regular tile"):**
   the picture becomes the viewer's own tile in a single-tile mode (no
   layout editing, split, swap, focus, Show Camera, Remove or Clear; the
   window keeps its own lease), so zoom, the zoom map, fisheye views,
@@ -953,6 +991,18 @@ example to keep it beside other work. Both apps follow these rules.
   talking, the echo status); the reply field and Send. Record there is the
   call recording. Insets and call cards keep their drawing for now, with
   the same header buttons.
+  - macOS: the tile is the viewer's `StageView` in a single fixed tile
+    mode, under the call bar ("Doorbell · 14:02:11 · 0:42", the pin, Pop
+    In, close) and above the captions, the Talk row and the reply. Wheel
+    and pinch zoom, the zoom map, Reset Zoom (the header button or the
+    menu), fisheye views and Quality work as in the grid; Quality and views
+    chosen there stay with that window. Its right-click menu is the header
+    model's list for a call window (Pop In Call, End Conversation, Record
+    Call, Save Picture with ⇧⌘R and ⇧⌘P), with no layout items; focus,
+    split and dropping a camera do nothing. The tile asks for the main
+    stream while its picture, zoom included, is drawn wider than the
+    sub-stream's (`CallWindowQuality`). Save Picture and Record Call say
+    "coming soon" until capture lands; no recording pill yet.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows),

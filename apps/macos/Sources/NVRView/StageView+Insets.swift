@@ -49,6 +49,8 @@ extension StageView {
                 self.endConversation(filling)
             }
         }
+        // The call window's tile has no insets of its own.
+        guard !fixedTile else { return }
         detectionToken = model.subscribeDetections { [weak self] event, camera, date in
             self?.detected(event, camera: camera, at: date)
         }
@@ -327,6 +329,7 @@ extension StageView {
     /// After any change of the board: alerts dismissed elsewhere, leases,
     /// the swapped-in camera's stream, the views and their places.
     func syncInsets() {
+        guard !fixedTile else { return }
         insetBoard.dropSoundAlarms { [alertActive] in !alertActive($0) }
         insetBoard.remove { [model] in model.runtime($0.camera.device) == nil }
         var wanted: [CameraRef: Int] = [:]
@@ -383,6 +386,7 @@ extension StageView {
 
     /// From `refreshChrome` (model changes, the window's slow timer).
     func refreshInsets() {
+        guard !fixedTile else { return }
         let before = insetBoard
         insetBoard.dropSoundAlarms { [alertActive] in !alertActive($0) }
         if followCallPresentations() || insetBoard != before {

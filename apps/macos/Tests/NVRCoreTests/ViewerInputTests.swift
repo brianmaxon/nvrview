@@ -122,6 +122,24 @@ private func path(_ tree: LayoutNode, _ channel: Int) -> NodePath {
         #expect(key(2, "d") == nil)
     }
 
+    @Test func captureAndCameraKeys() {
+        #expect(key(35, "p") == .savePicture)
+        #expect(key(35, "P") == .savePicture)  // Caps Lock
+        #expect(key(35, "P", .shift) == .savePictureAs)
+        #expect(key(15, "r") == .toggleRecording)
+        #expect(key(15, "R", .shift) == .toggleRecording)
+        #expect(key(17, "t") == .toggleConversation)
+        // ⇧⌘P and ⇧⌘R are menu key equivalents, not single keys.
+        #expect(key(35, "p", [.command, .shift]) == nil)
+        #expect(key(15, "r", [.command, .shift]) == nil)
+        #expect(key(35, "p", repeat: true) == nil)
+        #expect(key(15, "r", repeat: true) == nil)
+        for (code, chars) in [(35, "p"), (15, "r"), (17, "t")] as [(UInt16, String)] {
+            #expect(key(code, chars, in: .textEditing) == nil)
+            #expect(key(code, chars, .shift, in: .textEditing) == nil)
+        }
+    }
+
     @Test func lettersInEitherCase() {
         #expect(key(3, "F", .shift) == .toggleFullScreen)
         #expect(key(3, "F") == .toggleFullScreen)  // Caps Lock
