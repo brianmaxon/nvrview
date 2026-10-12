@@ -227,9 +227,13 @@ internal sealed class ViewerWindow
             {
                 Stage.CallCards.RestoreAnchor(new InsetAnchor(ix, iy));
             }
+            // Fill Tiles, and each camera's zoom, crop and Fill choice (docs/UX.md "Fill Tiles").
+            state.Views = restore.PictureViews;
         }
         // Moving the call insets saves the window's record (their position belongs to the window).
         Stage.CallCards.AnchorChanged += () => Changed?.Invoke();
+        // So does a zoom, a crop or a Fill choice.
+        Stage.ViewsChanged += () => Changed?.Invoke();
         ApplySidebar();
         Place(restore);
         Stage.PushSize();
@@ -388,7 +392,8 @@ internal sealed class ViewerWindow
     {
         WindowContent content = State.Content is WindowContent.Scratch ? new WindowContent.Scratch(State.Name, State.Tree) : State.Content;
         InsetAnchor? inset = Stage.CallCards.Anchor;
-        return new SavedWindow(content, _windowedFrame, IsFullScreen, _sidebarCollapsed, _sidebarWidth, inset?.X, inset?.Y);
+        return new SavedWindow(content, _windowedFrame, IsFullScreen, _sidebarCollapsed, _sidebarWidth, inset?.X, inset?.Y,
+            State.Views.Fill, SavedTileViews.Of(State.Views));
     }
 
     // ---- content ----

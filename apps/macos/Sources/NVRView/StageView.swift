@@ -13,13 +13,16 @@ final class WindowState {
     /// The focused tile (also during the animations in and out).
     var focused: NodePath?
     var editing = false
-    /// Crop pictures to fill their tiles instead of letterboxing.
-    var fill = false
-    /// Digital zoom per camera, in picture coordinates (docs/UX.md "Digital
-    /// zoom"). Keyed by camera so it follows the picture through layout
-    /// changes, swaps, focus and the switch to the main stream; tiles of
-    /// the same camera in one window share it.
-    var zoom: [CameraRef: TileZoom] = [:]
+    /// The window's Fill Tiles switch, and per camera its digital zoom (or
+    /// at 1x its filled crop's position) and own Fill choice, in picture
+    /// coordinates (docs/UX.md "Digital zoom", "Fill Tiles"). Keyed by
+    /// camera so it follows the picture through layout changes, swaps,
+    /// focus and the switch to the main stream; tiles of the same camera in
+    /// one window share it. Saved with the window.
+    var views = TileViews<CameraRef>()
+    /// Whether the window's switch is on (tiles without their own choice
+    /// fill).
+    var fill: Bool { views.fill }
 
     init(content: WindowContent, name: String, tree: LayoutNode) {
         self.content = content
@@ -157,11 +160,15 @@ final class StageView: NSView {
     var insetColumn: CGRect?
     /// The user moved the column or reset its position (save the window).
     var onInsetAnchorChange: () -> Void = {}
+    /// The window's picture settings changed (a zoom, a pan, a Fill
+    /// choice): the owner saves the window (debounced there).
+    var onViewsChanged: () -> Void = {}
 
     private enum Gesture {
         case divider(NodePath)
         case tile(from: NodePath, start: CGPoint, dragging: Bool)
-        /// A drag in a zoomed tile pans its picture.
+        /// A drag in a zoomed tile, or on a filled picture with part hidden,
+        /// pans its picture.
         case pan(CameraRef, last: CGPoint)
         /// A drag in a dewarped fisheye tile turns its view.
         case aim(NodePath, last: CGPoint)
@@ -294,17 +301,18 @@ final class StageView: NSView {
         for (path, inset) in insets where !shown.contains(path) { inset.setShown(false) }
         for leaf in leaves {
             guard let inset = insets[leaf.path] else { continue }
-            guard let camera = leaf.camera, let z = state.zoom[camera], z.isZoomed, fisheyeMode(leaf.path) == nil,
+            guard let camera = leaf.camera, case let z = state.views.zoom(camera), z.isZoomed, fisheyeMode(leaf.path) == nil,
                 let picture = pictureSizes[camera], picture.width > 0, picture.height > 0
             else {
                 inset.setShown(false)
                 continue
             }
             // In the picture as drawn zoomed (it grows over the bars).
-            let pictureRect = TilePlacement.shownRect(rect: leaf.rect, picture: picture, fill: state.fill, zoom: z)
+            let pictureRect = TilePlacement.shownRect(
+                rect: leaf.rect, picture: picture, fill: state.views.fills(camera), zoom: z)
             let frame = ZoomInsetView.frame(inPicture: pictureRect, aspect: picture.width / picture.height)
             if inset.frame != frame { inset.frame = frame }
-            inset.update(region: z.visible(in: zoomBase(leaf.rect, picture)))
+            inset.update(region: z.visible(in: zoomBase(leaf.rect, picture, camera)))
             inset.setShown(chromeVisible)
         }
     }
@@ -361,7 +369,14 @@ final class StageView: NSView {
     /// virtual camera (its Reset Zoom applies).
     func isZoomed(_ path: NodePath) -> Bool {
         if fisheyeMode(path) != nil { return state.tree[path]?.fisheye.aim != nil }
-        return state.tree[path]?.camera.flatMap { state.zoom[$0] }?.isZoomed == true
+        return state.tree[path]?.camera.map { state.views.zoom($0).isZoomed } == true
+    }
+
+    /// Whether the tile at `path` shows a filled picture's crop moved off
+    /// center at 1x (its Reset Position applies).
+    func isPanned(_ path: NodePath) -> Bool {
+        guard fisheyeMode(path) == nil, let camera = state.tree[path]?.camera else { return false }
+        return state.views.fills(camera) && state.views.zoom(camera).isPanned
     }
 
     /// The rate the first tile showing `camera` drew new pictures at.
@@ -430,7 +445,11 @@ final class StageView: NSView {
             let pictureSize = CGSize(width: Int(mapping.layoutSize.width), height: Int(mapping.layoutSize.height))
             let matrix = snapshot.color.flatMap { YCbCrToRGB(rowMajor: $0.ycbcrToRGB) }
                 ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
-            if pictureSize != .zero, pictureSizes[camera] != pictureSize { pictureSizes[camera] = pictureSize }
+            if pictureSize != .zero, pictureSizes[camera] != pictureSize {
+                pictureSizes[camera] = pictureSize
+                // Whether a drag pans depends on the picture's shape.
+                window?.invalidateCursorRects(for: overlay)
+            }
             // Zoomed, the picture grows over the bars, then crops (TilePlacement).
             let placed = TilePlacement.place(
                 rect: rect, scaleX: scaleX, scaleY: scaleY, picture: pictureSize,
@@ -461,7 +480,7 @@ final class StageView: NSView {
                 guard let camera = leaf.camera, let tile = model.leases.tile(for: camera) else { continue }
                 paths.append(leaf.path)
                 draw(
-                    tile, camera: camera, rect: leaf.rect, zoom: state.zoom[camera] ?? .none, fill: state.fill,
+                    tile, camera: camera, rect: leaf.rect, zoom: state.views.zoom(camera), fill: state.views.fills(camera),
                     path: leaf.path)
                 if fixedTile { followFixedDemand(tile, camera: camera, drawnWidth: Double(leaf.rect.width * scaleX)) }
                 // Read only for meters on screen (audible, or hovered).
@@ -703,8 +722,8 @@ final class StageView: NSView {
     // MARK: Digital zoom (docs/UX.md "Digital zoom")
 
     /// How the picture sits in the tile `rect` at 1x (fitted or filled).
-    private func zoomBase(_ rect: CGRect, _ picture: CGSize) -> ZoomBase {
-        ZoomBase(picture: picture, tile: rect.size, fill: state.fill)
+    private func zoomBase(_ rect: CGRect, _ picture: CGSize, _ camera: CameraRef) -> ZoomBase {
+        ZoomBase(picture: picture, tile: rect.size, fill: state.views.fills(camera))
     }
 
     /// The tile under the pointer as drawn now (the focused one in focus).
@@ -720,7 +739,7 @@ final class StageView: NSView {
         guard let leaf = drawnLeaf(at: p), let camera = leaf.camera, let picture = pictureSizes[camera] else {
             return nil
         }
-        return (camera, leaf.path, TilePlacement.unit(p, in: leaf.rect), leaf.rect.size, zoomBase(leaf.rect, picture))
+        return (camera, leaf.path, TilePlacement.unit(p, in: leaf.rect), leaf.rect.size, zoomBase(leaf.rect, picture, camera))
     }
 
     /// How `camera`'s picture sits at 1x now, in the tile `path` if it
@@ -733,18 +752,61 @@ final class StageView: NSView {
         guard let leaf = leaves.first(where: { $0.path == path && $0.camera == camera })
             ?? leaves.first(where: { $0.camera == camera })
         else { return .whole }
-        return zoomBase(leaf.rect, picture)
+        return zoomBase(leaf.rect, picture, camera)
     }
 
     private func setZoom(_ z: TileZoom, for camera: CameraRef) {
-        let was = state.zoom[camera]?.isZoomed == true
-        state.zoom[camera] = z.isZoomed ? z : nil
-        if was != z.isZoomed { refreshChrome() }
+        let old = state.views.zoom(camera)
+        guard z != old else { return }
+        state.views.setZoom(z, for: camera)
+        if old.isZoomed != z.isZoomed || old.isPanned != z.isPanned {
+            refreshChrome()
+            window?.invalidateCursorRects(for: overlay)
+        }
         syncDemands()
+        viewsChanged()
     }
 
     /// The zoom a tile's camera has (1x if none).
-    func zoom(of camera: CameraRef) -> TileZoom { state.zoom[camera] ?? .none }
+    func zoom(of camera: CameraRef) -> TileZoom { state.views.zoom(camera) }
+
+    /// Whether `camera`'s tiles fill (its own choice, else the window's).
+    func fills(_ camera: CameraRef) -> Bool { state.views.fills(camera) }
+
+    /// Fill Tile for one camera (the tile menu): its tiles fill or fit.
+    func setFill(_ fills: Bool, for camera: CameraRef) {
+        guard state.views.fills(camera) != fills else { return }
+        state.views.setFill(fills, for: camera)
+        fillChanged()
+    }
+
+    /// Fill Tiles for the window: every tile follows (the tiles' own
+    /// choices are cleared).
+    func setWindowFill(_ fills: Bool) {
+        state.views.setWindowFill(fills)
+        fillChanged()
+    }
+
+    private func fillChanged() {
+        refreshChrome()
+        window?.invalidateCursorRects(for: overlay)
+        lastKey = nil
+        delegate?.stageDidChangeState(self)
+        viewsChanged()
+    }
+
+    /// Asks the owner to save the window (debounced there).
+    private func viewsChanged() { onViewsChanged() }
+
+    /// Whether a plain drag on the picture of `camera`'s tile `leaf` moves
+    /// the picture (zoomed in, or a filled picture with part hidden)
+    /// instead of swapping the tile.
+    func picturePans(_ leaf: LeafFrame) -> Bool {
+        guard let camera = leaf.camera, fisheyeMode(leaf.path) == nil, let picture = pictureSizes[camera] else {
+            return false
+        }
+        return zoom(of: camera).canPan(in: zoomBase(leaf.rect, picture, camera))
+    }
 
     /// Zooms the tile at `p` by `factor` around `p`: at once (pinch), or
     /// eased over the next refreshes (a mouse-wheel notch).
@@ -773,7 +835,8 @@ final class StageView: NSView {
             fisheyeSaveDue = clock.now + 0.5
             return
         }
-        guard let t = zoomTarget(at: p), zoom(of: t.camera).isZoomed, t.size.width > 0, t.size.height > 0 else {
+        guard let t = zoomTarget(at: p), zoom(of: t.camera).canPan(in: t.base), t.size.width > 0, t.size.height > 0
+        else {
             return
         }
         zoomEasing.cancel(t.camera)
@@ -802,9 +865,17 @@ final class StageView: NSView {
         resetZoom(camera)
     }
 
+    /// Back to 1x and, for a filled picture, its crop back to the middle:
+    /// eased from a zoom, at once from a crop moved at 1x.
     private func resetZoom(_ camera: CameraRef) {
-        guard zoom(of: camera).isZoomed else { return }
-        zoomEasing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5)), for: camera, now: clock.now)
+        let z = zoom(of: camera)
+        guard !z.isDefault else { return }
+        guard z.isZoomed else {
+            zoomEasing.cancel(camera)
+            setZoom(.none, for: camera)
+            return
+        }
+        zoomEasing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5), recenter: true), for: camera, now: clock.now)
     }
 
     /// One step of the mouse-wheel easing (from `tick`). Time-based, so it
@@ -854,7 +925,7 @@ final class StageView: NSView {
                 let focused = fixedTile ? fixedAsksMain : focusedCamera != nil && state.focused == leaf.path
                 model.leases.setDemand(
                     owner: owner, camera: camera, quality: state.tree[leaf.path]?.quality ?? .auto,
-                    focused: focused, zoomScale: state.zoom[camera]?.scale ?? 1)
+                    focused: focused, zoomScale: state.views.zoom(camera).scale)
             }
         }
         for owner in demandOwners.subtracting(owners) { model.leases.clearDemands(owner: owner) }
@@ -1055,17 +1126,43 @@ final class StageView: NSView {
 
     // MARK: Pointer (from the overlay)
 
-    /// A plain drag in a tile zoomed past 1x pans its picture; at 1x, or
-    /// while editing the layout, it drags the tile to swap (docs/UX.md
-    /// "Digital zoom").
+    /// A plain drag on the picture of a tile zoomed past 1x, or of a
+    /// filled tile whose picture is partly hidden, pans the picture; on
+    /// other tiles, on a tile's shown header, or while editing the layout,
+    /// it drags the tile to swap (docs/UX.md "Digital zoom", "Fill Tiles").
     private func panGesture(at p: CGPoint) -> Gesture? {
-        if !state.editing, let leaf = drawnLeaf(at: p), fisheyeMode(leaf.path) != nil {
-            return .aim(leaf.path, last: p)
-        }
-        guard !state.editing, let leaf = drawnLeaf(at: p), let camera = leaf.camera, zoom(of: camera).isZoomed else {
-            return nil
-        }
+        guard !state.editing, let leaf = drawnLeaf(at: p), !onShownHeader(p, leaf.path) else { return nil }
+        if fisheyeMode(leaf.path) != nil { return .aim(leaf.path, last: p) }
+        guard let camera = leaf.camera, picturePans(leaf) else { return nil }
         return .pan(camera, last: p)
+    }
+
+    /// Whether `p` is on the shown hover header of the tile at `path`
+    /// (where a drag swaps tiles).
+    private func onShownHeader(_ p: CGPoint, _ path: NodePath) -> Bool {
+        chromes[path]?.shownHeaderFrame?.contains(p) == true
+    }
+
+    /// What a plain drag starting at `p` does (self-test: the same choice
+    /// the pointer makes): "pan", "aim", "swap" or nil.
+    func dragKind(at p: CGPoint) -> String? {
+        switch panGesture(at: p) {
+        case .pan?: return "pan"
+        case .aim?: return "aim"
+        default: return !fixedTile && state.focused == nil && frames.leaf(at: p) != nil ? "swap" : nil
+        }
+    }
+
+    /// Drags from `from` to `to` as the pointer would (self-test): the
+    /// same mouse down, dragged and up handlers, in `steps` moves.
+    func simulateDrag(from: CGPoint, to: CGPoint, steps: Int = 4) {
+        mouseDown(at: from, clickCount: 1)
+        let n = max(steps, 1)
+        for i in 1...n {
+            let k = CGFloat(i) / CGFloat(n)
+            mouseDragged(to: CGPoint(x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k))
+        }
+        mouseUp(at: to)
     }
 
     fileprivate func mouseDown(at p: CGPoint, clickCount: Int) {
@@ -1116,6 +1213,7 @@ final class StageView: NSView {
             setDropTarget(target == from ? nil : target)
         case .pan(let camera, let last)?:
             gesture = .pan(camera, last: p)
+            NSCursor.closedHand.set()
             // Measured in the tile where the drag began, wherever it goes.
             guard let leaf = currentLeaves.last(where: { $0.camera == camera && $0.rect.contains(last) }) else { return }
             pan(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: CGVector(dx: p.x - last.x, dy: p.y - last.y))
@@ -1144,6 +1242,8 @@ final class StageView: NSView {
             edit { $0.swapping(from, to) }
         case .aim?:
             saveFisheye()
+        case .pan?:
+            window?.invalidateCursorRects(for: overlay)
         default:
             break
         }
@@ -1156,11 +1256,25 @@ final class StageView: NSView {
     }
 
     fileprivate func cursorRects() -> [(CGRect, NSCursor)] {
-        guard state.focused == nil else { return [] }
-        return frames.dividers.map { d in
-            (d.hitRect(minimum: 8), d.axis == .row ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown)
+        // An open hand over a picture a drag pans, below the header's
+        // strip (a drag there swaps the tile).
+        var rects: [(CGRect, NSCursor)] = []
+        if !state.editing {
+            for leaf in currentLeaves where picturePans(leaf) {
+                let strip = min(Self.headerDragHeight, leaf.rect.height)
+                rects.append((leaf.rect.divided(atDistance: strip, from: .minYEdge).remainder, NSCursor.openHand))
+            }
         }
+        guard state.focused == nil else { return rects }
+        return rects
+            + frames.dividers.map { d in
+                (d.hitRect(minimum: 8), d.axis == .row ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown)
+            }
     }
+
+    /// The height of a tile's header strip, where the pointer stays an
+    /// arrow (a drag there swaps the tile).
+    static let headerDragHeight: CGFloat = 40
 
     // MARK: Drag and drop (cameras from the sidebar)
 

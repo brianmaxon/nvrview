@@ -95,7 +95,7 @@ private func tick(_ a: inout FocusAnimation, _ now: Double) -> FocusAnimation.Fi
         let clock = ManualViewerClock(now: 50)
         var easing = ZoomEasing<CameraRef>()
         var zoom = TileZoom(scale: 2, center: CGPoint(x: 0.3, y: 0.7))
-        easing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5)), for: camera, now: clock.now)
+        easing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5), recenter: true), for: camera, now: clock.now)
         let steps = run(&easing, &zoom, clock: clock, dt: 1.0 / 60) { _ in .whole }
         #expect(zoom == .none)
         #expect(!zoom.isZoomed)
@@ -110,7 +110,7 @@ private func tick(_ a: inout FocusAnimation, _ now: Double) -> FocusAnimation.Fi
         let clock = ManualViewerClock(now: 0)
         var easing = ZoomEasing<CameraRef>()
         var zoom = TileZoom(scale: 2, center: CGPoint(x: 0.6, y: 0.4)).clamped(in: fillBase(CGSize(width: 2560, height: 1440)))
-        easing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5)), for: camera, now: clock.now)
+        easing.set(.init(scale: 1, unit: CGPoint(x: 0.5, y: 0.5), recenter: true), for: camera, now: clock.now)
         let main = fillBase(CGSize(width: 2560, height: 1440))  // 16:9: the whole picture
         let sub = fillBase(CGSize(width: 640, height: 480))  // 4:3: a centered crop
         #expect(main != sub)
