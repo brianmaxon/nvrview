@@ -389,56 +389,151 @@ internal static class StoreTests
             T.Check(File.Exists(Path.Combine(dir, "bad.json.unreadable")));
         });
 
-        // The shared vectors (fixtures/synthetic/tile-views.json "saved"; the Mac app's TileViewsTests reads them too).
+        // The shared vectors (fixtures/synthetic/tile-views.json "saved" and "migrate"; the Mac app's TileViewsTests
+        // reads them too).
+        static JsonObject Window(JsonNode c)
+        {
+            var o = new JsonObject
+            {
+                ["content"] = new JsonObject { ["layout"] = new JsonObject { ["id"] = "layout-1" } },
+                ["frame"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0, ["width"] = 800.0, ["height"] = 500.0 },
+            };
+            foreach ((string key, JsonNode? value) in c["window"]!.AsObject())
+            {
+                o[key] = value?.DeepClone();
+            }
+            return o;
+        }
+        static string Want(JsonNode c) => string.Join("; ", c["entries"]!.AsArray().Select(e =>
+        {
+            JsonArray a = e!.AsArray();
+            string fill = a[8] is null ? "null" : a[8]!.GetValue<bool>().ToString();
+            return $"{a[0]!.GetValue<string>()} {a[1]!.GetValue<string>()} {a[2]!.GetValue<string>()} {a[3]!.GetValue<int>()} {a[4]!.GetValue<int>()} {a[5]!.GetValue<double>()} {a[6]!.GetValue<double>()} {a[7]!.GetValue<double>()} {fill}";
+        }));
+        static string Got(IEnumerable<(TileViewKey Key, TileView View)> entries) => string.Join("; ", entries.Select(e =>
+            $"{e.Key.Layout} {e.Key.Tile} {e.Key.Camera.Device} {e.Key.Camera.Channel} {e.Key.Camera.Lens} {e.View.Zoom.Scale} {e.View.Zoom.CenterX} {e.View.Zoom.CenterY} {(e.View.Fill is { } f ? f.ToString() : "null")}"));
+
         T.Run("windows: Fill Tiles and the tiles' zoom, crop and Fill choices (shared vectors)", () =>
         {
             JsonNode vectors = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "tile-views.json")))!;
             foreach (JsonNode? c in vectors["saved"]!.AsArray())
             {
                 string name = c!["name"]!.GetValue<string>();
-                var o = new JsonObject
-                {
-                    ["content"] = new JsonObject { ["layout"] = new JsonObject { ["id"] = "layout-1" } },
-                    ["frame"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0, ["width"] = 800.0, ["height"] = 500.0 },
-                };
-                foreach ((string key, JsonNode? value) in c["window"]!.AsObject())
-                {
-                    o[key] = value?.DeepClone();
-                }
-                List<SavedWindow> list = WindowStore.FromJson(new JsonArray(o));
+                List<SavedWindow> list = WindowStore.FromJson(new JsonArray(Window(c)));
                 T.Equal(1, list.Count, name);
                 SavedWindow w = list[0];
                 T.Equal(c["fill"]!.GetValue<bool>(), w.Fill, name);
-                string want = string.Join("; ", c["entries"]!.AsArray().Select(e =>
-                {
-                    JsonArray a = e!.AsArray();
-                    string fill = a[6] is null ? "null" : a[6]!.GetValue<bool>().ToString();
-                    return $"{a[0]!.GetValue<string>()} {a[1]!.GetValue<int>()} {a[2]!.GetValue<int>()} {a[3]!.GetValue<double>()} {a[4]!.GetValue<double>()} {a[5]!.GetValue<double>()} {fill}";
-                }));
-                string got = string.Join("; ", (w.Views?.Entries ?? []).Select(e =>
-                    $"{e.Camera.Device} {e.Camera.Channel} {e.Camera.Lens} {e.View.Zoom.Scale} {e.View.Zoom.CenterX} {e.View.Zoom.CenterY} {(e.View.Fill is { } f ? f.ToString() : "null")}"));
-                T.Equal(want, got, name);
+                T.Equal(Want(c), Got(w.Views?.Entries ?? []), name);
+                T.Check(w.Legacy is null, $"{name}: nothing to migrate");
                 // What is read back is written back the same.
                 List<SavedWindow> again = WindowStore.FromJson(JsonNode.Parse(WindowStore.ToJson(list)));
                 T.Equal(w with { Content = null! }, again[0] with { Content = null! }, $"{name}: round trip");
             }
-            // A plain window writes neither member.
+            // A plain window writes none of the members.
             string plain = WindowStore.ToJson([new SavedWindow(new WindowContent.Layout("layout-1"), new Rect(0, 0, 800, 500))]);
-            T.Check(!plain.Contains("\"fill\"", StringComparison.Ordinal) && !plain.Contains("tileViews", StringComparison.Ordinal), "nothing written while default");
+            T.Check(!plain.Contains("\"fill\"", StringComparison.Ordinal) && !plain.Contains("\"tiles\"", StringComparison.Ordinal)
+                && !plain.Contains("tileViews", StringComparison.Ordinal), "nothing written while default");
             // At most the limit, the newest kept.
             var many = new JsonArray();
-            for (int i = 0; i < TileViews<CameraRef>.Limit + 44; i++)
+            for (int i = 0; i < TileViews<TileViewKey>.Limit + 44; i++)
             {
-                many.Add((JsonNode)new JsonObject { ["camera"] = new JsonObject { ["device"] = "nvr-a", ["channel"] = i }, ["scale"] = 2.0 });
+                many.Add((JsonNode)new JsonObject { ["layout"] = "layout:layout-1", ["tile"] = $"t{i}", ["camera"] = new JsonObject { ["device"] = "nvr-a", ["channel"] = i }, ["scale"] = 2.0 });
             }
             var big = new JsonObject
             {
                 ["content"] = new JsonObject { ["layout"] = new JsonObject { ["id"] = "layout-1" } },
                 ["frame"] = new JsonObject { ["x"] = 0.0, ["y"] = 0.0, ["width"] = 800.0, ["height"] = 500.0 },
-                ["tileViews"] = many,
+                ["tiles"] = many,
             };
-            IReadOnlyList<(CameraRef Camera, TileView View)> kept = WindowStore.FromJson(new JsonArray(big))[0].Views!.Entries;
-            T.Check(kept.Count == TileViews<CameraRef>.Limit && kept[0].Camera.Channel == 44 && kept[^1].Camera.Channel == TileViews<CameraRef>.Limit + 43, "bounded, newest kept");
+            IReadOnlyList<(TileViewKey Key, TileView View)> kept = WindowStore.FromJson(new JsonArray(big))[0].Views!.Entries;
+            T.Check(kept.Count == TileViews<TileViewKey>.Limit && kept[0].Key.Tile == "t44" && kept[^1].Key.Camera.Channel == TileViews<TileViewKey>.Limit + 43, "bounded, newest kept");
+        });
+
+        T.Run("windows: views kept per camera migrate to the tiles showing it (shared vectors)", () =>
+        {
+            JsonNode vectors = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "tile-views.json")))!;
+            foreach (JsonNode? c in vectors["migrate"]!.AsArray())
+            {
+                string name = c!["name"]!.GetValue<string>();
+                SavedWindow w = WindowStore.FromJson(new JsonArray(Window(c)))[0];
+                string layout = c["layout"]!.GetValue<string>();
+                List<LayoutNode> leaves = [.. c["tiles"]!.AsArray().Select(t =>
+                {
+                    JsonArray a = t!.AsArray();
+                    CameraRef? camera = a[1] is null ? null : new CameraRef(a[1]!.GetValue<string>(), a[2]!.GetValue<int>(), a[3]!.GetValue<int>());
+                    return LayoutNode.Leaf(camera).SettingMember(NodePath.Root, TileIds.Member, JsonValue.Create(a[0]!.GetValue<string>())!.ToJsonString())!;
+                })];
+                LayoutNode tree = LayoutNode.Chain(SplitAxis.Row, leaves);
+                TileViews<TileViewKey> views = w.PictureViews;
+                if (w.Legacy is { } legacy)
+                {
+                    views.Migrate(legacy.Entries, layout, tree);
+                }
+                T.Equal(c["fill"]!.GetValue<bool>(), views.Fill, name);
+                T.Equal(Want(c), Got(views.Saved), name);
+                // Saved again, it is in the per-tile form only.
+                string json = WindowStore.ToJson([w with { Views = SavedTileViews.Of(views), Legacy = null }]);
+                T.Check(!json.Contains("tileViews", StringComparison.Ordinal), $"{name}: the old form is not written");
+            }
+        });
+
+        T.Run("windows: tile identities and views per tile through swaps, camera changes, splits and removals", () =>
+        {
+            var a = new CameraRef("nvr-a", 0);
+            var b = new CameraRef("nvr-a", 1);
+            var two = new TileZoom(2, 0.3, 0.5);
+            var three = new TileZoom(3, 0.6, 0.4);
+            // Two tiles of one camera are independent.
+            LayoutNode same = LayoutNode.Balanced(new[] { a, a, b }).WithTileIds();
+            List<TileViewKey> keys = same.TileKeys("L");
+            T.Equal(3, keys.Select(k => k.Tile).Distinct().Count(), "every tile has its own identity");
+            var views = new TileViews<TileViewKey>();
+            views.SetZoom(keys[0], two);
+            views.SetZoom(keys[1], three);
+            views.SetFill(keys[1], true);
+            T.Check(views.Zoom(keys[0]) == two && !views.Fills(keys[0]) && views.Zoom(keys[1]) == three && views.Fills(keys[1]), "independent");
+            T.Check(views.MixedIn("L") && !views.MixedIn("M"), "mixed per layout");
+
+            // A swap moves each view with its camera; the tiles keep their identities.
+            LayoutNode tree = LayoutNode.Balanced(new[] { a, b }).WithTileIds();
+            NodePath p = tree.Leaves[0].Path, q = tree.Leaves[1].Path;
+            views = new TileViews<TileViewKey>();
+            views.SetZoom(tree.TileKeyAt(p, "L")!.Value, two);
+            views.SetZoom(tree.TileKeyAt(q, "L")!.Value, three);
+            views.SetZoom(new TileViewKey("M", "t0", a), three);
+            views.SwapViews("L", tree, p, q);
+            LayoutNode swapped = tree.Swapping(p, q)!;
+            views.Prune("L", swapped);
+            T.Check(swapped[p]!.TileId() == tree[p]!.TileId() && swapped[p]!.Camera == b, "the tiles keep their identities");
+            T.Equal(three, views.Zoom(swapped.TileKeyAt(p, "L")!.Value), "b's view moved with it");
+            T.Equal(two, views.Zoom(swapped.TileKeyAt(q, "L")!.Value), "a's view moved with it");
+
+            // Another camera in a tile starts at the default; showing the first again does not bring it back.
+            LayoutNode shown = swapped.Assigning(a, p)!.WithTileIds();
+            views.Prune("L", shown);
+            T.Equal(TileZoom.None, views.Zoom(shown.TileKeyAt(p, "L")!.Value), "a new camera starts at 1x");
+            LayoutNode again = shown.Assigning(b, p)!;
+            T.Equal(TileZoom.None, views.Zoom(again.TileKeyAt(p, "L")!.Value), "the old view is gone");
+            T.Equal(three, views.Zoom(new TileViewKey("M", "t0", a)), "another layout's views are kept");
+
+            // Identities survive splits and removals, and a stored layout reads them back.
+            LayoutNode grid = LayoutNode.Balanced(new CameraRef?[] { a, b, a, null }).WithTileIds();
+            var before = grid.Leaves.Select(l => grid[l.Path]!.TileId()).ToList();
+            var split = grid.Splitting(grid.Leaves[0].Path, SplitAxis.Row)!.Value;
+            LayoutNode named = split.Tree.WithTileIds();
+            var after = named.Leaves.Select(l => named[l.Path]!.TileId()).ToList();
+            T.Check(before.All(after.Contains) && named[split.NewLeaf]!.TileId() is { } fresh && !before.Contains(fresh), "a split keeps the identities and names the new tile");
+            LayoutNode removed = named.Removing(named.Leaves[2].Path)!.Value.Tree;
+            T.Check(removed.WithTileIds() == removed, "a removal keeps the others' identities");
+            LayoutNode read = LayoutJson.ReadNode(JsonNode.Parse(LayoutJson.NodeToJson(removed))!);
+            T.Check(read == removed, "stored and read back");
+
+            // Renaming the content keeps the views.
+            views = new TileViews<TileViewKey>();
+            views.SetZoom(new TileViewKey(TileViewKey.ScratchKey, "t0", a), two);
+            views.SetZoom(new TileViewKey("layout:x", "t0", a), three);
+            views.Rename(TileViewKey.ScratchKey, "layout:x");
+            T.Check(views.Count == 1 && views.Zoom(new TileViewKey("layout:x", "t0", a)) == two, "renamed");
         });
 
         T.Run("windows: placement keeps a reachable frame, else centers it", () =>

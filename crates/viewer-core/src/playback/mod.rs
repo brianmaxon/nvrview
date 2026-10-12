@@ -412,7 +412,7 @@ impl Core {
 
     /// The device of a camera, for the engine, and the core's ID for it.
     fn pb_device(&self, c: &CamReq) -> Result<(DevSetup, u64), RecError> {
-        let d = self.recordings.playback_device(&c.device, c.camera)?;
+        let d = self.recordings.playback_device(&c.device)?;
         Ok((
             DevSetup {
                 key: c.device.clone(),
@@ -501,15 +501,23 @@ impl Core {
         json: &str,
     ) -> Result<(String, PlaybackPending), RecError> {
         self.pb_check()?;
-        let req = self.parse_open(json)?;
+        // Refusals are logged (user-paced, one per open) so a refused open
+        // says why.
+        let req = self
+            .parse_open(json)
+            .inspect_err(|e| info!(error = ?e, "playback refused: the request"))?;
         if lock(&self.playback.core.playbacks).len() >= MAX_PLAYBACKS {
+            info!("playback refused: too many playbacks");
             return Err(RecError::Limit);
         }
-        self.pb_tiles_fit(req.cameras.len())?;
+        self.pb_tiles_fit(req.cameras.len())
+            .inspect_err(|_| info!("playback refused: the tile limit"))?;
         let mut devices: Vec<DevSetup> = Vec::new();
         let mut ids = Vec::new();
         for c in &req.cameras {
-            let (d, id) = self.pb_device(c)?;
+            let (d, id) = self
+                .pb_device(c)
+                .inspect_err(|e| info!(error = ?e, "playback refused: a camera's device"))?;
             if !devices.iter().any(|o| o.key == d.key) {
                 devices.push(d);
             }

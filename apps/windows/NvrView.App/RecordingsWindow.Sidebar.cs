@@ -347,6 +347,14 @@ internal sealed partial class RecordingsWindow
         {
             kinds.Children.Add(new TextBlock { Text = KindFilters.Indicator(kind).Label(), FontSize = 11, Foreground = new SolidColorBrush(KindColor(kind)) });
         }
+        // Sounds other than the alarms (those have their own badges), named on hover.
+        IReadOnlyList<string> sounds = SoundKinds.Names(incident.Events.Where(e => !KindFilters.Indicator(e.Kind).IsSound()));
+        if (sounds.Count > 0)
+        {
+            var sound = new TextBlock { Text = "Sound", FontSize = 11, Foreground = new SolidColorBrush(TimelineColors.Sound) };
+            ToolTipService.SetToolTip(sound, "Sounds: " + string.Join(", ", sounds));
+            kinds.Children.Add(sound);
+        }
         if (incident.Locked)
         {
             kinds.Children.Add(new FontIcon { Glyph = "", FontSize = 10, Foreground = new SolidColorBrush(Muted) });
@@ -494,14 +502,50 @@ internal sealed partial class RecordingsWindow
                 {
                     Content = Service.CameraName(c),
                     IsChecked = Service.IsEnabled(c),
-                    Margin = new Thickness(16, 0, 0, 0),
                     MinWidth = 0,
                 };
                 RecordingCamera camera = c;
                 box.Click += (_, _) => Service.SetEnabled(camera, box.IsChecked == true);
-                _camerasPanel.Children.Add(box);
+                var row = new Grid { Margin = new Thickness(16, 0, 0, 0) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                row.Children.Add(box);
+                ToggleButton listen = ListenToggle(camera);
+                Grid.SetColumn(listen, 1);
+                row.Children.Add(listen);
+                _camerasPanel.Children.Add(row);
             }
         }
+    }
+
+    // A camera's "Listen for sounds" switch (nv_sound_watch): its sub-stream stays open with no tile so its sound is
+    // analyzed (loudness, alarms) while it is not on screen; at most four cameras of a device.
+    private ToggleButton ListenToggle(RecordingCamera camera)
+    {
+        bool on = Service.IsListening(camera);
+        (string State, string? Reason)? state = Service.ListenStates.TryGetValue(camera, out var s) ? s : null;
+        var b = new ToggleButton
+        {
+            Content = new FontIcon { Glyph = state?.State == "refused" ? "\uE7BA" : "\uE767", FontSize = 11 },
+            IsChecked = on,
+            Padding = new Thickness(6, 2, 6, 2),
+            MinWidth = 0,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        string tip = on
+            ? $"Listen for sounds: {(state is { } st ? SoundListening.Describe(st.State, st.Reason) : "starting")}. Click to stop."
+            : $"Listen for sounds while not on screen (keeps this camera's sub-stream open; at most {SoundListening.MaxPerDevice} per device)";
+        ToolTipService.SetToolTip(b, tip);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(b, "Listen for sounds");
+        b.Click += (_, _) =>
+        {
+            if (!Service.SetListening(camera, b.IsChecked == true))
+            {
+                b.IsChecked = false;
+                Refresh();
+            }
+        };
+        return b;
     }
 
     // ---- camera groups ----

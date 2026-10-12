@@ -214,13 +214,7 @@ public sealed class RecordingsPlayer(RecordingsService model)
         }
         catch (NvException e)
         {
-            Message = e.Status switch
-            {
-                NvStatus.Limit => "Too many cameras or playbacks to play this",
-                NvStatus.Unsupported => "This device cannot play its recordings",
-                NvStatus.InvalidArgument => "These cameras cannot be played (are they still searched?)",
-                _ => $"The recording could not be played (status {(int)e.Status})",
-            };
+            Message = PlaybackOpenMessage.Text(e.Status);
         }
         Changed?.Invoke();
     }

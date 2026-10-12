@@ -58,7 +58,7 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
         public bool Paused;
     }
 
-    private sealed record FakeEvent(RecordingCamera Camera, string Kind, long Start, long End)
+    private sealed record FakeEvent(RecordingCamera Camera, string Kind, long Start, long End, string Source = "device")
     {
         public string Key => $"i-{Start}-{Camera.Device}-{Camera.Channel}-{Camera.Lens}";
 
@@ -192,6 +192,10 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
                     all.AddRange(EventsOf(c, d).Where(e =>
                         e.End >= q.Start && e.Start <= q.End && (q.Kinds?.Contains(e.Kind) ?? true)));
                 }
+                all.AddRange(_labels
+                    .Where(l => l.Camera == c && days.Contains(DeviceTime.DayStart(l.Start)) && l.End >= q.Start && l.Start <= q.End &&
+                        (q.Kinds?.Contains(l.Kind) ?? true))
+                    .Select(l => new FakeEvent(c, l.Kind, l.Start, l.End, SoundKinds.LocalAudio)));
             }
         }
         return [.. all.OrderBy(e => e.Start).ThenBy(e => e.Key, StringComparer.Ordinal)];
@@ -203,7 +207,7 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
     {
         ["camera"] = CameraNode(e.Camera),
         ["kind"] = e.Kind,
-        ["source"] = "device",
+        ["source"] = e.Source,
         ["start"] = e.Start,
         ["end"] = e.End,
     };
@@ -828,6 +832,8 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
                 ["chunks_done"] = done ? 1 : 0,
                 ["chunks_total"] = 1,
                 ["bytes"] = done ? 1 << 20 : 0,
+                // As the core: null until the device gave an estimate (and after the last chunk).
+                ["bytes_estimate"] = null,
                 ["output"] = done ? $"{d.Folder}/Camera {c.Channel + 1}.mp4" : null,
             })]),
         };

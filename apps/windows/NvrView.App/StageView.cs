@@ -16,7 +16,7 @@
 //   over the tile's bars until it fills the tile, then crops (TileZoom);
 //   a drag on a filled picture with part hidden moves its crop, and a drag
 //   on a tile's shown header swaps it (docs/UX.md "Fill Tiles"); the zoom,
-//   crop and Fill choice are kept per camera in WindowState.Views and saved
+//   crop and Fill choice are kept per tile in WindowState.Views and saved
 //   with the window;
 // - the tile features: the corner indicators and sound badges, the alert strip
 //   and its Dismiss (Enter), the Quality menu (kept in the layout leaf), M to
@@ -51,25 +51,54 @@ namespace NvrView.App;
 /// <summary>One window's arrangement and what the user is doing with it.</summary>
 internal sealed class WindowState(WindowContent content, string name, LayoutNode tree)
 {
+    private LayoutNode _tree = tree.WithTileIds();
+
     public WindowContent Content { get; set; } = content;
 
     public string Name { get; set; } = name;
 
-    public LayoutNode Tree { get; set; } = tree;
+    /// <summary>
+    /// The arrangement shown. Every leaf has a tile identity (<see cref="TileIdentity.WithTileIds"/>, given on
+    /// every set), and the views of tiles no longer in it are forgotten.
+    /// </summary>
+    public LayoutNode Tree
+    {
+        get => _tree;
+        set
+        {
+            _tree = value.WithTileIds();
+            Views.Prune(ViewsKey, _tree);
+        }
+    }
 
     public NodePath? Selected { get; set; }
 
     public bool Editing { get; set; }
 
     /// <summary>
-    /// The window's Fill Tiles switch, and per camera its digital zoom (at 1x, its filled crop's position) and
-    /// own Fill choice, in picture coordinates (docs/UX.md "Fill Tiles"). Keyed by camera, so tiles of the same
-    /// camera in one window share it. Saved with the window.
+    /// The window's Fill Tiles switch, and per tile its digital zoom (at 1x, its filled crop's position) and own
+    /// Fill choice, in picture coordinates (docs/UX.md "Digital zoom", "Fill Tiles"). Keyed by layout, tile and
+    /// camera (<see cref="TileViewKey"/>), so two tiles of one camera are independent views; a view stays through
+    /// focus, layout switches and the switch to the main stream, moves with its camera in a swap, and starts
+    /// over when its tile is given another camera. Saved with the window.
     /// </summary>
-    public TileViews<CameraRef> Views { get; set; } = new();
+    public TileViews<TileViewKey> Views { get; set; } = new();
 
     /// <summary>Fill Tiles: tiles without a choice of their own crop their pictures to fill instead of fitting.</summary>
     public bool Fill => Views.Fill;
+
+    /// <summary>The name this content's tile views go by.</summary>
+    public string ViewsKey => Content.ViewsKey;
+
+    /// <summary>The view key of the tile at <paramref name="path"/> (null while it shows no camera).</summary>
+    public TileViewKey? ViewKey(NodePath path) => _tree.TileKeyAt(path, ViewsKey);
+
+    /// <summary>The window shows <paramref name="content"/> under another name (an unsaved arrangement saved, a group edited): the views go along.</summary>
+    public void Rename(WindowContent content)
+    {
+        Views.Rename(ViewsKey, content.ViewsKey);
+        Content = content;
+    }
 }
 
 internal sealed partial class StageView : UserControl
@@ -333,11 +362,13 @@ internal sealed partial class StageView : UserControl
                 _viewer.SetQuality(same, quality);
                 same.FisheyeSetting = fisheye;
                 PublishFisheye(same);
+                // Another layout may have put another view on the same place.
+                PublishView(same);
                 continue;
             }
             var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality) { FisheyeSetting = fisheye };
             t.Shared = leaf.Camera is { } c ? _viewer.Leases.Tile(c) : null;
-            // The zoom, crop and Fill choice follow the camera through layout changes (docs/UX.md "Fill Tiles").
+            // The tile's own zoom, crop and Fill choice (docs/UX.md "Digital zoom", "Fill Tiles").
             PublishView(t);
             t.ZoomChanged = OnTileZoomChanged;
             PublishFisheye(t);
@@ -407,7 +438,7 @@ internal sealed partial class StageView : UserControl
         }
         State.Tree = tree;
         Reload();
-        Edited?.Invoke(tree);
+        Edited?.Invoke(State.Tree);
     }
 
     /// <summary>The selected tile, or the only one.</summary>
@@ -437,6 +468,7 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    /// <summary>Shows <paramref name="camera"/> in the tile at <paramref name="path"/>; a camera new to the tile starts at the default view.</summary>
     public void Assign(CameraRef? camera, NodePath path)
     {
         if (!FixedTile)
@@ -445,14 +477,16 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    /// <summary>Swaps the cameras of two tiles; each view goes with its camera (the tiles keep their identities, members and places).</summary>
     public void Swap(NodePath from, NodePath to)
     {
-        if (FixedTile)
+        if (FixedTile || from == to || State.Tree.Swapping(from, to) is not { } swapped)
         {
             return;
         }
+        State.Views.SwapViews(State.ViewsKey, State.Tree, from, to);
         State.Selected = to;
-        Edit(t => t.Swapping(from, to));
+        Edit(_ => swapped);
     }
 
     public void ApplyPreset(LayoutPreset preset)
@@ -648,51 +682,46 @@ internal sealed partial class StageView : UserControl
     /// <summary>Back to 1x and, for a filled picture, its crop back to the middle (Reset zoom, Reset position, 0).</summary>
     public static void ResetZoom(StageTile t) => t.DigitalZoom = TileZoom.None;
 
-    /// <summary>Puts the window's zoom, crop and Fill choice for the tile's camera on the tile (what the render thread reads).</summary>
+    /// <summary>Puts the tile's own zoom, crop and Fill choice on it (what the render thread reads).</summary>
     private void PublishView(StageTile t)
     {
-        if (t.CameraOrNone is { } c)
+        if (State.ViewKey(t.Path) is { } k)
         {
-            t.LoadZoom(State.Views.Zoom(c));
-            t.WantsFill = State.Views.Fills(c);
+            t.LoadZoom(State.Views.Zoom(k));
+            t.WantsFill = State.Views.Fills(k);
         }
     }
 
-    // A tile's zoom or crop changed (wheel, pinch, drag, reset): kept for its camera, shared with the
-    // window's other tiles of that camera, and saved.
+    // A tile's zoom or crop changed (wheel, pinch, drag, reset): kept for that tile only, and saved.
     private void OnTileZoomChanged(StageTile t)
     {
-        if (t.CameraOrNone is not { } c)
+        if (State.ViewKey(t.Path) is not { } k)
         {
             return;
         }
         TileZoom z = t.DigitalZoom;
-        if (State.Views.Zoom(c) == z)
+        if (State.Views.Zoom(k) == z)
         {
             return;
         }
-        State.Views.SetZoom(c, z);
-        foreach (StageTile o in _tiles)
-        {
-            if (o != t && o.CameraOrNone == c)
-            {
-                o.LoadZoom(z);
-            }
-        }
+        State.Views.SetZoom(k, z);
         ViewsChanged?.Invoke();
     }
 
-    /// <summary>Whether the tile's camera fills (its own Fill tile choice, else the window's Fill Tiles).</summary>
-    public bool Fills(StageTile t) => t.CameraOrNone is { } c ? State.Views.Fills(c) : State.Fill;
+    /// <summary>Whether the tile fills (its own Fill tile choice, else the window's Fill Tiles).</summary>
+    public bool Fills(StageTile t) => State.ViewKey(t.Path) is { } k ? State.Views.Fills(k) : State.Fill;
 
-    /// <summary>Fill tile (the tile's menu): this camera's tiles in the window fill, or fit.</summary>
+    /// <summary>Whether a tile of the window's content has a Fill choice of its own (the switch is mixed).</summary>
+    public bool FillMixed => State.Views.MixedIn(State.ViewsKey);
+
+    /// <summary>Fill tile (the tile's menu): this tile fills, or fits.</summary>
     public void SetTileFill(StageTile t, bool fill)
     {
-        if (t.CameraOrNone is not { } c || State.Views.Fills(c) == fill)
+        if (State.ViewKey(t.Path) is not { } k || State.Views.Fills(k) == fill)
         {
             return;
         }
-        State.Views.SetFill(c, fill);
+        State.Views.SetFill(k, fill);
         FillChanged();
     }
 
@@ -717,7 +746,7 @@ internal sealed partial class StageView : UserControl
     /// <summary>Whether the point is on the tile's shown hover header, where a drag swaps the tile.</summary>
     private bool OnShownHeader(StageTile t, Point p) =>
         ChromeFor(t) is { HeaderShown: true }
-        && p.X >= t.X && p.X < t.X + t.Width && p.Y >= t.Y && p.Y < t.Y + Math.Min(TileChrome.HeaderHeight, t.Height);
+        && p.X >= t.FrameX && p.X < t.FrameX + t.FrameWidth && p.Y >= t.FrameY && p.Y < t.FrameY + Math.Min(TileChrome.HeaderHeight, t.FrameHeight);
 
     // ---- pointer ----
 
@@ -748,10 +777,25 @@ internal sealed partial class StageView : UserControl
 
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
-        Point p = e.GetCurrentPoint(this).Position;
+        PointerPoint pp = e.GetCurrentPoint(this);
         Interact();
+        PointerMove(pp.Position, pp.Properties.IsLeftButtonPressed);
+        UpdatePointerShape(pp.Position);
+    }
+
+    /// <summary>
+    /// Every pointer move (the handler, and the self-test's pointer path): a gesture goes on while the button
+    /// is down, wherever the move arrives from, and ends at the first move without it (a release this element
+    /// did not see).
+    /// </summary>
+    internal void PointerMove(Point p, bool buttonDown)
+    {
+        if (_gesture != GestureKind.None && !buttonDown)
+        {
+            PointerReleasedAt(p);
+            return;
+        }
         PointerMovedTo(p);
-        UpdatePointerShape(p);
     }
 
     /// <summary>The pointer moved to <paramref name="p"/> (the pointer handler, and the self-test's simulated drags).</summary>
@@ -871,6 +915,12 @@ internal sealed partial class StageView : UserControl
         return _gesture;
     }
 
+    /// <summary>The left button went down at <paramref name="p"/> through the pointer path (self-test); whether a gesture began.</summary>
+    internal bool PointerDown(Point p) => PointerPressedAt(p) != GestureKind.None;
+
+    /// <summary>The left button went up at <paramref name="p"/> through the pointer path (self-test).</summary>
+    internal void PointerUp(Point p) => PointerReleasedAt(p);
+
     /// <summary>What a plain drag starting at <paramref name="p"/> would do (self-test): "pan", "turn", "swap", or null.</summary>
     internal string? DragKind(Point p)
     {
@@ -945,8 +995,21 @@ internal sealed partial class StageView : UserControl
         _dragging = false;
     }
 
-    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e) =>
+        PointerCaptureLostWith(e.GetCurrentPoint(this).Properties.IsLeftButtonPressed);
+
+    /// <summary>
+    /// Capture went away (the handler, and the self-test's pointer path). While the button is still down the
+    /// gesture goes on: the moves still bubble here from the chrome above the picture (a header that appeared
+    /// under the pointer, a system gesture taking capture), so a drag pans 1:1 until the button comes up. A
+    /// drag that lost its button ends.
+    /// </summary>
+    internal void PointerCaptureLostWith(bool buttonDown)
     {
+        if (buttonDown && _gesture != GestureKind.None)
+        {
+            return;
+        }
         if (_gesture == GestureKind.Divider)
         {
             Edited?.Invoke(State.Tree);
@@ -1006,8 +1069,20 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>A two-finger pinch on a touch screen: zooms a Virtual PTZ tile by the step's scale (the tile where the fingers are).</summary>
-    protected override void OnManipulationStarted(ManipulationStartedRoutedEventArgs e)
+    protected override void OnManipulationStarted(ManipulationStartedRoutedEventArgs e) =>
+        ManipulationBegan(e.PointerDeviceType == PointerDeviceType.Touch);
+
+    /// <summary>
+    /// A manipulation began (the handler, and the self-test's pointer path). Only a touch pinch replaces a drag;
+    /// a mouse or pen drag goes on (with the stage's Scale mode a mouse drag also starts a manipulation, which
+    /// used to end the pan after its first few pixels).
+    /// </summary>
+    internal void ManipulationBegan(bool touch)
     {
+        if (!touch)
+        {
+            return;
+        }
         // The first finger began a drag; the pinch replaces it (its view is saved, not left half-turned).
         if (_gesture == GestureKind.Fisheye && _panTile is { } turned)
         {
@@ -1434,7 +1509,7 @@ internal sealed partial class StageView : UserControl
             {
                 if (BuildTileMenu(s) is { } menu)
                 {
-                    menu.ShowAt(this, new Windows.Foundation.Point(s.X + Math.Min(s.Width, 120) / 2, s.Y + TileChrome.HeaderHeight));
+                    menu.ShowAt(this, new Windows.Foundation.Point(s.FrameX + Math.Min(s.FrameWidth, 120) / 2, s.FrameY + TileChrome.HeaderHeight));
                 }
                 return true;
             }
@@ -1565,7 +1640,7 @@ internal sealed partial class StageView : UserControl
     /// </summary>
     public void SetFill(bool fill)
     {
-        if (State.Fill == fill && !State.Views.Mixed)
+        if (State.Fill == fill && !FillMixed)
         {
             return;
         }

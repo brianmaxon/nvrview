@@ -83,9 +83,25 @@ final class RecordingsBrowser {
             syncPlayer()
         }
     }
-    /// Timeline zoom: 1 shows the whole day in the window's width.
-    var zoom: Double = 1
+    /// The part of the day the timeline lanes show (zoom 1: the whole day
+    /// in the lanes' width).
+    var timeline = TimelineViewport() { didSet { if timeline.zoom != oldValue.zoom { reloadLoudness() } } }
     var showingGroups = false
+    /// Each lane's loudness for the shown day, at `loudnessBucket`.
+    private(set) var loudness: [RecordingCamera: LoudnessLane] = [:]
+    /// The lanes' width in points (the view reports it), for the loudness
+    /// bucket.
+    var lanesWidth: Double = 600 { didSet { if abs(lanesWidth - oldValue) >= 1 { reloadLoudness() } } }
+    /// About one loudness value per two points at the zoom shown.
+    var loudnessBucket: Int64 {
+        LoudnessScale.bucket(visibleSeconds: Double(DeviceTime.day) * timeline.visible, width: lanesWidth)
+    }
+    @ObservationIgnored private var loudnessAsked: (day: Int64, bucket: Int64, cameras: [RecordingCamera], revision: Int)?
+    /// Re-reads today's loudness now and then: live seconds arrive with no
+    /// event (FFI-RECORDINGS.md section 2a, "a pull API").
+    @ObservationIgnored private var loudnessTimer: Timer?
+    /// How often the loudness lanes were read (the self-test).
+    @ObservationIgnored private(set) var loudnessReads = 0
 
     /// Days of the calendar's month that have recordings on an enabled camera.
     private(set) var recordedDays: Set<Int64> = []
@@ -112,6 +128,14 @@ final class RecordingsBrowser {
         month = DeviceTime.month(containing: today).start
         token = model.subscribe { [weak self] in self?.reload() }
         show(day: today)
+        let t = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isToday else { return }
+                self.reloadLoudness(force: true)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        loudnessTimer = t
     }
 
     var isToday: Bool { day == model.today }
@@ -171,6 +195,8 @@ final class RecordingsBrowser {
     /// The window closes: its playback closes, its hold ends, its thumbnail
     /// requests are dropped.
     func close() {
+        loudnessTimer?.invalidate()
+        loudnessTimer = nil
         player.close()
         if holding { model.hold(holdID, cameras: nil) }
         holding = false
@@ -196,9 +222,29 @@ final class RecordingsBrowser {
         updateHold()
         reloadCalendar()
         reloadLanes()
+        reloadLoudness()
         reloadIncidents()
         syncPlayer()
     }
+
+    /// Reads the shown day's loudness lanes when the day, the cameras, the
+    /// bucket, or the index changed (`force`: also when nothing did).
+    func reloadLoudness(force: Bool = false) {
+        let bucket = loudnessBucket, cams = cameras, revision = model.indexRevision
+        if !force, let a = loudnessAsked, a.day == day, a.bucket == bucket, a.cameras == cams, a.revision == revision {
+            return
+        }
+        loudnessAsked = (day, bucket, cams, revision)
+        loudnessReads += 1
+        let answer = model.loudness(
+            start: day, end: day + DeviceTime.day - 1, bucket: bucket, cameras: LoudnessScale.microphones(cams))
+        var out: [RecordingCamera: LoudnessLane] = [:]
+        for lane in answer?.lanes ?? [] { out[lane.camera] = lane }
+        if out != loudness { loudness = out }
+    }
+
+    /// The loudness a lane shows (its camera's microphone).
+    func loudness(of camera: RecordingCamera) -> LoudnessLane? { loudness[LoudnessScale.microphone(of: camera)] }
 
     /// Holds today (for the enabled cameras) while today is shown; the core
     /// is told only when that changes.
@@ -248,7 +294,7 @@ final class RecordingsBrowser {
 
     private func applyFilters() {
         incidents = dayIncidents.filter { i in
-            KindFilter.passes(i.kinds, kindFilters) && (!lockedOnly || i.locked)
+            KindFilter.passes(i, kindFilters) && (!lockedOnly || i.locked)
         }
     }
 

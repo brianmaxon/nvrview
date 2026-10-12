@@ -77,7 +77,7 @@ extension StageView {
         case .resetZoom, .resetPosition:
             resetZoom(at: path)
         case .fillTile:
-            setFill(!fills(camera), for: camera)
+            setFill(!fills(atTile: path), atTile: path)
         case .pop:
             if fixedTile { model.popInCall(camera.firstLens) } else { model.popOutCall(camera.firstLens) }
             return
@@ -159,8 +159,8 @@ extension StageView {
         MenuKeyHint.apply(entry.macShortcut, to: item)
         switch entry.item {
         case .fillTile:
-            item.state = fills(camera) ? .on : .off
-            item.toolTip = "Crop this camera's picture to fill its tile; drag the picture to choose the part shown"
+            item.state = fills(atTile: path) ? .on : .off
+            item.toolTip = "Crop this tile's picture to fill it; drag the picture to choose the part shown"
         case .resetPosition:
             item.toolTip = "Show the middle of the filled picture again"
         case .entrance:

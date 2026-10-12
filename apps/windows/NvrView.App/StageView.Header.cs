@@ -146,7 +146,7 @@ internal sealed partial class StageView
         if (under == this)
         {
             // From a key: the "..." position at the header's right end.
-            menu.ShowAt(this, new Windows.Foundation.Point(Math.Max(t.X + t.Width - 40, t.X), t.Y + TileChrome.HeaderHeight));
+            menu.ShowAt(this, new Windows.Foundation.Point(Math.Max(t.FrameX + t.FrameWidth - 40, t.FrameX), t.FrameY + TileChrome.HeaderHeight));
         }
         else
         {

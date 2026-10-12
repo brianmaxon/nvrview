@@ -245,7 +245,10 @@ in either case.
 | M | Listen to the selected tile, or mute it if it is the one playing (⌘L / Ctrl+L does the same). |
 
 Selection is visible as a thin outline that fades with the other chrome, and
-follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
+follows a click on a tile. The outline and the header belong to the tile: they
+cover its whole area (not just a fitted picture inside it), whatever the zoom
+or Fill, and the whole stage while the tile is focused or in full screen.
+Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
@@ -397,11 +400,12 @@ look at a detail.
 - Mouse wheel or trackpad pinch zooms around the pointer; trackpad
   two-finger scroll, or dragging, pans while zoomed. Zoom ranges from 1x to
   about 8x, smoothly, at display rate.
-- The zoom belongs to the tile: it survives layout changes and focus, and
-  when focus switches the camera to the main stream the same region is
-  shown, now with the main stream's detail (the region is kept in picture
-  coordinates, independent of resolution). It is saved with the window
-  (see "Fill Tiles").
+- The zoom belongs to the tile: two tiles of the same camera are
+  independent views (one wide, one zoomed on a detail). It survives layout
+  changes and focus, and when focus switches the camera to the main stream
+  the same region is shown, now with the main stream's detail (the region
+  is kept in picture coordinates, independent of resolution). It is saved
+  with the window (see "Fill Tiles").
 - Double-click keeps its meaning (focus); 0 or a small reset control in the
   hover header returns to 1x (and a filled picture's crop to the middle);
   zoom never changes what is recorded or streamed.
@@ -432,14 +436,26 @@ Details settled while building it (macOS):
 - A plain drag on the picture of a tile zoomed past 1x pans its picture, as
   does one on a filled picture with part hidden (see "Fill Tiles"). On other
   tiles, on a tile's shown hover header, and always while editing the
-  layout, a drag drags the tile to swap.
+  layout, a drag drags the tile to swap. A pan follows the pointer 1:1 from
+  press to release, also when the hover header appears under the pointer
+  (Windows: a lost pointer capture or a mouse drag starting a manipulation no
+  longer ends it; only a touch pinch replaces it).
 - A mouse wheel (line-based scrolling) zooms, each notch 1.25x, eased over
   the next refreshes. Precise scrolling (trackpad, Magic Mouse) pans a zoomed
   tile and does nothing at 1x; with Option held it zooms instead, for devices
   without a pinch. A pinch zooms continuously.
-- The zoom is kept per camera in each window, so it follows the picture
-  through swaps, layout changes, focus and stream switches; two tiles of the
-  same camera in one window share it.
+- The zoom is kept per tile: per window, per layout, and per tile of the
+  layout (with the camera the tile shows). Each tile of a layout has a
+  stable identity, its `tile` member in the stored layout, which stays put
+  when other tiles are split, removed or swapped (a split keeps the old
+  tile's identity and gives the new tile one of its own; a layout stored
+  before tiles had identities gets the same ones on every launch, `t<n>` by
+  reading order). A swap moves each tile's zoom, crop and Fill choice with
+  its camera (the view travels with what was dragged); focus, layout
+  switches and the switch between sub-stream and main stream keep it; Show
+  Camera, a camera dropped on the tile or any other change of the tile's
+  camera starts that tile at 1x, centered, following the window's Fill
+  Tiles. Removing a tile forgets its view.
 - The inset map is an outline of the whole picture with the visible region
   marked, drawn as overlay layers (no second picture, so no extra drawing or
   texture work), in the bottom left corner of the picture as drawn.
@@ -455,7 +471,8 @@ does not fit is cropped.
   clears the tiles' own choices, so all tiles follow it.
 - **Fill Tile** in a tile's menu (macOS: the right-click menu and the
   header's "…"; Windows: the right-click menu, "Fill Tile") fills or fits
-  that camera's tiles in this window only, checked while it fills. While
+  that tile only (another tile of the same camera keeps its own choice),
+  checked while it fills. While
   some tiles differ from the window's switch, the macOS menu item shows a
   mixed state; the Windows toggle shows the window's own setting.
 - **Choosing the part shown**: on a filled tile whose picture is partly
@@ -477,20 +494,25 @@ does not fit is cropped.
   menu, shown while a filled crop is moved at 1x, brings it back to the
   middle; 0 and the header's reset control (shown while zoomed) also
   recenter it.
-- **Remembered**: the window's switch, and per camera its zoom (scale and
+- **Remembered**: the window's switch, and per tile its zoom (scale and
   center), crop position and own Fill choice, are saved with the window
-  and restored on relaunch (windows.json, `fill` and `tileViews`, written
-  only when not the default). They are per camera within a window, so the
-  same camera in two tiles of one window shares them and they follow the
-  camera through swaps and layout changes; the same camera in another
-  window has its own. Positions are fractions of the picture, so the
-  sub-stream and the main stream show the same part. A window keeps at
-  most 256 cameras (the one changed longest ago is dropped first); saved
-  values are clamped when read, and entries that cannot be read are
-  skipped. The rule and its vectors (`TileViews`,
-  `fixtures/synthetic/tile-views.json`) are shared by both apps.
+  and restored on relaunch (windows.json: `fill`, and `tiles`, entries of
+  `layout` (`layout:<id>`, `group:<id>` or `scratch`), `tile` (the tile's
+  identity), `camera`, `scale`, `x`, `y`, `fill`; written only when not
+  the default). They are per window, per layout and per tile (see "Digital
+  zoom" for what keeps or resets them); the same layout in another window
+  has its own. Positions are fractions of the picture, so the sub-stream
+  and the main stream show the same part. A window keeps at most 256
+  tiles across its layouts (the one changed longest ago is dropped first);
+  saved values are clamped when read, and entries that cannot be read are
+  skipped. A file from before views were per tile (`tileViews`, per
+  camera) is read once: each camera's view goes to every tile of the
+  window's layout showing it, and the window is saved in the new form. The
+  rule and its vectors (`TileViews`, `fixtures/synthetic/tile-views.json`)
+  are shared by both apps.
 - **Fisheye and multi-lens cameras**: each lens of a multi-lens camera is a
-  camera of its own here (its own zoom, crop and Fill choice). A fisheye
+  camera of its own here (its tiles have their own zoom, crop and Fill
+  choice). A fisheye
   tile in Original fills, pans and zooms like any tile; a dewarped view
   (Panorama, Double panorama, Quad, Virtual PTZ) always covers its tile and
   a drag turns the view instead (see "Fisheye cameras"), so its Fill choice
@@ -1122,8 +1144,9 @@ example to keep it beside other work. Both apps follow these rules.
 The NVR's own recordings, found by what happened and played back
 ([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
-(milestone P, M1 and M2) and on Windows (W1, W2). The sound lanes
-(M3) and exports (M4) come later.
+(milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
+strips, sound events, listening for sounds) on both. Exports (M4) come
+later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1137,8 +1160,8 @@ The NVR's own recordings, found by what happened and played back
   the other windows. On Windows the pane buttons are the
   hamburger and the details icons, Ctrl-click adds an incident to the
   selection, Show in Explorer and the Recycle Bin (through `IFileOperation`)
-  stand for Finder and the Trash, and the timeline zooms with Ctrl and the
-  wheel.
+  stand for Finder and the Trash, and the timeline's wheel zoom is not
+  eased and has no pinch (the scroll bar and a touchpad pan it).
 - **Layout:** seeing the clip comes first, so the **player** is the middle
   of the window, with the **transport** under it and the day's **timeline
   lanes** under that. On the left, collapsible, the month's calendar, the
@@ -1213,9 +1236,47 @@ The NVR's own recordings, found by what happened and played back
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the
-  playhead. A click on a lane of a camera that plays seeks there; a click on
+  playhead. The lanes zoom as a tile's digital zoom does ("Digital zoom"):
+  a mouse wheel zooms around the pointer (the time under it stays put),
+  each notch 1.25×, eased; Shift and the wheel pans; a horizontal
+  two-finger scroll pans and a pinch (or Option and a two-finger scroll)
+  zooms; a vertical two-finger scroll scrolls the lanes when there are more
+  than fit. The zoom buttons zoom around the middle. The lanes draw only the
+  visible part of the day, and the ruler's ticks get finer as it zooms (down
+  to 5 minutes). A click on a lane of a camera that plays seeks there; a click on
   an event of another camera selects its incident; anywhere else that
   camera plays alone from there.
+- **Sound** ([PLAYBACK.md](PLAYBACK.md) "Sound"; FFI-RECORDINGS.md
+  section 2a). Under each lane a **loudness strip** (10 points) shows the
+  camera's loudness for the day from `nv_recordings_loudness`: per bucket
+  the loudest second light and the average dark, from -80 dBFS (nothing)
+  to 0 dBFS (full height), blank where no audio was analyzed, which is not
+  silence. A legend under the lanes says so. The bucket follows the zoom,
+  about one value per two points (60 to 300 s for the whole day, down to a
+  few seconds at 48×); the strip of a camera's second lens shows the first
+  lens's microphone. Today's strips are read again every 10 s (live seconds
+  come with no event; the call answers from memory). **Sound events**
+  (`source` `local_audio`: smoke and CO alarms from the core's detector,
+  other sounds from labels an app classifier puts) are bars in the lanes
+  like other events, alarms in their kind's color and other sounds in their
+  own (with a waveform symbol on macOS); they join incidents, the
+  incident rows show a sound badge with the sounds' names on hover (alarms
+  keep their own badges), and a **Sounds** kind filter shows only incidents
+  with a sound (the sound kinds, or any event from sound). **Listen for
+  sounds** is a per-camera switch (an ear on macOS, a speaker on Windows)
+  beside each camera in "Cameras to search": `nv_sound_watch` keeps that
+  camera's sub-stream open with no tile, so its sound is analyzed while it
+  is not on screen. It costs the device a sub-stream (about 110 kbit/s)
+  that counts toward its streams like a tile, so at most four cameras of a
+  device listen (a device carried six sub-streams on one session, and the
+  player takes up to four); a fifth is refused with a message. The switch's
+  tooltip says what the core answered (listening, no sound from this
+  camera, the device is not connected). The list is kept with the cameras
+  to search (`listen` in `recordings-cameras.json`) and given to the core
+  at each launch. Not built yet: analyzing a recorded day
+  (`nv_sound_analyze_day` answers `no_source` until the core has a source
+  for recorded audio), and the app classifiers that put labels (SoundAnalysis
+  on macOS, a model on Windows).
 - **The selected incident (inspector):** its name (Rename; an empty name
   goes back to time and kinds), time span and date, badges, and camera
   group; Locked (locking keeps it: its video is downloaded and nothing about
