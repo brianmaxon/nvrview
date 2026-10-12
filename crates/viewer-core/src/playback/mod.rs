@@ -129,6 +129,7 @@ impl PbShared {
 struct PbTile {
     id: u64,
     device: String,
+    camera: DeviceCamera,
     handle: TileHandle,
 }
 
@@ -542,6 +543,7 @@ impl Core {
             tiles.push(PbTile {
                 id: tile,
                 device: c.device.clone(),
+                camera: c.camera,
                 handle,
             });
             gates.push(gate);
@@ -620,6 +622,12 @@ impl Core {
         {
             let pbs = lock(&self.playback.core.playbacks);
             let p = pbs.get(&playback).ok_or(RecError::UnknownId)?;
+            if p.tiles
+                .iter()
+                .any(|t| t.device == c.device && t.camera == c.camera)
+            {
+                return Err(RecError::InvalidArgument);
+            }
             if p.tiles.len() >= MAX_CAMERAS {
                 return Err(RecError::Limit);
             }
@@ -641,9 +649,19 @@ impl Core {
             self.end_tiles(vec![(tile, handle)], CloseReason::Closed);
             return Err(RecError::UnknownId);
         };
+        if p.tiles
+            .iter()
+            .any(|t| t.device == c.device && t.camera == c.camera)
+        {
+            // Added by another call meanwhile.
+            drop(pbs);
+            self.end_tiles(vec![(tile, handle)], CloseReason::Closed);
+            return Err(RecError::InvalidArgument);
+        }
         p.tiles.push(PbTile {
             id: tile,
             device: c.device,
+            camera: c.camera,
             handle,
         });
         drop(pbs);
