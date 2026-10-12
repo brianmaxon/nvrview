@@ -703,7 +703,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         Connect(device.Config, password);
     }
 
-    /// <summary>Saves, connects, or reconnects a device from the Settings dialog.</summary>
+    /// <summary>Saves, connects, or reconnects a device from the Settings window.</summary>
     public void SaveDevice(DeviceConfig config, string? newPassword)
     {
         DeviceEntry? old = _devices.FirstOrDefault(d => d.Config.Key == config.Key);

@@ -61,6 +61,12 @@
 //    "Open calls in their own window" routing are remembered. Then, on the real computer: the
 //    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
 //    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
+// 11c. the header and the Settings window (docs/UX.md "Windows header", "Settings window"): the
+//    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
+//    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
+//    manual clock; the tile menu holds none of the app-wide items; Settings is one window of its own
+//    with a pane of five sections, a section taller than the window scrolls to its last control, a
+//    second open brings the same window forward, its size is remembered, and it closes with the app;
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
 //
@@ -196,7 +202,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             v.Disconnect(wrong);
 
             // parity: settings-save-remove
-            // What the Settings dialog does on Save and Remove (in memory in
+            // What the Settings window does on Save and Remove (in memory in
             // this mode): a second device connects, then goes away.
             var saved = new DeviceConfig { Name = "second", Host = mock.Host, Port = mock.Port, User = "example-user" };
             v.SaveDevice(saved, Environment.GetEnvironmentVariable("NVRVIEW_TEST_PASSWORD") ?? "example-password");
@@ -210,31 +216,32 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
 
             // parity: settings-dialog-opens
-            // The dialog itself opens and closes. Its device search is real but
+            // The window itself opens and closes. Its device search is real but
             // limited to loopback (nothing answers there); the answers are made up
             // and fed in as the core's events.
             v.DiscoveryRequest = "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}";
-            var hooks = new SettingsDialogHooks();
-            var dialog = SettingsDialog.Create(app.Stage!.XamlRoot, v, development: true, hooks);
-            _ = dialog.ShowAsync();
+            var hooks = new SettingsPagesHooks();
+            SettingsWindow settings = SettingsWindow.Open(v, development: true, SettingsSection.Devices, hooks: hooks, background: true);
             await Task.Delay(500);
-            bool shown = dialog.IsLoaded;
-            Say($"settings dialog shown: {shown}");
+            bool shown = settings.IsLoaded;
+            Say($"settings window shown: {shown}");
             if (!shown)
             {
-                _problems.Add("the Settings dialog did not open");
+                _problems.Add("the Settings window did not open");
             }
             await FindDevices(v, hooks, mock);
             // parity: discovery-stop-on-close
-            dialog.Hide();
+            settings.Close();
             bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
-            Say($"find devices: search stopped when the dialog closed: {stopped}");
+            Say($"find devices: search stopped when the window closed: {stopped}");
             if (!stopped)
             {
                 _problems.Add("closing Settings did not stop the device search");
             }
             v.DiscoveryRequest = null;
         }
+
+        await HeaderAndSettings(v);
 
         // parity: resize
         // 2. Live resize.
@@ -1434,13 +1441,213 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
     }
 
+    // 11c. The header, the trimmed tile menu, and the Settings window (docs/UX.md "Windows header", "Settings window").
+    private async Task HeaderAndSettings(Viewer v)
+    {
+        ViewerWindow w = app.Windows[0];
+        StageView stage = w.Stage;
+        HeaderBar header = w.Header;
+        IViewerClock realClock = w.RevealClock;
+
+        // parity: header-present
+        // The header is the title bar: it draws into it, keeps room for the caption buttons, hands the system its
+        // controls, and shows the quick actions, Settings, and the reserved recording spot.
+        var buttons = header.Buttons();
+        Say($"header: {string.Join(" / ", buttons.Select(b => b.Name))}; layout \"{header.LayoutLabel}\"; recording spot reserved {header.HasRecordingSpot}, shown {header.RecordingSpotVisible}");
+        Expect(w.ExtendsIntoTitleBar, "the window does not extend its content into the title bar");
+        HeaderAction[] expected = [HeaderAction.FindDevices, HeaderAction.EditLayout, HeaderAction.FillTiles, HeaderAction.FullScreen, HeaderAction.Settings];
+        Expect(expected.All(a => buttons.Any(b => b.Action == a && b.Enabled && b.Visible && b.Name.Length > 0)), "the header lacks a quick action or Settings");
+        Expect(header.LayoutLabel == w.ContentTitle && w.DockedHeaderShown, "the header does not show the current layout");
+        Expect(header.HasRecordingSpot && !header.RecordingSpotVisible, "the recording spot is not reserved, or shows before anything records");
+        Expect(Math.Abs(header.Root.ActualHeight - header.Root.Height) < 1 && header.Root.ActualHeight >= 32, "the header does not have the title bar's height");
+        bool regions = await Until(() => w.PassthroughRegions >= buttons.Count, 5);
+        Say($"header: {w.PassthroughRegions} interactive regions handed to the system");
+        Expect(regions, "the header's controls were not given to the system as interactive regions");
+
+        // parity: header-actions
+        // The actions do what the menu items did.
+        header.Press(HeaderAction.EditLayout);
+        bool editing = stage.State.Editing;
+        string editName = header.Buttons().First(b => b.Action == HeaderAction.EditLayout).Name;
+        header.Press(HeaderAction.EditLayout);
+        Expect(editing && editName == "Done editing" && !stage.State.Editing, "Edit layout in the header did not toggle editing");
+        header.Press(HeaderAction.FillTiles);
+        bool filled = stage.State.Fill;
+        header.Press(HeaderAction.FillTiles);
+        Expect(filled && !stage.State.Fill, "Fill tiles in the header did not toggle");
+        stage.FullScreenOverride = true;
+        header.Update();
+        string fullName = header.Buttons().First(b => b.Action == HeaderAction.FullScreen).Name;
+        stage.FullScreenOverride = null;
+        header.Update();
+        Expect(fullName == "Leave full screen" && header.Buttons().First(b => b.Action == HeaderAction.FullScreen).Name == "Full screen", "the Full screen button does not say what it does");
+        List<string> overflow = Texts(header.BuildOverflow().Items);
+        Say($"header: overflow {string.Join(" / ", overflow)}");
+        string[] rest = ["New window", w.SidebarDocked ? "Hide sidebar" : "Show sidebar", "Indicator corner", "Show diagnostics", "Keyboard shortcuts"];
+        Expect(rest.All(overflow.Contains) && overflow.Any(t => t == "Check for updates…" || t.StartsWith("Update to ", StringComparison.Ordinal) || t.StartsWith("Switch to ", StringComparison.Ordinal)),
+            "the overflow menu lacks an app-wide item that left the tile menu");
+        // The same arrangement saved as a layout, so no camera loses its lease while the window switches.
+        WindowContent before = w.State.Content;
+        string? layoutId = v.CreateLayout("Header test", w.State.Tree);
+        List<string> picker = Texts(header.BuildLayoutMenu().Items);
+        Say($"header: layout picker {string.Join(" / ", picker)}");
+        Expect(layoutId is not null && picker.Contains("All Cameras") && picker.Contains("Header test") && picker.Contains("New layout…")
+            && picker.Contains("New layout from template") && picker.Contains("Save as layout…"), "the layout picker lacks a layout or a layout action");
+        // parity: header-layout-picker
+        // Choosing a layout in the picker shows it in the window, and the header follows.
+        if (layoutId is not null)
+        {
+            w.Show(new WindowContent.Layout(layoutId));
+            Expect(header.LayoutLabel == "Header test" && Texts(header.BuildLayoutMenu().Items).Contains("Header test")
+                && !Texts(header.BuildLayoutMenu().Items).Contains("Save as layout…"), "the header did not follow the layout shown");
+            w.Show(before);
+            v.DeleteLayout(layoutId);
+        }
+        Expect(header.LayoutLabel == w.ContentTitle, "the header did not return to the arrangement shown");
+
+        // parity: header-fullscreen-reveal
+        // In full screen the header is hidden and slides in from the top edge on the sidebar's timing (manual clock).
+        var clock = new ManualViewerClock(5000);
+        w.RevealClock = clock;
+        w.SimulateHeaderFullScreen(true);
+        Expect(!w.HeaderVisible && !w.DockedHeaderShown && !w.HeaderOverlayInteractive, "the header is not hidden in full screen");
+        w.HeaderPointerAt(inEdge: true, inHeader: false);
+        clock.Advance(0.1);
+        w.TickHeader();
+        Expect(!w.HeaderVisible, "a pass over the top edge revealed the header");
+        clock.Advance(0.06);
+        w.TickHeader();
+        Expect(w.HeaderVisible && w.HeaderOverlayShown && w.HeaderOverlayInteractive, "resting at the top edge did not reveal the header");
+        w.HeaderPointerAt(inEdge: false, inHeader: true);
+        clock.Advance(5);
+        w.TickHeader();
+        Expect(w.HeaderVisible, "the header slid away while the pointer was on it");
+        w.HeaderPointerAt(inEdge: false, inHeader: false);
+        clock.Advance(0.49);
+        w.TickHeader();
+        bool stillThere = w.HeaderVisible;
+        clock.Advance(0.02);
+        w.TickHeader();
+        Say($"header: full screen reveal: hidden {!w.HeaderOverlayShown}, held until half a second after the pointer left {stillThere}");
+        Expect(stillThere && !w.HeaderVisible && !w.HeaderOverlayInteractive, "the header did not slide away half a second after the pointer left");
+        w.SimulateHeaderFullScreen(null);
+        w.RevealClock = realClock;
+        Expect(w.HeaderVisible && w.DockedHeaderShown, "leaving full screen did not dock the header again");
+
+        // parity: tile-menu-no-app-wide
+        // The right-click menu holds the tile's own actions and none of the app-wide ones.
+        StageTile tile = Tiles[0];
+        Microsoft.UI.Xaml.Controls.MenuFlyout? tileMenu = stage.BuildTileMenu(tile);
+        List<string> tileItems = tileMenu is null ? [] : Texts(tileMenu.Items);
+        Say($"tile menu: {string.Join(" / ", tileItems)}");
+        string[] own = ["Focus", "Listen", "Start conversation", "Allow talk-back", "Unmute on ring", "Calls open in", "Quality"];
+        Expect(own.All(tileItems.Contains), "the tile menu lost one of the tile's own actions");
+        Expect(!tileItems.Any(HeaderActions.IsAppWideTitle), $"the tile menu still holds an app-wide item: {string.Join(", ", tileItems.Where(HeaderActions.IsAppWideTitle))}");
+        stage.SetEditing(true);
+        List<string> editItems = Texts(stage.BuildTileMenu(tile)!.Items);
+        stage.SetEditing(false);
+        Expect(editItems.Contains("Split side by side") && editItems.Contains("Show camera") && !editItems.Any(HeaderActions.IsAppWideTitle),
+            "the tile menu while editing lacks a layout action or holds an app-wide item");
+
+        await SettingsWindowSteps(v, w);
+    }
+
+    private async Task SettingsWindowSteps(Viewer v, ViewerWindow w)
+    {
+        v.DiscoveryRequest = "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}";
+
+        // parity: settings-window-sections
+        // Settings opens as a window of its own with a pane of sections, from the header (Find devices opens it on Devices).
+        int made = SettingsWindow.Created;
+        w.Header.Press(HeaderAction.FindDevices);
+        SettingsWindow? sw = SettingsWindow.Current;
+        Expect(sw is not null && SettingsWindow.Created == made + 1, "Find devices in the header did not open the Settings window");
+        if (sw is null)
+        {
+            return;
+        }
+        await Task.Delay(500);
+        bool searching = await Until(() => v.Discovery.IsSearching, 5);
+        Say($"settings window: sections {string.Join(" / ", sw.SectionTitles)}; on {sw.Section.Title()}, searching {searching}");
+        Expect(sw.IsLoaded && sw.Section == SettingsSection.Devices && searching, "Find devices did not show the Devices section and start the search");
+        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list the five sections");
+        foreach (SettingsSection section in SettingsSections.All)
+        {
+            sw.Show(section);
+            Expect(sw.Section == section && ReferenceEquals(sw.ShownScroller, sw.ScrollerOf(section)), $"the {section.Title()} section was not shown in its scroller");
+        }
+        sw.Show(SettingsSection.Cameras);
+        bool stopped = await Until(() => !v.Discovery.IsSearching, 5);
+        Expect(stopped, "leaving the Devices section did not stop the search");
+
+        // parity: settings-window-scrolls
+        // A section taller than the window scrolls to its last control.
+        sw.ResizeTo(520, 240);
+        sw.Show(SettingsSection.AlertsAndCalls);
+        Microsoft.UI.Xaml.Controls.ScrollViewer sc = sw.ScrollerOf(SettingsSection.AlertsAndCalls);
+        Microsoft.UI.Xaml.FrameworkElement last = sw.LastElementOf(SettingsSection.AlertsAndCalls);
+        bool tall = await Until(() => sc.ViewportHeight > 0 && sc.ViewportHeight < 240 && sc.ExtentHeight > sc.ViewportHeight, 5);
+        double Bottom() => last.TransformToVisual(sc).TransformBounds(new Windows.Foundation.Rect(0, 0, last.ActualWidth, last.ActualHeight)).Bottom;
+        double before = Bottom();
+        double viewport = sc.ViewportHeight;
+        sc.ChangeView(null, sc.ScrollableHeight, null, true);
+        bool scrolled = await Until(() => Math.Abs(sc.VerticalOffset - sc.ScrollableHeight) < 1, 5);
+        double after = Bottom();
+        Say($"settings window: Alerts & calls extent {sc.ExtentHeight:0} in a viewport of {viewport:0}; last control bottom {before:0} -> {after:0}");
+        Expect(tall && before > viewport + 1, "the Alerts & calls section is not taller than the small window, or its last control is already visible");
+        Expect(scrolled && after <= sc.ViewportHeight + 1, "scrolling did not bring the section's last control into view");
+
+        // parity: settings-window-single-instance
+        // Opening Settings again (the header, Ctrl+,) brings the same window to the front on the section asked for.
+        SettingsWindow again = w.OpenSettings(SettingsSection.Updates);
+        w.Header.Press(HeaderAction.Settings);
+        w.Stage.HandleKey((Windows.System.VirtualKey)188, true, false);
+        Say($"settings window: windows made {SettingsWindow.Created - made}, on {again.Section.Title()}");
+        Expect(ReferenceEquals(again, sw) && ReferenceEquals(SettingsWindow.Current, sw) && SettingsWindow.Created == made + 1, "opening Settings again made a second window");
+        Expect(again.Section == SettingsSection.Updates, "the open Settings window did not keep or take a section");
+
+        // parity: settings-window-frame-remembered
+        // The window comes back at the size the user left it.
+        sw.AppWindow.Resize(new Windows.Graphics.SizeInt32(700, 480));
+        bool pending = await Until(() => sw.FramePending, 5);
+        sw.FlushFrame();
+        WindowRect? saved = v.Settings.SettingsWindowFrame;
+        Say($"settings window: remembered {saved?.Width:0}x{saved?.Height:0}");
+        Expect(pending && saved is { } sf && Math.Abs(sf.Width - 700) <= 2 && Math.Abs(sf.Height - 480) <= 2, "the Settings window's size was not remembered");
+        sw.Close();
+        bool closed = await Until(() => SettingsWindow.Current is null, 5);
+        SettingsWindow reopened = SettingsWindow.Open(v, development: true, background: true);
+        await Task.Delay(300);
+        WindowRect frame = reopened.CurrentFrame;
+        Say($"settings window: reopened at {frame.Width:0}x{frame.Height:0}");
+        Expect(closed && Math.Abs(frame.Width - 700) <= 2 && Math.Abs(frame.Height - 480) <= 2, "the Settings window did not reopen at its remembered size");
+
+        // parity: settings-window-closes-with-app
+        // Closing the app closes it (Shutdown), and the device search with it.
+        SettingsWindow.CloseCurrent();
+        bool gone = await Until(() => SettingsWindow.Current is null, 5);
+        Expect(gone && !v.Discovery.IsSearching, "the Settings window stayed open when the app closed it");
+        v.DiscoveryRequest = null;
+    }
+
+    /// <summary>The texts of a menu's items (submenus by their own text), top level only.</summary>
+    private static List<string> Texts(IList<Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase> items) =>
+    [
+        .. items.Select(i => i switch
+        {
+            Microsoft.UI.Xaml.Controls.MenuFlyoutItem m => m.Text,
+            Microsoft.UI.Xaml.Controls.MenuFlyoutSubItem sub => sub.Text,
+            _ => "",
+        }).Where(t => t.Length > 0),
+    ];
+
     // 10. The tile features.
     /// <summary>
     /// The add-device screen's "Find Devices on This Network" list (docs/UX.md,
     /// "Finding devices"): it searches when shown, fills from the core's
     /// events, marks added devices, and a click fills the form.
     /// </summary>
-    private async Task FindDevices(Viewer v, SettingsDialogHooks hooks, (string Host, ushort Port) mock)
+    private async Task FindDevices(Viewer v, SettingsPagesHooks hooks, (string Host, ushort Port) mock)
     {
         static CoreEvent Event(string json) =>
             new() { Type = "discovered", Discovery = DiscoveryEvent.Parse(System.Text.Encoding.UTF8.GetBytes(json)) };
@@ -1768,9 +1975,8 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // parity: fisheye-mount-settings
         // Settings > fisheye mount (the picker, not the menu), then a synthetic pinch on the Virtual PTZ view.
-        var mountHooks = new SettingsDialogHooks();
-        var mountDialog = SettingsDialog.Create(stage.XamlRoot, v, development: true, mountHooks);
-        _ = mountDialog.ShowAsync();
+        var mountHooks = new SettingsPagesHooks();
+        SettingsWindow mountWindow = SettingsWindow.Open(v, development: true, SettingsSection.Cameras, hooks: mountHooks, background: true);
         await Task.Delay(300);
         var pickers = mountHooks.Mounts();
         Expect(pickers.Any(m => m.Camera == f.Camera.ChannelKey && m.Mount == FisheyeMount.Ceiling), "Settings does not list the fisheye camera with the default ceiling mount");
@@ -1803,7 +2009,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(pinchSaved.Aim is { } pa && Math.Abs(pa.Fov - FisheyeAim.MinFov) < 1e-9, "the pinched view was not saved with the layout");
         mountHooks.ChooseMount(f.Camera.ChannelKey, FisheyeMount.Ceiling);
         Expect(v.Settings.Mount(f.Camera) == FisheyeMount.Ceiling, "choosing Ceiling in Settings did not restore the default mount");
-        mountDialog.Hide();
+        mountWindow.Close();
         stage.Select(f.Path);
         stage.HandleKey(Windows.System.VirtualKey.Number0, false, false);
         Expect(f.Fisheye?.Aim == FisheyeAim.Default(FisheyeMount.Ceiling), "0 did not reset the virtual camera after the pinch");

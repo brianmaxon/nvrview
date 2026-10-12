@@ -1,12 +1,14 @@
-// Settings: the devices to connect to (address, port, user, password). The
-// list and the form share one dialog; saving reconnects that device. The
-// password goes straight to the credential store and is never shown again:
-// leaving the box empty when editing keeps the saved one. The corner of the
-// tiles' detection symbols, and the corner doorbell call cards stack from,
-// are chosen here too. The new-device form opens
-// with "Find Devices on This Network": a search of the local network starts
-// when the form is shown and stops when it goes away (docs/UX.md, "Finding
-// devices"); choosing a row fills the form's address and port.
+// Settings content, in the sections of the Settings window (SettingsWindow.cs;
+// docs/UX.md "Settings window"): Devices (the list and the form for the devices
+// to connect to: address, port, user, password; saving reconnects that device),
+// Cameras (each camera's options: where its calls open, unmute on ring, talk-back,
+// fisheye mount), Alerts & calls (the corners of the detection symbols and call
+// cards, calls in their own window, transcripts), Updates, and About. The password
+// goes straight to the credential store and is never shown again: leaving the box
+// empty when editing keeps the saved one. The new-device form opens with "Find
+// Devices on This Network": a search of the local network starts when the form is
+// shown and stops when it goes away (docs/UX.md, "Finding devices"); choosing a
+// row fills the form's address and port.
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -16,7 +18,7 @@ using NvrView.Tiles;
 namespace NvrView.App;
 
 /// <summary>What the self-test drives and reads: the same actions a click does.</summary>
-internal sealed class SettingsDialogHooks
+internal sealed class SettingsPagesHooks
 {
     /// <summary>The "New device" button.</summary>
     public Action NewDevice = () => { };
@@ -41,14 +43,45 @@ internal sealed class SettingsDialogHooks
     public Action<CameraRef, FisheyeMount> ChooseMount = (_, _) => { };
 }
 
-internal static class SettingsDialog
+/// <summary>The pages of the Settings window, built once and alive until <see cref="Closed"/>.</summary>
+internal sealed class SettingsPages
 {
-    public static async Task ShowAsync(XamlRoot root, Viewer viewer, bool development) =>
-        await Create(root, viewer, development).ShowAsync();
+    private Action _opened = () => { };
+    private Action _closed = () => { };
+    private Action<SettingsSection> _shown = _ => { };
+    private Action _findDevices = () => { };
 
-    /// <summary>The dialog, not shown yet.</summary>
-    public static ContentDialog Create(XamlRoot root, Viewer viewer, bool development, SettingsDialogHooks? hooks = null)
+    private SettingsPages()
     {
+    }
+
+    /// <summary>The page of each section (a ScrollViewer's content).</summary>
+    public Dictionary<SettingsSection, FrameworkElement> Pages { get; } = [];
+
+    /// <summary>The window is on screen: a pending device search may start.</summary>
+    public void Opened() => _opened();
+
+    /// <summary>The window closed: nothing keeps listening and the device search stops.</summary>
+    public void Closed() => _closed();
+
+    /// <summary>A section is shown: the device search runs only while the new-device form is.</summary>
+    public void Shown(SettingsSection section) => _shown(section);
+
+    /// <summary>The new-device form, searching the network.</summary>
+    public void FindDevices() => _findDevices();
+
+    private static StackPanel Section(string title, UIElement body)
+    {
+        var section = new StackPanel { Spacing = 6 };
+        section.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        section.Children.Add(body);
+        return section;
+    }
+
+    /// <summary>The pages, not shown yet.</summary>
+    public static SettingsPages Create(Viewer viewer, bool development, SettingsPagesHooks? hooks = null)
+    {
+        var result = new SettingsPages();
         var list = new ListView { Width = 220, Height = 260, SelectionMode = ListViewSelectionMode.Single };
         var name = new TextBox { Header = "Name", PlaceholderText = "NVR" };
         var host = new TextBox { Header = "Address", PlaceholderText = "192.0.2.10 or nvr.example" };
@@ -70,6 +103,7 @@ internal static class SettingsDialog
         };
         DeviceConfig? editing = null;
         bool opened = false;
+        bool onDevices = true;
 
         // Find Devices on This Network: the list, its status, and Search again.
         var finder = new StackPanel { Spacing = 6 };
@@ -139,7 +173,7 @@ internal static class SettingsDialog
 
         void StartFinding()
         {
-            if (opened)
+            if (opened && onDevices)
             {
                 viewer.StartDiscovery();
             }
@@ -352,22 +386,15 @@ internal static class SettingsDialog
             }
         };
         var callRows = new StackPanel { Spacing = 6 };
-        var callExpander = new Expander
-        {
-            Header = "Calls open in, per camera",
-            Content = callRows,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            HorizontalContentAlignment = HorizontalAlignment.Left,
-        };
+        StackPanel callSection = Section("Calls open in", callRows);
         // "Unmute on ring even when not listening", per doorbell (docs/UX.md "Doorbell calls").
         var unmuteRows = new StackPanel { Spacing = 6 };
-        var unmuteExpander = new Expander
-        {
-            Header = "Unmute on ring even when not listening, per doorbell",
-            Content = unmuteRows,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            HorizontalContentAlignment = HorizontalAlignment.Left,
-        };
+        StackPanel unmuteSection = Section("Unmute on ring even when not listening", unmuteRows);
+        // "Allow talk-back", per camera (camera motion control, off until allowed; every use is logged).
+        var talkRows = new StackPanel { Spacing = 6 };
+        StackPanel talkSection = Section("Allow talk-back", talkRows);
+        var talkBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
+        var noCameras = new TextBlock { Text = "No cameras yet. Connect a device first.", Opacity = 0.7 };
         var unmuteBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var callPickers = new List<(CameraRef Camera, string Label, ComboBox Picker)>();
         bool buildingCalls = false;
@@ -427,7 +454,30 @@ internal static class SettingsDialog
                     box.IsChecked = on;
                 }
             }
-            unmuteExpander.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (talkBoxes.Count != cameras.Count || !talkBoxes.Select(r => (r.Camera, r.Label)).SequenceEqual(cameras))
+            {
+                talkBoxes.Clear();
+                talkRows.Children.Clear();
+                foreach ((CameraRef camera, string label) in cameras)
+                {
+                    var box = new CheckBox { Content = label };
+                    CameraRef cam = camera;
+                    box.Click += (_, _) => viewer.SetTalkAllowed(cam, box.IsChecked == true);
+                    talkBoxes.Add((camera, label, box));
+                    talkRows.Children.Add(box);
+                }
+            }
+            foreach ((CameraRef camera, _, CheckBox box) in talkBoxes)
+            {
+                bool on = viewer.Settings.TalkAllowed(camera);
+                if (box.IsChecked != on)
+                {
+                    box.IsChecked = on;
+                }
+            }
+            talkSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            noCameras.Visibility = cameras.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+            unmuteSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             bool rebuild = firstCallBuild || global != lastCallsGlobal;
             firstCallBuild = false;
             lastCallsGlobal = global;
@@ -448,7 +498,7 @@ internal static class SettingsDialog
                     picker.SelectedIndex = index;
                 }
             }
-            callExpander.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            callSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             buildingCalls = false;
         }
 
@@ -464,13 +514,11 @@ internal static class SettingsDialog
         windowRow.Children.Add(callsInWindow);
         windowRow.Children.Add(windowPlacement);
 
-        var callSettings = new StackPanel { Spacing = 8 };
-        callSettings.Children.Add(corners);
-        callSettings.Children.Add(windowRow);
-        callSettings.Children.Add(callExpander);
-        callSettings.Children.Add(unmuteExpander);
-        callSettings.Children.Add(transcriptRow);
-        callSettings.Children.Add(transcriptNote);
+        var alertsPage = new StackPanel { Spacing = 12 };
+        alertsPage.Children.Add(corners);
+        alertsPage.Children.Add(windowRow);
+        alertsPage.Children.Add(transcriptRow);
+        alertsPage.Children.Add(transcriptNote);
 
         // Fisheye cameras: how each is mounted (docs/UX.md "Fisheye cameras"), kept in view-settings.json
         // like the menu's choice; shown only when a connected camera reports a fisheye lens.
@@ -530,55 +578,83 @@ internal static class SettingsDialog
         Action refreshMounts = RefreshMounts;
         viewer.Changed += refreshMounts;
 
-        var layout = new Grid { ColumnSpacing = 16, RowSpacing = 12 };
-        layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        layout.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        layout.RowDefinitions.Add(new RowDefinition());
-        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        layout.Children.Add(left);
+        var devicesPage = new Grid { ColumnSpacing = 16, RowSpacing = 12 };
+        devicesPage.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        devicesPage.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        devicesPage.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        devicesPage.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        devicesPage.Children.Add(left);
         Grid.SetColumn(form, 1);
-        layout.Children.Add(form);
-        Grid.SetRow(callSettings, 1);
-        Grid.SetColumnSpan(callSettings, 2);
-        layout.Children.Add(callSettings);
-        Grid.SetRow(mounts, 2);
-        Grid.SetColumnSpan(mounts, 2);
-        layout.Children.Add(mounts);
-        Grid.SetRow(note, 3);
+        devicesPage.Children.Add(form);
+        Grid.SetRow(note, 1);
         Grid.SetColumnSpan(note, 2);
-        layout.Children.Add(note);
+        devicesPage.Children.Add(note);
+
+        var camerasPage = new StackPanel { Spacing = 16 };
+        camerasPage.Children.Add(noCameras);
+        camerasPage.Children.Add(callSection);
+        camerasPage.Children.Add(unmuteSection);
+        camerasPage.Children.Add(talkSection);
+        camerasPage.Children.Add(mounts);
+
+        var updatesPage = new StackPanel { Spacing = 8 };
         if (App.Instance.Updater is { } updater)
         {
-            layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            FrameworkElement updates = UpdateSettingsPanel.Build(updater);
-            Grid.SetRow(updates, 4);
-            Grid.SetColumnSpan(updates, 2);
-            layout.Children.Add(updates);
+            updatesPage.Children.Add(UpdateSettingsPanel.Build(updater));
+        }
+        else
+        {
+            updatesPage.Children.Add(new TextBlock { Text = "Updates are not available in this run.", Opacity = 0.7 });
         }
 
+        var aboutPage = new StackPanel { Spacing = 6 };
+        aboutPage.Children.Add(new TextBlock { Text = "NvrView", FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, FontSize = 18 });
+        aboutPage.Children.Add(new TextBlock { Text = $"Version {App.Instance.Updater?.Current ?? typeof(SettingsPages).Assembly.GetName().Version?.ToString(3) ?? "0.0.0"}" });
+        aboutPage.Children.Add(new TextBlock { Text = "A native viewer for Reolink NVRs and cameras.", Opacity = 0.8 });
+        aboutPage.Children.Add(new TextBlock { Text = "Licensed MIT OR Apache-2.0. Press F1 in a viewer window for the keyboard shortcuts.", Opacity = 0.8, TextWrapping = TextWrapping.Wrap });
+
+        result.Pages[SettingsSection.Devices] = devicesPage;
+        result.Pages[SettingsSection.Cameras] = camerasPage;
+        result.Pages[SettingsSection.AlertsAndCalls] = alertsPage;
+        result.Pages[SettingsSection.Updates] = updatesPage;
+        result.Pages[SettingsSection.About] = aboutPage;
+
         Reload(viewer.Devices.FirstOrDefault()?.Config.Key);
-        var dialog = new ContentDialog
-        {
-            XamlRoot = root,
-            Title = "Devices",
-            Content = layout,
-            CloseButtonText = "Done",
-            DefaultButton = ContentDialogButton.Close,
-        };
-        // The search starts when the form with no device selected is on
-        // screen, and ends when the dialog closes.
-        dialog.Opened += (_, _) =>
+        // The search runs while the Devices page shows the new-device form, and stops when either goes away.
+        result._opened = () =>
         {
             opened = true;
             RefreshFinder();
-            if (editing is null)
+            if (editing is null && onDevices)
             {
                 StartFinding();
             }
         };
-        dialog.Closed += (_, _) =>
+        result._shown = section =>
+        {
+            onDevices = section == SettingsSection.Devices;
+            if (!opened)
+            {
+                return;
+            }
+            if (onDevices && editing is null)
+            {
+                StartFinding();
+            }
+            else if (!onDevices)
+            {
+                StopFinding();
+            }
+        };
+        result._findDevices = () =>
+        {
+            NewDevice();
+            if (!viewer.Discovery.IsSearching)
+            {
+                StartFinding();
+            }
+        };
+        result._closed = () =>
         {
             opened = false;
             viewer.Changed -= refresh;
@@ -608,7 +684,7 @@ internal static class SettingsDialog
                 })],
                 findStatus.Text);
         }
-        return dialog;
+        return result;
     }
 }
 
