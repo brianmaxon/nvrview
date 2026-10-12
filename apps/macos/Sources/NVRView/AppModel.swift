@@ -198,6 +198,62 @@ final class AppModel {
         callWindowPlacement = Self.placement(in: defaults)
         saveCallTranscripts = defaults.bool(forKey: Self.saveTranscriptsKey)
     }
+    // MARK: Capture settings (docs/CAPTURE.md "Save picture")
+
+    /// Where the capture settings are kept: the standard defaults, a
+    /// throwaway suite in the self-test (`useCaptureDefaults`).
+    @ObservationIgnored private(set) var captureDefaults = UserDefaults.standard
+    /// Renders and encodes saved pictures, off the main thread.
+    @ObservationIgnored let pictureRenderer = PictureRenderer()
+    static let picturesFolderKey = "picturesFolder"
+    static let pictureFormatKey = "pictureFormat"
+    static let shareSafeNamesKey = "shareSafeNames"
+
+    /// "Save pictures to": `~/Pictures/NVRView` until the user chooses.
+    var picturesFolder = AppModel.picturesFolder(in: .standard) {
+        didSet {
+            captureDefaults.set(picturesFolder.path, forKey: Self.picturesFolderKey)
+            notify()
+        }
+    }
+    /// PNG (the default) or JPEG.
+    var pictureFormat = AppModel.pictureFormat(in: .standard) {
+        didSet {
+            captureDefaults.set(pictureFormat.rawValue, forKey: Self.pictureFormatKey)
+            notify()
+        }
+    }
+    /// "Share-safe names": pictures name the camera `Camera A`.
+    var shareSafeNames = UserDefaults.standard.bool(forKey: AppModel.shareSafeNamesKey) {
+        didSet {
+            captureDefaults.set(shareSafeNames, forKey: Self.shareSafeNamesKey)
+            notify()
+        }
+    }
+
+    static var defaultPicturesFolder: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("NVRView", isDirectory: true)
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Pictures/NVRView", isDirectory: true)
+    }
+
+    private static func picturesFolder(in defaults: UserDefaults) -> URL {
+        defaults.string(forKey: picturesFolderKey).flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? defaultPicturesFolder
+    }
+
+    private static func pictureFormat(in defaults: UserDefaults) -> PictureFormat {
+        defaults.string(forKey: pictureFormatKey).flatMap(PictureFormat.init(rawValue:)) ?? .png
+    }
+
+    /// Keeps the capture settings in `defaults` from now on (read from there).
+    func useCaptureDefaults(_ defaults: UserDefaults) {
+        captureDefaults = defaults
+        picturesFolder = Self.picturesFolder(in: defaults)
+        pictureFormat = Self.pictureFormat(in: defaults)
+        shareSafeNames = defaults.bool(forKey: Self.shareSafeNamesKey)
+    }
+
     /// Where the insets go now.
     var insetCorner: ChromeCorner { insetCornerChoice ?? indicatorCorner.opposite }
 
