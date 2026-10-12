@@ -12,7 +12,9 @@
 #                                             directory, idling SECONDS (default 5)
 #   scripts/windows-app.sh publish            the trimmed release layout in target/dotnet/publish (startup, selftest, and
 #                                             update run against it with NVRVIEW_APP_PUBLISHED=1)
-#   scripts/windows-app.sh package            builds, then zips the app as target/dotnet/package/NvrView-<version>-win-x64.zip
+#   scripts/windows-app.sh mark-tested        after the publish-based tests passed: records the publish output as tested
+#                                             (needs NVRVIEW_TREE, the tree being checked); `package` then reuses it
+#   scripts/windows-app.sh package            builds (or reuses the tested publish output), then zips the app as target/dotnet/package/NvrView-<version>-win-x64.zip
 #   scripts/windows-app.sh update             the side-by-side update end to end
 #                                             (docs/UPDATES.md): packages the built app as
 #                                             NvrView-<version>-win-x64.zip, signs it with a
@@ -53,13 +55,56 @@ build() {
 # debug symbols, with nvrview.dll next to the executable.
 publish() {
   cargo build --release -p viewer-ffi -p mock-nvr
-  rm -rf "$out/publish"
+  rm -rf "$out/publish" "$out/publish.pending" "$out/publish.tested"
   dotnet publish apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo \
     -p:DebugType=none -p:DebugSymbols=false
   cp target/release/nvrview.dll "$(dirname "$exe")/"
   find "$(dirname "$exe")" -type f | wc -l
   du -sk "$(dirname "$exe")"
   ls -l "$exe"
+  # Fingerprint of what was just built, for mark-tested and package. Only for
+  # a known tree (scripts/windows-check.sh passes NVRVIEW_TREE; "dirty" or
+  # unset means nothing is ever reused).
+  if tree_known; then
+    publish_fingerprint >"$out/publish.pending"
+  fi
+}
+
+tree_known() {
+  case "${NVRVIEW_TREE:-}" in '' | dirty) return 1 ;; esac
+  return 0
+}
+
+# The tree line, then one "sha256  ./path" line per file of the publish
+# output, in a fixed order.
+publish_fingerprint() {
+  printf 'tree=%s\n' "$NVRVIEW_TREE"
+  (cd "$(dirname "$exe")" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
+}
+
+# Called by the worker after every test on the publish output passed: the
+# output must still be exactly what publish wrote (the tests changed nothing),
+# and is then the tested build that `package` reuses.
+mark_tested() {
+  exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
+  if ! tree_known || [ ! -f "$out/publish.pending" ]; then
+    echo "mark-tested: no fingerprint for the publish output (unknown tree); it will be rebuilt for a package"
+    return 0
+  fi
+  if [ "$(cat "$out/publish.pending")" = "$(publish_fingerprint)" ]; then
+    mv "$out/publish.pending" "$out/publish.tested"
+    echo "publish output recorded as tested for tree $NVRVIEW_TREE"
+  else
+    rm -f "$out/publish.pending"
+    echo "mark-tested: the publish output changed during the tests; it will be rebuilt for a package"
+  fi
+}
+
+# True when the publish output on disk is, file by file, the build that passed
+# the tests for the tree being packaged.
+tested_publish_reusable() {
+  tree_known && [ -f "$out/publish.tested" ] && [ -f "$exe" ] || return 1
+  [ "$(cat "$out/publish.tested")" = "$(publish_fingerprint)" ]
 }
 
 # Runs a .cmd file as a one-time scheduled task in the logged-on user's
@@ -159,7 +204,12 @@ package() {
   version="$(tr -d '[:space:]' <VERSION)"
   NVRVIEW_APP_PUBLISHED=1
   exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"
-  publish
+  if tested_publish_reusable; then
+    echo "reusing the publish output that passed the tests for tree $NVRVIEW_TREE (hashes of all files match)"
+  else
+    echo "no matching tested publish output; building it"
+    publish
+  fi
   rm -rf "$out/package"
   make_zip "$PWD/$out/package/NvrView-$version-win-x64.zip"
   ls -l "$out/package"
@@ -206,11 +256,12 @@ case "${1:-}" in
   build) build ;;
   publish) NVRVIEW_APP_PUBLISHED=1; exe="$out/publish/NvrView.App/release_win-x64/NvrView.App.exe"; publish ;;
   package) package ;;
+  mark-tested) mark_tested ;;
   update) update ;;
   selftest) shift; selftest "$@" ;;
   startup) shift; startup "$@" ;;
   *)
-    echo "usage: $0 build | publish | package | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
+    echo "usage: $0 build | publish | mark-tested | package | selftest [SECONDS] [APP OPTIONS...] | startup [SECONDS] | update" >&2
     exit 2
     ;;
 esac
