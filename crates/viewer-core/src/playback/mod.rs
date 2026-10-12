@@ -617,6 +617,22 @@ impl Core {
     /// camera already in the playback), [`RecError::Limit`] beyond
     /// [`MAX_CAMERAS`], [`RecError::Closed`].
     pub fn playback_add_camera(&self, playback: u64, json: &str) -> Result<u64, RecError> {
+        let (tile, pending) = self.playback_add_camera_deferred(playback, json)?;
+        pending.publish();
+        Ok(tile)
+    }
+
+    /// [`Core::playback_add_camera`], holding back the new tile's actions
+    /// until the returned [`PlaybackPending`] is published (the C function
+    /// writes the tile's ID first).
+    ///
+    /// # Errors
+    /// As [`Core::playback_add_camera`].
+    pub fn playback_add_camera_deferred(
+        &self,
+        playback: u64,
+        json: &str,
+    ) -> Result<(u64, PlaybackPending), RecError> {
         let cmd = self.pb_cmd(playback)?;
         let c = cam_req(&Value::Object(object(json)?), Tier::Sub)?;
         {
@@ -668,8 +684,7 @@ impl Core {
         if cmd.try_send(Cmd::Add(setup, Some(dev))).is_err() {
             warn!(playback, "playback busy: camera not added");
         }
-        let _ = gate.send(());
-        Ok(tile)
+        Ok((tile, PlaybackPending { gates: vec![gate] }))
     }
 
     /// `nv_playback_remove_camera`: removes one camera; its tile closes
