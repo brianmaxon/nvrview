@@ -91,3 +91,11 @@ playback-split-here          macos    gap: the Windows fake store (FakeRecording
 capture-picture-tile        macos    gap: Windows Save Picture is CAP-P2
 capture-picture-zoomed      macos    gap: Windows Save Picture is CAP-P2
 capture-picture-fisheye     macos    gap: Windows Save Picture is CAP-P2
+capture-encoder-priming     macos    gap: Windows recording is CAP-W5
+capture-record-tile         macos    gap: Windows recording is CAP-W5
+capture-record-indicator    macos    gap: Windows recording is CAP-W5
+capture-record-disk-low     macos    gap: Windows recording is CAP-W5
+capture-record-main-limit   macos    gap: Windows recording is CAP-W5
+capture-call-record-button  macos    gap: Windows recording is CAP-W5
+capture-record-real-core    macos    gap: Windows recording is CAP-W5
+capture-call-record-real-core macos    gap: Windows recording is CAP-W5

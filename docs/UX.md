@@ -127,9 +127,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture is built on macOS (see "Save picture") and planned
-> on Windows; recording and PTZ are not built yet: their buttons and menu
-> items are in place and say so (below).
+> the keys). Save picture and recording are built on macOS (see "Save
+> picture" and "Recording") and planned on Windows; PTZ is not built yet:
+> its buttons and menu items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -171,8 +171,8 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** Record, the PTZ pad, Presets, Lens, and
-  the long tail's record items are shown in their final places
+- **Not built yet:** the PTZ pad, Presets and Lens (and, on Windows,
+  Record and the long tail's record items) are shown in their final places
   (so the layout and the overflow are the final ones), dimmed, with "coming
   soon" in the tooltip. A click, the key (R) or the menu item
   shows "Start Recording is coming soon" (and so on) over the stage for
@@ -250,9 +250,8 @@ overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
 
-> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
-> the others say "… is coming soon" until capture lands, and the Option
-> keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
+> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
+> work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
 > Ctrl+Shift+R exist (`TileKeyMap`); T works, the others say "… is coming
 > soon"; there is no Camera menu (the window's header has no menu bar) and
 > the Alt keys come with PTZ. They act on the selected tile,
@@ -277,9 +276,11 @@ with = or a digit works on every keyboard layout that has those keys.
   As…, Start Recording (Stop Recording while recording), Start
   Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
   of the running recordings, each with Stop), Stop All Recordings, Open
-  Pictures Folder, Open Recordings Folder. Until recording and PTZ land,
-  Presets and Recordings hold a disabled placeholder, Stop All Recordings
-  is disabled, and the other items say "coming soon". Pan and Tilt… is
+  Pictures Folder, Open Recordings Folder. Recordings lists the running
+  recordings ("Stop Channel 1 (0:42)"), Stop All Recordings is enabled
+  while any runs; until PTZ lands, Presets holds a disabled placeholder
+  and Pan and Tilt… says "coming soon". In a viewer window ⇧⌘R records
+  the selected tile's call while its call is open, and is R otherwise. Pan and Tilt… is
   enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
   so they also work in a call window.
 - **Windows:** the F1 help overlay lists them, the keys are mapped in
@@ -608,7 +609,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Recording
 
-> **Planned** (CAPTURE.md, "Live recording"; not built yet).
+> **Built on macOS** (CAPTURE.md, "Live recording", "Implementation status
+> (M5)"); Windows is CAP-W5.
 
 Recording saves a camera's live stream on this computer as an MP4 (video
 as received, the camera's audio).
@@ -642,6 +644,32 @@ as received, the camera's audio).
 - These are this computer's recordings of what it received, gaps included,
   not the NVR's own recordings (PLAYBACK.md, "Local captures and the NVR's
   recordings").
+
+Details settled while building it (macOS):
+
+- **Settings > Capture > Recordings:** "Save recordings to" (Choose… and
+  Reset), "Record from" (Main stream or Sub-stream), "Stop after" (1 minute
+  to 12 hours) and "or at" (0.1 to 64 GB). "Share-safe names" in Pictures
+  applies to live recordings too. Every change is sent to the core at once
+  and applies to recordings started afterwards.
+- **Record or Stop on a grid tile** stops every recording of that camera
+  (a call recording included) or starts a live one from "Record from";
+  "Record Main Stream" and "Record Sub-stream" are in the "…" and
+  right-click menus while the camera is not recorded.
+- **The pill** sits outside the hover header, so it stays when the header
+  fades: in the corner opposite the corner indicators, except that the top
+  right (where the header's buttons are) becomes the top left. The title
+  starts after it there.
+- **Messages** over the stage of the windows showing the camera (else the
+  active window): a refused start says which limit ("Already recording 4
+  cameras…", "Not enough free disk space to record: at least 2 GB is
+  needed.", "This device already records two main streams…" with a
+  "Record Sub-stream" button that starts the sub-stream instead); an end
+  says why ("Recording saved", "Recording stopped at its 60 minutes
+  limit", "… the disk is almost full", …) with Show in Finder when the
+  file is there. Nothing is said for the recordings a quit stops.
+- **Toolbar:** "● N recording" while any runs; its menu lists them with
+  Stop, then Stop All Recordings and Open Recordings Folder.
 
 ## Pan, tilt, and zoom
 
@@ -976,7 +1004,9 @@ Details settled while building it (Windows):
 
 ### Recording calls
 
-> **Planned** (CAPTURE.md, "Recording calls"; not built yet).
+> **Built on macOS** (CAPTURE.md, "Recording calls", "Implementation status
+> (M5)"), except the per-doorbell Default, Always, Never: "Record calls" is
+> one setting for every doorbell. Windows is CAP-W5.
 
 - **Setting:** Settings > Alerts > Doorbell calls, **"Record calls"**, off
   by default, and per doorbell Default, Always, or Never. Turning it on the
@@ -1088,8 +1118,9 @@ example to keep it beside other work. Both apps follow these rules.
     Call, Save Picture with ⇧⌘R and ⇧⌘P), with no layout items; focus,
     split and dropping a camera do nothing. The tile asks for the main
     stream while its picture, zoom included, is drawn wider than the
-    sub-stream's (`CallWindowQuality`). Save Picture and Record Call say
-    "coming soon" until capture lands; no recording pill yet.
+    sub-stream's (`CallWindowQuality`). Record Call (the header button, the
+    menus, ⇧⌘R) starts and stops the call recording, and the call bar shows
+    "● Recording 0:42" before its text while it runs.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows).
