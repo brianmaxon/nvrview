@@ -18,8 +18,8 @@ namespace NvrView.App;
 /// <summary>The header items whose action lands later: their buttons, menu items and keys are in place and say so.</summary>
 internal static class TileActionStub
 {
-    /// <summary>PTZ: not built yet (Save Picture and recording are built).</summary>
-    public static bool IsPending(TileHeaderItem item) => item is TileHeaderItem.PanTilt or TileHeaderItem.Presets or TileHeaderItem.Lens;
+    /// <summary>Every item is built now (Save Picture, recording, PTZ); the hook stays for an item that lands later.</summary>
+    public static bool IsPending(TileHeaderItem item) => false;
 
     /// <summary>"Save Picture is coming soon".</summary>
     public static string Message(string label) => $"{label.TrimEnd('…')} is coming soon";
@@ -138,6 +138,15 @@ internal sealed partial class StageView
                     _viewer.Calls.End(camera, "closed");
                 }
                 break;
+            case TileHeaderItem.PanTilt:
+                ShowPtz(PtzMode.Pad, t, from);
+                break;
+            case TileHeaderItem.Lens:
+                ShowPtz(PtzMode.Lens, t, from);
+                break;
+            case TileHeaderItem.Presets:
+                ShowPresets(t, from);
+                break;
             case TileHeaderItem.ResetZoom or TileHeaderItem.ResetPosition:
                 ResetTile(t);
                 break;
@@ -250,6 +259,8 @@ internal sealed partial class StageView
                 }
             case TileHeaderItem.CallsOpenIn:
                 return CallsOpenInMenu(camera, entry.Label);
+            case TileHeaderItem.Presets:
+                return PresetsSubItem(camera, entry.Label);
             case TileHeaderItem.FillTile:
                 {
                     var fill = new ToggleMenuFlyoutItem { Text = entry.Label, IsChecked = Fills(t) };

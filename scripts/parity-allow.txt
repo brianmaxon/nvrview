@@ -91,8 +91,3 @@ playback-split-here          macos    gap: the Windows fake store (FakeRecording
 export-follow-cut            macos    gap: Windows follow cut export needs the follow and grid views (W3); the writer (MfExport.RenderEdit, IEditFrames) is built and the rules are unit-tested
 export-grid                  macos    gap: Windows grid export needs the follow and grid views (W3); see export-follow-cut
 export-real-core            macos    gap: the Windows playback steps run on the fakes only (playback-real-core); a keyframe trim and a range download against the mock are not driven on Windows yet
-ptz-pad-hold                macos    gap: Windows PTZ controls are PTZ-Z3
-ptz-deadman                 macos    gap: Windows PTZ controls are PTZ-Z3
-ptz-preset-recall           macos    gap: Windows PTZ controls are PTZ-Z3
-ptz-lens-clamp              macos    gap: Windows PTZ controls are PTZ-Z3
-ptz-lens1-addressing        macos    gap: Windows PTZ controls are PTZ-Z3

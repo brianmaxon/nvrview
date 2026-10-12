@@ -32,6 +32,8 @@ internal sealed class CoreEvent
     public string? Model;
     public string? Key;
     public string? What;
+    public string? Action;
+    public int? Position;
     public int Channel = -1;
     public int Lens;
     public int Status;
@@ -109,6 +111,8 @@ internal sealed class CoreEvent
                 case "model": e.Model = v.GetString(); break;
                 case "key": e.Key = v.GetString(); break;
                 case "what": e.What = v.GetString(); break;
+                case "action": e.Action = v.GetString(); break;
+                case "position" when v.ValueKind == JsonValueKind.Number: e.Position = (int)Long(v); break;
                 case "channel" when v.ValueKind == JsonValueKind.Number: e.Channel = (int)Long(v); break;
                 case "lens" when v.ValueKind == JsonValueKind.Number: e.Lens = (int)Long(v); break;
                 case "status" when v.ValueKind == JsonValueKind.Number: e.Status = (int)Long(v); break;

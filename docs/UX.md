@@ -127,10 +127,8 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture and recording are built on both apps (see "Save
-> picture" and "Recording"); PTZ is built on macOS (see "Pan, tilt, and
-> zoom") and not yet on Windows: there its buttons and menu
-> items are in place and say so (below).
+> the keys). Save picture, recording, and PTZ are built on both apps (see
+> "Save picture", "Recording", and "Pan, tilt, and zoom").
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -172,10 +170,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet (Windows):** the PTZ pad, Presets and Lens are shown in
-  their final places (so the layout and the overflow are the final ones),
-  dimmed, with "coming soon" in the tooltip. A click, the key or the menu
-  item shows "Presets is coming soon" (and so on) over the stage for
+- **Not built yet:** nothing now. An item whose action lands later is
+  shown in its final place (so the layout and the overflow are the final
+  ones), dimmed, with "coming soon" in the tooltip. A click, the key or the
+  menu item shows "… is coming soon" over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -254,12 +252,12 @@ overlay (Windows) so they can be discovered.
 ### Capture and camera keys
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
-> work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`) and work (Ctrl+Shift+R records the
-> selected tile's call while its call is open, and is R otherwise); there is
-> no Camera menu (the window's header has no menu bar: Stop all recordings
-> and Open recordings folder are in its "…" menu) and the Alt keys come with
-> PTZ. They act on the selected tile,
+> work; the Option keys are PTZ ("Pan, tilt, and zoom"). **Windows:** P,
+> Shift+P, R, T, Ctrl+Shift+P and Ctrl+Shift+R exist (`TileKeyMap`) and work
+> (Ctrl+Shift+R records the selected tile's call while its call is open, and
+> is R otherwise); there is no Camera menu (the window's header has no menu
+> bar: Stop all recordings and Open recordings folder are in its "…" menu)
+> and the Alt keys are PTZ ("Pan, tilt, and zoom"). They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -714,11 +712,16 @@ records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
 
-> **Built on macOS** (Z2; Windows is Z3). The pad and lens popovers under
-> the header buttons and the Camera menu's "Pan and Tilt…", the presets
-> menu (recall only; also Camera ▸ Presets), the Option keys, and the stop
-> on release, window close, tile close and focus loss. Per-camera grants
-> for automation are in Settings ▸ Cameras.
+> **Built on both apps** (Z2 on macOS, Z3 on Windows). The pad and lens
+> popovers (Windows: flyouts) under the header buttons and the Camera
+> menu's "Pan and Tilt…" (Windows: the header "…" and right-click menus'
+> "Pan and Tilt…", "Zoom and Focus…" and "Presets", which has no Camera
+> menu), the presets menu (recall only), the Option (Windows: Alt) keys,
+> and the stop on release, window close, tile close and focus loss (on
+> Windows also when the window stops being the active one). Per-camera
+> grants for automation are in Settings ▸ Cameras. On Windows an Alt key
+> that drives a camera is swallowed, so releasing Alt does not open the
+> window's system menu.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device

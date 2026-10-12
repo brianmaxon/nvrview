@@ -27,12 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCES = {
     "macos": [ROOT / "apps/macos/Sources/NVRView/SelfTest.swift"],
-    "windows": [
-        ROOT / "apps/windows/NvrView.App/SelfTest.cs",
-        ROOT / "apps/windows/NvrView.App/SelfTest.Capture.cs",
-        ROOT / "apps/windows/NvrView.App/SelfTest.Recording.cs",
-        ROOT / "apps/windows/NvrView.App/SelfTest.Export.cs",
-    ],
+    "windows": sorted((ROOT / "apps/windows/NvrView.App").glob("SelfTest*.cs")),
 }
 ALLOW = ROOT / "scripts/parity-allow.txt"
 MARKER = re.compile(r"^\s*//+\s*parity:\s*(\S+)\s*$")
