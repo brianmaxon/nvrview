@@ -252,6 +252,9 @@ public struct Incident: Sendable, Equatable, Identifiable, Decodable {
     public var group: String?
     public var start: Int64
     public var end: Int64
+    /// Seconds of recording a playback or download takes before the start
+    /// and after the end (`margin_s`).
+    public var margin: Int64
     public var kinds: [String]
     public var growing: Bool
     public var edited: Bool
@@ -262,6 +265,7 @@ public struct Incident: Sendable, Equatable, Identifiable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case key, id, name, group, start, end, kinds, growing, edited, locked, cameras, events, downloads
+        case margin = "margin_s"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -272,6 +276,7 @@ public struct Incident: Sendable, Equatable, Identifiable, Decodable {
         group = try c.decodeIfPresent(String.self, forKey: .group)
         start = try c.decode(Int64.self, forKey: .start)
         end = try c.decode(Int64.self, forKey: .end)
+        margin = try c.decodeIfPresent(Int64.self, forKey: .margin) ?? 0
         kinds = try c.decodeIfPresent([String].self, forKey: .kinds) ?? []
         growing = try c.decodeIfPresent(Bool.self, forKey: .growing) ?? false
         edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
@@ -466,6 +471,12 @@ public enum RecordingsRequest {
     /// `nv_recordings_want`.
     public static func want(_ cameras: [RecordingCamera], days: [Int64], force: Bool = false) -> String {
         #"{"cameras":\#(Self.cameras(cameras)),"days":[\#(days.map(String.init).joined(separator: ","))],"force":\#(force)}"#
+    }
+
+    /// `nv_recordings_want` with `months` alone (minor 7): only those
+    /// months' calendars (any second within each month).
+    public static func want(_ cameras: [RecordingCamera], months: [Int64], force: Bool = false) -> String {
+        #"{"cameras":\#(Self.cameras(cameras)),"months":[\#(months.map(String.init).joined(separator: ","))],"force":\#(force)}"#
     }
 
     /// `nv_recordings_hold_today`.

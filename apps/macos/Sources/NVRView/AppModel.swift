@@ -902,9 +902,10 @@ final class AppModel {
             // need not hear of every download step.
             recordings.apply(e)
             return
-        case .playback:
-            // No playback views yet (milestone P, M2).
-            break
+        case .playback(let e):
+            // The recordings windows' players (milestone P, M2).
+            recordings.applyPlayback(e)
+            return
         }
         notify()
     }

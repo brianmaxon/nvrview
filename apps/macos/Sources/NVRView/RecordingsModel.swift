@@ -120,7 +120,13 @@ final class RecordingsModel {
         }
     }
 
-    func shutdown() { closed = true }
+    /// The app quits: every open playback closes first (its plays stop on
+    /// the device), then nothing more is asked of the core.
+    func shutdown() {
+        for player in players.values.compactMap(\.value) { player.close() }
+        players.removeAll()
+        closed = true
+    }
 
     private static func quoted(_ s: String) -> String {
         let data = (try? JSONSerialization.data(withJSONObject: [s], options: [.withoutEscapingSlashes])) ?? Data()
@@ -237,6 +243,19 @@ final class RecordingsModel {
             return nil
         } catch {
             return error == .limit ? "Too many days are waiting to be searched; try again shortly" : "Could not search (status \(error.code))"
+        }
+    }
+
+    /// Asks for months' calendars alone (minor 7; a calendar paged to
+    /// another month). Returns a message when the core refused.
+    @discardableResult
+    func want(_ cameras: [RecordingCamera], months: [Int64]) -> String? {
+        guard available, !cameras.isEmpty, !months.isEmpty, let core = core() else { return nil }
+        do throws(CoreStatus) {
+            try core.recordingsWant(json: RecordingsRequest.want(cameras, months: months))
+            return nil
+        } catch {
+            return error == .limit ? "Too many days are waiting to be searched; try again shortly" : nil
         }
     }
 
@@ -484,6 +503,78 @@ final class RecordingsModel {
     private func publishDownloads() {
         publishScheduled = false
         downloads = board.downloads
+    }
+
+    // MARK: Playback (minor 6)
+
+    /// A weak reference to a window's player, for routing events.
+    private final class PlayerRef {
+        weak var value: RecordingsPlayer?
+        init(_ p: RecordingsPlayer) { value = p }
+    }
+
+    @ObservationIgnored private var players: [UInt64: PlayerRef] = [:]
+
+    func makePlayer() -> RecordingsPlayer { RecordingsPlayer(model: self) }
+
+    /// Opens a playback for `player` (its events go to it).
+    func openPlayback(json: String, cameras: [RecordingCamera], player: RecordingsPlayer) throws(CoreStatus)
+        -> CoreBridge.OpenedTiles
+    {
+        guard available, !closed else { throw .unsupported }
+        let opened = try bridge.openPlayback(json: json, cameras: cameras.map { (UInt8($0.channel), .sub) })
+        players[opened.id] = PlayerRef(player)
+        return opened
+    }
+
+    func closePlayback(_ playback: UInt64, tiles: [CoreTile]) {
+        players[playback] = nil
+        bridge.closePlayback(playback, tiles: tiles)
+    }
+
+    func forgetPlaybackTiles(_ tiles: [CoreTile]) { bridge.forgetTiles(tiles) }
+
+    func removePlaybackCamera(_ playback: UInt64, tile: CoreTile) {
+        bridge.removePlaybackCamera(playback, tile: tile)
+    }
+
+    func addPlaybackCamera(_ playback: UInt64, camera: RecordingCamera) -> CoreTile? {
+        do throws(CoreStatus) {
+            return try bridge.addPlaybackCamera(
+                playback, json: PlaybackCamera(camera: camera).json, channel: UInt8(camera.channel), tier: .sub)
+        } catch {
+            notice = error == .limit ? "At most four cameras play at once" : "Could not add the camera (status \(error.code))"
+            return nil
+        }
+    }
+
+    /// A playback call that returns at once (play, pause, seek, rate).
+    func playbackCall(_ body: (any CoreAPI) throws(CoreStatus) -> Void) {
+        guard let core = core() else { return }
+        do throws(CoreStatus) { try body(core) } catch {
+            if error != .unknownID { notice = "The player could not do that (status \(error.code))" }
+        }
+    }
+
+    func playbackPosition(_ playback: UInt64) -> PlaybackPosition? {
+        guard !closed else { return nil }
+        return bridge.playbackPosition(playback)
+    }
+
+    /// A playback tile's sound through the core's tile audio path.
+    func setPlaybackAudio(_ tile: CoreTile, audible: Bool, volume: Float) {
+        guard !closed else { return }
+        try? bridge.setTileAudio(tile, audible: audible, volume: volume)
+    }
+
+    func applyPlayback(_ e: PlaybackEvent) {
+        let id: UInt64
+        switch e {
+        case .state(let p, _, _, _), .camera(let p, _, _, _), .seek(let p, _, _, _), .closed(let p, _): id = p
+        }
+        guard let player = players[id]?.value else { return }
+        if case .closed = e { players[id] = nil }
+        player.apply(e)
     }
 
     // MARK: Events

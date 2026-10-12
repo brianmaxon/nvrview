@@ -155,6 +155,16 @@ optional, default false):
 There is no separate refresh call: pull to refresh is `nv_recordings_want`
 with `"force": true`.
 
+A calendar paged to another month asks for that month alone (minor 7;
+FFI.md, "Recordings"): `"months"` instead of (or beside) `"days"`, any
+second within each month, at most 12. Only the months' calendars (142) are
+searched, after the wanted days:
+
+```json
+{"cameras": [{"device": "d-3f9a0c1b7e2d4a65", "channel": 3}],
+ "months": [1788220800], "force": false}
+```
+
 Query (all members optional except `start` and `end`):
 
 ```json
@@ -1123,6 +1133,7 @@ fields must be ignored.
 ```json
 {"type": "recordings_index", "device": "d-3f9a0c1b7e2d4a65", "state": "busy", "pending_days": 11, "revision": 40}
 {"type": "recordings_day_failed", "device": "d-3f9a0c1b7e2d4a65", "camera": {"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}, "day": 1791504000, "reason": "session closed during the search"}
+{"type": "recordings_month_failed", "device": "d-3f9a0c1b7e2d4a65", "cameras": [{"device": "d-3f9a0c1b7e2d4a65", "channel": 3, "lens": 0}], "month": 1788220800, "reason": "session closed during the search"}
 {"type": "recordings_changed", "device": "d-3f9a0c1b7e2d4a65", "revision": 41, "start": 1791590400, "end": 1791676799}
 {"type": "incidents_changed", "revision": 12}
 {"type": "camera_groups_changed", "revision": 3}
@@ -1149,8 +1160,12 @@ fields must be ignored.
   not be searched. It is **not retried automatically**; the view asks
   again (`nv_recordings_want`) if it still shows that day. `reason` is
   English, for logs, not for parsing.
+- `recordings_month_failed` (minor 7): the calendar of a month asked for
+  alone (`"months"` in `nv_recordings_want`) could not be searched for
+  these cameras; not retried automatically. `month` is its first second.
 - `recordings_changed` names one device and the range of days that
-  changed (`start` of the first day, `end` of the last). The lane reports
+  changed (`start` of the first day, `end` of the last); a month asked
+  for alone (minor 7) is reported over the whole month. The lane reports
   one camera-day at a time; the owner coalesces those into one event per
   device (at most one a second while filling), so a range may cover days
   that did not change. `incidents_changed` follows when incidents in it

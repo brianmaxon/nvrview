@@ -149,6 +149,12 @@ pub fn day_start(s: Secs) -> Secs {
     s.div_euclid(86_400) * 86_400
 }
 
+/// The first and last second of the month that contains `s`.
+pub fn month_span(s: Secs) -> (Secs, Secs) {
+    let (first, last) = indexer::month_bounds(s);
+    (secs(first), secs(last))
+}
+
 /// Supplies the device's current local time in naive seconds. Apps pass a
 /// clock that applies the device's offset from UTC; tests pass a fixed one.
 pub type Clock = std::sync::Arc<dyn Fn() -> Secs + Send + Sync>;

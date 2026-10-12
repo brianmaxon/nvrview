@@ -618,8 +618,11 @@ impl Core {
                 session,
                 events,
                 gate_rx,
-                self.lens.clone(),
-                self.clock.clone(),
+                device::DeviceContext {
+                    lens: self.lens.clone(),
+                    clock: self.clock.clone(),
+                    names_hook: Some(self.recordings.names_hook(&key)),
+                },
             );
             if let Some(s) = handle.session() {
                 self.recordings.device_added(&key, id, s);

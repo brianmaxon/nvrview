@@ -441,3 +441,88 @@ async fn requests_wait_for_the_device_and_fail_once_its_session_ends() {
     r.lane.stop().await;
     s.close_shared().await;
 }
+
+fn months_indexed(events: &[LaneEvent]) -> Vec<(Vec<DeviceCamera>, Secs)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            LaneEvent::MonthIndexed { cameras, month, .. } => Some((cameras.clone(), *month)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn months_asked_alone_fetch_only_their_calendars_once() {
+    let nvr = spawn_mock();
+    let s = session(&nvr);
+    let r = rig(s.clone(), |_| {});
+    let cams = [IndexedChannel::first(0), IndexedChannel::first(1)];
+    let september = secs(DateTime::new(2026, 9, 1, 0, 0, 0).unwrap());
+
+    // Two months, any second within each: one 142 per month for both
+    // cameras, newest month first, and no day searched.
+    r.lane
+        .request_months(&cams, &[september + 86_400 * 3, day(9) + 3600], false)
+        .unwrap();
+    r.settle().await;
+    let events = r.take();
+    assert_eq!(
+        months_indexed(&events),
+        vec![
+            (vec![cam(0), cam(1)], day(1)),
+            (vec![cam(0), cam(1)], september)
+        ]
+    );
+    assert!(indexed(&events).is_empty());
+    assert_eq!(nvr.command_count(142), 2);
+    assert_eq!(nvr.command_count(14), 0);
+    {
+        let idx = r.index.lock().unwrap();
+        assert!(idx.recorded_days(cam(0)).contains(&day(8)));
+        assert!(idx.recorded_days(cam(0)).contains(&day(10)));
+    }
+
+    // September ended before it was fetched: final, not asked again. The
+    // current month is fresh for a minute.
+    r.lane
+        .request_months(&cams, &[september, day(10)], false)
+        .unwrap();
+    r.settle().await;
+    assert!(months_indexed(&r.take()).is_empty());
+    assert_eq!(nvr.command_count(142), 2);
+
+    // Forced: asked again.
+    r.lane
+        .request_months(&cams[..1], &[september], true)
+        .unwrap();
+    r.settle().await;
+    assert_eq!(months_indexed(&r.take()), vec![(vec![cam(0)], september)]);
+    assert_eq!(nvr.command_count(142), 3);
+
+    // Wanted days come before months asked alone.
+    r.lane
+        .request_months(&cams[..1], &[september], true)
+        .unwrap();
+    r.lane.request_days(&cams[..1], &[day(9)], true).unwrap();
+    r.settle().await;
+    let events = r.take();
+    let first_day = events
+        .iter()
+        .position(|e| matches!(e, LaneEvent::DayIndexed { .. }))
+        .unwrap();
+    let september_at = events
+        .iter()
+        .position(|e| matches!(e, LaneEvent::MonthIndexed { month, .. } if *month == september))
+        .unwrap();
+    assert!(first_day < september_at, "{events:?}");
+
+    // More than a year at once is refused.
+    let many: Vec<Secs> = (0..13).map(|n| day(1) - n * 32 * 86_400).collect();
+    assert_eq!(
+        r.lane.request_months(&cams, &many, false),
+        Err(LaneError::Limit)
+    );
+    r.lane.stop().await;
+    s.close_shared().await;
+}

@@ -24,9 +24,10 @@
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
- * playback (section 6).
+ * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
+ * calendar alone) and the recordings_month_failed event.
  */
-#define NV_ABI_MINOR 6
+#define NV_ABI_MINOR 7
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -903,13 +904,16 @@ enum NvStatus nv_recordings_events(struct NvCore *core,
 
 /**
  * Asks for these cameras' days to be in the index:
- * {"cameras":[{"device":"<key>","channel":3}],"days":[S,...],"force":false}
- * (days: any second within each day, device-local). Returns at once;
- * recordings_changed follows for each device as days arrive. Days already
- * indexed are searched again only with "force" (the user's refresh).
- * NV_ERR_LIMIT for more than 31 days or when a device's queue (4096
- * camera-days) would overflow (nothing is queued); NV_ERR_INVALID_ARGUMENT
- * for a camera nv_recordings_enable does not allow.
+ * {"cameras":[{"device":"<key>","channel":3}],"days":[S,...],"months":[S,...],
+ * "force":false} (days and months: any second within each, device-local;
+ * "months", minor 7, asks for only those months' calendars, after the days;
+ * either list may be left out, not both). Returns at once;
+ * recordings_changed follows for each device as days and months arrive.
+ * Days and past months already indexed are searched again only with
+ * "force" (the user's refresh). NV_ERR_LIMIT for more than 31 days or 12
+ * months or when a device's queue (4096 camera-days) would overflow
+ * (nothing is queued); NV_ERR_INVALID_ARGUMENT for a camera
+ * nv_recordings_enable does not allow.
  *
  * # Safety
  * `core` is a live handle; `json` is a NUL-terminated string.

@@ -5,6 +5,7 @@ use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
 use crate::lens::{self, Camera, LensContext, LensProbes, ProbeJob, TileStarts};
+use crate::recordings_owner::{ChannelNamesHook, ReportedChannel};
 use bc_protocol::detection::{self, AlarmState};
 use bc_protocol::session::Command;
 use bc_protocol::stream::StreamTier;
@@ -57,6 +58,14 @@ pub(crate) struct DeviceHandle {
     runtime: Handle,
 }
 
+/// What a device's watch task shares with the rest of the core.
+pub(crate) struct DeviceContext {
+    pub(crate) lens: LensContext,
+    pub(crate) clock: HostClock,
+    /// Told the channels' reported names (the recordings owner).
+    pub(crate) names_hook: Option<ChannelNamesHook>,
+}
+
 impl DeviceHandle {
     /// Starts watching `session`; must be called inside the runtime. No
     /// event is sent until `gate` resolves (or its sender is dropped), so
@@ -67,9 +76,13 @@ impl DeviceHandle {
         session: DeviceSession,
         events: EventSink,
         gate: oneshot::Receiver<()>,
-        lens: LensContext,
-        clock: HostClock,
+        shared: DeviceContext,
     ) -> DeviceHandle {
+        let DeviceContext {
+            lens,
+            clock,
+            names_hook,
+        } = shared;
         let session = Arc::new(session);
         let tiles = Arc::new(TileStarts::default());
         let (stop_tx, stop_rx) = oneshot::channel();
@@ -81,6 +94,7 @@ impl DeviceHandle {
             lens,
             tiles: tiles.clone(),
             clock,
+            names_hook,
         };
         let watcher = tokio::spawn(watch(ctx, stop_rx, gate));
         DeviceHandle {
@@ -554,6 +568,40 @@ struct WatchCtx {
     lens: LensContext,
     tiles: Arc<TileStarts>,
     clock: HostClock,
+    /// Told the channels' reported names and lens counts whenever they
+    /// change (the recordings owner names cameras by them).
+    names_hook: Option<ChannelNamesHook>,
+}
+
+/// The channels' reported names, with how many lenses each camera has
+/// (from the capabilities, or a second-lens probe); channels without a
+/// name are left out.
+fn reported_channels(
+    names: &HashMap<u8, VersionInfo>,
+    detects: Option<&Detects>,
+    probed: &HashMap<u8, u8>,
+) -> HashMap<u8, ReportedChannel> {
+    names
+        .iter()
+        .filter(|(_, v)| !v.name.trim().is_empty())
+        .map(|(ch, v)| {
+            let from_caps = detects
+                .and_then(|d| d.get(ch))
+                .map_or(0, |x| x.lenses.len());
+            let lenses = if from_caps >= 2 {
+                u8::try_from(from_caps).unwrap_or(u8::MAX)
+            } else {
+                probed.get(ch).copied().filter(|n| *n >= 2).unwrap_or(1)
+            };
+            (
+                *ch,
+                ReportedChannel {
+                    name: v.name.trim().to_owned(),
+                    lenses,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Turns session state into events until stopped: `device_state` on every
@@ -575,7 +623,9 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
         lens,
         tiles,
         clock,
+        names_hook,
     } = ctx;
+    let mut reported: Option<HashMap<u8, ReportedChannel>> = None;
     let mut state_rx = session.watch_state();
     let mut channels_rx = session.watch_channels();
     let mut alarms_rx = session.alarms();
@@ -770,6 +820,13 @@ async fn watch(ctx: WatchCtx, mut stop: oneshot::Receiver<()>, gate: oneshot::Re
                 }
                 advance(&mut probes, &mut tasks, &slots, &names, &detects);
             },
+        }
+        if let Some(hook) = &names_hook {
+            let now = reported_channels(&names, detects.as_ref(), probes.known());
+            if reported.as_ref() != Some(&now) {
+                hook(now.clone());
+                reported = Some(now);
+            }
         }
     }
     tasks.shutdown().await;
