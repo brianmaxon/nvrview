@@ -739,7 +739,7 @@ impl Session {
         Ok((id, bytes))
     }
 
-    /// Builds a play (command 5) of one recording file at normal speed,
+    /// Builds a play (command 5) of one recording file at the request's speed,
     /// after a [`Session::replay_seek`] with the same `seq`. Its replies
     /// (a first reply with a stream-info record, then media whose headers
     /// carry `seq`) come with the returned message ID.
@@ -1860,6 +1860,7 @@ mod tests {
             stream: StreamTier::Sub,
             file_id: "file-id-1".into(),
             file_name: "file-name-1".into(),
+            speed: 1,
         };
         let (pid, bytes) = s.start_play(&q, seq).unwrap();
         let play = decode_one(&bytes);

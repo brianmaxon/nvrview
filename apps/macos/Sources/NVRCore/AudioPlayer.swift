@@ -54,11 +54,10 @@ import Synchronization
 /// least: `prepareVoiceProcessing` builds the voice-processing engine when a
 /// call opens (a built engine that was not started does not run the input
 /// device: no microphone in use, measured); Talk only switches to it; after
-/// Talk the engine lingers (`stopVoiceProcessing(linger:)`, 2 minutes), so
-/// pressing Talk again is instant, and playback goes back to a plain engine
-/// when the call ends (`discardVoiceProcessing`) or the linger runs out.
-/// While it lingers the input device keeps running with nothing taken from
-/// it, and the system shows the microphone in use. Never two render blocks
+/// Talk the engine stays until the call ends, so pressing Talk again is
+/// instant, and playback goes back to a plain engine when the call ends
+/// (`discardVoiceProcessing`). Until then the input device keeps running
+/// with nothing taken from it, and the system shows the microphone in use. Never two render blocks
 /// on the core at once: each switch stops one engine and starts the other.
 ///
 /// Voice processing reports a multichannel input (9 channels measured, all
@@ -448,12 +447,13 @@ public final class AudioPlayer: @unchecked Sendable {
     }
 
     /// Stops the microphone at once (nothing more is tapped after this
-    /// returns). The voice-processing engine keeps playing for `linger`
-    /// seconds, so Talk pressed again soon needs no switch (and no gap);
-    /// then playback moves back to a plain engine. While it lingers the
-    /// input device keeps running (the system shows the microphone in use)
-    /// and nothing is taken from it.
-    public func stopVoiceProcessing(linger: Double = AudioPlayer.voiceProcessingLinger) {
+    /// returns). The voice-processing engine keeps playing until
+    /// `discardVoiceProcessing` (the call ended), or for `linger` seconds
+    /// when given, so Talk pressed again needs no switch: moving playback
+    /// back to a plain engine drops about a second of audio (measured).
+    /// While it stays, the input device keeps running (the system shows the
+    /// microphone in use) and nothing is taken from it.
+    public func stopVoiceProcessing(linger: Double? = nil) {
         let ticket = lock.withLock { () -> Int in
             wanted += 1
             if capture != nil {
@@ -462,11 +462,10 @@ public final class AudioPlayer: @unchecked Sendable {
             }
             return wanted
         }
-        queue.asyncAfter(deadline: .now() + linger) { [weak self] in self?.leaveVoiceProcessing(ticket) }
+        if let linger {
+            queue.asyncAfter(deadline: .now() + linger) { [weak self] in self?.leaveVoiceProcessing(ticket) }
+        }
     }
-
-    /// How long a voice-processing engine keeps playing after Talk, s.
-    public static let voiceProcessingLinger = 120.0
 
     /// On the queue: back to a plain engine unless Talk was pressed again.
     private func leaveVoiceProcessing(_ ticket: Int) {

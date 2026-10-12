@@ -263,10 +263,11 @@ ducking); automatic gain control is left on. Measured on one Mac (macOS 26;
 
 So the switches happen where they hurt least: the voice-processing engine is
 built (not started) when a call opens, if the microphone is already allowed;
-Talk only switches to it; after Talk it lingers for 2 minutes with nothing
+Talk only switches to it; after Talk it stays until the call ends with nothing
 taken from the microphone (the system shows the microphone in use), so
 pressing Talk again is instant; playback goes back to a plain engine when
-the call ends or the linger runs out. The slow work runs on a queue of its
+the call ends (switching back drops about a second of audio, so it is not
+done between Talks). The slow work runs on a queue of its
 own, never on the main thread, and never two render blocks on the core at
 once. A device change while voice processing runs rebuilds it (at most 5
 times in 30 s); when that fails the player goes back to plain playback, the

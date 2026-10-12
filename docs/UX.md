@@ -604,8 +604,7 @@ Details settled while building it (macOS):
   speaks, except for 0.15 s after the doorbell is very loud (a peak over
   0.5). Without voice processing it is not captioned while the doorbell's
   audio is audible and carrying sound (and 0.4 s after). Voice processing
-  is prepared when a call opens and stays on for 2 minutes after Talk (or
-  until the call ends), so pressing Talk again does not interrupt the
+  is prepared when a call opens and stays on after Talk until the call ends, so pressing Talk again does not interrupt the
   doorbell's audio; meanwhile the system shows the microphone in use,
   though nothing is taken from it or sent. Switching to
   it and back each interrupts the doorbell's audio briefly (AUDIO.md, "Echo

@@ -38,10 +38,10 @@
 //! `reports` (a lane may call its sink from a request made under `state`).
 //! An index is locked briefly under `state` (the lane locks it alone).
 //!
-//! **Review mode (later).** A playback engine (C10) that pauses a device's
-//! live tiles while several of its cameras play back asks per device key;
-//! everything here is keyed by device key already, and nothing in the
-//! owner depends on live tiles.
+//! **Playback.** The playback engine (`crate::playback`, slice C10) asks
+//! per device key for the index, the device's offset from UTC, and its
+//! session ([`RecordingsHub::playback_device`]); live view keeps running
+//! beside it.
 
 mod config;
 mod downloads;
@@ -516,6 +516,39 @@ impl RecordingsHub {
     pub(crate) fn hub(&self) -> &Arc<Hub> {
         &self.hub
     }
+
+    /// What a playback (slice C10) needs of a camera's device: the index
+    /// that says which files hold which times, the device's offset from
+    /// UTC, and its session and core ID while it is added.
+    ///
+    /// # Errors
+    /// [`RecError::NotConfigured`] before `recordings_configure`,
+    /// [`RecError::InvalidArgument`] for a camera of a device that is not
+    /// enabled or not allowed by its channel list.
+    pub(crate) fn playback_device(
+        &self,
+        key: &str,
+        cam: DeviceCamera,
+    ) -> Result<PlaybackDevice, RecError> {
+        let st = lock(&self.hub.state);
+        sound::check_camera(&st, key, cam)?;
+        let dev = st.devices.get(key).ok_or(RecError::InvalidArgument)?;
+        let added = st.sessions.get(key);
+        Ok(PlaybackDevice {
+            index: dev.index.clone(),
+            utc_offset_s: dev.enable.utc_offset_s,
+            session: added.map(|a| a.session.clone()),
+            id: added.map(|a| a.id),
+        })
+    }
+}
+
+/// A device as a playback sees it ([`RecordingsHub::playback_device`]).
+pub(crate) struct PlaybackDevice {
+    pub(crate) index: Arc<Mutex<DeviceIndex>>,
+    pub(crate) utc_offset_s: i64,
+    pub(crate) session: Option<Arc<DeviceSession>>,
+    pub(crate) id: Option<u64>,
 }
 
 impl Hub {

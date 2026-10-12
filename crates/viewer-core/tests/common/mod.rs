@@ -133,6 +133,9 @@ struct TileRec {
     seen: Vec<Seen>,
     /// The generation of each entry in `seen`.
     gens: Vec<u32>,
+    /// When each entry in `seen` happened, on the runtime's clock (for
+    /// tiles that run as tasks on a test runtime).
+    times: Vec<Option<tokio::time::Instant>>,
     configures: usize,
     decodes: usize,
     answered: usize,
@@ -194,6 +197,24 @@ impl Recorder {
             .into_iter()
             .filter(|(g, _)| *g == generation)
             .map(|(_, s)| s)
+            .collect()
+    }
+
+    /// Every `Decode` with its generation, timestamp, and when it happened
+    /// on the runtime's clock.
+    pub fn decode_times(&self, tile: u64) -> Vec<(u32, u64, tokio::time::Instant)> {
+        let tiles = self.tiles.lock().unwrap();
+        let Some(t) = tiles.get(&tile) else {
+            return Vec::new();
+        };
+        t.seen
+            .iter()
+            .zip(&t.gens)
+            .zip(&t.times)
+            .filter_map(|((s, g), at)| match (s, at) {
+                (Seen::Decode { pts, .. }, Some(at)) => Some((*g, *pts, *at)),
+                _ => None,
+            })
             .collect()
     }
 
@@ -354,6 +375,11 @@ impl Callbacks for Recorder {
             };
             rec.seen.push(seen);
             rec.gens.push(generation);
+            rec.times.push(
+                tokio::runtime::Handle::try_current()
+                    .ok()
+                    .map(|_| tokio::time::Instant::now()),
+            );
             if answer.is_some() {
                 rec.answered += 1;
             }

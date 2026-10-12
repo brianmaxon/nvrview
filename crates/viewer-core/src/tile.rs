@@ -7,16 +7,26 @@
 //! that queue drops to the next keyframe and reports a discontinuity, and the
 //! pipeline's own backpressure bounds what is handed to the decoder. Decoder
 //! results come in through a bounded channel that never blocks the sender.
+//!
+//! A playback tile (docs/FFI-RECORDINGS.md, section 6) is the same tile fed
+//! by the playback engine instead of a subscription ([`Source::Feed`]): its
+//! generation 0 is an empty placeholder, every seek is a new generation
+//! ([`TileCommand::Playback`]) shown once the picture the engine names has
+//! been decoded, it reports its decode latency and backlog back through the
+//! feed, it sends no `tile_tier` events (the playback reports its own), and
+//! it does no live sound analysis.
 
 use crate::audio::{AudioFrame, AudioHub, TileAudio, TileAudioControl, TileAudioLink, TileConfig};
 use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
+use crate::playback::feed::{FeedItem, FeedRx};
 use crate::sound::{SoundHub, TileSoundLink};
 use crate::{Callbacks, in_callback};
 use bc_protocol::media::{Codec as MediaCodec, Record};
 use bc_protocol::stream::StreamTier;
 use bc_session::{Item, Subscription};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -77,7 +87,59 @@ pub(crate) enum TileCommand {
     },
     /// The app asked again for the tier already requested.
     Reaffirm,
+    /// A playback tile's next generation (a seek or a restart of its play),
+    /// numbered by the playback; shown once the feed's target picture has
+    /// been decoded, or at once, cleared, when the feed's first item is
+    /// [`FeedItem::Clear`].
+    Playback {
+        generation: u32,
+        tier: StreamTier,
+        feed: FeedRx,
+    },
 }
+
+/// Where a generation's media comes from.
+pub(crate) enum Source {
+    /// A live subscription.
+    Live(Subscription),
+    /// The playback engine.
+    Feed(FeedRx),
+    /// Nothing (a playback tile's generation 0).
+    Placeholder,
+}
+
+impl Source {
+    /// The next item; `None` once a live session has ended for good.
+    async fn recv(&mut self) -> Option<FeedItem> {
+        match self {
+            Source::Live(s) => s.recv().await.map(FeedItem::Item),
+            Source::Feed(f) => Some(f.recv().await),
+            Source::Placeholder => std::future::pending().await,
+        }
+    }
+
+    fn dropped(&self) -> u64 {
+        match self {
+            Source::Live(s) => s.dropped(),
+            Source::Feed(f) => f.dropped(),
+            Source::Placeholder => 0,
+        }
+    }
+
+    fn feed(&self) -> Option<&FeedRx> {
+        match self {
+            Source::Feed(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+/// How long a playback generation may take to be shown before it is
+/// abandoned (the engine gives up on a camera sooner and clears it).
+const PLAYBACK_START_LIMIT: Duration = Duration::from_secs(60);
+
+/// Decodes remembered per generation for measuring the decode latency.
+const LATENCY_SAMPLES: usize = 32;
 
 /// What a tile thread needs from the core.
 #[derive(Clone)]
@@ -157,6 +219,13 @@ pub(crate) struct TileHandle {
     runner: Option<Runner>,
 }
 
+impl TileHandle {
+    /// A sender of commands to the tile (for the playback engine).
+    pub(crate) fn commands(&self) -> mpsc::Sender<TileCommand> {
+        self.commands.clone()
+    }
+}
+
 /// What runs a tile.
 enum Runner {
     /// A thread of its own (apps).
@@ -218,6 +287,8 @@ pub(crate) struct TileStart {
     pub(crate) device: u64,
     pub(crate) channel: u8,
     pub(crate) tier: StreamTier,
+    /// A playback tile: fed by the playback engine, no live sound analysis.
+    pub(crate) playback: bool,
 }
 
 /// Starts a tile thread. It does nothing until `gate` resolves (or its
@@ -226,7 +297,7 @@ pub(crate) struct TileStart {
 /// ends at once with `login_failed`, as it does when its session ends later.
 pub(crate) fn spawn(
     start: TileStart,
-    sub: Option<Subscription>,
+    sub: Option<Source>,
     ctx: TileContext,
     audio: Arc<TileAudioControl>,
     gate: oneshot::Receiver<()>,
@@ -236,6 +307,7 @@ pub(crate) fn spawn(
         device,
         channel,
         tier,
+        playback,
     } = start;
     let (tx, rx) = mpsc::channel(RESULTS_CAPACITY);
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMANDS_CAPACITY);
@@ -246,7 +318,12 @@ pub(crate) fn spawn(
     let events = ctx.events.clone();
     let hub = ctx.audio.clone();
     let meter = audio.meter.clone();
-    let sound = ctx.sound.add_tile(id, device, channel);
+    // Recorded audio is not live: no alarms or loudness from playback.
+    let sound = if playback {
+        None
+    } else {
+        ctx.sound.add_tile(id, device, channel)
+    };
     let state = TileThread {
         closed_reported: closed_reported.clone(),
         id,
@@ -274,6 +351,7 @@ pub(crate) fn spawn(
         last_video_pts: None,
         next_generation: 1,
         stale_results: 0,
+        playback,
     };
     let runner = if state.ctx.tile_threads {
         Runner::Thread(
@@ -317,8 +395,11 @@ const OTHER_CLOCK_US: i64 = 5_000_000;
 struct Generation {
     generation: u32,
     tier: StreamTier,
-    sub: Option<Subscription>,
+    sub: Option<Source>,
     p: TilePipeline,
+    /// Playback: decodes sent and when (pts, core clock µs), to measure
+    /// the decode latency.
+    sent: VecDeque<(u64, u64)>,
     /// Camera timestamp of the picture the app reported decoded last.
     last_decoded_pts: Option<u64>,
     /// The device answered the start with 400 and the session is waiting
@@ -333,17 +414,52 @@ struct Generation {
 }
 
 impl Generation {
-    fn new(generation: u32, tier: StreamTier, sub: Option<Subscription>, p: TilePipeline) -> Self {
+    fn new(generation: u32, tier: StreamTier, sub: Option<Source>, p: TilePipeline) -> Self {
         Generation {
             generation,
             tier,
             sub,
             p,
+            sent: VecDeque::new(),
             last_decoded_pts: None,
             waiting: false,
             video_seen: false,
             info_only_since: None,
             info_only_reported: false,
+        }
+    }
+
+    fn feed(&self) -> Option<&FeedRx> {
+        self.sub.as_ref().and_then(Source::feed)
+    }
+
+    /// Playback: notes a `Decode` sent now.
+    fn note_sent(&mut self, pts: u64, now_us: u64) {
+        if self.feed().is_none() {
+            return;
+        }
+        if self.sent.len() == LATENCY_SAMPLES {
+            self.sent.pop_front();
+        }
+        self.sent.push_back((pts, now_us));
+    }
+
+    /// Playback: a picture was decoded; measures its latency.
+    fn note_decoded(&mut self, pts: u64, now_us: u64) {
+        let Some(i) = self.sent.iter().position(|(p, _)| *p == pts) else {
+            return;
+        };
+        let (_, at) = self.sent[i];
+        self.sent.drain(..=i);
+        if let Some(f) = self.feed() {
+            f.note_latency(now_us.saturating_sub(at));
+        }
+    }
+
+    /// Playback: publishes the pipeline's backlog to the engine.
+    fn publish_backlog(&self) {
+        if let Some(f) = self.feed() {
+            f.set_backlog((self.p.queued_units() + self.p.in_flight()) as u64);
         }
     }
 
@@ -470,6 +586,8 @@ struct Starting {
     first_decoded: Option<Instant>,
     /// Set once it may be shown.
     ready: Option<Ready>,
+    /// Playback: shown cleared (`NV_ACTION_CLEAR` once it is current).
+    clear: bool,
 }
 
 /// The tile's generations: the one shown, and at most one starting.
@@ -489,7 +607,7 @@ impl Streams {
     /// shown. Only for tiers on one clock ([`one_clock`]) and timestamps within
     /// [`OTHER_CLOCK_US`]; otherwise its first decoded picture will do.
     /// [`Streams::cap`] bounds the wait.
-    fn apply(&mut self, r: DecoderResult, stale: &mut u64) {
+    fn apply(&mut self, r: DecoderResult, stale: &mut u64, now_us: u64) {
         let g = if r.generation == self.current.generation {
             &mut self.current
         } else if let Some(s) = self
@@ -506,6 +624,7 @@ impl Streams {
             ResultKind::Decoded(pts) => {
                 g.p.decoded(pts);
                 g.last_decoded_pts = Some(pts);
+                g.note_decoded(pts, now_us);
             }
             ResultKind::Failed(kind) => {
                 g.p.decode_failed(kind);
@@ -526,9 +645,11 @@ impl Streams {
         let now = Instant::now();
         let first = *st.first_decoded.get_or_insert(now);
         let delta_us = shown.map(|o| pts as i64 - o as i64);
-        let go = match delta_us {
-            None => true,
-            Some(d) => !st.align || d >= 0 || d.abs() > OTHER_CLOCK_US,
+        let go = match (st.g.feed(), delta_us) {
+            // Playback: the picture the engine named, or a later one.
+            (Some(f), _) => f.target().is_some_and(|t| pts >= t),
+            (None, None) => true,
+            (None, Some(d)) => !st.align || d >= 0 || d.abs() > OTHER_CLOCK_US,
         };
         if go {
             st.ready = Some(Ready {
@@ -595,6 +716,8 @@ struct TileThread {
     next_generation: u32,
     /// Decoder results for generations that are gone.
     stale_results: u64,
+    /// A playback tile.
+    playback: bool,
 }
 
 fn codec(c: MediaCodec) -> Codec {
@@ -605,7 +728,7 @@ fn codec(c: MediaCodec) -> Codec {
 }
 
 /// Waits for the next subscription item; never resolves without one.
-async fn next_item(sub: &mut Option<Subscription>) -> Option<Item> {
+async fn next_item(sub: &mut Option<Source>) -> Option<FeedItem> {
     match sub {
         Some(s) => s.recv().await,
         None => std::future::pending().await,
@@ -614,7 +737,7 @@ async fn next_item(sub: &mut Option<Subscription>) -> Option<Item> {
 
 /// Waits for the next item of the starting generation, if any. `Some(None)`
 /// means its subscription ended.
-async fn next_starting_item(starting: &mut Option<Starting>) -> Option<Item> {
+async fn next_starting_item(starting: &mut Option<Starting>) -> Option<FeedItem> {
     match starting {
         Some(s) if s.failed.is_none() => match &mut s.g.sub {
             Some(sub) => sub.recv().await,
@@ -636,7 +759,7 @@ impl TileThread {
     fn run(
         mut self,
         tier: StreamTier,
-        sub: Option<Subscription>,
+        sub: Option<Source>,
         wake: oneshot::Receiver<()>,
         gate: oneshot::Receiver<()>,
     ) {
@@ -651,7 +774,7 @@ impl TileThread {
     async fn serve(
         &mut self,
         tier: StreamTier,
-        sub: Option<Subscription>,
+        sub: Option<Source>,
         mut wake: oneshot::Receiver<()>,
         gate: oneshot::Receiver<()>,
     ) {
@@ -666,7 +789,7 @@ impl TileThread {
                 0,
                 tier,
                 sub,
-                TilePipeline::new(self.id as u32, self.ctx.pipeline),
+                TilePipeline::new(self.id as u32, self.pipeline_config()),
             ),
             starting: None,
         };
@@ -684,7 +807,7 @@ impl TileThread {
                 biased;
                 _ = &mut wake => break,
                 r = self.results.recv() => match r {
-                    Some(r) => s.apply(r, &mut self.stale_results),
+                    Some(r) => s.apply(r, &mut self.stale_results, self.ctx.clock.now_us()),
                     // The core dropped the sender: the tile is closing.
                     None => break,
                 },
@@ -745,6 +868,10 @@ impl TileThread {
             self.deliver(&mut s);
             s.cap(self.ctx.tier_switch_align_cap);
             self.settle(&mut s);
+            s.current.publish_backlog();
+            if let Some(st) = &s.starting {
+                st.g.publish_backlog();
+            }
             let now = Instant::now();
             if now >= next_stats {
                 next_stats = now + self.ctx.stats_interval;
@@ -769,16 +896,61 @@ impl TileThread {
         drop(s);
     }
 
+    /// The pipeline settings: a playback tile keeps its picture however
+    /// long it is paused (no clearing after a time without pictures).
+    fn pipeline_config(&self) -> video_pipeline::PipelineConfig {
+        let mut c = self.ctx.pipeline;
+        if self.playback {
+            c.clear_after_us = 0;
+        }
+        c
+    }
+
+    /// Sends a `tile_tier` event, except for playback tiles (the playback
+    /// reports seeks and restarts itself).
+    fn tier_event(&self, o: Object) {
+        if !self.playback {
+            self.ctx.events.send(o.finish(), Priority::State);
+        }
+    }
+
     /// A tier request from the app.
     fn command(&mut self, s: &mut Streams, c: TileCommand) {
         match c {
+            TileCommand::Playback {
+                generation,
+                tier,
+                feed,
+            } => {
+                if let Some(st) = s.starting.take() {
+                    self.abandon(st, "superseded");
+                }
+                self.next_generation = generation.wrapping_add(1);
+                info!(tile = self.id, generation, "playback generation starting");
+                s.starting = Some(Starting {
+                    g: Generation::new(
+                        generation,
+                        tier,
+                        Some(Source::Feed(feed)),
+                        TilePipeline::new(self.id as u32, self.pipeline_config()),
+                    ),
+                    requested_ns: self.ctx.clock.now_ns(),
+                    deadline: Instant::now() + PLAYBACK_START_LIMIT,
+                    failed: None,
+                    align: false,
+                    first_decoded: None,
+                    ready: None,
+                    clear: false,
+                });
+            }
             TileCommand::Reaffirm => {
                 if s.starting.is_none() {
-                    self.ctx.events.send(
-                        tier_event(self.id, s.current.tier, "active", s.current.generation)
-                            .finish(),
-                        Priority::State,
-                    );
+                    self.tier_event(tier_event(
+                        self.id,
+                        s.current.tier,
+                        "active",
+                        s.current.generation,
+                    ));
                 }
             }
             TileCommand::Switch {
@@ -793,10 +965,7 @@ impl TileThread {
                 if tier == s.current.tier {
                     // Back to what is shown: nothing to start.
                     drop(sub);
-                    self.ctx.events.send(
-                        tier_event(self.id, tier, "active", s.current.generation).finish(),
-                        Priority::State,
-                    );
+                    self.tier_event(tier_event(self.id, tier, "active", s.current.generation));
                     return;
                 }
                 let generation = self.next_generation;
@@ -808,16 +977,13 @@ impl TileThread {
                     tier = crate::device::tier_name(tier),
                     "tier switch starting"
                 );
-                self.ctx.events.send(
-                    tier_event(self.id, tier, "starting", generation).finish(),
-                    Priority::State,
-                );
+                self.tier_event(tier_event(self.id, tier, "starting", generation));
                 s.starting = Some(Starting {
                     g: Generation::new(
                         generation,
                         tier,
-                        sub,
-                        TilePipeline::new(self.id as u32, self.ctx.pipeline),
+                        sub.map(Source::Live),
+                        TilePipeline::new(self.id as u32, self.pipeline_config()),
                     ),
                     requested_ns,
                     deadline: Instant::now() + self.ctx.tier_switch_timeout,
@@ -825,6 +991,7 @@ impl TileThread {
                     align: one_clock(tier, s.current.tier),
                     first_decoded: None,
                     ready: None,
+                    clear: false,
                 });
             }
         }
@@ -843,12 +1010,7 @@ impl TileThread {
         self.ctx
             .callbacks
             .on_action(self.id, g.generation, &Action::Reset);
-        self.ctx.events.send(
-            tier_event(self.id, g.tier, "failed", g.generation)
-                .str("reason", reason)
-                .finish(),
-            Priority::State,
-        );
+        self.tier_event(tier_event(self.id, g.tier, "failed", g.generation).str("reason", reason));
         // Its subscription drops here: the stream stops unless another tile
         // shows it.
         drop(g);
@@ -878,6 +1040,25 @@ impl TileThread {
         self.ctx
             .callbacks
             .on_action(self.id, old.generation, &Action::Reset);
+        if let Some(f) = s.current.feed() {
+            f.set_shown();
+        }
+        if st.clear {
+            self.ctx
+                .callbacks
+                .on_action(self.id, s.current.generation, &Action::Clear);
+        }
+        if self.playback {
+            info!(
+                tile = self.id,
+                generation = s.current.generation,
+                "playback generation shown"
+            );
+            self.last_video_pts = None;
+            self.audio.discontinuity();
+            drop(old);
+            return;
+        }
         let elapsed = self.ctx.clock.now_ns().saturating_sub(st.requested_ns);
         info!(
             tile = self.id,
@@ -889,10 +1070,12 @@ impl TileThread {
             capped = ready.capped,
             "tier switched"
         );
-        self.ctx.events.send(
-            tier_event(self.id, s.current.tier, "active", s.current.generation).finish(),
-            Priority::State,
-        );
+        self.tier_event(tier_event(
+            self.id,
+            s.current.tier,
+            "active",
+            s.current.generation,
+        ));
         let mut timing = Object::event("timing")
             .str("what", "tier_switch")
             .u64("tile", self.id)
@@ -917,7 +1100,36 @@ impl TileThread {
 
     /// An item of the generation being started: video goes to its pipeline;
     /// audio waits until it is shown.
-    fn starting_item(tile: u64, st: &mut Starting, item: Item, ctx: &TileContext) {
+    fn starting_item(tile: u64, st: &mut Starting, item: FeedItem, ctx: &TileContext) {
+        let item = match item {
+            FeedItem::Item(i) => i,
+            FeedItem::Clear => {
+                // Nothing to show at the position: shown at once, cleared.
+                st.clear = true;
+                st.ready.get_or_insert(Ready {
+                    delta_us: None,
+                    held: Duration::ZERO,
+                    capped: false,
+                });
+                return;
+            }
+            FeedItem::Target => {
+                // Named after its picture was decoded already.
+                let reached =
+                    st.g.feed()
+                        .and_then(FeedRx::target)
+                        .zip(st.g.last_decoded_pts)
+                        .is_some_and(|(t, last)| last >= t);
+                if reached && st.ready.is_none() {
+                    st.ready = Some(Ready {
+                        delta_us: None,
+                        held: Duration::ZERO,
+                        capped: false,
+                    });
+                }
+                return;
+            }
+        };
         st.g.track_waiting(tile, &item, &ctx.events);
         match item {
             Item::Media(Record::Video {
@@ -944,7 +1156,17 @@ impl TileThread {
         }
     }
 
-    fn item(&mut self, g: &mut Generation, item: Item) {
+    fn item(&mut self, g: &mut Generation, item: FeedItem) {
+        let item = match item {
+            FeedItem::Item(i) => i,
+            FeedItem::Clear => {
+                self.ctx
+                    .callbacks
+                    .on_action(self.id, g.generation, &Action::Clear);
+                return;
+            }
+            FeedItem::Target => return,
+        };
         g.track_waiting(self.id, &item, &self.ctx.events);
         if let Item::Media(r) = &item {
             g.track_info_only(r);
@@ -1027,11 +1249,18 @@ impl TileThread {
             let Some(action) = s.current.p.next_action() else {
                 break;
             };
+            let decode = match action {
+                Action::Decode { pts, .. } => Some(pts),
+                _ => None,
+            };
             self.ctx
                 .callbacks
                 .on_action(self.id, s.current.generation, &action);
+            if let Some(pts) = decode {
+                s.current.note_sent(pts, self.ctx.clock.now_us());
+            }
             while let Ok(r) = self.results.try_recv() {
-                s.apply(r, &mut self.stale_results);
+                s.apply(r, &mut self.stale_results, self.ctx.clock.now_us());
             }
         }
         loop {
@@ -1050,18 +1279,25 @@ impl TileThread {
             if action == Action::Status(TileStatus::Undecodable) {
                 st.failed = Some("undecodable");
             }
+            let decode = match action {
+                Action::Decode { pts, .. } => Some(pts),
+                _ => None,
+            };
             self.ctx
                 .callbacks
                 .on_action(self.id, st.g.generation, &action);
+            if let Some(pts) = decode {
+                st.g.note_sent(pts, self.ctx.clock.now_us());
+            }
             while let Ok(r) = self.results.try_recv() {
-                s.apply(r, &mut self.stale_results);
+                s.apply(r, &mut self.stale_results, self.ctx.clock.now_us());
             }
         }
     }
 
     fn stats(&self, g: &Generation) {
         let s = g.p.stats();
-        let queue_dropped = g.sub.as_ref().map_or(0, Subscription::dropped);
+        let queue_dropped = g.sub.as_ref().map_or(0, Source::dropped);
         self.ctx.events.send(
             Object::event("tile_stats")
                 .u64("tile", self.id)

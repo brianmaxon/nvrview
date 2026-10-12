@@ -106,6 +106,24 @@ pub struct ArchiveConfig {
     /// tests of what happens while a fill runs; devices take a fraction of a
     /// second). `None`: at once.
     pub search_delay: Option<std::time::Duration>,
+    /// The device's offset from UTC in seconds (east positive). Recording
+    /// times, searches, and seeks are device local; the wall-clock seconds
+    /// in keyframes' extra headers are UTC, that is local time less this
+    /// (observed, docs/protocol.md, "Rates, keyframes, and how a play
+    /// ends"). Default 0.
+    pub utc_offset_s: i64,
+    /// Whether a play that reaches the end of the recordings ends with an
+    /// empty message (the mock's choice; default true). A device was never
+    /// seen ending a play (docs/protocol.md): with `false` the play just
+    /// stops sending, as far as anything is known.
+    pub play_end_message: bool,
+    /// Recording files that do not exist: (channel, file start). The file
+    /// search leaves them out and plays skip their time (a camera that did
+    /// not record then).
+    pub missing: Vec<(u8, DateTime)>,
+    /// Channels whose plays are accepted but send nothing (a fault for
+    /// tests of a play that never delivers).
+    pub silent_plays: Vec<u8>,
 }
 
 /// One play (command 5) the fake served, for test assertions.
@@ -125,6 +143,11 @@ pub struct PlayLog {
     pub stream: Option<StreamTier>,
     /// `supportSub` as sent.
     pub support_sub: Option<u8>,
+    /// Whether the named file holds the seek time, so the play was served
+    /// (a play whose file does not hold the session's seek position gets
+    /// nothing, as observed: docs/protocol.md, "Live view and plays on one
+    /// session").
+    pub served: bool,
 }
 
 impl ArchiveConfig {
@@ -146,12 +169,30 @@ impl ArchiveConfig {
             play_burst_secs: 3,
             max_plays: None,
             search_delay: None,
+            utc_offset_s: 0,
+            play_end_message: true,
+            missing: Vec::new(),
+            silent_plays: Vec::new(),
         }
     }
 
     /// One past the last recorded second (naive seconds).
     pub(crate) fn recorded_end(&self) -> i64 {
         self.sorted_days().last().map_or(0, |d| ts(*d) + 86_400)
+    }
+
+    /// Whether `channel` has no recording at naive second `t` (a file
+    /// listed in [`ArchiveConfig::missing`]).
+    pub(crate) fn missing_at(&self, channel: u8, t: i64) -> bool {
+        if self.missing.is_empty() {
+            return false;
+        }
+        let len = i64::from(self.file_minutes.max(1)) * 60;
+        let day = t.div_euclid(86_400) * 86_400;
+        let start = day + (t - day).div_euclid(len) * len;
+        self.missing
+            .iter()
+            .any(|(c, s)| *c == channel && ts(*s) == start)
     }
 
     fn has_day(&self, t: DateTime) -> bool {
@@ -166,6 +207,24 @@ impl ArchiveConfig {
         v.dedup();
         v
     }
+}
+
+/// Whether the file `Id` of `channel` names a file of the store that holds
+/// `at` (files tile each recorded day from midnight).
+pub(crate) fn file_holds(cfg: &ArchiveConfig, channel: u8, file_id: &str, at: DateTime) -> bool {
+    let Some(start) = file_id
+        .strip_prefix(&format!("mock-file-{channel}-"))
+        .and_then(|s| s.parse::<i64>().ok())
+    else {
+        return false;
+    };
+    let len = i64::from(cfg.file_minutes.max(1)) * 60;
+    let day_end = start.div_euclid(86_400) * 86_400 + 86_400;
+    let t = ts(at);
+    cfg.has_day(dt(start))
+        && !cfg.missing_at(channel, start)
+        && start <= t
+        && t < (start + len).min(day_end)
 }
 
 /// A recording file of the fake store.
@@ -211,7 +270,7 @@ pub(crate) fn files(
         let mut s = d0;
         while s < d0 + 86_400 {
             let e = (s + len).min(d0 + 86_400) - 1;
-            if e >= ts(start) && s <= ts(end) {
+            if e >= ts(start) && s <= ts(end) && !cfg.missing_at(channel, s) {
                 out.push(FileEntry {
                     channel,
                     start: dt(s),
@@ -435,8 +494,9 @@ pub(crate) enum Kind {
 
 /// Synthetic recorded media for `[start, end]` of a channel: starts at the
 /// keyframe at or before `start`. Video timestamps are microseconds of the
-/// device's wall clock (as naive seconds), and every video record carries
-/// the 8-byte extra header whose first four bytes are those seconds.
+/// device's local wall clock (as naive seconds), and every video record
+/// carries the 8-byte extra header whose first four bytes are those seconds
+/// in UTC (less [`ArchiveConfig::utc_offset_s`]).
 /// Empty when the window has no recording.
 pub(crate) fn media(
     cfg: &ArchiveConfig,
@@ -492,7 +552,7 @@ pub(crate) fn media(
             };
             if keyframe || have_pictures {
                 let mut extra = [0u8; 8];
-                extra[..4].copy_from_slice(&(secs as u32).to_le_bytes());
+                extra[..4].copy_from_slice(&((secs - cfg.utc_offset_s) as u32).to_le_bytes());
                 let rec = encode_video(0, keyframe, fixture.codec(), abs_us, &extra, data);
                 out.push((if keyframe { Kind::Key } else { Kind::Predicted }, rec));
                 have_pictures = true;

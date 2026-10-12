@@ -805,10 +805,13 @@ pub fn parse_download_estimate(xml: &str) -> Result<Option<u64>, XmlError> {
 // ---------------------------------------------------------------------------
 // 123, 5, 7: playback of a recording file (docs/protocol.md, "Playback")
 
-/// The only `playSpeed` value observed in a decryptable capture: normal
-/// speed. Other rates were seen only encrypted, so their values are not
-/// known and are never sent (docs/MILESTONE-P.md, B1).
+/// `playSpeed` of normal speed.
 pub const PLAY_SPEED_NORMAL: u32 = 1;
+
+/// Every `playSpeed` the official client was observed sending (decimal
+/// integers; docs/protocol.md, "Rates, keyframes, and how a play ends").
+/// No other value is ever sent.
+pub const PLAY_SPEEDS: [u32; 5] = [1, 2, 4, 8, 16];
 
 /// The `channelId` the official client put in its 123 (seek), observed as 0
 /// although the recording belonged to another channel; why is an open
@@ -828,6 +831,9 @@ pub struct PlayRequest {
     pub file_id: String,
     /// The file's `name` from the file search (the stop names it).
     pub file_name: String,
+    /// `playSpeed`: one of [`PLAY_SPEEDS`] (anything else is sent as
+    /// [`PLAY_SPEED_NORMAL`]).
+    pub speed: u32,
 }
 
 /// Body of a seek (command 123): where the next play starts, tagged with
@@ -851,11 +857,17 @@ pub const fn play_support_sub(stream: StreamTier) -> u8 {
     }
 }
 
-/// Body of a play (command 5) at normal speed.
+/// Body of a play (command 5) at the request's speed (normal speed when it
+/// is not one of [`PLAY_SPEEDS`]).
 pub fn play_body(q: &PlayRequest) -> String {
+    let speed = if PLAY_SPEEDS.contains(&q.speed) {
+        q.speed
+    } else {
+        PLAY_SPEED_NORMAL
+    };
     wrap(&format!(
         "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<Id>{}</Id>\n{}\
-         <supportSub>{}</supportSub>\n<playSpeed>{PLAY_SPEED_NORMAL}</playSpeed>\n\
+         <supportSub>{}</supportSub>\n<playSpeed>{speed}</playSpeed>\n\
          <streamType>{}</streamType>\n</FileInfo>\n</FileInfoList>\n",
         q.channel,
         escape(&q.file_id),
@@ -893,6 +905,7 @@ mod tests {
             stream: StreamTier::Sub,
             file_id: "1-3-0-example".into(),
             file_name: "example".into(),
+            speed: 1,
         };
         let b = play_body(&q);
         let root = Element::parse(&b).unwrap();
@@ -906,6 +919,12 @@ mod tests {
         let fi = root.find("FileInfo").unwrap();
         assert_eq!(fi.text_of("supportSub"), Some("0"));
         assert_eq!(fi.text_of("streamType"), Some("mainStream"));
+        for (speed, sent) in [(16, "16"), (8, "8"), (2, "2"), (3, "1"), (0, "1")] {
+            q.speed = speed;
+            let root = Element::parse(&play_body(&q)).unwrap();
+            let fi = root.find("FileInfo").unwrap();
+            assert_eq!(fi.text_of("playSpeed"), Some(sent));
+        }
     }
 
     #[test]

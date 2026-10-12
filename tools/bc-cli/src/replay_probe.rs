@@ -847,6 +847,7 @@ async fn probe<W: Write>(
                     stream: cfg.tier,
                     file_id: file.id.clone(),
                     file_name: file.name.clone(),
+                    speed: 1,
                 },
                 at: if cfg.batched {
                     shared.unwrap_or_else(|| add_secs(file.start, 5))
