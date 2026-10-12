@@ -196,6 +196,38 @@ public protocol CoreAPI: Sendable {
     /// `nv_sound_configure`: live sound settings (JSON).
     func soundConfigure(json: String) throws(CoreStatus)
 
+    // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
+    //
+    // A playback's tiles deliver actions to the sink like live tiles and are
+    // answered the same way; `closeTile` refuses them. Not from inside a
+    // callback, except `playbackPosition`.
+
+    /// `nv_playback_open` (`PlaybackRequest` builds the JSON): opened paused
+    /// at the request's position; no action or event about it arrives before
+    /// this returns.
+    func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback
+    /// `nv_playback_add_camera` (`PlaybackCamera.json`): joins at the current position.
+    func playbackAddCamera(_ playback: UInt64, json: String) throws(CoreStatus) -> UInt64
+    /// `nv_playback_remove_camera`: its tile closes (`tile_closed`).
+    func playbackRemoveCamera(_ playback: UInt64, tile: UInt64) throws(CoreStatus)
+    /// `nv_playback_play`.
+    func playbackPlay(_ playback: UInt64) throws(CoreStatus)
+    /// `nv_playback_pause`.
+    func playbackPause(_ playback: UInt64) throws(CoreStatus)
+    /// `nv_playback_seek`: returns at once; `playback_seek` events follow.
+    func playbackSeek(_ playback: UInt64, positionMs: Int64, mode: SeekMode) throws(CoreStatus)
+    /// `nv_playback_set_rate`: 0.25, 0.5, 1, 2, 4, 8, or 16.
+    func playbackSetRate(_ playback: UInt64, rate: Double) throws(CoreStatus)
+    /// `nv_playback_set_offset`: this camera shows position + `offsetMs`.
+    func playbackSetOffset(_ playback: UInt64, tile: UInt64, offsetMs: Int64) throws(CoreStatus)
+    /// `nv_playback_position`: for the scrubber, at display rate; any thread,
+    /// also inside callbacks.
+    func playbackPosition(_ playback: UInt64) throws(CoreStatus) -> PlaybackPosition
+    /// `nv_playback_status`: the playback's details (JSON).
+    func playbackStatus(_ playback: UInt64) throws(CoreStatus) -> String
+    /// `nv_playback_close`: every tile closes, then `playback_closed`.
+    func playbackClose(_ playback: UInt64) throws(CoreStatus)
+
     /// `nv_audio_render` and its context, for the real-time callback. Valid
     /// until `free`; stop rendering before that.
     var audioRenderHook: AudioRenderHook { get }

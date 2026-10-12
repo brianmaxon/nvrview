@@ -889,8 +889,8 @@ final class AppModel {
             updater?.handle(u)
         case .tileTier, .audioStats, .tileStats:
             break
-        case .recordings:
-            // No recordings views yet (milestone P, M1).
+        case .recordings, .playback:
+            // No recordings or playback views yet (milestone P, M1 and M2).
             break
         }
         notify()
