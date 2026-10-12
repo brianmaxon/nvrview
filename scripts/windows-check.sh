@@ -65,6 +65,14 @@ elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
+if [ -n "$package_to" ] && [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then
+  # Package from the worker whose full check stamped HEAD's tree, so its
+  # tested publish output can be reused (the stamp's steps end "worker <name>").
+  stamp="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks/$(git rev-parse 'HEAD^{tree}').windows"
+  if [ -f "$stamp" ]; then
+    NVRVIEW_WINDOWS_WORKER=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)$/\1/p' "$stamp")
+  fi
+fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
 case "$worker" in
   *[!A-Za-z0-9_-]* | '') echo "NVRVIEW_WINDOWS_WORKER: letters, digits, - and _ only" >&2; exit 2 ;;
@@ -126,7 +134,7 @@ if [ -n "$package_to" ]; then
   zip="NvrView-$version-win-x64.zip"
   echo "building the Windows app package on $host"
   # shellcheck disable=SC2086,SC2029
-  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && scripts/windows-app.sh package\""
+  ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src && NVRVIEW_TREE=$tree_sent scripts/windows-app.sh package\""
   mkdir -p "$package_to"
   # scp reads the Windows path relative to the home directory.
   # shellcheck disable=SC2086
@@ -155,6 +163,7 @@ for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY;
     vars="$vars $v=$val"
   fi
 done
+vars="$vars NVRVIEW_TREE=$tree_sent"
 # $gitbash and $vars are meant to expand here, on this side.
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""
