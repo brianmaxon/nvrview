@@ -1,0 +1,9 @@
+# Versions convert-rtdetr.py was measured with (docs/VISION.md, "Models and
+# licenses"). coremltools warns that torch 2.8 is newer than it was tested
+# with; the conversion was checked against PyTorch's outputs regardless.
+torch==2.8.0
+transformers==4.57.3
+coremltools==8.3.0
+numpy==2.2.6
+safetensors==0.5.3
+huggingface_hub==0.36.0

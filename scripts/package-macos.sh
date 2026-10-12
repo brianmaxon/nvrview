@@ -11,7 +11,13 @@
 #   --update-source SOURCE    the update source the app uses until the user sets
 #                             one (an absolute folder path or an http(s) URL)
 #
-# With either, Contents/Resources/update-defaults.json is written before code
+#   --bundle-detector         also install the on-device detector's model (about
+#                             37 MB) into Contents/Resources/Models, checked
+#                             against scripts/detector-model.json (see
+#                             scripts/detector-model.sh); without it the app
+#                             finds the model in its per-user Models folder
+#
+# With either key or source, Contents/Resources/update-defaults.json is written before code
 # signing, so the signature covers it (docs/UPDATES.md, "Bundled defaults").
 # Neither is ever committed; without them nothing changes and the app trusts
 # nothing until the user adds a key.
@@ -27,10 +33,12 @@ fi
 real=1
 key_files=""
 update_source=""
-usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE]"
+usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE] [--bundle-detector]"
+bundle_detector=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --fake-only) real=0; shift ;;
+    --bundle-detector) bundle_detector=1; shift ;;
     --trusted-key-file)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
       [ -f "$2" ] || { echo "package-macos: the key file $2 does not exist" >&2; exit 2; }
@@ -104,6 +112,10 @@ if [ -n "$key_files" ] || [ -n "$update_source" ]; then
   IFS=$oldifs
   if [ -n "$update_source" ]; then set -- "$@" --update-source "$update_source"; fi
   python3 -I scripts/update-defaults.py "$@"
+fi
+
+if [ "$bundle_detector" = 1 ]; then
+  scripts/detector-model.sh fetch --into "$app/Contents/Resources/Models"
 fi
 
 # Sign with a stable identity when one is available, so the Keychain keeps

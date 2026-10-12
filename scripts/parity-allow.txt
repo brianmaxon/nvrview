@@ -95,3 +95,4 @@ events-log-filter            macos    gap: Windows smart alerts UI is planned (N
 verify-view-dismiss          macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-inset            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-tile             macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
+alerts-detector-benchmark macos    gap: Windows detector is planned (Windows ML)

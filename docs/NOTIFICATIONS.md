@@ -303,6 +303,42 @@ stills of 1280×720 or more, and small distant figures are where models fail.
   fail open (alert, unverified) and other cases alert one severity lower,
   unverified.
 
+### The detector host contract (as implemented on macOS)
+
+The core never runs a model. It decodes the pictures it needs, chooses crops
+(the whole frame plus the tile plan, plus a region's bounding crop), and asks
+its host to detect; the host returns **raw boxes** and the core applies
+thresholds, tile merging, tracking, and the rest of verification. On macOS the
+host is `DetectorKit`:
+
+- **Input:** a decoded picture (`CVPixelBuffer`; BGRA, or any format Core
+  Image reads) and a list of crops as normalized rectangles (origin top left,
+  0 to 1 across the picture). The standard plan is `CropPlan.wholeFramePlusTiles`:
+  the whole picture plus four tiles of 60 % with 20 % overlap.
+- **Output:** per crop, `{class_id, score, box}`: `class_id` is the model's
+  COCO index (names come with the model), `score` the class probability, `box`
+  in the **original picture's** normalized coordinates, already mapped back
+  through the crop and clamped to the picture. One box per model query (RT-DETR
+  needs no suppression of overlaps), its best class only. The only filter is a
+  noise floor on the score (default 0.05, configurable, 0 returns all 300
+  queries); decision thresholds belong to the core.
+- **Threading:** `DetectorService` runs one job at a time off the main thread,
+  with a bounded wait queue (default 2). A full queue drops the **oldest**
+  waiting job (it throws `dropped`), not the newest. Canceling a waiting job
+  removes it at once; canceling the running one returns at once and discards
+  its result (Core ML cannot be interrupted; the next job starts when the pass
+  ends).
+- **Speed for the processor ranking:** `DetectorBenchmark` runs the same crop
+  plan on synthetic pictures and reports the median time per picture, the
+  worst, preprocessing alone, load time, peak resident size and footprint
+  growth. The self-test step `alerts-detector-benchmark` prints it for the
+  Neural Engine and the CPU. The number to rank on is the median per picture
+  with the Neural Engine (VISION.md: about 50 ms on the Mac measured).
+- **Model location, in order:** the `NVRVIEW_DETECTOR_MODEL` path, the app
+  bundle's `Resources/Models`, the per-user `Application Support/NVRView/Models`
+  folder. No model means the host reports itself unable to detect, and the
+  coordinator must not rank it as a processor.
+
 ### Classification limits
 
 Only what the model really outputs: person, vehicle, bicycle, animal.
@@ -875,7 +911,7 @@ alerts"):
 | S3 | Verification maths: crop and tile plan, box merge, per-class thresholds, IoU tracking across pictures and angles, moving vs parked, static memory, repeat suppression | S2 |
 | S4 | `viewer-core` orchestration: wake streams, picture collection, caps, still-present re-checks, catch-up, decision log store, trace events; ABI minor; `mock-nvr` end-to-end | S2, S3 |
 | S5 | Baselines: index backfill, Gamma–Poisson rates, novelty map | S2 |
-| S6 | macOS: Core ML runtime, notifications and actions, settings, verification view, event log, feedback | S4 |
+| S6 | macOS: Core ML runtime (**detector, queue and benchmark done**: `DetectorKit`), notifications and actions, settings, verification view, event log, feedback | S4 |
 | S7 | Windows: Windows ML, the same contract, app notifications, settings, verification view, event log, feedback | S4 |
 | S8 | Standby in both apps ("not watching since", energy and traffic) | S4, S1 |
 | S9 | Coordinator: discovery, pairing between apps, ranked election, lease, handoff, startup check | S4, local API |
@@ -903,3 +939,4 @@ alerts"):
 | Learning | On, bounded, visible, resettable; never touches always-alert rules (proposed default). |
 | Multimodal verifier | Off; when on, only for the borderline band and captions (proposed default). |
 | Retention | Event log 90 days, snapshots 7 days, evaluation pictures until deleted (proposed default). |
+| How the detector model reaches the app (macOS) | **Proposed: a first-use download** of the checksum-pinned, compiled model (37 MB zip) from the user's own update source, shown as part of turning smart alerts on; bundling it (`package-macos.sh --bundle-detector`) stays available for offline installs. Not decided: where the zip is published (`scripts/detector-model.json` has no url yet). |

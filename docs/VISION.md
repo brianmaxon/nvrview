@@ -367,6 +367,54 @@ a third of one core out of 14, and no GPU.
    take the device's events and run no model, except for what the device does
    not detect.
 
+## Implementation status: the Mac detector
+
+The detector for the notification pipeline ([NOTIFICATIONS.md](NOTIFICATIONS.md))
+is built for macOS as the Swift module `DetectorKit` (`apps/macos/Sources/
+DetectorKit`). Windows is planned (Windows ML) and not started.
+
+- **Model.** RT-DETR R18 (`PekingU/rtdetr_r18vd`, Apache-2.0, COCO), converted
+  by `tools/vision-lab/scripts/convert-rtdetr.py` from a pinned source: the
+  Hugging Face commit `ac77a11f...`, whose `model.safetensors` must hash to
+  `fe87a5a3...` (the script refuses anything else), with the packages in
+  `convert-requirements.txt` (torch 2.8.0, transformers 4.57.3, coremltools
+  8.3.0). The script writes a manifest next to the package (source, hashes,
+  versions, preprocessing). FP16 `.mlpackage`: 39 MB; compiled `.mlmodelc`
+  39 MB; 37 MB zipped (the weights do not compress). Never committed.
+- **Interface.** One input `image`, 640 x 640 RGB, scaled by 1/255 inside the
+  model; no mean or standard deviation. Outputs `logits` (1 x 300 x 80, raw,
+  before the sigmoid) and `pred_boxes` (1 x 300 x 4: center x, center y,
+  width, height, normalized to the input, origin top left). Class names are in
+  the model's metadata (`labels`, COCO order: 0 person, 1 bicycle, 2 car,
+  3 motorcycle, 5 bus, 7 truck, 15 cat, 16 dog).
+- **Preprocessing.** Each crop is stretched, not letterboxed, to 640 x 640
+  (what the model was trained with and what every number above used).
+  Letterboxing is implemented (`InputFit.letterbox`) and tested for the box
+  mapping but not measured for recall. BGRA pictures are scaled with vImage on
+  the CPU, other formats (the decoder's biplanar YCbCr) with Core Image.
+- **Compute units.** `cpuAndNeuralEngine` by default; the whole picture plus
+  four tiles of one picture go to Core ML as one batch.
+- **Delivery.** `scripts/detector-model.sh build` makes the compiled, zipped
+  model and prints its size and SHA-256; `fetch` installs a published copy
+  after checking both against `scripts/detector-model.json`;
+  `package-macos.sh --bundle-detector` puts it in the app bundle. Where the
+  published zip lives is an owner decision (see NOTIFICATIONS.md, Decisions).
+
+Measured on the synthetic benchmark (release build, one process that also
+runs the viewer, eight 1280 x 720 pictures, the whole picture plus four tiles =
+5 crops per picture, on a busy shared Mac, load average 10 to 11):
+
+| Compute | Per picture (5 crops), median | Per crop | Preprocessing | Peak resident | Footprint growth | Model load |
+| --- | --- | --- | --- | --- | --- | --- |
+| CPU + Neural Engine | 50.5 ms | 10 ms | 1.4 ms | 364 MB | +102 MB | 2.7 s first, cached after |
+| CPU only | 100.6 ms | 20 ms | 1.6 ms | 488 MB | +51 MB | 32 ms |
+
+The Neural Engine time matches the 53 ms measured earlier with vision-lab, and
+is twice as fast as the CPU alone. A debug build is 1.5 times slower (the tensor
+reading and decoding loops are unoptimized), so rank processors on release numbers.
+The footprint includes whatever the process already held; the growth column
+is what loading the model and running the benchmark added.
+
 ## Open questions
 
 - **Several frames instead of one.** Live video gives what stills cannot:

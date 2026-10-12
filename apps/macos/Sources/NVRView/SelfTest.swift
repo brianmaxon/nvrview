@@ -109,6 +109,10 @@ import VideoKit
 ///    trusted and the source the default, listed as bundled; a user key,
 ///    turning the bundled key off, and the user's own source override it,
 ///    and with no file nothing is trusted;
+/// 14g. the on-device detector (docs/VISION.md, "Implementation status"): with
+///    the model present (`NVRVIEW_DETECTOR_MODEL`), the benchmark runs on the
+///    Neural Engine and the CPU and a detection goes through the queue off the
+///    main thread; without the model the step says so and passes;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -4859,6 +4863,19 @@ final class SelfTest {
     }
 
     private func checkLogNow() {
+        // parity: alerts-detector-benchmark
+        // Started here and awaited before the rest, so a slow model load does
+        // not delay the earlier steps.
+        awaitDetector(DetectorSelfTest())
+    }
+
+    private func awaitDetector(_ detector: DetectorSelfTest) {
+        guard detector.finished else { return after(0.05) { [self] in awaitDetector(detector) } }
+        problems += detector.problems
+        checkLogRest()
+    }
+
+    private func checkLogRest() {
         // parity: updates-notes-scroll
         problems += UpdateNotesSelfTest.run()
         // parity: updates-bundled-defaults
