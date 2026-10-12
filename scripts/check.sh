@@ -8,6 +8,27 @@ if [ -d /opt/homebrew/opt/rustup/bin ]; then
   PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 fi
 
+# Build caching, for this repository only: with sccache installed, a shared
+# compile cache keyed by each crate's exact inputs, so checkouts and agent
+# worktrees reuse each other's dependency builds and can never overwrite each
+# other's results; no incremental caches (the largest part of target/, and
+# sccache cannot use them). Either can be overridden from the environment.
+if [ -z "${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER=sccache
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
+fi
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+
+# Disk guard: a full disk fails builds halfway and leaves every tool unable to
+# write. NVRVIEW_MIN_FREE_GB changes the threshold.
+min_free_gb="${NVRVIEW_MIN_FREE_GB:-15}"
+free_kb=$(df -Pk . | awk 'NR == 2 { print $4 }')
+if [ "$free_kb" -lt $((min_free_gb * 1024 * 1024)) ]; then
+  echo "check.sh: $((free_kb / 1024 / 1024)) GB free, needs $min_free_gb GB. Free space first:" >&2
+  echo "  remove merged worktrees (git worktree list) and old Docker volumes (scripts/clean-docker.sh)." >&2
+  exit 1
+fi
+
 # Each step prints how long the previous one took, and the end prints the total.
 check_start=$(date +%s)
 step_start=$check_start
