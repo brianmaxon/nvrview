@@ -66,6 +66,8 @@ alert-inset-swap            macos    gap: Windows call cards do not swap with th
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
+header-overflow-menu        macos    gap: the Windows tile header does not use TileHeaderLayout yet, so no "…" menu or model-built tile menu
+header-priority-narrow      macos    gap: the Windows tile header does not use TileHeaderLayout yet (the model and its vectors are tested)
 inset-drag-multi            macos    gap: Windows call cards cannot be moved yet (docs/UX.md "Alert insets", "Moving them")
 inset-drag-resize           macos    gap: Windows call cards cannot be moved yet, so no position kept across a resize
 inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window

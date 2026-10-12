@@ -422,6 +422,10 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         case .resetZoom: stage.resetSelectedZoom()
         case .toggleListening: toggleListening(nil)
         case .confirm: stage.confirm()
+        case .savePicture: stage.performOnSelected(.savePicture)
+        case .savePictureAs: stage.performOnSelected(.savePictureAs)
+        case .toggleRecording: stage.performOnSelected(.record)
+        case .toggleConversation: stage.performOnSelected(.conversation)
         }
     }
 
@@ -510,6 +514,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         {
             return false
         }
+        if let camera = validateCameraItem(item) { return camera }
         switch item.action {
         case #selector(toggleEditing(_:)):
             item.title = state.editing ? "Done Editing" : "Edit Layout"

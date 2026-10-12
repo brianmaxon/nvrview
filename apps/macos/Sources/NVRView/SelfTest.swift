@@ -585,9 +585,107 @@ final class SelfTest {
                 stage.fullScreen = false
                 stage.chromeHideDelay = 3
                 stage.alertActive = { [weak model] in model?.alerts.isActive($0) == true }
-                insetStep()
+                headerStep()
             }
         }
+    }
+
+    // MARK: The tile header (docs/UX.md "Tile header")
+
+    /// A tile's header laid out by the shared model at a narrow, a middle
+    /// and a wide width: the buttons on screen are the model's, in its
+    /// order, inside the tile and clear of the title; "…" holds the rest
+    /// and the right-click menu is the model's list. Capabilities from the
+    /// `channels` event put Start Conversation in a doorbell's header and
+    /// the PTZ buttons in a moving camera's. Save picture and recording are
+    /// not built yet: their button and keys say "coming soon".
+    private func headerStep() {
+        guard let model = app.model, let window else { return insetStep() }
+        let stage = window.stage
+        // The chrome as the model says now (the step before faked an alert).
+        stage.refreshChrome()
+        guard let leaf = stage.frames.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera,
+            let chrome = stage.chromes[leaf.path], let tile = stage.headerTile(camera, path: leaf.path)
+        else {
+            problems.append("no tile with a header")
+            return insetStep()
+        }
+        let saved = chrome.frame
+        let buttons = TileHeaderLayout.buttons(for: tile)
+        let m = TileHeaderMetrics.standard
+        /// Lays the header out `width` points wide: the buttons shown, and
+        /// whether they sit inside the tile, apart, and right of the title.
+        func at(_ width: CGFloat) -> (shown: [TileHeaderItem], layout: TileHeaderLayout?, placed: Bool) {
+            chrome.frame = CGRect(x: saved.minX, y: saved.minY, width: width, height: saved.height)
+            chrome.layoutSubtreeIfNeeded()
+            let frames = chrome.headerButtonFrames.values.sorted { $0.minX < $1.minX }
+            let apart = zip(frames, frames.dropFirst()).allSatisfy { $0.maxX <= $1.minX + 0.5 }
+            let inside = frames.allSatisfy { $0.minX >= 0 && $0.maxX <= width + 0.5 }
+            let clear = frames.first.map { chrome.titleFrame.maxX <= $0.minX } ?? true
+            return (chrome.shownHeaderButtons, chrome.headerLayout, apart && inside && clear)
+        }
+        // parity: header-priority-narrow
+        let narrow = at(110)
+        // One point short of every button: some go into "…".
+        let width = CGFloat(2 * m.padding + m.titleMin + m.icon * Double(buttons.count) - 1)
+        let fit = Int((Double(width) - 2 * m.padding - m.titleMin - m.icon) / m.icon)
+        let middle = at(width)
+        let nudged = at(width + 5)
+        let wide = at(1000)
+        let narrowOK = narrow.shown == [.more] && narrow.layout?.visible == [.title, .more] && narrow.placed
+        let middleOK = middle.shown == Array(buttons.prefix(fit)) + [.more]
+            && middle.layout?.visible.filter({ $0 != .title }) == middle.shown && middle.placed
+        let wideOK = wide.shown == buttons && wide.layout?.showsMore == false && wide.placed
+        let steady = nudged.shown == middle.shown
+        // Capabilities: the doorbell and the moving camera of the fake NVR.
+        let doorbell = CameraRef(device: camera.device, channel: 3, lens: 0)
+        let mover = CameraRef(device: camera.device, channel: 1, lens: 0)
+        let doorbellButtons = stage.headerTile(doorbell, path: leaf.path).map(TileHeaderLayout.buttons(for:)) ?? []
+        let moverButtons = stage.headerTile(mover, path: leaf.path).map(TileHeaderLayout.buttons(for:)) ?? []
+        let plainTalk = model.channelInfo(camera)?.talk == true || model.channelInfo(camera)?.doorbell == true
+        let caps = doorbellButtons.contains(.conversation) && !moverButtons.contains(.conversation)
+            && [TileHeaderItem.panTilt, .presets, .lens].allSatisfy(moverButtons.contains)
+            && !doorbellButtons.contains(.panTilt) && (plainTalk || !buttons.contains(.conversation))
+        print(
+            "header: 110 pt \(narrow.shown.map(\.rawValue)), \(Int(width)) pt \(middle.shown.map(\.rawValue)), "
+                + "5 pt wider unchanged \(steady), 1000 pt \(wide.shown.map(\.rawValue)); "
+                + "doorbell \(doorbellButtons.map(\.rawValue)), pan-tilt camera \(moverButtons.map(\.rawValue))")
+        if !narrowOK { problems.append("below 120 pt the header did not show only the title and …") }
+        if !middleOK { problems.append("one point short of every button, the header did not show the model's first \(fit) buttons and …") }
+        if !wideOK { problems.append("a wide header did not show every button without …") }
+        if !steady { problems.append("a 5 pt width change reflowed the header") }
+        if !caps { problems.append("the channels event's talk, doorbell and PTZ capabilities did not reach the header") }
+        // parity: header-overflow-menu
+        _ = at(width)
+        let more = stage.moreMenu(leaf.path)?.items.map(\.title) ?? []
+        let wantMore = chrome.headerLayout?.moreMenu.map(\.label) ?? ["?"]
+        let context = stage.contextMenu(for: leaf).items.map(\.title)
+        let wantContext = TileHeaderLayout.menu(for: tile).map(\.label)
+        let menusOK = more == wantMore && Array(context.prefix(wantContext.count)) == wantContext
+            && context.contains("Split Side by Side") && more.contains("Entrance") && !more.contains("Listen")
+        print("header menus: … \(more), right-click starts with the model's \(wantContext.count) items \(menusOK)")
+        if !menusOK { problems.append("the … or right-click menu is not the header model's list (\(more) vs \(wantMore))") }
+        // A button whose action is not built yet says so; so do P and R.
+        _ = at(1000)
+        chrome.pressHeader(.savePicture)
+        let clicked = stage.toastText
+        advance(ToastView.duration + 0.1)
+        let gone = stage.toastText == nil
+        window.window?.makeFirstResponder(stage)
+        window.state.selected = leaf.path
+        press("p", keyCode: 35)
+        let keyP = stage.toastText
+        press("r", keyCode: 15)
+        let keyR = stage.toastText
+        advance(ToastView.duration + 0.1)
+        chrome.frame = saved
+        stage.relayoutChrome()
+        print("header stubs: click \(clicked ?? "nothing"), gone after \(ToastView.duration) s \(gone), P \(keyP ?? "nothing"), R \(keyR ?? "nothing")")
+        if clicked != "Save Picture is coming soon" || !gone { problems.append("Save Picture's button did not say it is coming soon") }
+        if keyP != "Save Picture is coming soon" || keyR != "Start Recording is coming soon" {
+            problems.append("P or R did not reach the header's actions")
+        }
+        insetStep()
     }
 
     // MARK: Alert insets and doorbell calls

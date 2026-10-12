@@ -58,9 +58,23 @@ final class StageView: NSView {
     weak var delegate: StageDelegate?
     let grid: MetalGridView
     private let overlay = StageOverlay()
-    private var chromes: [NodePath: TileChromeView] = [:]
-    private var frames = LayoutFrames(leaves: [], dividers: [])
+    private(set) var chromes: [NodePath: TileChromeView] = [:]
+    private(set) var frames = LayoutFrames(leaves: [], dividers: [])
     private var lastKey: RenderKey?
+    /// The call window's stage (docs/CAPTURE.md, "The call window is a
+    /// regular tile"): one leaf, no layout editing, split, swap, focus,
+    /// Show Camera, Remove or Clear, no alert insets, and the selection is
+    /// always that tile. Its owner holds the camera's lease.
+    let fixedTile: Bool
+    /// The fixed tile asks for the main stream (Auto, by the drawn size
+    /// and zoom: `CallWindowQuality`).
+    private(set) var fixedAsksMain = false
+    /// The fixed tile's sub-stream picture width, once it showed one.
+    private var fixedSubWidth: Double?
+    /// The short message over the stage ("… is coming soon").
+    let toast = ToastView()
+    /// When the toast goes, on the stage's clock.
+    var toastHideAt: Double?
 
     /// Wired by the alert work (docs/UX.md "Alerts"): whether a camera has
     /// an active alert (its tile's header then stays shown, also in full
@@ -159,9 +173,10 @@ final class StageView: NSView {
 
     var gap: CGFloat { state.editing ? 6 : 2 }
 
-    init(model: AppModel, state: WindowState, renderer: GridRenderer) {
+    init(model: AppModel, state: WindowState, renderer: GridRenderer, fixedTile: Bool = false) {
         self.model = model
         self.state = state
+        self.fixedTile = fixedTile
         clock = model.clock
         idle = ChromeIdle(now: model.clock.now)
         grid = MetalGridView(renderer: renderer)
@@ -176,6 +191,8 @@ final class StageView: NSView {
         addSubview(grid)
         addSubview(overlay)
         installInsets()
+        installToast()
+        if fixedTile { state.selected = state.tree.leaves.first?.path }
         overlay.registerForDraggedTypes([.string])
         alertActive = { [weak model] in model?.alerts.isActive($0) == true }
         dismissAlert = { [weak model] in model?.dismissAlert($0) }
@@ -222,13 +239,13 @@ final class StageView: NSView {
                 self.dismissAlert(camera)
                 self.refreshChrome()
             }
-            view.onSpeaker = { [weak self] additive in self?.speakerClicked(path, additive: additive) }
+            view.onItem = { [weak self] item, button in self?.performHeaderItem(item, at: path, from: button) }
+            view.isPending = { TileActionStub.isPending($0) }
             view.onRetry = { [weak self] in
                 guard let self, let camera = self.frames.leaves.first(where: { $0.path == path })?.camera else { return }
                 self.model.retry(camera)
                 self.refreshChrome()
             }
-            view.onResetZoom = { [weak self] in self?.resetZoom(at: path) }
             overlay.addSubview(view)
             chromes[leaf.path] = view
             let inset = ZoomInsetView()
@@ -247,6 +264,7 @@ final class StageView: NSView {
         frames = state.tree.frames(in: overlay.bounds, gap: gap)
         layoutChrome()
         layoutInsetViews()
+        if !toast.isHidden { toast.place(in: bounds) }
         window?.invalidateCursorRects(for: overlay)
     }
 
@@ -297,12 +315,6 @@ final class StageView: NSView {
         for leaf in frames.leaves {
             guard let view = chromes[leaf.path] else { continue }
             view.apply(content(for: leaf))
-            if fisheyeMode(leaf.path) != nil {
-                // The reset control returns a moved view to its default.
-                view.setZoomed(state.tree[leaf.path]?.fisheye.aim != nil)
-            } else {
-                view.setZoomed(leaf.camera.flatMap { state.zoom[$0] }?.isZoomed == true)
-            }
             view.setHeaderPinned(leaf.camera.map(alertActive) == true)
             view.setOutlineShown(chromeVisible)
         }
@@ -313,7 +325,8 @@ final class StageView: NSView {
     }
 
     private func content(for leaf: LeafFrame) -> TileChromeContent {
-        let selected = state.selected == leaf.path && (state.editing || state.focused == nil)
+        // The call window's one tile is always selected; no outline there.
+        let selected = !fixedTile && state.selected == leaf.path && (state.editing || state.focused == nil)
         guard let camera = leaf.camera else {
             return TileChromeContent(
                 title: "Empty tile", hasCamera: false, audible: false, selected: selected, editing: state.editing,
@@ -340,7 +353,15 @@ final class StageView: NSView {
             indicators: IndicatorItem.items(from: active), corner: model.indicatorCorner,
             alertLines: alertLines(for: camera),
             veil: model.veil(for: camera), retry: model.retryOffered(for: camera), hasCamera: true, audible: model.audible.contains(camera),
+            header: headerTile(camera, path: leaf.path),
             selected: selected, editing: state.editing, dropTarget: dropTarget == leaf.path)
+    }
+
+    /// Whether the tile at `path` is zoomed past 1x, or shows a moved
+    /// virtual camera (its Reset Zoom applies).
+    func isZoomed(_ path: NodePath) -> Bool {
+        if fisheyeMode(path) != nil { return state.tree[path]?.fisheye.aim != nil }
+        return state.tree[path]?.camera.flatMap { state.zoom[$0] }?.isZoomed == true
     }
 
     /// The rate the first tile showing `camera` drew new pictures at.
@@ -442,6 +463,7 @@ final class StageView: NSView {
                 draw(
                     tile, camera: camera, rect: leaf.rect, zoom: state.zoom[camera] ?? .none, fill: state.fill,
                     path: leaf.path)
+                if fixedTile { followFixedDemand(tile, camera: camera, drawnWidth: Double(leaf.rect.width * scaleX)) }
                 // Read only for meters on screen (audible, or hovered).
                 if let chrome = chromes[leaf.path], chrome.wantsLevel, let level = model.level(camera) {
                     chrome.setLevel(level.peak)
@@ -460,6 +482,19 @@ final class StageView: NSView {
             renderer.tiles = tiles
             renderedPaths = paths
         }
+    }
+
+    /// Auto for the call window's tile: the main stream while its picture
+    /// is drawn (zoom included) wider than the sub-stream's pictures.
+    private func followFixedDemand(_ tile: CoreTile, camera: CameraRef, drawnWidth: Double) {
+        if let picture = pictureSizes[camera], picture.width > 0, tile.tierState.shown == model.leases.tiers(for: camera).grid {
+            fixedSubWidth = Double(picture.width)
+        }
+        let main = CallWindowQuality.wantsMain(
+            drawnWidth: drawnWidth * zoom(of: camera).scale, subWidth: fixedSubWidth, wasMain: fixedAsksMain)
+        guard main != fixedAsksMain else { return }
+        fixedAsksMain = main
+        syncDemands()
     }
 
     /// The source rectangles the renderer samples now, by leaf (tests and
@@ -494,6 +529,7 @@ final class StageView: NSView {
         stepZoom(now: now)
         stepFisheye(now: now)
         tickInsets(now: now)
+        tickToast(now: now)
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }
     }
@@ -502,6 +538,7 @@ final class StageView: NSView {
     func tick() { tick(now: clock.now) }
 
     func toggleFocus(_ path: NodePath? = nil) {
+        guard !fixedTile else { return }
         if state.focused != nil {
             unfocus()
         } else if let p = path ?? state.selected ?? (frames.leaves.count == 1 ? frames.leaves.first?.path : nil),
@@ -512,7 +549,7 @@ final class StageView: NSView {
     }
 
     func focus(_ path: NodePath) {
-        guard !state.editing, state.tree[path]?.camera != nil || frames.leaves.count > 1 else { return }
+        guard !fixedTile, !state.editing, state.tree[path]?.camera != nil || frames.leaves.count > 1 else { return }
         state.selected = path
         state.focused = path
         animateFocus(to: 1)
@@ -580,6 +617,7 @@ final class StageView: NSView {
     /// Moves the selection to the tile in `direction` by position; in focus,
     /// focuses that tile instead.
     func moveSelection(_ direction: MoveDirection) {
+        guard !fixedTile else { return }
         if let f = state.focused {
             guard !focusAnimation.isRunning, let n = frames.neighbor(of: f, direction) else { return }
             switchFocus(to: n)
@@ -813,10 +851,10 @@ final class StageView: NSView {
                 guard let camera = leaf.camera else { continue }
                 let owner = DemandOwner(stage: id, path: leaf.path)
                 owners.insert(owner)
+                let focused = fixedTile ? fixedAsksMain : focusedCamera != nil && state.focused == leaf.path
                 model.leases.setDemand(
                     owner: owner, camera: camera, quality: state.tree[leaf.path]?.quality ?? .auto,
-                    focused: focusedCamera != nil && state.focused == leaf.path,
-                    zoomScale: state.zoom[camera]?.scale ?? 1)
+                    focused: focused, zoomScale: state.zoom[camera]?.scale ?? 1)
             }
         }
         for owner in demandOwners.subtracting(owners) { model.leases.clearDemands(owner: owner) }
@@ -942,7 +980,7 @@ final class StageView: NSView {
     var isEasingFisheye: Bool { fisheyeEasing.isEasing }
 
     /// Fisheye View ▸ Original, Panorama, Double Panorama, Quad, Virtual PTZ.
-    private func fisheyeMenuItem(path: NodePath) -> NSMenuItem {
+    func fisheyeMenuItem(path: NodePath) -> NSMenuItem {
         let current = state.tree[path]?.fisheye.mode ?? .original
         let sub = NSMenu()
         for mode in FisheyeViewMode.allCases {
@@ -963,7 +1001,7 @@ final class StageView: NSView {
     }
 
     /// Fisheye Mount ▸ Ceiling, Wall, Desk (per camera).
-    private func mountMenuItem(camera: CameraRef) -> NSMenuItem {
+    func mountMenuItem(camera: CameraRef) -> NSMenuItem {
         let current = model.cameraOptions(camera).fisheyeMount
         let sub = NSMenu()
         for m in FisheyeMount.allCases {
@@ -990,7 +1028,7 @@ final class StageView: NSView {
     }
 
     func split(_ axis: SplitAxis) {
-        guard let path = state.selected ?? (frames.leaves.count == 1 ? [] : nil),
+        guard !fixedTile, let path = state.selected ?? (frames.leaves.count == 1 ? [] : nil),
             let (tree, new) = state.tree.splitting(at: path, axis: axis)
         else { return }
         state.selected = new
@@ -998,18 +1036,14 @@ final class StageView: NSView {
     }
 
     func removeSelected() {
-        guard let path = state.selected, let (tree, survivor) = state.tree.removing(at: path) else { return }
+        guard !fixedTile, let path = state.selected, let (tree, survivor) = state.tree.removing(at: path) else { return }
         state.selected = tree[survivor]?.isLeaf == true ? survivor : nil
         edit { _ in tree }
     }
 
     func assign(_ camera: CameraRef?, at path: NodePath) {
+        guard !fixedTile else { return }
         edit { $0.assigning(camera, at: path) }
-    }
-
-    private func speakerClicked(_ path: NodePath, additive: Bool) {
-        guard let camera = state.tree[path]?.camera else { return }
-        model.toggleListening(camera, additive: additive)
     }
 
     /// The selected tile's camera (Listen menu, keyboard).
@@ -1036,6 +1070,11 @@ final class StageView: NSView {
 
     fileprivate func mouseDown(at p: CGPoint, clickCount: Int) {
         window?.makeFirstResponder(self)
+        if fixedTile {
+            // One tile: a drag pans or aims it; nothing else moves.
+            gesture = panGesture(at: p)
+            return
+        }
         if state.focused != nil {
             if clickCount == 2 { unfocus() } else { gesture = panGesture(at: p) }
             return
@@ -1145,7 +1184,7 @@ final class StageView: NSView {
     }
 
     fileprivate func dragUpdated(at p: CGPoint, camera: CameraRef?) -> NSDragOperation {
-        guard camera != nil, state.focused == nil, let leaf = frames.leaf(at: p) else {
+        guard !fixedTile, camera != nil, state.focused == nil, let leaf = frames.leaf(at: p) else {
             setDropTarget(nil)
             return []
         }
@@ -1155,7 +1194,7 @@ final class StageView: NSView {
 
     fileprivate func performDrop(at p: CGPoint, camera: CameraRef?) -> Bool {
         defer { setDropTarget(nil) }
-        guard let camera, state.focused == nil, let leaf = frames.leaf(at: p) else { return false }
+        guard !fixedTile, let camera, state.focused == nil, let leaf = frames.leaf(at: p) else { return false }
         state.selected = leaf.path
         assign(camera, at: leaf.path)
         return true
@@ -1178,14 +1217,14 @@ final class StageView: NSView {
                 NSApp.sendAction(#selector(ViewerWindowController.toggleEditing(_:)), to: nil, from: self)
             }
         case 51, 117:  // Delete, Forward Delete
-            if state.editing { removeSelected() } else { super.keyDown(with: event) }
+            if state.editing, !fixedTile { removeSelected() } else { super.keyDown(with: event) }
         default:
             super.keyDown(with: event)
         }
     }
 
     /// Quality ▸ Auto, Clear, Fluent, and Balanced where the camera has it.
-    private func qualityMenuItem(camera: CameraRef, path: NodePath) -> NSMenuItem {
+    func qualityMenuItem(camera: CameraRef, path: NodePath) -> NSMenuItem {
         let current = model.leases.effectiveQuality(state.tree[path]?.quality ?? .auto, camera)
         let sub = NSMenu()
         for q in TileQuality.allCases where q != .balanced || model.leases.offersBalanced(camera) {
@@ -1208,43 +1247,31 @@ final class StageView: NSView {
         return item
     }
 
+    /// The right-click menu: the tile's actions from the header model
+    /// (`TileHeaderLayout.menu(for:)`, the header's order and wording),
+    /// then, in a viewer window, the layout's own items.
     fileprivate func menu(at p: CGPoint) -> NSMenu? {
         guard state.focused == nil, let leaf = frames.leaf(at: p) else { return nil }
         state.selected = leaf.path
         refreshChrome()
+        return contextMenu(for: leaf)
+    }
+
+    /// The right-click menu of a tile (also for the self-test).
+    func contextMenu(for leaf: LeafFrame) -> NSMenu {
         let menu = NSMenu()
         func item(_ title: String, _ action: @escaping () -> Void) {
             menu.addItem(ClosureMenuItem(title: title, action: action))
         }
-        if let camera = leaf.camera {
-            item(model.audible.contains(camera) ? "Stop Listening" : "Listen") { [weak self] in
-                self?.model.toggleListening(camera, additive: false)
+        if let camera = leaf.camera, let tile = headerTile(camera, path: leaf.path) {
+            for entry in TileHeaderLayout.menu(for: tile) {
+                menu.addItem(menuItem(entry, camera: camera, path: leaf.path))
             }
-            item("Focus") { [weak self] in self?.focus(leaf.path) }
-            if model.calls.call(for: camera) == nil {
-                let c = ClosureMenuItem(title: "Start Conversation") { [weak self] in self?.startConversation(camera) }
-                c.toolTip = "Open the call: captions of what the camera hears, Talk, and typed replies spoken through its speaker"
-                menu.addItem(c)
-            } else {
-                item("End Conversation") { [weak self] in self?.endConversation(camera) }
-                if isPoppedOut(camera) {
-                    item("Pop In Call") { [weak self] in self?.model.popInCall(camera.firstLens) }
-                } else {
-                    item("Pop Out Call") { [weak self] in self?.model.popOutCall(camera.firstLens) }
-                }
-            }
-            menu.addItem(qualityMenuItem(camera: camera, path: leaf.path))
-            if model.isFisheye(camera) {
-                menu.addItem(fisheyeMenuItem(path: leaf.path))
-                menu.addItem(mountMenuItem(camera: camera))
-            }
-            let entrance = model.cameraOptions(camera).entrance
-            let e = ClosureMenuItem(title: "Entrance") { [weak self] in self?.model.setEntrance(camera, !entrance) }
-            e.state = entrance ? .on : .off
-            e.toolTip = "A person on this camera opens an alert inset when it is not on screen"
-            menu.addItem(e)
+            if fixedTile { return menu }
             menu.addItem(.separator())
+            item("Focus") { [weak self] in self?.focus(leaf.path) }
         }
+        if fixedTile { return menu }
         item("Split Side by Side") { [weak self] in self?.split(.row) }
         item("Split Stacked") { [weak self] in self?.split(.col) }
         item("Remove Tile") { [weak self] in self?.removeSelected() }
