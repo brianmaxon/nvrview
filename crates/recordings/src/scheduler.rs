@@ -34,7 +34,8 @@
 //!   which can be the session's reader and with it every live frame.
 
 use crate::chunk::{self, ChunkIndex, ChunkWriter};
-use crate::incident::{CameraId, Incident};
+use crate::export::range::RangeJob;
+use crate::incident::{CameraEvent, CameraId, Incident};
 use crate::naming::{self, NamePattern};
 use crate::store::{read_json, write_atomic, write_json};
 use crate::{Secs, date_time};
@@ -96,6 +97,11 @@ pub struct SchedulerConfig {
     pub cancel_timeout: Duration,
     /// Output names.
     pub pattern: NamePattern,
+    /// Where the folders of downloads outside `root` are listed, so they
+    /// resume after a restart. Without it, a download whose folder is
+    /// elsewhere than under `root` is refused
+    /// ([`EnqueueError::NotConfigured`]).
+    pub registry: Option<PathBuf>,
 }
 
 impl SchedulerConfig {
@@ -110,6 +116,7 @@ impl SchedulerConfig {
             per_device: 1,
             cancel_timeout: Duration::from_secs(2),
             pattern: NamePattern::default(),
+            registry: None,
         }
     }
 }
@@ -289,6 +296,19 @@ struct JobFile {
     /// resumed or returned again, even if the folder stays.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     trashed: bool,
+    /// Set for a range download ([`Scheduler::enqueue_range`]); then
+    /// `incident` is a stand-in that only carries the ID and the name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    range: Option<RangeMeta>,
+}
+
+/// What a range download keeps of its request, persisted in its job file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeMeta {
+    /// Start, device-local seconds.
+    pub start: Secs,
+    /// End (exclusive), device-local seconds.
+    pub end: Secs,
 }
 
 /// Progress of one camera.
@@ -321,6 +341,9 @@ pub struct CameraProgress {
     pub first_picture_wall_ms: Option<i64>,
     /// The final file's path.
     pub output: PathBuf,
+    /// Start of the camera's download range, device-local seconds (the
+    /// file's first picture is at or just before it).
+    pub start: Secs,
 }
 
 /// Progress of one incident download.
@@ -332,6 +355,9 @@ pub struct IncidentProgress {
     pub key: String,
     /// Its folder.
     pub folder: PathBuf,
+    /// The range, for a range download (then `key` is the download's ID
+    /// and no incident goes with it).
+    pub range: Option<RangeMeta>,
     /// Paused by the user.
     pub paused: bool,
     /// Per camera.
@@ -378,6 +404,9 @@ pub enum EnqueueError {
     NoSource,
     /// The folder or job file could not be written.
     Io(io::Error),
+    /// The folder is not under the downloads directory and there is no
+    /// registry to list it in.
+    NotConfigured,
 }
 
 impl fmt::Display for EnqueueError {
@@ -386,6 +415,9 @@ impl fmt::Display for EnqueueError {
             EnqueueError::Limit => f.write_str("too many downloads known; forget finished ones"),
             EnqueueError::NoSource => f.write_str("no camera of the incident has a source"),
             EnqueueError::Io(e) => write!(f, "{e}"),
+            EnqueueError::NotConfigured => {
+                f.write_str("a folder outside the downloads directory needs a data directory")
+            }
         }
     }
 }
@@ -397,7 +429,7 @@ impl From<EnqueueError> for io::Error {
         match e {
             EnqueueError::Io(e) => e,
             EnqueueError::NoSource => io::Error::new(io::ErrorKind::InvalidInput, e.to_string()),
-            EnqueueError::Limit => io::Error::other(e.to_string()),
+            EnqueueError::Limit | EnqueueError::NotConfigured => io::Error::other(e.to_string()),
         }
     }
 }
@@ -410,6 +442,19 @@ pub struct IncidentDownload {
     /// One source per camera to download; cameras of the incident without a
     /// source are skipped.
     pub cameras: Vec<CameraSource>,
+}
+
+/// Where an incident download goes and how it is written
+/// ([`Scheduler::enqueue_incident_to`]).
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// The directory to make the download's folder in (default: the
+    /// scheduler's root). A directory other than the root is listed in the
+    /// registry so the download resumes after a restart.
+    pub dest: Option<PathBuf>,
+    /// Write no `incident.json` (names are the caller's to neutralize in
+    /// the request).
+    pub share_safe: bool,
 }
 
 /// Why a chunk attempt failed.
@@ -501,7 +546,11 @@ impl Job {
     fn new(seq: u64, folder: PathBuf, file: JobFile) -> Job {
         Job {
             seq,
-            key: file.incident.key(),
+            key: if file.range.is_some() {
+                file.incident.id.clone()
+            } else {
+                file.incident.key()
+            },
             folder,
             live: vec![Live::default(); file.cameras.len()],
             file,
@@ -587,6 +636,8 @@ struct Inner {
     /// Devices whose workers run (they stay, idle, after the device is
     /// removed, and serve it again when it is added back).
     staffed: Mutex<HashSet<String>>,
+    /// Serializes changes to the registry file.
+    registry: Mutex<()>,
 }
 
 /// Most downloads the scheduler knows at once ([`Scheduler::forget`]
@@ -646,6 +697,14 @@ fn retry_failed(c: &mut CameraJob) -> bool {
 /// Brings a job file read back from disk up to date with its folder:
 /// chunks marked complete whose files are missing are fetched again, and a
 /// job that was running is queued.
+/// `data_dir/recordings/downloads.json`: the folders of downloads that are
+/// not under the downloads directory.
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistryFile {
+    version: u32,
+    folders: Vec<PathBuf>,
+}
+
 fn normalize(folder: &Path, j: &mut JobFile) {
     for cam in &mut j.cameras {
         let dir = folder.join(PARTS_DIR).join(&cam.parts);
@@ -692,6 +751,7 @@ impl Scheduler {
                 progress,
                 workers: Mutex::new(Vec::new()),
                 staffed: Mutex::new(HashSet::new()),
+                registry: Mutex::new(()),
             }),
         }
     }
@@ -752,7 +812,20 @@ impl Scheduler {
     /// 3. otherwise a new download is queued, in a new folder: ` (2)`,
     ///    ` (3)`, ... is appended when the name is taken.
     pub fn enqueue_incident(&self, req: &IncidentDownload) -> Result<Enqueued, EnqueueError> {
+        self.enqueue_incident_to(req, &Placement::default())
+    }
+
+    /// [`Scheduler::enqueue_incident`] with the folder made in
+    /// `place.dest` instead of the root, and without `incident.json` for a
+    /// share-safe download.
+    pub fn enqueue_incident_to(
+        &self,
+        req: &IncidentDownload,
+        place: &Placement,
+    ) -> Result<Enqueued, EnqueueError> {
         let inc = &req.incident;
+        let root: &Path = place.dest.as_deref().unwrap_or(&self.inner.cfg.root);
+        let outside = root != self.inner.cfg.root;
         let ranges: BTreeMap<CameraId, (Secs, Secs)> = inc
             .download_ranges()
             .into_iter()
@@ -791,9 +864,12 @@ impl Scheduler {
             v.sort_by_key(|(c, r)| (r.0, (*c).clone()));
             v.iter().map(|(c, _)| names[*c].clone()).collect()
         };
+        if outside && self.inner.cfg.registry.is_none() {
+            return Err(EnqueueError::NotConfigured);
+        }
         let pattern = &self.inner.cfg.pattern;
         let base = naming::folder_name(inc, &ordered, pattern);
-        let mut folder = self.inner.cfg.root.join(&base);
+        let mut folder = root.join(&base);
         let mut n = 2;
         loop {
             match read_json::<JobFile>(&folder.join(PARTS_DIR).join(JOB_FILE)) {
@@ -803,6 +879,9 @@ impl Scheduler {
                     // Queued in an earlier run (finished, or beyond the
                     // resume cap): known again, as it is on disk.
                     normalize(&folder, &mut j);
+                    if outside {
+                        self.register(&folder).map_err(EnqueueError::Io)?;
+                    }
                     self.insert(folder.clone(), j).map_err(EnqueueError::Io)?;
                     return Ok(Enqueued {
                         id: inc.id.clone(),
@@ -812,15 +891,20 @@ impl Scheduler {
                 }
                 Ok(None) if !folder.exists() => break,
                 _ => {
-                    folder = self.inner.cfg.root.join(format!("{base} ({n})"));
+                    folder = root.join(format!("{base} ({n})"));
                     n += 1;
                 }
             }
         }
         let io = EnqueueError::Io;
         fs::create_dir_all(folder.join(PARTS_DIR)).map_err(io)?;
-        let json = naming::incident_json(inc, &ranges, &names, pattern);
-        write_json(&folder.join("incident.json"), &json).map_err(io)?;
+        if outside {
+            self.register(&folder).map_err(io)?;
+        }
+        if !place.share_safe {
+            let json = naming::incident_json(inc, &ranges, &names, pattern);
+            write_json(&folder.join("incident.json"), &json).map_err(io)?;
+        }
         let cameras: Vec<CameraJob> = ranges
             .iter()
             .filter_map(|(c, (s, e))| {
@@ -857,6 +941,7 @@ impl Scheduler {
             paused: false,
             cameras,
             trashed: false,
+            range: None,
         };
         self.insert(folder.clone(), file).map_err(io)?;
         info!(cameras = ranges.len(), "incident download queued");
@@ -865,6 +950,210 @@ impl Scheduler {
             folder,
             existing: false,
         })
+    }
+
+    /// Queues a range download planned by
+    /// [`crate::export::range::plan_range`]: one camera job per camera of
+    /// `job` over `[job.start, job.end)`, in `job.folder` (else
+    /// `job.folder_name` under the root; ` (2)` and so on when the name is
+    /// taken). A known download with the job's ID is returned instead
+    /// (`existing`), finished or not, also one of an earlier run whose
+    /// folder is still there. `events` are the indexed events inside the
+    /// range, for `incident.json` (none is written for a share-safe job).
+    ///
+    /// # Errors
+    /// [`EnqueueError::Limit`] at [`MAX_DOWNLOADS`] known downloads;
+    /// [`EnqueueError::NotConfigured`] for a folder outside the root when
+    /// the scheduler has no registry; [`EnqueueError::NoSource`] without
+    /// cameras; [`EnqueueError::Io`].
+    pub fn enqueue_range(
+        &self,
+        job: &RangeJob,
+        events: &[CameraEvent],
+    ) -> Result<Enqueued, EnqueueError> {
+        if job.cameras.is_empty() {
+            return Err(EnqueueError::NoSource);
+        }
+        {
+            let st = lock(&self.inner.state);
+            if let Some(j) = st.jobs.get(&job.id) {
+                return Ok(Enqueued {
+                    id: job.id.clone(),
+                    folder: j.folder.clone(),
+                    existing: true,
+                });
+            }
+            if st.jobs.len() >= MAX_DOWNLOADS {
+                return Err(EnqueueError::Limit);
+            }
+        }
+        let root = &self.inner.cfg.root;
+        let base: PathBuf = job
+            .folder
+            .as_deref()
+            .map_or_else(|| root.join(&job.folder_name), PathBuf::from);
+        let outside = base.parent() != Some(root.as_path());
+        if outside && self.inner.cfg.registry.is_none() {
+            return Err(EnqueueError::NotConfigured);
+        }
+        let name = base
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut found: Option<PathBuf> = None;
+        for n in 1..=crate::export::range::MAX_FOLDER_TRIES {
+            let folder = if n == 1 {
+                base.clone()
+            } else {
+                base.with_file_name(format!("{name} ({n})"))
+            };
+            match read_json::<JobFile>(&folder.join(PARTS_DIR).join(JOB_FILE)) {
+                Ok(Some(mut j))
+                    if j.incident.id == job.id && j.version == JOB_VERSION && !j.trashed =>
+                {
+                    // Queued in an earlier run: known again, as on disk.
+                    normalize(&folder, &mut j);
+                    if outside {
+                        self.register(&folder).map_err(EnqueueError::Io)?;
+                    }
+                    self.insert(folder.clone(), j).map_err(EnqueueError::Io)?;
+                    return Ok(Enqueued {
+                        id: job.id.clone(),
+                        folder,
+                        existing: true,
+                    });
+                }
+                Ok(None) if !folder.exists() => {
+                    found = Some(folder);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let folder = found.ok_or_else(|| {
+            EnqueueError::Io(io::Error::other("no free folder name for the download"))
+        })?;
+        let io = EnqueueError::Io;
+        fs::create_dir_all(folder.join(PARTS_DIR)).map_err(io)?;
+        if outside {
+            self.register(&folder).map_err(io)?;
+        }
+        if let Some(json) = crate::export::range::range_incident_json(job, events) {
+            write_json(&folder.join("incident.json"), &json).map_err(io)?;
+        }
+        let cameras: Vec<CameraJob> = job
+            .cameras
+            .iter()
+            .map(|c| CameraJob {
+                camera: c.camera.clone(),
+                name: c.name.clone(),
+                uid: None,
+                stream: c.camera.local().stream(c.tier).name().to_owned(),
+                start: job.start,
+                end: job.end,
+                file: c.file.clone(),
+                parts: slug(&c.camera),
+                chunks: chunk_windows(job.start, job.end, self.inner.cfg.chunk_secs)
+                    .into_iter()
+                    .map(|(start, end)| ChunkState {
+                        start,
+                        end,
+                        done: false,
+                        bytes: 0,
+                        attempts: 0,
+                        video_frames: None,
+                    })
+                    .collect(),
+                state: CameraState::Queued,
+                paused: false,
+                first_picture_wall_ms: None,
+            })
+            .collect();
+        let standin = Incident {
+            id: job.id.clone(),
+            name: job.name.clone(),
+            group: None,
+            margin: 0,
+            events: job
+                .cameras
+                .iter()
+                .map(|c| CameraEvent {
+                    camera: c.camera.clone(),
+                    kind: "range".to_owned(),
+                    start: job.start,
+                    end: job.end,
+                })
+                .collect(),
+            extra_cameras: Default::default(),
+        };
+        let file = JobFile {
+            version: JOB_VERSION,
+            incident: standin,
+            paused: false,
+            cameras,
+            trashed: false,
+            range: Some(RangeMeta {
+                start: job.start,
+                end: job.end,
+            }),
+        };
+        self.insert(folder.clone(), file).map_err(io)?;
+        info!(cameras = job.cameras.len(), "range download queued");
+        Ok(Enqueued {
+            id: job.id.clone(),
+            folder,
+            existing: false,
+        })
+    }
+
+    /// The folders of downloads outside the root, as the registry lists
+    /// them (empty without a registry or before it exists).
+    fn registered(&self) -> Vec<PathBuf> {
+        let Some(path) = &self.inner.cfg.registry else {
+            return Vec::new();
+        };
+        match read_json::<RegistryFile>(path) {
+            Ok(Some(r)) => r.folders,
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                warn!(error = %e, "unreadable downloads registry ignored");
+                Vec::new()
+            }
+        }
+    }
+
+    fn store_registry(&self, folders: Vec<PathBuf>) -> io::Result<()> {
+        match &self.inner.cfg.registry {
+            Some(path) => write_json(
+                path,
+                &RegistryFile {
+                    version: 1,
+                    folders,
+                },
+            ),
+            None => Ok(()),
+        }
+    }
+
+    /// Lists `folder` in the registry (once).
+    fn register(&self, folder: &Path) -> io::Result<()> {
+        let _g = lock(&self.inner.registry);
+        let mut all = self.registered();
+        if !all.iter().any(|f| f == folder) {
+            all.push(folder.to_owned());
+            self.store_registry(all)?;
+        }
+        Ok(())
+    }
+
+    /// Takes `folder` out of the registry.
+    fn unregister(&self, folder: &Path) -> io::Result<()> {
+        let _g = lock(&self.inner.registry);
+        let all = self.registered();
+        if all.iter().any(|f| f == folder) {
+            self.store_registry(all.into_iter().filter(|f| f != folder).collect())?;
+        }
+        Ok(())
     }
 
     fn insert(&self, folder: PathBuf, file: JobFile) -> io::Result<()> {
@@ -889,19 +1178,32 @@ impl Scheduler {
     /// fetched again. Returns how many incidents were resumed.
     pub fn resume_all(&self) -> io::Result<usize> {
         let mut found = Vec::new();
+        let listed = self.registered();
+        let mut folders: Vec<PathBuf> = Vec::new();
         if self.inner.cfg.root.is_dir() {
             for entry in fs::read_dir(&self.inner.cfg.root)? {
-                let folder = entry?.path();
-                let path = folder.join(PARTS_DIR).join(JOB_FILE);
-                match read_json::<JobFile>(&path) {
-                    Ok(Some(j)) if j.version == JOB_VERSION && !j.trashed => {
-                        found.push((folder, j));
-                    }
-                    Ok(_) => {}
-                    Err(e) => warn!(error = %e, "unreadable download job skipped"),
-                }
+                folders.push(entry?.path());
             }
         }
+        folders.extend(
+            listed
+                .iter()
+                .filter(|f| f.parent() != Some(self.inner.cfg.root.as_path()))
+                .cloned(),
+        );
+        for folder in folders {
+            let path = folder.join(PARTS_DIR).join(JOB_FILE);
+            match read_json::<JobFile>(&path) {
+                Ok(Some(j)) if j.version == JOB_VERSION && !j.trashed => {
+                    found.push((folder, j));
+                }
+                Ok(_) => {}
+                Err(e) => warn!(error = %e, "unreadable download job skipped"),
+            }
+        }
+        // Listed folders that still have work (or a failure to retry) stay
+        // listed; finished, trashed, and vanished ones drop out.
+        let mut keep: Vec<PathBuf> = Vec::new();
         found.sort_by_key(|(_, j)| j.incident.start());
         let mut n = 0;
         for (folder, mut j) in found {
@@ -931,7 +1233,21 @@ impl Scheduler {
             } else if !failed {
                 continue;
             }
+            if listed.contains(&folder) {
+                keep.push(folder.clone());
+            }
             self.insert(folder, j)?;
+        }
+        if self.inner.cfg.registry.is_some() && keep.len() != listed.len() {
+            let _g = lock(&self.inner.registry);
+            // Entries added since the listing was read are not dropped.
+            let extra: Vec<PathBuf> = self
+                .registered()
+                .into_iter()
+                .filter(|f| !listed.contains(f))
+                .collect();
+            keep.extend(extra);
+            self.store_registry(keep)?;
         }
         Ok(n)
     }
@@ -1041,6 +1357,7 @@ impl Scheduler {
         // for it, and make every later one a no-op.
         lock(&job.saved).closed = true;
         if delete_partial {
+            self.unregister(&job.folder)?;
             match fs::remove_dir_all(job.parts_root()) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1132,6 +1449,7 @@ impl Inner {
                     id: j.file.incident.id.clone(),
                     key: j.key.clone(),
                     folder: j.folder.clone(),
+                    range: j.file.range,
                     paused: j.file.paused,
                     cameras: j
                         .file
@@ -1165,6 +1483,7 @@ impl Inner {
                                 working: live.running,
                                 first_picture_wall_ms: c.first_picture_wall_ms,
                                 output: j.folder.join(&c.file),
+                                start: c.start,
                             }
                         })
                         .collect(),

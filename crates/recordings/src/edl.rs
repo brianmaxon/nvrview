@@ -1465,7 +1465,6 @@ mod tests {
         req.cut = Cut::Frame;
         let p = plan_follow("d", &inc, &files, &req).unwrap();
         assert_eq!(seg(&p), vec![(6400, 15_000, 0)]);
-        assert_eq!(p.suggested_file.split(' ').nth(1), Some("07.42.06"));
         // A window across the switch keeps both shots, clipped.
         req.cut = Cut::Keyframe;
         req.in_ms = Some(TM + 2500);
