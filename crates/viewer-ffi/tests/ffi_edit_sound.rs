@@ -710,15 +710,16 @@ fn edit_lists_and_sound_through_the_c_interface() {
             serde_json::from_str(CStr::from_ptr(room.as_ptr()).to_str().unwrap()).unwrap();
         assert_eq!(again["request"], queued["request"]);
         let request = queued["request"].as_u64().unwrap();
-        // With no audio source (none exists until downloads or playback
-        // provide one) the request fails; events say so.
+        // The audio of a day comes from finished downloads of the camera
+        // that cover it; this day has none, so the request fails and the
+        // events say so.
         rig.until("the analysis to end", 60, |ctx| {
             ctx.events("sound_analyze")
                 .iter()
                 .any(|e| e["request"] == request && e["state"] == "failed")
         });
         let last = rig.ctx.events("sound_analyze").pop().unwrap();
-        assert_eq!(last["reason"], "no_source");
+        assert_eq!(last["reason"], "no_audio");
         assert_eq!(last["camera"]["channel"], 0);
         assert_eq!(
             nv_sound_analyze_cancel(core, request),
