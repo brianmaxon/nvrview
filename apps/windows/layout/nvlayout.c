@@ -84,6 +84,12 @@ int main(void) {
     OFF(NvCallbacks, on_event);
     OFF(NvCallbacks, on_audio_tap);
 
+    SIZE(NvAudioEncoder);
+    OFF(NvAudioEncoder, context);
+    OFF(NvAudioEncoder, open);
+    OFF(NvAudioEncoder, encode);
+    OFF(NvAudioEncoder, close);
+
     SIZE(NvTileLayout);
     OFF(NvTileLayout, cell);
     OFF(NvTileLayout, dest);

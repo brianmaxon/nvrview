@@ -962,6 +962,9 @@ final class AppModel {
             // The recordings windows' players (milestone P, M2).
             recordings.applyPlayback(e)
             return
+        case .recording:
+            // Capture (minor 9): no recording is started from the app yet.
+            return
         }
         notify()
     }

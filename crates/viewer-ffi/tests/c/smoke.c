@@ -6,7 +6,8 @@
  * and reads its level, stores a layout, goes through the recordings
  * functions (index, incidents, a thumbnail, a download, a lock, the Trash),
  * plays two cameras' recordings back beside the live tile (open, play,
- * seek, 4x, close), and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
+ * seek, 4x, close), records the live tile and a call with a fake AAC
+ * encoder to finalized MP4 files, and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
  * against a spawned mock-nvr with recordings.
  *
  * usage: smoke HOST PORT WORKDIR   (password from NVRVIEW_TEST_PASSWORD;
@@ -701,6 +702,247 @@ static void playback(NvCore *core, const char *key) {
     atomic_store(&g_pb_tile_closed, atomic_load(&g_tile_closed) - closed_before);
 }
 
+/* ---- Capture (minor 9) ---------------------------------------------- */
+
+/* The fake encoder's counts. */
+static atomic_ulong g_enc_opened, g_enc_frames, g_enc_closed_flushed, g_enc_refused;
+static const uint8_t SILENT_AU[4] = {0, 0, 0, 7};
+
+static void enc_answer(uint64_t recording, uint32_t track) {
+    if (nv_record_audio_encoded(atomic_load(&g_core), recording, track, SILENT_AU,
+                                sizeof SILENT_AU) != NV_OK) {
+        atomic_fetch_add(&g_enc_refused, 1);
+    }
+}
+
+static bool enc_open(void *context, uint64_t recording, uint32_t track, uint32_t sample_rate,
+                     uint32_t channels, uint32_t bit_rate, uint8_t *asc, size_t asc_cap,
+                     size_t *asc_len, uint32_t *priming_frames) {
+    (void)context;
+    (void)recording;
+    (void)track;
+    if (sample_rate != 48000 || channels != 1 || bit_rate == 0 || asc_cap < 2) {
+        atomic_fetch_add(&g_enc_refused, 1);
+        return false;
+    }
+    /* AAC-LC, 48 kHz, mono. */
+    asc[0] = 0x11;
+    asc[1] = 0x88;
+    *asc_len = 2;
+    *priming_frames = 2112;
+    atomic_fetch_add(&g_enc_opened, 1);
+    return true;
+}
+
+/* Answers each frame from inside the callback, as an encoder may. */
+static void enc_encode(void *context, uint64_t recording, uint32_t track, const float *pcm,
+                       size_t frames) {
+    (void)context;
+    if (pcm == NULL || frames != 1024) {
+        atomic_fetch_add(&g_enc_refused, 1);
+        return;
+    }
+    float sum = 0;
+    for (size_t i = 0; i < frames; i++) {
+        sum += pcm[i] * pcm[i];
+    }
+    if (sum != sum) {
+        atomic_fetch_add(&g_enc_refused, 1);
+    }
+    atomic_fetch_add(&g_enc_frames, 1);
+    enc_answer(recording, track);
+}
+
+static void enc_close(void *context, uint64_t recording, uint32_t track, bool flush) {
+    (void)context;
+    if (flush) {
+        enc_answer(recording, track);
+        enc_answer(recording, track);
+        atomic_fetch_add(&g_enc_closed_flushed, 1);
+    }
+}
+
+static NvStatus record_status_fn(NvCore *core, const char *query, char *out, size_t cap,
+                                 size_t *len) {
+    (void)query;
+    return nv_record_status(core, out, cap, len);
+}
+
+/* Starts a recording; its ID and file (file NULL to skip), 0 on failure. */
+static uint64_t record_start(NvCore *core, const char *request, char *file, size_t file_cap) {
+    char out[4096];
+    size_t len = 0;
+    long long id = 0;
+    if (nv_record_start(core, request, out, sizeof out, &len) != NV_OK ||
+        !number_member(out, "recording", &id) || id <= 0 ||
+        strstr(out, "\"state\":\"waiting_keyframe\"") == NULL ||
+        (file != NULL && !string_member(out, "file", file, file_cap))) {
+        return 0;
+    }
+    return (uint64_t)id;
+}
+
+/* Waits until the recording's status shows it recording for `ms`. */
+static bool recorded_for(NvCore *core, uint64_t id, long long ms) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"recording\":%llu,", (unsigned long long)id);
+    for (int i = 0; i < 1000; i++) {
+        char *status = query_json(core, record_status_fn, NULL);
+        long long duration = 0;
+        bool done = status != NULL && strstr(status, needle) != NULL &&
+                    strstr(status, "\"state\":\"recording\"") != NULL &&
+                    number_member(status, "duration_ms", &duration) && duration >= ms;
+        free(status);
+        if (done) {
+            return true;
+        }
+        sleep_ms(10);
+    }
+    return false;
+}
+
+/* Waits until no recording is left running. */
+static bool all_ended(NvCore *core) {
+    for (int i = 0; i < 1000; i++) {
+        char *status = query_json(core, record_status_fn, NULL);
+        bool done = status != NULL && strcmp(status, "{\"recordings\":[]}") == 0;
+        free(status);
+        if (done) {
+            return true;
+        }
+        sleep_ms(10);
+    }
+    return false;
+}
+
+/* A finalized (not fragmented) MP4: top-level ftyp first, then a moov and no
+ * moof. */
+static bool finalized_mp4(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    bool ftyp = false, moov = false, moof = false, first = true;
+    unsigned char h[16];
+    long pos = 0;
+    while (fseek(f, pos, SEEK_SET) == 0 && fread(h, 1, 8, f) == 8) {
+        unsigned long long size = ((unsigned long long)h[0] << 24) | (h[1] << 16) |
+                                  (h[2] << 8) | h[3];
+        if (size == 1) {
+            if (fread(h + 8, 1, 8, f) != 8) {
+                break;
+            }
+            size = 0;
+            for (int i = 8; i < 16; i++) {
+                size = (size << 8) | h[i];
+            }
+        }
+        if (size < 8) {
+            break;
+        }
+        if (first) {
+            ftyp = memcmp(h + 4, "ftyp", 4) == 0;
+            first = false;
+        }
+        moov |= memcmp(h + 4, "moov", 4) == 0;
+        moof |= memcmp(h + 4, "moof", 4) == 0;
+        pos += (long)size;
+    }
+    fclose(f);
+    return ftyp && moov && !moof;
+}
+
+/* Records the live tile to a finalized MP4, then a call recording through
+ * the fake encoder, with the status codes and the limit answer. */
+static void capture(NvCore *core, uint64_t tile, const char *work) {
+    char json[2048], file[1024], out[256];
+    size_t len = 0;
+    snprintf(json, sizeof json,
+             "{\"kind\":\"live\",\"tile\":%llu,\"name\":\"Smoke\",\"utc_offset_s\":0}",
+             (unsigned long long)tile);
+    if (record_start(core, json, NULL, 0) != 0 ||
+        nv_record_start(core, json, out, sizeof out, &len) != NV_ERR_NOT_CONFIGURED ||
+        nv_capture_configure(core, "{\"live_dir\":\"relative\"}") != NV_ERR_INVALID_ARGUMENT) {
+        problem("capture before nv_capture_configure");
+    }
+    char config[1200];
+    snprintf(config, sizeof config,
+             "{\"live_dir\":\"%s/live\",\"min_free_bytes\":0,\"stop_free_bytes\":0}", work);
+    if (nv_capture_configure(core, config) != NV_OK) {
+        problem("nv_capture_configure");
+        return;
+    }
+    NvAudioEncoder encoder = {NULL, enc_open, enc_encode, NULL};
+    if (nv_capture_set_encoder(core, &encoder) != NV_ERR_INVALID_ARGUMENT) {
+        problem("an encoder without close was accepted");
+    }
+    encoder.close = enc_close;
+    if (nv_capture_set_encoder(core, &encoder) != NV_OK) {
+        problem("nv_capture_set_encoder");
+    }
+
+    /* Live: about two seconds, stopped, finalized. */
+    uint64_t live = record_start(core, json, file, sizeof file);
+    if (live == 0) {
+        problem("nv_record_start (live)");
+        return;
+    }
+    if (!recorded_for(core, live, 2000)) {
+        problem("the live recording did not record");
+    }
+    if (nv_record_stop(core, live) != NV_OK || !all_ended(core)) {
+        problem("nv_record_stop (live)");
+    }
+    if (!finalized_mp4(file)) {
+        problem("the live recording is not a finalized MP4");
+    }
+
+    /* A call: Conversation, Visitor (the camera sends no audio here), and
+     * You all go through the encoder. */
+    snprintf(json, sizeof json, "{\"kind\":\"call\",\"tile\":%llu,\"file\":\"%s/live/call.mp4\"}",
+             (unsigned long long)tile, work);
+    uint64_t call = record_start(core, json, file, sizeof file);
+    if (call == 0) {
+        problem("nv_record_start (call)");
+        return;
+    }
+    if (!recorded_for(core, call, 1500)) {
+        problem("the call recording did not record");
+    }
+    if (nv_record_stop(core, call) != NV_OK || !all_ended(core)) {
+        problem("nv_record_stop (call)");
+    }
+    if (!finalized_mp4(file)) {
+        problem("the call recording is not a finalized MP4");
+    }
+    if (atomic_load(&g_enc_opened) != 3 || atomic_load(&g_enc_closed_flushed) != 3 ||
+        atomic_load(&g_enc_frames) < 3 * 40 || atomic_load(&g_enc_refused) != 0) {
+        problem("the encoder's calls");
+    }
+    if (nv_capture_set_encoder(core, NULL) != NV_OK) {
+        problem("removing the encoder");
+    }
+
+    /* Limits: no live recordings allowed answers which limit. */
+    snprintf(config, sizeof config, "{\"live_dir\":\"%s/live\",\"max_live\":0,\"min_free_bytes\":0}",
+             work);
+    snprintf(json, sizeof json, "{\"kind\":\"live\",\"tile\":%llu}", (unsigned long long)tile);
+    if (nv_capture_configure(core, config) != NV_OK ||
+        nv_record_start(core, json, out, sizeof out, &len) != NV_ERR_LIMIT ||
+        strcmp(out, "{\"limit\":\"live\"}") != 0 || len != strlen(out)) {
+        problem("the live limit");
+    }
+    snprintf(json, sizeof json, "{\"kind\":\"live\",\"tile\":%llu}", (unsigned long long)tile + 100);
+    if (nv_record_start(core, json, out, sizeof out, &len) != NV_ERR_UNKNOWN_ID ||
+        nv_record_start(core, "{\"kind\":\"film\"}", out, sizeof out, &len) !=
+            NV_ERR_INVALID_ARGUMENT ||
+        nv_record_stop(core, 999999) != NV_ERR_UNKNOWN_ID ||
+        nv_record_status(core, out, sizeof out, NULL) != NV_ERR_INVALID_ARGUMENT ||
+        nv_record_audio_encoded(core, call, 0, NULL, 4) != NV_ERR_INVALID_ARGUMENT) {
+        problem("capture refusals");
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: smoke HOST PORT WORKDIR\n");
@@ -818,6 +1060,7 @@ int main(int argc, char **argv) {
         }
         recordings(core, key, work);
         playback(core, key);
+        capture(core, tile, work);
     }
 
     if (nv_tile_close(core, tile) != NV_OK) {

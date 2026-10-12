@@ -21,9 +21,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use viewer_core::audio::TapBlock;
 use viewer_core::{
-    Action, Callbacks, Codec, ColorMatrix, Core, CoreConfig, CoreError, DecodeFailureKind,
-    LogSettings, MAX_CAMERAS, PlaybackState, RecError, SeekMode, StreamTier, ThumbKind, Thumbnail,
-    ThumbnailAnswer, TileStatus, clock,
+    Action, AudioEncoder, Callbacks, CaptureError, Codec, ColorMatrix, Core, CoreConfig, CoreError,
+    DecodeFailureKind, EncoderOpened, LogSettings, MAX_CAMERAS, PlaybackState, RecError, SeekMode,
+    StreamTier, ThumbKind, Thumbnail, ThumbnailAnswer, TileStatus, clock,
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
@@ -36,8 +36,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
 /// playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
 /// calendar alone) and the recordings_month_failed event. Minor 8: edit
-/// lists (section 7) and the rest of sound (section 2a).
-pub const NV_ABI_MINOR: u32 = 8;
+/// lists (section 7) and the rest of sound (section 2a). Minor 9: capture
+/// (live and call recordings; docs/FFI.md, "Capture").
+pub const NV_ABI_MINOR: u32 = 9;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -50,7 +51,8 @@ pub enum NvStatus {
     NV_ERR_UNKNOWN_ID = -2,
     /// the core is shutting down
     NV_ERR_CLOSED = -3,
-    /// too many devices, tiles, layouts, or queued requests
+    /// too many devices, tiles, layouts, queued requests, or recordings, or
+    /// too little disk space for a recording
     NV_ERR_LIMIT = -4,
     NV_ERR_INTERNAL = -5,
     /// the output buffer is too small; *len holds the size needed
@@ -59,7 +61,9 @@ pub enum NvStatus {
     NV_ERR_NOT_PERMITTED = -7,
     /// the device's backend cannot do this (minor 5)
     NV_ERR_UNSUPPORTED = -8,
-    /// nv_recordings_configure not called, or no downloads_dir (minor 5)
+    /// nv_recordings_configure not called, or no downloads_dir (minor 5);
+    /// nv_capture_configure not called, or a call recording without an
+    /// encoder (minor 9)
     NV_ERR_NOT_CONFIGURED = -9,
     /// accepted; the answer arrives as an event (only nv_thumbnail_get
     /// returns it; minor 5)
@@ -275,7 +279,8 @@ pub struct NvAudioBlock {
 /// on_audio_tap: may be NULL (no taps). Serialized across the core; `block`
 ///   and its samples are valid only during the call.
 /// From inside a callback an app may call nv_tile_decoded and
-/// nv_tile_decode_failed, and nothing else.
+/// nv_tile_decode_failed, and nothing else (and from inside an
+/// NvAudioEncoder callback, nv_record_audio_encoded).
 /// No event names a device before nv_device_add returns its ID, and no
 /// on_action for a tile runs before nv_tile_open returns its ID.
 pub type NvActionCallback =
@@ -2790,6 +2795,335 @@ pub unsafe extern "C" fn nv_playback_status(
 pub unsafe extern "C" fn nv_playback_close(core: *mut NvCore, playback: u64) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_call(core, |c| Ok(c.playback_close(playback)?)) }
+}
+
+// ---- Capture (minor 9) ----------------------------------------------------
+
+/// Most bytes of an AudioSpecificConfig an encoder's `open` may write.
+pub const NV_ASC_MAX: usize = 64;
+
+/// The app's AAC encoder (docs/FFI.md, "Capture"), copied by
+/// nv_capture_set_encoder. `track` is the audio track's index in the file
+/// (a live recording: 0; a call: 0 Conversation, 1 Visitor, 2 You). All
+/// three functions are called on the recorders' own threads (never at the
+/// same time for one recording) and must return quickly. Each encoded frame
+/// is answered with nv_record_audio_encoded, from inside `encode` or `close`
+/// or from any other thread, until `close` returns. The functions and
+/// `context` stay in use until nv_core_free returns.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct NvAudioEncoder {
+    pub context: *mut c_void,
+    /// Opens an AAC-LC encoder for one track of a recording. Writes the
+    /// AudioSpecificConfig into asc (*asc_len bytes, 1 to asc_cap, which is
+    /// NV_ASC_MAX) and the encoder's priming in frames. Returns false if it
+    /// cannot.
+    pub open: NvEncoderOpen,
+    /// One frame of 1024 mono float samples (`frames` is 1024), valid only
+    /// during the call.
+    pub encode: NvEncoderEncode,
+    /// Ends the track; with flush, the encoder's remaining output first.
+    pub close: NvEncoderClose,
+}
+
+pub type NvEncoderOpen = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        recording: u64,
+        track: u32,
+        sample_rate: u32,
+        channels: u32,
+        bit_rate: u32,
+        asc: *mut u8,
+        asc_cap: usize,
+        asc_len: *mut usize,
+        priming_frames: *mut u32,
+    ) -> bool,
+>;
+pub type NvEncoderEncode = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        recording: u64,
+        track: u32,
+        pcm: *const f32,
+        frames: usize,
+    ),
+>;
+pub type NvEncoderClose =
+    Option<unsafe extern "C" fn(context: *mut c_void, recording: u64, track: u32, flush: bool)>;
+
+/// An [`NvAudioEncoder`] with every function present, as the core's
+/// [`AudioEncoder`].
+struct FfiEncoder {
+    context: Context,
+    open: unsafe extern "C" fn(
+        *mut c_void,
+        u64,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut u8,
+        usize,
+        *mut usize,
+        *mut u32,
+    ) -> bool,
+    encode: unsafe extern "C" fn(*mut c_void, u64, u32, *const f32, usize),
+    close: unsafe extern "C" fn(*mut c_void, u64, u32, bool),
+}
+
+impl AudioEncoder for FfiEncoder {
+    fn open(
+        &self,
+        recording: u64,
+        track: u32,
+        sample_rate: u32,
+        channels: u32,
+        bit_rate: u32,
+    ) -> Option<EncoderOpened> {
+        let mut asc = [0u8; NV_ASC_MAX];
+        let mut asc_len = 0usize;
+        let mut priming = 0u32;
+        // SAFETY: the app's function, with its own context, a buffer of
+        // NV_ASC_MAX bytes, and two out pointers valid for the call, as
+        // NvAudioEncoder documents.
+        let ok = unsafe {
+            (self.open)(
+                self.context.0,
+                recording,
+                track,
+                sample_rate,
+                channels,
+                bit_rate,
+                asc.as_mut_ptr(),
+                asc.len(),
+                &mut asc_len,
+                &mut priming,
+            )
+        };
+        if !ok || asc_len == 0 || asc_len > asc.len() {
+            return None;
+        }
+        Some(EncoderOpened {
+            audio_specific_config: asc[..asc_len].to_vec(),
+            priming_frames: priming,
+        })
+    }
+
+    fn encode(&self, recording: u64, track: u32, pcm: &[f32]) {
+        // SAFETY: the app's function with its own context; `pcm` is valid
+        // for its length during the call.
+        unsafe {
+            (self.encode)(self.context.0, recording, track, pcm.as_ptr(), pcm.len());
+        }
+    }
+
+    fn close(&self, recording: u64, track: u32, flush: bool) {
+        // SAFETY: the app's function with its own context.
+        unsafe { (self.close)(self.context.0, recording, track, flush) }
+    }
+}
+
+impl From<CaptureError> for NvStatus {
+    fn from(e: CaptureError) -> NvStatus {
+        match e {
+            CaptureError::InvalidArgument => NvStatus::NV_ERR_INVALID_ARGUMENT,
+            CaptureError::UnknownId => NvStatus::NV_ERR_UNKNOWN_ID,
+            CaptureError::Closed => NvStatus::NV_ERR_CLOSED,
+            CaptureError::Limit(_) => NvStatus::NV_ERR_LIMIT,
+            CaptureError::NotConfigured => NvStatus::NV_ERR_NOT_CONFIGURED,
+            CaptureError::Internal => NvStatus::NV_ERR_INTERNAL,
+        }
+    }
+}
+
+/// Sets the capture settings (docs/FFI.md, "Capture"): {"live_dir":
+/// "<absolute directory>","max_duration_s":3600,"max_bytes":4000000000,
+/// "min_free_bytes":2000000000,"stop_free_bytes":1000000000,"max_live":4,
+/// "max_calls":2,"quality":"main"|"sub","share_safe":false}; all but
+/// live_dir optional. Applies to recordings started afterwards. The first
+/// call also finalizes (event `recording` `recovered`) or deletes the
+/// partial files a crash left, before it returns. Call it before
+/// nv_record_start, which answers NV_ERR_NOT_CONFIGURED until then.
+/// NV_ERR_INVALID_ARGUMENT for invalid JSON or values or a relative
+/// live_dir. Any thread, never inside a callback. Added in minor 9, as
+/// everything down to nv_record_status.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_capture_configure(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.capture_configure(arg(json)?)?)) }
+}
+
+/// Installs the app's AAC encoder (the struct is copied), or removes it
+/// (NULL). Recordings already running keep the encoder they started with.
+/// Without one, a live recording whose camera audio is not AAC is video only
+/// (`audio` `unsupported`) and a call recording cannot start.
+/// NV_ERR_INVALID_ARGUMENT when a function pointer is NULL. Any thread,
+/// never inside a callback.
+///
+/// # Safety
+/// `core` is a live handle; `encoder` is null or valid for reading one
+/// NvAudioEncoder, whose functions and context stay valid until
+/// nv_core_free returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_capture_set_encoder(
+    core: *mut NvCore,
+    encoder: *const NvAudioEncoder,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    let e = unsafe { encoder.as_ref() }.copied();
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let enc: Option<Arc<dyn AudioEncoder>> = match e {
+                None => None,
+                Some(NvAudioEncoder {
+                    context,
+                    open: Some(open),
+                    encode: Some(encode),
+                    close: Some(close),
+                }) => Some(Arc::new(FfiEncoder {
+                    context: Context(context),
+                    open,
+                    encode,
+                    close,
+                })),
+                Some(_) => return Err(NvStatus::NV_ERR_INVALID_ARGUMENT),
+            };
+            Ok(c.capture_set_encoder(enc)?)
+        })
+    }
+}
+
+/// One encoded AAC access unit (raw, no ADTS header; 1 to 8192 bytes) for
+/// `track` of `recording`, answering the encoder's `encode` (and the flush
+/// of `close`) in order. Any thread, including inside the encoder's own
+/// NV_ERR_UNKNOWN_ID for an unknown recording.
+/// NV_ERR_UNKNOWN_ID for a recording that has ended and been forgotten.
+///
+/// # Safety
+/// `core` is a live handle; `data` is valid for reading `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_record_audio_encoded(
+    core: *mut NvCore,
+    recording: u64,
+    track: u32,
+    data: *const u8,
+    len: usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if data.is_null() || len == 0 {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        // SAFETY: non-null and valid for `len` bytes per the caller.
+        let unit = unsafe { std::slice::from_raw_parts(data, len) };
+        match c.record_audio_encoded(recording, track, unit) {
+            Ok(()) => NvStatus::NV_OK,
+            Err(e) => e.into(),
+        }
+    })
+}
+
+/// Starts a live or call recording of a tile's camera:
+/// {"kind":"live","tile":7,"quality":"sub","name":"Camera 1",
+///  "share_safe":false,"utc_offset_s":0} or {"kind":"call","tile":7,
+///  "file":"<absolute path>.mp4"}. Answers {"recording":12,"file":
+/// "<absolute path>","state":"waiting_keyframe"}; `recording` events follow.
+/// NV_ERR_LIMIT for a count limit, the main-stream limit, or low disk, with
+/// {"limit":"live"|"calls"|"main_streams"|"disk_low"} as the answer
+/// (written when it fits; *len set either way); NV_ERR_NOT_CONFIGURED
+/// before nv_capture_configure, or for a call without an encoder;
+/// NV_ERR_UNKNOWN_ID for an unknown tile; NV_ERR_INVALID_ARGUMENT. When the
+/// answer does not fit, the recording is stopped again (its events, for an
+/// ID never handed out, may follow) and NV_ERR_BUFFER_TOO_SMALL returned
+/// with *len set: pass a buffer of a few KiB. Any thread, never inside a
+/// callback.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_record_start(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(request)) = (unsafe { core_ref(core) }, unsafe { string(request) })
+        else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.record_start(request) {
+            Ok(answer) => {
+                // SAFETY: per the caller.
+                let s = unsafe { copy_out(&answer, out, cap, len) };
+                if s != NvStatus::NV_OK {
+                    // The app cannot learn the ID: take the recording back.
+                    if let Some(id) = serde_json::from_str::<serde_json::Value>(&answer)
+                        .ok()
+                        .and_then(|v| v["recording"].as_u64())
+                    {
+                        let _ = c.record_stop(id);
+                    }
+                }
+                s
+            }
+            Err(e) => {
+                if let Some(a) = e.limit_answer() {
+                    // SAFETY: per the caller; the limit is reported whether
+                    // or not its answer fits.
+                    let _ = unsafe { copy_out(&a, out, cap, len) };
+                } else {
+                    // SAFETY: non-null and valid for one write per the caller.
+                    unsafe { put(len, 0) };
+                }
+                e.into()
+            }
+        }
+    })
+}
+
+/// Stops a recording and finalizes it; returns at once (events
+/// `finalizing`, then `finished`). NV_ERR_UNKNOWN_ID for an unknown
+/// recording (stopping one that is ending does nothing). Any thread, never
+/// inside a callback.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_record_stop(core: *mut NvCore, recording: u64) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.record_stop(recording)?)) }
+}
+
+/// {"recordings":[...]}: the latest `recording` event of each recording
+/// that has not ended.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_record_status(
+    core: *mut NvCore,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.record_status())) }
 }
 
 #[cfg(test)]
