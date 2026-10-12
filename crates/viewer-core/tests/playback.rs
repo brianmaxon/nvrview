@@ -218,12 +218,13 @@ fn four_cameras_start_as_a_group_play_paced_and_in_sync() {
     assert_eq!(tiles.len(), 4);
     rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
 
-    // One seek per play, all at the same time, then the four plays.
+    // One seek per play, all at the same time (an exact seek's 2 s lead
+    // before the position), then the four plays.
     let log = nvr.play_log();
     assert_eq!(log.len(), 4, "{log:?}");
     assert_eq!(nvr.command_count(123), 4);
     for l in &log {
-        assert_eq!(l.at, d(8, 10, 0, 30));
+        assert_eq!(l.at, d(8, 10, 0, 28));
         assert!(l.served);
         assert_eq!((l.speed, l.support_sub), (Some(1), Some(1)));
         assert_eq!(l.stream, Some(StreamTier::Sub));
@@ -312,10 +313,14 @@ fn a_seek_restarts_every_play_together_as_a_new_generation() {
     let target = ms(8, 10, 30, 0) + 500;
     rig.core.playback_seek(pb, target, SeekMode::Exact).unwrap();
     rig.until("the seek", 20, || rig.seek_active(pb, 2));
-    // Stop all, seek all to one time, play all.
+    // Stop all, seek all to one time (2 s before the target), play all.
     let log = nvr.play_log();
     assert_eq!(log.len(), 4);
-    assert!(log[2..].iter().all(|l| l.at == d(8, 10, 30, 0) && l.served));
+    assert!(
+        log[2..]
+            .iter()
+            .all(|l| l.at == d(8, 10, 29, 58) && l.served)
+    );
     assert_eq!(nvr.command_count(123), 4);
     assert!(nvr.command_count(7) >= 2);
     assert_eq!(nvr.active_plays(), 2);
@@ -401,9 +406,10 @@ fn rates_send_play_speed_and_pace_the_clock() {
     rig.until("plays at 4x", 20, || {
         nvr.play_log().iter().filter(|l| l.speed == Some(4)).count() == 2
     });
-    // Stop all, seek all to the position, play all at playSpeed 4.
+    // Stop all, seek all to the position (less the lead), play all at
+    // playSpeed 4.
     let log = nvr.play_log();
-    assert!(log[2..].iter().all(|l| l.at == d(8, 10, 0, 10)), "{log:?}");
+    assert!(log[2..].iter().all(|l| l.at == d(8, 10, 0, 8)), "{log:?}");
     rig.until("playing", 20, || {
         rig.position(pb).1 == PlaybackState::Playing
     });
@@ -477,7 +483,7 @@ fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
     // Only the camera with a recording at the time was started.
     let log = nvr.play_log();
     assert_eq!(log.len(), 1, "{log:?}");
-    assert_eq!((log[0].channel, log[0].at), (0, d(8, 10, 1, 30)));
+    assert_eq!((log[0].channel, log[0].at), (0, d(8, 10, 1, 28)));
     assert_eq!(
         rig.camera_state(pb, tiles[1]).unwrap()["state"],
         "no_recording"
@@ -767,7 +773,9 @@ fn a_newer_playback_takes_the_device_and_the_older_shows_unavailable() {
     assert_eq!(nvr.active_plays(), 2);
     let log = nvr.play_log();
     assert!(
-        log[2..].iter().all(|l| l.at == d(8, 15, 30, 0) && l.served),
+        log[2..]
+            .iter()
+            .all(|l| l.at == d(8, 15, 29, 58) && l.served),
         "{log:?}"
     );
     // The newer one plays; the older one's clock does not wait for its
@@ -996,6 +1004,163 @@ fn an_incident_opens_with_its_cameras_and_range_and_bad_requests_are_refused() {
     );
     assert_eq!(rig.core.playback_play(999), Err(RecError::UnknownId));
     assert_eq!(rig.core.playback_close(pb), Err(RecError::UnknownId));
+    rig.sim.settle();
+    assert_eq!(nvr.active_plays(), 0);
+}
+
+/// What [`watch_sync`] saw over one stage.
+#[derive(Debug, Default)]
+struct SyncWatch {
+    /// Largest spread of the cameras' newest shown pictures (media ms),
+    /// over samples where every camera had shown one and none was late.
+    spread_ms: i64,
+    /// The same over samples while a camera was late.
+    spread_late_ms: i64,
+    /// Samples, and those taken while a camera was late.
+    samples: usize,
+    late_samples: usize,
+    /// Each camera's first picture of the stage: the position less its
+    /// media time when it was seen (negative: shown ahead of the clock).
+    first_lag_ms: Vec<i64>,
+}
+
+/// Samples, every 20 ms for `secs` of simulated time, each camera's newest
+/// decoded picture of generation `generation` or later at or after
+/// `from_ms` (pictures decoded up to a seek's target are never shown), and
+/// how far apart the cameras' pictures are.
+fn watch_sync(
+    rig: &Rig,
+    pb: u64,
+    tiles: &[u64],
+    generation: u32,
+    from_ms: i64,
+    secs: u64,
+) -> SyncWatch {
+    let mut w = SyncWatch {
+        first_lag_ms: vec![i64::MIN; tiles.len()],
+        ..SyncWatch::default()
+    };
+    for _ in 0..secs * 50 {
+        rig.sim.advance(Duration::from_millis(20));
+        rig.core.flush_events();
+        let pos = rig.position(pb).0;
+        let newest: Vec<Option<i64>> = tiles
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let n = rig
+                    .rec
+                    .decode_times(*t)
+                    .into_iter()
+                    .filter(|(g, p, _)| *g >= generation && pts_ms(*p) >= from_ms)
+                    .map(|(_, p, _)| pts_ms(p))
+                    .next_back();
+                if let Some(p) = n
+                    && w.first_lag_ms[i] == i64::MIN
+                {
+                    w.first_lag_ms[i] = pos - p;
+                }
+                n
+            })
+            .collect();
+        if newest.iter().any(Option::is_none) {
+            continue;
+        }
+        let v: Vec<i64> = newest.into_iter().flatten().collect();
+        let spread = v.iter().max().unwrap() - v.iter().min().unwrap();
+        let late = tiles.iter().any(|t| {
+            rig.camera_state(pb, *t)
+                .is_some_and(|e| e["state"] == "late")
+        });
+        w.samples += 1;
+        if late {
+            w.late_samples += 1;
+            w.spread_late_ms = w.spread_late_ms.max(spread);
+        } else {
+            w.spread_ms = w.spread_ms.max(spread);
+        }
+    }
+    w
+}
+
+/// The bug a hardware run showed: after a seek or a rate change, a camera
+/// whose play started late, began at a keyframe after the target, or
+/// stalled mid-play was not held with the others, and the cameras' media
+/// times drifted seconds apart. Here, at 1x (after a seek), 4x, and 16x
+/// (after rate changes), with one camera whose first media comes late, one
+/// whose play begins at a keyframe after the target, and one that stalls
+/// mid-play, the cameras stay together: within 250 ms at 1x, 500 ms at 4x,
+/// and one keyframe interval of the decoded stream (the mock's 2 s GOP)
+/// plus a few ticks at 16x, where only keyframes are shown. The stalled
+/// camera is shown `late` for a bounded time while the others go on, and
+/// then rejoins them through a restart of its play alone.
+#[test]
+fn cameras_stay_together_after_seeks_and_rate_changes_despite_late_and_stalled_plays() {
+    use mock_nvr::archive::PlayFaultKind::{FirstKeyframeAfter, FirstMediaAfter, Stall};
+    let rig = Rig::new();
+    let faults = mock_nvr::archive::PlayFaults::default();
+    let f2 = faults.clone();
+    let nvr = archive_mock(&rig.sim, 4, move |a| a.play_faults = f2);
+    let (_dev, key) = rig.add(&nvr, &[0, 1, 2, 3]);
+    let (pb, tiles) = rig.open(json!({
+        "start_ms": ms(8, 9, 0, 0), "end_ms": ms(8, 13, 0, 0), "position_ms": ms(8, 10, 0, 10),
+        "cameras": cams(&key, &[0, 1, 2, 3], "sub"),
+    }));
+    rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
+    rig.core.playback_play(pb).unwrap();
+    rig.sim.advance(Duration::from_secs(3));
+
+    for (rate, bound_ms) in [(1.0, 250), (4.0, 500), (16.0, 2_000 + 16 * 50)] {
+        let plays = nvr.play_log().len();
+        // Channel 1 starts 3 s late; channel 2 begins at the first keyframe
+        // 4 s after the device's seek time (2 s after the target); channel 3
+        // stalls for 10 s after 6 s worth (at the rate) of media.
+        faults.add(1, FirstMediaAfter(Duration::from_secs(3)));
+        faults.add(2, FirstKeyframeAfter(4));
+        faults.add(
+            3,
+            Stall {
+                after_secs: (6.0 * rate) as u32,
+                pause: Duration::from_secs(10),
+            },
+        );
+        let target = if rate == 1.0 {
+            let target = rig.position(pb).0 + 60_000;
+            rig.core.playback_seek(pb, target, SeekMode::Exact).unwrap();
+            target
+        } else {
+            rig.core.playback_set_rate(pb, rate).unwrap();
+            rig.position(pb).0
+        };
+        let generation = generation(&rig, pb, 0);
+        let w = watch_sync(&rig, pb, &tiles, generation, target, 16);
+        let log = nvr.play_log();
+        // The four started as a group, then channel 3 once more, alone.
+        let again: Vec<u8> = log[plays + 4..].iter().map(|l| l.channel).collect();
+        assert_eq!(again, vec![3], "{rate}x: {log:?}");
+        assert!(w.samples > 250, "{rate}x: {w:?}");
+        assert!(w.spread_ms <= bound_ms, "{rate}x: {w:?}");
+        // After the clock waited 2 s for it, late for at most 0.8 s, and
+        // never further behind than 0.75 s of wall time at the rate.
+        assert!(w.late_samples <= 40, "{rate}x: {w:?}");
+        assert!(
+            w.spread_late_ms <= bound_ms.max((750.0 * rate) as i64),
+            "{rate}x: {w:?}"
+        );
+        // No camera's first picture was shown ahead of the clock.
+        for lag in &w.first_lag_ms {
+            assert!(*lag >= -(bound_ms / 2), "{rate}x: {w:?}");
+        }
+        let states: Vec<String> = tiles
+            .iter()
+            .map(|t| rig.camera_state(pb, *t).unwrap()["state"].to_string())
+            .collect();
+        assert!(
+            states.iter().all(|s| s == "\"playing\""),
+            "{rate}x: {states:?}"
+        );
+    }
+    rig.core.playback_close(pb).unwrap();
     rig.sim.settle();
     assert_eq!(nvr.active_plays(), 0);
 }
