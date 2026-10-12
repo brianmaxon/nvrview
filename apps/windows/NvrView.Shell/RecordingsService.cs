@@ -187,6 +187,12 @@ public sealed class RecordingsService
     /// </summary>
     public Action<RecordedThumbnail, Action<RecordedThumbnail?>>? ThumbnailDecoder { get; set; }
 
+    /// <summary>
+    /// Drops the decoder's waiting requests (the window moved on); each is answered with
+    /// <see cref="ThumbnailDecodeQueue.Canceled"/>, which makes its picture be asked for again later.
+    /// </summary>
+    public Action? ThumbnailDecoderCancel { get; set; }
+
     /// <summary>The app names a camera as its camera list does (null: "Channel N").</summary>
     public Func<RecordingCamera, string?>? CameraNamer { get; set; }
 
@@ -651,6 +657,11 @@ public sealed class RecordingsService
             {
                 return;
             }
+            if (ReferenceEquals(small, ThumbnailDecodeQueue.Canceled))
+            {
+                Thumbnails.Set(key, new ThumbnailState.Dropped());
+                return;
+            }
             if (small is null)
             {
                 Thumbnails.Set(key, new ThumbnailState.Failed("the picture could not be decoded"));
@@ -676,6 +687,7 @@ public sealed class RecordingsService
         {
             return;
         }
+        ThumbnailDecoderCancel?.Invoke();
         try
         {
             _core.ThumbnailCancel(null);

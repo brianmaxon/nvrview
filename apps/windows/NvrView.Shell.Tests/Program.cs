@@ -97,6 +97,7 @@ internal static class Program
         PlaybackTests.Run();
         RecordingsBrowseTests.Run();
         RecordingsModelTests.Run();
+        ThumbnailDecodingTests.Run();
         return T.Summary();
     }
 }

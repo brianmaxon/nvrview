@@ -1228,9 +1228,13 @@ The NVR's own recordings, found by what happened and played back
   cameras. Removing a camera is the finest edit there is: the core's edit
   log has no way to leave out one event (FFI-RECORDINGS.md section 3).
 - **Thumbnails:** asked for as rows appear; a spinner until the device's
-  keyframe arrives, which the app decodes (VideoToolbox), shrinks to 320
-  points, and gives back to the core's cache as a JPEG, so the next time it
-  is read as is. A crossed-out camera means no recording in the range. The
+  keyframe arrives, which the app decodes (VideoToolbox; Windows: Media
+  Foundation), shrinks to 320 points (pixels on Windows) on the longer side
+  without enlarging, and gives back to the core's cache as a JPEG (ImageIO;
+  Windows: WIC, no metadata), so the next time it is read as is. The decoding
+  happens off the UI thread; on Windows through a bounded queue that takes the
+  newest request first and drops the oldest. A picture that does not decode
+  shows a placeholder and is logged at most every 30 seconds. A crossed-out camera means no recording in the range. The
   window keeps at most 512 in memory; queued fetches are dropped when it
   shows another day or closes.
 - **Downloads** (the header's Downloads): every download with its folder's

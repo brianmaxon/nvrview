@@ -452,7 +452,10 @@ internal sealed partial class RecordingsWindow
         return box;
     }
 
-    private static async Task LoadImageAsync(Microsoft.UI.Xaml.Controls.Image target, byte[] data)
+    /// <summary>Cover pictures put on screen so far (the self-test sees that a row shows one).</summary>
+    public int ThumbnailsShown { get; private set; }
+
+    private async Task LoadImageAsync(Microsoft.UI.Xaml.Controls.Image target, byte[] data)
     {
         try
         {
@@ -462,6 +465,7 @@ internal sealed partial class RecordingsWindow
             var bitmap = new BitmapImage();
             await bitmap.SetSourceAsync(stream);
             target.Source = bitmap;
+            ThumbnailsShown++;
         }
         catch (Exception e) when (e is InvalidOperationException or System.Runtime.InteropServices.COMException)
         {
