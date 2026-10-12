@@ -192,6 +192,8 @@ public enum CoreEvent: Sendable, Equatable {
     case recordings(RecordingsEvent)
     /// Minor 6: recorded playback (state, cameras, seeks, closed).
     case playback(PlaybackEvent)
+    /// Minor 9: a live or call recording's progress.
+    case recording(RecordingEvent)
 
     /// The `discovered` event's own shape (its `channels` is a number, unlike
     /// the `channels` event's list).
@@ -288,6 +290,9 @@ public enum CoreEvent: Sendable, Equatable {
             }
             if PlaybackEvent.types.contains(t.type) {
                 return PlaybackEvent.parse(json).map(CoreEvent.playback)
+            }
+            if t.type == "recording" {
+                return RecordingEvent.parse(json).map(CoreEvent.recording)
             }
         }
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
