@@ -349,7 +349,7 @@ fn opt_uid(uid: Option<&str>) -> String {
 
 /// Escapes text for an XML element (identifiers come from device replies and
 /// are echoed back; never trust them to be markup-free).
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

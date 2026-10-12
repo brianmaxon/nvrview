@@ -167,6 +167,78 @@ pub struct SessionConfig {
     /// pushed meanwhile continues the same talk. Zero closes right after
     /// the audio. Default 1.5 s.
     pub talk_tail: Duration,
+    /// Camera motion control: the dead-man and hold timers and the rate
+    /// limits ([`PtzConfig`]).
+    pub ptz: PtzConfig,
+}
+
+/// A token-bucket rate limit: `per_second` on average, `burst` at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RateLimit {
+    /// Sustained commands per second.
+    pub per_second: u32,
+    /// Commands allowed at once after a quiet spell.
+    pub burst: u32,
+}
+
+/// Camera motion control settings (docs/ARCHITECTURE.md, "Device
+/// commands"). The limits are sized against runaway software: a person at
+/// the controls never reaches them. `stop` is never limited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PtzConfig {
+    /// A move the caller stops renewing is stopped this long after its
+    /// last renewal (the dead-man timer). Default 1 s; callers renew at
+    /// least every 500 ms while the control is held.
+    pub deadman: Duration,
+    /// A move is stopped after this long however often it is renewed; the
+    /// same direction is refused until the control is released. Default
+    /// 30 s.
+    pub max_hold: Duration,
+    /// Moves and lens moves per camera. Default 20 per second, bursts of
+    /// 40.
+    pub camera_moves: RateLimit,
+    /// Preset recalls per camera. Default 5 per second, bursts of 5.
+    pub camera_presets: RateLimit,
+    /// Moves and lens moves per device, all cameras together. Default 60
+    /// per second, bursts of 120.
+    pub device_moves: RateLimit,
+    /// Preset recalls per device. Default 15 per second, bursts of 15.
+    pub device_presets: RateLimit,
+    /// Automation (a local API client, automatic correction) is refused on
+    /// a camera while the user moves it and for this long after the user's
+    /// last command there. Default 5 s.
+    pub manual_priority: Duration,
+    /// After a zoom move or a preset recall, the lens positions (294) are
+    /// read again this much later, when the camera has settled, as the
+    /// official client does. Default 6 s.
+    pub lens_reread: Duration,
+}
+
+impl Default for PtzConfig {
+    fn default() -> Self {
+        PtzConfig {
+            deadman: Duration::from_secs(1),
+            max_hold: Duration::from_secs(30),
+            camera_moves: RateLimit {
+                per_second: 20,
+                burst: 40,
+            },
+            camera_presets: RateLimit {
+                per_second: 5,
+                burst: 5,
+            },
+            device_moves: RateLimit {
+                per_second: 60,
+                burst: 120,
+            },
+            device_presets: RateLimit {
+                per_second: 15,
+                burst: 15,
+            },
+            manual_priority: Duration::from_secs(5),
+            lens_reread: Duration::from_secs(6),
+        }
+    }
 }
 
 impl SessionConfig {
@@ -205,6 +277,7 @@ impl SessionConfig {
             talk_max_duration: Duration::from_secs(300),
             talk_catch_up: Duration::from_millis(200),
             talk_tail: Duration::from_millis(1500),
+            ptz: PtzConfig::default(),
         }
     }
 }

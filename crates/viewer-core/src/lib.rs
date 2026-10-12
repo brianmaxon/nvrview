@@ -37,6 +37,12 @@
 //!   with [`CoreError::NotPermitted`] unless the app enabled the channel
 //!   ([`Core::set_talk_permission`], off by default); the device session
 //!   rate-limits, paces, logs, and closes it on every exit path.
+//! - **Camera motion** ([`Core::ptz_move`] and its siblings) names its
+//!   origin: the app's own controls ([`MotionOrigin::Manual`]) need no
+//!   enable; automation needs a per-camera grant
+//!   ([`Core::set_motion_grant`]). The device session rate-limits, logs,
+//!   and stops every move on every path; a tile that started a move stops
+//!   it when it closes.
 //! - **Logging.** With a log directory, the core installs `viewer-log`
 //!   (rotation capped by file count and total size, rate-limited). Passwords
 //!   are never logged; addresses only at debug level.
@@ -50,6 +56,7 @@ mod events;
 mod json;
 mod lens;
 mod playback;
+pub mod ptz;
 mod recordings_owner;
 pub mod sound;
 pub mod store;
@@ -57,8 +64,9 @@ pub mod talk;
 mod tile;
 pub mod update;
 
+pub use bc_protocol::ptz::{Direction as PtzDirection, LensAxis};
 pub use bc_protocol::stream::StreamTier;
-pub use bc_session::{BackoffConfig, Connector};
+pub use bc_session::{BackoffConfig, Connector, MotionOrigin};
 pub use capture::LimitKind;
 pub use capture_owner::{
     AudioEncoder, CaptureError, EncoderOpened, FINALIZE_WAIT, FreeSpace, SystemFreeSpace,
@@ -352,6 +360,8 @@ pub struct Core {
     lens: lens::LensContext,
     /// Talk-back permissions and every tile's talk.
     talk: talk::TalkHub,
+    /// Camera motion from tiles.
+    ptz: ptz::PtzHub,
     /// The one LAN device search ([`discover`]).
     discover: discover::DiscoverHub,
     /// The one update check or download ([`update`]).
@@ -435,6 +445,7 @@ impl Core {
             },
         };
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
+        let ptz = ptz::PtzHub::new(event_sink.clone(), handle.clone());
         let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
         let update =
             update::UpdateHub::new(event_sink.clone(), config.data_dir.clone(), clock.clone());
@@ -474,6 +485,7 @@ impl Core {
             device_keys: Mutex::new(device_keys),
             lens,
             talk,
+            ptz,
             discover,
             update,
             recordings,
@@ -793,6 +805,7 @@ impl Core {
         // Its plays stop before the session closes.
         self.playback_device_removed(&dev.key);
         self.talk.forget_device(device);
+        self.ptz.forget_device(device);
         // Recordings let go of the session before it closes.
         self.recordings.device_removed(&dev.key, device);
         dev.handle.close_blocking(&self.handle);
@@ -991,6 +1004,7 @@ impl Core {
         for (id, _) in &tiles {
             self.talk.tile_closed(*id);
             self.capture.tile_closed(*id);
+            self.ptz.tile_closed(*id);
         }
         for (id, mut t) in tiles {
             t.end(reason);
@@ -1401,6 +1415,162 @@ impl Core {
         self.capture.status()
     }
 
+    /// A tile's device, channel and session, for camera motion.
+    fn ptz_target(
+        &self,
+        tile: u64,
+    ) -> Result<(u64, u8, Arc<bc_session::DeviceSession>), CoreError> {
+        let reg = lock(&self.registry);
+        let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+        let (device, channel) = (t.device, t.channel);
+        let session = reg
+            .devices
+            .get(&device)
+            .and_then(|d| d.handle.session())
+            .ok_or(CoreError::UnknownId)?;
+        Ok((device, channel, session))
+    }
+
+    fn ptz_send(
+        &self,
+        tile: u64,
+        command: bc_session::PtzCommand,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        self.check_api()?;
+        if let MotionOrigin::Automation(c) = &origin
+            && !valid_client(c)
+        {
+            return Err(CoreError::InvalidArgument);
+        }
+        let (device, channel, session) = self.ptz_target(tile)?;
+        self.ptz
+            .send(tile, device, channel, &session, command, origin);
+        Ok(())
+    }
+
+    /// Reads what a tile's camera can do and where its lens is (199, 294,
+    /// 190, 340: viewing tier only) and returns the `nv_ptz_info` JSON
+    /// (docs/FFI.md, "Camera motion (PTZ)"). Blocks until the device
+    /// answers, at most [`PTZ_INFO_TIMEOUT`].
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback,
+    /// [`CoreError::Internal`] when the device did not answer.
+    pub fn ptz_info(&self, tile: u64) -> Result<String, CoreError> {
+        self.check_api()?;
+        let (_, channel, session) = self.ptz_target(tile)?;
+        let read = self.handle.block_on(async move {
+            tokio::time::timeout(PTZ_INFO_TIMEOUT, session.ptz_info(channel)).await
+        });
+        match read {
+            Ok(Ok(info)) => Ok(ptz::info_json(&info)),
+            Ok(Err(e)) => {
+                debug!(tile, reason = e.name(), "camera motion info not read");
+                Err(CoreError::Internal)
+            }
+            Err(_) => Err(CoreError::Internal),
+        }
+    }
+
+    /// Starts or renews a pan or tilt move of a tile's camera at `speed`
+    /// (1 to 64). The app renews it at least every 500 ms while its control
+    /// is held (renewals are not sent to the camera); the camera stops 1 s
+    /// after the last renewal, after 30 s of holding, on
+    /// [`Core::ptz_stop`], when the tile closes, and on every other exit
+    /// path. Returns at once; the outcome comes as a `ptz` event.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for a speed outside 1–64, an empty or
+    /// overlong automation name, or a call from inside a callback;
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`].
+    pub fn ptz_move(
+        &self,
+        tile: u64,
+        direction: PtzDirection,
+        speed: u32,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        let speed = u8::try_from(speed)
+            .ok()
+            .filter(|s| ptz::SPEEDS.contains(s))
+            .ok_or(CoreError::InvalidArgument)?;
+        self.ptz_send(
+            tile,
+            bc_session::PtzCommand::Move { direction, speed },
+            origin,
+        )
+    }
+
+    /// Stops a tile's camera at once. Never rate-limited.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_stop(&self, tile: u64, origin: MotionOrigin) -> Result<(), CoreError> {
+        self.ptz_send(tile, bc_session::PtzCommand::Stop, origin)
+    }
+
+    /// Moves a tile's lens zoom or focus to `position`, clamped to the
+    /// range the camera reported.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_lens(
+        &self,
+        tile: u64,
+        axis: LensAxis,
+        position: i32,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        self.ptz_send(
+            tile,
+            bc_session::PtzCommand::Lens { axis, position },
+            origin,
+        )
+    }
+
+    /// Recalls preset `id` (from [`Core::ptz_info`]) on a tile's camera.
+    /// Saving or deleting presets is not possible.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_preset(&self, tile: u64, id: u32, origin: MotionOrigin) -> Result<(), CoreError> {
+        self.ptz_send(tile, bc_session::PtzCommand::Preset { id }, origin)
+    }
+
+    /// Grants or withdraws camera motion control on one channel of a device
+    /// for an automation: a local API client by name, or
+    /// [`MotionOrigin::AUTO_CORRECTION`]. None is granted until granted,
+    /// for this run of the core (the app stores the user's grants and
+    /// passes them after adding the device). Withdrawing stops that
+    /// automation's move. The app's own controls need no grant.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for an empty or overlong name or from
+    /// inside a callback, [`CoreError::UnknownId`], [`CoreError::Closed`].
+    pub fn set_motion_grant(
+        &self,
+        device: u64,
+        channel: u8,
+        client: &str,
+        granted: bool,
+    ) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !valid_client(client) {
+            return Err(CoreError::InvalidArgument);
+        }
+        let session = lock(&self.registry)
+            .devices
+            .get(&device)
+            .ok_or(CoreError::UnknownId)?
+            .handle
+            .session()
+            .ok_or(CoreError::UnknownId)?;
+        session.set_motion_grant(channel, client, granted);
+        Ok(())
+    }
+
     /// Now on the core's clock, nanoseconds: the host clock ([`clock`]), or
     /// a test runtime's simulated clock ([`TestRuntime`]). Render host
     /// times ([`Core::render_audio`]) are on this clock.
@@ -1455,6 +1625,7 @@ impl Core {
         // No on_audio_tap after this; the renderer renders silence.
         self.tile_ctx.audio.shutdown();
         self.talk.shutdown();
+        self.ptz.shutdown();
         // A running search ends with its `discovery_done` (stopped).
         self.discover.stop();
         // A running update check or download is canceled (its folder
@@ -1503,6 +1674,15 @@ fn capture_error(e: CoreError) -> CaptureError {
         CoreError::Closed => CaptureError::Closed,
         _ => CaptureError::InvalidArgument,
     }
+}
+
+/// Longest wait of [`Core::ptz_info`].
+pub const PTZ_INFO_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// An automation name: 1 to [`ptz::MAX_CLIENT_NAME`] bytes, no control
+/// characters.
+fn valid_client(c: &str) -> bool {
+    !c.is_empty() && c.len() <= ptz::MAX_CLIENT_NAME && !c.chars().any(char::is_control)
 }
 
 fn layout_error(e: store::LayoutError) -> CoreError {
