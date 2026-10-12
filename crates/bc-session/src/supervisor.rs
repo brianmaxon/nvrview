@@ -3,6 +3,7 @@
 use crate::Shared;
 use crate::archive::{TransferItem, TransferKind, TransferSink};
 use crate::config::{Jitter, SessionConfig};
+use crate::ptz::{Ptz, PtzControl, PtzReq};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::talk::{TalkControl, TalkLimits, TalkReq, Talks};
 use crate::transport::Connector;
@@ -188,6 +189,7 @@ pub(crate) enum Request {
     Query(QueryReq),
     Transfer(TransferReq),
     Talk(TalkReq),
+    Ptz(PtzReq),
 }
 
 pub(crate) struct NewSub {
@@ -221,6 +223,8 @@ pub struct DeviceSession {
     pub(crate) play_seq: std::sync::atomic::AtomicU32,
     /// Talk-back permissions and rate limit.
     pub(crate) talk_control: Arc<TalkControl>,
+    /// Camera motion grants and stop notices.
+    pub(crate) ptz_control: Arc<PtzControl>,
     pub(crate) talk_starts_per_minute: u32,
     pub(crate) talk_buffer: usize,
     join: Option<JoinHandle<()>>,
@@ -270,6 +274,8 @@ impl DeviceSession {
                 tail: config.talk_tail,
             },
         );
+        let ptz_control = Arc::new(PtzControl::new());
+        let ptz = Ptz::new(config.ptz, ptz_control.clone());
         let ctx = Ctx {
             cfg: config,
             shared: shared.clone(),
@@ -282,6 +288,7 @@ impl DeviceSession {
             queries: Queries::default(),
             transfers: Transfers::default(),
             talks,
+            ptz,
             conn_gen: 0,
             limiter: LogLimiter::new(Duration::from_secs(5)),
             wait_log: LogLimiter::new(Duration::from_secs(5)),
@@ -310,6 +317,7 @@ impl DeviceSession {
             play_group_delay,
             play_seq,
             talk_control,
+            ptz_control,
             talk_starts_per_minute,
             talk_buffer,
             join: Some(join),
@@ -871,6 +879,7 @@ struct Ctx {
     queries: Queries,
     transfers: Transfers,
     talks: Talks,
+    ptz: Ptz,
     /// Incremented on every successful login.
     conn_gen: u64,
     limiter: LogLimiter,
@@ -893,6 +902,7 @@ impl Ctx {
             Request::Query(q) => self.queries.add(q),
             Request::Transfer(t) => self.transfers.add(t),
             Request::Talk(t) => self.talks.add(t),
+            Request::Ptz(r) => self.ptz.add(r),
         }
     }
 
@@ -950,6 +960,7 @@ impl Ctx {
         self.queries.connection_lost();
         self.transfers.connection_lost();
         self.talks.connection_lost();
+        self.ptz.connection_lost();
     }
 
     /// Ends the session for good: refuses new subscriptions, and closes every
@@ -964,6 +975,7 @@ impl Ctx {
         self.queries.close_all();
         self.transfers.close_all();
         self.talks.finish();
+        self.ptz.finish();
     }
 }
 
@@ -1249,8 +1261,14 @@ async fn graceful_close<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
     c: &mut Conn<R, W>,
 ) {
-    // Close every talk first (11): a speaker must not stay open.
-    for bytes in ctx.talks.close_all(&mut c.session) {
+    // Stop every moving camera and close every talk first (18 stop, 11):
+    // a camera must not keep moving, a speaker must not stay open.
+    for bytes in ctx
+        .ptz
+        .close_all(&mut c.session)
+        .into_iter()
+        .chain(ctx.talks.close_all(&mut c.session))
+    {
         if c.send(&bytes).await.is_err() {
             break;
         }
@@ -1638,6 +1656,17 @@ fn stop_bytes(session: &mut Session, id: u32, t: &ActiveTransfer) -> Option<Vec<
     }
 }
 
+/// Sends camera motion commands and their stops (see [`Ptz::poll`]).
+async fn sync_ptz<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    ctx: &mut Ctx,
+    c: &mut Conn<R, W>,
+) -> Result<(), Failure> {
+    for bytes in ctx.ptz.poll(&mut c.session) {
+        c.send(&bytes).await?;
+    }
+    Ok(())
+}
+
 /// Opens, feeds, and closes talks (see [`Talks::poll`]).
 async fn sync_talks<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     ctx: &mut Ctx,
@@ -1862,6 +1891,9 @@ fn handle_event(ctx: &mut Ctx, ev: Event, demux_log: &mut LogLimiter) {
             ..
         } => ctx.talks.on_reply(command, message_id, status),
         Event::Control {
+            message_id, status, ..
+        } if ctx.ptz.owns(message_id) => ctx.ptz.on_reply(message_id, status),
+        Event::Control {
             command: 145, xml, ..
         } => match xml::parse_channel_info_list(&xml) {
             Ok(list) => {
@@ -1933,12 +1965,17 @@ async fn connected_loop<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         sync_queries(ctx, c).await?;
         sync_transfers(ctx, c).await?;
         sync_talks(ctx, c).await?;
+        sync_ptz(ctx, c).await?;
         let probe_due = last_rx.max(last_probe) + probe_after;
         let dead_due = last_rx + dead_after;
-        let wait_due = match (ctx.subs.due(&ctx.cfg), ctx.talks.next_due()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let wait_due = [
+            ctx.subs.due(&ctx.cfg),
+            ctx.talks.next_due(),
+            ctx.ptz.next_due(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let wait_due = Some(wait_due.map_or(ctx.diag_last + DIAGNOSTIC_INTERVAL, |w| {
             w.min(ctx.diag_last + DIAGNOSTIC_INTERVAL)
         }));
