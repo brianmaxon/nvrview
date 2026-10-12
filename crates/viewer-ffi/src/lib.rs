@@ -22,7 +22,8 @@ use std::sync::Arc;
 use viewer_core::audio::TapBlock;
 use viewer_core::{
     Action, Callbacks, Codec, ColorMatrix, Core, CoreConfig, CoreError, DecodeFailureKind,
-    LogSettings, RecError, StreamTier, ThumbKind, Thumbnail, ThumbnailAnswer, TileStatus, clock,
+    LogSettings, MAX_CAMERAS, PlaybackState, RecError, SeekMode, StreamTier, ThumbKind, Thumbnail,
+    ThumbnailAnswer, TileStatus, clock,
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
@@ -32,8 +33,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// unchanged (new functions, events, status codes); resets to 0 with a new
 /// NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
 /// nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
-/// part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5).
-pub const NV_ABI_MINOR: u32 = 5;
+/// part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
+/// playback (section 6).
+pub const NV_ABI_MINOR: u32 = 6;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -134,12 +136,38 @@ pub enum NvThumbKind {
     NV_THUMB_IMAGE = 3,
 }
 
+/// How a seek shows its target (minor 6).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NvSeekMode {
+    /// show the keyframe at or before the position first (fast; scrubbing)
+    NV_SEEK_KEYFRAME = 0,
+    /// decode from that keyframe and show the picture at the position
+    NV_SEEK_EXACT = 1,
+}
+
+/// A playback's state (minor 6).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NvPlaybackState {
+    /// playing, but the clock waits for a camera
+    NV_PLAYBACK_BUFFERING = 0,
+    NV_PLAYBACK_PLAYING = 1,
+    NV_PLAYBACK_PAUSED = 2,
+    /// at the end of the range or of the recordings
+    NV_PLAYBACK_ENDED = 3,
+    /// every camera failed
+    NV_PLAYBACK_FAILED = 4,
+}
+
 /// An `NvStreamTier` value as received from C (validated before use).
 pub type NvStreamTierValue = u32;
 /// An `NvThumbKind` value as received from C (validated before use).
 pub type NvThumbKindValue = u32;
 /// An `NvDecodeFailure` value as received from C (validated before use).
 pub type NvDecodeFailureValue = u32;
+/// An `NvSeekMode` value as received from C (validated before use).
+pub type NvSeekModeValue = u32;
 
 /// Borrowed bytes: valid only until the callback that received them returns.
 #[repr(C)]
@@ -655,14 +683,34 @@ pub mod test_support {
         runtime: TestRuntime,
         callbacks: NvCallbacks,
     ) -> Result<*mut NvCore, NvStatus> {
+        core_new_at(runtime, callbacks, None)
+    }
+
+    /// [`core_new_on`] with the simulated clock starting at
+    /// `wall_clock_start_us` (microseconds since the Unix epoch), so
+    /// recordings tests know which day is "today".
+    ///
+    /// # Errors
+    /// As `nv_core_new`.
+    pub fn core_new_at(
+        runtime: TestRuntime,
+        callbacks: NvCallbacks,
+        wall_clock_start_us: Option<i64>,
+    ) -> Result<*mut NvCore, NvStatus> {
         let (Some(on_action), Some(on_event)) = (callbacks.on_action, callbacks.on_event) else {
             return Err(NvStatus::NV_ERR_INVALID_ARGUMENT);
         };
         let cfg = viewer_core::CoreConfig {
             test_runtime: Some(runtime),
+            test_wall_clock_start_us: wall_clock_start_us,
             ..viewer_core::CoreConfig::default()
         };
         new_core(cfg, callbacks, on_action, on_event)
+    }
+
+    /// Waits until every event queued so far has been delivered.
+    pub fn flush_events(core: &NvCore) {
+        core.core.flush_events();
     }
 
     /// Now on the core's clock (render host times are on it): the
@@ -2214,6 +2262,331 @@ pub unsafe extern "C" fn nv_downloads_get(
 pub unsafe extern "C" fn nv_sound_configure(core: *mut NvCore, json: *const c_char) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_call(core, |c| Ok(c.sound_configure(arg(json)?)?)) }
+}
+
+// ---- Recorded playback (minor 6; docs/FFI-RECORDINGS.md, section 6) ------
+
+fn seek_mode(m: NvSeekModeValue) -> Option<SeekMode> {
+    match m {
+        0 => Some(SeekMode::Keyframe),
+        1 => Some(SeekMode::Exact),
+        _ => None,
+    }
+}
+
+fn playback_state(s: PlaybackState) -> NvPlaybackState {
+    match s {
+        PlaybackState::Buffering => NvPlaybackState::NV_PLAYBACK_BUFFERING,
+        PlaybackState::Playing => NvPlaybackState::NV_PLAYBACK_PLAYING,
+        PlaybackState::Paused => NvPlaybackState::NV_PLAYBACK_PAUSED,
+        PlaybackState::Ended => NvPlaybackState::NV_PLAYBACK_ENDED,
+        PlaybackState::Failed => NvPlaybackState::NV_PLAYBACK_FAILED,
+    }
+}
+
+/// The playback and tile IDs of the core's open answer
+/// (`{"playback": N, "tiles": [...]}`).
+fn open_answer(answer: &str) -> Option<(u64, Vec<u64>)> {
+    let v: serde_json::Value = serde_json::from_str(answer).ok()?;
+    let id = v["playback"].as_u64()?;
+    let tiles = v["tiles"]
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_u64)
+        .collect::<Option<Vec<u64>>>()?;
+    Some((id, tiles))
+}
+
+/// How many cameras an open request names (an incident's, as it is now);
+/// `None` when the request is invalid (opening reports why).
+fn camera_count(c: &Core, json: &str) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if let Some(key) = v.get("incident").and_then(serde_json::Value::as_str) {
+        let inc: serde_json::Value = serde_json::from_str(&c.incident_get(key).ok()?).ok()?;
+        return inc["incident"]["cameras"].as_array().map(Vec::len);
+    }
+    v.get("cameras")?.as_array().map(Vec::len)
+}
+
+/// Opens a playback (docs/FFI-RECORDINGS.md, section 6), paused at
+/// "position_ms" with an exact seek:
+/// {"start_ms":S,"end_ms":E,"position_ms":P,"rate":1.0,"sync":"wait"|"free",
+///  "cameras":[{"camera":{"device":"<key>","channel":3,"lens":0},
+///  "tier":"sub"|"main","offset_ms":0}]}, or {"incident":"<key>","tier":"sub"}
+/// for an incident's cameras and range with its margins. Times are
+/// device-local milliseconds. Writes the playback's ID to *out_playback and
+/// one tile ID per camera, in request order, to out_tiles (tile_cap
+/// entries; *tile_count receives the number, at most 4). Playback tiles are
+/// tiles like live ones (on_action, nv_tile_decoded, nv_tile_set_tier,
+/// audio, tile_stats, tile_closed); nothing about them is delivered before
+/// this call returns. When tile_cap is too small nothing is opened:
+/// NV_ERR_BUFFER_TOO_SMALL with *tile_count set. (Only if an incident
+/// gained a camera while it was being opened is the playback opened and
+/// closed again; tile_closed and playback_closed for IDs never handed out
+/// may then follow, and are ignored like any unknown ID.) NV_ERR_LIMIT beyond 8 playbacks, 4 cameras, a 24-hour range, or
+/// the core's tile limit; NV_ERR_INVALID_ARGUMENT for invalid JSON, a rate
+/// other than 0.25, 0.5, 1, 2, 4, 8, or 16, a camera twice, or a camera of
+/// a device not enabled with nv_recordings_enable; NV_ERR_UNKNOWN_ID for an
+/// unknown incident; NV_ERR_NOT_CONFIGURED before nv_recordings_configure.
+/// Any thread, never inside a callback. Added in minor 6, as everything
+/// down to nv_playback_close.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string;
+/// `out_playback` and `tile_count` are valid for one write; `out_tiles` is
+/// null or valid for writing `tile_cap` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_open(
+    core: *mut NvCore,
+    json: *const c_char,
+    out_playback: *mut u64,
+    out_tiles: *mut u64,
+    tile_cap: usize,
+    tile_count: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(json)) = (unsafe { core_ref(core) }, unsafe { string(json) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if out_playback.is_null() || tile_count.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        let fits = |n: usize| !out_tiles.is_null() && tile_cap >= n;
+        // Known before opening in almost every case, so a small out_tiles
+        // opens nothing.
+        if let Some(n) = camera_count(c, json).filter(|n| *n <= MAX_CAMERAS && !fits(*n)) {
+            // SAFETY: non-null and valid for one write per the caller.
+            unsafe { put(tile_count, n) };
+            return NvStatus::NV_ERR_BUFFER_TOO_SMALL;
+        }
+        let (answer, pending) = match c.playback_open_deferred(json) {
+            Ok(a) => a,
+            Err(e) => return e.into(),
+        };
+        let Some((id, tiles)) = open_answer(&answer) else {
+            return NvStatus::NV_ERR_INTERNAL;
+        };
+        // SAFETY: non-null and valid for one write per the caller.
+        unsafe { put(tile_count, tiles.len()) };
+        if !fits(tiles.len()) {
+            // An incident that gained cameras since it was counted: close
+            // it again (the engine needs its gate open to stop).
+            drop(pending);
+            let _ = c.playback_close(id);
+            return NvStatus::NV_ERR_BUFFER_TOO_SMALL;
+        }
+        // SAFETY: `out_tiles` is valid for `tile_cap` >= tiles.len()
+        // entries and `out_playback` for one write, per the caller; neither
+        // overlaps memory the core owns.
+        unsafe {
+            std::ptr::copy_nonoverlapping(tiles.as_ptr(), out_tiles, tiles.len());
+            put(out_playback, id);
+        }
+        // Only now, with the IDs in the app's hands, do the tiles and the
+        // playback's events start.
+        pending.publish();
+        NvStatus::NV_OK
+    })
+}
+
+/// Adds a camera ({"camera":{...},"tier":"sub","offset_ms":0}); it joins at
+/// the current position (its device's plays start again together). Writes
+/// its tile ID to *out_tile. NV_ERR_LIMIT beyond 4 cameras or the tile
+/// limit; NV_ERR_INVALID_ARGUMENT for a camera already in the playback.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string; `out_tile`
+/// is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_add_camera(
+    core: *mut NvCore,
+    playback: u64,
+    json: *const c_char,
+    out_tile: *mut u64,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let json = arg(json)?;
+            if out_tile.is_null() {
+                return Err(NvStatus::NV_ERR_INVALID_ARGUMENT);
+            }
+            let (tile, pending) = c.playback_add_camera_deferred(playback, json)?;
+            // SAFETY: non-null and valid for one write per the caller.
+            put(out_tile, tile);
+            // The tile's actions start once the app has its ID.
+            pending.publish();
+            Ok(())
+        })
+    }
+}
+
+/// Removes one camera: its play stops and its tile closes (tile_closed,
+/// reason "closed"). Waits for the playback's engine (bounded). Never call
+/// it from a callback.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_remove_camera(
+    core: *mut NvCore,
+    playback: u64,
+    tile: u64,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.playback_remove_camera(playback, tile)?)) }
+}
+
+/// Starts the shared clock (from start_ms after the end). Returns at once;
+/// playback_state follows.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_play(core: *mut NvCore, playback: u64) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.playback_play(playback)?)) }
+}
+
+/// Holds the shared clock; the pictures stay on screen.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_pause(core: *mut NvCore, playback: u64) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.playback_pause(playback)?)) }
+}
+
+/// Moves the shared clock to position_ms (device-local; clamped to the
+/// playback's range). Returns at once; every tile starts a new generation
+/// (playback_seek events), and a newer seek replaces one still starting.
+/// NV_ERR_INVALID_ARGUMENT for a mode that is not an NvSeekMode.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_seek(
+    core: *mut NvCore,
+    playback: u64,
+    position_ms: i64,
+    mode: NvSeekModeValue,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let mode = seek_mode(mode).ok_or(NvStatus::NV_ERR_INVALID_ARGUMENT)?;
+            Ok(c.playback_seek(playback, position_ms, mode)?)
+        })
+    }
+}
+
+/// Forward rate: 0.25, 0.5, 1, 2, 4, 8, or 16 (others
+/// NV_ERR_INVALID_ARGUMENT). Audio plays at 1 only. Every tile starts a new
+/// generation; playback_state reports the new rate.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_set_rate(
+    core: *mut NvCore,
+    playback: u64,
+    rate: f64,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.playback_set_rate(playback, rate)?)) }
+}
+
+/// Per-camera clock offset: this camera shows position + offset_ms (a nudge
+/// of a few seconds; at most 24 hours either way). Its device's plays start
+/// again. NV_ERR_UNKNOWN_ID for a tile not in the playback.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_set_offset(
+    core: *mut NvCore,
+    playback: u64,
+    tile: u64,
+    offset_ms: i64,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.playback_set_offset(playback, tile, offset_ms)?)
+        })
+    }
+}
+
+/// The position (device-local ms) and state for the scrubber, as of the
+/// engine's last step (every 10 ms). One brief lock; callable from any
+/// thread, including inside callbacks.
+///
+/// # Safety
+/// `core` is a live handle; `position_ms` and `state` are valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_position(
+    core: *mut NvCore,
+    playback: u64,
+    position_ms: *mut i64,
+    state: *mut NvPlaybackState,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if position_ms.is_null() || state.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.playback_position(playback) {
+            Ok((p, s)) => {
+                // SAFETY: both non-null and valid for one write per the
+                // caller.
+                unsafe {
+                    put(position_ms, p);
+                    put(state, playback_state(s));
+                }
+                NvStatus::NV_OK
+            }
+            Err(e) => e.into(),
+        }
+    })
+}
+
+/// The playback's details: {"playback","state","position_ms","rate","sync",
+/// "start_ms","end_ms","cameras":[{"tile","camera","tier","offset_ms",
+/// "state","reason"?,"generation"}]}. Out-buffer rules as
+/// nv_recordings_calendar; the answer may change between two calls. Never
+/// call it from a callback.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+/// `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_status(
+    core: *mut NvCore,
+    playback: u64,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.playback_status(playback)?)) }
+}
+
+/// Stops every play, closes every tile of the playback (tile_closed for
+/// each), then playback_closed ("closed"). Waits for the playback's engine
+/// (bounded). Never call it from a callback.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_playback_close(core: *mut NvCore, playback: u64) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.playback_close(playback)?)) }
 }
 
 #[cfg(test)]

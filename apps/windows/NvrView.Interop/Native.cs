@@ -162,6 +162,30 @@ public enum NvThumbKind
     [CName("NV_THUMB_IMAGE")] Image = 3,
 }
 
+/// <summary>How a seek shows its target (minor 6).</summary>
+public enum NvSeekMode
+{
+    /// <summary>The keyframe at or before the position first (fast; scrubbing).</summary>
+    [CName("NV_SEEK_KEYFRAME")] Keyframe = 0,
+    /// <summary>Decode from that keyframe and show the picture at the position.</summary>
+    [CName("NV_SEEK_EXACT")] Exact = 1,
+}
+
+/// <summary>A playback's state (minor 6).</summary>
+public enum NvPlaybackState
+{
+    /// <summary>Playing, but the clock waits for a camera.</summary>
+    [CName("NV_PLAYBACK_BUFFERING")] Buffering = 0,
+    /// <summary>Playing.</summary>
+    [CName("NV_PLAYBACK_PLAYING")] Playing = 1,
+    /// <summary>Paused.</summary>
+    [CName("NV_PLAYBACK_PAUSED")] Paused = 2,
+    /// <summary>At the end of the range or of the recordings.</summary>
+    [CName("NV_PLAYBACK_ENDED")] Ended = 3,
+    /// <summary>Every camera failed.</summary>
+    [CName("NV_PLAYBACK_FAILED")] Failed = 4,
+}
+
 /// <summary>A cover thumbnail's description (minor 5).</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct NvThumbnail
@@ -365,7 +389,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 5;
+    public const uint AbiMinor = 6;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -681,4 +705,63 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_sound_configure(nint core, string json);
+
+    // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
+
+    /// <summary>Opens a playback, paused; one tile ID per camera into tiles (minor 6).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_open(
+        nint core, string json, ulong* playback, ulong* tiles, nuint tileCap, nuint* tileCount);
+
+    /// <summary>Adds a camera at the current position (minor 6).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_add_camera(nint core, ulong playback, string json, ulong* tile);
+
+    /// <summary>Removes one camera; its tile closes (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_remove_camera(nint core, ulong playback, ulong tile);
+
+    /// <summary>Starts the shared clock (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_play(nint core, ulong playback);
+
+    /// <summary>Holds the shared clock (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_pause(nint core, ulong playback);
+
+    /// <summary>Moves the shared clock; returns at once (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_seek(nint core, ulong playback, long positionMs, NvSeekMode mode);
+
+    /// <summary>0.25, 0.5, 1, 2, 4, 8, or 16 (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_set_rate(nint core, ulong playback, double rate);
+
+    /// <summary>This camera shows position + offsetMs (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_set_offset(nint core, ulong playback, ulong tile, long offsetMs);
+
+    /// <summary>Position and state for the scrubber; also inside callbacks (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_position(
+        nint core, ulong playback, long* positionMs, NvPlaybackState* state);
+
+    /// <summary>The playback's details (JSON; minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_status(nint core, ulong playback, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Closes every tile, then playback_closed (minor 6).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_playback_close(nint core, ulong playback);
 }

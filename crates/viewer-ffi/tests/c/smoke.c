@@ -5,7 +5,8 @@
  * its audio from a separate (audio-device-like) thread with a tap attached
  * and reads its level, stores a layout, goes through the recordings
  * functions (index, incidents, a thumbnail, a download, a lock, the Trash),
- * and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
+ * plays two cameras' recordings back beside the live tile (open, play,
+ * seek, 4x, close), and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
  * against a spawned mock-nvr with recordings.
  *
  * usage: smoke HOST PORT WORKDIR   (password from NVRVIEW_TEST_PASSWORD;
@@ -37,6 +38,10 @@ static atomic_ulong g_device_info_rec;
 /* nv_tile_open writes the ID here, and only then lets actions run, so the
  * callback may read it without further synchronization. */
 static uint64_t g_tile;
+/* Set while playback tiles (minor 6) may exist; set before
+ * nv_playback_open, so their actions are never taken for unknown tiles. */
+static atomic_bool g_pb_phase;
+static atomic_ulong g_pb_decodes, g_pb_seeks_active, g_pb_rate4, g_pb_closed, g_pb_tile_closed;
 
 static void sleep_ms(long ms) {
     struct timespec ts = {ms / 1000, (ms % 1000) * 1000000L};
@@ -61,6 +66,16 @@ static bool contains(const char *text, size_t len, const char *needle) {
 static void on_action(void *context, uint64_t tile, const NvAction *action) {
     (void)context;
     atomic_fetch_add(&g_callbacks, 1);
+    if (atomic_load(&g_pb_phase) && tile != g_tile) {
+        /* A playback tile (the only other tiles): recorded video arrives
+         * like live video. */
+        if (action->kind == NV_ACTION_DECODE &&
+            nv_tile_decoded(atomic_load(&g_core), tile, action->generation,
+                            action->decode.pts_us) == NV_OK) {
+            atomic_fetch_add(&g_pb_decodes, 1);
+        }
+        return;
+    }
     if (tile != g_tile) {
         problem("action for a tile whose ID nv_tile_open had not returned");
     }
@@ -126,6 +141,16 @@ static void on_event(void *context, const char *json, size_t len) {
     }
     if (contains(json, len, "\"type\":\"tile_closed\"")) {
         atomic_fetch_add(&g_tile_closed, 1);
+    }
+    if (contains(json, len, "\"type\":\"playback_seek\"") && contains(json, len, "\"state\":\"active\"")) {
+        atomic_fetch_add(&g_pb_seeks_active, 1);
+    }
+    if (contains(json, len, "\"type\":\"playback_state\"") && contains(json, len, "\"rate\":4.0") &&
+        contains(json, len, "\"state\":\"playing\"")) {
+        atomic_fetch_add(&g_pb_rate4, 1);
+    }
+    if (contains(json, len, "\"type\":\"playback_closed\"")) {
+        atomic_fetch_add(&g_pb_closed, 1);
     }
     if (contains(json, len, "\"type\":\"recordings_changed\"")) {
         atomic_fetch_add(&g_rec_changed, 1);
@@ -473,6 +498,120 @@ static void recordings(NvCore *core, const char *key, const char *work) {
     }
 }
 
+/* ---- Recorded playback (minor 6) ------------------------------------ */
+
+static NvStatus playback_status_fn(NvCore *core, const char *query, char *out, size_t cap,
+                                   size_t *len) {
+    return nv_playback_status(core, (uint64_t)strtoull(query, NULL, 10), out, cap, len);
+}
+
+static bool wait_count(atomic_ulong *counter, unsigned long at_least) {
+    for (int i = 0; i < 2000 && atomic_load(counter) < at_least; i++) {
+        sleep_ms(10);
+    }
+    return atomic_load(counter) >= at_least;
+}
+
+/* Opens a playback of yesterday's recordings of both channels (indexed by
+ * recordings()), plays it beside the live tile, seeks, plays at 4x, and
+ * closes it, with its events and status codes. */
+static void playback(NvCore *core, const char *key) {
+    long long day = ((long long)time(NULL) / 86400 - 1) * 86400;
+    long long start = (day + 10 * 3600) * 1000, p0 = start + 30000;
+    char json[1024];
+    snprintf(json, sizeof json,
+             "{\"start_ms\":%lld,\"end_ms\":%lld,\"position_ms\":%lld,\"cameras\":["
+             "{\"camera\":{\"device\":\"%s\",\"channel\":0},\"tier\":\"sub\"},"
+             "{\"camera\":{\"device\":\"%s\",\"channel\":1},\"tier\":\"sub\"}]}",
+             start, start + 600000, p0, key, key);
+    uint64_t pb = 0, tiles[4] = {0};
+    size_t count = 0;
+    atomic_store(&g_pb_phase, true);
+    unsigned long closed_before = atomic_load(&g_tile_closed);
+
+    if (nv_playback_open(core, json, &pb, tiles, 1, &count) != NV_ERR_BUFFER_TOO_SMALL ||
+        count != 2 ||
+        nv_playback_open(core, "{\"start_ms\":0}", &pb, tiles, 4, &count) !=
+            NV_ERR_INVALID_ARGUMENT ||
+        nv_playback_open(core, json, NULL, tiles, 4, &count) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_playback_open refusals");
+    }
+    if (nv_playback_open(core, json, &pb, tiles, 4, &count) != NV_OK || count != 2 || pb == 0 ||
+        tiles[0] == 0 || tiles[1] == 0) {
+        problem("nv_playback_open");
+        return;
+    }
+    if (!wait_count(&g_pb_seeks_active, 1) || !wait_count(&g_pb_decodes, 2)) {
+        problem("the opening seek did not show pictures");
+    }
+    int64_t pos = 0;
+    NvPlaybackState state = NV_PLAYBACK_FAILED;
+    if (nv_playback_position(core, pb, &pos, &state) != NV_OK || pos != p0 ||
+        state != NV_PLAYBACK_PAUSED) {
+        problem("paused at the opening position");
+    }
+    if (nv_tile_close(core, tiles[0]) != NV_ERR_INVALID_ARGUMENT ||
+        nv_playback_seek(core, pb, p0, (NvSeekMode)9) != NV_ERR_INVALID_ARGUMENT ||
+        nv_playback_set_rate(core, pb, 3.0) != NV_ERR_INVALID_ARGUMENT ||
+        nv_playback_play(core, pb + 1000) != NV_ERR_UNKNOWN_ID ||
+        nv_playback_set_offset(core, pb, tiles[1], 0) != NV_OK) {
+        problem("playback refusals");
+    }
+
+    /* Play for a second. */
+    if (nv_playback_play(core, pb) != NV_OK) {
+        problem("nv_playback_play");
+    }
+    sleep_ms(1000);
+    if (nv_playback_position(core, pb, &pos, &state) != NV_OK || pos <= p0 ||
+        state != NV_PLAYBACK_PLAYING) {
+        problem("playing");
+    }
+
+    /* An exact seek half a minute on: the next generation shows it. */
+    unsigned long seeks = atomic_load(&g_pb_seeks_active);
+    long long target = p0 + 30000;
+    if (nv_playback_seek(core, pb, target, NV_SEEK_EXACT) != NV_OK ||
+        !wait_count(&g_pb_seeks_active, seeks + 1) ||
+        nv_playback_position(core, pb, &pos, &state) != NV_OK || pos < target) {
+        problem("nv_playback_seek");
+    }
+
+    /* 4x: the clock runs about four times as fast. */
+    if (nv_playback_set_rate(core, pb, 4.0) != NV_OK || !wait_count(&g_pb_rate4, 1)) {
+        problem("nv_playback_set_rate");
+    }
+    int64_t before = 0, after = 0;
+    nv_playback_position(core, pb, &before, &state);
+    sleep_ms(1000);
+    nv_playback_position(core, pb, &after, &state);
+    if (after - before < 2500) {
+        problem("4x did not run faster");
+    }
+    char id[32];
+    snprintf(id, sizeof id, "%llu", (unsigned long long)pb);
+    char *status = query_json(core, playback_status_fn, id);
+    if (status == NULL || strstr(status, "\"rate\":4.0") == NULL ||
+        strstr(status, "\"cameras\":[{") == NULL) {
+        problem("nv_playback_status");
+    }
+    free(status);
+    if (nv_playback_pause(core, pb) != NV_OK) {
+        problem("nv_playback_pause");
+    }
+
+    /* Close: both tiles close, then playback_closed. */
+    if (nv_playback_close(core, pb) != NV_OK || !wait_count(&g_pb_closed, 1) ||
+        nv_playback_close(core, pb) != NV_ERR_UNKNOWN_ID ||
+        nv_playback_position(core, pb, &pos, &state) != NV_ERR_UNKNOWN_ID) {
+        problem("nv_playback_close");
+    }
+    if (atomic_load(&g_tile_closed) - closed_before != 2) {
+        problem("expected a tile_closed per playback tile");
+    }
+    atomic_store(&g_pb_tile_closed, atomic_load(&g_tile_closed) - closed_before);
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: smoke HOST PORT WORKDIR\n");
@@ -589,6 +728,7 @@ int main(int argc, char **argv) {
             problem("nv_layout_delete");
         }
         recordings(core, key, work);
+        playback(core, key);
     }
 
     if (nv_tile_close(core, tile) != NV_OK) {
@@ -676,7 +816,7 @@ int main(int argc, char **argv) {
     if (atomic_load(&g_configures) != 2) {
         problem("expected exactly one Configure per generation");
     }
-    if (atomic_load(&g_tile_closed) != 1) {
+    if (atomic_load(&g_tile_closed) - atomic_load(&g_pb_tile_closed) != 1) {
         problem("expected exactly one tile_closed");
     }
     if (atomic_load(&g_problems) != 0) {

@@ -190,6 +190,8 @@ public enum CoreEvent: Sendable, Equatable {
     case update(UpdateEvent)
     /// Minor 5: recordings (index, incidents, groups, thumbnails, downloads).
     case recordings(RecordingsEvent)
+    /// Minor 6: recorded playback (state, cameras, seeks, closed).
+    case playback(PlaybackEvent)
 
     /// The `discovered` event's own shape (its `channels` is a number, unlike
     /// the `channels` event's list).
@@ -280,8 +282,13 @@ public enum CoreEvent: Sendable, Equatable {
 
     public static func parse(_ json: Data) -> CoreEvent? {
         // Recordings events name devices by key (a string), not by ID.
-        if let t = try? JSONDecoder().decode(TypeWire.self, from: json), RecordingsEvent.types.contains(t.type) {
-            return RecordingsEvent.parse(json).map(CoreEvent.recordings)
+        if let t = try? JSONDecoder().decode(TypeWire.self, from: json) {
+            if RecordingsEvent.types.contains(t.type) {
+                return RecordingsEvent.parse(json).map(CoreEvent.recordings)
+            }
+            if PlaybackEvent.types.contains(t.type) {
+                return PlaybackEvent.parse(json).map(CoreEvent.playback)
+            }
         }
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
         switch w.type {

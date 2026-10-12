@@ -1,8 +1,10 @@
 # C interface for recordings, ABI 3 minor 5 (contract for milestone P)
 
 > **Sections 1 to 5, 8, 9, and `nv_sound_configure` are implemented**
-> (slice F1: FFI.md, "Recordings (minor 5)", and the header); the rest is
-> still a proposal (playback F2, edit lists and sound F3, export F4). This
+> (slice F1: FFI.md, "Recordings (minor 5)", and the header), and so is
+> **section 6, recorded playback, as minor 6** (slice F2: FFI.md, "Recorded
+> playback (minor 6)"; without `nv_playback_step`); the rest is still a
+> proposal (edit lists and sound F3, export F4). This
 > was the contract for review before the core and the apps were built in
 > parallel, as [FFI-ABI3.md](FFI-ABI3.md) was for M3. Everything in
 > [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h) still holds; the additions
@@ -1836,3 +1838,43 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
     `failed` (`session_closed`), and the app closes the playback. A camera of
     a device that is enabled but not added when the playback opens is
     `failed` (`session_closed`) until the playback is opened again.
+
+## Clarifications from the implementation (F2, 2026-10-11)
+
+What wrapping section 6 in C functions (MILESTONE-P.md, F2) settled.
+
+1. **Minor 6, not 5.** F1 shipped as minor 5 on its own, so the playback
+   functions, `NvSeekMode`, `NvPlaybackState`, and the four playback events
+   are minor 6 (FFI.md, "Versioning"). Section 13's list of minor 5
+   additions is to be read without `nv_playback_*`, `NvSeekMode`, and
+   `NvPlaybackState`.
+2. **`nv_playback_step` is not exported** in minor 6 (C10 did not build
+   stepping); it takes a later minor.
+3. **`nv_playback_status`** is added: `(core, playback, out, cap, len)`
+   with the out-buffer rules, answering the engine's details (state,
+   position, rate, sync, range, and per camera its tile, camera, tier,
+   offset, state, reason, and shown generation). Never from a callback.
+4. **`nv_playback_open` and a small `tile_cap`.** The cameras are counted
+   before anything opens (an incident's as it is at the call), so a
+   `tile_cap` below the count returns `NV_ERR_BUFFER_TOO_SMALL` with
+   `*tile_count` set and opens nothing. Only an incident that gains a
+   camera between the count and the open is opened and closed again; its
+   `tile_closed` and `playback_closed` for IDs never handed out may then
+   arrive and are ignored like any unknown ID. A request naming more than
+   4 cameras is `NV_ERR_LIMIT` whatever `tile_cap` is. NULL `out_playback`
+   or `tile_count` is `NV_ERR_INVALID_ARGUMENT`.
+5. **Nothing before the IDs.** The tiles' actions and the playback's
+   events are held back until `nv_playback_open` has written the IDs
+   (`playback_open_deferred` and `PlaybackPending::publish`), and a new
+   tile's actions until `nv_playback_add_camera` has written its ID
+   (`playback_add_camera_deferred`, added with F2), as `nv_tile_open` does
+   for a live tile.
+6. **Adding a camera already in the playback** is
+   `NV_ERR_INVALID_ARGUMENT`, as section 6's open rule says for a camera
+   twice; C10 had not checked it on add (fixed in the core with F2).
+7. **Threads.** Only `nv_playback_position` may be called inside a
+   callback; every other playback function returns
+   `NV_ERR_INVALID_ARGUMENT` there. `nv_playback_remove_camera` and
+   `nv_playback_close` wait (bounded, about 10 s) for the engine; the
+   others return at once, and `NV_ERR_LIMIT` means 64 requests already wait
+   for that playback's engine.

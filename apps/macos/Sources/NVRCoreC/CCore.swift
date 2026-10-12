@@ -421,6 +421,67 @@ public final class CCore: CoreAPI {
         try check(nv_sound_configure(try core(), json))
     }
 
+    // MARK: Recorded playback (minor 6)
+
+    public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {
+        let c = try core()
+        var playback: UInt64 = 0
+        // At most 4 cameras per playback, so 4 entries always fit.
+        var tiles = [UInt64](repeating: 0, count: 4)
+        var count = 0
+        let status = tiles.withUnsafeMutableBufferPointer { b in
+            nv_playback_open(c, json, &playback, b.baseAddress, b.count, &count)
+        }
+        try check(status)
+        return OpenedPlayback(playback: playback, tiles: Array(tiles.prefix(count)))
+    }
+
+    public func playbackAddCamera(_ playback: UInt64, json: String) throws(CoreStatus) -> UInt64 {
+        var tile: UInt64 = 0
+        try check(nv_playback_add_camera(try core(), playback, json, &tile))
+        return tile
+    }
+
+    public func playbackRemoveCamera(_ playback: UInt64, tile: UInt64) throws(CoreStatus) {
+        try check(nv_playback_remove_camera(try core(), playback, tile))
+    }
+
+    public func playbackPlay(_ playback: UInt64) throws(CoreStatus) {
+        try check(nv_playback_play(try core(), playback))
+    }
+
+    public func playbackPause(_ playback: UInt64) throws(CoreStatus) {
+        try check(nv_playback_pause(try core(), playback))
+    }
+
+    public func playbackSeek(_ playback: UInt64, positionMs: Int64, mode: SeekMode) throws(CoreStatus) {
+        try check(nv_playback_seek(try core(), playback, positionMs, NvSeekMode(rawValue: mode.rawValue)))
+    }
+
+    public func playbackSetRate(_ playback: UInt64, rate: Double) throws(CoreStatus) {
+        try check(nv_playback_set_rate(try core(), playback, rate))
+    }
+
+    public func playbackSetOffset(_ playback: UInt64, tile: UInt64, offsetMs: Int64) throws(CoreStatus) {
+        try check(nv_playback_set_offset(try core(), playback, tile, offsetMs))
+    }
+
+    public func playbackPosition(_ playback: UInt64) throws(CoreStatus) -> PlaybackPosition {
+        var position: Int64 = 0
+        var state = NV_PLAYBACK_FAILED
+        try check(nv_playback_position(try core(), playback, &position, &state))
+        return PlaybackPosition(positionMs: position, state: PlaybackState(rawValue: state.rawValue) ?? .failed)
+    }
+
+    public func playbackStatus(_ playback: UInt64) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_playback_status(c, playback, $0, $1, $2) }
+    }
+
+    public func playbackClose(_ playback: UInt64) throws(CoreStatus) {
+        try check(nv_playback_close(try core(), playback))
+    }
+
     /// `nv_audio_render` with the core handle as its context. Players stop
     /// rendering before `free` (CoreBridge.shutdown sees to it).
     public var audioRenderHook: AudioRenderHook {

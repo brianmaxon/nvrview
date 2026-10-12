@@ -94,6 +94,7 @@ internal static class Program
         DiscoveryTests.Run();
         UpdateTests.Run();
         RecordingsTests.Run();
+        PlaybackTests.Run();
         return T.Summary();
     }
 }

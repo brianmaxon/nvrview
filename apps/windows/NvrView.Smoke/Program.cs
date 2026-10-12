@@ -153,6 +153,12 @@ internal sealed class FakeApp : NvCoreCallbacks
     }
 
     public ulong Device;
+    /// <summary>The live tile; set after nv_tile_open returns.</summary>
+    public ulong MainTile;
+    /// <summary>Set before a playback opens: tiles other than the live one are its tiles.</summary>
+    public volatile bool PlaybackPhase;
+    public long PlaybackDecodes;
+    public long PlaybackTilesClosed;
     public volatile bool CloseReturned;
     public volatile bool TileClosedSeen;
     public volatile bool Connected;
@@ -227,6 +233,16 @@ internal sealed class FakeApp : NvCoreCallbacks
     {
         Interlocked.Increment(ref Callbacks);
         Interlocked.Increment(ref Actions);
+        if (PlaybackPhase && tile != Volatile.Read(ref MainTile))
+        {
+            // A playback tile (the only other tiles): recorded video
+            // arrives like live video and is answered the same way.
+            if (action.Kind == NvActionKind.Decode && core.Decoded(tile, action.Generation, action.Decode.PtsUs) == NvStatus.Ok)
+            {
+                Interlocked.Increment(ref PlaybackDecodes);
+            }
+            return;
+        }
         if (CloseReturned)
         {
             Problem("on_action after nv_tile_close returned");
@@ -464,6 +480,9 @@ internal sealed class FakeApp : NvCoreCallbacks
                 {
                     _layoutRevisions.Add(e.GetProperty("revision").GetUInt64());
                 }
+                break;
+            case "tile_closed" when PlaybackPhase && e.GetProperty("tile").GetUInt64() != Volatile.Read(ref MainTile):
+                Interlocked.Increment(ref PlaybackTilesClosed);
                 break;
             case "tile_closed":
                 if (TileClosedSeen)
@@ -713,6 +732,7 @@ internal sealed class Smoke(Options options)
             return 1;
         }
         ulong tile = core.OpenTile(device, 0, NvStreamTier.Sub);
+        Volatile.Write(ref _app.MainTile, tile);
         if (tile == 0)
         {
             Problem("tile ID 0");
@@ -753,6 +773,7 @@ internal sealed class Smoke(Options options)
 
         string key = CheckLayouts(core, device, dataDir);
         CheckRecordings(core, key, dataDir);
+        CheckPlayback(core, key);
         CheckDiscovery(core);
         CheckUpdates(core);
         CheckGrid();
@@ -1153,6 +1174,69 @@ internal sealed class Smoke(Options options)
         }
     }
 
+    // Recorded playback (minor 6): two cameras of yesterday's recordings
+    // (indexed by CheckRecordings) beside the live tile: open, play, seek,
+    // 4x, status, close, with the events and status codes.
+    private void CheckPlayback(NvCore core, string key)
+    {
+        IPlayback pb = core;
+        long day = (DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 86400 - 1) * 86400;
+        long start = (day + 10 * 3600) * 1000, p0 = start + 30_000;
+        string request = $$"""{"start_ms":{{start}},"end_ms":{{start + 600_000}},"position_ms":{{p0}},"cameras":[{"camera":{"device":"{{key}}","channel":0},"tier":"sub"},{"camera":{"device":"{{key}}","channel":1},"tier":"sub"}]}""";
+        _app.PlaybackPhase = true;
+        if (StatusOf(() => pb.PlaybackOpen("{\"start_ms\":0}")) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackPlay(999_999)) != NvStatus.UnknownId)
+        {
+            Problem("playback refusals");
+        }
+        OpenedPlayback opened = pb.PlaybackOpen(request);
+        if (opened.Tiles.Count != 2 || opened.Playback == 0)
+        {
+            Problem("nv_playback_open");
+            return;
+        }
+        if (!WaitUntil(() => _app.EventCount("playback_seek") >= 2 && Interlocked.Read(ref _app.PlaybackDecodes) > 0, 20_000))
+        {
+            Problem("the opening seek did not show pictures");
+        }
+        if (pb.PlaybackPosition(opened.Playback) != (p0, NvPlaybackState.Paused))
+        {
+            Problem("not paused at the opening position");
+        }
+        if (StatusOf(() => core.CloseTile(opened.Tiles[0])) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackSetRate(opened.Playback, 3)) != NvStatus.InvalidArgument ||
+            StatusOf(() => pb.PlaybackSeek(opened.Playback, p0, (NvSeekMode)9)) != NvStatus.InvalidArgument)
+        {
+            Problem("playback tile refusals");
+        }
+        pb.PlaybackPlay(opened.Playback);
+        if (!WaitUntil(() => pb.PlaybackPosition(opened.Playback) is { State: NvPlaybackState.Playing } p && p.PositionMs > p0 + 500, 10_000))
+        {
+            Problem("the playback did not play");
+        }
+        int seeks = _app.EventCount("playback_seek");
+        pb.PlaybackSeek(opened.Playback, p0 + 30_000, NvSeekMode.Exact);
+        if (!WaitUntil(() => _app.EventCount("playback_seek") >= seeks + 2, 20_000) ||
+            pb.PlaybackPosition(opened.Playback).PositionMs < p0 + 30_000)
+        {
+            Problem("nv_playback_seek");
+        }
+        pb.PlaybackSetRate(opened.Playback, 4);
+        pb.PlaybackSetOffset(opened.Playback, opened.Tiles[1], 0);
+        if (!WaitUntil(() => pb.PlaybackStatus(opened.Playback).Contains("\"rate\":4.0", StringComparison.Ordinal), 5_000))
+        {
+            Problem("nv_playback_set_rate or nv_playback_status");
+        }
+        pb.PlaybackPause(opened.Playback);
+        pb.PlaybackClose(opened.Playback);
+        if (!WaitUntil(() => _app.EventCount("playback_closed") == 1 && Interlocked.Read(ref _app.PlaybackTilesClosed) == 2, 5_000) ||
+            StatusOf(() => pb.PlaybackClose(opened.Playback)) != NvStatus.UnknownId)
+        {
+            Problem("nv_playback_close");
+        }
+        _app.PlaybackPhase = false;
+    }
+
     private static (ulong Revision, JsonElement? Layout) ReadLayout(NvCore core, string id, int initialCapacity)
     {
         using JsonDocument doc = JsonDocument.Parse(core.LayoutsJson(initialCapacity));
@@ -1225,9 +1309,10 @@ internal sealed class Smoke(Options options)
         {
             Problem($"actions for {_app.ActionTiles.Count} tiles");
         }
-        if (_app.EventCount("tile_closed") != 1)
+        // The playback's two tiles closed with it (CheckPlayback).
+        if (_app.EventCount("tile_closed") - Interlocked.Read(ref _app.PlaybackTilesClosed) != 1)
         {
-            Problem("expected exactly one tile_closed");
+            Problem("expected exactly one tile_closed for the live tile");
         }
         if (_app.EventCount("tile_stats") == 0)
         {
