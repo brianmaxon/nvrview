@@ -400,6 +400,10 @@ public sealed class RecordingsService
             Notice = $"At most {SoundListening.MaxPerDevice} cameras of a device listen for sounds";
             return false;
         }
+        // The list changes before the call: the core's sound_watch event may arrive during it (the fake sends it
+        // at once) and is kept only for a camera on the list.
+        bool had = IsListening(camera);
+        SetListed(camera, on);
         if (Usable && _core is IEditSound sound)
         {
             try
@@ -408,6 +412,7 @@ public sealed class RecordingsService
             }
             catch (NvException e) when (on)
             {
+                SetListed(camera, had);
                 Notice = e.Status == NvStatus.Limit
                     ? "Too many cameras listen for sounds"
                     : $"Could not listen to this camera {StatusText(e)}";
@@ -417,6 +422,16 @@ public sealed class RecordingsService
             {
             }
         }
+        if (save)
+        {
+            SaveEnablement();
+        }
+        Changed();
+        return true;
+    }
+
+    private void SetListed(RecordingCamera camera, bool on)
+    {
         List<RecordingCamera> list = Listening.TryGetValue(camera.Device, out List<RecordingCamera>? l) ? l : [];
         if (on && !list.Contains(camera))
         {
@@ -435,12 +450,6 @@ public sealed class RecordingsService
         {
             Listening[camera.Device] = list;
         }
-        if (save)
-        {
-            SaveEnablement();
-        }
-        Changed();
-        return true;
     }
 
     /// <summary>Loudness lanes for <paramref name="cameras"/> over [start, end] (memory only).</summary>

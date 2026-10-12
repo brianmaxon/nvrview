@@ -238,31 +238,39 @@ final class RecordingsModel {
     /// Returns false (with `notice` set) when it was refused.
     @discardableResult
     func setListening(_ camera: RecordingCamera, _ on: Bool, save: Bool = true) -> Bool {
-        var list = listening[camera.device] ?? []
         if on, !SoundListening.canAdd(camera, to: listeningCameras) {
             notice = "At most \(SoundListening.maxPerDevice) cameras of a device listen for sounds"
             return false
         }
+        // The list changes before the call: the core's `sound_watch` event
+        // may arrive during it and is kept only for a camera on the list.
+        let had = isListening(camera)
+        setListed(camera, on)
         if let core = core() {
             do throws(CoreStatus) {
                 try core.soundWatch(camera: camera.json, enabled: on)
             } catch {
                 if on {
+                    setListed(camera, had)
                     notice = error == .limit
                         ? "Too many cameras listen for sounds" : "Could not listen to this camera (status \(error.code))"
                     return false
                 }
             }
         }
+        if save { saveEnablement() }
+        changed()
+        return true
+    }
+
+    private func setListed(_ camera: RecordingCamera, _ on: Bool) {
+        var list = listening[camera.device] ?? []
         if on, !list.contains(camera) { list.append(camera) }
         if !on {
             list.removeAll { $0 == camera }
             listenStates[camera] = nil
         }
         listening[camera.device] = list.isEmpty ? nil : list
-        if save { saveEnablement() }
-        changed()
-        return true
     }
 
     /// Loudness lanes for `cameras` over `[start, end]` (memory only).
