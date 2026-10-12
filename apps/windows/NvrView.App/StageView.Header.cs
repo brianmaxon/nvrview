@@ -57,7 +57,8 @@ internal sealed partial class StageView
             Presets = ptz.Presets,
             Lens = ptz.ZoomFocus,
             Fisheye = _viewer.IsFisheye(camera),
-            Picture = StatusOf(t).Text is null,
+            // A status over a picture that is still there ("Recovering" while a stream restarts) does not take the buttons away.
+            Picture = StatusOf(t).Kind == TileMessage.None,
             Recording = false,
             Zoomed = zoomed || moved,
             Panned = !zoomed && !dewarped && Fills(t) && t.DigitalZoom.IsPanned,
