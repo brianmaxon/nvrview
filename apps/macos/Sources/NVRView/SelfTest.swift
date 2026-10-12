@@ -814,7 +814,7 @@ final class SelfTest {
             if !readsBack { problems.append("the window's saved record lost the crop or the tile's Fill choice") }
             if !same { problems.append("a window restored from the record did not get the crop and Fill choices back") }
             if !sameCrop { problems.append("a restored window does not show the same part of the picture") }
-            // parity: fill-per-tile
+            // parity: fill-window-switch
             // The window's switch: every tile fills, then every tile fits.
             window.toggleFill(nil)
             let allFill = stage.fills(camera) && stage.fills(otherCamera) && !window.state.views.mixed
