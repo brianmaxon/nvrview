@@ -27,9 +27,10 @@
  * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
  * calendar alone) and the recordings_month_failed event. Minor 8: edit
  * lists (section 7) and the rest of sound (section 2a). Minor 9: capture
- * (live and call recordings; docs/FFI.md, "Capture").
+ * (live and call recordings; docs/FFI.md, "Capture"). Minor 12: smart
+ * alerts (docs/FFI.md, "Smart alerts").
  */
-#define NV_ABI_MINOR 9
+#define NV_ABI_MINOR 12
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -1607,6 +1608,135 @@ enum NvStatus nv_record_stop(struct NvCore *core, uint64_t recording);
  * `len` is valid for one write.
  */
 enum NvStatus nv_record_status(struct NvCore *core, char *out, size_t cap, size_t *len);
+
+/**
+ * Sets the smart-alert settings (docs/NOTIFICATIONS.md "Settings", plus
+ * "enabled", "utc_offset_min", "acquisition", and "inputs"; docs/FFI.md,
+ * "Smart alerts"). Cameras are named by the device IDs of this run. The
+ * first call starts the engine; until then triggers are ignored. Values
+ * out of range are clamped and reported in the alerts_configured event,
+ * never refused. NV_ERR_INVALID_ARGUMENT for JSON that is not a settings
+ * object. Any thread, never inside a callback. Added in minor 12, as
+ * everything down to nv_alert_mute.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_alerts_configure(struct NvCore *core, const char *json);
+
+/**
+ * The event log, newest first (docs/FFI.md, "Smart alerts"): `query` is
+ * a JSON object of filters (NULL or "{}" for the newest 100); answers
+ * {"entries":[...],"more":bool,"status":{...}} into `out` like
+ * nv_layouts_get.
+ *
+ * # Safety
+ * `core` is a live handle; `query` is null or a NUL-terminated string;
+ * `out` is null or valid for writing `cap` bytes; `len` is valid for one
+ * write.
+ */
+enum NvStatus nv_alerts_get(struct NvCore *core,
+                            const char *query,
+                            char *out,
+                            size_t cap,
+                            size_t *len);
+
+/**
+ * Queues a trigger from the app (a source of its own, or a self-test)
+ * and writes its trigger ID: {"source":"external","origin":"<key>",
+ * "kind",...} or {"source":"device"|"local_audio"|...,"camera":{...},
+ * "kind",...}. NV_ERR_NOT_CONFIGURED while smart alerts are off,
+ * NV_ERR_LIMIT when the intake queue is full.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string;
+ * `trigger_id` is null or valid for one write.
+ */
+enum NvStatus nv_alerts_trigger_put(struct NvCore *core, const char *json, uint64_t *trigger_id);
+
+/**
+ * Copies the frames of a verification request (the `request` of a
+ * verify_request event) into `out`: Annex-B access units from a keyframe
+ * (parameter sets included) to the picture to check, whose sizes the
+ * event lists. `*info` gets the codec (NV_THUMB_H264_KEYFRAME or
+ * NV_THUMB_H265_KEYFRAME), the picture size, and the picture's stream
+ * timestamp. NV_ERR_BUFFER_TOO_SMALL: *info and *len filled.
+ * NV_ERR_UNKNOWN_ID once the request was answered or expired. Never
+ * waits on a device.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `info`
+ * and `len` are valid for one write; `out` is null or valid for writing
+ * `cap` bytes.
+ */
+enum NvStatus nv_alert_frames_get(struct NvCore *core,
+                                  const char *request,
+                                  struct NvThumbnail *info,
+                                  uint8_t *out,
+                                  size_t cap,
+                                  size_t *len);
+
+/**
+ * The detector's boxes for a verification request:
+ * {"detections":[{"class":"person","score":0.8,"box":{"x","y","w","h"}}]}
+ * in normalized coordinates of the whole picture. NV_ERR_UNKNOWN_ID once
+ * the request was answered or expired. A picture that could not be
+ * decoded is simply not answered.
+ *
+ * # Safety
+ * `core` is a live handle; `request` and `json` are NUL-terminated
+ * strings.
+ */
+enum NvStatus nv_alert_detections_put(struct NvCore *core, const char *request, const char *json);
+
+/**
+ * Stores the app's picture of an alert (usually a JPEG with its boxes),
+ * replacing an earlier one; outputs that send pictures wait briefly for
+ * it. The bytes are copied. NV_ERR_LIMIT above 1 MiB, NV_ERR_UNKNOWN_ID
+ * for an alert ID never given.
+ *
+ * # Safety
+ * `core` is a live handle; `data` is valid for reading `len` bytes.
+ */
+enum NvStatus nv_alert_snapshot_put(struct NvCore *core,
+                                    uint64_t alert_id,
+                                    const uint8_t *data,
+                                    size_t len);
+
+/**
+ * Copies an alert's stored picture into `out` (*len gets its size).
+ * NV_ERR_UNKNOWN_ID when there is none; NV_ERR_BUFFER_TOO_SMALL with *len
+ * set.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap`
+ * bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_alert_snapshot_get(struct NvCore *core,
+                                    uint64_t alert_id,
+                                    uint8_t *out,
+                                    size_t cap,
+                                    size_t *len);
+
+/**
+ * Feedback on an alert: {"alert_id":4,"vote":"up"|"down","reason":
+ * "nothing_there"|"wrong_type"|"not_interesting"|"duplicate"} (a reason
+ * only with "down"). NV_ERR_UNKNOWN_ID for an alert ID never given.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_alert_feedback(struct NvCore *core, const char *json);
+
+/**
+ * Mutes a camera ({"device","channel","lens"}) for `seconds`, at most
+ * 24 h; 0 ends a mute. A mute is the only thing that stops always-alert
+ * rules. NV_ERR_NOT_CONFIGURED before the first nv_alerts_configure.
+ *
+ * # Safety
+ * `core` is a live handle; `camera` is a NUL-terminated string.
+ */
+enum NvStatus nv_alert_mute(struct NvCore *core, const char *camera, uint32_t seconds);
 
 #ifdef __cplusplus
 }  // extern "C"
