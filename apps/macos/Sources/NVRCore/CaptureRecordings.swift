@@ -168,18 +168,19 @@ public struct RecordingBoard: Sendable, Equatable {
 
     public init() {}
 
-    /// The app started a recording.
+    /// The app started a recording (before any of its events is handled:
+    /// they reach the main queue after the start returned).
     public mutating func begin(_ id: UInt64, kind: String, camera: CameraRef, file: String, tier: String) {
         running[id] = Entry(
             id: id, kind: kind, camera: camera, file: file, state: "waiting_keyframe", tier: tier, durationMs: 0)
     }
 
-    /// A `recording` event; `camera` resolves the event's device ID for a
-    /// recording the app did not start (one recovered after a crash).
+    /// A `recording` event. Events of a recording the app did not start
+    /// are ignored (FFI.md: an ID never handed out), except `recovered`.
     /// Returns the event when the recording ended (and was known or
     /// recovered), nil otherwise.
     @discardableResult
-    public mutating func apply(_ e: RecordingEvent, camera: (RecordingEvent) -> CameraRef?) -> RecordingEvent? {
+    public mutating func apply(_ e: RecordingEvent) -> RecordingEvent? {
         if e.ended {
             let known = running.removeValue(forKey: e.recording) != nil
             guard known || e.state == "recovered" else { return nil }
@@ -187,9 +188,7 @@ public struct RecordingBoard: Sendable, Equatable {
             if ended.count > Self.endedKept { ended.removeFirst(ended.count - Self.endedKept) }
             return e
         }
-        var entry =
-            running[e.recording]
-            ?? Entry(id: e.recording, kind: e.kind, camera: camera(e), file: e.file, state: e.state, tier: e.tier, durationMs: 0)
+        guard var entry = running[e.recording] else { return nil }
         entry.state = e.state
         entry.file = e.file
         entry.tier = e.tier

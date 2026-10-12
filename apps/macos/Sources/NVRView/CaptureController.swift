@@ -182,12 +182,7 @@ final class CaptureController {
 
     /// A `recording` event from the core.
     func apply(_ e: RecordingEvent) {
-        let ended = board.apply(e) { [model] e in
-            model.devices.first { $0.deviceID == e.device }.map {
-                CameraRef(device: $0.key, channel: Int(e.channel), lens: Int(e.lens))
-            }
-        }
-        guard let ended else { return }
+        guard let ended = board.apply(e) else { return }
         if ended.kind == "call" { model.transcripts.pruneRecordings() }
         model.logEvent(
             "Recording \(ended.state) (\(ended.reason ?? "-")): \((ended.file as NSString).lastPathComponent), "

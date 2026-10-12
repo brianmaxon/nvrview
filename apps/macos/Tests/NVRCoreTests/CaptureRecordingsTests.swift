@@ -87,19 +87,22 @@ import Testing
         func event(_ id: UInt64, _ state: String, ms: UInt64, kind: String = "live") -> RecordingEvent {
             Self.event(id, state, reason: state == "finished" ? "stopped" : nil, ms: ms, kind: kind)
         }
-        #expect(b.apply(event(7, "recording", ms: 83_000)) { _ in nil } == nil)
+        #expect(b.apply(event(7, "recording", ms: 83_000)) == nil)
         #expect(b.pill(for: cam) == "● REC 1:23")
-        // Another camera's recording, resolved from the event.
+        // A call of another camera; the events of an ID the app never
+        // started are ignored.
         let other = CameraRef(device: "d9", channel: 2)
-        b.apply(event(8, "recording", ms: 1000, kind: "call")) { _ in other }
+        b.begin(8, kind: "call", camera: other, file: "/x/b.mp4", tier: "sub")
+        b.apply(event(8, "recording", ms: 1000, kind: "call"))
+        b.apply(event(9, "recording", ms: 1000))
         #expect(b.call(of: other)?.id == 8 && b.list.map(\.id) == [7, 8])
         b.rekey("d1", to: "k1")
         #expect(b.live(of: CameraRef(device: "k1", channel: 2))?.id == 7)
-        let end = b.apply(event(7, "finished", ms: 90_000)) { _ in nil }
+        let end = b.apply(event(7, "finished", ms: 90_000))
         #expect(end?.recording == 7 && b.ended.last?.recording == 7)
         #expect(b.pill(for: CameraRef(device: "k1", channel: 2)) == nil)
         // An unknown recording's end is ignored.
-        #expect(b.apply(event(99, "finished", ms: 0)) { _ in nil } == nil)
+        #expect(b.apply(event(99, "finished", ms: 0)) == nil)
     }
 
     @Test func thePillNeverOverflows() {
