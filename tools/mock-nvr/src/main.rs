@@ -165,8 +165,8 @@ fn run() -> Result<(), String> {
     cfg.width = width;
     cfg.height = height;
     cfg.user = user;
-    if let Some(path) = audio {
-        let mut a = AudioConfig::new(AudioFixture::load(&path).map_err(|e| e.to_string())?);
+    if let Some(path) = &audio {
+        let mut a = AudioConfig::new(AudioFixture::load(path).map_err(|e| e.to_string())?);
         a.clock_hz = audio_clock;
         a.jitter_us = audio_jitter_ms.saturating_mul(1000);
         cfg.audio = Some(std::sync::Arc::new(a));
@@ -191,7 +191,14 @@ fn run() -> Result<(), String> {
         let days = (0..i64::from(recording_days))
             .filter_map(|i| DateTime::from_naive_secs(now - i * 86_400))
             .collect();
-        cfg.archive = Some(ArchiveConfig::new(days));
+        let mut a = ArchiveConfig::new(days);
+        if let Some(path) = &audio {
+            // The recorded days carry the same audio, so a download has a track.
+            a.audio = Some(std::sync::Arc::new(
+                AudioFixture::load(path).map_err(|e| e.to_string())?,
+            ));
+        }
+        cfg.archive = Some(a);
     }
     // Every channel advertises the same capabilities.
     cfg.aitypes = vec![aitype; usize::from(channels)];

@@ -1,0 +1,18 @@
+[package]
+name = "alerts"
+version = "0.1.0"
+description = "Sans-I/O smart-notification rules engine for nvrview: triggers, gate, rules, night from sunrise and sunset, episodes and cooldowns, external-trigger confirmation, and explained decisions"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1"
+
+[lints]
+workspace = true

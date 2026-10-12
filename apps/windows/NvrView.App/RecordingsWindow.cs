@@ -54,6 +54,7 @@ internal sealed partial class RecordingsWindow
     private readonly Button _sidebarButton = new();
     private readonly Button _previousDay = new();
     private readonly Button _nextDay = new();
+    private readonly Button _analyzeSounds = new();
     private readonly ToggleButton _playerTab = new() { Content = "Player" };
     private readonly ToggleButton _downloadsTab = new();
     private readonly Button _inspectorButton = new();
@@ -262,6 +263,13 @@ internal sealed partial class RecordingsWindow
         _nextDay.Content = new FontIcon { Glyph = "\uE76C", FontSize = 12 };
         StyleIcon(_nextDay, "Next day");
         _nextDay.Click += (_, _) => Browser.NextDay();
+        _analyzeSounds.Content = new FontIcon { Glyph = "\uE8D6", FontSize = 14 };
+        StyleIcon(_analyzeSounds, "Analyze Sounds: find sounds in this day's downloaded video for all searched cameras");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_analyzeSounds, "Analyze Sounds");
+        _analyzeSounds.Click += (_, _) => Browser.AnalyzeSound();
+        var dayButtons = new StackPanel { Orientation = Orientation.Horizontal };
+        dayButtons.Children.Add(_nextDay);
+        dayButtons.Children.Add(_analyzeSounds);
         _dayTitle.Margin = new Thickness(6, 0, 6, 0);
         var tabs = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         _playerTab.Click += (_, _) => ShowCenter(RecordingsCenter.Player);
@@ -274,13 +282,13 @@ internal sealed partial class RecordingsWindow
         Grid.SetColumn(_sidebarButton, 0);
         Grid.SetColumn(_previousDay, 1);
         Grid.SetColumn(_dayTitle, 2);
-        Grid.SetColumn(_nextDay, 3);
+        Grid.SetColumn(dayButtons, 3);
         Grid.SetColumn(tabs, 4);
         Grid.SetColumn(_inspectorButton, 6);
         header.Children.Add(_sidebarButton);
         header.Children.Add(_previousDay);
         header.Children.Add(_dayTitle);
-        header.Children.Add(_nextDay);
+        header.Children.Add(dayButtons);
         header.Children.Add(tabs);
         header.Children.Add(_inspectorButton);
     }
@@ -420,6 +428,7 @@ internal sealed partial class RecordingsWindow
     {
         _dayTitle.Text = Browser.DayTitle;
         _nextDay.IsEnabled = !Browser.IsToday;
+        _analyzeSounds.IsEnabled = Browser.CanAnalyze;
         RefreshCenter();
         RefreshSidebar();
         RefreshPlayer();

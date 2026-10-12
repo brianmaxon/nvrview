@@ -135,6 +135,23 @@ started on that app.
 | Recording calls (Conversation, Visitor, You tracks; consent note; beside the transcript) | yes (no per-doorbell choice) | yes (no per-doorbell choice) | UX.md "Recording calls", AUDIO.md "Recording calls". macOS: the call window's Record and ⇧⌘R, "Record calls" in Settings > Alerts with the consent note (one setting for every doorbell; the per-doorbell Default, Always, Never is not built), the recording and the transcript share their stem. IDs `capture-call-record-button`, `capture-call-record-real-core` (four tracks, only Conversation enabled, all decoding, ended with the call); `capture-call-record-auto` is not in the self-test. Windows: the call window's Record and Ctrl+Shift+R (also in a viewer window while the selected tile's call is open), "Record calls" in Settings > Alerts & calls with the consent dialog, the recording and the transcript share their stem (`CallRecordingFiles.SharedStem`), old call recordings pruned to the newest 100 and 10 GB (`TranscriptStore.PruneRecordings`). |
 | PTZ pad (press and hold, speed), presets, lens zoom and focus | no (planned) | no (planned) | UX.md "Pan, tilt, and zoom". IDs `ptz-pad-hold`, `ptz-deadman`, `ptz-preset-recall`, `ptz-lens-clamp`. |
 
+### Smart notifications
+
+Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
+(`crates/alerts`) is built in the core and shared, nothing in either app yet.
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | no (planned) | no (planned) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. |
+| Live verification view in the tile (pictures with boxes, step log) | no (planned) | no (planned) | IDs `verify-view-tile`, `verify-view-dismiss`. |
+| Verification inset and non-activating verification window, stacked, never taking focus | no (planned) | no (planned) | Same mechanism as the doorbell call insets and call window. ID `verify-view-inset`. |
+| Events log (every decision with its trace, filters, jump to recording or incident) | no (planned) | no (planned) | IDs `events-log-filter`, `events-log-jump`. |
+| Smart-alert settings (cameras, zones, schedules, always-alert rules, location, sources, outputs) | no (planned) | no (planned) | One settings document (`alerts.json`) on both. |
+| External trigger mapping (sources to camera angles with regions) | no (planned) | no (planned) | Needs the local API's trigger grant. |
+| Standby toggle and automatic standby on battery; "Not watching since" | no (planned) | no (planned) | Menu bar on macOS, tray on Windows. |
+| Smart-alert processor election among running apps, handoff, startup check | no (planned) | no (planned) | Same protocol on both; a headless service may join later. |
+| Feedback on notifications and log entries (useful, not useful with reasons) | no (planned) | no (planned) | |
+
 ### Recordings (milestone P)
 
 | Feature | macOS | Windows | Notes |
@@ -147,7 +164,8 @@ started on that app.
 | Camera names as the camera list shows them (override, reported name, lens) | yes | yes | ID `recordings-camera-names`; the core also names cameras by the reported names (FFI.md "Recordings"). |
 | Window layout: player in the middle, collapsible sidebar and inspector that give way in a narrow window | yes | yes | ID `recordings-layout`. |
 | Timeline lanes per camera (spans, events by kind with badges, zoom, playhead; a click seeks the player or plays that camera) | yes | yes | IDs `recordings-calendar-lanes`, `playback-scrub`. |
-| Recordings sound: loudness strip under each lane with a legend, sound events (alarms and labels) in lanes, sound badge, Sounds filter | yes | yes | IDs `recordings-loudness-lanes`, `recordings-sound-labels`; the same rules and vectors (`SoundKinds`, `LoudnessScale`). docs/UX.md "Recordings", Sound. Analyzing a recorded day (`nv_sound_analyze_day`) is not exposed (no audio source for recorded days yet); no app classifier puts labels yet. |
+| Recordings sound: loudness strip under each lane with a legend, sound events (alarms and labels) in lanes, sound badge, Sounds filter | yes | yes | IDs `recordings-loudness-lanes`, `recordings-sound-labels`; the same rules and vectors (`SoundKinds`, `LoudnessScale`). docs/UX.md "Recordings", Sound. No app classifier puts labels yet. |
+| Recordings: Analyze Sounds for a day's downloaded video (day header for all searched cameras, a lane's menu for one; progress and Cancel in the lane; results as loudness and sound labels; `no_audio` and `no_source` messages) | yes | yes | IDs `recordings-analyze-no-audio`, `recordings-analyze-day`, `recordings-analyze-cancel` on the fakes (each models analyze-day from its synthetic downloads); the same state and message rules and vectors (`SoundAnalysis`). macOS also runs it on the real core against the mock (`recordings-analyze-real-core`, `scripts/macos-real-selftest.sh`, the mock started with audio). The context menu is a right click on the lane on Windows, a context menu on its name on macOS. |
 | Recordings: Listen for sounds per camera (`nv_sound_watch`, at most four per device, kept between launches) | yes | yes | ID `recordings-listen-for-sounds`; `SoundListening`. |
 | Timeline wheel zoom around the pointer (each notch 1.25x, whole day to 48x), panning | yes | yes | ID `recordings-timeline-wheel-zoom`; the same rule and vectors (`TimelineViewport`). macOS: the wheel zooms eased, Shift and the wheel or a horizontal two-finger scroll pans, Option and a two-finger scroll or a pinch zooms, a vertical two-finger scroll scrolls the lanes. Windows: the wheel zooms (not eased), Shift and the wheel or a horizontal wheel pans, the scroll bar and a touchpad pan; no pinch. |
 | Incident list with kind filters (Animals matches every animal kind), camera or group scope, Locked | yes | yes | ID `recordings-animal-filter`. |

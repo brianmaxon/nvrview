@@ -54,6 +54,10 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
         public required string Incident;
         public required string Folder;
         public required List<RecordingCamera> Cameras;
+
+        // The incident's span (device-local seconds): what the download covers.
+        public long Start;
+        public long End;
         public string State = "queued";
         public bool Paused;
     }
@@ -807,6 +811,8 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
             Incident = e.Key,
             Folder = $"{_downloadsDir}/{e.Start} {e.Kind} — Camera {e.Camera.Channel + 1}",
             Cameras = cameras,
+            Start = e.Start,
+            End = e.End,
         };
         _downloads.Add(d);
         return d;

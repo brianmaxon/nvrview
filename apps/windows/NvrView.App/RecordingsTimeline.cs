@@ -211,9 +211,10 @@ internal sealed class LanesView : Grid
     };
     private readonly Canvas _canvas = new() { Background = new SolidColorBrush(Colors.Transparent) };
     private readonly Rectangle _head = new() { Width = 2, Fill = new SolidColorBrush(TimelineColors.Playhead), IsHitTestVisible = false };
-    private readonly List<TextBlock> _labels = [];
+    private readonly List<FrameworkElement> _labels = [];
     private IReadOnlyList<TimelineLane> _lanes = [];
     private IReadOnlyList<LoudnessLane?> _loudness = [];
+    private IReadOnlySet<RecordingCamera> _analyzing = new HashSet<RecordingCamera>();
     private long _day;
     private TimelineViewport _view = new();
     // Scrolls of ours still to land (their ViewChanged is not the user's), and retries left.
@@ -234,10 +235,17 @@ internal sealed class LanesView : Grid
         _scroll.ViewChanged += OnViewChanged;
         _canvas.Tapped += OnTapped;
         _canvas.PointerWheelChanged += OnWheel;
+        _canvas.RightTapped += OnRightTapped;
     }
 
     /// <summary>A click on a lane: the camera, the second, and the event under the pointer if any.</summary>
     public event Action<RecordingCamera, long, RecordedEvent?>? LaneClicked;
+
+    /// <summary>"Analyze Sounds" was chosen from a lane's menu.</summary>
+    public event Action<RecordingCamera>? AnalyzeRequested;
+
+    /// <summary>The cancel beside a lane's analysis progress was clicked.</summary>
+    public event Action<RecordingCamera>? AnalyzeCancelRequested;
 
     /// <summary>The user zoomed (the wheel) or panned (Shift and the wheel, a horizontal wheel, the scroll bar).</summary>
     public event Action<TimelineViewport>? ViewportRequested;
@@ -254,11 +262,15 @@ internal sealed class LanesView : Grid
     public TimelineViewport Viewport => _view;
 
     /// <summary>Shows the lanes of a day, <paramref name="view"/>'s part of it, with each lane's loudness (in lane order).</summary>
-    public void Set(IReadOnlyList<TimelineLane> lanes, IReadOnlyList<LoudnessLane?> loudness, long day, TimelineViewport view, long? playheadMs)
+    public void Set(IReadOnlyList<TimelineLane> lanes, IReadOnlyList<LoudnessLane?> loudness, long day, TimelineViewport view, long? playheadMs,
+        IReadOnlySet<RecordingCamera>? analyzing = null)
     {
-        bool changed = !ReferenceEquals(lanes, _lanes) || !loudness.SequenceEqual(_loudness) || day != _day || view.Zoom != _view.Zoom || !_drawn;
+        analyzing ??= new HashSet<RecordingCamera>();
+        bool changed = !ReferenceEquals(lanes, _lanes) || !loudness.SequenceEqual(_loudness) || day != _day || view.Zoom != _view.Zoom || !_drawn ||
+            !analyzing.SetEquals(_analyzing);
         _lanes = lanes;
         _loudness = loudness;
+        _analyzing = analyzing;
         _day = day;
         _view = view;
         _playheadSec = playheadMs is { } ms ? DeviceTime.FloorDiv(ms, 1000) : null;
@@ -368,14 +380,34 @@ internal sealed class LanesView : Grid
                 _canvas.Children.Add(bar);
             }
             AddLoudness(i < _loudness.Count ? _loudness[i] : null, top + RecordingsPanes.LaneHeight, w);
-            var label = new TextBlock
+            var name = new TextBlock
             {
-                Text = lane.Failed ? $"{lane.Name} ⚠ could not search this day" : lane.Name,
+                Text = lane.Failed ? $"{lane.Name} \u26A0 could not search this day" : lane.Name,
                 FontSize = 11,
                 Foreground = new SolidColorBrush(lane.Failed ? Windows.UI.Color.FromArgb(0xFF, 0xF5, 0x9E, 0x0B) : Colors.White),
+                VerticalAlignment = VerticalAlignment.Center,
                 IsHitTestVisible = false,
             };
-            Canvas.SetTop(label, top + 5);
+            FrameworkElement label = name;
+            if (_analyzing.Contains(lane.Camera))
+            {
+                // Progress and a cancel beside the name (the percent is not known).
+                RecordingCamera camera = lane.Camera;
+                var cancel = new HyperlinkButton { Content = "Cancel", FontSize = 10, Padding = new Thickness(4, 0, 4, 0), MinHeight = 0, MinWidth = 0 };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(cancel, "Cancel sound analysis");
+                ToolTipService.SetToolTip(cancel, "Cancel analyzing this camera's sound");
+                cancel.Click += (_, _) => AnalyzeCancelRequested?.Invoke(camera);
+                var progress = new ProgressRing { IsActive = true, Width = 12, Height = 12 };
+                ToolTipService.SetToolTip(progress, "Analyzing sound");
+                label = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 6,
+                    Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0xA0, 0x20, 0x22, 0x26)),
+                    Children = { name, progress, cancel },
+                };
+            }
+            Canvas.SetTop(label, top + 3);
             _labels.Add(label);
             _canvas.Children.Add(label);
         }
@@ -432,7 +464,7 @@ internal sealed class LanesView : Grid
     private void PlaceLabels()
     {
         // Lane names stay at the left edge of what is shown.
-        foreach (TextBlock label in _labels)
+        foreach (FrameworkElement label in _labels)
         {
             Canvas.SetLeft(label, _scroll.HorizontalOffset + 6);
         }
@@ -465,6 +497,24 @@ internal sealed class LanesView : Grid
         long slack = (long)(4 / ContentWidth * 86400);
         RecordedEvent? near = _lanes[lane].Events.FirstOrDefault(x => x.Start - slack <= second && second <= x.End + slack);
         LaneClicked?.Invoke(_lanes[lane].Camera, second, near);
+        e.Handled = true;
+    }
+
+    // A right click on a lane: its menu (Analyze Sounds).
+    private void OnRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        Windows.Foundation.Point at = e.GetPosition(_canvas);
+        (int lane, _) = At(at);
+        if (lane < 0 || lane >= _lanes.Count)
+        {
+            return;
+        }
+        RecordingCamera camera = _lanes[lane].Camera;
+        var item = new MenuFlyoutItem { Text = "Analyze Sounds", IsEnabled = !_analyzing.Contains(camera) };
+        item.Click += (_, _) => AnalyzeRequested?.Invoke(camera);
+        var menu = new MenuFlyout();
+        menu.Items.Add(item);
+        menu.ShowAt(_canvas, new Microsoft.UI.Xaml.Controls.Primitives.FlyoutShowOptions { Position = at });
         e.Handled = true;
     }
 

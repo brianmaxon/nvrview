@@ -271,6 +271,22 @@ final class RecordingsBrowser {
         if out != loudness { loudness = out }
     }
 
+    /// Analyzes the shown day's sound from the downloaded video, for one
+    /// lane's camera or for all the searched cameras (the lanes).
+    func analyzeSound(_ camera: RecordingCamera? = nil) {
+        model.analyzeSound(of: camera.map { [$0] } ?? lanes.map(\.camera), day: day)
+    }
+
+    func cancelAnalysis(_ camera: RecordingCamera) { model.cancelAnalysis(camera, day: day) }
+
+    /// A lane's sound analysis while it waits or runs.
+    func analysis(of camera: RecordingCamera) -> SoundAnalysis.Entry? {
+        model.analysis(camera, day: day).flatMap { $0.active ? $0 : nil }
+    }
+
+    /// Whether any lane can still be asked to analyze.
+    var canAnalyze: Bool { lanes.contains { !model.isAnalyzing($0.camera, day: day) } }
+
     /// The loudness a lane shows (its camera's microphone).
     func loudness(of camera: RecordingCamera) -> LoudnessLane? { loudness[LoudnessScale.microphone(of: camera)] }
 

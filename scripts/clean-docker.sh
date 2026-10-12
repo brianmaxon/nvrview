@@ -1,7 +1,7 @@
 #!/bin/sh
 # Removes what the Linux check (scripts/linux-check.sh) and the C# check
-# (scripts/csharp-check.sh) leave in Docker: their build, cargo-registry, and
-# NuGet volumes, and with --image also the Rust and .NET SDK images they
+# (scripts/csharp-check.sh) leave in Docker: the shared cargo-registry, sccache,
+# and NuGet volumes (plus any leftover per-checkout ones), and with --image also the Rust and .NET SDK images they
 # pulled. Touches nothing else in Docker. The next check rebuilds from scratch
 # (a few minutes).
 #
@@ -33,7 +33,7 @@ run() {
 
 # Containers from the check are started with --rm; remove any left by an
 # interrupted run that still hold the volumes.
-volumes="$(docker volume ls -q --filter name='^nvrview-linux-') $(docker volume ls -q --filter name='^nvrview-csharp-')"
+volumes="$(docker volume ls -q --filter name='^nvrview-linux-') $(docker volume ls -q --filter name='^nvrview-csharp-') $(docker volume ls -q --filter name='^nvrview-sccache$')"
 for v in $volumes; do
   for c in $(docker ps -aq --filter volume="$v"); do
     run docker rm -f "$c"
@@ -45,7 +45,7 @@ for v in $volumes; do
 done
 
 if [ "$remove_image" = 1 ]; then
-  for i in "$image" "$dotnet_image"; do
+  for i in "$image" "$dotnet_image" "nvrview-rust-sccache:0.18.0-$(printf '%s' "$image" | tr '/:' '__')"; do
     if docker image inspect "$i" >/dev/null 2>&1; then
       # Fails, and leaves the image, if a container of another project uses it.
       run docker image rm "$i" || echo "kept $i: it is still in use"

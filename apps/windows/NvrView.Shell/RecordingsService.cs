@@ -387,6 +387,108 @@ public sealed class RecordingsService
             k, Enabled.TryGetValue(k, out List<RecordingCamera>? on) ? on : [],
             Listening.TryGetValue(k, out List<RecordingCamera>? heard) && heard.Count > 0 ? heard : null)));
 
+    // ---- analyzing a day's sound ----
+
+    /// <summary>Each camera-day's latest sound analysis (<c>nv_sound_analyze_day</c>), by camera as asked and the day's start.</summary>
+    public Dictionary<(RecordingCamera Camera, long Day), AnalysisEntry> SoundAnalyses { get; } = [];
+
+    /// <summary>The analysis of a camera's day, if one was asked for.</summary>
+    public AnalysisEntry? Analysis(RecordingCamera camera, long day) =>
+        SoundAnalyses.GetValueOrDefault((camera, DeviceTime.DayStart(day)));
+
+    /// <summary>Whether a camera's day is waiting for or being analyzed.</summary>
+    public bool IsAnalyzing(RecordingCamera camera, long day) => Analysis(camera, day) is { Active: true };
+
+    /// <summary>
+    /// Asks for the sound of these cameras' day to be analyzed from the downloaded video (<c>nv_sound_analyze_day</c>);
+    /// progress and the outcome come back as <c>sound_analyze</c> events. Sets <see cref="Notice"/> when nothing can be asked.
+    /// </summary>
+    public void AnalyzeSound(IEnumerable<RecordingCamera> cameras, long day)
+    {
+        if (!Usable || _core is not IEditSound sound)
+        {
+            return;
+        }
+        if (DownloadsFolder is null)
+        {
+            Notice = SoundAnalysis.Failure("no_source");
+            return;
+        }
+        Notice = null;
+        foreach (RecordingCamera camera in cameras)
+        {
+            if (IsAnalyzing(camera, day))
+            {
+                continue;
+            }
+            try
+            {
+                string answer = sound.SoundAnalyzeDay(SoundAnalysis.Query(camera, day));
+                var key = (camera, DeviceTime.DayStart(day));
+                if (!SoundAnalyses.TryGetValue(key, out AnalysisEntry? now) || !now.Active)
+                {
+                    using JsonDocument doc = JsonDocument.Parse(answer);
+                    if (doc.RootElement.TryGetProperty("request", out JsonElement r) && r.TryGetUInt64(out ulong id))
+                    {
+                        SoundAnalyses[key] = new AnalysisEntry(id, AnalysisState.Queued);
+                    }
+                }
+            }
+            catch (NvException e)
+            {
+                Notice = SoundAnalysis.Refusal(e.Status);
+            }
+        }
+        Changed();
+    }
+
+    /// <summary>Cancels a camera's analysis (<c>nv_sound_analyze_cancel</c>).</summary>
+    public void CancelAnalysis(RecordingCamera camera, long day)
+    {
+        if (!Usable || _core is not IEditSound sound || Analysis(camera, day) is not { Active: true } e)
+        {
+            return;
+        }
+        try
+        {
+            sound.SoundAnalyzeCancel(e.Request);
+        }
+        catch (NvException x)
+        {
+            // Already over: its own event says how.
+            if (x.Status != NvStatus.UnknownId)
+            {
+                Notice = $"Could not cancel {StatusText(x)}";
+            }
+        }
+    }
+
+    private void ApplyAnalysis(RecordingsEvent.SoundAnalyze a)
+    {
+        if (a.Day is not { } day || SoundAnalysis.ParseState(a.State) is not { } state)
+        {
+            return;
+        }
+        var key = (a.Camera, DeviceTime.DayStart(day));
+        SoundAnalyses.TryGetValue(key, out AnalysisEntry? old);
+        AnalysisEntry entry = SoundAnalysis.Fold(old, (ulong)a.Request, state, a.Reason, a.Seconds, a.Labels);
+        if (entry == old)
+        {
+            return;
+        }
+        SoundAnalyses[key] = entry;
+        if (!entry.Active && SoundAnalysis.Outcome(entry) is { } message)
+        {
+            Notice = message;
+        }
+        // What the analysis stored (loudness, sound labels) is read again.
+        if (state == AnalysisState.Done)
+        {
+            IndexRevision++;
+        }
+        Changed();
+    }
+
     // ---- listening for sounds ----
 
     /// <summary>Whether a camera listens for sounds.</summary>
@@ -1159,6 +1261,9 @@ public sealed class RecordingsService
                     ListenStates[w.Camera] = (w.State, w.Reason);
                     Changed();
                 }
+                break;
+            case RecordingsEvent.SoundAnalyze a:
+                ApplyAnalysis(a);
                 break;
             case RecordingsEvent.DownloadRemoved r:
                 if (_board.Removed(r.Id, r.Trash, r.Folder) is { } folder)

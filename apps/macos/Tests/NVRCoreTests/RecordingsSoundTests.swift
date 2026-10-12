@@ -62,4 +62,32 @@ import Testing
         #expect(SoundListening.describe(state: "refused", reason: "no_audio") == "No sound from this camera")
         #expect(SoundListening.describe(state: "watching", reason: nil) == "Listening")
     }
+
+    @Test func analyzingADay() {
+        let cam = RecordingCamera(device: d, channel: 3)
+        #expect(SoundAnalysis.query(camera: cam, day: 86_400) == #"{"camera":{"device":"d-example","channel":3,"lens":0},"day":86400}"#)
+        // The words for each way it fails.
+        #expect(SoundAnalysis.failure(reason: "no_audio") == "Nothing downloaded for this day — download the day or an incident first")
+        #expect(SoundAnalysis.failure(reason: "no_source") == "Set a downloads folder in Settings")
+        #expect(SoundAnalysis.failure(reason: "index") == "Could not analyze the sound (index)")
+        #expect(SoundAnalysis.failure(reason: nil) == "Could not analyze the sound")
+        #expect(SoundAnalysis.refusal(.notConfigured) == "Set a downloads folder in Settings")
+        #expect(SoundAnalysis.refusal(.limit).hasPrefix("Too many"))
+        // Events fold into an entry; a late queued or running never undoes a finished state.
+        var e = SoundAnalysis.fold(nil, request: 4, state: .queued, reason: nil, seconds: nil, labels: nil)
+        #expect(e.active && SoundAnalysis.progress(e) == "Waiting to analyze sound" && SoundAnalysis.outcome(e) == nil)
+        e = SoundAnalysis.fold(e, request: 4, state: .running, reason: nil, seconds: nil, labels: nil)
+        #expect(SoundAnalysis.progress(e) == "Analyzing sound")
+        let done = SoundAnalysis.fold(e, request: 4, state: .done, reason: nil, seconds: 5_400, labels: 2)
+        #expect(!done.active && SoundAnalysis.progress(done) == nil)
+        #expect(SoundAnalysis.outcome(done) == "Analyzed 1 h 30 min of sound; found 2 sounds")
+        #expect(SoundAnalysis.fold(done, request: 4, state: .running, reason: nil, seconds: nil, labels: nil) == done)
+        // A new request replaces a finished one.
+        #expect(SoundAnalysis.fold(done, request: 5, state: .queued, reason: nil, seconds: nil, labels: nil).active)
+        #expect(SoundAnalysis.outcome(SoundAnalysis.Entry(request: 4, state: .done, seconds: 0, labels: 0)) == "No sound found in the downloaded video")
+        #expect(SoundAnalysis.outcome(SoundAnalysis.Entry(request: 4, state: .done, seconds: 45, labels: 1)) == "Analyzed 45 s of sound; found 1 sound")
+        #expect(SoundAnalysis.outcome(SoundAnalysis.Entry(request: 4, state: .canceled)) == "Sound analysis canceled")
+        #expect(SoundAnalysis.outcome(SoundAnalysis.Entry(request: 4, state: .failed, reason: "no_audio")) == SoundAnalysis.failure(reason: "no_audio"))
+        #expect(SoundAnalysis.duration(59) == "59 s" && SoundAnalysis.duration(720) == "12 min" && SoundAnalysis.duration(7_200) == "2 h")
+    }
 }

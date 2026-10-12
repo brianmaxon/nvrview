@@ -6,41 +6,50 @@
 #
 # Two containers, one after the other:
 #   1. the Rust image builds libnvrview.so, mock-nvr, and the C layout helper
-#      (apps/windows/layout/nvlayout.c) in the build volume shared with
-#      scripts/linux-check.sh (nvrview-linux-target-<checkout>, nvrview-linux-cargo);
+#      (apps/windows/layout/nvlayout.c) and copies them to a temporary host
+#      directory (removed on exit);
 #   2. the .NET SDK image builds apps/windows (sources mounted read-only;
-#      output in the nvrview-csharp-build-<checkout> volume, packages in
-#      nvrview-csharp-nuget) and runs the smoke test, then the shell tests
-#      (NvrView.Shell.Tests: layouts, leases, window restore, ...).
-# scripts/clean-docker.sh removes the volumes (--image also the images).
+#      output in an anonymous volume deleted with the container, packages in
+#      the shared nvrview-csharp-nuget volume) and runs the smoke test, then
+#      the shell tests (NvrView.Shell.Tests: layouts, leases, window restore).
+# No per-checkout volumes exist; the shared caches (cargo registry, sccache,
+# NuGet) are described in scripts/docker-rust-image.sh.
+# scripts/clean-docker.sh removes the caches (--image also the images).
 set -eu
 cd "$(git rev-parse --show-toplevel)"
-# One build volume per checkout (worktrees mount different trees at the same
-# /src path, and Cargo would take another tree's newer artifacts as fresh);
-# the cargo registry is content-addressed and shared.
-checkout=$(printf '%s' "$PWD" | shasum | cut -c1-8)
+. scripts/docker-rust-image.sh
 
-rust_image="${NVRVIEW_LINUX_IMAGE:-rust:1-bookworm}"
 dotnet_image="${NVRVIEW_DOTNET_IMAGE:-mcr.microsoft.com/dotnet/sdk:10.0.301-noble}"
 
+out=$(mktemp -d "${TMPDIR:-/tmp}/nvrview-csharp.XXXXXX")
+trap 'rm -rf "$out"' EXIT INT TERM
+
+
+# shellcheck disable=SC2086 # $rust_env is a list of -e options
 docker run --rm \
   -v "$PWD":/src \
-  -v "nvrview-linux-target-$checkout:/src/target" \
+  -v /src/target \
+  -v "$out:/out" \
   -v nvrview-linux-cargo:/usr/local/cargo/registry \
+  -v nvrview-sccache:/sccache \
   -w /src \
   -e CARGO_TERM_COLOR=never \
+  $rust_env \
   "$rust_image" \
   sh -c 'set -e
     cargo build --locked --quiet -p viewer-ffi -p mock-nvr
     mkdir -p target/csharp
     cc -std=c11 -Wall -Wextra -Werror -I crates/viewer-ffi/include \
       apps/windows/layout/nvlayout.c -o target/csharp/nvlayout
-    target/csharp/nvlayout >target/csharp/layout.txt'
+    target/csharp/nvlayout >target/csharp/layout.txt
+    mkdir -p /out/debug /out/csharp
+    cp target/debug/mock-nvr target/debug/libnvrview.so /out/debug/
+    cp target/csharp/layout.txt /out/csharp/'
 
 docker run --rm \
   -v "$PWD":/src:ro \
-  -v "nvrview-linux-target-$checkout:/src/target:ro" \
-  -v "nvrview-csharp-build-$checkout:/build" \
+  -v "$out:/src/target:ro" \
+  -v /build \
   -v nvrview-csharp-nuget:/root/.nuget/packages \
   -w /src/apps/windows \
   -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \

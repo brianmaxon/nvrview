@@ -7,8 +7,8 @@
 // SoundLabelsPut keeps the labels as events with source local_audio on
 // indexed days, replacing the same analyzer's labels in the request's range
 // (as the core does); SoundAnalyzeDay queues a request that
-// CompleteRecordingWork finishes with sound_analyze running and done (no
-// seconds, no labels). GetTileLoudness is not a tile model's: the fake store
+// CompleteRecordingWork finishes from the synthetic downloads (no_source, no_audio, or
+// running and done with heard seconds and a label). GetTileLoudness is not a tile model's: the fake store
 // knows no tiles, so every tile is unknown.
 
 using System.Text.Json;
@@ -35,6 +35,9 @@ public sealed partial class FakeRecordings
     }
     private readonly List<(ulong Request, RecordingCamera Camera, long Day)> _analyses = [];
     private ulong _nextAnalysis = 1;
+
+    // Seconds of audio analyzed from downloads: first-lens camera, span.
+    private readonly List<(RecordingCamera Camera, long Start, long End)> _analyzed = [];
 
     private void RequireKnownCamera(RecordingCamera c, string function)
     {
@@ -282,18 +285,23 @@ public sealed partial class FakeRecordings
         {
             Configured(F);
             List<RecordingCamera> cameras = o["cameras"] is JsonArray list ? [.. list.Select(n => Camera(n, F))] : [.. _watched];
-            JsonNode?[] Fill(bool heard, int value) =>
-                [.. Enumerable.Range(0, (int)count).Select(_ => heard ? (JsonNode?)JsonValue.Create(value) : null)];
             var lanes = new JsonArray([.. cameras.Select(c =>
             {
-                bool heard = _watched.Contains(c) && Allowed(c);
+                bool live = _watched.Contains(c) && Allowed(c);
+                // A bucket is heard when the camera listens or an analyzed download reaches into it.
+                bool[] heard = [.. Enumerable.Range(0, (int)count).Select(i =>
+                {
+                    long from = start + (i * (long)bucket), to = from + bucket - 1;
+                    return live || _analyzed.Any(a => a.Camera == c && a.Start <= to && a.End >= from);
+                })];
+                JsonNode?[] Fill(int value) => [.. heard.Select(h => h ? (JsonNode?)JsonValue.Create(value) : null)];
                 return (JsonNode)new JsonObject
                 {
                     ["camera"] = CameraNode(c),
                     ["bucket_s"] = bucket,
                     ["start"] = start,
-                    ["peak_db"] = new JsonArray(Fill(heard, -40)),
-                    ["rms_db"] = new JsonArray(Fill(heard, -50)),
+                    ["peak_db"] = new JsonArray(Fill(-40)),
+                    ["rms_db"] = new JsonArray(Fill(-50)),
                 };
             })]);
             return new JsonObject { ["revision"] = _revision, ["lanes"] = lanes }.ToJsonString();
@@ -401,16 +409,65 @@ public sealed partial class FakeRecordings
     };
 
     // Called with the gate held, from CompleteRecordingWork.
+    // As the core does from finished downloads: with no downloads folder a request fails no_source, with no finished
+    // download of that camera reaching into the day no_audio; otherwise running, then done, with every second of
+    // the downloads inside the day heard (loudness) and one smoke_alarm label per download (the pattern detector's,
+    // replacing its earlier ones over that audio).
     private void CompleteSoundAnalyses()
     {
+        bool changed = false;
         foreach ((ulong request, RecordingCamera c, long day) in _analyses)
         {
-            Emit(AnalysisEvent(request, c, day, "running"));
-            JsonObject done = AnalysisEvent(request, c, day, "done");
-            done["seconds"] = 0;
-            done["labels"] = 0;
-            Emit(done);
+            JsonObject last;
+            if (_downloadsDir is null)
+            {
+                last = AnalysisEvent(request, c, day, "failed");
+                last["reason"] = "no_source";
+            }
+            else
+            {
+                long dayStart = DeviceTime.DayStart(day);
+                List<(long Start, long End)> spans = [];
+                foreach (FakeDownload d in _downloads.Where(d => d.State == "done" && d.Cameras.Contains(c)))
+                {
+                    long s = Math.Max(d.Start, dayStart), e = Math.Min(d.End, dayStart + DeviceTime.Day - 1);
+                    if (s <= e)
+                    {
+                        spans.Add((s, e));
+                    }
+                }
+                if (spans.Count == 0)
+                {
+                    last = AnalysisEvent(request, c, day, "failed");
+                    last["reason"] = "no_audio";
+                }
+                else
+                {
+                    RecordingCamera mic = c with { Lens = 0 };
+                    long seconds = 0;
+                    foreach ((long s, long e) in spans)
+                    {
+                        seconds += e - s + 1;
+                        _analyzed.RemoveAll(a => a.Camera == mic && a.Start == s);
+                        _analyzed.Add((mic, s, e));
+                        _labels.RemoveAll(l => l.Camera == c && l.Analyzer == "pattern-v1" && l.Start >= s && l.Start <= e);
+                        _labels.Add((c, "smoke_alarm", s, s + Math.Min(4, e - s), "pattern-v1"));
+                    }
+                    _revision++;
+                    _incidentsRevision++;
+                    changed = true;
+                    Emit(AnalysisEvent(request, c, day, "running"));
+                    last = AnalysisEvent(request, c, day, "done");
+                    last["seconds"] = seconds;
+                    last["labels"] = spans.Count;
+                }
+            }
+            Emit(last);
         }
         _analyses.Clear();
+        if (changed)
+        {
+            Emit(new JsonObject { ["type"] = "incidents_changed", ["revision"] = _incidentsRevision });
+        }
     }
 }

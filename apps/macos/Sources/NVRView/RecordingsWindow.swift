@@ -153,6 +153,10 @@ struct RecordingsHeader: View {
                 Button { browser.nextDay() } label: { Image(systemName: "chevron.right") }
                     .disabled(browser.isToday)
                     .help("Next day")
+                Button { browser.analyzeSound() } label: { Image(systemName: "waveform.badge.magnifyingglass") }
+                    .disabled(!browser.canAnalyze)
+                    .help("Analyze Sounds: find sounds in this day's downloaded video for all searched cameras")
+                    .accessibilityLabel("Analyze Sounds")
                 Spacer(minLength: 8)
                 Picker("", selection: $browser.center) {
                     ForEach(RecordingsBrowser.Center.allCases) { c in

@@ -195,6 +195,8 @@ internal sealed partial class RecordingsWindow
 
         _lanes.Margin = new Thickness(10, 0, 10, 6);
         _lanes.LaneClicked += (camera, second, near) => Browser.LaneClick(camera, second, near);
+        _lanes.AnalyzeRequested += camera => Browser.AnalyzeSound(camera);
+        _lanes.AnalyzeCancelRequested += camera => Browser.CancelAnalysis(camera);
         _lanes.ViewportRequested += view =>
         {
             Browser.Timeline = view;
@@ -331,7 +333,7 @@ internal sealed partial class RecordingsWindow
             _scrub.Set(0, 0, [], 0, []);
             _scrubStart.Text = _scrubEnd.Text = "";
         }
-        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, open ? t.PositionMs : null);
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, open ? t.PositionMs : null, LanesAnalyzing);
         _emptyText.Text = editing ? edit.Message ?? (edit.Loading ? "Opening the downloaded files…" : "")
             : open ? ""
             : Browser.Player.Message is { } m ? m
@@ -341,13 +343,16 @@ internal sealed partial class RecordingsWindow
     }
 
     /// <summary>Each lane's loudness, in lane order.</summary>
+    /// <summary>The lanes whose sound is being analyzed.</summary>
+    private HashSet<RecordingCamera> LanesAnalyzing => [.. Browser.Lanes.Where(l => Browser.AnalysisOf(l.Camera) is not null).Select(l => l.Camera)];
+
     private List<LoudnessLane?> LanesLoudness => [.. Browser.Lanes.Select(l => Browser.LoudnessOf(l.Camera))];
 
     private void RefreshLanes()
     {
         double height = Math.Max(_playerColumn.ActualHeight, RecordingsPanes.WindowMinHeight - 80);
         _lanesRow.Height = new GridLength(RecordingsPanes.LanesHeight(height, Browser.Lanes.Count));
-        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null);
+        _lanes.Set(Browser.Lanes, LanesLoudness, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null, LanesAnalyzing);
     }
 
     // ---- the picture area ----

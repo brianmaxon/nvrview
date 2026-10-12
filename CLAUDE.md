@@ -92,6 +92,11 @@ rereads, so take fewer, better-aimed steps.
 - **Use the pointers you are given.** Prompts name files, types, and fixtures;
   start there instead of surveying the tree. Search with `rg` before opening
   files.
+- **Docker leaves nothing behind.** Every `docker run` uses `--rm`, and no new
+  named volumes: only the shared caches (`nvrview-linux-cargo`,
+  `nvrview-sccache`, `nvrview-csharp-nuget`) exist; build output goes in
+  anonymous volumes that die with the container. Old per-checkout volumes:
+  `scripts/clean-docker-volumes.sh`.
 - **Report briefly.** The final report says what changed, what ran and passed,
   and what was not verified; no full logs or file dumps.
 
