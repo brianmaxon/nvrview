@@ -1,3 +1,4 @@
+import Foundation
 import NVRViewCore
 import VideoKit
 
@@ -20,6 +21,20 @@ extension NvStreamTier {
 
 extension PixelSize {
     public init(_ s: NvSize) { self.init(width: s.width, height: s.height) }
+}
+
+extension Thumbnail {
+    /// A thumbnail from the C description and its bytes; nil for a kind this
+    /// version does not know.
+    public init?(_ info: NvThumbnail, data: Data) {
+        guard let kind = ThumbnailKind(rawValue: info.kind.rawValue) else { return nil }
+        self.init(kind: kind, width: info.width, height: info.height, ptsMicros: info.pts_us, data: data)
+    }
+
+    /// The C description (the bytes go separately).
+    public var info: NvThumbnail {
+        NvThumbnail(kind: NvThumbKind(rawValue: kind.rawValue), width: width, height: height, pts_us: ptsMicros)
+    }
 }
 
 extension NvSize {

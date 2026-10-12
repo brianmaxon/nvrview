@@ -131,6 +131,12 @@ public struct CoreStatus: Sendable, Equatable, Error {
     public static let bufferTooSmall = CoreStatus(-6)
     /// Talk-back (camera motion control) is not enabled for that camera.
     public static let notPermitted = CoreStatus(-7)
+    /// Minor 5: the device's backend cannot do this (also: a core without recordings).
+    public static let unsupported = CoreStatus(-8)
+    /// Minor 5: recordings are not configured, or there is no downloads folder.
+    public static let notConfigured = CoreStatus(-9)
+    /// Minor 5: accepted; the answer arrives as an event (thumbnails).
+    public static let pending = CoreStatus(1)
 
     public var isOK: Bool { code == 0 }
 }

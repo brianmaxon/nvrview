@@ -262,6 +262,165 @@ public final class CCore: CoreAPI {
         if !status.isOK { throw status }
     }
 
+    // MARK: Recordings, part 1 (minor 5)
+
+    private func check(_ status: NvStatus) throws(CoreStatus) {
+        let s = CoreStatus(status)
+        if !s.isOK { throw s }
+    }
+
+    /// Calls a function that changes state once, with a buffer large enough
+    /// for its answer: calling again would apply the change again
+    /// (docs/FFI.md, "Recordings (minor 5)").
+    private static func once(
+        _ call: (UnsafeMutablePointer<CChar>?, Int, UnsafeMutablePointer<Int>) -> NvStatus
+    ) throws(CoreStatus) -> String {
+        var buffer = [CChar](repeating: 0, count: 64 * 1024)
+        var length = 0
+        let status = CoreStatus(buffer.withUnsafeMutableBufferPointer { call($0.baseAddress, $0.count, &length) })
+        if !status.isOK { throw status }
+        return buffer.withUnsafeBufferPointer { b in
+            String(decoding: UnsafeRawBufferPointer(start: b.baseAddress, count: min(length, b.count)), as: UTF8.self)
+        }
+    }
+
+    public func recordingsConfigure(json: String) throws(CoreStatus) {
+        try check(nv_recordings_configure(try core(), json))
+    }
+
+    public func recordingsEnable(deviceKey: String, json: String?) throws(CoreStatus) {
+        let c = try core()
+        try check(Self.withOptionalCString(json) { nv_recordings_enable(c, deviceKey, $0) })
+    }
+
+    public func recordingsCalendar(query: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_recordings_calendar(c, query, $0, $1, $2) }
+    }
+
+    public func recordingsSpans(query: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_recordings_spans(c, query, $0, $1, $2) }
+    }
+
+    public func recordingsEvents(query: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_recordings_events(c, query, $0, $1, $2) }
+    }
+
+    public func recordingsWant(json: String) throws(CoreStatus) {
+        try check(nv_recordings_want(try core(), json))
+    }
+
+    public func recordingsHoldToday(_ hold: UInt64, json: String?) throws(CoreStatus) {
+        let c = try core()
+        try check(Self.withOptionalCString(json) { nv_recordings_hold_today(c, hold, $0) })
+    }
+
+    public func recordingsStatus() throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_recordings_status(c, $0, $1, $2) }
+    }
+
+    public func incidentsGet(query: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_incidents_get(c, query, $0, $1, $2) }
+    }
+
+    public func incidentGet(key: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_incident_get(c, key, $0, $1, $2) }
+    }
+
+    public func incidentEdit(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.once { nv_incident_edit(c, json, $0, $1, $2) }
+    }
+
+    public func incidentLock(key: String, locked: Bool) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.once { nv_incident_lock(c, key, locked, $0, $1, $2) }
+    }
+
+    public func cameraGroupsGet() throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_camera_groups_get(c, $0, $1, $2) }
+    }
+
+    public func cameraGroupsPut(json: String) throws(CoreStatus) {
+        try check(nv_camera_groups_put(try core(), json))
+    }
+
+    public func thumbnailGet(key: String) throws(CoreStatus) -> ThumbnailResult {
+        let c = try core()
+        var capacity = 64 * 1024
+        for _ in 0..<4 {
+            var info = NvThumbnail()
+            var data = Data(count: capacity)
+            var length = 0
+            let status = CoreStatus(
+                data.withUnsafeMutableBytes { b in
+                    nv_thumbnail_get(c, key, &info, b.bindMemory(to: UInt8.self).baseAddress, b.count, &length)
+                })
+            if status == .pending { return .pending }
+            if status == .bufferTooSmall {
+                capacity = max(length, 1)
+                continue
+            }
+            if !status.isOK { throw status }
+            guard let thumbnail = Thumbnail(info, data: data.prefix(length)) else { throw .internal }
+            return .ready(thumbnail)
+        }
+        throw .internal
+    }
+
+    public func thumbnailPut(key: String, thumbnail: Thumbnail) throws(CoreStatus) {
+        let c = try core()
+        var info = thumbnail.info
+        let status = thumbnail.data.withUnsafeBytes { b in
+            nv_thumbnail_put(c, key, &info, b.bindMemory(to: UInt8.self).baseAddress, b.count)
+        }
+        try check(status)
+    }
+
+    public func thumbnailCancel(key: String?) throws(CoreStatus) {
+        let c = try core()
+        try check(Self.withOptionalCString(key) { nv_thumbnail_cancel(c, $0) })
+    }
+
+    public func downloadIncident(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.once { nv_download_incident(c, json, $0, $1, $2) }
+    }
+
+    public func downloadPause(_ download: String, camera: String?, paused: Bool) throws(CoreStatus) {
+        let c = try core()
+        try check(Self.withOptionalCString(camera) { nv_download_pause(c, download, $0, paused) })
+    }
+
+    public func downloadRetry(_ download: String, camera: String?) throws(CoreStatus) {
+        let c = try core()
+        try check(Self.withOptionalCString(camera) { nv_download_retry(c, download, $0) })
+    }
+
+    public func downloadForget(_ download: String, deletePartial: Bool) throws(CoreStatus) {
+        try check(nv_download_forget(try core(), download, deletePartial))
+    }
+
+    public func downloadTrash(_ download: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.once { nv_download_trash(c, download, $0, $1, $2) }
+    }
+
+    public func downloadsGet() throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_downloads_get(c, $0, $1, $2) }
+    }
+
+    public func soundConfigure(json: String) throws(CoreStatus) {
+        try check(nv_sound_configure(try core(), json))
+    }
+
     /// `nv_audio_render` with the core handle as its context. Players stop
     /// rendering before `free` (CoreBridge.shutdown sees to it).
     public var audioRenderHook: AudioRenderHook {

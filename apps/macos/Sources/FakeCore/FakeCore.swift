@@ -188,6 +188,10 @@ public final class FakeCore: CoreAPI {
         public var discoveryDuration: Duration?
         /// What update checks find (`FakeUpdates.swift`); nil: up to date.
         public var updateOffer: FakeUpdateOffer?
+        /// Thumbnail fetches and downloads finish only on
+        /// `completeRecordingWork()` (tests); off, shortly after the call
+        /// that queued them (`FakeRecordings.swift`).
+        public var recordingWorkIsManual = false
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -226,6 +230,7 @@ public final class FakeCore: CoreAPI {
     let options: Options
     let discovery = FakeDiscoveryState()
     let updates = FakeUpdateState()
+    let recordings = FakeRecordingsState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()
@@ -248,6 +253,9 @@ public final class FakeCore: CoreAPI {
         self.sink = sink
         layouts = FakeLayouts(file: options.layoutsFile, limit: options.maxLayouts)
     }
+
+    /// Whether `free` ran.
+    var isFreed: Bool { world.withLock { $0.freed } }
 
     /// Everything the app did wrong so far (empty when all is well).
     public var violations: [String] { problems.withLock { $0 } }
