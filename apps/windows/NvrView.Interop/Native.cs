@@ -706,6 +706,46 @@ public static unsafe partial class NvNative
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_sound_configure(nint core, string json);
 
+    // Edit lists and the rest of sound (minor 8; docs/FFI.md, "Edit lists and
+    // sound (minor 8)").
+
+    /// <summary>The edit list of a finished download (JSON; minor 8).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_edit_compute(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Keeps a camera's sub-stream open for sound only (minor 8).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_sound_watch(
+        nint core, string camera, [MarshalAs(UnmanagedType.U1)] bool enabled);
+
+    /// <summary>Loudness lanes for the timeline (JSON; minor 8).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_recordings_loudness(nint core, string query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Labels the app's classifier produced (JSON; minor 8).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_sound_labels_put(nint core, string json);
+
+    /// <summary>Asks for a recorded day's sound to be analyzed (minor 8).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_sound_analyze_day(nint core, string json, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Cancels a queued or running analysis request (minor 8).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_sound_analyze_cancel(nint core, ulong request);
+
+    /// <summary>A live tile's recent loudness, one byte per second and value (minor 8).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_tile_loudness(
+        nint core, ulong tile, byte* peak, byte* rms, nuint cap, long* startSeconds, nuint* len);
+
     // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
 
     /// <summary>Opens a playback, paused; one tile ID per camera into tiles (minor 6).</summary>

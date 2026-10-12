@@ -187,11 +187,19 @@ public abstract record RecordingsEvent
     /// <summary>After forget or trash; with Trash, the folder the app moves to the Recycle Bin now.</summary>
     public sealed record DownloadRemoved(string Id, bool Trash, string? Folder) : RecordingsEvent;
 
+    /// <summary>A camera on the "always listen" list: <c>watching</c>, <c>stopped</c>, or <c>refused</c> (Reason: <c>no_audio</c>, <c>device_closed</c>, <c>sound_off</c>).</summary>
+    public sealed record SoundWatch(RecordingCamera Camera, string State, string? Reason) : RecordingsEvent;
+
+    /// <summary>A recorded day's sound analysis: <c>queued</c>, <c>running</c>, <c>done</c> (Seconds, Labels), <c>failed</c> (Reason), or <c>canceled</c>.</summary>
+    public sealed record SoundAnalyze(
+        long Request, RecordingCamera Camera, long? Day, string State, string? Reason, long? Seconds, long? Labels)
+        : RecordingsEvent;
+
     /// <summary>The event types this record parses.</summary>
     public static readonly IReadOnlySet<string> Types = new HashSet<string>
     {
         "recordings_index", "recordings_day_failed", "recordings_changed", "incidents_changed",
-        "camera_groups_changed", "thumbnail", "download", "download_removed",
+        "camera_groups_changed", "thumbnail", "download", "download_removed", "sound_watch", "sound_analyze",
     };
 
     /// <summary>Parses one event; null for another type or a malformed one.</summary>
@@ -221,6 +229,15 @@ public abstract record RecordingsEvent
                 "download" when DownloadProgress.From(e) is { } p => new Download(p),
                 "download_removed" when DownloadProgress.Str(e, "download") is { } id =>
                     new DownloadRemoved(id, DownloadProgress.Bool(e, "trash"), DownloadProgress.Str(e, "folder")),
+                "sound_watch" when e.TryGetProperty("camera", out JsonElement wc) && RecordingCamera.From(wc) is { } watched &&
+                    DownloadProgress.Str(e, "state") is { } watchState =>
+                    new SoundWatch(watched, watchState, DownloadProgress.Str(e, "reason")),
+                "sound_analyze" when DownloadProgress.Long(e, "request") is { } request &&
+                    e.TryGetProperty("camera", out JsonElement ac) && RecordingCamera.From(ac) is { } analyzed &&
+                    DownloadProgress.Str(e, "state") is { } analyzeState =>
+                    new SoundAnalyze(request, analyzed, DownloadProgress.Long(e, "day"), analyzeState,
+                        DownloadProgress.Str(e, "reason"), DownloadProgress.Long(e, "seconds"),
+                        DownloadProgress.Long(e, "labels")),
                 _ => null,
             };
         }
