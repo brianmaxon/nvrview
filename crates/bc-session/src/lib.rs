@@ -18,7 +18,8 @@
 //!   each subscriber has its own queue, keyframe gating, and drop counters, so
 //!   a slow one never affects another. A subscriber that attaches mid-stream
 //!   gets the stream info, then video from the next keyframe.
-//! - **Read-only, but for talk-back**: only commands the protocol crate's allowlist can build are
+//! - **Read-only, but for camera motion control** (talk-back, pan, tilt, presets, lens):
+//!   only commands the protocol crate's allowlist can build are
 //!   ever sent (login, preview start and stop, keepalive, the detection
 //!   subscription (192) behind [`DeviceSession::alarms`], the read-only
 //!   info queries behind [`DeviceSession::query`], and the recording
@@ -52,6 +53,16 @@
 //!   real time with a bounded buffer, logged at every start and stop, and
 //!   closed (command 11) on every exit path: stop, drop, session close, a
 //!   withdrawn permission, an idle or overlong talk, and device errors.
+//! - **Cameras stop**: camera motion control ([`DeviceSession::ptz_move`],
+//!   [`DeviceSession::ptz_recall`], [`DeviceSession::ptz_lens`]) names its
+//!   origin: the user's own controls need no enable, automation needs a
+//!   per-camera grant ([`DeviceSession::set_motion_grant`]) and yields to
+//!   the user. Only what the channel's capabilities offer is sent, from
+//!   fixed templates; moves and recalls are rate-limited per camera and per
+//!   device, every command is logged, and a move is always followed by
+//!   `stop`: on release, a dead-man timer, a maximum hold, a device refusal,
+//!   a withdrawn grant, close and drop, and after a reconnect for a move
+//!   the lost connection could not stop.
 //! - **Quiet logs**: repeated connection failures are logged at most about
 //!   once every few seconds, with a count of the suppressed ones. Credentials
 //!   are never logged; addresses are not logged at all.
@@ -60,15 +71,19 @@ mod archive;
 mod config;
 mod lens;
 mod play;
+mod ptz;
 mod queue;
 mod supervisor;
 mod talk;
 mod transport;
 
 pub use archive::{CoverImage, Download, DownloadError, DownloadEvent, SearchError};
-pub use config::{BackoffConfig, SessionConfig};
+pub use config::{BackoffConfig, PtzConfig, RateLimit, SessionConfig};
 pub use lens::LensProbe;
 pub use play::{Play, PlayStart};
+pub use ptz::{
+    MotionOrigin, PtzCommand, PtzInfo, PtzNotice, PtzOutcome, PtzPending, PtzRefusal, StopCause,
+};
 pub use queue::{Item, Subscription};
 pub use supervisor::{
     AlarmPush, ConnState, DeviceSession, MANUAL_RETRY_FLOOR, QueryError, QueryReply, SessionClosed,

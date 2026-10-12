@@ -7,10 +7,13 @@
 //! [`Event::LoginOk`] arrives start previews and send keepalives.
 //!
 //! Only commands on the allowlist ([`Command`]) can be produced. Each has a
-//! [`Tier`]: viewing commands are always allowed; motion commands (talk-back)
-//! only for a channel the caller enabled with
-//! [`Session::set_motion_allowed`]. Nothing that changes device settings is
-//! on the list.
+//! [`Tier`]: viewing commands are always allowed; motion commands (camera
+//! motion control) only through their own builders, each from a fixed
+//! template: talk-back only for a channel the caller enabled with
+//! [`Session::set_motion_allowed`], and pan, tilt, presets and lens moves
+//! only for a channel whose own capabilities (199, as read on this session)
+//! offer them ([`Session::ptz_move`] and its siblings). Nothing that changes
+//! device settings is on the list.
 
 use crate::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
@@ -19,6 +22,7 @@ use crate::archive::{
 use crate::crypto::{SessionKey, credential_hash, xor_obfuscate};
 use crate::framer::{EncodeError, RawMessage, encode_message, encode_message_with_status};
 use crate::header::Class;
+use crate::ptz::{self, Direction, LensAxis, Preset, ZoomFocus};
 use crate::stream::StreamTier;
 use crate::talk::{self, TalkConfig};
 use crate::xml::{self, PreviewPolicy, XmlError};
@@ -89,6 +93,20 @@ pub enum Command {
     TalkStream = 202,
     /// 11: close talk-back (motion tier).
     TalkClose = 11,
+    /// 18: pan or tilt, and stop (motion tier; only the four observed
+    /// directions and `stop` can be built).
+    PtzControl = 18,
+    /// 19: recall a preset (motion tier; only `toPos` can be built: the
+    /// same number saves and deletes presets, which is never built).
+    PtzPresetRecall = 19,
+    /// 295: move the lens zoom or focus to a position (motion tier).
+    PtzLensMove = 295,
+    /// 294: lens zoom and focus ranges and positions (viewing tier).
+    PtzZoomFocus = 294,
+    /// 190: the preset list (viewing tier).
+    PtzPresets = 190,
+    /// 340: the pan and tilt self-test state (viewing tier).
+    PtzSelfTest = 340,
 }
 
 /// When a command may be sent (docs/ARCHITECTURE.md, "Device commands").
@@ -97,8 +115,11 @@ pub enum Command {
 pub enum Tier {
     /// Read-only: always allowed.
     Viewing,
-    /// Camera motion control (here: talk-back): only for a channel the
-    /// caller enabled ([`Session::set_motion_allowed`]).
+    /// Camera motion control: talk-back only for a channel the caller
+    /// enabled ([`Session::set_motion_allowed`]); pan, tilt, preset recall
+    /// and lens moves only where the channel's capabilities offer them.
+    /// The caller adds the origin checks, rate limits and logging
+    /// (docs/ARCHITECTURE.md, "Device commands").
     Motion,
 }
 
@@ -139,6 +160,12 @@ impl Command {
             201 => Command::TalkOpen,
             202 => Command::TalkStream,
             11 => Command::TalkClose,
+            18 => Command::PtzControl,
+            19 => Command::PtzPresetRecall,
+            295 => Command::PtzLensMove,
+            294 => Command::PtzZoomFocus,
+            190 => Command::PtzPresets,
+            340 => Command::PtzSelfTest,
             _ => return None,
         })
     }
@@ -146,7 +173,12 @@ impl Command {
     /// The command's tier.
     pub const fn tier(self) -> Tier {
         match self {
-            Command::TalkOpen | Command::TalkStream | Command::TalkClose => Tier::Motion,
+            Command::TalkOpen
+            | Command::TalkStream
+            | Command::TalkClose
+            | Command::PtzControl
+            | Command::PtzPresetRecall
+            | Command::PtzLensMove => Tier::Motion,
             _ => Tier::Viewing,
         }
     }
@@ -172,6 +204,14 @@ pub enum SessionError {
     CommandNotAllowed(u32),
     /// A motion-tier command for a channel the caller has not enabled.
     MotionNotEnabled(u8),
+    /// A camera motion command the channel's capabilities (199) do not
+    /// offer.
+    MotionNotSupported(u8),
+    /// A camera motion command that needs a fact this session has not read
+    /// from the device yet (capabilities, lens ranges, or presets).
+    MotionStateUnknown(&'static str),
+    /// A preset recall for an id the channel's preset list (190) lacks.
+    UnknownPreset(u32),
     /// A received message is not expected in the current state.
     Unexpected {
         /// Command number of the message.
@@ -199,6 +239,11 @@ impl fmt::Display for SessionError {
             SessionError::MotionNotEnabled(c) => {
                 write!(f, "camera motion control is not enabled for channel {c}")
             }
+            SessionError::MotionNotSupported(c) => {
+                write!(f, "channel {c} does not offer this camera motion")
+            }
+            SessionError::MotionStateUnknown(what) => write!(f, "{what} not read yet"),
+            SessionError::UnknownPreset(id) => write!(f, "no preset {id} on this channel"),
             SessionError::Unexpected { command } => {
                 write!(f, "unexpected message, command {command}")
             }
@@ -361,6 +406,60 @@ pub struct Session {
     motion: HashSet<u8>,
     /// Channels with a talk opened (201 sent) and not yet closed.
     talks: HashSet<u8>,
+    /// Camera motion facts read from the device on this session.
+    ptz: PtzFacts,
+}
+
+/// Most read-only queries whose replies the session remembers to learn
+/// from (199, 294, 190); older ones are forgotten.
+const READS_REMEMBERED: usize = 64;
+
+/// What the device reported about camera motion on this session: the
+/// motion builders check against it, never against what a caller claims.
+#[derive(Debug, Default)]
+struct PtzFacts {
+    /// Per channel, from the latest 199 reply; `None` until one arrived.
+    caps: Option<HashMap<u8, PtzCaps>>,
+    /// Per channel, from the latest 294 reply.
+    lens: HashMap<u8, ZoomFocus>,
+    /// Per channel, from the latest 190 reply.
+    presets: HashMap<u8, Vec<Preset>>,
+    /// Queries sent and not answered yet, by message ID.
+    reads: std::collections::BTreeMap<u32, (Command, Option<u8>)>,
+    /// Channels sent a move (18 with a direction) and no stop since.
+    moving: HashSet<u8>,
+}
+
+/// What a channel's camera can do, from its 199 item and its lenses'
+/// sub-items together (a multi-lens camera's pan-and-tilt lens may only
+/// be described in its sub-item; the official client addressed its moves
+/// to the plain channel).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PtzCaps {
+    /// Pan and tilt (`ptzType` 3).
+    pub pan_tilt: bool,
+    /// Presets (`ptzPreset` bit 0).
+    pub presets: bool,
+    /// Lens zoom and focus (`ptzType` 1 or 3).
+    pub zoom_focus: bool,
+}
+
+impl PtzCaps {
+    /// The capabilities of one 199 item, its lenses included.
+    pub fn of(item: &crate::detection::ChannelAi) -> PtzCaps {
+        let mut c = PtzCaps::default();
+        for caps in std::iter::once(&item.caps).chain(item.lenses.iter().map(|l| &l.caps)) {
+            c.pan_tilt |= caps.pan_tilt();
+            c.presets |= caps.presets();
+            c.zoom_focus |= caps.zoom_focus();
+        }
+        c
+    }
+
+    /// Whether the camera offers any motion.
+    pub fn any(&self) -> bool {
+        self.pan_tilt || self.presets || self.zoom_focus
+    }
 }
 
 impl fmt::Debug for Session {
@@ -396,6 +495,7 @@ impl Session {
             seeks: VecDeque::new(),
             motion: HashSet::new(),
             talks: HashSet::new(),
+            ptz: PtzFacts::default(),
         }
     }
 
@@ -531,7 +631,11 @@ impl Session {
             other => return Err(SessionError::CommandNotAllowed(other.number())),
         };
         let id = self.alloc_id()?;
-        Ok((id, self.send(cmd, id, ext.as_bytes(), &[])?))
+        let bytes = self.send(cmd, id, ext.as_bytes(), &[])?;
+        if cmd == Command::Support {
+            self.remember_read(id, cmd, None);
+        }
+        Ok((id, bytes))
     }
 
     /// Builds a preview start. Returns the message ID that identifies this
@@ -898,6 +1002,194 @@ impl Session {
         self.talks.iter().copied()
     }
 
+    fn remember_read(&mut self, id: u32, cmd: Command, channel: Option<u8>) {
+        let reads = &mut self.ptz.reads;
+        reads.insert(id, (cmd, channel));
+        while reads.len() > READS_REMEMBERED {
+            reads.pop_first();
+        }
+    }
+
+    /// Learns camera motion facts from the reply to a remembered query.
+    fn learn(&mut self, message_id: u32, status: u16, xml_text: &str) {
+        let Some((cmd, channel)) = self.ptz.reads.remove(&message_id) else {
+            return;
+        };
+        if status != 200 {
+            return;
+        }
+        match (cmd, channel) {
+            (Command::Support, _) => {
+                if let Ok(items) = crate::detection::parse_channel_ai(xml_text) {
+                    self.ptz.caps =
+                        Some(items.iter().map(|i| (i.channel, PtzCaps::of(i))).collect());
+                }
+            }
+            (Command::PtzZoomFocus, Some(ch)) => {
+                if let Ok(zf) = ptz::parse_zoom_focus(xml_text) {
+                    self.ptz.lens.insert(ch, zf);
+                }
+            }
+            (Command::PtzPresets, Some(ch)) => {
+                if let Ok(p) = ptz::parse_presets(xml_text) {
+                    self.ptz.presets.insert(ch, p);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a capabilities reply (199) has been read on this session.
+    pub fn ptz_caps_known(&self) -> bool {
+        self.ptz.caps.is_some()
+    }
+
+    /// A channel's camera motion capabilities, from the latest 199 reply
+    /// (`None` before one arrived; all false for a channel it lacks).
+    pub fn ptz_caps(&self, channel: u8) -> Option<PtzCaps> {
+        self.ptz
+            .caps
+            .as_ref()
+            .map(|c| c.get(&channel).copied().unwrap_or_default())
+    }
+
+    /// A channel's lens ranges, from the latest 294 reply on this session.
+    pub fn ptz_lens_ranges(&self, channel: u8) -> Option<ZoomFocus> {
+        self.ptz.lens.get(&channel).copied()
+    }
+
+    /// A channel's presets, from the latest 190 reply on this session.
+    pub fn ptz_presets(&self, channel: u8) -> Option<&[Preset]> {
+        self.ptz.presets.get(&channel).map(Vec::as_slice)
+    }
+
+    /// Channels sent a move and no stop since.
+    pub fn ptz_moving(&self) -> impl Iterator<Item = u8> + '_ {
+        self.ptz.moving.iter().copied()
+    }
+
+    fn check_ptz(
+        &self,
+        channel: u8,
+        offers: impl Fn(&PtzCaps) -> bool,
+    ) -> Result<(), SessionError> {
+        if self.state != State::LoggedIn {
+            return Err(SessionError::WrongState("not logged in"));
+        }
+        match self.ptz_caps(channel) {
+            None => Err(SessionError::MotionStateUnknown("capabilities")),
+            Some(c) if offers(&c) => Ok(()),
+            Some(_) => Err(SessionError::MotionNotSupported(channel)),
+        }
+    }
+
+    /// Builds a read-only PTZ query (294, 190 or 340, viewing tier) for a
+    /// channel. The session learns lens ranges (294) and presets (190)
+    /// from the replies.
+    pub fn ptz_query(&mut self, cmd: Command, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+        if !matches!(
+            cmd,
+            Command::PtzZoomFocus | Command::PtzPresets | Command::PtzSelfTest
+        ) {
+            return Err(SessionError::CommandNotAllowed(cmd.number()));
+        }
+        let id = self.alloc_id()?;
+        let ext = ptz::query_extension(channel);
+        let bytes = self.send(cmd, id, ext.as_bytes(), &[])?;
+        self.remember_read(id, cmd, Some(channel));
+        Ok((id, bytes))
+    }
+
+    /// Builds a move (18 with a direction, motion tier) from the fixed
+    /// template, speed limited to 1–64. Refused unless this session's 199
+    /// reply says the channel pans and tilts. The caller must follow it
+    /// with [`Session::ptz_stop`] on every path.
+    pub fn ptz_move(
+        &mut self,
+        channel: u8,
+        direction: Direction,
+        speed: u8,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        self.check_ptz(channel, |c| c.pan_tilt)?;
+        let id = self.alloc_id()?;
+        let ext = ptz::command_extension(channel);
+        let body = ptz::move_body(channel, direction, speed);
+        let bytes = self.send(Command::PtzControl, id, ext.as_bytes(), body.as_bytes())?;
+        self.ptz.moving.insert(channel);
+        Ok((id, bytes))
+    }
+
+    /// Builds a stop (18 `stop`, motion tier). Always possible while logged
+    /// in, except on a channel this session knows cannot pan or tilt and
+    /// never moved: a stop must go out on every path, also on a new
+    /// connection that has not read the capabilities yet.
+    pub fn ptz_stop(&mut self, channel: u8) -> Result<(u32, Vec<u8>), SessionError> {
+        if self.state != State::LoggedIn {
+            return Err(SessionError::WrongState("not logged in"));
+        }
+        if !self.ptz.moving.contains(&channel)
+            && self.ptz_caps(channel).is_some_and(|c| !c.pan_tilt)
+        {
+            return Err(SessionError::MotionNotSupported(channel));
+        }
+        let id = self.alloc_id()?;
+        let ext = ptz::command_extension(channel);
+        let body = ptz::stop_body(channel);
+        let bytes = self.send(Command::PtzControl, id, ext.as_bytes(), body.as_bytes())?;
+        self.ptz.moving.remove(&channel);
+        Ok((id, bytes))
+    }
+
+    /// Builds a preset recall (19 `toPos`, motion tier) with the preset's
+    /// name from this session's 190 reply. Refused unless the channel has
+    /// presets (199) and its list (190, read first) holds `id`. Saving and
+    /// deleting presets cannot be built.
+    pub fn ptz_recall(&mut self, channel: u8, id: u32) -> Result<(u32, Vec<u8>), SessionError> {
+        self.check_ptz(channel, |c| c.presets)?;
+        let name = self
+            .ptz_presets(channel)
+            .ok_or(SessionError::MotionStateUnknown("preset list"))?
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or(SessionError::UnknownPreset(id))?
+            .name
+            .clone();
+        let msg = self.alloc_id()?;
+        let ext = ptz::command_extension(channel);
+        let body = ptz::recall_body(channel, id, &name);
+        let bytes = self.send(
+            Command::PtzPresetRecall,
+            msg,
+            ext.as_bytes(),
+            body.as_bytes(),
+        )?;
+        Ok((msg, bytes))
+    }
+
+    /// Builds a lens move (295, motion tier) to `position` clamped to the
+    /// range of this session's latest 294 reply; returns the position sent.
+    /// Refused unless the channel has lens zoom and focus (199) and the
+    /// motor's range has been read.
+    pub fn ptz_lens(
+        &mut self,
+        channel: u8,
+        axis: LensAxis,
+        position: i32,
+    ) -> Result<(u32, Vec<u8>, i32), SessionError> {
+        self.check_ptz(channel, |c| c.zoom_focus)?;
+        let range = self
+            .ptz_lens_ranges(channel)
+            .ok_or(SessionError::MotionStateUnknown("lens ranges"))?
+            .axis(axis)
+            .ok_or(SessionError::MotionNotSupported(channel))?;
+        let pos = range.clamp(position);
+        let id = self.alloc_id()?;
+        let ext = ptz::command_extension(channel);
+        let body = ptz::lens_body(channel, axis, pos);
+        let bytes = self.send(Command::PtzLensMove, id, ext.as_bytes(), body.as_bytes())?;
+        Ok((id, bytes, pos))
+    }
+
     fn key(&self) -> Result<&SessionKey, SessionError> {
         self.key
             .as_ref()
@@ -964,6 +1256,21 @@ impl Session {
     }
 
     fn handle_logged_in(&mut self, msg: &RawMessage) -> Result<Event, SessionError> {
+        let ev = self.handle_logged_in_inner(msg)?;
+        if let Event::Control {
+            message_id,
+            status,
+            xml,
+            ..
+        } = &ev
+            && !self.ptz.reads.is_empty()
+        {
+            self.learn(*message_id, *status, xml);
+        }
+        Ok(ev)
+    }
+
+    fn handle_logged_in_inner(&mut self, msg: &RawMessage) -> Result<Event, SessionError> {
         let h = msg.header;
         let ext = msg.extension();
         let payload = msg.payload();
@@ -1384,28 +1691,29 @@ mod tests {
     #[test]
     fn allowlist() {
         for n in [
-            1, 2, 3, 4, 5, 7, 10, 11, 14, 15, 16, 80, 93, 123, 142, 143, 144, 145, 146, 192, 199,
-            201, 202, 272, 273, 274, 298, 318,
+            1, 2, 3, 4, 5, 7, 10, 11, 14, 15, 16, 18, 19, 80, 93, 123, 142, 143, 144, 145, 146,
+            190, 192, 199, 201, 202, 272, 273, 274, 294, 295, 298, 318, 340,
         ] {
             assert!(Command::is_allowed(n));
             assert_eq!(Command::from_number(n).unwrap().number(), n);
         }
-        // Only talk-back is motion; everything else is viewing.
-        for n in [11, 201, 202] {
+        // Talk-back and the PTZ moves, recall and lens moves are motion;
+        // everything else is viewing.
+        for n in [11, 18, 19, 201, 202, 295] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Motion);
         }
-        for n in [1, 2, 3, 4, 5, 7, 10, 93, 123, 143, 199] {
+        for n in [1, 2, 3, 4, 5, 7, 10, 93, 123, 143, 190, 199, 294, 340] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Viewing);
         }
         // Never: playback commands not observed in use (381–383, 150, 8, 9),
         // 193 (stop alarm report: the session simply logs out), 300 (writes
         // the AI configuration) and, above all, 303 (delete recording files).
-        // Not yet: the PTZ motion commands (18, 19, 295) and the talk
-        // variants the client does not use (12, 203–205); 20 and 331 change
-        // settings.
+        // Not yet: the talk variants the client does not use (12, 203–205)
+        // and the PTZ commands not observed (433, 468, 445, 545, 709, 224,
+        // 742); 20, 34, 35, 64, 225, 331, 332 and 708 change settings.
         for n in [
-            0, 8, 9, 12, 13, 18, 19, 20, 33, 44, 58, 76, 102, 150, 193, 203, 204, 205, 295, 300,
-            303, 331, 381, 382, 383, 511, 600,
+            0, 8, 9, 12, 13, 20, 33, 34, 35, 44, 58, 64, 76, 102, 150, 193, 203, 204, 205, 224,
+            225, 300, 303, 331, 332, 381, 382, 383, 433, 445, 468, 511, 545, 600, 708, 709, 742,
         ] {
             assert!(!Command::is_allowed(n), "{n}");
         }
@@ -2129,5 +2437,122 @@ mod tests {
         s.forget_talk(3);
         assert!(s.talk_close(3).is_err());
         assert!(s.talk_open(3, &cfg).is_ok());
+    }
+
+    fn payload_text(key: &SessionKey, m: &RawMessage) -> String {
+        let mut b = m.payload().to_vec();
+        key.decrypt(&mut b);
+        String::from_utf8(b).unwrap()
+    }
+
+    #[test]
+    fn ptz_commands_follow_what_the_device_reported() {
+        use crate::ptz::{self, Direction, LensAxis};
+        let (mut s, key) = logged_in();
+        // Nothing moves before the capabilities are read, except a stop.
+        assert_eq!(
+            s.ptz_move(2, Direction::Left, 20),
+            Err(SessionError::MotionStateUnknown("capabilities"))
+        );
+        assert!(s.ptz_stop(2).is_ok());
+        // Channel 1: lens only. Channel 2: pan, tilt, presets, lens.
+        // Channel 3: a multi-lens camera whose second lens pans and tilts.
+        let (id, _) = s.query_info(Command::Support, None).unwrap();
+        let support = "<Support><item><chnID>0</chnID><aitype>0</aitype><ptzType>0</ptzType></item>\
+            <item><chnID>1</chnID><aitype>0</aitype><ptzType>1</ptzType></item>\
+            <item><chnID>2</chnID><aitype>0</aitype><ptzType>3</ptzType><ptzPreset>3</ptzPreset></item>\
+            <item><chnID>3</chnID><aitype>0</aitype><subItem><chnID>0</chnID><aitype>0</aitype>\
+            </subItem><subItem><chnID>1</chnID><aitype>0</aitype><ptzType>3</ptzType></subItem></item>\
+            </Support>";
+        s.handle(&decode_one(&device_xml(&key, 199, id, 200, support)))
+            .unwrap();
+        assert!(s.ptz_caps_known());
+        assert_eq!(s.ptz_caps(0), Some(PtzCaps::default()));
+        assert!(s.ptz_caps(3).unwrap().pan_tilt);
+        assert_eq!(
+            s.ptz_move(0, Direction::Left, 20),
+            Err(SessionError::MotionNotSupported(0))
+        );
+        assert_eq!(
+            s.ptz_move(1, Direction::Left, 20),
+            Err(SessionError::MotionNotSupported(1))
+        );
+        assert_eq!(s.ptz_stop(1), Err(SessionError::MotionNotSupported(1)));
+        assert_eq!(s.ptz_recall(1, 0), Err(SessionError::MotionNotSupported(1)));
+
+        // A move and its stop: the observed bodies, as payload after a
+        // channel extension without chnType.
+        let (mid, bytes) = s.ptz_move(2, Direction::Up, 40).unwrap();
+        let m = decode_one(&bytes);
+        assert_eq!((m.header.command, m.header.message_id), (18, mid));
+        let mut ext = m.extension().to_vec();
+        key.decrypt(&mut ext);
+        assert_eq!(String::from_utf8(ext).unwrap(), ptz::command_extension(2));
+        assert_eq!(payload_text(&key, &m), ptz::move_body(2, Direction::Up, 40));
+        assert_eq!(s.ptz_moving().collect::<Vec<_>>(), vec![2]);
+        let m = decode_one(&s.ptz_stop(2).unwrap().1);
+        assert_eq!(payload_text(&key, &m), ptz::stop_body(2));
+        assert_eq!(s.ptz_moving().count(), 0);
+        assert!(s.ptz_move(3, Direction::Right, 1).is_ok());
+
+        // A recall needs the preset list; only listed ids, with their name.
+        assert_eq!(
+            s.ptz_recall(2, 1),
+            Err(SessionError::MotionStateUnknown("preset list"))
+        );
+        let (pid, bytes) = s.ptz_query(Command::PtzPresets, 2).unwrap();
+        let m = decode_one(&bytes);
+        assert_eq!(m.header.command, 190);
+        assert!(m.payload().is_empty());
+        s.handle(&decode_one(&device_xml(
+            &key,
+            190,
+            pid,
+            200,
+            "<PtzPreset><channelId>2</channelId><presetList><preset><id>1</id><name>Gate</name>\
+             </preset></presetList></PtzPreset>",
+        )))
+        .unwrap();
+        assert_eq!(s.ptz_recall(2, 4), Err(SessionError::UnknownPreset(4)));
+        let m = decode_one(&s.ptz_recall(2, 1).unwrap().1);
+        assert_eq!(m.header.command, 19);
+        assert_eq!(payload_text(&key, &m), ptz::recall_body(2, 1, "Gate"));
+
+        // A lens move needs the range, and is clamped to it.
+        assert_eq!(
+            s.ptz_lens(1, LensAxis::Zoom, 5).map(|r| r.2),
+            Err(SessionError::MotionStateUnknown("lens ranges"))
+        );
+        let (zid, _) = s.ptz_query(Command::PtzZoomFocus, 1).unwrap();
+        // A refused read teaches nothing.
+        s.handle(&decode_one(&device_xml(&key, 294, zid, 400, "")))
+            .unwrap();
+        assert!(s.ptz_lens_ranges(1).is_none());
+        let (zid, _) = s.ptz_query(Command::PtzZoomFocus, 1).unwrap();
+        s.handle(&decode_one(&device_xml(
+            &key,
+            294,
+            zid,
+            200,
+            "<PtzZoomFocus><channelId>1</channelId><zoom><maxPos>28</maxPos><minPos>0</minPos>\
+             <curPos>3</curPos></zoom><focus><maxPos>164</maxPos><minPos>0</minPos>\
+             <curPos>90</curPos></focus></PtzZoomFocus>",
+        )))
+        .unwrap();
+        let (_, bytes, pos) = s.ptz_lens(1, LensAxis::Zoom, 99).unwrap();
+        assert_eq!(pos, 28);
+        let m = decode_one(&bytes);
+        assert_eq!(m.header.command, 295);
+        assert_eq!(
+            payload_text(&key, &m),
+            ptz::lens_body(1, LensAxis::Zoom, 28)
+        );
+        assert_eq!(s.ptz_lens(1, LensAxis::Focus, -4).unwrap().2, 0);
+        // Only the PTZ reads go through ptz_query.
+        assert_eq!(
+            s.ptz_query(Command::PtzControl, 1),
+            Err(SessionError::CommandNotAllowed(18))
+        );
+        assert!(s.ptz_query(Command::PtzSelfTest, 2).is_ok());
     }
 }
