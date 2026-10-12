@@ -45,10 +45,13 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - Never change device configuration: the session layer has a command
   allowlist, and nothing that changes device settings goes on it.
 - The one exception is **camera motion control** (PTZ preset recall and moves,
-  focus, a doorbell's speaker): a separate allowlist tier, off by default,
-  enabled per camera by the user, rate-limited, and logged. Never send it
-  automatically unless the user enabled automatic correction for that camera.
-  See "Device commands" in docs/ARCHITECTURE.md.
+  focus, a doorbell's speaker): a separate allowlist tier, rate-limited (well
+  above any human pace, so manual use never notices) and logged. The user's
+  own manual PTZ controls work without a prior enable; talk-back still needs
+  the camera's permission (the "Allow talk-back?" prompt). Nothing automated
+  (the local API, automatic correction) sends motion commands unless the user
+  granted that client or feature for that camera. See "Device commands" in
+  docs/ARCHITECTURE.md.
 - One session per device carrying all channels; close it on every exit path.
   NVRs allow only a few logins, and exhausting them locks out other clients.
 - Tests and development run against `tools/mock-nvr`, not real hardware, unless
