@@ -155,6 +155,7 @@ internal sealed class ViewerWindow
         Grid.SetColumn(stageArea, 2);
         _root.Children.Add(stageArea);
         _root.KeyDown += OnKey;
+        _root.KeyUp += OnKeyUp;
 
         // The header: the docked one is the title bar of a normal window; the overlay slides in over the
         // stage in full screen, from a strip at the top edge.
@@ -214,6 +215,11 @@ internal sealed class ViewerWindow
             if (e.WindowActivationState != WindowActivationState.Deactivated)
             {
                 Activated?.Invoke(this);
+            }
+            else
+            {
+                // Losing the focus stops a held camera move (a pad button, an Alt arrow).
+                _viewer.Ptz.StopAll();
             }
         };
 
@@ -757,6 +763,13 @@ internal sealed class ViewerWindow
         }
         bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
         bool repeat = e.KeyStatus.WasKeyDown;
+        // Alt with an arrow, = or -, or 1 to 9 drives the selected tile's camera (docs/UX.md "Capture and camera keys").
+        // Handling the key keeps Alt from opening the window's system menu when it comes up.
+        if (e.KeyStatus.IsMenuKeyDown && Stage.HandlePtzKey(e.Key, e.KeyStatus.ScanCode, alt: true, repeat))
+        {
+            e.Handled = true;
+            return;
+        }
         switch (e.Key)
         {
             case VirtualKey.S when !ctrl:
@@ -788,6 +801,16 @@ internal sealed class ViewerWindow
             return;
         }
         e.Handled = Stage.HandleKey(e.Key, ctrl, repeat);
+    }
+
+    private void OnKeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        Stage.HandlePtzKeyUp(e.Key);
+        if (e.Key is VirtualKey.Menu or VirtualKey.LeftMenu or VirtualKey.RightMenu && Stage.HandlePtzAltUp())
+        {
+            // Alt was used with a camera key: it must not also open the system menu.
+            e.Handled = true;
+        }
     }
 
     private static bool Within(DependencyObject d, params UIElement[] roots)

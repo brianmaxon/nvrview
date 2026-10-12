@@ -624,6 +624,9 @@ impl Streams {
             ResultKind::Decoded(pts) => {
                 g.p.decoded(pts);
                 g.last_decoded_pts = Some(pts);
+                if let Some(f) = g.feed() {
+                    f.set_decoded(pts);
+                }
                 g.note_decoded(pts, now_us);
             }
             ResultKind::Failed(kind) => {

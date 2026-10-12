@@ -117,6 +117,7 @@ struct RecordingsView: View {
             }
         }
         .sheet(isPresented: $browser.showingGroups) { CameraGroupsEditor(browser: browser) }
+        .sheet(item: Bindable(browser.export).rangeRequest) { RangeDownloadSheet(browser: browser, request: $0) }
     }
 
     private struct PaneKey: Equatable {
@@ -792,7 +793,7 @@ struct DownloadRow: View {
         let d = download
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(d.folderName).font(.body.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Text(d.rangeText.map { "Range \($0)" } ?? d.folderName).font(.body.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 Text(d.stateText).font(.caption).foregroundStyle(d.state == "failed" ? Color.red : Color.secondary)
             }

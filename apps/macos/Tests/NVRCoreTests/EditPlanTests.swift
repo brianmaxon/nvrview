@@ -168,7 +168,7 @@ struct EditPlanTests {
         defer { session.close() }
         #expect(session.failures.isEmpty)
         let file = try #require(session.files[0])
-        #expect(file.info.keyframesMs == [0, 2000, 4000] && file.info.width == 640 && file.info.codec == "h264")
+        #expect(file.info.keyframesMs == [0, 2000, 4000] && file.info.width == 640 && file.info.codec == "h264", "KF \(file.info.keyframesMs) \(file.info.durationMs)")
         #expect(file.keyframe(atOrBefore: 3999) == 2000)
         let renderer = try GridRenderer()
         func look(_ t: Int64) throws -> (color: Int?, frame: Int) {

@@ -113,6 +113,10 @@ final class StageView: NSView {
     let toast = ToastView()
     /// When the toast goes, on the stage's clock.
     var toastHideAt: Double?
+    /// The camera motion popover (pan pad or lens sliders) and what drives it.
+    var ptzPopover: NSPopover?
+    var ptzPopoverController: PTZPopoverController?
+    var ptzObserver: Int?
     /// The pictures this stage saved, the last one with what it was made
     /// from (self-test).
     var pictureSaves = 0
@@ -238,6 +242,7 @@ final class StageView: NSView {
         addSubview(overlay)
         installInsets()
         installToast()
+        installPTZ()
         if fixedTile { state.selected = state.tree.leaves.first?.path }
         overlay.registerForDraggedTypes([.string])
         alertActive = { [weak model] in model?.alerts.isActive($0) == true }
@@ -594,6 +599,7 @@ final class StageView: NSView {
         tickToast(now: now)
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }
+        model.ptz.tick(now: now)
     }
 
     /// `tick(now:)` at the clock's time.

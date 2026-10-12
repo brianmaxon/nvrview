@@ -62,16 +62,13 @@ enum CameraMenu {
             i.allowsKeyEquivalentWhenHidden = true
             return i
         }
-        func placeholder(_ title: String) -> NSMenu {
-            let m = NSMenu(title: title)
-            let none = NSMenuItem(title: "Coming soon", action: nil, keyEquivalent: "")
-            none.isEnabled = false
-            m.addItem(none)
+        let presets = item("Presets", nil)
+        presets.submenu = {
+            let m = NSMenu(title: "Presets")
+            m.delegate = PresetsMenuDelegate.shared
             m.autoenablesItems = false
             return m
-        }
-        let presets = item("Presets", nil)
-        presets.submenu = placeholder("Presets")
+        }()
         let recordings = item("Recordings", nil)
         recordings.submenu = RecordingsMenu.make()
         let menu = NSMenu(title: "Camera")
@@ -97,6 +94,32 @@ enum CameraMenu {
         let parent = NSMenuItem(title: "Camera", action: nil, keyEquivalent: "")
         parent.submenu = menu
         return parent
+    }
+}
+
+/// The Camera menu's Presets submenu: the selected tile's camera's list,
+/// read when the menu opens (recall only).
+@MainActor
+final class PresetsMenuDelegate: NSObject, NSMenuDelegate {
+    static let shared = PresetsMenuDelegate()
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.autoenablesItems = false
+        func note(_ text: String) {
+            let i = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            i.isEnabled = false
+            menu.addItem(i)
+        }
+        guard let stage = (NSApp.keyWindow?.windowController as? ViewerWindowController)?.stage,
+            let path = stage.selectedPath, let camera = stage.state.tree[path]?.camera,
+            stage.selectedHeaderTile?.presets == true
+        else { return note("No camera with presets selected") }
+        guard let info = stage.model.ptz.info(for: camera) else {
+            stage.model.ptz.load(camera)
+            return note("Reading the presets…")
+        }
+        for item in presetItems(info: info, camera: camera, ptz: stage.model.ptz) { menu.addItem(item) }
     }
 }
 

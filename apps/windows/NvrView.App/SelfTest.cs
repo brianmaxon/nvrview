@@ -61,6 +61,11 @@
 //    "Open calls in their own window" routing are remembered. Then, on the real computer: the
 //    system voice renders a sentence, the desktop recognizer (where Windows has one) hears it,
 //    and with --mic-test the microphone opens for a moment (its audio is measured and dropped);
+// 11e. camera motion (docs/UX.md "Pan, tilt, and zoom"), against the mock's cameras that move (SelfTest.Ptz.cs):
+//    a held pad button renews its move at least every 500 ms and stops on release, an Alt arrow does the same, the
+//    app going quiet lets the camera stop by itself (the core's dead-man event), presets recall from the menu and
+//    with Alt+2, the lens stays in its range (the core clamps what is sent past it) and a drag sends the first and
+//    the last position, and a multi-lens camera's second lens is moved as its own camera;
 // 11c. the header and the Settings window (docs/UX.md "Windows header", "Settings window"): the
 //    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
 //    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
@@ -413,6 +418,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         await FisheyeViews(v, stage, r);
         await LayoutsAndWindows(v);
         await Calls(v, stage);
+        await PtzSteps(v, stage);
         await RecordingsSteps(v);
 
         // parity: detection-events
@@ -741,6 +747,8 @@ internal sealed partial class SelfTest(App app, AppOptions options)
                 _problems.Add("recordings: no lane of a playing camera");
             }
         }
+
+        await ExportSteps(w, fake, service);
 
         // parity: recordings-timeline-wheel-zoom
         // The lanes' wheel as the window gets it: a notch zooms around the pointer (its time stays under it), many
@@ -1267,6 +1275,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             Expect(p.PositionMs == at, $"edits: the cameras continue at {p.PositionMs}, not the edit's {at}");
         }
+
+        // The edit is closed, so its files can be written again: with sound for the export steps, then as they were.
+        await ExportEditSteps(w, b, fake, d.Download, s, files);
         try
         {
             if (d.Folder is { } folder)
@@ -2085,7 +2096,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
                 && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
             Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
             Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
-            // Every header action but PTZ's is built, and no mock camera moves: nothing is left to say "coming soon".
+            // Every header action is built: nothing is left to say "coming soon".
         }
         finally
         {

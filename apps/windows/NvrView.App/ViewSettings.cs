@@ -35,6 +35,12 @@ internal sealed class ViewSettingsFile
     /// <summary>Cameras the user allowed talk-back to ("deviceKey:channel"); camera motion control, off unless listed.</summary>
     public List<string>? TalkAllowed { get; set; }
 
+    /// <summary>Automations the user let move a camera, by camera ("deviceKey:channel"): client names such as auto_correction. Camera motion control, off unless listed; the user's own PTZ controls need no entry.</summary>
+    public Dictionary<string, string[]>? MotionGrants { get; set; }
+
+    /// <summary>The pan and tilt pad's speed (1 to 64); absent: 20.</summary>
+    public int? PtzSpeed { get; set; }
+
     /// <summary>Doorbells whose ring unmutes them even when the user is not listening ("deviceKey:channel"); off unless listed.</summary>
     public List<string>? UnmuteOnRing { get; set; }
 
@@ -103,6 +109,8 @@ internal sealed class ViewSettings(string? file)
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
+    private Dictionary<string, HashSet<string>> _motionGrants = [];
+    private int _ptzSpeed;
     private HashSet<string> _unmuteOnRing = [];
     private bool _callsInWindow;
     private Dictionary<string, string> _callPresentations = [];
@@ -163,6 +171,79 @@ internal sealed class ViewSettings(string? file)
         }
         Save();
         Changed?.Invoke();
+    }
+
+    /// <summary>The automations the user let move a camera (a channel's, whatever the lens); empty unless allowed.</summary>
+    public IReadOnlyCollection<string> MotionGrants(CameraRef camera)
+    {
+        Load();
+        return _motionGrants.TryGetValue(MountKey(camera), out HashSet<string>? g) ? [.. g.Order(StringComparer.Ordinal)] : [];
+    }
+
+    /// <summary>Every grant of a device's cameras: the channel and the automation.</summary>
+    public IReadOnlyList<(int Channel, string Client)> MotionGrantsFor(string deviceKey)
+    {
+        Load();
+        var result = new List<(int, string)>();
+        string prefix = deviceKey + ":";
+        foreach ((string key, HashSet<string> clients) in _motionGrants)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal) && int.TryParse(key.AsSpan(prefix.Length), out int channel))
+            {
+                result.AddRange(clients.Order(StringComparer.Ordinal).Select(c => (channel, c)));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Whether the automation may move the camera.</summary>
+    public bool MotionGranted(CameraRef camera, string client)
+    {
+        Load();
+        return _motionGrants.TryGetValue(MountKey(camera), out HashSet<string>? g) && g.Contains(client);
+    }
+
+    /// <summary>Lets (or stops letting) an automation move a camera (saved).</summary>
+    public void SetMotionGrant(CameraRef camera, string client, bool granted)
+    {
+        Load();
+        string key = MountKey(camera);
+        if (!_motionGrants.TryGetValue(key, out HashSet<string>? g))
+        {
+            g = [];
+            _motionGrants[key] = g;
+        }
+        bool changed = granted ? g.Add(client) : g.Remove(client);
+        if (g.Count == 0)
+        {
+            _motionGrants.Remove(key);
+        }
+        if (!changed)
+        {
+            return;
+        }
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>The pad's speed kept from the last run (0: none kept).</summary>
+    public int PtzSpeed
+    {
+        get
+        {
+            Load();
+            return _ptzSpeed;
+        }
+        set
+        {
+            Load();
+            if (_ptzSpeed == value)
+            {
+                return;
+            }
+            _ptzSpeed = value;
+            Save();
+        }
     }
 
     /// <summary>A ring of this doorbell (a channel's, whatever the lens) plays its sound even when the user is not listening to anything.</summary>
@@ -590,6 +671,8 @@ internal sealed class ViewSettings(string? file)
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
             _unmuteOnRing = read?.UnmuteOnRing is { } u ? [.. u] : [];
+            _motionGrants = read?.MotionGrants is { } mg ? mg.Where(kv => kv.Value.Length > 0).ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value)) : [];
+            _ptzSpeed = read?.PtzSpeed is { } ps ? Math.Clamp(ps, 1, 64) : 0;
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
             _picturesFolder = string.IsNullOrWhiteSpace(read?.PicturesFolder) ? null : read.PicturesFolder;
             _pictureFormat = PictureFormats.FromKey(read?.PictureFormat);
@@ -632,6 +715,8 @@ internal sealed class ViewSettings(string? file)
                     InsetCorner = _insetCorner?.Name(),
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
+                    MotionGrants = _motionGrants.Count > 0 ? _motionGrants.ToDictionary(kv => kv.Key, kv => kv.Value.Order(StringComparer.Ordinal).ToArray()) : null,
+                    PtzSpeed = _ptzSpeed > 0 && _ptzSpeed != 20 ? _ptzSpeed : null,
                     UnmuteOnRing = _unmuteOnRing.Count > 0 ? [.. _unmuteOnRing.Order(StringComparer.Ordinal)] : null,
                     SaveCallTranscripts = _saveTranscripts,
                     PicturesFolder = _picturesFolder,

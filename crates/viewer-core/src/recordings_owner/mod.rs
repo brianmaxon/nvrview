@@ -47,6 +47,7 @@ mod config;
 mod day_audio;
 mod downloads;
 mod edit;
+mod exports;
 mod locks;
 mod query;
 mod sound;
@@ -1121,7 +1122,13 @@ impl crate::Core {
                     .iter()
                     .map(|(k, a)| (k.clone(), a.session.clone()))
                     .collect();
-                let d = downloads::Downloads::start(h, dir, dl, &sessions, old);
+                // Downloads outside the downloads directory are listed under
+                // the data directory (none without one).
+                let registry = h
+                    .data_dir
+                    .as_ref()
+                    .map(|_| st.stores.as_ref().expect("set").root.join("downloads.json"));
+                let d = downloads::Downloads::start(h, dir, dl, &sessions, registry, old);
                 st.stores.as_mut().expect("set").downloads = Some(d);
             } else if let Some(old) = old {
                 h.rt.spawn(old.stop());

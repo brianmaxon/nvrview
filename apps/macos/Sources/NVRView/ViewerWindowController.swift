@@ -331,6 +331,13 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         }
         // Tab and Esc go to the alert insets first, when there are any.
         if event.type == .keyDown, let key = insetKey(for: event), stage.handleInsetKey(key) { return true }
+        // Option with an arrow, = or - or a digit steers the selected camera;
+        // the arrow's release (or Option's) ends the move.
+        if event.type == .keyDown, let key = ptzKey(for: event), stage.handlePTZKey(key) { return true }
+        if event.type == .keyUp, let direction = ViewerKeys.ptzKeyUp(keyCode: event.keyCode) {
+            stage.handlePTZKeyUp(direction)
+        }
+        if event.type == .flagsChanged { stage.handlePTZModifiers(optionDown: event.modifierFlags.contains(.option)) }
         guard event.type == .keyDown, let shortcut = shortcut(for: event) else { return false }
         perform(shortcut)
         return true
@@ -358,6 +365,16 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         return ViewerKeys.shortcut(
             keyCode: event.keyCode, characters: event.charactersIgnoringModifiers, modifiers: modifiers,
             isRepeat: event.isARepeat, context: keyContext)
+    }
+
+    func ptzKey(for event: NSEvent) -> PTZKey? {
+        let flags = event.modifierFlags
+        var modifiers: KeyModifiers = []
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.command) { modifiers.insert(.command) }
+        return ViewerKeys.ptzKey(keyCode: event.keyCode, modifiers: modifiers, isRepeat: event.isARepeat, context: keyContext)
     }
 
     func insetKey(for event: NSEvent) -> InsetKey? {
@@ -649,10 +666,18 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         proposed.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
     }
 
+    /// The window lost the keyboard focus: nothing stays held.
+    func windowDidResignKey(_ notification: Notification) {
+        stage.closePTZPopover()
+        model.ptz.stopAll()
+    }
+
     func windowWillClose(_ notification: Notification) {
         timer?.invalidate()
         sidebarObservation = nil
         if let token { model.unsubscribe(token) }
+        stage.closePTZPopover()
+        model.ptz.stopAll()
         stage.tearDown()
         model.leases.update(from: held, to: [:])
         held = [:]

@@ -159,9 +159,16 @@ import VideoKit
         let follow = try object(try core.editCompute(json: #"{"kind":"follow","download":"\#(id)"}"#))
         #expect(follow["kind"] as? String == "follow" && (follow["segments"] as? [Any])?.isEmpty == false)
         #expect(throws: CoreStatus.unknownID) { try core.editCompute(json: #"{"kind":"follow","download":"nope"}"#) }
-        #expect(throws: CoreStatus.unsupported) {
-            try core.editCompute(json: #"{"kind":"follow","download":"\#(id)","out_ms":1}"#)
+        // Export (minor 10): a trim over the finished files, a range
+        // download, and a still plan.
+        let trimmed = try object(try core.editCompute(
+            json: #"{"kind":"trim","download":"\#(id)","in_ms":0,"out_ms":4000000000000,"share_safe":true}"#))
+        #expect((trimmed["outputs"] as? [[String: Any]])?.first?["name"] as? String == "Camera A")
+        #expect(throws: CoreStatus.invalidArgument) {
+            try core.editCompute(json: #"{"kind":"follow","download":"\#(id)","in_ms":9,"out_ms":3}"#)
         }
+        #expect(throws: CoreStatus.invalidArgument) { try core.downloadRange(json: #"{"start":5,"end":4,"cameras":[]}"#) }
+        #expect(throws: CoreStatus.unknownID) { try core.stillPlan(json: #"{"playback":987654}"#) }
         #expect(throws: CoreStatus.invalidArgument) { try core.editCompute(json: "{") }
         let cam0 = cams[0].json
         try core.soundWatch(camera: cam0, enabled: true)

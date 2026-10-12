@@ -104,9 +104,58 @@ internal sealed partial class SelfTest
         return (tried, right);
     }
 
+    // For a JPEG: how many sample points of the saved image match the same encoder's JPEG of a CPU conversion of the picture
+    // (null when that could not be made). The codec's own losses move with the picture's content, so comparing encoded with
+    // encoded cancels them and checks the drawing alone.
+    private static async Task<(int Checked, int Matched)?> CompareEncoded(RenderedImage image, Yuv y, PixelRegion region, int tolerance)
+    {
+        var bgra = new byte[image.Width * image.Height * 4];
+        for (int row = 0; row < image.Height; row++)
+        {
+            for (int x = 0; x < image.Width; x++)
+            {
+                int i = (row * image.Width + x) * 4;
+                if (region.X + x < y.Width && region.Y + row < y.Height)
+                {
+                    (int r, int g, int b) = CpuRgb(y, region.X + x, region.Y + row);
+                    bgra[i] = (byte)b;
+                    bgra[i + 1] = (byte)g;
+                    bgra[i + 2] = (byte)r;
+                }
+                bgra[i + 3] = 255;
+            }
+        }
+        byte[]? jpeg = await PictureSaver.EncodeAsync(new RenderedImage(image.Width, image.Height, bgra), PictureFormat.Jpeg);
+        if (jpeg is null || await DecodeJpeg(jpeg) is not { } reference || reference.Width != image.Width || reference.Height != image.Height)
+        {
+            return null;
+        }
+        int tried = 0, right = 0;
+        for (int j = 1; j <= 6; j++)
+        {
+            for (int i = 1; i <= 6; i++)
+            {
+                int x = image.Width * i / 7, row = image.Height * j / 7;
+                if (region.X + x >= y.Width || region.Y + row >= y.Height)
+                {
+                    continue;
+                }
+                int o = (row * reference.Width + x) * 4;
+                (int gr, int gg, int gb) = image.Rgb(x, row);
+                tried++;
+                if (Math.Abs(gr - reference.Pixels[o + 2]) <= tolerance && Math.Abs(gg - reference.Pixels[o + 1]) <= tolerance
+                    && Math.Abs(gb - reference.Pixels[o]) <= tolerance)
+                {
+                    right++;
+                }
+            }
+        }
+        return (tried, right);
+    }
+
     // Checks one finished save: a file with the naming rule's shape and extension, the "Picture saved" toast with its button, the
     // dimensions (size, within a pixel, when given), and, when the picture is a copy of the decoded one (yuv given), its pixels
-    // (JPEG blurs the edges between colors, so it is asked for fewer matches).
+    // (a JPEG against the same encoder's JPEG of the picture, CompareEncoded).
     private async Task<RenderedImage?> CheckSaved(StageView stage, PictureSaveRecord? rec, string what, string ext, string nameEnds, (int W, int H)? size, int tolerance, Yuv? yuv, PixelRegion? region = null, int minPercent = 95)
     {
         if (rec is null)
@@ -138,7 +187,10 @@ internal sealed partial class SelfTest
         Expect(toast == "Picture saved" && stage.ToastActionTitle == "Show in folder", $"{what}: the confirmation toast said {toast ?? "nothing"}");
         if (yuv is not null)
         {
-            (int tried, int right) = ComparePicture(image, yuv, region ?? PictureRegion.Whole(yuv.Width, yuv.Height), tolerance);
+            // A JPEG is compared with the same encoder's JPEG of the drawn picture: its losses (far off on a sharp color
+            // edge, so they vary with the frame saved) cancel out.
+            PixelRegion r = region ?? PictureRegion.Whole(yuv.Width, yuv.Height);
+            (int tried, int right) = ext == "jpg" ? await CompareEncoded(image, yuv, r, tolerance) ?? (0, 0) : ComparePicture(image, yuv, r, tolerance);
             Say($"{what}: {right} of {tried} sampled pixels match the decoded picture");
             Expect(tried >= 20 && right * 100 >= tried * minPercent, $"{what}: only {right} of {tried} pixels match the decoded picture");
         }
@@ -179,7 +231,7 @@ internal sealed partial class SelfTest
             v.Settings.ShareSafePictureNames = true;
             v.Settings.PictureFormat = PictureFormat.Jpeg;
             rec = await Saving(stage, () => stage.PerformHeaderItem(t, TileHeaderItem.SavePicture, null));
-            await CheckSaved(stage, rec, "picture (share-safe JPEG)", "jpg", " Camera A", full, 24, drawn, minPercent: 80);
+            await CheckSaved(stage, rec, "picture (share-safe JPEG)", "jpg", " Camera A", full, 8, drawn);
             v.Settings.ShareSafePictureNames = false;
             v.Settings.PictureFormat = PictureFormat.Png;
 

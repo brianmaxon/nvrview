@@ -22,7 +22,7 @@
 //! as a configuration request ([`PtzBoard::config_requests`]) that nvrview
 //! must never send.
 
-use bc_protocol::ptz::{self, Direction, LensRange};
+use bc_protocol::ptz::{self, Cam, Direction, LensRange};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use tokio::time::Instant;
@@ -208,6 +208,8 @@ pub struct PtzLogEntry {
     pub command: u32,
     /// The channel it named, if readable.
     pub channel: Option<u8>,
+    /// The lens its extension named (`subChannel`; 0 when absent).
+    pub lens: u8,
     /// What it asked.
     pub request: PtzRequest,
     /// The status answered.
@@ -225,7 +227,7 @@ impl PtzLogEntry {
 }
 
 struct Inner {
-    state: HashMap<u8, PtzState>,
+    state: HashMap<Cam, PtzState>,
     log: VecDeque<PtzLogEntry>,
     config_requests: u64,
     status: u16,
@@ -234,12 +236,12 @@ struct Inner {
 /// Every mock camera's motion state, shared by all connections (the
 /// cameras do not care which session moved them).
 pub struct PtzBoard {
-    cameras: HashMap<u8, PtzCamera>,
+    cameras: HashMap<Cam, PtzCamera>,
     inner: Mutex<Inner>,
 }
 
 impl PtzBoard {
-    pub(crate) fn new(cameras: HashMap<u8, PtzCamera>) -> PtzBoard {
+    pub(crate) fn new(cameras: HashMap<Cam, PtzCamera>) -> PtzBoard {
         let state = cameras
             .iter()
             .map(|(c, cam)| (*c, PtzState::new(cam)))
@@ -263,8 +265,8 @@ impl PtzBoard {
     /// The position is brought up to now on a copy, so a caller on
     /// another clock (a test thread outside a simulated runtime) cannot
     /// disturb the camera's own.
-    pub fn state(&self, channel: u8) -> Option<PtzState> {
-        let mut s = self.lock().state.get(&channel)?.clone();
+    pub fn state(&self, cam: impl Into<Cam>) -> Option<PtzState> {
+        let mut s = self.lock().state.get(&cam.into())?.clone();
         s.settle(Instant::now());
         Some(s)
     }
@@ -292,6 +294,7 @@ impl PtzBoard {
         connection: u64,
         command: u32,
         channel: Option<u8>,
+        lens: u8,
         body: &str,
     ) -> (u16, String) {
         let now = Instant::now();
@@ -299,13 +302,18 @@ impl PtzBoard {
         let (request, status, reply) = match command {
             18 | 19 | 295 => match ptz::parse_request(command, body) {
                 Ok(r) => {
-                    let (status, reply) = self.motion(&mut g, &r, now);
+                    let (status, reply) = self.motion(&mut g, &r, lens, now);
                     (PtzRequest::Motion(r), status, reply)
                 }
                 Err(_) => (PtzRequest::Unreadable(command), 400, String::new()),
             },
             _ => {
-                let (status, reply) = self.query(&mut g, command, channel, now);
+                let (status, reply) = self.query(
+                    &mut g,
+                    command,
+                    channel.map(|c| Cam::with_lens(c, lens)),
+                    now,
+                );
                 (PtzRequest::Query(command), status, reply)
             }
         };
@@ -325,13 +333,14 @@ impl PtzBoard {
             connection,
             command,
             channel,
+            lens,
             request,
             status,
         });
         (status, reply)
     }
 
-    fn motion(&self, g: &mut Inner, r: &ptz::Request, now: Instant) -> (u16, String) {
+    fn motion(&self, g: &mut Inner, r: &ptz::Request, lens: u8, now: Instant) -> (u16, String) {
         let forced = g.status;
         match r {
             ptz::Request::Control {
@@ -339,10 +348,17 @@ impl PtzBoard {
                 command,
                 speed,
             } => {
-                if !self.cameras.get(channel).is_some_and(|c| c.pan_tilt) {
+                if !self
+                    .cameras
+                    .get(&Cam::with_lens(*channel, lens))
+                    .is_some_and(|c| c.pan_tilt)
+                {
                     return (400, String::new());
                 }
-                let st = g.state.get_mut(channel).expect("state per camera");
+                let st = g
+                    .state
+                    .get_mut(&Cam::with_lens(*channel, lens))
+                    .expect("state per camera");
                 st.settle(now);
                 if command == "stop" {
                     st.moving = None;
@@ -377,7 +393,7 @@ impl PtzBoard {
                 }
                 let Some(p) = self
                     .cameras
-                    .get(channel)
+                    .get(&Cam::with_lens(*channel, lens))
                     .and_then(|c| c.presets.iter().find(|p| p.id == *id))
                 else {
                     return (400, String::new());
@@ -385,7 +401,10 @@ impl PtzBoard {
                 if forced != 200 {
                     return (forced, String::new());
                 }
-                let st = g.state.get_mut(channel).expect("state per camera");
+                let st = g
+                    .state
+                    .get_mut(&Cam::with_lens(*channel, lens))
+                    .expect("state per camera");
                 st.settle(now);
                 st.moving = None;
                 st.pan = p.pan;
@@ -398,7 +417,7 @@ impl PtzBoard {
                 command,
                 position,
             } => {
-                let Some(cam) = self.cameras.get(channel) else {
+                let Some(cam) = self.cameras.get(&Cam::with_lens(*channel, lens)) else {
                     return (400, String::new());
                 };
                 let (range, zoom) = match command.as_str() {
@@ -412,7 +431,10 @@ impl PtzBoard {
                 if forced != 200 {
                     return (forced, String::new());
                 }
-                let st = g.state.get_mut(channel).expect("state per camera");
+                let st = g
+                    .state
+                    .get_mut(&Cam::with_lens(*channel, lens))
+                    .expect("state per camera");
                 if zoom {
                     st.zoom = Some(*position);
                 } else {
@@ -427,13 +449,15 @@ impl PtzBoard {
         &self,
         g: &mut Inner,
         command: u32,
-        channel: Option<u8>,
+        cam_key: Option<Cam>,
         now: Instant,
     ) -> (u16, String) {
-        let Some((ch, cam)) = channel.and_then(|c| self.cameras.get(&c).map(|cam| (c, cam))) else {
+        let Some((key, cam)) = cam_key.and_then(|c| self.cameras.get(&c).map(|cam| (c, cam)))
+        else {
             return (400, String::new());
         };
-        let st = g.state.get_mut(&ch).expect("state per camera");
+        let ch = key.channel;
+        let st = g.state.get_mut(&key).expect("state per camera");
         st.settle(now);
         match command {
             294 if cam.zoom.is_some() || cam.focus.is_some() => {

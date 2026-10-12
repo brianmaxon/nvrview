@@ -28,8 +28,15 @@ public enum SyntheticRecording {
         public var keyframeInterval: Int
         /// Index into `palette`.
         public var color: Int
+        /// A mono AAC track of a sine tone at this frequency, as long as the
+        /// video; nil for no sound.
+        public var audioHz: Int?
 
-        public init(width: Int = 640, height: Int = 360, fps: Int = 10, frames: Int, keyframeInterval: Int = 20, color: Int) {
+        public init(
+            width: Int = 640, height: Int = 360, fps: Int = 10, frames: Int, keyframeInterval: Int = 20, color: Int,
+            audioHz: Int? = nil
+        ) {
+            self.audioHz = audioHz
             self.width = width
             self.height = height
             self.fps = fps
@@ -43,6 +50,10 @@ public enum SyntheticRecording {
 
     /// Writes an H.264 MP4 (BT.601, video range, flagged that way).
     public static func write(_ spec: Spec, to url: URL) async throws {
+        try await EncoderGate.run { try await writeNow(spec, to: url) }
+    }
+
+    private static func writeNow(_ spec: Spec, to url: URL) async throws {
         try? FileManager.default.removeItem(at: url)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -75,56 +86,132 @@ public enum SyntheticRecording {
             ])
         guard writer.canAdd(input) else { throw WriteError.setup("input") }
         writer.add(input)
+        var audio: AVAssetWriterInput?
+        if spec.audioHz != nil {
+            let a = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: 44_100, AVNumberOfChannelsKey: 1,
+                    AVEncoderBitRateKey: 64_000,
+                ])
+            a.expectsMediaDataInRealTime = false
+            guard writer.canAdd(a) else { throw WriteError.setup("audio") }
+            writer.add(a)
+            audio = a
+        }
         guard writer.startWriting() else { throw WriteError.setup(String(describing: writer.error)) }
         writer.startSession(atSourceTime: .zero)
-        let job = Job(writer: writer, input: input, adaptor: adaptor, spec: spec)
+        let job = Job(writer: writer, input: input, audio: audio, adaptor: adaptor, spec: spec)
         try await job.run()
     }
 
-    /// The writer's state, used on its queue only.
+    /// The writer's state, used on its queues only.
     private final class Job: @unchecked Sendable {
         let writer: AVAssetWriter
         let input: AVAssetWriterInput
+        let audio: AVAssetWriterInput?
         let adaptor: AVAssetWriterInputPixelBufferAdaptor
         let spec: Spec
         var frame = 0
+        var audioSamples = 0
+        var failed = false
         let queue = DispatchQueue(label: "nvrview.synthetic-recording")
+        let audioQueue = DispatchQueue(label: "nvrview.synthetic-recording.audio")
 
-        init(writer: AVAssetWriter, input: AVAssetWriterInput, adaptor: AVAssetWriterInputPixelBufferAdaptor, spec: Spec) {
+        init(writer: AVAssetWriter, input: AVAssetWriterInput, audio: AVAssetWriterInput?, adaptor: AVAssetWriterInputPixelBufferAdaptor, spec: Spec) {
             self.writer = writer
             self.input = input
+            self.audio = audio
             self.adaptor = adaptor
             self.spec = spec
         }
 
+        static let rate = 44_100
+        static let chunk = 1024
+
         func run() async throws {
-            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, any Error>) in
-                input.requestMediaDataWhenReady(on: queue) { [self] in
-                    while input.isReadyForMoreMediaData, frame < spec.frames {
-                        guard let pool = adaptor.pixelBufferPool, let buffer = SyntheticRecording.picture(spec, frame: frame, pool: pool),
-                            adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: Int32(spec.fps)))
+            let group = DispatchGroup()
+            group.enter()
+            input.requestMediaDataWhenReady(on: queue) { [self] in
+                while input.isReadyForMoreMediaData, frame < spec.frames {
+                    guard let pool = adaptor.pixelBufferPool, let buffer = SyntheticRecording.picture(spec, frame: frame, pool: pool),
+                        adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(frame), timescale: Int32(spec.fps)))
+                    else {
+                        failed = true
+                        frame = spec.frames + 1
+                        input.markAsFinished()
+                        group.leave()
+                        return
+                    }
+                    frame += 1
+                }
+                guard frame == spec.frames else { return }
+                frame += 1
+                input.markAsFinished()
+                group.leave()
+            }
+            if let audio, let hz = spec.audioHz {
+                group.enter()
+                let total = spec.frames * Self.rate / spec.fps
+                audio.requestMediaDataWhenReady(on: audioQueue) { [self] in
+                    while audio.isReadyForMoreMediaData, audioSamples < total {
+                        let n = min(Self.chunk, total - audioSamples)
+                        guard let buffer = SyntheticRecording.tone(hz: hz, from: audioSamples, count: n, rate: Self.rate), audio.append(buffer)
                         else {
-                            frame = spec.frames + 1
-                            input.markAsFinished()
-                            writer.cancelWriting()
-                            done.resume(throwing: WriteError.failed(String(describing: writer.error)))
+                            failed = true
+                            audioSamples = total + 1
+                            audio.markAsFinished()
+                            group.leave()
                             return
                         }
-                        frame += 1
+                        audioSamples += n
                     }
-                    guard frame == spec.frames else { return }
-                    frame += 1
-                    input.markAsFinished()
-                    writer.finishWriting { [self] in
-                        if writer.status == .completed {
-                            done.resume()
-                        } else {
-                            done.resume(throwing: WriteError.failed(String(describing: writer.error)))
-                        }
-                    }
+                    guard audioSamples == total else { return }
+                    audioSamples += 1
+                    audio.markAsFinished()
+                    group.leave()
                 }
             }
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in group.notify(queue: .global()) { c.resume() } }
+            if failed {
+                writer.cancelWriting()
+                throw WriteError.failed(String(describing: writer.error))
+            }
+            await writer.finishWriting()
+            if writer.status != .completed { throw WriteError.failed(String(describing: writer.error)) }
         }
+    }
+
+    /// `count` samples of a 16-bit mono sine at `hz`, starting at sample `from`.
+    static func tone(hz: Int, from: Int, count: Int, rate: Int) -> CMSampleBuffer? {
+        var samples = [Int16](repeating: 0, count: count)
+        for i in 0..<count { samples[i] = Int16(10_000 * sin(2 * Double.pi * Double(hz) * Double(from + i) / Double(rate))) }
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Float64(rate), mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked, mBytesPerPacket: 2,
+            mFramesPerPacket: 1, mBytesPerFrame: 2, mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(
+            allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil,
+            formatDescriptionOut: &format) == noErr, let format
+        else { return nil }
+        var block: CMBlockBuffer?
+        let bytes = count * 2
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil, customBlockSource: nil, offsetToData: 0,
+            dataLength: bytes, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block) == noErr, let block
+        else { return nil }
+        let copied = samples.withUnsafeBytes {
+            CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes)
+        }
+        guard copied == noErr else { return nil }
+        var out: CMSampleBuffer?
+        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+            allocator: nil, dataBuffer: block, formatDescription: format, sampleCount: count,
+            presentationTimeStamp: CMTime(value: Int64(from), timescale: Int32(rate)), packetDescriptions: nil,
+            sampleBufferOut: &out) == noErr
+        else { return nil }
+        return out
     }
 
     /// BT.601 video-range Y, Cb, Cr of an RGB color.
@@ -195,5 +282,39 @@ public enum SyntheticRecording {
             frame = frame << 1 | ((v.x + v.y + v.z) / 3 > 128 ? 1 : 0)
         }
         return (color, frame)
+    }
+}
+
+/// One hardware video encoder session at a time in a process that runs tests
+/// in parallel: with several, the encoder falls back to other keyframe
+/// timing (a 17-frame group of pictures for a 20-frame interval), which the
+/// tests that count keyframes in synthetic files cannot take.
+public actor EncoderGate {
+    private static let shared = EncoderGate()
+    private var busy = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    public static func run<T: Sendable>(_ body: @Sendable () async throws -> T) async rethrows -> T {
+        await shared.enter()
+        do {
+            let value = try await body()
+            await shared.leave()
+            return value
+        } catch {
+            await shared.leave()
+            throw error
+        }
+    }
+
+    private func enter() async {
+        if busy {
+            await withCheckedContinuation { waiting.append($0) }
+        } else {
+            busy = true
+        }
+    }
+
+    private func leave() {
+        if waiting.isEmpty { busy = false } else { waiting.removeFirst().resume() }
     }
 }

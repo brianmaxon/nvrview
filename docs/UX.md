@@ -127,9 +127,8 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture and recording are built on both apps (see "Save
-> picture" and "Recording"); PTZ is not built yet: its buttons and menu
-> items are in place and say so (below).
+> the keys). Save picture, recording, and PTZ are built on both apps (see
+> "Save picture", "Recording", and "Pan, tilt, and zoom").
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -171,10 +170,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** the PTZ pad, Presets and Lens are shown in their final
-  places (so the layout and the overflow are the final ones), dimmed, with
-  "coming soon" in the tooltip. A click, the key or the menu item
-  shows "Presets is coming soon" (and so on) over the stage for
+- **Not built yet:** nothing now. An item whose action lands later is
+  shown in its final place (so the layout and the overflow are the final
+  ones), dimmed, with "coming soon" in the tooltip. A click, the key or the
+  menu item shows "… is coming soon" over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -253,12 +252,12 @@ overlay (Windows) so they can be discovered.
 ### Capture and camera keys
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
-> work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`) and work (Ctrl+Shift+R records the
-> selected tile's call while its call is open, and is R otherwise); there is
-> no Camera menu (the window's header has no menu bar: Stop all recordings
-> and Open recordings folder are in its "…" menu) and the Alt keys come with
-> PTZ. They act on the selected tile,
+> work; the Option keys are PTZ ("Pan, tilt, and zoom"). **Windows:** P,
+> Shift+P, R, T, Ctrl+Shift+P and Ctrl+Shift+R exist (`TileKeyMap`) and work
+> (Ctrl+Shift+R records the selected tile's call while its call is open, and
+> is R otherwise); there is no Camera menu (the window's header has no menu
+> bar: Stop all recordings and Open recordings folder are in its "…" menu)
+> and the Alt keys are PTZ ("Pan, tilt, and zoom"). They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -713,9 +712,16 @@ records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
 
-> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"). The core's side is
-> built (Z1: commands, limits, the stop on every path, grants); the apps'
-> controls are not.
+> **Built on both apps** (Z2 on macOS, Z3 on Windows). The pad and lens
+> popovers (Windows: flyouts) under the header buttons and the Camera
+> menu's "Pan and Tilt…" (Windows: the header "…" and right-click menus'
+> "Pan and Tilt…", "Zoom and Focus…" and "Presets", which has no Camera
+> menu), the presets menu (recall only), the Option (Windows: Alt) keys,
+> and the stop on release, window close, tile close and focus loss (on
+> Windows also when the window stops being the active one). Per-camera
+> grants for automation are in Settings ▸ Cameras. On Windows an Alt key
+> that drives a camera is swallowed, so releasing Alt does not open the
+> window's system menu.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device
@@ -1193,8 +1199,7 @@ The NVR's own recordings, found by what happened and played back
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
 (milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
 strips, sound events, listening for sounds) on both; the follow cut and
-grids on both (M3 and W3). Exports (M4 and W4) come
-later.
+grids on both (M3 and W3); exports on both (M4 and W4).
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
@@ -1306,7 +1311,7 @@ later.
   cell has its camera's name. **Sound** follows the picture: in the follow
   cut the shown camera's, cutting with it; in a grid the first cell's, or
   the cell clicked; at 1× only, as in Cameras. A file that cannot be opened
-  draws black and the player says so. The same drawing serves exports (M4):
+  draws black and the player says so. The same drawing serves exports (next item):
   `EditSession` renders any time of the edit offscreen at any size.
   **On Windows** the view menu is a drop-down button in the second row of
   the transport (Cameras, Follow Cut, 2-Up, 4-Up; the three disabled with
@@ -1330,6 +1335,87 @@ later.
   could not be opened". The same drawing serves exports (W4):
   `EditFiles.Render` draws any time of the edit into a `GridRenderer`'s
   offscreen frame of any size.
+- **Export** (macOS, M4): the **Export** menu left of the view menu, and
+  the keys **I** and **O** on the player, which set the **in** and **out
+  points** at the playhead (a point that would cross the other clears it;
+  Clear In and Out removes both). The points show on the scrubber (a shaded
+  span with a flag at each end, which can be dragged; a press elsewhere
+  seeks as before) and over the timeline lanes, in the cameras view and in
+  the follow cut and grids. They stay inside the scrubber's range (a point
+  outside a newly shown range is dropped). Every export asks where to save
+  (a save panel for one file, a folder panel for several; names come from
+  the core's plan, with " (2)" when taken) and remembers the folder with a
+  security-scoped bookmark. An export runs off the main thread with a
+  progress strip above the transport and a **Cancel**; a canceled or failed
+  export leaves no file (it is written under a hidden name and moved into
+  place when whole). One export runs at a time.
+  - **Trim to In and Out** (all cameras or one): from the incident's
+    downloaded files, or, when it is not downloaded, from a range
+    download of just that span, made first. **Keyframe copy** (default):
+    the compressed samples are copied, instant and lossless, starting at the
+    keyframe at or before the in point. **Exact Trim** re-encodes the whole
+    output (VideoToolbox, H.264 or HEVC like the source) so it starts at the
+    picture asked for; re-encoding only the first group of pictures would
+    be quicker for a long clip, and the whole clip is simpler, so a trim is
+    meant to be short. Sound is copied (AAC) or converted to AAC.
+  - **Export Follow Cut / 2-Up / 4-Up** writes the edit of the downloaded
+    incident, cut to the points when set, as an MP4 (H.264 or HEVC, chosen in
+    the menu) at 30 frames a second: each frame is the live view's Metal
+    drawing of the decoded files (`EditSession.render`); the size is the
+    grid's canvas, or the largest source of the follow cut, scaled down to fit
+    1920 by 1080. Sound follows the live rules: the shown camera's in a
+    follow cut, the chosen cell's (the first) in a grid while it has video.
+    Names are not burned into the picture.
+  - **Download Range** opens a sheet with the points' span (else the
+    scrubber's), the cameras (the playing ones checked), an optional name,
+    and optionally another folder than the downloads folder. It queues a
+    range download (`nv_download_range`); the Downloads list shows it as
+    "Range" with its times (the `download` event's `range`).
+  - **Save Picture** saves the current picture (a camera view's shown camera,
+    or the follow cut or grid as drawn at the playhead), **Save a Picture of
+    Each Camera** one per camera (what each playing tile shows, or each
+    camera's picture from its file at the playhead); PNG or JPEG as in Save
+    Picture of live view (Settings).
+  - **Share-Safe** (a switch, kept between launches): names are "Camera A",
+    "Camera B", ..., the user's incident name and `incident.json` are left
+    out, and written MP4 files carry no creation time, only the generic
+    handler names `VideoHandler` and `SoundHandler`, and no user-data or
+    metadata boxes (the app patches what AVFoundation wrote, in place). The
+    app adds no metadata of its own to pictures either. The `.parts` job
+    state of a share-safe download still holds device keys until it is
+    forgotten (FFI-RECORDINGS.md section 7a (d)).
+  - **On Windows** (W4) the same export is the **Export** button beside the
+    transport (a menu: Set In Point, Set Out Point, Clear In and Out, Trim to
+    In and Out, Trim One Camera, Exact Trim, Download Range, Save Picture,
+    Save a Picture of Each Camera, Share-Safe), with **I** and **O** (not
+    while typing). The in and out points show on the scrubber as a shaded
+    span with an I flag and an O flag (draggable; a press elsewhere seeks)
+    and as a band over the lanes. Every export asks with the Windows save
+    picker (one file) or folder picker (several; " (2)" when a name is
+    taken), which remember their last folder, and the app keeps the folder
+    too (`export-settings.json`, with the share-safe switch and the trim
+    kind). The strip above the transport shows progress and **Cancel**; a
+    canceled or failed export leaves no file (written as
+    `.nvrview-export-<id>.mp4` beside the destination and moved into place
+    when whole). **Trim** is made with Media Foundation: the keyframe copy
+    reads the compressed samples and writes them untouched; **Exact Trim**
+    decodes from the keyframe and encodes the output again as H.264, and
+    both carry the sound as it is (AAC). Choices where the docs were silent:
+    a trim that the core says cannot be a copy is re-encoded even when Exact
+    Trim is off; **Save Picture** is the shown (or first) playback camera's
+    current picture drawn with the renderer of Save Picture, and a picture of
+    each camera comes from its tile the same way (a downloaded file's picture
+    at a time is decoded with Media Foundation, for the follow cut and grid
+    views). Share-safe zeroes the creation times, renames the handlers to
+    `VideoHandler` and `SoundHandler`, and turns user-data and metadata boxes
+    into free space with their contents cleared. **Export Follow Cut / 2-Up /
+    4-Up** draws 30 frames a second with W3's offscreen renderer
+    (`EditFrameRenderer`, over a second set of the plan's files, so the
+    player's pictures do not move) into the size macOS uses, and writes them
+    with Media Foundation as H.264 or H.265; the sound is the pieces the
+    player's rules give (`AudioPiece.Of`), copied from the files as AAC; a
+    file whose sound has another format than the first piece's is left
+    silent rather than re-encoded.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the

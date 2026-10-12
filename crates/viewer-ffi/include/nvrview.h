@@ -27,9 +27,13 @@
  * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
  * calendar alone) and the recordings_month_failed event. Minor 8: edit
  * lists (section 7) and the rest of sound (section 2a). Minor 9: capture
- * (live and call recordings; docs/FFI.md, "Capture").
+ * (live and call recordings; docs/FFI.md, "Capture"). Minor 10: export
+ * (section 7a): nv_download_range, nv_still_plan, the trim kind and in_ms and
+ * out_ms of nv_edit_compute, and dest and share_safe on export requests.
+ * Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
+ * nv_ptz_lens, nv_ptz_preset, nv_motion_grant).
  */
-#define NV_ABI_MINOR 9
+#define NV_ABI_MINOR 11
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -716,6 +720,89 @@ enum NvStatus nv_talk_stop(struct NvCore *core, uint64_t tile, bool drain);
 enum NvStatus nv_talk_set_conversation(struct NvCore *core, uint64_t tile, bool open);
 
 /**
+ * Reads what a tile's camera can do and where its lens is (viewing tier
+ * only) as JSON into `out` (NUL-terminated; `*len` bytes without the NUL):
+ * `request` is `{"tile":N}`; the answer is `{"pan_tilt":bool,"zoom":
+ * {"min","max","cur"}|null,"focus":...,"presets":[{"id","name"}],
+ * "speeds":[1,64]}` (docs/FFI.md, "Camera motion (PTZ)"). Blocks for at
+ * most 20 s. NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap` <=
+ * `*len`; NV_ERR_INTERNAL when the device did not answer. Added in minor 11.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_ptz_info(struct NvCore *core,
+                          const char *request,
+                          char *out,
+                          size_t cap,
+                          size_t *len);
+
+/**
+ * Starts or renews a pan or tilt move of a tile's camera: `direction` is
+ * "left", "right", "up" or "down", `speed` 1 to 64. The app calls it again
+ * at least every 500 ms while the control is held; the camera stops 1 s
+ * after the last call, after 30 s of holding, on nv_ptz_stop, when the
+ * tile closes, and on every other exit path. Returns at once; the outcome
+ * arrives as a `ptz` event. These calls are the user's own manual control
+ * and need no enable. NV_ERR_INVALID_ARGUMENT for another direction or
+ * a speed outside 1 to 64. Added in minor 11.
+ *
+ * # Safety
+ * `core` is a live handle; `direction` is a NUL-terminated string.
+ */
+enum NvStatus nv_ptz_move(struct NvCore *core,
+                          uint64_t tile,
+                          const char *direction,
+                          uint32_t speed);
+
+/**
+ * Stops a tile's camera at once. Never rate-limited. NV_ERR_UNKNOWN_ID for
+ * an unknown tile. Added in minor 11.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_ptz_stop(struct NvCore *core, uint64_t tile);
+
+/**
+ * Moves a tile's lens `what` ("zoom" or "focus") to the absolute
+ * `position`, clamped to the range nv_ptz_info reports. The outcome
+ * arrives as a `ptz` event carrying the position sent. Added in minor 11.
+ *
+ * # Safety
+ * `core` is a live handle; `what` is a NUL-terminated string.
+ */
+enum NvStatus nv_ptz_lens(struct NvCore *core, uint64_t tile, const char *what, int32_t position);
+
+/**
+ * Recalls preset `id` (from nv_ptz_info) on a tile's camera. Saving or
+ * deleting presets is not possible. Added in minor 11.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_ptz_preset(struct NvCore *core, uint64_t tile, uint32_t id);
+
+/**
+ * Grants or withdraws camera motion control on one channel of a device for
+ * an automation: `client` is a local API client's name or
+ * "auto_correction" (1 to 64 bytes, no control characters). None is
+ * granted until granted, for this run of the core; the app passes the
+ * user's grants after each nv_device_add. Withdrawing stops that
+ * automation's move. The app's own controls need no grant. Added in
+ * minor 11.
+ *
+ * # Safety
+ * `core` is a live handle; `client` is a NUL-terminated string.
+ */
+enum NvStatus nv_motion_grant(struct NvCore *core,
+                              uint64_t device,
+                              uint8_t channel,
+                              const char *client,
+                              bool granted);
+
+/**
  * The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,
  * NUL-terminated, `*len` bytes without the NUL. The same address (host and
  * port) gets the same key in every run while the data directory is kept.
@@ -1141,7 +1228,8 @@ enum NvStatus nv_thumbnail_cancel(struct NvCore *core, const char *key);
 
 /**
  * Queues an incident's download ({"incident":"<key>","cameras":[{"camera":
- * {...},"tier":"main"}]}, cameras optional) and answers {"download":"<id>",
+ * {...},"tier":"main"}],"dest":"<absolute directory>","share_safe":false},
+ * all but incident optional) and answers {"download":"<id>",
  * "folder":"<absolute path>","existing":bool}. An unfinished download of
  * the same incident key, or a finished one of the unchanged incident, is
  * returned instead. NV_ERR_NOT_CONFIGURED without downloads_dir;
@@ -1158,6 +1246,50 @@ enum NvStatus nv_download_incident(struct NvCore *core,
                                    char *out,
                                    size_t cap,
                                    size_t *len);
+
+/**
+ * Queues the download of a time range of chosen cameras ({"start":..,
+ * "end":..,"cameras":[{"camera":{...},"tier":"main"}],"name":null,
+ * "dest":"<absolute directory>","share_safe":false}; seconds, device-local)
+ * through the same scheduler as nv_download_incident, and answers
+ * {"download":"<id>","folder":"<absolute path>","existing":bool}. The same
+ * cameras, tiers, and range return the existing download.
+ * NV_ERR_NOT_CONFIGURED without downloads_dir (or without a data directory
+ * when dest is elsewhere); NV_ERR_LIMIT beyond 16 cameras, 24 hours, or 1000
+ * known downloads; NV_ERR_INVALID_ARGUMENT for an empty range or a camera
+ * that nv_recordings_enable does not allow. As for nv_incident_edit, the
+ * download is queued even when the answer does not fit. Added in minor 10.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_download_range(struct NvCore *core,
+                                const char *request,
+                                char *out,
+                                size_t cap,
+                                size_t *len);
+
+/**
+ * Plans still images and answers their sources and suggested files as JSON
+ * (section 7a). {"playback":<id>,"tiles":[..],"format":"png","dest":..,
+ * "share_safe":false} names the picture each playback tile shows (the
+ * newest one the app answered with nv_tile_decoded); {"download":"<id>",
+ * "camera":{...},"at_ms":..,"exact":true,"format":"jpeg"} names a position
+ * in a finished file. Answers from memory. NV_ERR_UNKNOWN_ID for an unknown
+ * playback, tile, or download; NV_ERR_INVALID_ARGUMENT for invalid JSON or
+ * values, a time outside the file, or a tile that has shown nothing.
+ * Out-buffer rules as nv_recordings_calendar. Added in minor 10.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_still_plan(struct NvCore *core,
+                            const char *request,
+                            char *out,
+                            size_t cap,
+                            size_t *len);
 
 /**
  * Pauses or resumes a whole download (camera NULL) or one camera of it
@@ -1243,9 +1375,11 @@ enum NvStatus nv_sound_configure(struct NvCore *core, const char *json);
  * optional. Pure computation over the incident and its finished files; no
  * device traffic. NV_ERR_UNKNOWN_ID for an unknown download;
  * NV_ERR_INVALID_ARGUMENT for invalid JSON or values or when no camera has
- * a finished file; NV_ERR_UNSUPPORTED for in_ms, out_ms, or the trim kind
- * (export, a later minor). Out-buffer rules as nv_recordings_calendar. Added
- * in minor 8.
+ * a finished file. Minor 10 added the "trim" kind
+ * ({"kind":"trim","download":"<id>","cameras":[...],"in_ms":..,"out_ms":..,
+ * "cut":"keyframe"|"exact"}), in_ms and out_ms on follow and grid, and dest
+ * and share_safe on every kind (section 7a); a range download takes trim
+ * only. Out-buffer rules as nv_recordings_calendar. Added in minor 8.
  *
  * # Safety
  * `core` is a live handle; `request` is a NUL-terminated string; `out` is

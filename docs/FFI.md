@@ -673,18 +673,15 @@ The `channels` event gains, without an ABI change, from each channel's
 
 ## Camera motion (PTZ)
 
-> **Proposed, not yet implemented.** Pan, tilt, lens zoom and focus, and
+> **Implemented (ABI 3, minor 11).** Pan, tilt, lens zoom and focus, and
 > preset recall for [CAPTURE.md](CAPTURE.md) "Pan, tilt, and zoom"; the
-> commands are in protocol.md, "What nvrview will send". Its own minor,
-> the next free one when it lands ("Versioning").
->
-> **Implementation status (Z1).** The Rust side exists on `Core`:
-> `ptz_info`, `ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset` (each
-> taking a `MotionOrigin`; the C functions will pass `Manual`) and
-> `set_motion_grant`, with the `ptz` events below. The C functions are
-> not exported yet: minors are numbered in the order they land and other
-> additions in flight are taking the next ones, so they come with the
-> apps' PTZ controls (Z2) on the next free minor then. As built, beyond the shapes
+> commands are in protocol.md, "What nvrview will send". The C functions
+> pass the origin `Manual` (the user's own controls). A camera is a
+> channel and a lens: a tile on the `mobile` or `extern` stream of a
+> multi-lens camera steers its second lens, addressed with `subChannel` 1
+> in the request extension (protocol.md, "Camera motion control"), while
+> the `extern` tile of a single-lens camera steers its only lens. Grants
+> (`nv_motion_grant`) are per channel. As built, beyond the shapes
 > below: a renewal sends nothing and reports nothing; a lens move's `sent`
 > event carries the clamped `position`; `refused` (the core's rules:
 > `not_granted`, `user_steering`, `rate_limited` with `retry_after_ms`,
@@ -1131,10 +1128,9 @@ NvStatus nv_tile_loudness(NvCore *core, uint64_t tile, uint8_t *peak, uint8_t *r
   cannot be read are left out, and `NV_ERR_INVALID_ARGUMENT` says no camera
   has a finished file or the plan has nothing to show (no events in the
   files' footage). `NV_ERR_UNKNOWN_ID` is an unknown download or one whose
-  incident no longer exists. **`in_ms`, `out_ms`, and the `trim` kind answer
-  `NV_ERR_UNSUPPORTED`** in this minor: they belong to export (F4), which
-  adds them to this function without changing its declaration. `dest` and
-  `share_safe` are likewise F4's and are ignored here. The call reads each
+  incident no longer exists. (Minor 8 answered `NV_ERR_UNSUPPORTED` to
+  `in_ms`, `out_ms`, and the `trim` kind; minor 10 accepts them, see
+  "Export (minor 10)".) The call reads each
   finished file's `moov` box (bounded) on the caller's thread, so it takes
   a few milliseconds per file, not a network round trip.
 - **Sound** calls are those of section 2a: `nv_sound_watch` (at most 64
@@ -1158,6 +1154,50 @@ Events (FFI-RECORDINGS.md, sections 2a and 8; ignore unknown types and fields):
 `no_audio`, `device_closed`, `sound_off`); of `sound_analyze` `queued`,
 `running`, `done`, `failed` (`reason` `no_source`, `no_audio`,
 `source_unavailable`, `not_enabled`, `index`, `internal`), or `canceled`.
+
+## Export (minor 10)
+
+Slice F4 of [MILESTONE-P.md](MILESTONE-P.md): export
+([FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 7a). The core plans (ranges,
+edit lists, trims, names); the app decodes, encodes, and writes with platform
+APIs. The core side is `viewer_core::recordings_owner` (`download_range`,
+`still_plan`, `edit_compute` over `recordings::export` and
+`Scheduler::enqueue_range`; C14 and C15). The rules of section 7a and the
+"Clarifications from the implementation (F4)" there apply.
+
+```c
+NvStatus nv_download_range(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+NvStatus nv_still_plan(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+```
+
+- **Status codes, threads, JSON in and out** are those of "Recordings (minor
+  5)". `nv_download_range` changes state like `nv_download_incident`: the
+  download is queued even when the answer does not fit the buffer, and asking
+  again returns the same download as `existing`, so a binding makes the call
+  once with room for the answer. `nv_still_plan` answers from memory (it
+  reads a finished file's `moov` box for a file still) and may be repeated.
+- **`nv_download_range`** takes `{"start", "end", "cameras": [{"camera",
+  "tier"}], "name", "dest", "share_safe"}` (seconds, device-local) and
+  answers `{"download", "folder", "existing"}`. `NV_ERR_NOT_CONFIGURED`
+  without `downloads_dir` (or without a data directory when `dest` is not
+  the downloads directory), `NV_ERR_LIMIT` beyond 16 cameras, 24 hours, or
+  1000 known downloads, `NV_ERR_INVALID_ARGUMENT` for an empty range, a
+  `dest` that is not an absolute directory, or a camera
+  `nv_recordings_enable` does not allow. The `download` event of a range
+  download has `incident` null and `range` `{"start","end"}`.
+- **`nv_edit_compute`** gains the `trim` kind (`in_ms`, `out_ms`, `cut`
+  `keyframe` or `exact`, optional `cameras`), which works on incident and
+  range downloads; `in_ms` and `out_ms` on `follow` and `grid` (a range
+  download has no incident, so those two answer `NV_ERR_INVALID_ARGUMENT`
+  for one); and `dest` and `share_safe` on every kind. Its declaration is
+  unchanged.
+- **`nv_still_plan`** takes `{"playback", "tiles", "format", "dest",
+  "share_safe"}` (the picture each playback tile shows now: the newest one
+  the app answered with `nv_tile_decoded` for the generation the tile shows)
+  or `{"download", "camera", "at_ms", "exact", "format"}` (a position in a
+  finished file). `NV_ERR_UNKNOWN_ID` for an unknown playback, tile, or
+  download.
+- **`dest` and `share_safe`** are accepted by `nv_download_incident` too.
 
 ## Recorded playback (minor 6)
 
@@ -1283,11 +1323,12 @@ symbol at all, so a bound app checks first):
 | 7 | a month's calendar alone: `months` in `nv_recordings_want` and the `recordings_month_failed` event (see "Recordings"); no declaration changed |
 | 8 | edit lists and sound (see "Edit lists and sound (minor 8)"): `nv_edit_compute`, `nv_sound_watch`, `nv_recordings_loudness`, `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`, `nv_tile_loudness`, and the `sound_watch` and `sound_analyze` events |
 | 9 | capture (see "Capture"): `nv_capture_configure`, `nv_capture_set_encoder`, `nv_record_audio_encoded`, `nv_record_start`, `nv_record_stop`, `nv_record_status`, `NvAudioEncoder` (and its `NvEncoderOpen`, `NvEncoderEncode`, `NvEncoderClose`), `NV_ASC_MAX`, and the `recording` event |
+| 10 | export (see "Export (minor 10)"): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` of `nv_edit_compute`, `dest` and `share_safe` on export requests, and `range` in the `download` event |
+| 11 | camera motion (see "Camera motion (PTZ)"): `nv_ptz_info`, `nv_ptz_move`, `nv_ptz_stop`, `nv_ptz_lens`, `nv_ptz_preset`, `nv_motion_grant`, and the `ptz` event |
 
 Later minors are taken in the order the additions land; this table is the
-source of truth. Export (F4) and stepping a playback (`nv_playback_step`)
-take the next free minors. Camera motion ("Camera motion (PTZ)") is
-proposed and takes the next free minor when it lands.
+source of truth. Stepping a playback (`nv_playback_step`) takes the next
+free minor.
 
 ## Builds
 

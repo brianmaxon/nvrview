@@ -25,8 +25,9 @@ extern "C" {
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1. Minor 6: recorded playback. Minor 7: "months" in
  * nv_recordings_want. Minor 8: edit lists and the rest of sound. Minor 9:
- * capture (live and call recordings). */
-#define NV_ABI_MINOR 9
+ * capture (live and call recordings). Minor 10: export (nv_download_range,
+ * nv_still_plan, the trim kind). Minor 11: camera motion (PTZ). */
+#define NV_ABI_MINOR 11
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -337,6 +338,35 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
  * minor 4. */
 NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open);
 
+/* Camera motion (minor 11; docs/FFI.md, "Camera motion (PTZ)"; event ptz).
+ * The app's calls are the user's own manual control and need no enable. */
+
+/* What a tile's camera can do and where its lens is, as JSON: request
+ * {"tile":N}; answer {"pan_tilt","zoom":{"min","max","cur"}|null,"focus":...,
+ * "presets":[{"id","name"}],"speeds":[1,64]}. Blocks for at most 20 s. */
+NvStatus nv_ptz_info(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+
+/* Starts or renews a move ("left", "right", "up", "down"; speed 1 to 64).
+ * Call again at least every 500 ms while the control is held: the camera is
+ * stopped 1 s after the last call, after 30 s, and on every exit path. */
+NvStatus nv_ptz_move(NvCore *core, uint64_t tile, const char *direction, uint32_t speed);
+
+/* Stops the tile's camera at once; never limited. */
+NvStatus nv_ptz_stop(NvCore *core, uint64_t tile);
+
+/* Moves the lens "zoom" or "focus" to an absolute position, clamped to the
+ * range nv_ptz_info reported. */
+NvStatus nv_ptz_lens(NvCore *core, uint64_t tile, const char *what, int32_t position);
+
+/* Recalls a preset from nv_ptz_info's list (recall only). */
+NvStatus nv_ptz_preset(NvCore *core, uint64_t tile, uint32_t id);
+
+/* Grants or withdraws motion control on one channel for an automation (a
+ * local API client by name, or "auto_correction") for this run of the core;
+ * the app passes the user's grants after each nv_device_add. */
+NvStatus nv_motion_grant(NvCore *core, uint64_t device, uint8_t channel, const char *client,
+                         bool granted);
+
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back
  * UTF-8 and NUL-terminated in `out`; *len receives the length without the
  * NUL. When `cap` <= *len (or out is NULL) the call returns
@@ -552,8 +582,20 @@ NvStatus nv_sound_configure(NvCore *core, const char *json);
 
 /* An edit list for a finished download, as JSON: {"kind":"follow" | "grid",
  * "download":"<id>", ...}. Pure computation; no device traffic.
- * NV_ERR_UNSUPPORTED for in_ms, out_ms, and the trim kind (a later minor). */
+ * Minor 10 added the "trim" kind, in_ms and out_ms, dest, and share_safe. */
 NvStatus nv_edit_compute(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+
+/* Export (minor 10; docs/FFI-RECORDINGS.md, section 7a). Queues the download
+ * of a time range of chosen cameras ({"start","end","cameras":[{"camera",
+ * "tier"}],"name","dest","share_safe"} -> {"download","folder","existing"};
+ * made even when the answer does not fit, as nv_download_incident). */
+NvStatus nv_download_range(NvCore *core, const char *request, char *out, size_t cap,
+                           size_t *len);
+
+/* Plans still images from a playback's tiles ({"playback","tiles","format",
+ * "dest","share_safe"}) or from a position in a finished file
+ * ({"download","camera","at_ms","exact","format"}). */
+NvStatus nv_still_plan(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
 
 /* Keeps a camera's sub-stream open for sound only while enabled. */
 NvStatus nv_sound_watch(NvCore *core, const char *camera, bool enabled);

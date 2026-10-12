@@ -193,6 +193,13 @@ pub struct Config {
     /// `ptzPreset` follow the model unless [`Config::ptz_types`] or
     /// [`Config::ptz_presets`] name the channel.
     pub ptz: HashMap<u8, ptz::PtzCamera>,
+    /// Cameras that move on the second lens of a multi-lens channel, by
+    /// channel: addressed with `subChannel` 1 in the request extension
+    /// (docs/protocol.md, observed (second capture)); a plain request
+    /// reaches only the first lens. Their 199 sub-item carries `ptzType`
+    /// and `ptzPreset` from the model unless [`Config::lens_ptz_types`]
+    /// names the lens.
+    pub ptz_lens1: HashMap<u8, ptz::PtzCamera>,
 }
 
 /// Fisheye camera channels (docs/protocol.md, "Fisheye cameras"): flagged in
@@ -305,6 +312,7 @@ impl Config {
             lens_ptz_types: Vec::new(),
             fisheye: None,
             ptz: HashMap::new(),
+            ptz_lens1: HashMap::new(),
         }
     }
 
@@ -479,7 +487,19 @@ pub fn spawn_in(config: Config, runtime: &Handle) -> MockNvr {
 fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
     let (alarm_tx, alarm_rx) = mpsc::unbounded_channel();
     let alarms = alarms::Board::new(config.channels, alarm_tx);
-    let ptz = ptz::PtzBoard::new(config.ptz.clone());
+    let ptz = ptz::PtzBoard::new(
+        config
+            .ptz
+            .iter()
+            .map(|(c, m)| (bc_protocol::ptz::Cam::new(*c), m.clone()))
+            .chain(
+                config
+                    .ptz_lens1
+                    .iter()
+                    .map(|(c, m)| (bc_protocol::ptz::Cam::with_lens(*c, 1), m.clone())),
+            )
+            .collect(),
+    );
     let shared = Arc::new(Shared {
         config,
         shutdown: watch::Sender::new(false),
@@ -685,8 +705,8 @@ impl MockNvr {
 
     /// A moving camera's position and moving state now ([`ptz`]); `None`
     /// for a channel without one.
-    pub fn ptz_state(&self, channel: u8) -> Option<ptz::PtzState> {
-        self.shared.ptz.state(channel)
+    pub fn ptz_state(&self, cam: impl Into<bc_protocol::ptz::Cam>) -> Option<ptz::PtzState> {
+        self.shared.ptz.state(cam)
     }
 
     /// Every PTZ request received so far (18, 19, 295, 294, 190, 340),
@@ -1191,11 +1211,12 @@ impl Conn {
             10 | 11 | 201 | 202 => self.talk_command(m).await,
             18 | 19 | 295 | 294 | 190 | 340 => {
                 let channel = self.ext_channel(m);
+                let lens = self.ext_lens(m);
                 let body = self.payload_text(m);
                 let (status, reply) =
                     self.shared
                         .ptz
-                        .handle(self.id, m.header.command, channel, &body);
+                        .handle(self.id, m.header.command, channel, lens, &body);
                 self.reply_xml(m.header.command, id, status, &reply).await
             }
             other => self.reply_xml(other, id, 400, "").await,
@@ -1208,6 +1229,16 @@ impl Conn {
             .ok()
             .flatten()
             .and_then(|s| s.parse::<u8>().ok())
+    }
+
+    /// The lens named in the request's extension (`subChannel`; 0 when
+    /// absent).
+    fn ext_lens(&self, m: &RawMessage) -> u8 {
+        xml::find_text(&self.request_text(m), "subChannel")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0)
     }
 
     /// Talk-back (10, 201, 202, 11): see [`talk`].
@@ -1312,16 +1343,31 @@ impl Conn {
                  <fishEye>{fisheye}</fishEye>\n<ptzType>{ptz}</ptzType>\n\
                  <ptzPreset>{preset}</ptzPreset>\n"
             ));
-            let lenses = cfg.lens_aitypes.get(usize::from(c));
-            for (lens, ai) in lenses.into_iter().flatten().enumerate() {
-                let ptz = cfg
+            let lens_model = cfg.ptz_lens1.get(&c);
+            let mut lenses: Vec<u32> = cfg
+                .lens_aitypes
+                .get(usize::from(c))
+                .cloned()
+                .unwrap_or_default();
+            if lens_model.is_some() && lenses.len() < 2 {
+                lenses.resize(2, 0);
+            }
+            for (lens, ai) in lenses.into_iter().enumerate() {
+                let listed = cfg
                     .lens_ptz_types
                     .get(usize::from(c))
                     .and_then(|l| l.get(lens))
+                    .copied();
+                let model = if lens == 1 { lens_model } else { None };
+                let ptz = listed
+                    .or(model.map(ptz::PtzCamera::ptz_type))
                     .map(|t| format!("<ptzType>{t}</ptzType>\n"))
                     .unwrap_or_default();
+                let preset = model
+                    .map(|m| format!("<ptzPreset>{}</ptzPreset>\n", m.ptz_preset()))
+                    .unwrap_or_default();
                 s.push_str(&format!(
-                    "<subItem>\n<chnID>{lens}</chnID>\n<aitype>{ai}</aitype>\n{ptz}</subItem>\n"
+                    "<subItem>\n<chnID>{lens}</chnID>\n<aitype>{ai}</aitype>\n{ptz}{preset}</subItem>\n"
                 ));
             }
             s.push_str("</item>\n");
