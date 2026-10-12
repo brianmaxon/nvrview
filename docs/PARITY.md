@@ -138,11 +138,15 @@ started on that app.
 ### Smart notifications
 
 Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
-(`crates/alerts`) is built in the core and shared, nothing in either app yet.
+(`crates/alerts`), its service, the MQTT input, and the Home Assistant output
+are built in the core and shared. macOS has the verification host, snapshot,
+model download, and desktop notification (`AlertHost`, settings in
+`alerts.json`, credentials in the Keychain); Windows has the settings builder
+and the Credential Manager store only.
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | no (planned) | no (planned) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. |
+| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | built (no actions yet; off unless `alerts.json` enables it) | no (planned; settings builder and Credential Manager store built) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. macOS: IDs `alerts-e2e-verified`, `alerts-e2e-not-confirmed` (real core against the mock; a mock Home Assistant is pulsed for the alert only). The model is fetched on first use from the update source's `models` folder. |
 | Live verification view in the tile (pictures with boxes, step log) | no (planned) | no (planned) | IDs `verify-view-tile`, `verify-view-dismiss`. |
 | Verification inset and non-activating verification window, stacked, never taking focus | no (planned) | no (planned) | Same mechanism as the doorbell call insets and call window. ID `verify-view-inset`. |
 | Events log (every decision with its trace, filters, jump to recording or incident) | no (planned) | no (planned) | IDs `events-log-filter`, `events-log-jump`. |
