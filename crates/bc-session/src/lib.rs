@@ -82,6 +82,9 @@ use tokio::sync::Notify;
 /// State shared between the handle, subscriptions, and the supervisor.
 pub(crate) struct Shared {
     pub(crate) closing: AtomicBool,
+    /// The supervisor has finished for good (closed, or the login was
+    /// refused) and no longer reads requests.
+    pub(crate) ended: AtomicBool,
     pub(crate) wake: Notify,
     /// Streams the user asked to retry by hand ([`DeviceSession::retry_stream`]);
     /// bounded, deduplicated.

@@ -232,6 +232,7 @@ impl DeviceSession {
     pub fn spawn<C: Connector>(connector: C, config: SessionConfig) -> DeviceSession {
         let shared = Arc::new(Shared {
             closing: std::sync::atomic::AtomicBool::new(false),
+            ended: std::sync::atomic::AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             retry: std::sync::Mutex::new(Vec::new()),
         });
@@ -338,6 +339,13 @@ impl DeviceSession {
             .await
             .map_err(|_| SessionClosed)?;
         self.shared.wake.notify_one();
+        // A send that reserved its slot before the supervisor closed the
+        // channel can still land after the final drain, and nobody would
+        // ever close this queue. `ended` is set before the close, so if
+        // the request was missed, it is visible here.
+        if self.shared.ended.load(std::sync::atomic::Ordering::SeqCst) {
+            queue.close();
+        }
         Ok(Subscription {
             channel,
             tier,
@@ -956,6 +964,11 @@ impl Ctx {
     /// queue (including requests still waiting in the command channel) so
     /// subscribers see the end instead of waiting forever.
     fn finish(&mut self) {
+        // Before the channel closes, so a subscriber whose request lands
+        // after the drain below sees it (see `DeviceSession::subscribe`).
+        self.shared
+            .ended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.cmd_rx.close();
         while let Ok(r) = self.cmd_rx.try_recv() {
             self.request(r);
