@@ -1023,6 +1023,57 @@ user types a password instead of an address. The core does the searching
   control in the overlay, docks it again (which resizes the stage as before).
   The same works in full screen.
 
+## Windows header
+
+On Windows the window's title bar is a header the app draws
+(`ExtendsContentIntoTitleBar`; the system's minimize, maximize, and close
+buttons stay, and so do the snap layouts on the maximize button). It takes the
+system's title bar height and display scale, and tells the system which of its
+controls take the pointer; everything else drags the window. macOS keeps its
+menu bar (docs/PARITY.md): this is a Windows-only part.
+
+- **Left.** The app name and the window's current layout with a picker: the
+  layouts, All Cameras, and the groups to switch to, then New layout, New
+  layout from template, and Save as layout (an unsaved arrangement only).
+- **Middle.** The app-wide quick actions: Find devices (opens Settings on
+  Devices and searches the network), Edit layout (Ctrl+E, a toggle), Fill
+  tiles (a toggle, per window, not kept), and Full screen (F).
+- **Right.** A spot reserved for a future "N recording" indicator (hidden until
+  recording is reported), Settings (Ctrl+,), and a "…" menu with the rest:
+  New window (Ctrl+N), Show or Hide sidebar (S), Indicator corner, Show or
+  Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
+- **Full screen.** The header is hidden and slides over the stage from the top
+  edge like the sidebar does from the left: resting the pointer in a thin strip
+  at the top for about 150 ms reveals it as an overlay (the stage is not
+  resized); it slides away about half a second after the pointer leaves it,
+  unless a menu of the header is open. The timing is the sidebar's
+  (`SidebarReveal`; `HeaderChrome` adds the full screen switch).
+- **The tile menu** (right-click) holds only what concerns the tile under the
+  pointer: Focus, Listen, Start or End Conversation, Pop Out Call, Calls open
+  in, Allow talk-back, Unmute on ring, Reset zoom, Quality, Fisheye view and
+  mount, Dismiss alert, and, outside focus, the layout actions for that tile
+  (split, remove, clear, Show camera, Layout preset). Nothing under the pointer:
+  no menu. Every app-wide item it once held is in the header.
+
+## Settings window
+
+Settings (Windows) is a resizable window of its own, not a dialog, so a tall
+section scrolls. It opens from the header, Ctrl+, , a device row's menu, or
+Find devices; there is one instance, brought to the front (on the section
+asked for) if it is already open. It remembers its size and position, closes
+with the app, and stops the device search when it closes or when the Devices
+section is left. A pane lists the sections, each in a scrolling page:
+
+- **Devices.** The device list and the add or edit form, with Find Devices on
+  This Network ("Finding devices").
+- **Cameras.** Per camera: where its calls open, unmute on ring, allow
+  talk-back (off until allowed; every use is logged), and for fisheye cameras
+  the mount.
+- **Alerts & calls.** The corner of the detection symbols and of the call cards,
+  calls in their own window and where those open, and saved transcripts.
+- **Updates.** The update source, trusted keys, automatic checks, Check now.
+- **About.** The version and license.
+
 ## Windows notes
 
 The Windows app (`apps/windows/NvrView.App`) follows these requirements
@@ -1030,8 +1081,9 @@ with Windows conventions:
 
 - Ctrl takes the place of ⌘ (Ctrl+L listens, Ctrl+, opens Settings), and
   Ctrl+click on a speaker listens to several tiles.
-- Shortcuts are listed in a help overlay (F1) and in the right-click menu,
-  which also carries Settings, full screen, and diagnostics (Ctrl+D).
+- Shortcuts are listed in a help overlay (F1), opened from the header's "…"
+  menu, which also has diagnostics (Ctrl+D). Settings and full screen are
+  buttons in the header ("Windows header").
 - Full screen is the window's own full-screen presenter (F, and Esc after
   leaving focus).
 - A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel
@@ -1040,25 +1092,25 @@ with Windows conventions:
   (the field of view is divided by it, 120° to 20°, each step bounded); on
   other tiles it zooms the digital zoom around the point between the
   fingers, with the same bounded steps.
-- Fill Tiles is "Fill tiles" in the right-click menu (per window, not kept).
+- Fill Tiles is the header's "Fill tiles" toggle (per window, not kept).
   The zoom map sits in the tile's chrome and the reset control is a
   magnifier button at the right of the hover header, shown while the tile
   is zoomed (or a virtual camera was moved).
-- Settings lists "Unmute on ring even when not listening" with a check box
-  per camera (the macOS Settings > Cameras option), kept with the other
-  view settings.
-- Settings lists each fisheye camera with a Mount picker (Ceiling, Wall,
-  Desk; default Ceiling), kept with the other view settings like the
+- Settings > Cameras lists "Unmute on ring even when not listening" with a
+  check box per camera (the macOS Settings > Cameras option), kept with the
+  other view settings; the tile menu has the same toggle.
+- Settings > Cameras lists each fisheye camera with a Mount picker (Ceiling,
+  Wall, Desk; default Ceiling), kept with the other view settings like the
   right-click menu's Fisheye mount, and tiles in every window follow it at
   once.
 - Corner indicators use Segoe Fluent Icons (a vector paw for animals); the
-  corner is chosen in Settings or the right-click menu. A sound alarm also
+  corner is chosen in Settings > Alerts & calls or the header's "…" menu. A sound alarm also
   shows as a slate badge at the bottom left. Alerts, the Quality submenu, M,
   and the full screen idle hiding of the chrome and the pointer follow the
   sections above; the red border is steady when Windows' "Show animations" is
   off, as Reduce Motion is on the Mac.
 - Layouts, groups, and windows follow the sections above. Edit Layout is
-  Ctrl+E or the right-click menu (the edit bar holds the name, split, remove,
+  Ctrl+E or the header's Edit layout button (the edit bar holds the name, split, remove,
   presets, and Save as layout); Ctrl+N opens a new window. Layouts are the
   same documents the macOS app stores. The edge reveal, its timing, and its
   pin are as described under "Sidebar"; the sidebar's width is remembered

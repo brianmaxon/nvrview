@@ -6,6 +6,11 @@
 // are saved back to the core's store, and a layout changed elsewhere (another
 // window, another app) is followed, except while a drag here is changing it.
 //
+// The header (HeaderBar) is the window's title bar (ExtendsContentIntoTitleBar, the
+// system's caption buttons kept). In full screen it is hidden and slides over the
+// stage from the top edge on the same dwell and hide delays (NvrView.Shell.HeaderChrome);
+// its own timer, armed for its next deadline, runs only while a reveal is pending.
+//
 // The reveal: while the sidebar is collapsed, resting the pointer at the left
 // edge for about 150 ms slides a copy of the sidebar over the stage, which is
 // not resized; it slides away about half a second after the pointer leaves it,
@@ -51,6 +56,15 @@ internal sealed class ViewerWindow
     private readonly Border _overlay;
     private readonly SidebarReveal _reveal = new();
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _revealTimer;
+    private readonly Grid _outer = new();
+    private readonly HeaderBar _header;
+    private readonly HeaderBar _overlayHeader;
+    private readonly Border _headerEdge;
+    private readonly Border _headerOverlay;
+    private readonly HeaderChrome _headerChrome = new();
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer _headerTimer;
+    private bool? _headerFullScreenOverride;
+    private string _passthroughKey = "";
     private Dictionary<CameraRef, int> _held = [];
 
     /// <summary>Set while this window shows an unedited All Cameras grid, which follows the devices.</summary>
@@ -75,12 +89,13 @@ internal sealed class ViewerWindow
         Renderer = new StageRenderer(host, chain => ui.TryEnqueue(() => Stage.AttachSwapChain(chain)));
         Stage.Renderer = Renderer;
         Renderer.Circles = viewer.Circles;
-        Stage.SettingsRequested = OpenSettings;
-        Stage.UpdateTitle = () => App.Instance.Updater?.MenuTitle ?? "Check for updates…";
-        Stage.UpdateRequested = () => App.Instance.Updater?.MenuAction();
+        Stage.SettingsRequested = () => OpenSettings();
         Stage.Edited += OnEdited;
-        Stage.StateChanged += () => _editBar!.Update();
-        Stage.WindowMenu = AddWindowMenu;
+        Stage.StateChanged += () =>
+        {
+            _editBar!.Update();
+            UpdateHeaders();
+        };
 
         Sidebar = new SidebarView(viewer, this, overlay: false);
         OverlaySidebar = new SidebarView(viewer, this, overlay: true);
@@ -139,11 +154,55 @@ internal sealed class ViewerWindow
         Grid.SetColumn(stageArea, 2);
         _root.Children.Add(stageArea);
         _root.KeyDown += OnKey;
-        Window.Content = _root;
+
+        // The header: the docked one is the title bar of a normal window; the overlay slides in over the
+        // stage in full screen, from a strip at the top edge.
+        _header = new HeaderBar(this, viewer);
+        _overlayHeader = new HeaderBar(this, viewer);
+        _outer.Background = new SolidColorBrush(Colors.Black);
+        _outer.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _outer.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _outer.Children.Add(_header.Root);
+        Grid.SetRow(_root, 1);
+        _outer.Children.Add(_root);
+        _headerEdge = new Border
+        {
+            Height = EdgeWidth,
+            VerticalAlignment = VerticalAlignment.Top,
+            Background = new SolidColorBrush(Colors.Transparent),
+            Visibility = Visibility.Collapsed,
+        };
+        Grid.SetRowSpan(_headerEdge, 2);
+        _headerEdge.PointerEntered += (_, _) => HeaderPointerAt(inEdge: true, inHeader: false);
+        _headerEdge.PointerMoved += (_, _) => HeaderPointerAt(inEdge: true, inHeader: false);
+        _headerEdge.PointerExited += (_, _) => HeaderPointerAt(inEdge: false, inHeader: _headerChrome.IsOverlayShown && IsPointerOver(_headerOverlay!));
+        _outer.Children.Add(_headerEdge);
+        _headerOverlay = new Border
+        {
+            VerticalAlignment = VerticalAlignment.Top,
+            Child = _overlayHeader.Root,
+            Translation = new Vector3(0, -(float)(TitleBarRegions.TallHeight + 24), 0),
+            TranslationTransition = new Vector3Transition { Duration = TimeSpan.FromMilliseconds(180) },
+            Opacity = 0,
+            OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(180) },
+            IsHitTestVisible = false,
+            Shadow = new ThemeShadow(),
+        };
+        Grid.SetRowSpan(_headerOverlay, 2);
+        _headerOverlay.PointerEntered += (_, _) => HeaderPointerAt(inEdge: false, inHeader: true);
+        _headerOverlay.PointerExited += (_, _) => HeaderPointerAt(inEdge: false, inHeader: false);
+        _outer.Children.Add(_headerOverlay);
+        _header.MenuStateChanged += ArmHeader;
+        _overlayHeader.MenuStateChanged += ArmHeader;
+        Window.Content = _outer;
+        SetUpTitleBar();
 
         _revealTimer = ui.CreateTimer();
         _revealTimer.IsRepeating = false;
         _revealTimer.Tick += (_, _) => TickReveal();
+        _headerTimer = ui.CreateTimer();
+        _headerTimer.IsRepeating = false;
+        _headerTimer.Tick += (_, _) => TickHeader();
 
         viewer.LayoutsChanged += OnLayoutsChanged;
         viewer.Changed += OnViewerChanged;
@@ -308,8 +367,13 @@ internal sealed class ViewerWindow
                 // if it was open; S shows it meanwhile (docs/UX.md "Full screen chrome").
                 _fullScreenSidebar = false;
                 ApplySidebar();
+                ApplyHeader();
                 Changed?.Invoke();
             }
+        }
+        if (args.DidSizeChange)
+        {
+            UpdateTitleBarRegions();
         }
     }
 
@@ -437,16 +501,26 @@ internal sealed class ViewerWindow
         }
     }
 
+    /// <summary>The window's content as named in the header and the title: the name, and "(group)" or "(unsaved)".</summary>
+    public string ContentTitle
+    {
+        get
+        {
+            string kind = State.Content switch
+            {
+                WindowContent.Group => " (group)",
+                WindowContent.Scratch => " (unsaved)",
+                _ => "",
+            };
+            return $"{State.Name}{kind}";
+        }
+    }
+
     private void UpdateTitle()
     {
-        string kind = State.Content switch
-        {
-            WindowContent.Group => " (group)",
-            WindowContent.Scratch => " (unsaved)",
-            _ => "",
-        };
-        Window.Title = $"{State.Name}{kind} - nvrview";
+        Window.Title = $"{ContentTitle} - nvrview";
         _editBar.Update();
+        UpdateHeaders();
     }
 
     /// <summary>A camera picked in the sidebar: into the selected tile (or the only one), else the first empty tile, else shown alone.</summary>
@@ -583,34 +657,59 @@ internal sealed class ViewerWindow
         }
     }
 
-    public void OpenSettings()
-    {
-        if (Window.Content.XamlRoot is { } root)
-        {
-            _ = SettingsDialog.ShowAsync(root, _viewer, Program.Options.Development);
-        }
-    }
+    /// <summary>Opens the Settings window (one instance: an open one is brought to the front) on a section.</summary>
+    public SettingsWindow OpenSettings(SettingsSection? section = null, bool findDevices = false) =>
+        SettingsWindow.Open(_viewer, Program.Options.Development, section, findDevices, background: Program.Options.Background);
 
-    private void AddWindowMenu(MenuFlyout menu)
+    /// <summary>Recording is not reported yet: the header's "N recording" spot stays hidden.</summary>
+    public int RecordingCount => 0;
+
+    /// <summary>
+    /// An app-wide action from the header (docs/UX.md "Windows header"): what its button or menu item does, and what
+    /// the self-test presses.
+    /// </summary>
+    public void RunHeaderAction(HeaderAction action)
     {
-        void Item(string text, Action action, bool enabled = true)
+        switch (action)
         {
-            var item = new MenuFlyoutItem { Text = text, IsEnabled = enabled };
-            item.Click += (_, _) => action();
-            menu.Items.Add(item);
+            case HeaderAction.FindDevices:
+                OpenSettings(SettingsSection.Devices, findDevices: true);
+                break;
+            case HeaderAction.EditLayout:
+                Stage.SetEditing(!State.Editing);
+                break;
+            case HeaderAction.FillTiles:
+                Stage.SetFill(!State.Fill);
+                break;
+            case HeaderAction.FullScreen:
+                Stage.ToggleFullScreen();
+                break;
+            case HeaderAction.Settings:
+                OpenSettings();
+                break;
+            case HeaderAction.NewLayout:
+                NewLayout();
+                break;
+            case HeaderAction.SaveAsLayout:
+                SaveAsLayout();
+                break;
+            case HeaderAction.NewWindow:
+                App.Instance.OpenWindow(ToSaved().Content);
+                break;
+            case HeaderAction.ToggleSidebar:
+                ToggleSidebar();
+                break;
+            case HeaderAction.Diagnostics:
+                Stage.ToggleDiagnostics();
+                break;
+            case HeaderAction.KeyboardShortcuts:
+                Stage.ToggleHelp();
+                break;
+            case HeaderAction.CheckForUpdates:
+                App.Instance.Updater?.MenuAction();
+                break;
         }
-        Item(State.Editing ? "Done editing" : "Edit layout", () => Stage.SetEditing(!State.Editing));
-        if (State.Content is not WindowContent.Layout)
-        {
-            Item("Save as layout…", SaveAsLayout);
-        }
-        Item("New layout…", NewLayout);
-        var templates = new MenuFlyoutSubItem { Text = "New layout from template" };
-        AddTemplateItems(templates.Items);
-        menu.Items.Add(templates);
-        Item(SidebarDocked ? "Hide sidebar" : "Show sidebar", ToggleSidebar);
-        Item("New window", () => App.Instance.OpenWindow(ToSaved().Content));
-        menu.Items.Add(new MenuFlyoutSeparator());
+        UpdateHeaders();
     }
 
     // ---- keys ----
@@ -762,6 +861,178 @@ internal sealed class ViewerWindow
         }
     }
 
+    // ---- the header ----
+
+    /// <summary>The docked header (the title bar of a normal window).</summary>
+    public HeaderBar Header => _header;
+
+    /// <summary>The header that slides over the stage in full screen.</summary>
+    public HeaderBar OverlayHeader => _overlayHeader;
+
+    /// <summary>Whether the header is on screen: always in a normal window, in full screen while revealed.</summary>
+    public bool HeaderVisible => _headerChrome.IsVisible;
+
+    /// <summary>The header overlay is shown over the stage (full screen).</summary>
+    public bool HeaderOverlayShown => _headerChrome.IsOverlayShown;
+
+    /// <summary>The header overlay takes the pointer (it is revealed).</summary>
+    public bool HeaderOverlayInteractive => _headerOverlay.IsHitTestVisible;
+
+    /// <summary>The docked header is shown (a normal window).</summary>
+    public bool DockedHeaderShown => _header.Root.Visibility == Visibility.Visible;
+
+    /// <summary>Whether the window is drawing into the title bar (the system's caption buttons over the header).</summary>
+    public bool ExtendsIntoTitleBar => Window.ExtendsContentIntoTitleBar;
+
+    private bool HeaderFullScreen => _headerFullScreenOverride ?? IsFullScreen;
+
+    /// <summary>Self-test: makes the header behave as in full screen (or not) without changing the window.</summary>
+    public void SimulateHeaderFullScreen(bool? fullScreen)
+    {
+        _headerFullScreenOverride = fullScreen;
+        ApplyHeader();
+    }
+
+    private void SetUpTitleBar()
+    {
+        if (!AppWindowTitleBar.IsCustomizationSupported())
+        {
+            return;
+        }
+        Window.ExtendsContentIntoTitleBar = true;
+        Window.SetTitleBar(_header.Root);
+        AppWindowTitleBar bar = AppWindow.TitleBar;
+        bar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        // The caption buttons sit on the header's own color.
+        bar.ButtonBackgroundColor = Colors.Transparent;
+        bar.ButtonInactiveBackgroundColor = Colors.Transparent;
+        bar.ButtonForegroundColor = Colors.White;
+        bar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(0xFF, 0x9A, 0xA0, 0xA6);
+        bar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+        bar.ButtonHoverForegroundColor = Colors.White;
+        bar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF);
+        bar.ButtonPressedForegroundColor = Colors.White;
+        _header.Root.LayoutUpdated += (_, _) => UpdateTitleBarRegions();
+        _header.Root.Loaded += (_, _) =>
+        {
+            if (Window.Content.XamlRoot is { } root)
+            {
+                root.Changed += (_, _) => UpdateTitleBarRegions();
+            }
+            UpdateTitleBarRegions();
+        };
+    }
+
+    /// <summary>
+    /// Fits the header to the title bar the system reports (its height and the caption buttons' inset, in pixels, at
+    /// this display's scale) and tells the system which controls take the pointer instead of dragging the window.
+    /// </summary>
+    private void UpdateTitleBarRegions()
+    {
+        if (_closed || !Window.ExtendsContentIntoTitleBar || Window.Content.XamlRoot is not { } root)
+        {
+            return;
+        }
+        double scale = root.RasterizationScale;
+        AppWindowTitleBar bar = AppWindow.TitleBar;
+        _header.SetHeight(TitleBarRegions.HeaderHeight(bar.Height, scale));
+        _header.SetInsets(TitleBarRegions.ToUnits(bar.LeftInset, scale), TitleBarRegions.ToUnits(bar.RightInset, scale));
+        IReadOnlyList<PixelRect> pixels = TitleBarRegions.Passthrough(_header.InteractiveBounds(), scale, AppWindow.Size.Width, bar.Height);
+        string key = string.Join(";", pixels) + $"|{scale}|{bar.Height}";
+        if (key == _passthroughKey)
+        {
+            return;
+        }
+        _passthroughKey = key;
+        try
+        {
+            InputNonClientPointerSource.GetForWindowId(AppWindow.Id)
+                .SetRegionRects(NonClientRegionKind.Passthrough, [.. pixels.Select(p => new RectInt32(p.X, p.Y, p.Width, p.Height))]);
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            AppLog.Warn($"setting the title bar's interactive regions failed: {e.Message}");
+        }
+    }
+
+    /// <summary>The number of interactive regions last given to the system (self-test).</summary>
+    public int PassthroughRegions
+    {
+        get
+        {
+            try
+            {
+                return InputNonClientPointerSource.GetForWindowId(AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough).Length;
+            }
+            catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.Runtime.InteropServices.COMException)
+            {
+                return -1;
+            }
+        }
+    }
+
+    private void UpdateHeaders()
+    {
+        _header.Update();
+        _overlayHeader.Update();
+    }
+
+    /// <summary>Applies full screen or windowed to the header: docked as the title bar, or an overlay revealed at the top edge.</summary>
+    private void ApplyHeader()
+    {
+        bool full = HeaderFullScreen;
+        _headerChrome.SetFullScreen(full);
+        _header.Root.Visibility = full ? Visibility.Collapsed : Visibility.Visible;
+        _headerEdge.Visibility = full ? Visibility.Visible : Visibility.Collapsed;
+        ApplyHeaderReveal();
+        ArmHeader();
+        UpdateHeaders();
+    }
+
+    /// <summary>Where the pointer is for the header's reveal (also the self-test's simulated pointer).</summary>
+    public void HeaderPointerAt(bool inEdge, bool inHeader)
+    {
+        _headerChrome.Pointer(inEdge, inHeader, RevealClock.Now);
+        ArmHeader();
+    }
+
+    /// <summary>Runs what is due for the header (the timer; the self-test calls it after moving its manual clock).</summary>
+    public void TickHeader()
+    {
+        RevealHolds holds = RevealHolds.None;
+        if (_overlayHeader.OpenMenus > 0)
+        {
+            holds |= RevealHolds.Menu;
+        }
+        if (_headerChrome.Tick(RevealClock.Now, holds))
+        {
+            ApplyHeaderReveal();
+        }
+        ArmHeader();
+    }
+
+    private void ArmHeader()
+    {
+        _headerTimer.Stop();
+        if (_headerChrome.Deadline is { } deadline && RevealClock is SystemViewerClock)
+        {
+            _headerTimer.Interval = TimeSpan.FromSeconds(Math.Max(deadline - RevealClock.Now, 0.001));
+            _headerTimer.Start();
+        }
+    }
+
+    private void ApplyHeaderReveal()
+    {
+        bool shown = _headerChrome.IsOverlayShown;
+        _headerOverlay.Translation = new Vector3(0, shown ? 0 : -(float)(TitleBarRegions.TallHeight + 24), 0);
+        _headerOverlay.Opacity = shown ? 1 : 0;
+        _headerOverlay.IsHitTestVisible = shown;
+        if (shown)
+        {
+            _overlayHeader.Update();
+        }
+    }
+
     // ---- closing ----
 
     /// <summary>Stops this window's rendering and gives its leases back (idempotent).</summary>
@@ -773,6 +1044,7 @@ internal sealed class ViewerWindow
         }
         _closed = true;
         _revealTimer.Stop();
+        _headerTimer.Stop();
         _viewer.LayoutsChanged -= OnLayoutsChanged;
         _viewer.Changed -= OnViewerChanged;
         AppWindow.Changed -= OnAppWindowChanged;

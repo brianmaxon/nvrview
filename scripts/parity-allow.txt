@@ -14,7 +14,17 @@ audio-output-renders        windows  n/a: checks the WASAPI render; the macOS se
 call-desktop-recognizer     windows  n/a: the Windows desktop recognizer (System.Speech); the macOS self-test uses a fake engine and never prompts
 call-microphone             windows  n/a: opens the real WASAPI microphone with --mic-test; the macOS self-test uses a fake microphone, no permission prompt
 call-system-voice           windows  n/a: renders a sentence with the Windows voice; the macOS self-test uses a fake voice
+header-actions              windows  n/a: the Windows header replaces the title bar and the context menu's app-wide items; macOS keeps its menu bar (docs/PARITY.md)
+header-fullscreen-reveal    windows  n/a: the Windows header slides over the stage from the top edge in full screen; macOS reveals its menu bar itself
+header-layout-picker        windows  n/a: the Windows header's layout picker; macOS switches layouts from the sidebar and its menu bar
+header-present              windows  n/a: the Windows header is the title bar; macOS keeps its menu bar
 render-no-alloc             windows  n/a: counts .NET allocations on the render thread; Swift has no equivalent counter
+settings-window-closes-with-app windows  n/a: the Windows Settings window is a window of its own; macOS Settings is a panel
+settings-window-frame-remembered windows  n/a: the Windows Settings window is a resizable window of its own
+settings-window-scrolls     windows  n/a: the Windows Settings window replaced a dialog that could not scroll
+settings-window-sections    windows  n/a: the Windows Settings window has a pane of sections; macOS Settings has its own layout
+settings-window-single-instance windows  n/a: the Windows Settings window is one instance brought to the front
+tile-menu-no-app-wide       windows  n/a: only the Windows context menu held app-wide items; on macOS they are in the menu bar
 
 # ---- on Windows only, macOS self-test lacks the check -----------------------
 alert-dismiss-enter         windows  gap: the macOS self-test never raises a tile alert end to end (AlertCenter has unit tests; the smoke inset step dismisses with Esc)

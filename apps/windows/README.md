@@ -277,8 +277,8 @@ installed, and it runs from wherever it is copied.
   already running instead, with the password from `NVRVIEW_PASSWORD`, which
   is never stored (use it against mock-nvr only).
 - **Against a real NVR or camera**: start `NvrView.App.exe` with no options,
-  press Ctrl+, (or right-click, Settings, or "Add a device" on the empty
-  window) and enter the device's address, port (9000 by default), user, and
+  press Ctrl+, (or the header's Settings button, or "Add a device" on the
+  empty window) and enter the device's address, port (9000 by default), user, and
   password. The app connects at once and on every later start. The device
   list is in `%LOCALAPPDATA%\NvrView\settings.json` (no secrets in it); the
   password is a generic credential named `nvrview/device/<key>` in Windows
@@ -299,7 +299,8 @@ focused camera); F is full screen, Esc leaves focus and then full screen;
 the mouse wheel (or a touchpad pinch) zooms around the pointer, dragging
 pans, 0 resets; Ctrl+L listens to the selected tile; Ctrl+D shows
 diagnostics (picture size, tier, GPU or CPU decoding, incoming frame rate);
-F1 lists the shortcuts; right-click has all of it in a menu.
+F1 lists the shortcuts. The app-wide actions are in the header (below); the
+right-click menu is for the tile under the pointer.
 
 Layouts and windows:
 
@@ -356,8 +357,8 @@ that is refused once, then streams):
    `tile_waiting` first;
 2. the render thread allocates nothing over a second of steady playing;
 3. a second device with a wrong password ends in `login_failed`, said in
-   words; saving a device the way the Settings dialog does connects it and
-   opens its tiles, removing it closes them, and the dialog opens and closes;
+   words; saving a device the way Settings does connects it and
+   opens its tiles, removing it closes them, and the Settings window opens and closes;
    its "Find Devices on This Network" list (docs/UX.md, "Finding devices")
    starts a real core search, limited to loopback so nothing leaves the
    computer, when the new-device form is shown; four made-up devices fed in
@@ -417,7 +418,7 @@ that is refused once, then streams):
     kept in the layout leaf, and show the synthetic sphere's quadrant colors
     at the pixels the shared mapping predicts (90% of the samples, away from
     cell edges); the Virtual PTZ zoom eases on a manual clock to its target
-    and is saved, the Settings dialog's Mount picker sets the camera's mount
+    and is saved, the Settings window's Mount picker sets the camera's mount
     (saved, and the tile follows), a synthetic pinch scale divides the
     Virtual PTZ field of view and stops at 20°, 0 resets the view, and
     Original removes the member;
@@ -625,16 +626,51 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   at most 50 MB are kept. Names, text and pruning are `TranscriptFiles` in
   NvrView.Tiles, tested with the Mac's vectors; "Open transcripts folder"
   shows the folder. Self-test step `call-transcript-file`.
-- **Unmute on ring:** Settings has a check box per camera ("Unmute on ring
+- **Unmute on ring:** Settings > Cameras has a check box per camera (and the tile menu a toggle) ("Unmute on ring
   even when not listening"), kept in `view-settings.json` as `unmuteOnRing`;
   with it on, a press plays the doorbell at once instead of showing Unmute.
   Self-test step `unmute-on-ring`.
 - **Zoom chrome and Fill Tiles:** a zoomed tile shows a zoom map (bottom left
   of the zoomed picture, `ZoomMap`) and a reset button in its header; a touch
   screen's two-finger pinch zooms ordinary tiles around the fingers; "Fill
-  tiles" in the right-click menu crops pictures to fill their tiles (per
+  tiles" in the header crops pictures to fill their tiles (per
   window). Self-test steps `zoom-map`, `zoom-reset-control`,
   `zoom-touch-pinch`, `fill-tiles`.
+
+### The header and the Settings window
+
+Windows-only (macOS keeps its menu bar; docs/PARITY.md), described in
+[docs/UX.md](../../docs/UX.md) under "Windows header" and "Settings window".
+
+- **The header** is the title bar: `Window.ExtendsContentIntoTitleBar` and
+  `SetTitleBar`, a tall caption, the system's caption buttons kept (so snap
+  layouts stay). `ViewerWindow` reads the caption height and the buttons'
+  inset in pixels and the display scale (`XamlRoot.RasterizationScale`) and
+  fits the header (`TitleBarRegions` in NvrView.Tiles); the header's buttons
+  and picker are given to `InputNonClientPointerSource` as passthrough
+  regions, so only the rest drags the window. In full screen the docked
+  header collapses and an overlay copy slides in from a strip at the top edge
+  (`HeaderChrome` in NvrView.Shell, the sidebar's `SidebarReveal` timing, one
+  timer armed for the next deadline; an open header menu holds it). What each
+  action is and where it lives is `HeaderActions` (NvrView.Tiles, tested);
+  `ViewerWindow.RunHeaderAction` does them. The "N recording" spot is
+  reserved and hidden (`RecordingIndicator`).
+- **The tile menu** (`StageView.BuildTileMenu`) holds the tile's own actions
+  only; the self-test checks that none of `HeaderActions` is in it.
+- **The Settings window** (`SettingsWindow`) is a `Window` with a
+  `NavigationView` pane (Devices, Cameras, Alerts & calls, Updates, About;
+  `SettingsSections`) and a `ScrollViewer` per section around the content
+  `SettingsPages` builds. One instance (`SettingsWindow.Current`); opening
+  again brings it forward. Its frame is kept in `view-settings.json`
+  (`settingsWindowFrame`, physical pixels, restored through the same
+  on-screen check as viewer windows). It closes with the app and stops the
+  device search when closed or when the Devices section is left.
+- **Self-test steps** `header-present`, `header-actions`,
+  `header-layout-picker`, `header-fullscreen-reveal` (manual clock),
+  `tile-menu-no-app-wide`, `settings-window-sections`,
+  `settings-window-scrolls` (a section taller than the window scrolls to its
+  last control), `settings-window-single-instance`,
+  `settings-window-frame-remembered`, `settings-window-closes-with-app`.
 
 ### How it works
 
@@ -643,6 +679,8 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
 | `CoreHost` | the core and the shared GPU device; actions go straight to each tile's `VideoTile` inside the read side of a device gate; events are parsed and handed to the UI thread |
 | `Viewer` | the UI thread's state shared by every window: devices (state, retry time, channels, core device key), one `CameraTile` per leased camera (`TileLeases`; opened on the tier the planner picks), listening per camera, the layouts (the core's store), the groups, the detection tracker, indicator board, alert center, and the quality demands |
 | `ViewerWindow`, `SidebarView`, `EditBar` | one window: its content (`WindowState`), leases, sidebar and edge-reveal overlay, edit bar, keys, restore record |
+| `HeaderBar` | the window's header (below): layout picker, quick actions, Settings, the "…" menu; one docked, one overlay for full screen |
+| `SettingsWindow`, `SettingsPages` | the Settings window (below): the pane, one scrolling page per section, and the page content |
 | `StageRenderer` | one window's render thread: its swap chain, picture fit into the layout's cells, focus animation, zoom, the call cards' pictures drawn last, drawing, presenting, device-loss recovery, readback for the self-test |
 | `StageView`, `TileChrome` | one window's stage: one `StageTile` per layout leaf, the XAML above the swap chain (hover header, speaker, level meter, status line, corner indicators, sound badges, alert strip and border, selection outline, edit outlines, diagnostics); input, the designer, drops |
 | `IndicatorStrip`, `QualityMenu`, `ViewSettings` | self-contained tile-feature parts a window hosts: the symbol strip (tiles, and the sidebar's rows), the Quality submenu, and the saved indicator and call card corners (`view-settings.json`) |
@@ -650,7 +688,7 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |
 | `CallWindows`, `CallWindow` | the call windows: one per call shown in its own window, with its own swap chain and renderer (see "Calls") |
-| `WindowsCredentials`, `DeviceStore`, `SettingsDialog` | passwords in Credential Manager, the device list in `settings.json`, the Settings dialog |
+| `WindowsCredentials`, `DeviceStore` | passwords in Credential Manager, the device list in `settings.json` |
 | `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
 
 - **Swap chain** (`NvrView.Video/SwapChainTarget.cs`). A flip-model
@@ -815,8 +853,7 @@ settings stay off by default and no cap is applied.
 
 Self-update from a folder or server the user hosts, signed with the user's
 own Ed25519 keys ([docs/UPDATES.md](../../docs/UPDATES.md)). Settings has an
-Updates section under the devices; the stage's right-click menu has "Check
-for updates...". Versions live side by side: an update is unpacked into a new
+Updates section; the header's "…" menu has "Check for updates...". Versions live side by side: an update is unpacked into a new
 `NvrView-<version>` folder next to the running one (staging in
 `.NvrView-update`), and Restart now starts it with `--wait-for-pid` so it
 waits for this version to exit before logging in. The running folder and the

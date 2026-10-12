@@ -219,13 +219,8 @@ internal sealed partial class StageView : UserControl
     /// <summary>The render thread (set once by the window).</summary>
     public StageRenderer Renderer { get; set; }
 
-    /// <summary>The Settings dialog opener (set by the window).</summary>
+    /// <summary>The Settings window opener (set by the window).</summary>
     public Action? SettingsRequested { get; set; }
-
-    /// <summary>The update menu item's title and action (set by the window); no item when null.</summary>
-    public Func<string>? UpdateTitle { get; set; }
-
-    public Action? UpdateRequested { get; set; }
 
     /// <summary>The tree changed by a finished gesture or command (the window stores it).</summary>
     public event Action<LayoutNode>? Edited;
@@ -942,6 +937,21 @@ internal sealed partial class StageView : UserControl
         {
             Select(t.Path);
         }
+        // The menu holds actions of the tile under the pointer only; the app-wide actions are in the
+        // window's header (docs/UX.md "Windows header"). Nothing under the pointer: no menu.
+        if (t is not null && BuildTileMenu(t) is { } menu)
+        {
+            menu.ShowAt(this, at);
+        }
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// The context menu of a tile: its camera's actions (focus, listen, conversation, zoom, quality, fisheye,
+    /// dismiss), its layout actions while editing, and what other features add; null when it would be empty.
+    /// </summary>
+    internal MenuFlyout? BuildTileMenu(StageTile t)
+    {
         var menu = new MenuFlyout();
         MenuFlyoutItem Item(IList<MenuFlyoutItemBase> into, string text, Action action, bool enabled = true)
         {
@@ -955,6 +965,10 @@ internal sealed partial class StageView : UserControl
             Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the grid" : "Focus", () => ToggleFocus(t), !State.Editing);
             Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
             AddConversationItems(menu, camera);
+            var unmute = new ToggleMenuFlyoutItem { Text = "Unmute on ring", IsChecked = _viewer.Settings.UnmuteOnRing(camera) };
+            unmute.Click += (_, _) => _viewer.Settings.SetUnmuteOnRing(camera, unmute.IsChecked);
+            ToolTipService.SetToolTip(unmute, "When this camera rings, unmute it even if you are not listening");
+            menu.Items.Add(unmute);
             Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
             menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
             if (_viewer.IsFisheye(camera))
@@ -967,13 +981,13 @@ internal sealed partial class StageView : UserControl
                 Item(menu.Items, "Dismiss alert", () => _viewer.DismissAlert(camera));
             }
         }
-        if (t is not null)
+        TileMenuOpening?.Invoke(menu, t, this);
+        if (CanEditLayout)
         {
-            TileMenuOpening?.Invoke(menu, t, this);
-            menu.Items.Add(new MenuFlyoutSeparator());
-        }
-        if (t is not null && CanEditLayout)
-        {
+            if (menu.Items.Count > 0)
+            {
+                menu.Items.Add(new MenuFlyoutSeparator());
+            }
             Item(menu.Items, "Split side by side", () => Split(SplitAxis.Row), CanSplit);
             Item(menu.Items, "Split stacked", () => Split(SplitAxis.Col), CanSplit);
             Item(menu.Items, "Remove tile", RemoveSelected, State.Tree.LeafCount > 1 || !t.IsEmpty);
@@ -1009,23 +1023,8 @@ internal sealed partial class StageView : UserControl
                 Item(presets.Items, preset.Title(), () => ApplyPreset(preset));
             }
             menu.Items.Add(presets);
-            menu.Items.Add(new MenuFlyoutSeparator());
         }
-        WindowMenu?.Invoke(menu);
-        menu.Items.Add(IndicatorCornerMenu());
-        var fillItem = new ToggleMenuFlyoutItem { Text = "Fill tiles", IsChecked = State.Fill };
-        fillItem.Click += (_, _) => SetFill(!State.Fill);
-        menu.Items.Add(fillItem);
-        Item(menu.Items, IsFullScreen ? "Leave full screen" : "Full screen", ToggleFullScreen);
-        Item(menu.Items, _diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
-        Item(menu.Items, "Keyboard shortcuts", ToggleHelp);
-        Item(menu.Items, "Settings…", () => SettingsRequested?.Invoke());
-        if (UpdateTitle?.Invoke() is { } updateTitle)
-        {
-            Item(menu.Items, updateTitle, () => UpdateRequested?.Invoke());
-        }
-        menu.ShowAt(this, at);
-        e.Handled = true;
+        return menu.Items.Count > 0 ? menu : null;
     }
 
     // ---- conversations (docs/UX.md "Doorbell calls") ----
@@ -1221,7 +1220,7 @@ internal sealed partial class StageView : UserControl
     public bool IsEasingFisheyeZoom => _fisheyeZoom.IsEasing;
 
     /// <summary>The "Indicator corner" submenu: where the tiles' symbols sit (a setting, saved).</summary>
-    private MenuFlyoutSubItem IndicatorCornerMenu()
+    internal MenuFlyoutSubItem IndicatorCornerMenu()
     {
         var sub = new MenuFlyoutSubItem { Text = "Indicator corner" };
         foreach (ChromeCorner corner in Enum.GetValues<ChromeCorner>())
@@ -1259,9 +1258,6 @@ internal sealed partial class StageView : UserControl
             return TileQuality.Auto;
         }
     }
-
-    /// <summary>The window's own entries for the context menu (Edit Layout, Save as Layout, sidebar, new window).</summary>
-    public Action<MenuFlyout>? WindowMenu { get; set; }
 
     // ---- keys (from the window) ----
 
@@ -1409,15 +1405,20 @@ internal sealed partial class StageView : UserControl
         }
         State.Fill = fill;
         Relayout();
+        StateChanged?.Invoke();
     }
 
-    private void ToggleDiagnostics()
+    /// <summary>Whether the tiles show their diagnostics line.</summary>
+    public bool Diagnostics => _diagnostics;
+
+    public void ToggleDiagnostics()
     {
         _diagnostics = !_diagnostics;
         RefreshAll();
+        StateChanged?.Invoke();
     }
 
-    private void ToggleHelp() =>
+    public void ToggleHelp() =>
         _help.Visibility = _help.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
 
     // ---- chrome ----
