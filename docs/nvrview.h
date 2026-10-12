@@ -23,8 +23,9 @@ extern "C" {
  * (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
- * part 1. Minor 6: recorded playback. */
-#define NV_ABI_MINOR 6
+ * part 1. Minor 6: recorded playback. Minor 7: "months" in
+ * nv_recordings_want. */
+#define NV_ABI_MINOR 7
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -463,8 +464,9 @@ NvStatus nv_recordings_spans(NvCore *core, const char *query, char *out, size_t 
 NvStatus nv_recordings_events(NvCore *core, const char *query, char *out, size_t cap,
                               size_t *len);
 
-/* Asks for cameras' days to be in the index ({"cameras","days","force"});
- * returns at once, recordings_changed follows. NV_ERR_LIMIT beyond 31 days
+/* Asks for cameras' days to be in the index ({"cameras","days","months",
+ * "force"}; "months", minor 7: only those months' calendars); returns at
+ * once, recordings_changed follows. NV_ERR_LIMIT beyond 31 days, 12 months,
  * or a full queue (nothing queued); NV_ERR_INVALID_ARGUMENT for a camera
  * nv_recordings_enable does not allow. */
 NvStatus nv_recordings_want(NvCore *core, const char *json);

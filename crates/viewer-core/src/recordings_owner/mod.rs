@@ -138,6 +138,8 @@ const INDEX_EVENT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_ANSWER_BYTES: usize = 16 * 1024 * 1024;
 /// Most distinct days in one want.
 const MAX_WANT_DAYS: usize = recordings::lane::MAX_REQUEST_DAYS;
+/// Most distinct months in one want.
+const MAX_WANT_MONTHS: usize = recordings::lane::MAX_REQUEST_MONTHS;
 /// Most incidents in one merge.
 const MAX_MERGE: usize = 1000;
 
@@ -174,11 +176,37 @@ fn dir_name(key: &str) -> String {
         .collect()
 }
 
-/// A camera's name: the user's override, else "Camera N" (seam: the
-/// channel names devices report are not shared with the owner yet).
-fn camera_name(groups: &GroupStore, camera: &CameraId) -> String {
+/// What a device reported about one of its channels: the camera's name and
+/// how many lenses it has (1 for a single-lens camera).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReportedChannel {
+    pub(crate) name: String,
+    pub(crate) lenses: u8,
+}
+
+/// Every device's reported channels, by device key.
+pub(crate) type ReportedNames = HashMap<String, HashMap<u8, ReportedChannel>>;
+
+/// Tells the owner a device's reported channels (the device's watch task
+/// calls it whenever they change).
+pub(crate) type ChannelNamesHook = Arc<dyn Fn(HashMap<u8, ReportedChannel>) + Send + Sync>;
+
+/// A camera's name: the user's override; else the name the device reports
+/// for the channel, with the lens ("Front · Lens 2") for a multi-lens
+/// camera; else "Camera N" (before the device has reported names).
+fn camera_name(groups: &GroupStore, reported: &ReportedNames, camera: &CameraId) -> String {
     if let Some(n) = groups.name_of(camera) {
         return n.to_owned();
+    }
+    if let Some(r) = reported
+        .get(&camera.device)
+        .and_then(|d| d.get(&camera.channel))
+    {
+        return if r.lenses >= 2 || camera.lens > 0 {
+            format!("{} · Lens {}", r.name, u32::from(camera.lens) + 1)
+        } else {
+            r.name.clone()
+        };
     }
     if camera.lens == 0 {
         format!("Camera {}", u32::from(camera.channel) + 1)
@@ -234,10 +262,12 @@ struct Added {
     session: Arc<DeviceSession>,
 }
 
-/// Wanted days waiting for a device that is not added.
+/// Wanted days (and months asked for alone) waiting for a device that is
+/// not added.
 struct Parked {
     cameras: Vec<IndexedChannel>,
     days: Vec<Secs>,
+    months: Vec<Secs>,
     force: bool,
 }
 
@@ -256,7 +286,7 @@ impl Dev {
     fn parked_days(&self) -> usize {
         self.parked
             .iter()
-            .map(|p| p.cameras.len() * p.days.len())
+            .map(|p| p.cameras.len() * (p.days.len() + p.months.len()))
             .sum()
     }
 
@@ -384,6 +414,9 @@ pub(crate) struct Hub {
     wake: Notify,
     /// Sound for recordings (`sound.rs`).
     sound: sound::SoundOwner,
+    /// The channel names devices reported (a leaf lock: nothing else is
+    /// taken while it is held).
+    reported: Mutex<Arc<ReportedNames>>,
     /// Grows with every change to any index.
     revision: AtomicU64,
     closing: AtomicBool,
@@ -412,10 +445,26 @@ impl RecordingsHub {
                 trashing: Mutex::new(HashMap::new()),
                 wake: Notify::new(),
                 sound: sound::SoundOwner::default(),
+                reported: Mutex::new(Arc::new(HashMap::new())),
                 revision: AtomicU64::new(0),
                 closing: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// What the device with this key reports about its channels goes to the
+    /// owner through this hook (camera names in answers and downloads).
+    pub(crate) fn names_hook(&self, key: &str) -> ChannelNamesHook {
+        let hub = Arc::downgrade(&self.hub);
+        let key = key.to_owned();
+        Arc::new(move |channels| {
+            if let Some(h) = hub.upgrade() {
+                let mut r = lock(&h.reported);
+                let mut all = (**r).clone();
+                all.insert(key.clone(), channels);
+                *r = Arc::new(all);
+            }
+        })
     }
 
     /// A device was added to the core (`key` is its stable key). Called
@@ -642,7 +691,12 @@ impl Hub {
             dev.lane_holds.insert(h, lane.hold_today(&cams));
         }
         for p in dev.parked.drain(..) {
-            let _ = lane.request_days(&p.cameras, &p.days, p.force);
+            if !p.days.is_empty() {
+                let _ = lane.request_days(&p.cameras, &p.days, p.force);
+            }
+            if !p.months.is_empty() {
+                let _ = lane.request_months(&p.cameras, &p.months, p.force);
+            }
         }
         if let Some(bg) = dev.enable.background {
             dev.background = Some(self.rt.spawn(background(
@@ -654,6 +708,11 @@ impl Hub {
         dev.lane = Some(lane);
         self.wake.notify_one();
         old
+    }
+
+    /// The channel names devices reported, as of now.
+    fn reported(&self) -> Arc<ReportedNames> {
+        lock(&self.reported).clone()
     }
 
     // ---- lane events ----------------------------------------------------
@@ -678,6 +737,32 @@ impl Hub {
                 self.send(json!({
                     "type": "recordings_day_failed", "device": key,
                     "camera": camera_json(key, camera), "day": day, "reason": reason,
+                }));
+                if let Some(r) = lock(&self.reports).get_mut(key) {
+                    r.progress_dirty = true;
+                }
+                self.wake.notify_one();
+            }
+            LaneEvent::MonthIndexed { month, .. } => {
+                self.revision.fetch_add(1, Ordering::SeqCst);
+                let mut reports = lock(&self.reports);
+                if let Some(r) = reports.get_mut(key) {
+                    let (s, e) = recordings::month_span(month);
+                    r.changed = Some(r.changed.map_or((s, e), |(a, b)| (a.min(s), b.max(e))));
+                    r.progress_dirty = true;
+                }
+                drop(reports);
+                self.wake.notify_one();
+            }
+            LaneEvent::MonthFailed {
+                cameras,
+                month,
+                reason,
+            } => {
+                let cameras: Vec<Value> = cameras.iter().map(|c| camera_json(key, *c)).collect();
+                self.send(json!({
+                    "type": "recordings_month_failed", "device": key,
+                    "cameras": cameras, "month": month, "reason": reason,
                 }));
                 if let Some(r) = lock(&self.reports).get_mut(key) {
                     r.progress_dirty = true;
@@ -1120,14 +1205,17 @@ impl crate::Core {
     }
 
     /// `nv_recordings_want`: asks for these cameras' days to be in the
-    /// index (`{"cameras": [...], "days": [...], "force": false}`); returns
-    /// at once, and `recordings_changed` follows as days arrive. A device
-    /// that is not added keeps the request until it is (and reports
-    /// `waiting_device`).
+    /// index (`{"cameras": [...], "days": [...], "months": [...], "force":
+    /// false}`); returns at once, and `recordings_changed` follows as days
+    /// arrive. `months` (minor 7; any second within each month) asks for
+    /// only those months' calendars, after the days; either list may be
+    /// left out, not both. A device that is not added keeps the request
+    /// until it is (and reports `waiting_device`).
     ///
     /// # Errors
-    /// [`RecError::Limit`] for more than 31 days or when a device's queue
-    /// (4096 camera-days) would overflow (nothing is queued then),
+    /// [`RecError::Limit`] for more than 31 days or 12 months, or when a
+    /// device's queue (4096 camera-days) would overflow (nothing is queued
+    /// then),
     /// [`RecError::InvalidArgument`] for a camera not enabled,
     /// [`RecError::NotConfigured`], [`RecError::Closed`].
     pub fn recordings_want(&self, json: &str) -> Result<(), RecError> {
@@ -1135,23 +1223,36 @@ impl crate::Core {
         h.check()?;
         let m = config::request(json)?;
         let cams = config::cameras(&m)?;
-        let days: BTreeSet<Secs> = match m.get("days") {
-            Some(Value::Array(a)) => a
-                .iter()
-                .map(|v| {
-                    v.as_i64()
-                        .filter(|s| (0..=253_402_300_799).contains(s))
-                        .map(day_start)
-                        .ok_or(RecError::InvalidArgument)
-                })
-                .collect::<Result<_, _>>()?,
-            _ => return Err(RecError::InvalidArgument),
+        let times =
+            |name: &str, start: fn(Secs) -> Secs| -> Result<Option<BTreeSet<Secs>>, RecError> {
+                match m.get(name) {
+                    None => Ok(None),
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .map(|v| {
+                            v.as_i64()
+                                .filter(|s| (0..=253_402_300_799).contains(s))
+                                .map(start)
+                                .ok_or(RecError::InvalidArgument)
+                        })
+                        .collect::<Result<_, _>>()
+                        .map(Some),
+                    Some(_) => Err(RecError::InvalidArgument),
+                }
+            };
+        let (days, months) = match (
+            times("days", day_start)?,
+            times("months", |s| recordings::month_span(s).0)?,
+        ) {
+            (None, None) => return Err(RecError::InvalidArgument),
+            (d, mo) => (d.unwrap_or_default(), mo.unwrap_or_default()),
         };
-        if days.len() > MAX_WANT_DAYS {
+        if days.len() > MAX_WANT_DAYS || months.len() > MAX_WANT_MONTHS {
             return Err(RecError::Limit);
         }
         let force = config::flag(&m, "force")?;
         let days: Vec<Secs> = days.into_iter().rev().collect();
+        let months: Vec<Secs> = months.into_iter().rev().collect();
         let mut st = h.st();
         if st.stores.is_none() {
             return Err(RecError::NotConfigured);
@@ -1160,7 +1261,7 @@ impl crate::Core {
         // Checked for every device first, so a refusal queues nothing.
         for (key, cams) in &by {
             let dev = &st.devices[key];
-            if dev.pending_days() + cams.len() * days.len() > MAX_PARKED_DAYS {
+            if dev.pending_days() + cams.len() * (days.len() + months.len()) > MAX_PARKED_DAYS {
                 return Err(RecError::Limit);
             }
         }
@@ -1174,13 +1275,21 @@ impl crate::Core {
                 .collect();
             let dev = st.devices.get_mut(&key).expect("checked");
             match &dev.lane {
-                Some(l) => l
-                    .request_days(&chs, &days, force)
-                    .map_err(|_| RecError::Limit)?,
+                Some(l) => {
+                    if !days.is_empty() {
+                        l.request_days(&chs, &days, force)
+                            .map_err(|_| RecError::Limit)?;
+                    }
+                    if !months.is_empty() {
+                        l.request_months(&chs, &months, force)
+                            .map_err(|_| RecError::Limit)?;
+                    }
+                }
                 None => {
                     dev.parked.push(Parked {
                         cameras: chs,
                         days: days.clone(),
+                        months: months.clone(),
                         force,
                     });
                     if let Some(r) = lock(&h.reports).get_mut(&key) {
@@ -1588,5 +1697,43 @@ impl Hub {
             .as_ref()
             .map(|d| d.scheduler.clone())
             .ok_or(RecError::NotConfigured)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camera_names_prefer_the_override_then_the_reported_name_with_its_lens() {
+        let dir = tempfile::tempdir().unwrap();
+        let groups = GroupStore::open(&dir.path().join("groups.json"));
+        let mut reported = ReportedNames::new();
+        reported.insert(
+            "d-1".into(),
+            HashMap::from([
+                (
+                    0,
+                    ReportedChannel {
+                        name: "Front".into(),
+                        lenses: 1,
+                    },
+                ),
+                (
+                    1,
+                    ReportedChannel {
+                        name: "Yard".into(),
+                        lenses: 2,
+                    },
+                ),
+            ]),
+        );
+        let name = |c: CameraId| camera_name(&groups, &reported, &c);
+        assert_eq!(name(CameraId::new("d-1", 0)), "Front");
+        assert_eq!(name(CameraId::with_lens("d-1", 1, 0)), "Yard · Lens 1");
+        assert_eq!(name(CameraId::with_lens("d-1", 1, 1)), "Yard · Lens 2");
+        // Not reported (yet): the numbered name.
+        assert_eq!(name(CameraId::new("d-1", 4)), "Camera 5");
+        assert_eq!(name(CameraId::new("d-2", 0)), "Camera 1");
     }
 }

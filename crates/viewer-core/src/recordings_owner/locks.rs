@@ -213,7 +213,12 @@ impl Hub {
             }
             match stores.downloads.as_ref().map(|d| d.scheduler.clone()) {
                 Some(sched) => {
-                    let req = downloads::incident_request(&stores.groups, inc.clone(), whole(&inc));
+                    let req = downloads::incident_request(
+                        &stores.groups,
+                        &self.reported(),
+                        inc.clone(),
+                        whole(&inc),
+                    );
                     enqueue_later(self, sched, req);
                 }
                 None => info!("a locked incident stopped growing, but downloads are off"),
@@ -291,7 +296,12 @@ impl crate::Core {
                 "when_settled"
             }
             Some(sched) => {
-                let req = downloads::incident_request(&stores.groups, inc.clone(), whole(&inc));
+                let req = downloads::incident_request(
+                    &stores.groups,
+                    &h.reported(),
+                    inc.clone(),
+                    whole(&inc),
+                );
                 queue = Some((sched, req));
                 "queued"
             }

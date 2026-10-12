@@ -16,7 +16,11 @@
 //!    asked in that month at once), then each camera-day's files and events
 //!    (14–16, 272–274). Days already indexed are not searched again unless
 //!    the request forces it (a user's refresh).
-//! 3. **Today, while held** ([`LaneHandle::hold_today`]): today's calendar
+//! 3. **Months a view asked for** ([`LaneHandle::request_months`]), newest
+//!    first: only the month's calendar (142), for a calendar that pages to
+//!    another month. A past month's calendar fetched after it ended is not
+//!    asked again unless forced.
+//! 4. **Today, while held** ([`LaneHandle::hold_today`]): today's calendar
 //!    and day are searched again once they are older than
 //!    [`LaneConfig::refresh_today`], as long as some view holds them.
 //!
@@ -55,6 +59,9 @@ use tracing::{debug, warn};
 
 /// Most distinct days one [`LaneHandle::request_days`] may ask for.
 pub const MAX_REQUEST_DAYS: usize = 31;
+
+/// Most distinct months one [`LaneHandle::request_months`] may ask for.
+pub const MAX_REQUEST_MONTHS: usize = 12;
 
 /// Settings of a lane.
 #[derive(Clone)]
@@ -137,6 +144,28 @@ pub enum LaneEvent {
         /// The index's revision after storing it.
         revision: u64,
     },
+    /// The calendar of a month asked for alone
+    /// ([`LaneHandle::request_months`]) was searched and stored for these
+    /// cameras; the index is now at `revision`. (A calendar searched before
+    /// wanted days is reported by their [`LaneEvent::DayIndexed`].)
+    MonthIndexed {
+        /// The cameras.
+        cameras: Vec<DeviceCamera>,
+        /// Start of the month.
+        month: Secs,
+        /// The index's revision after storing it.
+        revision: u64,
+    },
+    /// A month asked for alone ([`LaneHandle::request_months`]) could not
+    /// be searched. It is not retried by itself; ask again.
+    MonthFailed {
+        /// The cameras.
+        cameras: Vec<DeviceCamera>,
+        /// Start of the month.
+        month: Secs,
+        /// English reason, for logs.
+        reason: String,
+    },
     /// A camera's day (or its month's calendar) could not be searched. It
     /// is not retried by itself; ask again.
     DayFailed {
@@ -161,7 +190,8 @@ pub enum LaneEvent {
 /// Why a request was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneError {
-    /// More than [`MAX_REQUEST_DAYS`] days, or the queue is full.
+    /// More than [`MAX_REQUEST_DAYS`] days (or [`MAX_REQUEST_MONTHS`]
+    /// months), or the queue is full.
     Limit,
 }
 
@@ -192,6 +222,8 @@ struct Queues {
     days: BTreeMap<(Reverse<Secs>, DeviceCamera), Want>,
     /// Month calendars to ask again even if fresh: (month start, camera).
     force_months: BTreeSet<(Secs, DeviceCamera)>,
+    /// Months asked for alone (calendar only), newest first, then camera.
+    months: BTreeMap<(Reverse<Secs>, DeviceCamera), Want>,
     /// Cameras whose today is held, per hold.
     holds: HashMap<u64, Vec<IndexedChannel>>,
     stop: bool,
@@ -382,6 +414,52 @@ impl LaneHandle {
         Ok(())
     }
 
+    /// Asks for these cameras' month calendars (any time within each
+    /// month) alone, after any wanted days: a calendar paged to another
+    /// month. A month whose calendar is fresh is not searched again unless
+    /// `force`. [`LaneEvent::MonthIndexed`] follows for each month searched,
+    /// [`LaneEvent::MonthFailed`] for one that could not be. Shares the
+    /// camera-day queue's bound (each camera-month counts as one).
+    pub fn request_months(
+        &self,
+        cameras: &[IndexedChannel],
+        months: &[Secs],
+        force: bool,
+    ) -> Result<(), LaneError> {
+        let months: BTreeSet<Secs> = months.iter().map(|m| secs(month_bounds(*m).0)).collect();
+        if months.len() > MAX_REQUEST_MONTHS {
+            return Err(LaneError::Limit);
+        }
+        {
+            let mut q = self.shared.q();
+            let new = months
+                .iter()
+                .flat_map(|m| cameras.iter().map(move |c| (Reverse(*m), c.camera)))
+                .filter(|k| !q.months.contains_key(k))
+                .count();
+            if q.days.len() + q.months.len() + new > self.shared.max_days {
+                return Err(LaneError::Limit);
+            }
+            for m in &months {
+                for c in cameras {
+                    let w = q
+                        .months
+                        .entry((Reverse(*m), c.camera))
+                        .or_insert_with(|| Want {
+                            uid: c.uid.clone(),
+                            force: false,
+                        });
+                    w.force |= force;
+                    if c.uid.is_some() {
+                        w.uid = c.uid.clone();
+                    }
+                }
+            }
+        }
+        self.shared.changed.notify_one();
+        Ok(())
+    }
+
     /// Keeps today's day and calendar of these cameras fresh until the
     /// returned hold is dropped (a view showing today holds it).
     pub fn hold_today(&self, cameras: &[IndexedChannel]) -> TodayHold {
@@ -429,18 +507,20 @@ impl LaneHandle {
         }
     }
 
-    /// Thumbnail requests and camera-days waiting.
+    /// Thumbnail requests and camera-days (and camera-months asked alone)
+    /// waiting.
     pub fn pending(&self) -> (usize, usize) {
         let q = self.shared.q();
-        (q.thumbs.len(), q.days.len())
+        (q.thumbs.len(), q.days.len() + q.months.len())
     }
 }
 
 /// One unit of work.
 enum Unit {
     Thumb(ThumbKey, Option<String>),
-    /// Calendars of one month for these cameras.
-    Month(Secs, Vec<(DeviceCamera, Option<String>)>),
+    /// Calendars of one month for these cameras; `alone` when asked for
+    /// without days (a failure is then reported for the month).
+    Month(Secs, Vec<(DeviceCamera, Option<String>)>, bool),
     /// One camera-day.
     Day(Secs, DeviceCamera, Option<String>),
 }
@@ -484,7 +564,7 @@ impl Worker {
                 ConnState::Connecting | ConnState::Backoff { .. } => {
                     let waiting = {
                         let q = self.shared.q();
-                        !q.thumbs.is_empty() || !q.days.is_empty()
+                        !q.thumbs.is_empty() || !q.days.is_empty() || !q.months.is_empty()
                     };
                     if waiting {
                         self.set_state(LaneState::WaitingDevice);
@@ -498,7 +578,7 @@ impl Worker {
             }
             let had_requests = {
                 let q = self.shared.q();
-                !q.thumbs.is_empty() || !q.days.is_empty()
+                !q.thumbs.is_empty() || !q.days.is_empty() || !q.months.is_empty()
             };
             match self.next_unit() {
                 Some(unit) => {
@@ -529,10 +609,14 @@ impl Worker {
 
     /// Fails every waiting request (the session can never succeed).
     fn fail_everything(&self, reason: &str) {
-        let (thumbs, days) = {
+        let (thumbs, days, months) = {
             let mut q = self.shared.q();
             q.force_months.clear();
-            (std::mem::take(&mut q.thumbs), std::mem::take(&mut q.days))
+            (
+                std::mem::take(&mut q.thumbs),
+                std::mem::take(&mut q.days),
+                std::mem::take(&mut q.months),
+            )
         };
         for (key, _) in thumbs {
             (self.sink)(LaneEvent::Thumbnail {
@@ -547,10 +631,22 @@ impl Worker {
                 reason: reason.to_owned(),
             });
         }
+        let mut by_month: BTreeMap<Secs, Vec<DeviceCamera>> = BTreeMap::new();
+        for ((Reverse(month), camera), _) in months {
+            by_month.entry(month).or_default().push(camera);
+        }
+        for (month, cameras) in by_month.into_iter().rev() {
+            (self.sink)(LaneEvent::MonthFailed {
+                cameras,
+                month,
+                reason: reason.to_owned(),
+            });
+        }
     }
 
     /// Picks the next unit: a thumbnail, else the newest wanted day (its
-    /// month's calendar first when stale), skipping days that need nothing.
+    /// month's calendar first when stale), skipping days that need nothing,
+    /// else the newest month asked for alone whose calendar is stale.
     fn next_unit(&self) -> Option<Unit> {
         let now = (self.cfg.clock)();
         let mut q = self.shared.q();
@@ -559,7 +655,9 @@ impl Worker {
         }
         let idx = lock(&self.index);
         loop {
-            let (&(Reverse(day), camera), want) = q.days.iter().next()?;
+            let Some((&(Reverse(day), camera), want)) = q.days.iter().next() else {
+                return self.next_month(&mut q, &idx, now);
+            };
             let want = want.clone();
             let (m_start, m_end) = month_bounds(day);
             let (ms, me) = (secs(m_start), secs(m_end));
@@ -582,11 +680,42 @@ impl Worker {
                         }
                         v
                     });
-                return Some(Unit::Month(ms, cams));
+                return Some(Unit::Month(ms, cams, false));
             }
             q.days.remove(&(Reverse(day), camera));
             if want.force || day_needed(&idx, camera, day, now, self.cfg.refresh_today) {
                 return Some(Unit::Day(day, camera, want.uid));
+            }
+        }
+    }
+
+    /// The newest month asked for alone whose calendar is due, for every
+    /// camera waiting for it (in one 142); months that need nothing are
+    /// dropped.
+    fn next_month(&self, q: &mut Queues, idx: &DeviceIndex, now: Secs) -> Option<Unit> {
+        loop {
+            let (&(Reverse(ms), _), _) = q.months.iter().next()?;
+            let me = secs(month_bounds(ms).1);
+            let keys: Vec<(Reverse<Secs>, DeviceCamera)> = q
+                .months
+                .keys()
+                .filter(|(Reverse(m), _)| *m == ms)
+                .copied()
+                .collect();
+            let mut cams = Vec::new();
+            for k in keys {
+                if let Some(w) = q.months.remove(&k) {
+                    let c = k.1;
+                    if w.force
+                        || q.force_months.contains(&(ms, c))
+                        || month_stale(idx.month_fetched_at(c, ms), me, now, self.cfg.refresh_today)
+                    {
+                        cams.push((c, w.uid));
+                    }
+                }
+            }
+            if !cams.is_empty() {
+                return Some(Unit::Month(ms, cams, true));
             }
         }
     }
@@ -632,7 +761,7 @@ impl Worker {
                 let state = self.thumbnail(&key, uid).await;
                 (self.sink)(LaneEvent::Thumbnail { key, state });
             }
-            Unit::Month(ms, cams) => self.month(ms, cams).await,
+            Unit::Month(ms, cams, alone) => self.month(ms, cams, alone).await,
             Unit::Day(day, camera, uid) => self.day(day, camera, uid).await,
         }
     }
@@ -662,7 +791,7 @@ impl Worker {
         }
     }
 
-    async fn month(&mut self, ms: Secs, cams: Vec<(DeviceCamera, Option<String>)>) {
+    async fn month(&mut self, ms: Secs, cams: Vec<(DeviceCamera, Option<String>)>, alone: bool) {
         let (m_start, m_end) = month_bounds(ms);
         let me = secs(m_end);
         let req = day_record_request(cams.iter().map(|(c, u)| (*c, self.uid(*c, u.clone()))));
@@ -686,28 +815,53 @@ impl Worker {
                     for (c, days) in months {
                         idx.set_month(c, ms, me, days, now)?;
                     }
-                    Ok::<(), std::io::Error>(())
+                    Ok::<u64, std::io::Error>(idx.revision())
                 })
                 .await;
-                if let Some(e) = match stored {
-                    Ok(Ok(())) => None,
+                let failure = match stored {
+                    Ok(Ok(revision)) => {
+                        if alone {
+                            (self.sink)(LaneEvent::MonthIndexed {
+                                cameras: cams.iter().map(|(c, _)| *c).collect(),
+                                month: ms,
+                                revision,
+                            });
+                        }
+                        None
+                    }
                     Ok(Err(e)) => Some(e.to_string()),
                     Err(e) => Some(e.to_string()),
-                } {
+                };
+                if let Some(e) = failure {
                     warn!(error = %e, "cannot store the recording calendar");
-                    self.fail_month(ms, me, &cams, &format!("cannot store: {e}"));
+                    self.fail_month(ms, me, &cams, &format!("cannot store: {e}"), alone);
                 }
             }
             Err(e) => {
                 debug!(error = %e, "day records failed");
-                self.fail_month(ms, me, &cams, &reason(&e));
+                self.fail_month(ms, me, &cams, &reason(&e), alone);
             }
         }
     }
 
     /// Reports and drops the waiting days of these cameras in a month whose
-    /// calendar could not be read.
-    fn fail_month(&self, ms: Secs, me: Secs, cams: &[(DeviceCamera, Option<String>)], why: &str) {
+    /// calendar could not be read (and the month itself when it was asked
+    /// for alone).
+    fn fail_month(
+        &self,
+        ms: Secs,
+        me: Secs,
+        cams: &[(DeviceCamera, Option<String>)],
+        why: &str,
+        alone: bool,
+    ) {
+        if alone {
+            (self.sink)(LaneEvent::MonthFailed {
+                cameras: cams.iter().map(|(c, _)| *c).collect(),
+                month: ms,
+                reason: why.to_owned(),
+            });
+        }
         let failed: Vec<(Secs, DeviceCamera)> = {
             let mut q = self.shared.q();
             let keys: Vec<(Reverse<Secs>, DeviceCamera)> = q

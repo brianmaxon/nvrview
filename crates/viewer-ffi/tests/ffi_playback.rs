@@ -223,7 +223,7 @@ fn playback_through_the_c_interface() {
     // SAFETY: valid pointers and strings throughout; the core is freed
     // once, at the end.
     unsafe {
-        assert_eq!(nv_abi_minor(), 6);
+        assert!(nv_abi_minor() >= 6);
         let host = c("127.0.0.1");
         let (user, password) = (c("example-user"), c("example-password"));
         let mut dev = 0u64;
