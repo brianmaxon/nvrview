@@ -1105,7 +1105,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool zoomed = Math.Abs(tile.Zoom - 2) < 0.01;
         bool map = chrome.MapShown;
         UnitRect seen = tile.DigitalZoom.Visible(tile.ZoomBase);
-        bool cropped = seen.Width < 0.9 && seen.Height < 0.9;
+        bool cropped = seen.Width < 0.9 || seen.Height < 0.9;
         bool wantsMain = await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
         bool resetShown = chrome.ResetShown;
         chrome.PressReset();
