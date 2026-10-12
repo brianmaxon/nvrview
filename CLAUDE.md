@@ -72,6 +72,29 @@ Follow [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
 - A user-visible feature lands on both apps (or [docs/PARITY.md](docs/PARITY.md) says why not), and its table is updated in the same change; a new self-test step gets a `// parity: id` marker.
 - American English spelling everywhere.
 
+## Working efficiently
+
+Agent time and tokens go mostly into steps and the context each step
+rereads, so take fewer, better-aimed steps.
+
+- **Start current.** In a new worktree, `git merge main` first if the branch
+  is behind local `main` (worktrees can start from the last pushed commit).
+- **Targeted while working, full once at the end.** While iterating, run only
+  what the change touches (`cargo nextest run -p <crate>`, `swift test
+  --filter <Suite>`, one self-test). Run `scripts/check.sh` once when the work
+  is done, and the Windows check once after that; rerun only what failed.
+- **Logs to files.** Send build, test, and self-test output to a log file and
+  read the summary and the failures (`tail`, `grep -E 'FAIL|error|panicked'`),
+  never a whole log. Read source files by range when you know where to look.
+- **Wait in one command.** When waiting for the Windows lock or a long job,
+  block in a single command (a loop with a sleep, or a background command),
+  not in repeated short checks.
+- **Use the pointers you are given.** Prompts name files, types, and fixtures;
+  start there instead of surveying the tree. Search with `rg` before opening
+  files.
+- **Report briefly.** The final report says what changed, what ran and passed,
+  and what was not verified; no full logs or file dumps.
+
 ## Checking your work
 
 `scripts/check.sh` runs everything below in order and stops at the first

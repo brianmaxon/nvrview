@@ -1,0 +1,22 @@
+[package]
+name = "capture"
+version = "0.1.0"
+description = "Pure base for local capture in nvrview: one epoch timeline, segment and gap policy, the call mixer and limiter, caps and disk-guard decisions, the partial-file registry, and file names"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audio-pipeline = { path = "../audio-pipeline" }
+mp4-remux = { path = "../mp4" }
+recordings = { path = "../recordings" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

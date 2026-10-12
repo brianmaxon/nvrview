@@ -8,11 +8,11 @@ use std::path::Path;
 
 /// Largest JSON file read back (index day files and job states are far
 /// smaller); a larger file is treated as corrupt.
-pub(crate) const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Writes `bytes` to `path` so that a crash leaves either the old or the
 /// new content: write a sibling temporary file, flush it to disk, rename.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(dir)?;
     let name = path
@@ -30,13 +30,13 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Serializes `value` as JSON and writes it atomically.
-pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+pub fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(io::Error::other)?;
     write_atomic(path, &bytes)
 }
 
 /// Reads JSON written by [`write_json`]; `Ok(None)` if the file is missing.
-pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),

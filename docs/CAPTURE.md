@@ -14,6 +14,52 @@
 > macOS the header, its menus and keys (capture and PTZ actions say "coming
 > soon") and the call window's picture as a single fixed tile.
 
+## Implementation status (K2)
+
+`crates/capture` is the pure base the recorder will be built on: no
+threads, clocks, devices, or file-system access of its own (callers pass
+timestamps, free bytes, sizes, and a predicate for names in use). It is not
+wired into `viewer-core` or the C interface yet. Each module's documentation
+lists its rules; the choices made where this page is silent are:
+
+- **Epoch timeline** (`epoch`): the file clock is microseconds, 0 at the
+  first video frame seen; a segment's own 0 is its keyframe. A camera
+  timestamp step beyond +5 s or under -1 s starts an epoch (smaller back
+  steps are reordering); timestamps wrap at 2^32 microseconds unless told
+  otherwise. A new epoch starts at the previous frame's file time plus the
+  host-measured gap (at least 1 ms). Camera audio further than 10 s from the
+  latest video is dropped and counted (`audio_unplaced`). Our sent audio is
+  mapped by the median of host arrival minus file time over the last 64
+  frames. Audio chunks within 20 ms of contiguous are snapped, later ones
+  leave counted silence, overlap is trimmed.
+- **Segments and gaps** (`policy`): a gap is a video step over 2 s; up to
+  60 s the file continues and the gap is counted, over that (or a format
+  change, or 60 s with no frame) the segment ends and the next keyframe
+  opens `(part N)`. No keyframe within 30 s of waiting at the start is
+  `no_video`. The duration cap runs from the first segment's keyframe (gaps
+  included) and the size cap counts every segment's bytes; both end the
+  recording before the frame that would pass them is written.
+- **Mixer** (`mixer`): Conversation, Visitor and You are always all
+  produced ("Both"); the mixer emits frames 250 ms behind the recording's
+  progress, drops (and counts) audio that arrives later or more than 10 s
+  ahead, and the limiter is a memoryless soft knee (identity to 0.8,
+  ceiling 0.98). One mixer per segment. `EncodeQueue` is the 10 s bound
+  for the app's encoder.
+- **Caps and disk** (`caps`): settings clamp to 1 minute to 12 hours and
+  100 MB to 64 GB (decimal units); finalizing needs the file size plus 2%
+  plus 8 MiB free, else the fragmented file is published.
+- **Partials** (`partials`): at most 32 entries, valid only as
+  `<stem>.partial.mp4` with target `<stem>.mp4`; recovery deletes a partial
+  under 4 KiB or whose target already exists, and recovers the rest.
+  `recordings::store` (atomic JSON writes) is shared, not copied.
+- **Names** (`naming`): built on `recordings::naming` and the still-image
+  name; a taken live name is numbered against `<stem>.mp4` and
+  `<stem>.partial.mp4`; a call stem follows the transcript's rule.
+
+Not in the crate: the muxer driver, threads, the free-space shim, the
+event JSON, the C interface (K4), and `fixtures/synthetic/capture-names.json`
+(the names are tested from tables in the crate).
+
 ## Principles
 
 1. **One tile, one header, everywhere.** The grid's tiles, the call window
