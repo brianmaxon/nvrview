@@ -1,8 +1,12 @@
 # Smart notifications
 
-Status: **designed; the rules engine (`crates/alerts`) is built**. Nothing
-else here is built yet: no app wiring, no C interface, no delivery, no
-models. Each section says what is built, what is planned, and what is still
+Status: **designed; the rules engine (`crates/alerts`) is built, and so is
+its service in `viewer-core` with the C interface (ABI 3 minor 12;
+[FFI.md](FFI.md), "Smart alerts")**: trigger intake, camera wakes and
+picture acquisition, the verification request and answer, decisions, the
+event log, and the seams for trigger inputs and outputs. Not built yet: the
+apps' side (detector, views, notifications), the input and output modules
+themselves, standby, the coordinator, and models. Each section says what is built, what is planned, and what is still
 to be measured. Protocol facts are marked **observed** or **reported**
 exactly as in [protocol.md](protocol.md); nothing here may depend on a
 reported fact until it is observed.
@@ -640,10 +644,14 @@ device), `learning` (on, promote at 1 in 20, demote at 1 in 2). Validation
 never fails: it clamps every value into range, rounds the location to 0.1°,
 drops unusable sources and duplicate cameras, and lists what it changed.
 
-### C interface (proposed)
+### C interface
 
-Additive, in the next free ABI minor when it lands (the current minor is 8),
-modeled on the thumbnail get-and-put pattern. Not built.
+Built as ABI 3 minor 12; [FFI.md](FFI.md), "Smart alerts", is the
+contract (it adds `nv_alert_snapshot_get` and `nv_alerts_trigger_put` with
+the trigger's ID, and names the settings' `enabled`, `utc_offset_min`,
+`acquisition`, and `inputs`). Standby (`nv_standby_set`) and the
+coordinator's `processor_state` are not built. The design as first
+proposed, modeled on the thumbnail get-and-put pattern:
 
 ```c
 NvStatus nv_alerts_configure(NvCore*, const char *settings_json);
@@ -668,7 +676,7 @@ for always-alert cases).
 
 ## The rules engine (`crates/alerts`)
 
-Built and tested; not yet wired to `viewer-core`.
+Built and tested; wired to `viewer-core` (below).
 
 - `trigger`: normalization (device field lists, unknown kinds, external
   bodies with keys checked and future times clamped).
@@ -685,6 +693,35 @@ Built and tested; not yet wired to `viewer-core`.
 - Bounded: 1024 episodes, 256 open checks, 4096 remembered trigger ids, 64
   trace steps, 8 detections per picture step.
 
+## The service in `viewer-core`
+
+Built (`viewer_core::alerts_owner`; the C contract is FFI.md "Smart
+alerts"):
+
+- **Intake**: a tap on the core's event queue turns `detection`, `motion`,
+  and `alarm` events into triggers; external sources reach it through
+  `ExternalTriggers` (a bounded queue input modules such as MQTT feed,
+  rate-limited per source) and the app through `nv_alerts_trigger_put`.
+- **Acquisition**: one wake per camera, shared by the checks that need it
+  and by any tile showing the same stream; the first keyframe, a picture
+  about 1 s later, and for external checks more every 2 s while the window
+  is open; a cover image (298) of the last 10 s when no picture came in
+  3 s. Caps per device (`standby.max_wake_per_device`) and per process
+  (8), waiting cameras ordered by priority (always-alert candidates
+  first), a re-check hold given up for a new check.
+- **Verification**: `verify_request` events; boxes from the app become the
+  engine's samples; no answer in 5 s counts as not checked.
+- **Timeliness**: still-present re-checks every `recheck_period_s` while an
+  alerted episode lasts, for at most `recheck_limit_s`; the stream stops
+  when the episode settles.
+- **Outputs**: modules implementing `AlertOutput`, built from `outputs[]`
+  by kind (the engine's kinds, `home_assistant` included); each result is
+  a `delivery` step. Delivery is asynchronous (a `DeliveryDone` handle,
+  30 s limit); outputs that send pictures wait up to 2 s for the app's
+  snapshot.
+- **Storage**: the decision log, snapshots, and feedback under
+  `data_dir/alerts/`, each bounded (FFI.md).
+
 ## Testing and evaluation
 
 - **Engine** (built): unit tests for every rule and state transition on
@@ -696,7 +733,13 @@ Built and tested; not yet wired to `viewer-core`.
   confirmation, a reconnect gap with late events); property tests that an
   always-alert outcome is never suppressed and that cooldowns never shrink
   within an episode.
-- **End to end against `mock-nvr`** (planned): scripted 33 pushes, synthetic
+- **End to end against `mock-nvr`** (built for the service:
+  `crates/viewer-core/tests/alerts.rs` on the simulated clock with a
+  scripted detector: external trigger to alert with trace, not confirmed,
+  no answer failing open, smoke and mutes, caps, a shared tile stream, a
+  reconnect mid-check, snapshots and the log, and a property test that
+  woken streams always stop; still planned: the webhook, catch-up, and
+  the coordinator): scripted 33 pushes, synthetic
   streams, and a scripted detector (boxes keyed by camera and time), covering
   wake, request, boxes, alert, settle, stream stop; network loss and catch-up;
   never a second login; the webhook (token, rate limit, region, window,
