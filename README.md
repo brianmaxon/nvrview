@@ -167,8 +167,34 @@ at the end shows each suite as ran or cached, with its time.
   fingerprint is everything under `apps/windows/` except the files that only
   another area exercises (`WINDOWS_OWNED` in `scripts/suite-cache.py`), so
   shared code reruns every area and a change to a recordings file reruns
-  recordings and the always-run startup smoke. A full run covers all areas. Sanitization, self-test parity,
+  recordings and the always-run startup smoke. A full run covers all areas.
+  The other Windows suites cover only the C# projects they build (and what
+  those reference): the video self-test the video demo project, the smoke test
+  the smoke project, the tile tests and the shell tests their own projects,
+  each with the shared build settings; the update test covers the updater and
+  start-up files, the packaging script, and the signing tool's crates (the
+  project table in `scripts/suite-cache.py` is checked against the project
+  files by `suite-cache.py check-projects`). Sanitization, self-test parity,
   the secret scan, and `cargo fmt` always run.
+- **Trimmed build.** The trimmed publish and its app self-test
+  (`app-publish.*`) and the update test run in full runs (releases) and when
+  the last passing trimmed run on Windows is more than 24 hours old
+  (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs print them as `deferred` and count
+  them like cached suites (merge stamps, never a release). The trade-off: a
+  problem that only trimming causes shows at the daily run or the release, not
+  at the merge that introduced it.
+- **Secret scan.** Normal checks scan the commits not yet covered by a clean
+  scan (`scripts/secret-scan.sh` records them in the git directory) and the
+  staged and unstaged changes; the whole history is scanned when the last full
+  scan is a day old, with `NVRVIEW_FULL_CHECK=1` (releases), and when the
+  gitleaks ignore list changes. A failed scan records nothing.
+- **Timings.** Every check ends with a table of its step times; merges and
+  releases add the total and the slowest three steps. Each run appends a line
+  (JSON: time, kind, total, steps) to `check-timings.jsonl` in the git
+  directory, which keeps the last 500.
+- **Parallel merges.** `scripts/merge-branch.sh` and `scripts/merge-train.sh`
+  run the Mac check and the Windows check at the same time, each with its own
+  log; the merge reaches main only when both pass.
 - **Never cached.** A suite with an unstaged or untracked input runs and is
   not recorded. Failures are never recorded. A pass from a Windows run retried
   after a known flake is recorded as retried and never skips a suite.

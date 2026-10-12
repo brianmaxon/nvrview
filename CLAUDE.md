@@ -134,6 +134,26 @@ tested by `scripts/test-suite-cache.sh`. The Windows app self-test is cached
 per area (`scripts/windows-selftest-areas.txt` puts every `// parity:` step in
 one area; `--areas a,b` runs some); a new step needs a table entry, and a new
 file that only one area exercises goes in `WINDOWS_OWNED` in the cache script.
+The other Windows suites are cached by the projects they build (video
+self-test, smoke test, tile tests, shell tests; `DOTNET_REFS` in the cache
+script mirrors the project references) and the update test by its updater
+files, so a recordings-only change reruns only the recordings area.
+
+**Trimmed build: daily, not per merge.** The trimmed publish and its self-test
+(`app-publish.*`, the update test) take minutes and fail only when trimming
+breaks something. Agent checks and merges run the debug-build areas only and
+print the trimmed suites as `deferred` (a stamp with them serves merges, never a
+release); they run in release checks, with `NVRVIEW_FULL_CHECK=1`, and when the
+last passing trimmed run on Windows is over 24 h old (`NVRVIEW_TRIMMED_MAX_AGE_H`).
+A trimming problem therefore shows at the daily run or the release, not at the
+merge that caused it: when one fails, bisect the day's merges.
+
+**Secret scan and timings.** The scan covers the commits added since the last
+clean scan plus staged and unstaged changes (`scripts/secret-scan.sh`; record in
+the common git directory); the full history runs once a day, with
+`NVRVIEW_FULL_CHECK=1`, in releases, and when the ignore list changes. Every
+check ends with its step times and the slowest three; each run appends a line
+to `check-timings.jsonl` in the common git directory (last 500).
 
 **Windows check and merging.** Run the final
 `NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh` on a *clean committed tree*
@@ -141,16 +161,17 @@ file that only one area exercises goes in `WINDOWS_OWNED` in the cache script.
 directory) that `scripts/merge-branch.sh` can reuse, so the merge does not run
 the Windows check again. Commit nothing after it that touches code; a later
 change means a new Windows run. The lead merges with
-`scripts/merge-branch.sh <branch> "<message>"`: merge without committing, Mac
-check (cached suites allowed and listed), then the Windows check only when the
+`scripts/merge-branch.sh <branch> "<message>"`: merge on a temporary branch,
+then the Mac check (cached suites allowed and listed) and, only when the
 branch's stamp does not cover the result or no full Windows run passed in 72
-hours (rules in the script header). To
-check Mac and Windows together, use `scripts/release-check.sh`.
+hours (rules in the script header), the Windows check at the same time; main
+moves only when both pass. To check Mac and Windows together on any tree, use
+`scripts/release-check.sh` (full runs).
 
 **Merge trains.** `scripts/merge-train.sh BRANCH[=MESSAGE]...` merges several
 finished branches (each with its own merge commit and message) on a temporary
-branch, runs the Mac check once and the Windows check once on the result (the
-reuse rules above apply to each merge step), and fast-forwards main. A branch
+branch, runs the Mac check and the Windows check once each, at the same time, on the
+result (the reuse rules above apply to each merge step), and fast-forwards main. A branch
 that conflicts is skipped and reported (a conflict only in `Cargo.lock` is
 resolved by regenerating it); when a check fails, the train is bisected until
 the failing branch is isolated, and the others merge. It prints a table of
