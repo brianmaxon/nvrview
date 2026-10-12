@@ -179,6 +179,10 @@ internal sealed class FakeApp : NvCoreCallbacks
     public long Callbacks;
     public long Actions;
     public long Events;
+    /// <summary>verify_request keys, for the smart-alert check (minor 12).</summary>
+    public readonly System.Collections.Concurrent.ConcurrentQueue<string> VerifyRequests = new();
+    /// <summary>New alerts (alert events with state new).</summary>
+    public long AlertsNew;
     public long TapBlocks;
     public int AnswerErrors;
     public Exception? ReportedException;
@@ -449,6 +453,15 @@ internal sealed class FakeApp : NvCoreCallbacks
                 else if (state == "login_failed")
                 {
                     Problem("login failed");
+                }
+                break;
+            case "verify_request":
+                VerifyRequests.Enqueue(e.GetProperty("request").GetString() ?? "");
+                break;
+            case "alert":
+                if (e.GetProperty("state").GetString() == "new")
+                {
+                    Interlocked.Increment(ref AlertsNew);
                 }
                 break;
             case "device_info":
@@ -775,6 +788,7 @@ internal sealed class Smoke(Options options)
         CheckRecordings(core, key, dataDir);
         CheckPlayback(core, key);
         CheckCapture(core, tile, dataDir);
+        CheckSmartAlerts(core, device);
         CheckDiscovery(core);
         CheckUpdates(core);
         CheckGrid();
@@ -1301,6 +1315,61 @@ internal sealed class Smoke(Options options)
             at += size;
         }
         return types.Count > 0 && types[0] == "ftyp" && types.Contains("moov") && !types.Contains("moof");
+    }
+
+    // Smart alerts (minor 12): a trigger from the app wakes channel 1; each
+    // picture is fetched and answered with a person; the alert is logged and
+    // gets a snapshot and feedback; then the service is turned off.
+    private void CheckSmartAlerts(NvCore core, ulong device)
+    {
+        ISmartAlerts alerts = core;
+        string camera = $$"""{"device":{{device}},"channel":1}""";
+        string trigger = $$"""{"source":"device","camera":{{camera}},"kind":"people"}""";
+        if (StatusOf(() => alerts.AlertsTriggerPut(trigger)) != NvStatus.NotConfigured ||
+            StatusOf(() => alerts.AlertsConfigure("{")) != NvStatus.InvalidArgument)
+        {
+            Problem("smart alerts before nv_alerts_configure");
+        }
+        alerts.AlertsConfigure("""{"cameras":[{"camera":""" + camera + """}],"utc_offset_min":0,"acquisition":{"recheck":false}}""");
+        alerts.AlertsTriggerPut(trigger);
+        bool alerted = WaitUntil(() =>
+        {
+            while (_app.VerifyRequests.TryDequeue(out string? key))
+            {
+                AlertFrames f = alerts.AlertFramesGet(key);
+                if (f.Kind != NvThumbKind.H264Keyframe || f.Data.Length < 4 || f.Data[0] != 0 || f.Data[1] != 0)
+                {
+                    Problem("nv_alert_frames_get");
+                }
+                alerts.AlertDetectionsPut(key, AlertDetection.Json([new AlertDetection("person", 0.9, 0.4, 0.2, 0.2, 0.5)]));
+                if (StatusOf(() => alerts.AlertDetectionsPut(key, """{"detections":[]}""")) != NvStatus.UnknownId)
+                {
+                    Problem("an answered request was answered again");
+                }
+            }
+            return Interlocked.Read(ref _app.AlertsNew) > 0;
+        }, 15_000);
+        if (!alerted)
+        {
+            Problem("no alert from a verified person");
+            return;
+        }
+        using JsonDocument log = JsonDocument.Parse(alerts.AlertsGet("""{"decision":["alert"]}"""));
+        ulong alertId = log.RootElement.GetProperty("entries")[0].GetProperty("decision").GetProperty("alert_id").GetUInt64();
+        alerts.AlertSnapshotPut(alertId, [0xFF, 0xD8, 0xFF, 0xD9]);
+        if (alerts.AlertSnapshotGet(alertId).Length != 4 ||
+            StatusOf(() => alerts.AlertSnapshotGet(alertId + 1000)) != NvStatus.UnknownId)
+        {
+            Problem("alert snapshots");
+        }
+        alerts.AlertFeedback($$"""{"alert_id":{{alertId}},"vote":"up"}""");
+        alerts.AlertMute(camera, 900);
+        alerts.AlertMute(camera, 0);
+        if (StatusOf(() => alerts.AlertMute("{}", 60)) != NvStatus.InvalidArgument)
+        {
+            Problem("nv_alert_mute accepted a bad camera");
+        }
+        alerts.AlertsConfigure("""{"enabled":false}""");
     }
 
     private void CheckCapture(NvCore core, ulong tile, string dataDir)

@@ -90,7 +90,7 @@ internal static class CaptureTests
                 RecordRequest.Live(7, 3600, quality: "sub", name: "Camera 1"));
             using JsonDocument call = JsonDocument.Parse(RecordRequest.Call(7, "/tmp/a b.mp4"));
             T.Equal("/tmp/a b.mp4", call.RootElement.GetProperty("file").GetString());
-            T.Equal(9u, NvNative.AbiMinor);
+            T.Check(NvNative.AbiMinor >= 9);
             T.Equal(64, NvNative.AscMax);
         });
 
