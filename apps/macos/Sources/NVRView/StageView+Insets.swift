@@ -142,6 +142,7 @@ extension StageView {
         if let item = insetBoard.dismiss(camera) {
             if item.kind.isCritical { dismissAlert(item.camera) }
             if item.kind.isCall { model.calls.end(item.camera, reason: "closed") }
+            if item.kind == .verification { verificationInsetDismissed(item.camera) }
         }
         syncInsets()
         refreshChrome()
@@ -534,6 +535,8 @@ extension StageView {
         for view in alertInsetViews.values where view.superview === insetLayer {
             insetLayer.addSubview(view, positioned: .above, relativeTo: stageCall)
         }
+        // A live check's boxes and steps ride on its inset.
+        layoutVerificationInsets()
     }
 
     // MARK: Self-test

@@ -16,6 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Calls shown in their own windows (not viewer windows).
     private(set) var callWindows: CallWindows?
     private var settings: SettingsWindowController?
+    /// Smart alerts: the event log's window and the live checks' window.
+    private(set) var eventsWindow: SmartAlertEventsWindowController?
+    private(set) var verificationPanel: VerificationPanelController?
     /// Open recordings windows (docs/UX.md "Recordings").
     private(set) var recordingsWindows: [RecordingsWindowController] = []
     /// With `--selftest`: AppKit's warnings on standard error, counted.
@@ -55,6 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         model.openWindow = { [weak self] content in self?.openWindow(content) }
         startCallWindows(model)
         startCapture(model)
+        startSmartAlerts(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
@@ -96,6 +100,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     static let selfTestDefaults = "nvrview-selftest"
+
+    // MARK: Smart alerts
+
+    /// The live checks' window and whether a camera is on any viewer window
+    /// (docs/UX.md "Smart alerts").
+    private func startSmartAlerts(_ model: AppModel) {
+        let alerts = model.smartAlerts!
+        alerts.isOnScreen = { [weak self] camera in self?.windows.contains { $0.stage.showsCamera(camera) } ?? false }
+        alerts.showPanel = { [weak self, weak model] show in
+            guard let self, let model else { return }
+            if show {
+                if verificationPanel == nil { verificationPanel = VerificationPanelController(model: model) }
+                // Never takes focus; in a self-test it stays behind.
+                if options.selfTestSeconds != nil {
+                    verificationPanel?.window?.orderBack(nil)
+                } else {
+                    verificationPanel?.present()
+                }
+            } else {
+                verificationPanel?.hide()
+            }
+        }
+    }
+
+    /// Window > Smart Alert Events.
+    @objc func showSmartAlertEvents(_ sender: Any?) {
+        let c = openSmartAlertEvents()
+        c?.showWindow(nil)
+        c?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The events window, opened if need be (behind the others, never key,
+    /// in a self-test).
+    @discardableResult
+    func openSmartAlertEvents() -> SmartAlertEventsWindowController? {
+        guard let model else { return nil }
+        if let open = eventsWindow { return open }
+        let c = SmartAlertEventsWindowController(app: model)
+        c.onClose = { [weak self] _ in self?.eventsWindow = nil }
+        c.events.jump = { [weak self] camera, ms in self?.openRecording(camera, atMs: ms) }
+        eventsWindow = c
+        if options.selfTestSeconds != nil { c.window?.orderBack(nil) }
+        return c
+    }
+
+    /// The recordings window at a camera, a few seconds before a time.
+    private func openRecording(_ camera: CameraRef, atMs ms: Int64) {
+        guard let model, let c = recordingsWindows.first ?? openRecordingsWindow() else { return }
+        c.showWindow(nil)
+        let seconds = ms / 1000 + Int64(model.recordings.utcOffset) - 5
+        c.browser.show(day: DeviceTime.dayStart(seconds))
+        c.browser.laneClick(RecordingCamera(device: camera.device, channel: camera.channel, lens: camera.lens), at: seconds)
+    }
 
     // MARK: Recordings (capture)
 
@@ -567,6 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(.separator())
         window.addItem(item("Recordings", #selector(showRecordings(_:)), "r", [.command, .option]))
+        window.addItem(item("Smart Alert Events", #selector(showSmartAlertEvents(_:)), "e", [.command, .option]))
         let windowItem = NSMenuItem()
         windowItem.submenu = window
         main.addItem(windowItem)

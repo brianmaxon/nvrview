@@ -96,6 +96,8 @@ final class StageView: NSView {
     weak var delegate: StageDelegate?
     let grid: MetalGridView
     private let overlay = StageOverlay()
+    /// The view over the tiles that holds their chrome.
+    var tileOverlay: NSView { overlay }
     private(set) var chromes: [NodePath: TileChromeView] = [:]
     private(set) var frames = LayoutFrames(leaves: [], dividers: [])
     private var lastKey: RenderKey?
@@ -171,6 +173,13 @@ final class StageView: NSView {
     }
     private var demandOwners: Set<DemandOwner> = []
 
+    // Live smart-alert checks (docs/UX.md "Smart alerts"; StageView+Verify.swift):
+    // a band in each tile showing a checked camera, an overlay on each
+    // verification inset.
+    var verifyBands: [NodePath: VerificationOverlayView] = [:]
+    var verifyInsetOverlays: [CameraRef: VerificationOverlayView] = [:]
+    var verifyToken: UUID?
+
     // Alert insets (docs/UX.md "Alert insets"; StageView+Insets.swift).
     var insetBoard = InsetBoard()
     var alertInsetViews: [CameraRef: InsetView] = [:]
@@ -241,6 +250,7 @@ final class StageView: NSView {
         addSubview(grid)
         addSubview(overlay)
         installInsets()
+        installVerification()
         installToast()
         installPTZ()
         if fixedTile { state.selected = state.tree.leaves.first?.path }
@@ -308,6 +318,8 @@ final class StageView: NSView {
         syncDemands()
         window?.invalidateCursorRects(for: overlay)
         lastKey = nil
+        // Which cameras the window shows decides where live checks go.
+        if verifyToken != nil { syncVerification() }
     }
 
     override func layout() {
@@ -328,6 +340,7 @@ final class StageView: NSView {
             if view.frame != leaf.rect { view.frame = leaf.rect }
         }
         layoutInsets(leaves)
+        layoutVerification(leaves)
         // The focused tile's chrome rides on top while it grows.
         if let f = state.focused, let view = chromes[f], overlay.subviews.last !== (insets[f] ?? view) {
             overlay.addSubview(view, positioned: .above, relativeTo: nil)
@@ -622,6 +635,7 @@ final class StageView: NSView {
         state.focused = path
         animateFocus(to: 1)
         refreshChrome()
+        if verifyToken != nil { syncVerification() }
         delegate?.stageDidChangeState(self)
     }
 
@@ -655,6 +669,7 @@ final class StageView: NSView {
         case .unfocused?:
             state.focused = nil
             refreshChrome()
+            if verifyToken != nil { syncVerification() }
         case nil:
             break
         }
@@ -965,6 +980,7 @@ final class StageView: NSView {
     /// The window is closing: ends focus, withdraws every stream request,
     /// and stops the renderer asking this stage for frames.
     func tearDown() {
+        tearDownVerification()
         tearDownInsets()
         endFocusImmediately()
         syncDemands(clearAll: true)

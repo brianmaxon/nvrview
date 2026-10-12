@@ -38,6 +38,8 @@ final class FakeAlertsState: @unchecked Sendable {
     struct World {
         var configured = false
         var enabled = false
+        /// The last settings document the app sent.
+        var lastConfiguration: String?
         var alwaysAlertCameras: Set<AlertCamera> = []
         var nextTrigger: UInt64 = 1
         var nextRequest: UInt64 = 1
@@ -82,11 +84,17 @@ extension FakeCore {
     }
 
     private static func parseCamera(_ any: Any?) -> AlertCamera? {
-        guard let o = any as? [String: Any], let d = o["device"] as? Int, let ch = o["channel"] as? Int,
+        // Numbers as JSON gives them, or as this file stored them (UInt64, UInt16, UInt8).
+        func int(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue ?? (v as? UInt64).map(Int.init) ?? (v as? UInt16).map(Int.init) ?? (v as? UInt8).map(Int.init) }
+        guard let o = any as? [String: Any], let d = int(o["device"]), let ch = int(o["channel"]),
             d >= 0, (0...Int(UInt16.max)).contains(ch)
         else { return nil }
-        return AlertCamera(device: UInt64(d), channel: UInt16(ch), lens: UInt8((o["lens"] as? Int) ?? 0))
+        return AlertCamera(device: UInt64(d), channel: UInt16(ch), lens: UInt8(clamping: int(o["lens"]) ?? 0))
     }
+
+    /// The last settings document `nv_alerts_configure` took (the self-test
+    /// reads what the app sent).
+    public var lastAlertsConfiguration: String? { alertsWorld.locked { $0.lastConfiguration } }
 
     /// Cameras whose person checks are always-alert cases (they fail open
     /// when no picture could be checked).
@@ -105,6 +113,7 @@ extension FakeCore {
         alertsWorld.locked { w in
             w.configured = true
             w.enabled = enabled
+            w.lastConfiguration = json
             if !enabled {
                 w.checks.removeAll()
                 w.requests.removeAll()

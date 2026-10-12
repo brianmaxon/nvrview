@@ -20,6 +20,10 @@ public enum InsetKind: Sendable, Hashable {
     case detection(String)
     /// Not an event: the view the stage showed before a swap.
     case view
+    /// A smart-alert check of a camera the window does not show (docs/UX.md
+    /// "Smart alerts"): the live verification view's inset. Its lifetime is
+    /// the check's (`VerificationBoard`), not the inset clock's.
+    case verification
 
     /// Red for smoke and CO, a calmer accent for the rest.
     public var isCritical: Bool { if case .soundAlarm = self { true } else { false } }
@@ -28,8 +32,9 @@ public enum InsetKind: Sendable, Hashable {
     public var isCall: Bool { self == .doorbell || self == .conversation }
 
     /// Doorbell and detection insets close by themselves after the event;
-    /// sound alarms stay until dismissed.
-    public var closesByItself: Bool { !isCritical && self != .view }
+    /// sound alarms stay until dismissed; a check's inset goes with its
+    /// check.
+    public var closesByItself: Bool { !isCritical && self != .view && self != .verification }
 
     /// The header's reason.
     public var reason: String {
@@ -39,6 +44,7 @@ public enum InsetKind: Sendable, Hashable {
         case .soundAlarm(let kind): "\(DetectionTracker.label(kind)) (sound)"
         case .detection(let kind): DetectionTracker.label(kind)
         case .view: "Back"
+        case .verification: "Smart alert check"
         }
     }
 }

@@ -4,8 +4,10 @@ Status: **designed; the rules engine (`crates/alerts`) is built, and so is
 its service in `viewer-core` with the C interface (ABI 3 minor 12;
 [FFI.md](FFI.md), "Smart alerts")**: trigger intake, camera wakes and
 picture acquisition, the verification request and answer, decisions, the
-event log, and the seams for trigger inputs and outputs. Not built yet: the
-apps' side (detector, views, notifications), the input and output modules
+event log, and the seams for trigger inputs and outputs. On macOS the
+settings, the live verification view, and the Events window are built
+([UX.md](UX.md) "Smart alerts"). Not built yet: the rest of the apps' side
+(detector, notifications, the Windows screens), the input and output modules
 themselves, standby, the coordinator, and models. Each section says what is built, what is planned, and what is still
 to be measured. Protocol facts are marked **observed** or **reported**
 exactly as in [protocol.md](protocol.md); nothing here may depend on a

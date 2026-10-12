@@ -90,6 +90,7 @@ final class SmartAlertsController {
         board.settings = s.view
         file.save(s)
         apply(force: true)
+        updatePanel()
         changed()
     }
 
@@ -175,6 +176,11 @@ final class SmartAlertsController {
 
     /// A request by key, while it is open.
     func request(_ key: String) -> VerifyRequest? { requests[key] }
+
+    /// The open requests of a check (by trigger ID), oldest first.
+    func requests(trigger: UInt64) -> [VerifyRequest] {
+        requests.values.filter { $0.triggerIDs.contains(trigger) }.sorted { $0.request < $1.request }
+    }
 
     /// The detector's answer to a request (the boxes it sent the core), and
     /// the picture it checked: the live view draws them.

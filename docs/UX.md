@@ -1516,6 +1516,118 @@ grids on both (M3 and W3); exports on both (M4 and W4).
   (the fake core) and `recordings-real-core` and `playback-real-core`
   (`scripts/macos-real-selftest.sh`, against the mock).
 
+## Smart alerts
+
+macOS (Windows is planned; PARITY.md). The design and the core's side are
+[NOTIFICATIONS.md](NOTIFICATIONS.md); the core contract is FFI.md "Smart
+alerts". The detector and the desktop notifications are separate slices;
+this section covers the settings, the live checks, and the event log.
+
+### Settings > Smart Alerts
+
+A tab of its own with five parts (a segmented control at the top). Every
+change is saved at once to `smart-alerts.json` in the app's data folder and
+sent to the core; the file holds no secret.
+
+- **General.** The Smart alerts switch (off until turned on; off sends the
+  core only `{"enabled":false}`, so it lets go of everything). Always alert:
+  smoke and CO alarms, a verified person on an outside camera at night, a
+  doorbell press at night (all on; only muting one camera stops them). Night:
+  a location (latitude and longitude, rounded to 0.1° when set) for sunset +
+  30 min to sunrise − 30 min, or fixed night hours (22:00–06:00). Mode (home,
+  away, night), the lowest severity that alerts, standby on battery (stored;
+  standby itself is a later slice), and, under Advanced, k, the score floor
+  and the window for a camera's own detections. What the core clamped is
+  listed.
+- **Cameras.** Every camera of every device; per camera: exposure (outside,
+  perimeter, inside), Entrance (the same mark as Settings > Cameras and the
+  alert insets), trust the camera's AI, check motion without a class, the
+  schedule (always, only at night, or time windows by weekday), the classes
+  that may alert, and zones: "Draw a Zone…" opens the region editor on a
+  still of the camera (its live picture, from a tile already playing or a
+  stream opened for at most 5 s); each zone is "alert only here" or "never
+  here (mask)".
+- **Sensors.** MQTT sensors: name, key, trigger kind; the broker (address,
+  port, TLS with an optional CA as PEM); the user name and password, saved to
+  the Keychain only ("Save Login"; the fields show "Saved in the Keychain");
+  the topic (wildcards only when allowed), the payload (ON/OFF values, or
+  JSON with a path), level or pulse, retained messages, debounce; a broker
+  outside the local network needs "Allow a broker outside the local
+  network". **Cameras that see the sensor's area:** add cameras (at least
+  one; a sensor never alerts on its own unless "Require a camera to confirm"
+  is turned off, which warns), draw each camera's region on a still, set its
+  weight; the window before and after and its retrigger limit, the classes,
+  the pictures needed, and alerting unverified when no picture could be
+  checked. The status line shows whether the core started the sensor's input
+  and, when the core reports it, "Connected" or "Login rejected".
+- **Outputs.** Desktop notifications (on, from a severity, with a picture).
+  Home Assistant: address, token (Keychain only), Test (asks the API root with
+  the token; turns nothing on; never follows a redirect), from a severity,
+  pictures (on; a warning when the address may be outside the local
+  network), first match or every match, pulse gap, cooldown, and rules (class,
+  camera, sensor, from severity → pulse, turn on, script, or notify, with the
+  entity ID or service checked as typed). The status line shows the last
+  delivery or whether the core took the output. "To fix" lists what clamping
+  cannot fix (a sensor without cameras, an http address outside the local
+  network, a malformed entity ID).
+- **Live View.** Where checks show ("In the tile, else an inset" by default,
+  "In the tile, else a small window", "Always in a small window"), whether
+  checks that end quiet or suppressed stay, and the minimum time after the
+  decision (60 s or more).
+
+### Live checks
+
+Each check the core runs is shown while it happens, from its `verify_step`
+events and the boxes the app's detector answered:
+
+- **In the tile.** When a viewer window shows the camera, a band across the
+  tile's bottom: a headline (class, camera, "checking…", then "alert
+  (severity)", "quiet log" or "suppressed"; "+N more" for other checks of the
+  camera), the latest steps, a close button, and "Dismiss All" when more than
+  one check is up. The detector's boxes are drawn on the picture where it is
+  shown (zoom and fill followed), each labeled with class and score, and
+  "below floor", "outside region" or "not looked for" when it does not count;
+  a hit is a thick green line, the rest thin, dashed or dotted (not color
+  alone). Every angle of the check that the window shows gets the band.
+- **In an inset.** Otherwise, per the setting, the check's first camera opens
+  a verification inset: the alert insets' column (draggable, snapping,
+  stacking newest first with "+N more", Tab swaps it with the stage), with
+  the same boxes and steps over its picture. Esc or its × closes it and its
+  checks.
+- **In a small window.** "Smart Alert Checks", a floating panel that never
+  activates the app or takes the keyboard (it becomes key only if a control
+  in it needs typing). It lists the checks (at most three, "+N more"), each
+  with its angles' pictures (the picture the detector checked, when it hands
+  one over) and boxes, its whole step log and explanation, a close button,
+  and Dismiss All; Esc closes the newest when it is focused.
+- **Which and how long.** A check shows from its first step. It goes at the
+  decision if it ended quiet or suppressed (unless "keep quiet checks" is on
+  or it was an always-alert candidate). An alert stays while its episode is
+  active and at least the minimum time (60 s) after the alert settles, or
+  after the last hover or click; hovering holds it. A check that never got a
+  decision counts as decided 120 s after its last step; an alert whose end
+  never came, 900 s after its decision. Nothing in the live view takes focus.
+
+### Events
+
+Window > Smart Alert Events (⌥⌘E) opens the event log in a window of its
+own (one instance; chosen over a Recordings sidebar entry so it can stay open
+beside the viewer). It lists every decision newest first: time, camera (or
+"Sensor"), class, decision with severity, and the explanation's first
+sentence; "Older…" pages back.
+
+- **Filters:** search over the explanations, Today / 7 Days / 30 Days / All,
+  camera, severity or higher, source (Camera AI, Sound, Sensor), decision
+  (Alerts, Quiet, Suppressed), and class. They go to the core as the
+  `nv_alerts_get` query, and new decisions refresh the list.
+- **An entry** shows its facts (always-alert rule, unverified, late), the
+  explanation, its snapshot, and every step of its trace with the
+  deliveries. Open Recording opens the Recordings window on that day at that
+  camera, 5 s before the decision. Useful, and Not Useful with a reason
+  (nothing there, wrong type, not interesting here or now, duplicate), are
+  stored with the entry and shown. Mute Camera mutes it for 15 minutes, an
+  hour, or until 07:00 (the only thing that stops always-alert rules).
+
 ## Finding devices
 
 Adding a device starts from a list of what answers on the network, so the
