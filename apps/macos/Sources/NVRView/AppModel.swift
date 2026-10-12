@@ -1099,6 +1099,9 @@ final class AppModel {
             return
         case .recording(let e):
             capture.apply(e)
+        case .smartAlert:
+            // Smart alerts (minor 12): no app side yet (detector, views).
+            return
         }
         notify()
     }

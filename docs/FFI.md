@@ -671,6 +671,185 @@ The `channels` event gains, without an ABI change, from each channel's
 (`channelType` "Doorbell"), and `"ptz": {"pan_tilt": true, "presets": true,
 "zoom_focus": true}` (CAPTURE.md, "Capabilities").
 
+## Smart alerts
+
+> **Minor 12.** The C side of [NOTIFICATIONS.md](NOTIFICATIONS.md): the core
+> owns the rules engine (`crates/alerts`), takes in triggers, wakes cameras,
+> holds pictures, and decides; the app decodes the pictures, runs its
+> detector, answers with boxes, and shows and delivers what the core decided.
+> The core side is `viewer_core::alerts_owner`.
+
+```c
+NvStatus nv_alerts_configure(NvCore *core, const char *json);
+NvStatus nv_alerts_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_alerts_trigger_put(NvCore *core, const char *json, uint64_t *trigger_id);
+NvStatus nv_alert_frames_get(NvCore *core, const char *request, NvThumbnail *info,
+                             uint8_t *out, size_t cap, size_t *len);
+NvStatus nv_alert_detections_put(NvCore *core, const char *request, const char *json);
+NvStatus nv_alert_snapshot_put(NvCore *core, uint64_t alert_id, const uint8_t *data, size_t len);
+NvStatus nv_alert_snapshot_get(NvCore *core, uint64_t alert_id, uint8_t *out, size_t cap,
+                               size_t *len);
+NvStatus nv_alert_feedback(NvCore *core, const char *json);
+NvStatus nv_alert_mute(NvCore *core, const char *camera, uint32_t seconds);
+```
+
+All of them answer from memory and never wait on a device; none may be
+called from inside a callback.
+
+**Settings.** `nv_alerts_configure` takes the settings document of
+NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
+`location`, `night`, `sources`, `timing`, `verification`,
+`min_alert_severity`, `outputs`, `standby`, `learning`) plus:
+
+- `enabled` (default true): false stops every check and lets go of every
+  woken stream; triggers are then ignored.
+- `utc_offset_min`: the computer's current offset from UTC (it includes
+  daylight saving time; send the settings again when it changes). Used for
+  night, schedules, and the device-time range of a cover-image fallback.
+- `acquisition` (all optional, clamped): `answer_timeout_ms` (5000; how
+  long a `verify_request` waits for boxes), `first_picture_timeout_ms`
+  (3000; then a cover image of the last 10 s is asked of the recording),
+  `second_picture_ms` (1000), `picture_interval_ms` (2000; later pictures
+  of an external check), `camera_pictures` (2 per camera for a camera's
+  own trigger), `sensor_pictures` (at most 4 per camera for an external
+  trigger), `max_wakes` (8 cameras woken at once across devices; the per
+  device limit is `standby.max_wake_per_device`, default 4),
+  `cover_fallback` (true), `recheck` (true: "still present" re-checks of
+  an alerted episode).
+- `inputs`: trigger input modules (for example MQTT), each `{"kind":...}`
+  plus its own settings, built by the module registered for that kind
+  (Rust: `Core::alerts_register_input`).
+
+Cameras are named by this run's device IDs (the IDs of `nv_device_add` and
+of the events); the app sends the settings after adding its devices. Until
+the first call nothing is checked. Values out of range are clamped, never
+refused; the result is one event:
+
+```json
+{"type":"alerts_configured","enabled":true,"issues":["night start clamped"],
+ "outputs":[{"index":1,"kind":"home_assistant","ok":true}],
+ "inputs":[{"index":0,"kind":"mqtt","ok":false,"error":"no module for this kind"}]}
+```
+
+`outputs` entries of a kind with a registered module (Rust:
+`Core::alerts_register_output`) are delivered to by the core; `desktop` is
+the app's own (from `alert` events).
+
+**Triggers.** The core's own `detection`, `motion`, and `alarm` events
+(device AI and status, `local_audio` smoke and CO) become triggers by
+themselves. External sources come through input modules (rate-limited per
+source: bursts of 20, then 10 a minute; a refusal is a `trigger_rejected`
+event) or from the app:
+
+```json
+{"source":"external","origin":"sensor-1","kind":"sensor_motion","state":"pulse","at_ms":1718900000000}
+{"source":"device","camera":{"device":1,"channel":2,"lens":0},"kind":"people","state":"start"}
+```
+
+`nv_alerts_trigger_put` writes the trigger's ID (`trigger_id` may be NULL);
+NV_ERR_NOT_CONFIGURED while the service is off, NV_ERR_LIMIT when the intake
+queue (256) is full.
+
+**Verification.** A check wakes each camera it needs by subscribing to its
+main stream on the existing session (a second lens: its `extern` stream).
+A tile already showing that stream shares it; nothing adds a login. The
+first keyframe and a picture about 1 s later (decoded forward from its
+keyframe) are held and announced:
+
+```json
+{"type":"verify_request","request":"v3","purpose":"check","camera":{"device":1,"channel":2,"lens":0},
+ "trigger_ids":[12],"codec":"h264","width":1280,"height":720,"pts_us":2000000,"bytes":5120,
+ "frames":[{"pts_us":1000000,"bytes":5000,"keyframe":true},{"pts_us":2000000,"bytes":120,"keyframe":false}],
+ "from_cover":false,"at_ms":1718900000250,"deadline_ms":1718900005250,"classes":["person"],"min_score":0.5,
+ "crops":[{"what":"frame","x":0,"y":0,"w":1,"h":1},{"what":"tile","x":0,"y":0,"w":0.55,"h":0.55},
+          {"what":"region","x":0.05,"y":0.45,"w":0.6,"h":0.55}]}
+```
+
+`nv_alert_frames_get` copies the access units (Annex-B, parameter sets
+before the keyframe, back to back in the sizes of `frames`) and fills
+`*info` like a thumbnail: `kind` NV_THUMB_H264_KEYFRAME or
+NV_THUMB_H265_KEYFRAME, the picture size, and `pts_us` of the picture to
+check (the last access unit). The app decodes to that picture, runs its
+detector on the crops (the whole picture, four overlapping tiles, and the
+source's region when it has one), maps boxes back to the whole picture,
+and answers:
+
+```json
+{"detections":[{"class":"person","score":0.8,"box":{"x":0.4,"y":0.3,"w":0.1,"h":0.4}}]}
+```
+
+`class` may also be the detector's label (`label` is accepted too): `car`,
+`truck`, `bus`, `motorcycle` count as `vehicle`, `dog` and `cat` as
+`animal`; labels without an alert class (`bicycle`, others) are ignored.
+An empty list means nothing was found. A picture the app could not decode
+is not answered: when `deadline_ms` passes it ends with
+`{"type":"verify_request_done","request":"v3","result":"timeout"}` and
+counts as not checked; a check with no picture checked at all is "could
+not look", which fails open for always-alert cases (NOTIFICATIONS.md,
+"Verification"). Answered requests end with `result` `answered`; requests
+of a check that ended first, `canceled`. After either, the request's
+calls answer NV_ERR_UNKNOWN_ID. `purpose` `recheck` is a "still present"
+picture of an alerted camera (every `timing.recheck_period_s`, for at most
+`recheck_limit_s`); its boxes keep or settle the episode.
+
+Bounds: at most 64 requests and 64 MiB of held frames at once (more
+pictures are skipped), a GOP of at most 300 access units or 24 MiB per
+woken stream, cameras woken per device and in all (more wait, the
+always-alert candidates first). A woken stream stops when its checks end
+and, after an alert, when the episode settles or its re-checks run out; a
+device's streams stop when it is removed, all of them at shutdown. A
+reconnect does not end a check: the session restarts the stream.
+
+**Steps and decisions.** Each trace step is sent as it happens, for the
+live verification view; each decision (alert, quiet, or suppress) once,
+with its full trace and explanation (NOTIFICATIONS.md, "Contracts"); an
+alert's end when its episode settles:
+
+```json
+{"type":"verify_step","trigger_id":12,"step":{"at_ms":1718900000250,"step":"frame_sampled","camera":{"device":1,"channel":2,"lens":0},"frame_ms":1718900000250,"detections":[{"class":"person","score":0.8,"above":true,"in_region":true,"hit":true}],"more":0}}
+{"type":"alert","state":"new","source":"device","device_key":"k-...","decision":{"trigger_id":12,"decision":"alert","severity":"high","alert_id":4,"rev":1,"explanation":"...","trace":{...}}}
+{"type":"alert","state":"logged","source":"device","decision":{"trigger_id":13,"decision":"quiet","reason":"not_confirmed","explanation":"...","trace":{...}}}
+{"type":"alert","state":"settled","alert_id":4,"rev":1,"trigger_id":12,"camera":{"device":1,"channel":2,"lens":0},"class":"person","at_ms":1718900130000}
+{"type":"trigger_rejected","source":"external","reason":"rate_limit"}
+```
+
+`state` is `new` (revision 1), `update` (a higher revision of the same
+alert), `logged` (quiet or suppressed), or `settled`. Alert IDs are unique
+across runs while the data directory is kept. An output's result is a
+`verify_step` with `"step":"delivery"` (`output` is its index in
+`outputs`, `kind`, `ok`), also kept in the log.
+
+**The event log.** Every decision is logged under `data_dir/alerts/log/`
+(in memory without a data directory): files of at most 1 MiB or 4000
+lines, at most 16 files, entries older than 90 days dropped.
+`nv_alerts_get` answers it newest first, like `nv_layouts_get`:
+
+```json
+{"limit":100,"before_ms":1718900000000,"since_ms":...,"until_ms":...,"camera":{"device":1,"channel":2},
+ "device":1,"decision":["alert","quiet","suppress"],"min_severity":"normal","source":["device","external"],
+ "class":["person"],"text":"camera 2","alert_id":4,"trigger_id":12}
+```
+
+(all optional; `limit` at most 1000) answers `{"entries":[...],"more":bool,
+"status":{...}}`: each entry is `{"logged_ms","source","device_key"?,
+"decision":{...},"deliveries":[steps],"snapshot":bool,"feedback"?}`;
+`status` is `{"configured","enabled","open_checks","episodes","muted":
+[{"camera","until_ms"}],"woken","waiting","requests","rechecks","outputs",
+"inputs"}`. Page with `before_ms` set to the last entry's `decided_ms`.
+
+**Snapshots, feedback, mutes.** `nv_alert_snapshot_put` stores the app's
+picture of an alert (at most 1 MiB, copied; NV_ERR_LIMIT above,
+NV_ERR_UNKNOWN_ID for an alert ID never given) under
+`data_dir/alerts/snapshots/` (at most 256 files, 64 MiB, 7 days); outputs
+that send pictures wait up to 2 s for it. `nv_alert_snapshot_get` copies
+it back (NV_ERR_BUFFER_TOO_SMALL with `*len` set). `nv_alert_feedback`
+takes `{"alert_id":4,"vote":"up"|"down","reason":"nothing_there"|
+"wrong_type"|"not_interesting"|"duplicate"}` (a reason only with `down`);
+it is stored (`data_dir/alerts/feedback.jsonl`, at most 4096 alerts) and
+shown in the log; learning from it is a later slice. `nv_alert_mute`
+mutes a camera (`{"device","channel","lens"}`) for `seconds`, at most 24 h;
+0 ends a mute. A mute is the only thing that stops always-alert rules.
+
 ## Camera motion (PTZ)
 
 > **Implemented (ABI 3, minor 11).** Pan, tilt, lens zoom and focus, and
@@ -1325,6 +1504,7 @@ symbol at all, so a bound app checks first):
 | 9 | capture (see "Capture"): `nv_capture_configure`, `nv_capture_set_encoder`, `nv_record_audio_encoded`, `nv_record_start`, `nv_record_stop`, `nv_record_status`, `NvAudioEncoder` (and its `NvEncoderOpen`, `NvEncoderEncode`, `NvEncoderClose`), `NV_ASC_MAX`, and the `recording` event |
 | 10 | export (see "Export (minor 10)"): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` of `nv_edit_compute`, `dest` and `share_safe` on export requests, and `range` in the `download` event |
 | 11 | camera motion (see "Camera motion (PTZ)"): `nv_ptz_info`, `nv_ptz_move`, `nv_ptz_stop`, `nv_ptz_lens`, `nv_ptz_preset`, `nv_motion_grant`, and the `ptz` event |
+| 12 | smart alerts (see "Smart alerts"): `nv_alerts_configure`, `nv_alerts_get`, `nv_alerts_trigger_put`, `nv_alert_frames_get`, `nv_alert_detections_put`, `nv_alert_snapshot_put`, `nv_alert_snapshot_get`, `nv_alert_feedback`, `nv_alert_mute`, and the `verify_request`, `verify_request_done`, `verify_step`, `alert`, `alerts_configured`, and `trigger_rejected` events |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

@@ -47,6 +47,7 @@
 //!   (rotation capped by file count and total size, rate-limited). Passwords
 //!   are never logged; addresses only at debug level.
 
+mod alerts_owner;
 pub mod audio;
 mod capture_owner;
 pub mod clock;
@@ -64,6 +65,11 @@ pub mod talk;
 mod tile;
 pub mod update;
 
+pub use alerts_owner::{
+    AlertError, AlertFrames, AlertInput, AlertNotice, AlertOutput, DeliveryDone, ExternalTrigger,
+    ExternalTriggers, InputContext, InputFactory, NoticeState, OutputContext, OutputFactory,
+    RecordingOutput, TriggerRejected,
+};
 pub use bc_protocol::ptz::{Direction as PtzDirection, LensAxis};
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector, MotionOrigin};
@@ -372,6 +378,8 @@ pub struct Core {
     playback: playback::PlaybackHub,
     /// Live and call recordings (docs/CAPTURE.md).
     capture: capture_owner::CaptureHub,
+    /// Smart alerts (docs/NOTIFICATIONS.md).
+    alerts: alerts_owner::AlertHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -465,6 +473,14 @@ impl Core {
             config.data_dir.clone(),
             config.test_runtime.is_none(),
         );
+        let alerts = alerts_owner::AlertHub::new(
+            handle.clone(),
+            event_sink.clone(),
+            clock.clone(),
+            config.data_dir.clone(),
+        );
+        // Detections, motion, and alarms become smart-alert triggers.
+        event_sink.set_tap(alerts.tap());
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -491,6 +507,7 @@ impl Core {
             recordings,
             playback: playback::PlaybackHub::new(),
             capture,
+            alerts,
         })
     }
 
@@ -640,6 +657,7 @@ impl Core {
                 },
             );
             if let Some(s) = handle.session() {
+                self.alerts.device_added(id, &key, s.clone());
                 self.recordings.device_added(&key, id, s);
             }
             handle
@@ -801,6 +819,8 @@ impl Core {
         drop(reg);
         // Its recordings end (and let go of the session) first.
         self.capture.device_removed(device);
+        // Cameras woken for smart-alert checks are let go.
+        self.alerts.device_removed(device);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
         // Its plays stop before the session closes.
         self.playback_device_removed(&dev.key);
@@ -1617,6 +1637,8 @@ impl Core {
         let tiles: Vec<(u64, TileHandle)> = reg.tiles.drain().collect();
         let devices: Vec<(u64, Device)> = reg.devices.drain().collect();
         drop(reg);
+        // Smart alerts stop first: woken streams, inputs, and outputs.
+        self.alerts.shutdown();
         // Recordings stop first (`core_shutdown`) and finalize within
         // FINALIZE_WAIT; what is left is recovered at the next configure.
         self.capture.shutdown();

@@ -119,7 +119,7 @@ import VideoKit
         #expect(CoreStatus.limit.code == NV_ERR_LIMIT.rawValue)
         #expect(CoreStatus.internal.code == NV_ERR_INTERNAL.rawValue)
         #expect(NV_ABI_VERSION == 3)
-        #expect(NV_ABI_MINOR == 11)
+        #expect(NV_ABI_MINOR == 12)
     }
 
     /// The package's copy of the header is the contract's, byte for byte.

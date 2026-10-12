@@ -26,8 +26,9 @@ extern "C" {
  * part 1. Minor 6: recorded playback. Minor 7: "months" in
  * nv_recordings_want. Minor 8: edit lists and the rest of sound. Minor 9:
  * capture (live and call recordings). Minor 10: export (nv_download_range,
- * nv_still_plan, the trim kind). Minor 11: camera motion (PTZ). */
-#define NV_ABI_MINOR 11
+ * nv_still_plan, the trim kind). Minor 11: camera motion (PTZ). Minor 12:
+ * smart alerts. */
+#define NV_ABI_MINOR 12
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -733,6 +734,40 @@ NvStatus nv_record_start(NvCore *core, const char *request, char *out, size_t ca
 NvStatus nv_record_stop(NvCore *core, uint64_t recording);
 /* {"recordings":[...]}: the latest recording event of each running one. */
 NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
+
+/* Smart alerts (minor 12; docs/FFI.md, "Smart alerts"; events
+ * verify_request, verify_request_done, verify_step, alert,
+ * alerts_configured, trigger_rejected). The core wakes cameras and holds
+ * pictures; the app decodes them, runs its detector, and answers with
+ * boxes. */
+
+/* The settings document (docs/NOTIFICATIONS.md "Settings", plus "enabled",
+ * "utc_offset_min", "acquisition", "inputs"). Cameras by this run's device
+ * IDs. Issues arrive in the alerts_configured event. */
+NvStatus nv_alerts_configure(NvCore *core, const char *json);
+/* The event log, newest first: {"entries":[...],"more":bool,"status":{...}}.
+ * query: filters as JSON, or NULL. */
+NvStatus nv_alerts_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+/* A trigger from the app; writes its ID (trigger_id may be NULL).
+ * NV_ERR_NOT_CONFIGURED while smart alerts are off. */
+NvStatus nv_alerts_trigger_put(NvCore *core, const char *json, uint64_t *trigger_id);
+/* A verify_request's frames: Annex-B access units from a keyframe
+ * (parameter sets included) to the picture; info gets the codec as an
+ * NvThumbKind keyframe kind, the size, and the picture's timestamp.
+ * NV_ERR_UNKNOWN_ID once answered or expired. */
+NvStatus nv_alert_frames_get(NvCore *core, const char *request, NvThumbnail *info,
+                             uint8_t *out, size_t cap, size_t *len);
+/* {"detections":[{"class","score","box":{"x","y","w","h"}}]}, normalized to
+ * the whole picture. */
+NvStatus nv_alert_detections_put(NvCore *core, const char *request, const char *json);
+/* The app's picture of an alert (at most 1 MiB; copied). */
+NvStatus nv_alert_snapshot_put(NvCore *core, uint64_t alert_id, const uint8_t *data, size_t len);
+NvStatus nv_alert_snapshot_get(NvCore *core, uint64_t alert_id, uint8_t *out, size_t cap,
+                               size_t *len);
+/* {"alert_id","vote":"up"|"down","reason"?}. */
+NvStatus nv_alert_feedback(NvCore *core, const char *json);
+/* {"device","channel","lens"} muted for seconds (at most 24 h; 0 unmutes). */
+NvStatus nv_alert_mute(NvCore *core, const char *camera, uint32_t seconds);
 
 #ifdef __cplusplus
 }

@@ -7,7 +7,9 @@
  * functions (index, incidents, a thumbnail, a download, a lock, the Trash),
  * plays two cameras' recordings back beside the live tile (open, play,
  * seek, 4x, close), records the live tile and a call with a fake AAC
- * encoder to finalized MP4 files, and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
+ * encoder to finalized MP4 files, checks a smart-alert verification round
+ * trip (a trigger, its pictures, boxes, the alert, the log), and checks the
+ * shutdown guarantees. Built and run by scripts/test-c-ffi.sh
  * against a spawned mock-nvr with recordings.
  *
  * usage: smoke HOST PORT WORKDIR   (password from NVRVIEW_TEST_PASSWORD;
@@ -134,6 +136,8 @@ static void on_action(void *context, uint64_t tile, const NvAction *action) {
     }
 }
 
+static void note_alert_event(const char *json, size_t len);
+
 static void on_event(void *context, const char *json, size_t len) {
     (void)context;
     atomic_fetch_add(&g_callbacks, 1);
@@ -144,6 +148,7 @@ static void on_event(void *context, const char *json, size_t len) {
     if (contains(json, len, "\"type\":\"tile_closed\"")) {
         atomic_fetch_add(&g_tile_closed, 1);
     }
+    note_alert_event(json, len);
     if (contains(json, len, "\"type\":\"playback_seek\"") && contains(json, len, "\"state\":\"active\"")) {
         atomic_fetch_add(&g_pb_seeks_active, 1);
     }
@@ -1046,6 +1051,138 @@ static void capture(NvCore *core, uint64_t tile, const char *work) {
     }
 }
 
+/* ---- Smart alerts (minor 12) ---------------------------------------- */
+
+/* verify_request keys seen by on_event, answered by the main thread. */
+static pthread_mutex_t g_req_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_req_keys[8][32];
+static int g_req_count;
+static atomic_ulong g_alerts_new, g_alerts_configured;
+
+static void note_alert_event(const char *json, size_t len) {
+    if (contains(json, len, "\"type\":\"alerts_configured\"")) {
+        atomic_fetch_add(&g_alerts_configured, 1);
+    }
+    if (contains(json, len, "\"type\":\"alert\"") && contains(json, len, "\"state\":\"new\"")) {
+        atomic_fetch_add(&g_alerts_new, 1);
+    }
+    if (!contains(json, len, "\"type\":\"verify_request\"")) {
+        return;
+    }
+    const char *p = strstr(json, "\"request\":\"");
+    if (p == NULL) {
+        problem("verify_request without a request key");
+        return;
+    }
+    p += strlen("\"request\":\"");
+    const char *end = strchr(p, '"');
+    pthread_mutex_lock(&g_req_lock);
+    if (end != NULL && end - p < 31 && g_req_count < 8) {
+        memcpy(g_req_keys[g_req_count], p, (size_t)(end - p));
+        g_req_keys[g_req_count][end - p] = 0;
+        g_req_count++;
+    }
+    pthread_mutex_unlock(&g_req_lock);
+}
+
+static NvStatus alerts_get_fn(NvCore *core, const char *query, char *out, size_t cap, size_t *len) {
+    return nv_alerts_get(core, query, out, cap, len);
+}
+
+/* A trigger from the app wakes channel 1; each picture is fetched and
+ * answered with a person; the alert is logged, gets a snapshot and
+ * feedback; then the camera is muted. */
+static void alerts(NvCore *core, uint64_t device) {
+    char json[512];
+    uint64_t trigger = 0;
+    snprintf(json, sizeof json,
+             "{\"source\":\"device\",\"camera\":{\"device\":%llu,\"channel\":1},\"kind\":\"people\"}",
+             (unsigned long long)device);
+    if (nv_alerts_trigger_put(core, json, &trigger) != NV_ERR_NOT_CONFIGURED ||
+        nv_alerts_configure(core, "{") != NV_ERR_INVALID_ARGUMENT) {
+        problem("smart alerts before configure");
+    }
+    char settings[512];
+    snprintf(settings, sizeof settings,
+             "{\"cameras\":[{\"camera\":{\"device\":%llu,\"channel\":1}}],\"utc_offset_min\":0,"
+             "\"acquisition\":{\"recheck\":false}}",
+             (unsigned long long)device);
+    if (nv_alerts_configure(core, settings) != NV_OK ||
+        nv_alerts_trigger_put(core, json, &trigger) != NV_OK || trigger == 0) {
+        problem("nv_alerts_configure or nv_alerts_trigger_put");
+        return;
+    }
+    int answered = 0;
+    for (int i = 0; i < 1000 && atomic_load(&g_alerts_new) == 0; i++) {
+        char key[32] = {0};
+        pthread_mutex_lock(&g_req_lock);
+        if (answered < g_req_count) {
+            memcpy(key, g_req_keys[answered], sizeof key);
+            answered++;
+        }
+        pthread_mutex_unlock(&g_req_lock);
+        if (key[0] == 0) {
+            sleep_ms(10);
+            continue;
+        }
+        NvThumbnail info;
+        size_t len = 0;
+        uint8_t *frames = NULL;
+        if (nv_alert_frames_get(core, key, &info, NULL, 0, &len) != NV_ERR_BUFFER_TOO_SMALL ||
+            len == 0 || (frames = malloc(len)) == NULL ||
+            nv_alert_frames_get(core, key, &info, frames, len, &len) != NV_OK ||
+            info.kind != NV_THUMB_H264_KEYFRAME || frames[0] != 0 || frames[1] != 0) {
+            problem("nv_alert_frames_get");
+        }
+        free(frames);
+        if (nv_alert_detections_put(core, key,
+                                    "{\"detections\":[{\"class\":\"person\",\"score\":0.9,"
+                                    "\"box\":{\"x\":0.4,\"y\":0.2,\"w\":0.2,\"h\":0.5}}]}") !=
+            NV_OK) {
+            problem("nv_alert_detections_put");
+        }
+        if (nv_alert_detections_put(core, key, "{\"detections\":[]}") != NV_ERR_UNKNOWN_ID) {
+            problem("an answered request was answered again");
+        }
+    }
+    if (atomic_load(&g_alerts_new) == 0 || atomic_load(&g_alerts_configured) == 0) {
+        problem("no alert from a verified person");
+        return;
+    }
+    char *log = query_json(core, alerts_get_fn, "{\"decision\":[\"alert\"]}");
+    long long alert_id = 0;
+    char *entry = log ? first_object(log, "entries") : NULL;
+    if (entry == NULL || !number_member(entry, "alert_id", &alert_id) || alert_id <= 0) {
+        problem("nv_alerts_get");
+    }
+    free(entry);
+    free(log);
+    static const uint8_t jpeg[] = {0xff, 0xd8, 'e', 'x', 0xff, 0xd9};
+    uint8_t back[16];
+    size_t back_len = 0;
+    if (nv_alert_snapshot_put(core, (uint64_t)alert_id, jpeg, sizeof jpeg) != NV_OK ||
+        nv_alert_snapshot_get(core, (uint64_t)alert_id, back, sizeof back, &back_len) != NV_OK ||
+        back_len != sizeof jpeg || memcmp(back, jpeg, sizeof jpeg) != 0 ||
+        nv_alert_snapshot_get(core, (uint64_t)alert_id + 1000, back, sizeof back, &back_len) !=
+            NV_ERR_UNKNOWN_ID) {
+        problem("alert snapshots");
+    }
+    snprintf(json, sizeof json, "{\"alert_id\":%lld,\"vote\":\"up\"}", alert_id);
+    char camera[128];
+    snprintf(camera, sizeof camera, "{\"device\":%llu,\"channel\":1}", (unsigned long long)device);
+    if (nv_alert_feedback(core, json) != NV_OK ||
+        nv_alert_feedback(core, "{\"alert_id\":1,\"vote\":\"maybe\"}") != NV_ERR_INVALID_ARGUMENT ||
+        nv_alert_mute(core, camera, 900) != NV_OK || nv_alert_mute(core, camera, 0) != NV_OK ||
+        nv_alert_mute(core, "{}", 60) != NV_ERR_INVALID_ARGUMENT ||
+        nv_alert_frames_get(core, "v0", NULL, NULL, 0, NULL) != NV_ERR_INVALID_ARGUMENT) {
+        problem("alert feedback, mute, and refusals");
+    }
+    /* Off: nothing stays woken. */
+    if (nv_alerts_configure(core, "{\"enabled\":false}") != NV_OK) {
+        problem("turning smart alerts off");
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: smoke HOST PORT WORKDIR\n");
@@ -1203,6 +1340,7 @@ int main(int argc, char **argv) {
         recordings(core, key, work);
         playback(core, key);
         capture(core, tile, work);
+        alerts(core, device);
     }
 
     if (nv_tile_close(core, tile) != NV_OK) {

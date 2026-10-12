@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 11;
+    public const uint AbiMinor = 12;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;
@@ -841,6 +841,54 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_record_status(nint core, byte* output, nuint cap, nuint* len);
+
+    // Smart alerts (minor 12; docs/FFI.md, "Smart alerts").
+
+    /// <summary>The smart-alert settings document (JSON; minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_configure(nint core, string json);
+
+    /// <summary>The event log, newest first (query JSON or null; minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_get(nint core, string? query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>A trigger from the app; its ID (minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_trigger_put(nint core, string json, ulong* triggerId);
+
+    /// <summary>A verification request's access units (minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_frames_get(
+        nint core, string request, NvThumbnail* info, byte* output, nuint cap, nuint* len);
+
+    /// <summary>The detector's boxes for a request (JSON; minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_detections_put(nint core, string request, string json);
+
+    /// <summary>The app's picture of an alert (copied; minor 12).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_snapshot_put(nint core, ulong alertId, byte* data, nuint len);
+
+    /// <summary>An alert's stored picture (minor 12).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_snapshot_get(nint core, ulong alertId, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Feedback on an alert (JSON; minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_feedback(nint core, string json);
+
+    /// <summary>Mutes a camera (JSON) for seconds; 0 unmutes (minor 12).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_mute(nint core, string camera, uint seconds);
 
     // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
 
