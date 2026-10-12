@@ -5,6 +5,7 @@
 using Microsoft.UI.Dispatching;
 using NvrView.Interop;
 using NvrView.Shell;
+using NvrView.Tiles;
 
 namespace NvrView.App;
 
