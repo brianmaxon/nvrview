@@ -23,8 +23,8 @@ extern "C" {
  * (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
- * part 1. */
-#define NV_ABI_MINOR 5
+ * part 1. Minor 6: recorded playback. */
+#define NV_ABI_MINOR 6
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -540,6 +540,66 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 /* Live sound settings: {"alarms":true,"loudness_history_s":600} (members
  * left out keep their values); applies to tiles opened afterwards. */
 NvStatus nv_sound_configure(NvCore *core, const char *json);
+
+/* Recorded playback (minor 6; docs/FFI-RECORDINGS.md, section 6; events
+ * playback_state, playback_camera, playback_seek, playback_closed). A
+ * playback is up to 4 cameras on one shared clock, each shown by a playback
+ * tile: a tile like a live one (on_action, nv_tile_decoded, generations,
+ * nv_tile_set_tier, audio, tile_stats, tile_closed) that nv_tile_close
+ * refuses. Times are device-local milliseconds. Any thread, never inside a
+ * callback, except nv_playback_position. */
+
+typedef enum NvSeekMode {
+    NV_SEEK_KEYFRAME = 0, /* show the keyframe at or before the position first (fast; scrubbing) */
+    NV_SEEK_EXACT = 1,    /* decode from that keyframe and show the picture at the position */
+} NvSeekMode;
+
+typedef enum NvPlaybackState {
+    NV_PLAYBACK_BUFFERING = 0, /* playing, but the clock waits for a camera */
+    NV_PLAYBACK_PLAYING = 1,
+    NV_PLAYBACK_PAUSED = 2,
+    NV_PLAYBACK_ENDED = 3,     /* at the end of the range or of the recordings */
+    NV_PLAYBACK_FAILED = 4,    /* every camera failed */
+} NvPlaybackState;
+
+/* Opens a playback, paused at "position_ms" with an exact seek:
+ * {"start_ms","end_ms","position_ms","rate","sync":"wait"|"free",
+ *  "cameras":[{"camera":{...},"tier":"sub"|"main","offset_ms":0}]} or
+ * {"incident":"<key>","tier":"sub"}. Writes one tile ID per camera, in
+ * request order, to out_tiles (tile_cap entries; *tile_count receives the
+ * number). A tile_cap too small opens nothing: NV_ERR_BUFFER_TOO_SMALL with
+ * *tile_count set. NV_ERR_LIMIT beyond 8 playbacks, 4 cameras, 24 hours, or
+ * the tile limit; NV_ERR_INVALID_ARGUMENT for a rate not listed below, a
+ * camera twice, or a device not enabled for recordings. */
+NvStatus nv_playback_open(NvCore *core, const char *json, uint64_t *out_playback,
+                          uint64_t *out_tiles, size_t tile_cap, size_t *tile_count);
+/* Adds a camera ({"camera":{...},"tier":"sub","offset_ms":0}) at the
+ * current position; removes one (tile_closed "closed" follows). */
+NvStatus nv_playback_add_camera(NvCore *core, uint64_t playback, const char *json,
+                                uint64_t *out_tile);
+NvStatus nv_playback_remove_camera(NvCore *core, uint64_t playback, uint64_t tile);
+NvStatus nv_playback_play(NvCore *core, uint64_t playback);
+NvStatus nv_playback_pause(NvCore *core, uint64_t playback);
+/* Moves the shared clock (clamped to the range); returns at once, and a
+ * newer seek replaces one still starting. */
+NvStatus nv_playback_seek(NvCore *core, uint64_t playback, int64_t position_ms, NvSeekMode mode);
+/* 0.25, 0.5, 1, 2, 4, 8, or 16. Audio plays at 1 only. */
+NvStatus nv_playback_set_rate(NvCore *core, uint64_t playback, double rate);
+/* This camera shows position + offset_ms. */
+NvStatus nv_playback_set_offset(NvCore *core, uint64_t playback, uint64_t tile,
+                                int64_t offset_ms);
+/* Position and state for the scrubber, as of the engine's last 10 ms step.
+ * Callable from any thread, including callbacks. */
+NvStatus nv_playback_position(NvCore *core, uint64_t playback, int64_t *position_ms,
+                              NvPlaybackState *state);
+/* {"playback","state","position_ms","rate","sync","start_ms","end_ms",
+ *  "cameras":[{"tile","camera","tier","offset_ms","state","reason"?,
+ *  "generation"}]}, out-buffer rules as nv_layouts_get. */
+NvStatus nv_playback_status(NvCore *core, uint64_t playback, char *out, size_t cap,
+                            size_t *len);
+/* Stops every play, closes every tile (tile_closed each), then
+ * playback_closed. */
+NvStatus nv_playback_close(NvCore *core, uint64_t playback);
 
 #ifdef __cplusplus
 }

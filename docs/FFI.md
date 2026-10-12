@@ -878,7 +878,8 @@ groups, cover thumbnails, downloads with the Trash, and
 `nv_sound_configure`. [FFI-RECORDINGS.md](FFI-RECORDINGS.md) is the
 contract (sections 1 to 5, 8, 9, and 13, with its decisions and
 clarifications); the core side is `viewer_core::recordings_owner` (C11,
-C13, C15). Recorded playback (section 6, F2), edit lists and the rest of
+C13, C15). Recorded playback (section 6, F2) is minor 6 ("Recorded
+playback (minor 6)"); edit lists and the rest of
 sound (sections 2a and 7, F3: `nv_sound_watch`, `nv_recordings_loudness`,
 `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
 `nv_tile_loudness`), and export (section 7a, F4) come later; an app checks
@@ -974,6 +975,88 @@ goes through configure, enable, want, the queries, an edit, a thumbnail from
 pending to ready and back as an image, a download to the end, a lock that
 returns it, and the Trash, against mock-nvr with two days of recordings.
 
+## Recorded playback (minor 6)
+
+Part 2 of the recordings interface (slice F2 of
+[MILESTONE-P.md](MILESTONE-P.md)): playbacks of up to four cameras on one
+shared clock. [FFI-RECORDINGS.md](FFI-RECORDINGS.md), section 6, is the
+contract, with its C10 and F2 clarifications; the core side is
+`viewer_core::playback` (C10).
+
+```c
+typedef enum NvSeekMode { NV_SEEK_KEYFRAME = 0, NV_SEEK_EXACT = 1 } NvSeekMode;
+typedef enum NvPlaybackState {
+    NV_PLAYBACK_BUFFERING = 0, NV_PLAYBACK_PLAYING = 1, NV_PLAYBACK_PAUSED = 2,
+    NV_PLAYBACK_ENDED = 3, NV_PLAYBACK_FAILED = 4,
+} NvPlaybackState;
+
+NvStatus nv_playback_open(NvCore *core, const char *json, uint64_t *out_playback,
+                          uint64_t *out_tiles, size_t tile_cap, size_t *tile_count);
+NvStatus nv_playback_add_camera(NvCore *core, uint64_t playback, const char *json,
+                                uint64_t *out_tile);
+NvStatus nv_playback_remove_camera(NvCore *core, uint64_t playback, uint64_t tile);
+NvStatus nv_playback_play(NvCore *core, uint64_t playback);
+NvStatus nv_playback_pause(NvCore *core, uint64_t playback);
+NvStatus nv_playback_seek(NvCore *core, uint64_t playback, int64_t position_ms, NvSeekMode mode);
+NvStatus nv_playback_set_rate(NvCore *core, uint64_t playback, double rate);
+NvStatus nv_playback_set_offset(NvCore *core, uint64_t playback, uint64_t tile,
+                                int64_t offset_ms);
+NvStatus nv_playback_position(NvCore *core, uint64_t playback, int64_t *position_ms,
+                              NvPlaybackState *state);
+NvStatus nv_playback_status(NvCore *core, uint64_t playback, char *out, size_t cap,
+                            size_t *len);
+NvStatus nv_playback_close(NvCore *core, uint64_t playback);
+```
+
+- **Playback tiles are tiles.** Their IDs come from the same space as live
+  tiles, and their media arrives through `on_action` with the same actions,
+  generations, and answering rules (`nv_tile_decoded`,
+  `nv_tile_decode_failed`), so an app's tile view shows recorded video as
+  it shows live video. `nv_tile_set_tier`, the audio calls, `tile_stats`,
+  and `tile_closed` work on them; `nv_tile_close` returns
+  `NV_ERR_INVALID_ARGUMENT` (use `nv_playback_remove_camera` or
+  `nv_playback_close`). Generation 0 of each tile is an empty placeholder
+  ended by a final Reset; every seek or rate change is a new generation.
+- **Opening.** The request is section 6's JSON (a camera list with a range,
+  or `{"incident": "<key>"}`); the cameras' devices must be enabled with
+  `nv_recordings_enable` and their days in the index (`nv_recordings_want`),
+  or the camera shows `no_recording`. Nothing about the playback or its
+  tiles (no action, no event) is delivered before `nv_playback_open`
+  returns its IDs. When `tile_cap` is smaller than the number of cameras,
+  nothing is opened: `NV_ERR_BUFFER_TOO_SMALL` with `*tile_count` set (4 is
+  always enough).
+- **Status codes** are the recordings' (`RecError` as in "Recordings"):
+  `NV_ERR_NOT_CONFIGURED` before `nv_recordings_configure`;
+  `NV_ERR_INVALID_ARGUMENT` for invalid JSON, a rate other than 0.25, 0.5,
+  1, 2, 4, 8, or 16, a seek mode that is not an `NvSeekMode`, a camera
+  twice (also when adding), a camera of a device not enabled, an offset
+  beyond 24 hours, or a NULL out pointer; `NV_ERR_UNKNOWN_ID` for an
+  unknown playback, tile, or incident; `NV_ERR_LIMIT` beyond 8 playbacks, 4
+  cameras per playback, a 24-hour range, the core's tile limit, or a full
+  command queue (64 waiting requests); `NV_ERR_CLOSED` while the core shuts
+  down.
+- **Threads.** Every call returns at once, except `nv_playback_remove_camera`
+  and `nv_playback_close`, which wait (at most about 10 s) for the
+  playback's engine to stop the plays. Any thread, never inside a callback
+  (there they return `NV_ERR_INVALID_ARGUMENT`), except
+  `nv_playback_position`, which takes one brief lock and is meant for the
+  scrubber, from any thread including callbacks.
+- **Not in minor 6:** `nv_playback_step` (section 6) is not implemented
+  yet and not exported; it takes a later minor.
+
+Events (FFI-RECORDINGS.md, sections 6 and 8):
+
+```json
+{"type":"playback_state","playback":3,"state":"playing","position_ms":1791618127000,"rate":1.0}
+{"type":"playback_camera","playback":3,"tile":11,"state":"buffering"}
+{"type":"playback_seek","playback":3,"position_ms":1791618130000,"generation":4,"state":"active"}
+{"type":"playback_closed","playback":3,"reason":"closed"}
+```
+
+The C smoke test opens a two-camera playback of the mock's recordings,
+plays it, seeks, changes the rate to 4x, and closes it, also under
+AddressSanitizer.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total
@@ -1012,10 +1095,11 @@ symbol at all, so a bound app checks first):
 | 3 | `nv_tile_retry` (the Retry button of a tile without a picture) |
 | 4 | `nv_talk_set_conversation` (no per-minute talk-back limit while the user has a call open; see "Talk-back") |
 | 5 | recordings, part 1 (see "Recordings"): `nv_recordings_*`, `nv_incident*`, `nv_camera_groups_*`, `nv_thumbnail_*`, `nv_download*`, `nv_sound_configure`, `NvThumbKind`, `NvThumbnail`, `NV_ERR_UNSUPPORTED`, `NV_ERR_NOT_CONFIGURED`, `NV_PENDING`, and the recordings events; `device_info.recordings` |
+| 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
 
 Later minors are taken in the order the additions land; this table is the
-source of truth. Recorded playback, edit lists, and export (F2 to F4) take
-the next free minors. Capture ("Capture") and camera motion ("Camera motion
+source of truth. Edit lists and export (F3, F4) and stepping a playback
+(`nv_playback_step`) take the next free minors. Capture ("Capture") and camera motion ("Camera motion
 (PTZ)") are proposed and take the next free minors when they land, each its
 own.
 

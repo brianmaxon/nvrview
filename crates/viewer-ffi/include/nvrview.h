@@ -23,9 +23,10 @@
  * unchanged (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
- * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5).
+ * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
+ * playback (section 6).
  */
-#define NV_ABI_MINOR 5
+#define NV_ABI_MINOR 6
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -99,6 +100,26 @@ typedef enum NvTileStatus {
   NV_TILE_UNDECODABLE = 3,
 } NvTileStatus;
 
+/**
+ * A playback's state (minor 6).
+ */
+typedef enum NvPlaybackState {
+  /**
+   * playing, but the clock waits for a camera
+   */
+  NV_PLAYBACK_BUFFERING = 0,
+  NV_PLAYBACK_PLAYING = 1,
+  NV_PLAYBACK_PAUSED = 2,
+  /**
+   * at the end of the range or of the recordings
+   */
+  NV_PLAYBACK_ENDED = 3,
+  /**
+   * every camera failed
+   */
+  NV_PLAYBACK_FAILED = 4,
+} NvPlaybackState;
+
 typedef enum NvStreamTier {
   NV_TIER_MAIN = 0,
   NV_TIER_SUB = 1,
@@ -145,6 +166,20 @@ typedef enum NvThumbKind {
    */
   NV_THUMB_IMAGE = 3,
 } NvThumbKind;
+
+/**
+ * How a seek shows its target (minor 6).
+ */
+typedef enum NvSeekMode {
+  /**
+   * show the keyframe at or before the position first (fast; scrubbing)
+   */
+  NV_SEEK_KEYFRAME = 0,
+  /**
+   * decode from that keyframe and show the picture at the position
+   */
+  NV_SEEK_EXACT = 1,
+} NvSeekMode;
 
 /**
  * The core. Opaque to C.
@@ -1134,6 +1169,162 @@ enum NvStatus nv_downloads_get(struct NvCore *core, char *out, size_t cap, size_
  * `core` is a live handle; `json` is a NUL-terminated string.
  */
 enum NvStatus nv_sound_configure(struct NvCore *core, const char *json);
+
+/**
+ * Opens a playback (docs/FFI-RECORDINGS.md, section 6), paused at
+ * "position_ms" with an exact seek:
+ * {"start_ms":S,"end_ms":E,"position_ms":P,"rate":1.0,"sync":"wait"|"free",
+ *  "cameras":[{"camera":{"device":"<key>","channel":3,"lens":0},
+ *  "tier":"sub"|"main","offset_ms":0}]}, or {"incident":"<key>","tier":"sub"}
+ * for an incident's cameras and range with its margins. Times are
+ * device-local milliseconds. Writes the playback's ID to *out_playback and
+ * one tile ID per camera, in request order, to out_tiles (tile_cap
+ * entries; *tile_count receives the number, at most 4). Playback tiles are
+ * tiles like live ones (on_action, nv_tile_decoded, nv_tile_set_tier,
+ * audio, tile_stats, tile_closed); nothing about them is delivered before
+ * this call returns. When tile_cap is too small nothing is opened:
+ * NV_ERR_BUFFER_TOO_SMALL with *tile_count set. (Only if an incident
+ * gained a camera while it was being opened is the playback opened and
+ * closed again; tile_closed and playback_closed for IDs never handed out
+ * may then follow, and are ignored like any unknown ID.) NV_ERR_LIMIT beyond 8 playbacks, 4 cameras, a 24-hour range, or
+ * the core's tile limit; NV_ERR_INVALID_ARGUMENT for invalid JSON, a rate
+ * other than 0.25, 0.5, 1, 2, 4, 8, or 16, a camera twice, or a camera of
+ * a device not enabled with nv_recordings_enable; NV_ERR_UNKNOWN_ID for an
+ * unknown incident; NV_ERR_NOT_CONFIGURED before nv_recordings_configure.
+ * Any thread, never inside a callback. Added in minor 6, as everything
+ * down to nv_playback_close.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string;
+ * `out_playback` and `tile_count` are valid for one write; `out_tiles` is
+ * null or valid for writing `tile_cap` entries.
+ */
+enum NvStatus nv_playback_open(struct NvCore *core,
+                               const char *json,
+                               uint64_t *out_playback,
+                               uint64_t *out_tiles,
+                               size_t tile_cap,
+                               size_t *tile_count);
+
+/**
+ * Adds a camera ({"camera":{...},"tier":"sub","offset_ms":0}); it joins at
+ * the current position (its device's plays start again together). Writes
+ * its tile ID to *out_tile. NV_ERR_LIMIT beyond 4 cameras or the tile
+ * limit; NV_ERR_INVALID_ARGUMENT for a camera already in the playback.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string; `out_tile`
+ * is valid for one write.
+ */
+enum NvStatus nv_playback_add_camera(struct NvCore *core,
+                                     uint64_t playback,
+                                     const char *json,
+                                     uint64_t *out_tile);
+
+/**
+ * Removes one camera: its play stops and its tile closes (tile_closed,
+ * reason "closed"). Waits for the playback's engine (bounded). Never call
+ * it from a callback.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_remove_camera(struct NvCore *core, uint64_t playback, uint64_t tile);
+
+/**
+ * Starts the shared clock (from start_ms after the end). Returns at once;
+ * playback_state follows.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_play(struct NvCore *core, uint64_t playback);
+
+/**
+ * Holds the shared clock; the pictures stay on screen.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_pause(struct NvCore *core, uint64_t playback);
+
+/**
+ * Moves the shared clock to position_ms (device-local; clamped to the
+ * playback's range). Returns at once; every tile starts a new generation
+ * (playback_seek events), and a newer seek replaces one still starting.
+ * NV_ERR_INVALID_ARGUMENT for a mode that is not an NvSeekMode.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_seek(struct NvCore *core,
+                               uint64_t playback,
+                               int64_t position_ms,
+                               NvSeekMode mode);
+
+/**
+ * Forward rate: 0.25, 0.5, 1, 2, 4, 8, or 16 (others
+ * NV_ERR_INVALID_ARGUMENT). Audio plays at 1 only. Every tile starts a new
+ * generation; playback_state reports the new rate.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_set_rate(struct NvCore *core, uint64_t playback, double rate);
+
+/**
+ * Per-camera clock offset: this camera shows position + offset_ms (a nudge
+ * of a few seconds; at most 24 hours either way). Its device's plays start
+ * again. NV_ERR_UNKNOWN_ID for a tile not in the playback.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_set_offset(struct NvCore *core,
+                                     uint64_t playback,
+                                     uint64_t tile,
+                                     int64_t offset_ms);
+
+/**
+ * The position (device-local ms) and state for the scrubber, as of the
+ * engine's last step (every 10 ms). One brief lock; callable from any
+ * thread, including inside callbacks.
+ *
+ * # Safety
+ * `core` is a live handle; `position_ms` and `state` are valid for one
+ * write.
+ */
+enum NvStatus nv_playback_position(struct NvCore *core,
+                                   uint64_t playback,
+                                   int64_t *position_ms,
+                                   enum NvPlaybackState *state);
+
+/**
+ * The playback's details: {"playback","state","position_ms","rate","sync",
+ * "start_ms","end_ms","cameras":[{"tile","camera","tier","offset_ms",
+ * "state","reason"?,"generation"}]}. Out-buffer rules as
+ * nv_recordings_calendar; the answer may change between two calls. Never
+ * call it from a callback.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap` bytes;
+ * `len` is valid for one write.
+ */
+enum NvStatus nv_playback_status(struct NvCore *core,
+                                 uint64_t playback,
+                                 char *out,
+                                 size_t cap,
+                                 size_t *len);
+
+/**
+ * Stops every play, closes every tile of the playback (tile_closed for
+ * each), then playback_closed ("closed"). Waits for the playback's engine
+ * (bounded). Never call it from a callback.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_playback_close(struct NvCore *core, uint64_t playback);
 
 #ifdef __cplusplus
 }  // extern "C"
