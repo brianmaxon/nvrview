@@ -129,6 +129,7 @@ internal sealed partial class StageView : UserControl
     private readonly Border _help;
     private readonly Border _toast;
     private readonly TextBlock _toastText;
+    private readonly HyperlinkButton _toastButton;
     private readonly CallStack _calls;
     private readonly List<TileChrome> _chromes = [];
     private readonly List<Rectangle> _outlines = [];
@@ -239,8 +240,18 @@ internal sealed partial class StageView : UserControl
             Margin = new Thickness(12, 12, 12, 22),
             Visibility = Visibility.Collapsed,
             IsHitTestVisible = false,
-            Child = _toastText,
         };
+        _toastButton = new HyperlinkButton { Padding = new Thickness(0), Visibility = Visibility.Collapsed, VerticalAlignment = VerticalAlignment.Center };
+        _toastButton.Click += (_, _) =>
+        {
+            Action? action = _toastAction;
+            _toastHideAt = 0;
+            action?.Invoke();
+        };
+        var toastRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
+        toastRow.Children.Add(_toastText);
+        toastRow.Children.Add(_toastButton);
+        _toast.Child = toastRow;
         AutomationProperties.SetLiveSetting(_toast, AutomationLiveSetting.Polite);
         root.Children.Add(_toast);
         Content = root;
