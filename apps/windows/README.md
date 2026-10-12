@@ -917,6 +917,35 @@ to the zip through `scripts/windows-check.sh --package <dir>
 [--trusted-key-file FILE] [--update-source SOURCE]`; a build from source has
 no such file and trusts nothing. See "Bundled defaults" in docs/UPDATES.md.
 
+## Adding a Windows test computer
+
+`scripts/windows-check.sh` runs the Windows checks on a computer reached over
+SSH. Several computers form a pool; a check takes the first free one, so
+parallel checks and merges finish sooner. To add one:
+
+1. On the new machine, run `scripts/setup-windows.ps1` (toolchain and
+   key-only SSH), as for the first one.
+2. On the Mac, add an alias with a key to `~/.ssh/config`:
+
+   ```
+   Host win-test-2
+       HostName <address of the new computer>
+       User <its user>
+       IdentityFile ~/.ssh/<key>
+   ```
+
+3. Name every alias in `NVRVIEW_WINDOWS_HOSTS`, for example in the shell
+   profile: `export NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"`.
+   `NVRVIEW_WINDOWS_HOST` still works for a single computer.
+4. Run one full check on it to prime its build output:
+   `NVRVIEW_WINDOWS_HOSTS=win-test-2 NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh`.
+
+There is one lock per host (`scripts/windows-lock.sh`; the first host uses
+`NVRVIEW_WINDOWS_LOCK`, the others add `-<alias>`). Merges and releases take a
+host before any waiting agent. Check stamps and the test result cache are keyed
+by tree and platform, not host, so a pass on any host counts. Each host keeps
+its own worker folders (about 5 GB each).
+
 ## Running the tests
 
 ### On macOS or Linux, in Docker (no .NET needed)

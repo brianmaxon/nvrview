@@ -3,8 +3,8 @@
 # (NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh) at the same time, prints
 # both summaries, and fails if either failed. On a clean committed tree each
 # leaves its check stamp (scripts/checked.sh), so the two together are what
-# scripts/release.sh needs. Takes the optional Windows lock
-# (NVRVIEW_WINDOWS_LOCK) for the Windows half.
+# scripts/release.sh needs. Takes the Windows lock (scripts/windows-lock.sh,
+# priority merge) for the Windows half.
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> [NVRVIEW_WINDOWS_WORKER=<name>] \
 #     scripts/release-check.sh
@@ -14,7 +14,11 @@ cd "$(git rev-parse --show-toplevel)"
 # (scripts/suite-cache.py), so the stamps they write count for a release.
 export NVRVIEW_FULL_CHECK=1
 
-: "${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
+. scripts/stamps-lib.sh
+[ -n "$(windows_hosts)" ] || { echo "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer" >&2; exit 2; }
+# Releases get the Windows computer before agents' checks.
+NVRVIEW_WINDOWS_PRIORITY=merge
+export NVRVIEW_WINDOWS_PRIORITY
 [ -z "$(git status --porcelain)" ] || echo "release-check: the working tree is not clean, so no stamps will be written" >&2
 
 logs=$(mktemp -d)
