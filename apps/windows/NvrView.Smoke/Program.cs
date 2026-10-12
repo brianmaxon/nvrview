@@ -774,6 +774,7 @@ internal sealed class Smoke(Options options)
         string key = CheckLayouts(core, device, dataDir);
         CheckRecordings(core, key, dataDir);
         CheckPlayback(core, key);
+        CheckCapture(core, tile, dataDir);
         CheckDiscovery(core);
         CheckUpdates(core);
         CheckGrid();
@@ -1222,6 +1223,152 @@ internal sealed class Smoke(Options options)
             StatusOf(() => sound.GetTileLoudness(987654321, 8)) != NvStatus.UnknownId)
         {
             Problem("nv_sound_analyze_day, nv_sound_analyze_cancel, or nv_tile_loudness");
+        }
+    }
+
+    // Capture (minor 9) through the bindings: the live tile recorded for
+    // two seconds to a finalized MP4, then a call whose Conversation and You
+    // tracks go through a managed encoder answering from inside its own
+    // calls, with the limit answer and the status codes.
+    private sealed class SmokeEncoder(ICapture capture) : ICaptureEncoder
+    {
+        public int Opened;
+        public int Frames;
+        public int Flushed;
+        public int Refused;
+
+        public EncoderOpened? Open(ulong recording, uint track, uint sampleRate, uint channels, uint bitRate)
+        {
+            if (sampleRate != 48000 || channels != 1)
+            {
+                Interlocked.Increment(ref Refused);
+                return null;
+            }
+            Interlocked.Increment(ref Opened);
+            return new EncoderOpened([0x11, 0x88], 2112);
+        }
+
+        public void Encode(ulong recording, uint track, ReadOnlySpan<float> pcm)
+        {
+            if (pcm.Length != 1024)
+            {
+                Interlocked.Increment(ref Refused);
+            }
+            Interlocked.Increment(ref Frames);
+            Answer(recording, track);
+        }
+
+        public void Close(ulong recording, uint track, bool flush)
+        {
+            if (flush)
+            {
+                Answer(recording, track);
+                Answer(recording, track);
+                Interlocked.Increment(ref Flushed);
+            }
+        }
+
+        private void Answer(ulong recording, uint track)
+        {
+            if (capture.RecordAudioEncoded(recording, track, [0, 0, 0, 7]) != NvStatus.Ok)
+            {
+                Interlocked.Increment(ref Refused);
+            }
+        }
+    }
+
+    private static bool FinalizedMp4(string path)
+    {
+        byte[] d = File.ReadAllBytes(path);
+        var types = new List<string>();
+        long at = 0;
+        while (at + 8 <= d.Length)
+        {
+            long size = (long)d[at] << 24 | (long)d[at + 1] << 16 | (long)d[at + 2] << 8 | d[at + 3];
+            types.Add(Encoding.ASCII.GetString(d, (int)at + 4, 4));
+            if (size == 1 && at + 16 <= d.Length)
+            {
+                size = 0;
+                for (int i = 8; i < 16; i++)
+                {
+                    size = size << 8 | d[at + i];
+                }
+            }
+            if (size < 8)
+            {
+                break;
+            }
+            at += size;
+        }
+        return types.Count > 0 && types[0] == "ftyp" && types.Contains("moov") && !types.Contains("moof");
+    }
+
+    private void CheckCapture(NvCore core, ulong tile, string dataDir)
+    {
+        ICapture cap = core;
+        string dir = Path.Combine(dataDir, "live");
+        string live = RecordRequest.Live(tile, RecordRequest.LocalUtcOffsetSeconds, name: "Smoke");
+        if (StatusOf(() => cap.RecordStart(live)) != NvStatus.NotConfigured ||
+            StatusOf(() => cap.CaptureConfigure("""{"live_dir":"relative"}""")) != NvStatus.InvalidArgument)
+        {
+            Problem("capture before nv_capture_configure");
+        }
+        cap.CaptureConfigure(new System.Text.Json.Nodes.JsonObject
+        {
+            ["live_dir"] = dir, ["min_free_bytes"] = 0, ["stop_free_bytes"] = 0, ["max_live"] = 1,
+        }.ToJsonString());
+
+        bool RecordedFor(ulong id, long ms) => WaitUntil(() =>
+        {
+            using JsonDocument s = JsonDocument.Parse(cap.RecordStatus());
+            return s.RootElement.GetProperty("recordings").EnumerateArray().Any(r =>
+                r.GetProperty("recording").GetUInt64() == id && r.GetProperty("state").GetString() == "recording" &&
+                r.GetProperty("duration_ms").GetInt64() >= ms);
+        }, 20_000);
+        bool AllEnded() => WaitUntil(() => cap.RecordStatus() == """{"recordings":[]}""", 10_000);
+
+        RecordingStarted started = cap.RecordStart(live);
+        try
+        {
+            cap.RecordStart(live);
+            Problem("a second live recording was allowed with max_live 1");
+        }
+        catch (NvException e) when (e.Status == NvStatus.Limit && e.Detail == "live")
+        {
+        }
+        if (!RecordedFor(started.Recording, 2000))
+        {
+            Problem("the live recording did not record");
+        }
+        cap.RecordStop(started.Recording);
+        if (!AllEnded() || !FinalizedMp4(started.File))
+        {
+            Problem("the live recording did not end as a finalized MP4");
+        }
+
+        var encoder = new SmokeEncoder(cap);
+        cap.CaptureSetEncoder(encoder);
+        RecordingStarted call = cap.RecordStart(RecordRequest.Call(tile, Path.Combine(dir, "call.mp4")));
+        if (!RecordedFor(call.Recording, 1500))
+        {
+            Problem("the call recording did not record");
+        }
+        cap.RecordStop(call.Recording);
+        if (!AllEnded() || !FinalizedMp4(call.File))
+        {
+            Problem("the call recording did not end as a finalized MP4");
+        }
+        if (encoder.Opened < 2 || encoder.Flushed != encoder.Opened || encoder.Frames < encoder.Opened * 40 ||
+            encoder.Refused != 0)
+        {
+            Problem($"the encoder's calls: opened {encoder.Opened}, frames {encoder.Frames}, flushed {encoder.Flushed}, refused {encoder.Refused}");
+        }
+        cap.CaptureSetEncoder(null);
+        if (StatusOf(() => cap.RecordStart(RecordRequest.Live(987654321, 0))) != NvStatus.UnknownId ||
+            StatusOf(() => cap.RecordStart("""{"kind":"film"}""")) != NvStatus.InvalidArgument ||
+            StatusOf(() => cap.RecordStop(987654321)) != NvStatus.UnknownId)
+        {
+            Problem("capture status codes");
         }
     }
 
