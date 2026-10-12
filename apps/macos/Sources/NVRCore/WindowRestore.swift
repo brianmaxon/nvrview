@@ -10,6 +10,16 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         case layout(id: String)
         case group(id: String)
         case scratch(name: String, root: LayoutNode)
+
+        /// The name the window's tile views go by for this content
+        /// (`TileKey.layout`).
+        public var viewsKey: String {
+            switch self {
+            case .layout(let id): TileKey.layoutKey(layout: id)
+            case .group(let id): TileKey.layoutKey(group: id)
+            case .scratch: TileKey.scratchKey
+            }
+        }
     }
 
     public var content: Content
@@ -26,15 +36,22 @@ public struct SavedWindow: Codable, Equatable, Sendable {
     /// The window's Fill Tiles switch (docs/UX.md "Fill Tiles"). Left out
     /// while off.
     public var fill: Bool
-    /// Each camera's zoom or crop position and own Fill choice in this
-    /// window (`TileViews`), the one changed longest ago first. Left out
-    /// while empty; entries that cannot be read are skipped, values are
-    /// clamped, and at most `TileViews.limit` are kept.
+    /// Each tile's zoom or crop position and own Fill choice in this
+    /// window, per layout (`TileViews` keyed by `TileKey`), the one changed
+    /// longest ago first ("tiles"). Left out while empty; entries that
+    /// cannot be read are skipped, values are clamped, and at most
+    /// `TileViews.limit` are kept.
     public var tileViews: [SavedTileView]
+    /// Per camera, as files kept the views before they were per tile
+    /// ("tileViews"; read only from a file without "tiles", never
+    /// written): the window gives each camera's view to every tile showing
+    /// it (`TileViews.migrate`).
+    public var legacyTileViews: [LegacyTileView]
 
     public init(
         content: Content, frame: CGRect, fullScreen: Bool = false, sidebarCollapsed: Bool = false,
-        insetAnchor: InsetAnchor? = nil, fill: Bool = false, tileViews: [SavedTileView] = []
+        insetAnchor: InsetAnchor? = nil, fill: Bool = false, tileViews: [SavedTileView] = [],
+        legacyTileViews: [LegacyTileView] = []
     ) {
         self.content = content
         self.frame = frame
@@ -43,10 +60,11 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         self.insetAnchor = insetAnchor
         self.fill = fill
         self.tileViews = tileViews
+        self.legacyTileViews = legacyTileViews
     }
 
     private enum CodingKeys: String, CodingKey {
-        case content, frame, fullScreen, sidebarCollapsed, insetAnchor, fill, tileViews
+        case content, frame, fullScreen, sidebarCollapsed, insetAnchor, fill, tiles, tileViews
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -57,11 +75,11 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         try c.encode(sidebarCollapsed, forKey: .sidebarCollapsed)
         try c.encodeIfPresent(insetAnchor, forKey: .insetAnchor)
         if fill { try c.encode(true, forKey: .fill) }
-        if !tileViews.isEmpty { try c.encode(tileViews, forKey: .tileViews) }
+        if !tileViews.isEmpty { try c.encode(tileViews, forKey: .tiles) }
     }
 
     /// The window's picture settings as saved (clamped and bounded).
-    public var views: TileViews<CameraRef> { TileViews(fill: fill, savedEntries: tileViews) }
+    public var views: TileViews<TileKey> { TileViews(fill: fill, savedEntries: tileViews) }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -71,10 +89,18 @@ public struct SavedWindow: Codable, Equatable, Sendable {
         sidebarCollapsed = try c.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed) ?? false
         insetAnchor = (try? c.decodeIfPresent(InsetAnchor.self, forKey: .insetAnchor)) ?? nil
         fill = ((try? c.decodeIfPresent(Bool.self, forKey: .fill)) ?? nil) ?? false
-        let entries = ((try? c.decodeIfPresent([Lossy<SavedTileView>].self, forKey: .tileViews)) ?? nil) ?? []
+        let entries = ((try? c.decodeIfPresent([Lossy<SavedTileView>].self, forKey: .tiles)) ?? nil) ?? []
         // Read through the model: clamped, without empty entries or
         // repeats, and bounded.
         tileViews = TileViews(fill: fill, savedEntries: entries.compactMap(\.value)).savedEntries
+        if c.contains(.tiles) {
+            legacyTileViews = []
+        } else {
+            // The per-camera form, read the same way.
+            let old = ((try? c.decodeIfPresent([Lossy<LegacyTileView>].self, forKey: .tileViews)) ?? nil) ?? []
+            legacyTileViews = TileViews(fill: fill, saved: old.compactMap(\.value).map { ($0.camera, $0.view) })
+                .saved.map { LegacyTileView(camera: $0.key, view: $0.view) }
+        }
     }
 
     /// Where to put a restored window: its saved frame if enough of it is on
