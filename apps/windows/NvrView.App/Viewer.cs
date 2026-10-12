@@ -353,7 +353,7 @@ internal sealed class SwitchableClock : IViewerClock
 }
 
 /// <summary>The viewer's state (see the file comment). UI thread only, except Tiles.</summary>
-internal sealed class Viewer : ITileBackend<CameraTile>
+internal sealed partial class Viewer : ITileBackend<CameraTile>
 {
     /// <summary>The most tiles one window shows (a layout's limit).</summary>
     public const int MaxTiles = LayoutNode.MaxLeaves;
@@ -381,6 +381,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         host.SetSink(Apply);
         host.Tiers.HasMiddleTier = HasMiddleTier;
         Settings.Changed += () => Changed?.Invoke();
+        InitPtz();
         ReloadLayouts();
     }
 
@@ -639,6 +640,8 @@ internal sealed class Viewer : ITileBackend<CameraTile>
             {
                 AppLog.Warn($"device key for {config.Key}: {e.Status}");
             }
+            // The core keeps automation grants for this run only: pass the user's again.
+            ApplyMotionGrants(entry);
         }
         Changed?.Invoke();
         return entry;
@@ -1098,6 +1101,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     {
         UpdateBoard();
         Calls.Tick(Clock.Now);
+        Ptz.Tick();
     }
 
     // ---- layouts (stored by the core) ----
@@ -1410,6 +1414,9 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                 return;
             case "talk":
                 Calls.OnTalkEvent(e);
+                return;
+            case "ptz":
+                Ptz.Handle(new PtzEvent(e.Tile, e.Action ?? "", PtzEvent.StateOf(e.State), e.Reason, e.Status != 0 ? e.Status : null, e.Position));
                 return;
             case "discovery_started":
             case "discovered":

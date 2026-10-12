@@ -393,6 +393,19 @@ internal sealed class SettingsPages
         // "Allow talk-back", per camera (camera motion control, off until allowed; every use is logged).
         var talkRows = new StackPanel { Spacing = 6 };
         StackPanel talkSection = Section("Allow talk-back", talkRows);
+        // "Let automatic correction move it", per camera that moves (camera motion control, off until allowed).
+        // The user's own pan, tilt, zoom and preset controls on a tile need no setting.
+        var motionRows = new StackPanel { Spacing = 6 };
+        var motionBody = new StackPanel { Spacing = 6 };
+        motionBody.Children.Add(new TextBlock
+        {
+            Text = "Your own pan, tilt, zoom and preset controls on a tile need no setting. This lets automation (automatic correction) move the camera, and is off until allowed here.",
+            TextWrapping = TextWrapping.Wrap,
+            Opacity = 0.7,
+        });
+        motionBody.Children.Add(motionRows);
+        StackPanel motionSection = Section("Camera that moves: let automatic correction move it", motionBody);
+        var motionBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var talkBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
         var noCameras = new TextBlock { Text = "No cameras yet. Connect a device first.", Opacity = 0.7 };
         var unmuteBoxes = new List<(CameraRef Camera, string Label, CheckBox Box)>();
@@ -475,6 +488,29 @@ internal sealed class SettingsPages
                     box.IsChecked = on;
                 }
             }
+            var movers = cameras.Where(c => viewer.CanMove(c.Camera)).ToList();
+            if (motionBoxes.Count != movers.Count || !motionBoxes.Select(r => (r.Camera, r.Label)).SequenceEqual(movers))
+            {
+                motionBoxes.Clear();
+                motionRows.Children.Clear();
+                foreach ((CameraRef camera, string label) in movers)
+                {
+                    var box = new CheckBox { Content = label };
+                    CameraRef cam = camera;
+                    box.Click += (_, _) => viewer.SetMotionGrant(cam, MotionClient.AutoCorrection, box.IsChecked == true);
+                    motionBoxes.Add((camera, label, box));
+                    motionRows.Children.Add(box);
+                }
+            }
+            foreach ((CameraRef camera, _, CheckBox box) in motionBoxes)
+            {
+                bool on = viewer.Settings.MotionGranted(camera, MotionClient.AutoCorrection);
+                if (box.IsChecked != on)
+                {
+                    box.IsChecked = on;
+                }
+            }
+            motionSection.Visibility = movers.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             talkSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             noCameras.Visibility = cameras.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
             unmuteSection.Visibility = cameras.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -595,6 +631,7 @@ internal sealed class SettingsPages
         camerasPage.Children.Add(callSection);
         camerasPage.Children.Add(unmuteSection);
         camerasPage.Children.Add(talkSection);
+        camerasPage.Children.Add(motionSection);
         camerasPage.Children.Add(mounts);
 
         var updatesPage = new StackPanel { Spacing = 8 };

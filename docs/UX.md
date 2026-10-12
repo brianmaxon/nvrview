@@ -128,8 +128,8 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
 > the keys). Save picture is built on macOS (see "Save picture") and planned
-> on Windows; recording is not built yet and PTZ is built on macOS: their buttons and menu
-> items are in place and say so (below).
+> on Windows; recording is not built yet: its buttons and menu items are in
+> place and say so (below). PTZ is built on both apps ("Pan, tilt, and zoom").
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -171,7 +171,7 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** Record (and on Windows the PTZ pad, Presets, Lens), and
+- **Not built yet:** Record, and
   the long tail's record items are shown in their final places
   (so the layout and the overflow are the final ones), dimmed, with "coming
   soon" in the tooltip. A click, the key (R) or the menu item
@@ -254,11 +254,11 @@ overlay (Windows) so they can be discovered.
 ### Capture and camera keys
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
-> the others say "… is coming soon" until capture lands, and the Option
-> keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
+> the others say "… is coming soon" until capture lands; the Option keys
+> are PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
 > Ctrl+Shift+R exist (`TileKeyMap`); T works, the others say "… is coming
-> soon"; there is no Camera menu (the window's header has no menu bar) and
-> the Alt keys come with PTZ. They act on the selected tile,
+> soon"; there is no Camera menu (the window's header has no menu bar); the
+> Alt keys are PTZ ("Pan, tilt, and zoom"). They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -667,11 +667,16 @@ as received, the camera's audio).
 
 ## Pan, tilt, and zoom
 
-> **Built on macOS** (Z2; Windows is Z3). The pad and lens popovers under
-> the header buttons and the Camera menu's "Pan and Tilt…", the presets
-> menu (recall only; also Camera ▸ Presets), the Option keys, and the stop
-> on release, window close, tile close and focus loss. Per-camera grants
-> for automation are in Settings ▸ Cameras.
+> **Built on both apps** (Z2 on macOS, Z3 on Windows). The pad and lens
+> popovers (Windows: flyouts) under the header buttons and the Camera
+> menu's "Pan and Tilt…" (Windows: the header "…" and right-click menus'
+> "Pan and Tilt…", "Zoom and Focus…" and "Presets", which has no Camera
+> menu), the presets menu (recall only), the Option (Windows: Alt) keys,
+> and the stop on release, window close, tile close and focus loss (on
+> Windows also when the window stops being the active one). Per-camera
+> grants for automation are in Settings ▸ Cameras. On Windows an Alt key
+> that drives a camera is swallowed, so releasing Alt does not open the
+> window's system menu.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device
