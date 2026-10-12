@@ -135,6 +135,23 @@ started on that app.
 | Recording calls (Conversation, Visitor, You tracks; consent note; beside the transcript) | no (planned) | no (planned) | UX.md "Recording calls", AUDIO.md "Recording calls". IDs `capture-call-record-button`, `capture-call-record-auto`, `capture-encoder-priming`. |
 | PTZ pad (press and hold, speed), presets, lens zoom and focus | no (planned) | no (planned) | UX.md "Pan, tilt, and zoom". IDs `ptz-pad-hold`, `ptz-deadman`, `ptz-preset-recall`, `ptz-lens-clamp`. |
 
+### Smart notifications
+
+Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
+(`crates/alerts`) is built in the core and shared, nothing in either app yet.
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | no (planned) | no (planned) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. |
+| Live verification view in the tile (pictures with boxes, step log) | no (planned) | no (planned) | IDs `verify-view-tile`, `verify-view-dismiss`. |
+| Verification inset and non-activating verification window, stacked, never taking focus | no (planned) | no (planned) | Same mechanism as the doorbell call insets and call window. ID `verify-view-inset`. |
+| Events log (every decision with its trace, filters, jump to recording or incident) | no (planned) | no (planned) | IDs `events-log-filter`, `events-log-jump`. |
+| Smart-alert settings (cameras, zones, schedules, always-alert rules, location, sources, outputs) | no (planned) | no (planned) | One settings document (`alerts.json`) on both. |
+| External trigger mapping (sources to camera angles with regions) | no (planned) | no (planned) | Needs the local API's trigger grant. |
+| Standby toggle and automatic standby on battery; "Not watching since" | no (planned) | no (planned) | Menu bar on macOS, tray on Windows. |
+| Smart-alert processor election among running apps, handoff, startup check | no (planned) | no (planned) | Same protocol on both; a headless service may join later. |
+| Feedback on notifications and log entries (useful, not useful with reasons) | no (planned) | no (planned) | |
+
 ### Recordings (milestone P)
 
 | Feature | macOS | Windows | Notes |
