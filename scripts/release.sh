@@ -4,13 +4,19 @@
 # it ends by printing what to upload and in what order.
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes FILE
-#       [--key-file PATH] [--out DIR] [--skip-windows]
+#       [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows]
 #
 #   --notes FILE      the release notes (plain text) shown by the apps; required
 #   --key-file PATH   the secret signing key (default ~/.config/nvrview-signing/update.key);
 #                     never printed; the script refuses if it is missing
 #   --out DIR         where the packages and the signed manifest go
 #                     (default dist/<version>, git-ignored)
+#   --update-source SOURCE
+#                     bundle this update source (an absolute folder path or an
+#                     http(s) URL) as the default in both packages. The public
+#                     key derived from the signing key is always bundled, so a
+#                     fresh install needs no setup (docs/UPDATES.md, "Bundled
+#                     defaults"). Without it only the key is bundled.
 #   --skip-windows    build only the macOS package (the result is labeled
 #                     macOS only and is not a complete release)
 #
@@ -37,14 +43,16 @@ die() { echo "release: $*" >&2; exit 1; }
 notes=""
 key="$HOME/.config/nvrview-signing/update.key"
 out=""
+update_source=""
 skip_windows=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) notes="${2:?--notes needs a file}"; shift 2 ;;
     --key-file) key="${2:?--key-file needs a path}"; shift 2 ;;
     --out) out="${2:?--out needs a directory}"; shift 2 ;;
+    --update-source) update_source="${2:?--update-source needs a folder path or URL}"; shift 2 ;;
     --skip-windows) skip_windows=1; shift ;;
-    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--skip-windows]" >&2; exit 2 ;;
+    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows]" >&2; exit 2 ;;
   esac
 done
 [ -n "$notes" ] || die "--notes FILE is required"
@@ -68,13 +76,30 @@ fi
 head_tree=$(git rev-parse 'HEAD^{tree}')
 
 start=$(date +%s)
+# The public key, derived from the secret one (only the public line is kept in
+# a temporary file); it is bundled into both packages and used to verify them.
+cargo build -q -p sign-update
+sign=target/debug/sign-update
+pubfile=$(mktemp)
+trap 'rm -f "$pubfile"' EXIT
+"$sign" pubkey --secret "$key" | sed -n 1p >"$pubfile"
+[ -s "$pubfile" ] || die "could not derive the public key from $key"
+if [ -n "$update_source" ]; then
+  # Validated here, before the long builds (the packaging scripts check again).
+  python3 -I scripts/update-defaults.py --update-source "$update_source" --out /dev/null >/dev/null ||
+    die "--update-source is not usable"
+fi
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 mac_zip="NVRView-$version-macos-arm64.zip"
 win_zip="NvrView-$version-win-x64.zip"
 
 echo "== macOS package"
-scripts/package-macos.sh
+if [ -n "$update_source" ]; then
+  scripts/package-macos.sh --trusted-key-file "$pubfile" --update-source "$update_source"
+else
+  scripts/package-macos.sh --trusted-key-file "$pubfile"
+fi
 cp "build/$mac_zip" "$out/$mac_zip"
 
 packages="$out/$mac_zip"
@@ -82,7 +107,11 @@ if [ "$skip_windows" = 1 ]; then
   echo "== Windows package skipped (--skip-windows): this is a macOS-only result"
 else
   echo "== Windows package (built on $NVRVIEW_WINDOWS_HOST)"
-  scripts/windows-check.sh --package "$out"
+  if [ -n "$update_source" ]; then
+    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source"
+  else
+    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile"
+  fi
   [ -s "$out/$win_zip" ] || die "the Windows package $win_zip was not fetched"
   chmod 644 "$out/$win_zip"
   packages="$packages $out/$win_zip"
@@ -92,16 +121,17 @@ fi
   die "the working tree changed during the build"
 
 echo "== manifest, signature, check"
-cargo build -q -p sign-update
-sign=target/debug/sign-update
 # shellcheck disable=SC2086 # a list of package paths without spaces
 "$sign" manifest --version "$version" --notes-file "$notes" --expires-in 90 \
   --out "$out/updates.json" $packages
 "$sign" sign --secret "$key" "$out/updates.json"
-# The public key, derived from the secret one; only the public line is kept.
-pubfile=$(mktemp)
-trap 'rm -f "$pubfile"' EXIT
-"$sign" pubkey --secret "$key" | sed -n 1p >"$pubfile"
+# Both packages carry the bundled defaults (the key, and the source if given).
+want_key=$(sed -n 's/^nvrview-ed25519-pub \([0-9a-f]*\)$/\1/p' "$pubfile")
+unzip -p "$out/$mac_zip" NVRView.app/Contents/Resources/update-defaults.json | grep -q "$want_key" ||
+  die "the macOS package does not bundle the public key"
+if [ "$skip_windows" != 1 ]; then
+  unzip -p "$out/$win_zip" update-defaults.json | grep -q "$want_key" || die "the Windows package does not bundle the public key"
+fi
 "$sign" check --source "$out" --key "$pubfile" --current 0.0.0
 
 now=$(date +%s)

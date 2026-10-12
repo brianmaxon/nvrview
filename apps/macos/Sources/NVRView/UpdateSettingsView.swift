@@ -23,6 +23,9 @@ struct UpdateSettingsView: View {
                 }
                 if let sourceProblem {
                     Text(sourceProblem).font(.callout).foregroundStyle(.red)
+                } else if updater.settings.sourceIsBundled {
+                    Text("Bundled default: \(updater.settings.effectiveSource). Type another to override it; clear the field to return to it.")
+                        .font(.callout).foregroundStyle(.secondary)
                 } else {
                     Text("A folder (a network share works), an https:// address, or http:// on your local network.")
                         .font(.callout).foregroundStyle(.secondary)
@@ -31,11 +34,20 @@ struct UpdateSettingsView: View {
                 Text("Update source")
             }
             Section {
-                ForEach(updater.settings.keys, id: \.self) { key in
+                ForEach(updater.settings.keyRows, id: \.key) { row in
                     HStack {
-                        Text("Key \(updater.keyID(key))").font(.body.monospaced())
+                        Text("Key \(updater.keyID(row.key))").font(.body.monospaced())
+                        if row.isBundled {
+                            Text(row.note).font(.callout).foregroundStyle(.secondary)
+                        }
                         Spacer()
-                        Button("Remove") { updater.removeKey(key) }
+                        if row.isBundled {
+                            Toggle(
+                                "Trust",
+                                isOn: Binding(get: { row.isOn }, set: { updater.setBundledKey(row.key, on: $0) }))
+                        } else {
+                            Button("Remove") { updater.removeKey(row.key) }
+                        }
                     }
                 }
                 HStack {

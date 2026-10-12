@@ -28,6 +28,7 @@ cd "$(git rev-parse --show-toplevel)"
 host="${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
 clean=0
 package_to=""
+defaults_args=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
@@ -35,9 +36,33 @@ elif [ "${1:-}" = "--package" ]; then
   # Builds the release app on the Windows computer instead of running the
   # checks, and fetches NvrView-<version>-win-x64.zip into the directory.
   # Used by scripts/release.sh.
-  package_to="${2:?usage: $0 --package <directory>}"
+  package_to="${2:?usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]}"
+  shift 2
+  # Bundled update defaults (docs/UPDATES.md, "Bundled defaults"): validated
+  # now, before the build, and added to the fetched zip as update-defaults.json
+  # at its top, next to the executable. Never committed, never sent to the
+  # Windows side. Kept as one argument per line.
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --trusted-key-file | --update-source)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        defaults_args="$defaults_args
+$1
+$2"
+        shift 2 ;;
+      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]" >&2; exit 2 ;;
+    esac
+  done
+  if [ -n "$defaults_args" ]; then
+    oldifs=$IFS
+    IFS='
+'
+    # shellcheck disable=SC2086 # split on newlines only
+    python3 -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
+    IFS=$oldifs
+  fi
 elif [ $# -gt 0 ]; then
-  echo "usage: $0 [--clean <worker name> | --package <directory>]" >&2
+  echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
@@ -106,6 +131,13 @@ if [ -n "$package_to" ]; then
   # scp reads the Windows path relative to the home directory.
   # shellcheck disable=SC2086
   scp $ssh_opts "$host:nvrview/worker/$worker/src/target/dotnet/package/$zip" "$package_to/$zip"
+  if [ -n "$defaults_args" ]; then
+    oldifs=$IFS; IFS='
+'
+    # shellcheck disable=SC2086
+    python3 -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
+    IFS=$oldifs
+  fi
   ls -l "$package_to/$zip"
   exit 0
 fi

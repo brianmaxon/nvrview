@@ -94,6 +94,11 @@ import VideoKit
 ///    Finder, is forgotten, and goes to the Trash (both recorded, not done)
 ///    once the core lets go of it, a camera group joins its cameras'
 ///    incidents, and closing the window releases its hold;
+/// 14f. bundled update defaults (docs/UPDATES.md): an `update-defaults.json` in a
+///    throwaway app folder, with a throwaway key and source, makes the key
+///    trusted and the source the default, listed as bundled; a user key,
+///    turning the bundled key off, and the user's own source override it,
+///    and with no file nothing is trusted;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -2420,6 +2425,8 @@ final class SelfTest {
     }
 
     private func checkLogNow() {
+        // parity: updates-bundled-defaults
+        if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
         // parity: appkit-warnings
         if let watch = app.logWatch {
             for p in watch.patterns {
