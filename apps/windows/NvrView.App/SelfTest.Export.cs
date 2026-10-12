@@ -1,5 +1,5 @@
 // Self-test steps of export from the Recordings window (docs/UX.md "Recordings", "Export"; the same IDs as the Mac
-// app's). They run on the fakes with synthetic MP4 files (SyntheticRecording) written where the fake's plans say the
+// app's). They run on the fakes with synthetic MP4 files (ExportSynthetic) written where the fake's plans say the
 // downloaded files are: a keyframe trim of an incident's download, the same share-safe, a range download of two
 // cameras, and a picture of each camera of that download. The save and folder pickers are answered by a script, the
 // files are read back with Media Foundation, and the pictures checked for the camera and frame they show.
@@ -34,7 +34,7 @@ internal sealed partial class SelfTest
     private static (int? Color, int? Frame)? LookFile(string path, long ms)
     {
         RenderedImage? image = MfExport.Picture(path, ms, exact: true);
-        return image is null ? null : SyntheticRecording.Read(image);
+        return image is null ? null : ExportSynthetic.Read(image);
     }
 
     private static async Task<bool> JobDone(RecordingsWindow w) =>
@@ -88,7 +88,7 @@ internal sealed partial class SelfTest
             }
             TrimOutput output = planned.Plan.Outputs[0];
             Expect(output.CopyPossible, "export: a keyframe trim should be a copy");
-            bool wrote = SyntheticRecording.Write(output.File, camera.Channel, (int)Math.Min((output.SourceOutMs + 3_000) / 100, 1_000));
+            bool wrote = ExportSynthetic.Write(output.File, camera.Channel, (int)Math.Min((output.SourceOutMs + 3_000) / 100, 1_000));
             Expect(wrote, "export: the synthetic recording could not be written");
             await export.TrimAsync([camera]);
             Expect(await JobDone(w), "export: the trim did not finish");
@@ -204,7 +204,7 @@ internal sealed partial class SelfTest
                     StillItem s = plan.Plan.Stills[0];
                     if (s.File is not null)
                     {
-                        Expect(SyntheticRecording.Write(s.File, c.Channel, 40), "export: the synthetic recording could not be written");
+                        Expect(ExportSynthetic.Write(s.File, c.Channel, 40), "export: the synthetic recording could not be written");
                     }
                 }
                 await export.SaveStillsFromFilesAsync(range.Download, range.Cameras.Select(x => x.Camera), at);
@@ -221,7 +221,7 @@ internal sealed partial class SelfTest
                         _problems.Add($"export: {Path.GetFileName(pictures[i])} could not be read back");
                         continue;
                     }
-                    (int? color, int? frame) = SyntheticRecording.Read(image);
+                    (int? color, int? frame) = ExportSynthetic.Read(image);
                     long expected = (items[i].SourceInMs ?? 0) / 100;
                     Expect(image.Width == 640 && image.Height == 360, $"export: {Path.GetFileName(pictures[i])} is {image.Width}x{image.Height}");
                     Expect(color == items[i].Camera.Channel % 4 && frame is { } f && Math.Abs(f - expected) <= 1,

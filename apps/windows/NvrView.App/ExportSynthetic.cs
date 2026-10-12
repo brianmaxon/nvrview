@@ -1,4 +1,5 @@
-// Synthetic recordings for the export self-test steps: H.264 MP4 files written with Media Foundation whose every
+// Synthetic recordings for the export self-test steps (named apart from NvrView.Video.SyntheticRecording, which the
+// follow cut and grid steps use): H.264 MP4 files written with Media Foundation whose every
 // picture says which camera it is and which frame it is (the same pictures as the Mac app's SyntheticRecording).
 // The top three quarters are one of the palette's colors; the bottom quarter is Bits black or white blocks across
 // the width, the frame number in binary (most significant bit on the left). Made up entirely.
@@ -7,7 +8,7 @@ using NvrView.Video;
 
 namespace NvrView.App;
 
-internal static class SyntheticRecording
+internal static class ExportSynthetic
 {
     /// <summary>The cameras' colors (RGB), one per source.</summary>
     public static readonly (int R, int G, int B)[] Palette = [(230, 40, 40), (40, 200, 60), (40, 70, 230), (230, 210, 40)];
