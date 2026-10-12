@@ -389,7 +389,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 8;
+    public const uint AbiMinor = 9;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -512,6 +512,37 @@ public static unsafe partial class NvNative
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_talk_set_conversation(nint core, ulong tile, [MarshalAs(UnmanagedType.U1)] bool open);
+
+    /// <summary>What a tile's camera can do, as JSON; request is {"tile":N} (minor 9). Waits for the camera.</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_info(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Starts or renews a pan or tilt move ("left", "right", "up", "down"; speed 1 to 64) (minor 9).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_move(nint core, ulong tile, string direction, uint speed);
+
+    /// <summary>Stops the tile's camera at once (minor 9).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_stop(nint core, ulong tile);
+
+    /// <summary>Moves the lens "zoom" or "focus" to an absolute position (minor 9).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_lens(nint core, ulong tile, string what, int position);
+
+    /// <summary>Recalls a preset of the camera's list (minor 9).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_preset(nint core, ulong tile, uint id);
+
+    /// <summary>Grants or withdraws motion control on a channel for an automation (minor 9).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_motion_grant(
+        nint core, ulong device, byte channel, string client, [MarshalAs(UnmanagedType.U1)] bool granted);
 
     /// <summary>The device's stable key into a buffer.</summary>
     [LibraryImport(Library)]

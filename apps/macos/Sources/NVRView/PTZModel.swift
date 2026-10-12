@@ -201,7 +201,11 @@ final class PTZModel {
     /// Time passes (the stage's tick): renews a held move, sends the lens
     /// positions a drag is waiting to send, and reads the lens again when the
     /// camera has settled.
+    /// A frozen app renews nothing (self-test of the dead-man stop).
+    var frozenForTest = false
+
     func tick(now: Double) {
+        if frozenForTest { return }
         if let call = hold.tick(now: now), let camera = held {
             send(call, camera)
         }
@@ -227,12 +231,21 @@ final class PTZModel {
         timer = t
     }
 
+    /// Every move, renewal and stop the app asked for (self-test).
+    private(set) var calls: [(at: Double, text: String)] = []
+    /// The `ptz` events heard (self-test).
+    private(set) var events: [PTZEvent] = []
+
     private func send(_ call: PTZHold.Call, _ camera: CameraRef) {
         guard let tile = tile(camera) else { return }
         do throws(CoreStatus) {
             switch call {
-            case .move(let d, let speed): try model.bridge.ptzMove(tile, d, speed: speed)
-            case .stop: try model.bridge.ptzStop(tile)
+            case .move(let d, let speed):
+                calls.append((now, "move \(d.rawValue) \(speed)"))
+                try model.bridge.ptzMove(tile, d, speed: speed)
+            case .stop:
+                calls.append((now, "stop"))
+                try model.bridge.ptzStop(tile)
             }
         } catch {
             fail(camera, error)
@@ -312,6 +325,7 @@ final class PTZModel {
     /// A `ptz` event: refusals and failures become a line over the tile and
     /// in the popover; the core's own stops end the app's hold.
     func handle(_ event: PTZEvent) {
+        events.append(event)
         guard let camera = model.leases.camera(forTile: event.tile) else { return }
         if event.action == "stop", event.state == .sent, let reason = event.reason,
             ["max_hold", "device_refused", "session_closed", "reconnected", "deadman"].contains(reason),

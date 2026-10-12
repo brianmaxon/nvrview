@@ -91,3 +91,8 @@ playback-split-here          macos    gap: the Windows fake store (FakeRecording
 capture-picture-tile        macos    gap: Windows Save Picture is CAP-P2
 capture-picture-zoomed      macos    gap: Windows Save Picture is CAP-P2
 capture-picture-fisheye     macos    gap: Windows Save Picture is CAP-P2
+ptz-pad-hold                macos    gap: Windows PTZ controls are PTZ-Z3
+ptz-deadman                 macos    gap: Windows PTZ controls are PTZ-Z3
+ptz-preset-recall           macos    gap: Windows PTZ controls are PTZ-Z3
+ptz-lens-clamp              macos    gap: Windows PTZ controls are PTZ-Z3
+ptz-lens1-addressing        macos    gap: Windows PTZ controls are PTZ-Z3

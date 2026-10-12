@@ -128,7 +128,7 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
 > the keys). Save picture is built on macOS (see "Save picture") and planned
-> on Windows; recording and PTZ are not built yet: their buttons and menu
+> on Windows; recording is not built yet and PTZ is built on macOS: their buttons and menu
 > items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
@@ -171,7 +171,7 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** Record, the PTZ pad, Presets, Lens, and
+- **Not built yet:** Record (and on Windows the PTZ pad, Presets, Lens), and
   the long tail's record items are shown in their final places
   (so the layout and the overflow are the final ones), dimmed, with "coming
   soon" in the tooltip. A click, the key (R) or the menu item
@@ -645,9 +645,11 @@ as received, the camera's audio).
 
 ## Pan, tilt, and zoom
 
-> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"). The core's side is
-> built (Z1: commands, limits, the stop on every path, grants); the apps'
-> controls are not.
+> **Built on macOS** (Z2; Windows is Z3). The pad and lens popovers under
+> the header buttons and the Camera menu's "Pan and Tilt…", the presets
+> menu (recall only; also Camera ▸ Presets), the Option keys, and the stop
+> on release, window close, tile close and focus loss. Per-camera grants
+> for automation are in Settings ▸ Cameras.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device

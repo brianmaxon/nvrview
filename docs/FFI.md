@@ -624,18 +624,15 @@ The `channels` event gains, without an ABI change, from each channel's
 
 ## Camera motion (PTZ)
 
-> **Proposed, not yet implemented.** Pan, tilt, lens zoom and focus, and
+> **Implemented (ABI 3, minor 9).** Pan, tilt, lens zoom and focus, and
 > preset recall for [CAPTURE.md](CAPTURE.md) "Pan, tilt, and zoom"; the
-> commands are in protocol.md, "What nvrview will send". Its own minor,
-> the next free one when it lands ("Versioning").
->
-> **Implementation status (Z1).** The Rust side exists on `Core`:
-> `ptz_info`, `ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset` (each
-> taking a `MotionOrigin`; the C functions will pass `Manual`) and
-> `set_motion_grant`, with the `ptz` events below. The C functions are
-> not exported yet: minors are numbered in the order they land and other
-> additions in flight are taking the next ones, so they come with the
-> apps' PTZ controls (Z2) on the next free minor then. As built, beyond the shapes
+> commands are in protocol.md, "What nvrview will send". The C functions
+> pass the origin `Manual` (the user's own controls). A camera is a
+> channel and a lens: a tile on the `mobile` or `extern` stream of a
+> multi-lens camera steers its second lens, addressed with `subChannel` 1
+> in the request extension (protocol.md, "Camera motion control"), while
+> the `extern` tile of a single-lens camera steers its only lens. Grants
+> (`nv_motion_grant`) are per channel. As built, beyond the shapes
 > below: a renewal sends nothing and reports nothing; a lens move's `sent`
 > event carries the clamped `position`; `refused` (the core's rules:
 > `not_granted`, `user_steering`, `rate_limited` with `retry_after_ms`,
@@ -1232,6 +1229,7 @@ symbol at all, so a bound app checks first):
 | 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
 | 7 | a month's calendar alone: `months` in `nv_recordings_want` and the `recordings_month_failed` event (see "Recordings"); no declaration changed |
 | 8 | edit lists and sound (see "Edit lists and sound (minor 8)"): `nv_edit_compute`, `nv_sound_watch`, `nv_recordings_loudness`, `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`, `nv_tile_loudness`, and the `sound_watch` and `sound_analyze` events |
+| 9 | camera motion (see "Camera motion (PTZ)"): `nv_ptz_info`, `nv_ptz_move`, `nv_ptz_stop`, `nv_ptz_lens`, `nv_ptz_preset`, `nv_motion_grant`, and the `ptz` event |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Export (F4) and stepping a playback (`nv_playback_step`)

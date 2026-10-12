@@ -582,6 +582,70 @@ public sealed unsafe partial class NvCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// What the tile's camera can do and where its lens is (minor 9): JSON with pan_tilt, zoom, focus,
+    /// presets and speeds. Waits for the camera (up to 20 s): not on the UI thread.
+    /// </summary>
+    public string PtzInfo(ulong tile, int initialCapacity = 1024)
+    {
+        NotInCallback();
+        var request = $"{{\"tile\":{tile}}}";
+        return ReadString(
+            (core, buf, cap, len) => NvNative.nv_ptz_info(core, request, buf, cap, len),
+            nameof(NvNative.nv_ptz_info),
+            initialCapacity);
+    }
+
+    /// <summary>Starts or renews a move; call again at least every 500 ms while held (minor 9).</summary>
+    public void PtzMove(ulong tile, string direction, uint speed)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_ptz_move(core, tile, direction, speed), nameof(NvNative.nv_ptz_move));
+        }
+    }
+
+    /// <summary>Stops the tile's camera at once (minor 9).</summary>
+    public void PtzStop(ulong tile)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_ptz_stop(core, tile), nameof(NvNative.nv_ptz_stop));
+        }
+    }
+
+    /// <summary>Moves the lens "zoom" or "focus" to an absolute position (clamped by the core) (minor 9).</summary>
+    public void PtzLens(ulong tile, string what, int position)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_ptz_lens(core, tile, what, position), nameof(NvNative.nv_ptz_lens));
+        }
+    }
+
+    /// <summary>Recalls a preset of the camera's list (minor 9).</summary>
+    public void PtzPreset(ulong tile, uint id)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_ptz_preset(core, tile, id), nameof(NvNative.nv_ptz_preset));
+        }
+    }
+
+    /// <summary>Lets (or stops letting) an automation move a channel, for this run of the core (minor 9).</summary>
+    public void MotionGrant(ulong device, byte channel, string client, bool granted)
+    {
+        NotInCallback();
+        using (AcquireLease(out nint core))
+        {
+            Check(NvNative.nv_motion_grant(core, device, channel, client, granted), nameof(NvNative.nv_motion_grant));
+        }
+    }
+
     /// <summary>The device's stable key, for layouts.</summary>
     /// <param name="device">The device ID.</param>
     /// <param name="initialCapacity">First buffer size; grown on NV_ERR_BUFFER_TOO_SMALL.</param>

@@ -874,6 +874,30 @@ internal sealed class Smoke(Options options)
         }
         core.TalkSetConversation(tile, true);
         core.TalkSetConversation(tile, false);
+        foreach (var call in new Action[]
+        {
+            () => core.PtzStop(tile + 100),
+            () => core.PtzMove(tile + 100, "left", 20),
+            () => core.PtzPreset(tile + 100, 0),
+        })
+        {
+            try
+            {
+                call();
+                Problem("a camera motion call accepted an unknown tile");
+            }
+            catch (NvException e) when (e.Status == NvStatus.UnknownId)
+            {
+            }
+        }
+        try
+        {
+            core.PtzMove(tile, "sideways", 20);
+            Problem("nv_ptz_move accepted a direction it does not know");
+        }
+        catch (NvException e) when (e.Status == NvStatus.InvalidArgument)
+        {
+        }
         core.SetTier(tile, tier);
         bool done = WaitUntil(() =>
             _app.Gen(generation).Answered >= 20 &&
