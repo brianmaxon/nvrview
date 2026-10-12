@@ -59,9 +59,12 @@ dependencies = [
  "bc-session",
  "discovery",
  "mock-nvr",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+ "viewer-core",
 ]
 
 [[package]]
