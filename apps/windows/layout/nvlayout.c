@@ -135,6 +135,13 @@ int main(void) {
     VAL(NV_THUMB_H264_KEYFRAME);
     VAL(NV_THUMB_H265_KEYFRAME);
     VAL(NV_THUMB_IMAGE);
+    VAL(NV_SEEK_KEYFRAME);
+    VAL(NV_SEEK_EXACT);
+    VAL(NV_PLAYBACK_BUFFERING);
+    VAL(NV_PLAYBACK_PLAYING);
+    VAL(NV_PLAYBACK_PAUSED);
+    VAL(NV_PLAYBACK_ENDED);
+    VAL(NV_PLAYBACK_FAILED);
 
     /* C enums are int-sized; the bindings declare them as 32-bit. */
     printf("size enum %u\n", (unsigned)sizeof(NvStatus));

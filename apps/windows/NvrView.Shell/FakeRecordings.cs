@@ -112,6 +112,15 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
         new(c, "vehicle", day + 17 * 3600 + c.Channel, day + 17 * 3600 + 20),
     ];
 
+    /// <summary>For FakePlayback: whether the store is configured and the device enabled.</summary>
+    internal (bool Configured, bool Enabled) PlaybackCheck(string device)
+    {
+        lock (_gate)
+        {
+            return (_configured, _enabled.ContainsKey(device));
+        }
+    }
+
     private void Configured(string function)
     {
         if (!_configured)
