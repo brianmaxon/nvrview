@@ -304,7 +304,7 @@ internal sealed class Updater
 
     // ---- dialogs ----
 
-    private async Task<ContentDialogResult?> Show(string title, string text, string? primary, string close)
+    private async Task<ContentDialogResult?> Show(string title, string text, string? primary, string close, UIElement? content = null)
     {
         if (Program.Options.Background || _dialogOpen || App.Instance.MainWindow?.Content?.XamlRoot is not { } root)
         {
@@ -314,7 +314,7 @@ internal sealed class Updater
         {
             XamlRoot = root,
             Title = title,
-            Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 },
+            Content = content ?? new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 },
             CloseButtonText = close,
             DefaultButton = primary is null ? ContentDialogButton.Close : ContentDialogButton.Primary,
         };
@@ -342,8 +342,8 @@ internal sealed class Updater
 
     private async Task AskDownload(string version, string notes)
     {
-        string text = (notes.Length > 0 ? notes + "\n\n" : "") + $"You have {Current}. The new version is installed in its own folder next to this one; this one stays as it is.";
-        if (await Show($"NvrView {version} is available", text, "Download", "Not now") == ContentDialogResult.Primary)
+        string line = $"You have {Current}. The new version is installed in its own folder next to this one; this one stays as it is.";
+        if (await Show($"NvrView {version} is available", line, "Download", "Not now", UpdateNotesView.Build(line, notes)) == ContentDialogResult.Primary)
         {
             Download(version);
         }

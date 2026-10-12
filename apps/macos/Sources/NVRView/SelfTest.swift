@@ -3098,6 +3098,8 @@ final class SelfTest {
     }
 
     private func checkLogNow() {
+        // parity: updates-notes-scroll
+        problems += UpdateNotesSelfTest.run()
         // parity: updates-bundled-defaults
         if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
         // parity: appkit-warnings

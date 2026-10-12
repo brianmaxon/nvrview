@@ -128,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         switch prompt {
         case .available(let v, let notes):
             alert.messageText = "NVRView \(v) is available"
-            alert.informativeText = (notes.isEmpty ? "" : notes + "\n\n") + "You have \(updater.current)."
+            alert.informativeText = "You have \(updater.current)."
+            if !notes.isEmpty { alert.accessoryView = UpdateNotesView.make(notes: notes) }
             alert.addButton(withTitle: "Download")
             alert.addButton(withTitle: "Not Now")
             respond = { if $0 == .alertFirstButtonReturn { updater.download(v) } }
