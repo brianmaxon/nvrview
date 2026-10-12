@@ -46,7 +46,7 @@ public actor DetectorProvider {
 
     /// COCO class names for the classes that matter here, used when the
     /// model carries no label list.
-    static let cocoLabels: [String] = {
+    public static let cocoLabels: [String] = {
         var names = [String](repeating: "", count: 80)
         for (index, name) in [
             0: "person", 1: "bicycle", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck", 15: "cat", 16: "dog",
