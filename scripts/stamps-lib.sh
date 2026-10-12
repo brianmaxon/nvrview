@@ -140,3 +140,81 @@ windows_unlock() {
     export NVRVIEW_WINDOWS_LOCK_HELD
   fi
 }
+
+# Gives back a Windows lock that a background half of parallel_checks may
+# still hold (the lock belongs to this shell's pid); safe when none is held.
+windows_unlock_any() {
+  scripts/windows-lock.sh release --owner-pid $$ >/dev/null 2>&1 || true
+}
+
+# Runs the Mac check and the Windows check at the same time (merge-branch.sh,
+# merge-train.sh; release-check.sh does the same), each with its own log.
+#   parallel_checks LOGDIR MAC_CMD WINDOWS_CMD SKIP_WINDOWS(0|1)
+# The commands run through `sh -c` in the current directory, which must be a
+# clean committed tree. The Windows half takes the Windows lock for its run
+# and retries up to 3 times after a known environmental flake (a retry runs
+# with NVRVIEW_RETRIED=1). Leaves LOGDIR/mac.log, windows.log, windows.msgs
+# and sets mac_rc, win_rc (0 when skipped), mac_secs, win_secs. The caller
+# decides what a failure means; a lock that cannot be taken counts as one.
+parallel_checks() {
+  pc_logs="$1"; pc_mac="$2"; pc_win="$3"; pc_skip="$4"
+  rm -f "$pc_logs/mac.rc" "$pc_logs/win.rc"
+  : >"$pc_logs/mac.log"
+  : >"$pc_logs/windows.log"
+  : >"$pc_logs/windows.msgs"
+  (
+    t0=$(date +%s)
+    rc=0
+    sh -c "$pc_mac" >"$pc_logs/mac.log" 2>&1 || rc=$?
+    echo "$rc $(($(date +%s) - t0))" >"$pc_logs/mac.rc"
+  ) &
+  pc_mac_pid=$!
+  pc_win_pid=""
+  if [ "$pc_skip" != 1 ]; then
+    (
+      t0=$(date +%s)
+      rc=0
+      if windows_lock 2>>"$pc_logs/windows.msgs"; then
+        try=1
+        while :; do
+          retried=""
+          if [ "$try" -gt 1 ]; then retried=1; fi
+          echo "== Windows check (try $try of 3)" >>"$pc_logs/windows.msgs"
+          rc=0
+          NVRVIEW_RETRIED=$retried sh -c "$pc_win" >"$pc_logs/windows.log" 2>&1 || rc=$?
+          if [ "$rc" != 0 ] && [ "$try" -lt 3 ] && windows_flake "$pc_logs/windows.log"; then
+            echo "looks like a known environmental flake; trying again" >>"$pc_logs/windows.msgs"
+            try=$((try + 1))
+            continue
+          fi
+          break
+        done
+        windows_unlock
+      else
+        rc=1
+        echo "the Windows lock could not be taken" >>"$pc_logs/windows.msgs"
+      fi
+      echo "$rc $(($(date +%s) - t0))" >"$pc_logs/win.rc"
+    ) &
+    pc_win_pid=$!
+  fi
+  wait "$pc_mac_pid" || true
+  if [ -n "$pc_win_pid" ]; then wait "$pc_win_pid" || true; fi
+  # shellcheck disable=SC2034 # the results are read by the caller
+  read -r mac_rc mac_secs <"$pc_logs/mac.rc" || { mac_rc=1; mac_secs=0; }
+  win_rc=0
+  win_secs=0
+  if [ "$pc_skip" != 1 ]; then
+    # shellcheck disable=SC2034
+    read -r win_rc win_secs <"$pc_logs/win.rc" || { win_rc=1; win_secs=0; }
+  fi
+}
+
+# The total and the slowest three steps over the check logs, and a line in the
+# timing log (scripts/timing.py).
+#   report_timings KIND TOTAL_SECONDS TREE LOG...
+report_timings() {
+  rt_kind="$1"; rt_total="$2"; rt_tree="$3"; shift 3
+  echo "total $rt_total s; $(python3 -I scripts/timing.py slowest "$@")"
+  python3 -I scripts/timing.py log "$rt_kind" "$rt_total" --tree "$rt_tree" "$@" || true
+}

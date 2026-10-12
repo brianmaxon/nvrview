@@ -55,6 +55,7 @@ summary "Mac check" "$logs/mac.log" "$mac_rc"
 summary "Windows check" "$logs/windows.log" "$win_rc"
 echo
 echo "both checks took $(($(date +%s) - start)) s in parallel."
+report_timings release-check "$(($(date +%s) - start))" "$(git rev-parse 'HEAD^{tree}')" "$logs/mac.log" "$logs/windows.log"
 if [ "$mac_rc" != 0 ] || [ "$win_rc" != 0 ]; then
   keep="${TMPDIR:-/tmp}/release-check-logs.$$"
   mkdir -p "$keep"

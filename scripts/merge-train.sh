@@ -17,7 +17,8 @@
 #    way if any branch touched it. A check that leaves any other change in the
 #    tree fails the train (stray changes are refused).
 # 2. The Mac check (NVRVIEW_DOCS_FAST_PATH=0 scripts/check.sh, cached suites
-#    allowed) runs once on the final tree, then the Windows check once. The
+#    allowed) and the Windows check run once each on the final tree, at the
+#    same time with their own logs (a failure of either fails the train). The
 #    Windows check is skipped when scripts/stamps-lib.sh
 #    (windows_reuse_decision, rules A and B of scripts/merge-branch.sh) covers
 #    every merge step in turn (each step's "main" is the train so far), and no
@@ -106,7 +107,7 @@ cleanup() {
       git branch -q -D "$tmpb" 2>/dev/null || true
     fi
   fi
-  windows_unlock
+  windows_unlock_any
   rm -rf "$logs"
 }
 trap cleanup EXIT
@@ -172,30 +173,11 @@ train_windows_decision() { # BASE
   echo "every one of the $tcount merge steps is covered by its branch's Windows result"
 }
 
-# Runs the Windows check with up to 3 tries for known flakes. The lock is held
-# by the caller.
-windows_run() {
-  try=1
-  while :; do
-    retried=""
-    if [ "$try" -gt 1 ]; then retried=1; fi
-    echo "== Windows check on the train (try $try of 3)"
-    if NVRVIEW_RETRIED=$retried sh -c "$win_cmd" >"$logs/windows.log" 2>&1; then
-      tail -n 3 "$logs/windows.log"
-      return 0
-    fi
-    if [ "$try" -lt 3 ] && windows_flake "$logs/windows.log"; then
-      echo "merge-train: looks like a known environmental flake; trying again" >&2
-      try=$((try + 1))
-      continue
-    fi
-    return 1
-  done
-}
-
-# Tries one group of branches on top of what has been accepted so far. Passing:
-# the branches stay merged and are recorded. Failing: HEAD goes back, $built
-# names the branches that merged (the ones to split), $fail_kind the check.
+# Tries one group of branches on top of what has been accepted so far. The
+# Mac check and the Windows check (unless the branches' own Windows results
+# cover it) run at the same time. Passing: the branches stay merged and are
+# recorded. Failing: HEAD goes back, $built names the branches that merged
+# (the ones to split), $fail_kind the check.
 attempt() { # BRANCH...
   base=$(git rev-parse HEAD)
   build "$@"
@@ -204,25 +186,6 @@ attempt() { # BRANCH...
     for b in $built; do record "$b" "merged" "already contained in main"; done
     return 0
   fi
-  echo "== Mac check on the train:$built"
-  mac_start=$(date +%s)
-  if ! sh -c "$mac_cmd" >"$logs/mac.log" 2>&1; then
-    fail_kind="Mac check"
-    cp "$logs/mac.log" "$logs/fail.log"
-    git reset -q --hard "$base"
-    return 1
-  fi
-  if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
-    fail_kind="Mac check (it changed files: $(git status --porcelain | head -n 3 | tr '\n' ' '))"
-    cp "$logs/mac.log" "$logs/fail.log"
-    git reset -q --hard "$base"
-    return 1
-  fi
-  tail -n 2 "$logs/mac.log"
-  mac_cached=$(sed -n 's/.*; cached suites: //p' "$logs/mac.log" | tail -n 1)
-  echo "Mac suites taken from the test result cache: ${mac_cached:-none}"
-  scripts/checked.sh --record mac "$(($(date +%s) - mac_start))" "check on the merge train" "${mac_cached:-none}" >/dev/null
-
   count=0
   [ -f "$counter" ] && count=$(cat "$counter")
   case "$count" in '' | *[!0-9]*) count=0 ;; esac
@@ -240,26 +203,49 @@ attempt() { # BRANCH...
     echo "run anyway: $force"
     skip=0
   fi
+  if [ "$skip" = 0 ]; then
+    [ -n "$(windows_hosts)" ] || die "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer"
+    echo "== Mac check and Windows check on the train:$built, at the same time"
+  else
+    echo "== Mac check on the train:$built (Windows check skipped)"
+  fi
+  attempt_start=$(date +%s)
+  parallel_checks "$logs" "$mac_cmd" "$win_cmd" "$skip"
+  if [ "$mac_rc" != 0 ]; then
+    fail_kind="Mac check"
+    cp "$logs/mac.log" "$logs/fail.log"
+    git reset -q --hard "$base"
+    return 1
+  fi
+  if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
+    fail_kind="Mac check (it changed files: $(git status --porcelain | head -n 3 | tr '\n' ' '))"
+    cp "$logs/mac.log" "$logs/fail.log"
+    git reset -q --hard "$base"
+    return 1
+  fi
+  if [ "$win_rc" != 0 ]; then
+    fail_kind="Windows check"
+    { cat "$logs/windows.msgs"; cat "$logs/windows.log"; } >"$logs/fail.log"
+    git reset -q --hard "$base"
+    return 1
+  fi
+  echo "Mac check: PASS in ${mac_secs}s"
+  tail -n 2 "$logs/mac.log"
+  mac_cached=$(sed -n 's/.*; cached suites: //p' "$logs/mac.log" | tail -n 1)
+  echo "Mac suites taken from the test result cache: ${mac_cached:-none}"
+  scripts/checked.sh --record mac "$mac_secs" "check on the merge train" "${mac_cached:-none}" >/dev/null
   if [ "$skip" = 1 ]; then
     scripts/checked.sh --record windows-reused 0 "no Windows run: $reason" >/dev/null
     echo "$((count + 1))" >"$counter"
     echo "Windows check skipped."
     win_note="Windows reused"
   else
-    [ -n "$(windows_hosts)" ] || die "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer"
-    windows_lock
-    if windows_run; then
-      windows_unlock
-      echo 0 >"$counter"
-      win_note="Windows ran"
-    else
-      windows_unlock
-      fail_kind="Windows check"
-      cp "$logs/windows.log" "$logs/fail.log"
-      git reset -q --hard "$base"
-      return 1
-    fi
+    echo "Windows check: PASS in ${win_secs}s"
+    tail -n 3 "$logs/windows.log"
+    echo 0 >"$counter"
+    win_note="Windows ran"
   fi
+  report_timings train "$(($(date +%s) - attempt_start))" "$(git rev-parse 'HEAD^{tree}')" "$logs/mac.log" "$logs/windows.log"
   for b in $built; do record "$b" "merged" "Mac ran; $win_note"; done
   return 0
 }
