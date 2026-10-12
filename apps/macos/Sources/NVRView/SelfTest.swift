@@ -368,6 +368,12 @@ final class SelfTest {
         when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in
             let size = grid.bounds.size, drawable = grid.drawableSize, resizes = grid.drawableResizes
             let overlay = window.sidebarOverlay
+            // The hide waits while a button is down or a field is being
+            // edited; the run must not depend on the real mouse (a click
+            // elsewhere on the machine) or on focus, so those are pinned.
+            let realButtonDown = overlay.isButtonDown, realEditing = overlay.isEditing
+            overlay.isButtonDown = { false }
+            overlay.isEditing = { false }
             overlay.simulatedPointer = CGPoint(x: 2, y: 200)
             overlay.pointerAt(CGPoint(x: 2, y: 200))
             advance(overlay.reveal.dwell / 2)
@@ -385,6 +391,8 @@ final class SelfTest {
                 advance(overlay.reveal.hideDelay)
                 if overlay.isShown { problems.append("the sidebar overlay did not slide away") }
                 overlay.simulatedPointer = nil
+                overlay.isButtonDown = realButtonDown
+                overlay.isEditing = realEditing
                 window.setSidebarCollapsedForTest(false)
                 when({ grid.drawableSize == Self.pixelSize(of: grid) }, timeout: 2) { [self] in lensStep() }
             }
