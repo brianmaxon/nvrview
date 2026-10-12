@@ -5,6 +5,8 @@
 #
 #   scripts/test-stamps.sh
 set -eu
+# The caller's choices (for example a full check) must not leak in.
+unset NVRVIEW_FULL_CHECK NVRVIEW_FULL_EVERY NVRVIEW_FULL_MAX_AGE_H NVRVIEW_CACHE_MAX_AGE_H NVRVIEW_FULL_WINDOWS_EVERY
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
