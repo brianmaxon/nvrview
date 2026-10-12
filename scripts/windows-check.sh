@@ -154,7 +154,7 @@ echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
 # The worker's options travel as variables set in that script.
 vars=""
-for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY; do
+for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY NVRVIEW_MIC_TEST; do
   eval "val=\${$v:-}"
   case "$val" in
     *[!A-Za-z0-9_.-]*) echo "$v: letters, digits, '.', '-' and '_' only" >&2; exit 2 ;;
@@ -173,7 +173,7 @@ now=$(date +%s)
 # scripts/release.sh look for.
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
   [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
-  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests; worker $worker"
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker"
 else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi

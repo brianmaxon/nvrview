@@ -120,12 +120,17 @@ if ! timeout "${NVRVIEW_CSHARP_TEST_TIMEOUT:-300}" dotnet target/dotnet/bin/NvrV
   exit 1
 fi
 
+# The real-microphone step needs a microphone that hears sound; an unattended
+# test computer usually has none, so it runs only with NVRVIEW_MIC_TEST=1.
+mic_test=
+if [ "${NVRVIEW_MIC_TEST:-0}" = 1 ]; then mic_test=--mic-test; else echo "real-microphone step not run (NVRVIEW_MIC_TEST=1 runs it)"; fi
+
 if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
   step "Windows app plain start, first run (interactive session)"
   scripts/windows-app.sh startup
 
   step "Windows app self-test (interactive session)"
-  scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --mic-test
+  scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
 
   step "Windows app, trimmed release build (publish)"
   scripts/windows-app.sh publish
@@ -134,7 +139,7 @@ if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then
   NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
 
   step "Windows app self-test, trimmed release build (interactive session)"
-  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --mic-test
+  NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test
 
   step "Windows side-by-side update, end to end, trimmed release build (interactive session)"
   NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh update
