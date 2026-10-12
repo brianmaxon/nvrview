@@ -48,6 +48,9 @@ final class FakeRecordingsState: @unchecked Sendable {
         var cameras: [RecordingCamera]
         var state: String
         var paused: Bool
+        /// The incident's span (device-local seconds): what the download covers.
+        var start: Int64 = 0
+        var end: Int64 = 0
     }
 
     struct World {
@@ -78,6 +81,8 @@ final class FakeRecordingsState: @unchecked Sendable {
         var labels: [(camera: RecordingCamera, kind: String, start: Int64, end: Int64, analyzer: String)] = []
         /// Sound analysis requests that have not finished: request, camera.
         var analyses: [(request: UInt64, camera: RecordingCamera, day: Int64)] = []
+        /// Seconds of audio analyzed from downloads: first-lens camera, span.
+        var analyzed: [(camera: RecordingCamera, start: Int64, end: Int64)] = []
         var nextAnalysis: UInt64 = 1
         var stopped = false
     }
@@ -754,7 +759,8 @@ extension FakeCore {
         let names = e.cameras.map { "Camera \($0.channel + 1)" }.joined(separator: ", ")
         let folder = (w.downloadsDir ?? "") + "/\(e.start) \(e.kinds.first ?? "recording") — \(names)"
         let d = FakeRecordingsState.Download(
-            id: id, incident: e.key, folder: folder, cameras: cameras, state: "queued", paused: false)
+            id: id, incident: e.key, folder: folder, cameras: cameras, state: "queued", paused: false, start: e.start,
+            end: e.end)
         w.downloads.append(d)
         return d
     }
@@ -916,7 +922,7 @@ extension FakeCore {
     /// their events. Paused downloads wait.
     public func completeRecordingWork() {
         guard !isFreed else { return }
-        completeSoundAnalyses()
+        defer { completeSoundAnalyses() }
         let cover = coverKeyframe
         let (thumbs, downloads) = recordings.locked { w -> ([ThumbnailKey], [FakeRecordingsState.Download]) in
             let thumbs = w.pendingThumbnails
@@ -1089,9 +1095,16 @@ extension FakeCore {
                 for item in list { cameras.append(try Self.camera(item)) }
             }
             let lanes = cameras.map { c -> [String: Any] in
-                let heard = w.watched.contains(c) && Self.allowed(w, c)
-                let peak: [Any] = Array(repeating: heard ? -40 : NSNull(), count: count)
-                let rms: [Any] = Array(repeating: heard ? -50 : NSNull(), count: count)
+                let live = w.watched.contains(c) && Self.allowed(w, c)
+                let mine = w.analyzed.filter { $0.camera == c }
+                // A bucket is heard when the camera listens or an analyzed
+                // download reaches into it.
+                let heard = (0..<count).map { i -> Bool in
+                    let from = start + Int64(i * bucket), to = from + Int64(bucket) - 1
+                    return live || mine.contains { $0.start <= to && $0.end >= from }
+                }
+                let peak: [Any] = heard.map { $0 ? -40 as Any : NSNull() }
+                let rms: [Any] = heard.map { $0 ? -50 as Any : NSNull() }
                 return [
                     "camera": Self.cameraObject(c), "bucket_s": bucket, "start": start,
                     "peak_db": peak, "rms_db": rms,
@@ -1169,20 +1182,55 @@ extension FakeCore {
         ["type": "sound_analyze", "request": request, "camera": cameraObject(c), "day": day, "state": state]
     }
 
-    /// Finishes every queued sound analysis: `running`, then `done` with no
-    /// audio analyzed (the fake has no recordings to listen to).
+    /// Finishes every queued sound analysis from the synthetic downloads, as
+    /// the core does from finished ones: with no downloads folder it fails
+    /// `no_source`, with no finished download of that camera reaching into the
+    /// day `no_audio`; otherwise `running`, then `done`, with every second of
+    /// the downloads inside the day heard (loudness) and one `smoke_alarm`
+    /// label per download (the pattern detector's, replacing its earlier
+    /// ones over that audio).
     func completeSoundAnalyses() {
-        let pending = recordings.locked { w -> [(request: UInt64, camera: RecordingCamera, day: Int64)] in
+        typealias Outcome = (request: UInt64, camera: RecordingCamera, day: Int64, failure: String?, seconds: Int, labels: Int)
+        let pending = recordings.locked { w -> [Outcome] in
             let p = w.analyses
             w.analyses.removeAll()
-            return p
+            return p.map { a -> Outcome in
+                guard w.downloadsDir != nil else { return (a.request, a.camera, a.day, "no_source", 0, 0) }
+                let dayStart = DeviceTime.dayStart(a.day)
+                var spans: [(start: Int64, end: Int64)] = []
+                for d in w.downloads where d.state == "done" && d.cameras.contains(a.camera) {
+                    let s = max(d.start, dayStart), e = min(d.end, dayStart + Self.day - 1)
+                    if s <= e { spans.append((s, e)) }
+                }
+                guard !spans.isEmpty else { return (a.request, a.camera, a.day, "no_audio", 0, 0) }
+                let mic = RecordingCamera(device: a.camera.device, channel: a.camera.channel, lens: 0)
+                var seconds: Int64 = 0
+                for s in spans {
+                    seconds += s.end - s.start + 1
+                    w.analyzed.removeAll { $0.camera == mic && $0.start == s.start }
+                    w.analyzed.append((mic, s.start, s.end))
+                    w.labels.removeAll { $0.camera == a.camera && $0.analyzer == "pattern-v1" && $0.start >= s.start && $0.start <= s.end }
+                    w.labels.append((a.camera, "smoke_alarm", s.start, s.start + min(4, s.end - s.start), "pattern-v1"))
+                }
+                w.revision += 1
+                w.incidentsRevision += 1
+                return (a.request, a.camera, a.day, nil, Int(seconds), spans.count)
+            }
         }
         for a in pending {
-            emit(event: Self.json(Self.analysisEvent(a.request, a.camera, a.day, "running")))
-            var done = Self.analysisEvent(a.request, a.camera, a.day, "done")
-            done["seconds"] = 0
-            done["labels"] = 0
-            emit(event: Self.json(done))
+            if a.failure == nil { emit(event: Self.json(Self.analysisEvent(a.request, a.camera, a.day, "running"))) }
+            var last = Self.analysisEvent(a.request, a.camera, a.day, a.failure == nil ? "done" : "failed")
+            if let reason = a.failure {
+                last["reason"] = reason
+            } else {
+                last["seconds"] = a.seconds
+                last["labels"] = a.labels
+            }
+            emit(event: Self.json(last))
+            if a.failure == nil {
+                let revision = recordings.locked { $0.incidentsRevision }
+                emit(event: Self.json(["type": "incidents_changed", "revision": revision]))
+            }
         }
     }
 }

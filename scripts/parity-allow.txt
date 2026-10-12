@@ -86,6 +86,7 @@ sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-e
 sidebar-system-peek         macos    n/a: guards against AppKit's own peek of a collapsed NSSplitView sidebar; the Windows sidebar is the app's own layout
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
 playback-real-core           macos    gap: the Windows playback steps run on the fakes only; a decoded picture from a real playback is not checked on Windows yet
+recordings-analyze-real-core macos    gap: the Windows recordings steps run on the fakes only; the real core analyzing a day downloaded from tools/mock-nvr is not driven from the Windows self-test yet
 playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
 capture-picture-tile        macos    gap: Windows Save Picture is CAP-P2

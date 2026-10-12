@@ -821,6 +821,75 @@ internal sealed class SelfTest(App app, AppOptions options)
             service.SetListening(heard[0], false);
         }
 
+        // parity: recordings-analyze-no-audio
+        // Analyze Sounds with nothing downloaded for the day: the analysis fails no_audio with its message, the lane
+        // shows no progress and no loudness.
+        RecordingCamera? analyzed = null;
+        if (b.Lanes.Count > 0)
+        {
+            RecordingCamera lane0 = b.Lanes[0].Camera;
+            Expect(service.Downloads.Count == 0, $"recordings: {service.Downloads.Count} downloads before the analysis steps");
+            b.AnalyzeSound(lane0);
+            Expect(b.AnalysisOf(lane0)?.State == AnalysisState.Queued, "recordings: Analyze Sounds queued nothing on the lane");
+            bool failed = await Until(() => { fake.CompleteRecordingWork(); return service.Analysis(lane0, b.Day)?.State == AnalysisState.Failed; }, 5);
+            Say($"recordings: analyze with nothing downloaded: {service.Analysis(lane0, b.Day)?.Reason ?? "no result"}, {service.Notice ?? "no message"}");
+            Expect(failed && service.Analysis(lane0, b.Day)?.Reason == "no_audio", "recordings: the analysis did not fail no_audio");
+            Expect(service.Notice == SoundAnalysis.Failure("no_audio"), $"recordings: the no_audio message was {service.Notice ?? "missing"}");
+            Expect(b.AnalysisOf(lane0) is null, "recordings: a failed analysis still shows progress");
+            b.ReloadLoudness(force: true);
+            Expect(b.LoudnessOf(lane0)?.Heard != true, "recordings: loudness appeared without audio");
+
+            // parity: recordings-analyze-day
+            // After a download: progress, then loudness and a sound label on the lane, and the done message.
+            Incident? toDownload = b.DayIncidents.FirstOrDefault(i => i.Kinds.SequenceEqual(["vehicle"])) ?? b.DayIncidents.FirstOrDefault(i => i.Cameras.Count > 0);
+            if (toDownload is not null)
+            {
+                analyzed = toDownload.Cameras[0].Camera;
+                b.Download(toDownload.Key);
+                bool downloaded = await Until(() => { fake.CompleteRecordingWork(); return service.Downloads.Any(d => d.State == "done"); }, 5);
+                Expect(downloaded, "recordings: the download for the analysis did not finish");
+                b.AnalyzeSound(analyzed);
+                Expect(service.IsAnalyzing(analyzed, b.Day), "recordings: Analyze Sounds shows no progress");
+                bool done = await Until(() => { fake.CompleteRecordingWork(); return service.Analysis(analyzed, b.Day)?.State == AnalysisState.Done; }, 5);
+                AnalysisEntry? entry = service.Analysis(analyzed, b.Day);
+                Say($"recordings: analyzed {entry?.Seconds ?? 0} s, {entry?.Labels ?? 0} labels; {service.Notice ?? "no message"}");
+                Expect(done && entry is { Seconds: > 0, Labels: 1 }, $"recordings: the analysis found {entry}");
+                Expect(b.AnalysisOf(analyzed) is null, "recordings: a finished analysis still shows progress");
+                Expect(entry is not null && service.Notice == SoundAnalysis.Outcome(entry), $"recordings: the done message was {service.Notice ?? "missing"}");
+                bool shown = await Until(() => b.LoudnessOf(analyzed)?.Heard == true
+                    && b.Lanes.FirstOrDefault(l => l.Camera == analyzed)?.Events.Any(e => e.Kind == "smoke_alarm" && e.Source == SoundKinds.LocalAudio) == true, 5);
+                Expect(shown, "recordings: no loudness or sound label on the lane after the analysis");
+            }
+            else
+            {
+                _problems.Add("recordings: no incident to download for the analysis");
+            }
+
+            // parity: recordings-analyze-cancel
+            // Canceling an analysis before it runs: it ends canceled, shows no progress, and does not come back when
+            // the core's work is done.
+            RecordingCamera? other = b.Lanes.Select(l => l.Camera).FirstOrDefault(c => c != analyzed);
+            if (other is { } o)
+            {
+                b.AnalyzeSound(o);
+                Expect(b.AnalysisOf(o) is not null, "recordings: nothing to cancel");
+                b.CancelAnalysis(o);
+                bool canceled = await Until(() => service.Analysis(o, b.Day)?.State == AnalysisState.Canceled, 5);
+                fake.CompleteRecordingWork();
+                Say($"recordings: analysis canceled: {service.Notice ?? "no message"}");
+                Expect(canceled && service.Analysis(o, b.Day)?.State == AnalysisState.Canceled, "recordings: the analysis did not end canceled");
+                Expect(b.AnalysisOf(o) is null, "recordings: a canceled analysis still shows progress");
+                Expect(service.Notice == SoundAnalysis.Outcome(new AnalysisEntry(0, AnalysisState.Canceled)), $"recordings: the cancel message was {service.Notice ?? "missing"}");
+                b.ReloadLoudness(force: true);
+                Expect(b.LoudnessOf(o)?.Heard != true, "recordings: a canceled analysis left loudness");
+            }
+            foreach (DownloadProgress d in service.Downloads.ToList())
+            {
+                service.Forget(d.Download);
+            }
+            w.Refresh();
+        }
+
         // parity: recordings-layout
         // The window at its smallest and at a large size: the side panes give way in a narrow window (inspector first)
         // and come back in a wide one.
