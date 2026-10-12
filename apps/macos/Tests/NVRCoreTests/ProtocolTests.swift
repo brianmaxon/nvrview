@@ -276,4 +276,28 @@ private func waitUntil(_ timeout: Double = 5, _ condition: () -> Bool) async {
             #expect(rig.fake.violations.isEmpty, "\(rig.fake.violations)")
         }
     }
+
+    /// docs/FFI.md: callbacks end when `nv_core_free` returns, not when it
+    /// begins. A tile thread that sends its queued `first_picture` timing
+    /// while free is stopping the tiles is legal and reaches the app; an
+    /// event after free returned is still a violation. (The interleaving
+    /// once happened by chance under load; the hook forces it.)
+    @Test func eventsWhileFreeingAreLegalAndAfterAreNot() throws {
+        var options = FakeCore.Options(clips: [try Fixtures.clip("h264-basic.h264")])
+        let flushed = Box(false)
+        options.onFreeBegan = { fake in
+            fake.flushEvents()  // what the tile thread's next pump would send
+            flushed.set(true)
+        }
+        let rig = try Rig(options)
+        let tile = try rig.open()
+        rig.play(tile, 1)  // the answer queues `first_picture` for the next pump
+        rig.bridge.shutdown()
+        #expect(flushed.get())
+        #expect(rig.fake.violations.isEmpty, "\(rig.fake.violations)")
+        #expect(rig.events.get().contains { if case .timing("first_picture", tile.id, _, _) = $0 { true } else { false } })
+        rig.fake.emit(event: #"{"type":"layouts_changed","revision":1}"#)
+        #expect(rig.fake.violations.count == 1)
+        #expect(rig.fake.violations.first?.hasPrefix("event emitted after free") == true)
+    }
 }
