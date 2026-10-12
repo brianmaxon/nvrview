@@ -87,7 +87,7 @@ using Point = Windows.Foundation.Point;
 
 namespace NvrView.App;
 
-internal sealed class SelfTest(App app, AppOptions options)
+internal sealed partial class SelfTest(App app, AppOptions options)
 {
     private readonly List<string> _problems = [];
     private readonly List<string> _lines = [];
@@ -1514,23 +1514,21 @@ internal sealed class SelfTest(App app, AppOptions options)
                 && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
             Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
             Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
-            // A button whose action is not built yet says so; so do P and R.
+            // A button whose action is not built yet says so; so does R (Save Picture works: SavePictures).
             At(1000);
-            chrome.PressHeader(TileHeaderItem.SavePicture);
+            chrome.PressHeader(TileHeaderItem.Record);
             string? clicked = stage.ToastText;
             clock.Advance(StageView.ToastSeconds + 0.1);
             stage.Tick();
             bool gone = stage.ToastText is null;
             stage.Select(tile.Path);
-            stage.HandleKey(Windows.System.VirtualKey.P, false, false);
-            string? keyP = stage.ToastText;
             stage.HandleKey(Windows.System.VirtualKey.R, false, false);
             string? keyR = stage.ToastText;
             clock.Advance(StageView.ToastSeconds + 0.1);
             stage.Tick();
-            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, P {keyP ?? "nothing"}, R {keyR ?? "nothing"}");
-            Expect(clicked == "Save Picture is coming soon" && gone, "Save Picture's button did not say it is coming soon");
-            Expect(keyP == "Save Picture is coming soon" && keyR == "Start Recording is coming soon", "P or R did not reach the header's actions");
+            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, R {keyR ?? "nothing"}");
+            Expect(clicked == "Start Recording is coming soon" && gone, "Record's button did not say it is coming soon");
+            Expect(keyR == "Start Recording is coming soon", "R did not reach the header's actions");
         }
         finally
         {
@@ -2340,7 +2338,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool searching = await Until(() => v.Discovery.IsSearching, 5);
         Say($"settings window: sections {string.Join(" / ", sw.SectionTitles)}; on {sw.Section.Title()}, searching {searching}");
         Expect(sw.IsLoaded && sw.Section == SettingsSection.Devices && searching, "Find devices did not show the Devices section and start the search");
-        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list the five sections");
+        Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list every section");
         foreach (SettingsSection section in SettingsSections.All)
         {
             sw.Show(section);
@@ -2499,6 +2497,7 @@ internal sealed class SelfTest(App app, AppOptions options)
     private async Task TileFeatures(Viewer v, StageView stage)
     {
         await HeaderModel(v, stage);
+        await SavePictures(v, stage);
 
         // parity: corner-indicators
         // Camera AI detections from the mock reach the corner indicators.
@@ -2721,6 +2720,9 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(FisheyeTileSetting.FromJson(member).Mode == mode, $"fisheye {mode.Title()}: the view was not kept in the layout leaf ({member})");
             await CheckColors(mode.Title(), f, r, circle);
         }
+
+        await FisheyePictures(v, stage, r, f, circle);
+        stage.SetFisheyeMode(f, FisheyeViewMode.Ptz);
 
         // parity: fisheye-ptz-zoom
         // Virtual PTZ zoom: eased on the viewer's clock, ends on the target, saved; 0 resets.
