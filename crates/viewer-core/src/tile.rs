@@ -20,6 +20,7 @@ use crate::audio::{AudioFrame, AudioHub, TileAudio, TileAudioControl, TileAudioL
 use crate::clock::HostClock;
 use crate::events::{EventSink, Priority};
 use crate::json::Object;
+use crate::live_pacer::LivePacer;
 use crate::playback::feed::{FeedItem, FeedRx};
 use crate::sound::{SoundHub, TileSoundLink};
 use crate::{Callbacks, in_callback};
@@ -409,6 +410,8 @@ struct Generation {
     video_seen: bool,
     /// When a 0x0 stream-info record arrived while no video had.
     info_only_since: Option<Instant>,
+    /// Live: paces the pictures to their timestamps (live_pacer.rs).
+    pacer: LivePacer,
     /// `tile_error` was sent for a stream that stayed info-only.
     info_only_reported: bool,
 }
@@ -426,6 +429,7 @@ impl Generation {
             video_seen: false,
             info_only_since: None,
             info_only_reported: false,
+            pacer: LivePacer::default(),
         }
     }
 
@@ -806,6 +810,10 @@ impl TileThread {
                 break;
             }
             let align_deadline = s.align_deadline(self.ctx.tier_switch_align_cap);
+            let pace_deadline = s.current.pacer.next_due().map(|due| {
+                tokio::time::Instant::now()
+                    + Duration::from_micros(due.saturating_sub(self.ctx.clock.now_us()))
+            });
             tokio::select! {
                 biased;
                 _ = &mut wake => break,
@@ -853,6 +861,12 @@ impl TileThread {
                         None => std::future::pending().await,
                     }
                 } => {}
+                _ = async {
+                    match pace_deadline {
+                        Some(d) => tokio::time::sleep_until(d).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
             }
             self.link.apply(&mut self.audio);
             let now_us = self.ctx.clock.now_us();
@@ -868,6 +882,7 @@ impl TileThread {
                     st.failed = Some("timeout");
                 }
             }
+            self.release_paced(&mut s.current, now_us);
             self.deliver(&mut s);
             s.cap(self.ctx.tier_switch_align_cap);
             self.settle(&mut s);
@@ -1159,7 +1174,39 @@ impl TileThread {
         }
     }
 
+    /// Takes an item of the shown generation: a live stream's pictures (and
+    /// the stream info between them) go through its pacer, the rest at once.
     fn item(&mut self, g: &mut Generation, item: FeedItem) {
+        if !self.playback && matches!(g.sub, Some(Source::Live(_))) {
+            match item {
+                FeedItem::Item(Item::Media(r @ (Record::Video { .. } | Record::Info { .. }))) => {
+                    let now = self.ctx.clock.now_us();
+                    g.pacer.push(now, r);
+                    self.release_paced(g, now);
+                    return;
+                }
+                FeedItem::Item(Item::Discontinuity) => {
+                    let held: Vec<Record> = g.pacer.flush().collect();
+                    for r in held {
+                        self.apply_item(g, FeedItem::Item(Item::Media(r)));
+                    }
+                    self.apply_item(g, item);
+                    return;
+                }
+                other => return self.apply_item(g, other),
+            }
+        }
+        self.apply_item(g, item);
+    }
+
+    /// Hands the paced records that are due to the pipeline.
+    fn release_paced(&mut self, g: &mut Generation, now: u64) {
+        while let Some(r) = g.pacer.pop_due(now) {
+            self.apply_item(g, FeedItem::Item(Item::Media(r)));
+        }
+    }
+
+    fn apply_item(&mut self, g: &mut Generation, item: FeedItem) {
         let item = match item {
             FeedItem::Item(i) => i,
             FeedItem::Clear => {

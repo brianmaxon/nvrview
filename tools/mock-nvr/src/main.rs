@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--fixture FILE]\n\
-    \x20               [--user NAME] [--max-logins N] [--fps N] [--width N] [--height N]\n\
+    \x20               [--user NAME] [--max-logins N] [--fps N] [--video-burst N] [--width N] [--height N]\n\
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
@@ -41,6 +41,7 @@ fn run() -> Result<(), String> {
     let mut fixture = PathBuf::from("fixtures/synthetic/h264-basic.h264");
     let (mut channels, mut max_logins, mut fps) = (4u8, 4usize, 25u32);
     let (mut width, mut height) = (320u32, 240u32);
+    let mut video_burst = 1u32;
     let mut user = String::from("example-user");
     let mut audio: Option<PathBuf> = None;
     let (mut audio_clock, mut audio_jitter_ms) = (16_000.0f64, 0u32);
@@ -79,6 +80,9 @@ fn run() -> Result<(), String> {
                 max_logins = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--fps" => fps = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
+            "--video-burst" => {
+                video_burst = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
             "--width" => width = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
             "--height" => height = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
             "--audio" => audio = Some(PathBuf::from(v)),
@@ -182,6 +186,7 @@ fn run() -> Result<(), String> {
     cfg.channels = channels;
     cfg.max_logins = max_logins;
     cfg.fps = fps;
+    cfg.video_burst = video_burst;
     cfg.width = width;
     cfg.height = height;
     cfg.user = user;

@@ -55,6 +55,7 @@ pub mod discover;
 mod events;
 mod json;
 mod lens;
+mod live_pacer;
 mod playback;
 pub mod ptz;
 mod recordings_owner;
