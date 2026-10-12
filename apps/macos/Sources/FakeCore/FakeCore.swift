@@ -112,8 +112,9 @@ public struct FakeDeviceSpec: Sendable {
 /// It also checks the app: every Decode not discarded by a later Flush, Reset
 /// or Configure must be answered exactly once (per generation), nothing may
 /// be answered that was not asked, close/remove/free must not be called from
-/// inside a callback, and no callback may run after `free`. Problems collect
-/// in `violations`.
+/// inside a callback, and no callback may run after `free` returns
+/// (docs/FFI.md: while it runs, a tile thread may still send what it has).
+/// Problems collect in `violations`.
 ///
 /// Create one with `FakeCore.factory(options:onCreate:)` to hand to
 /// `CoreBridge`, or directly with `init(options:sink:)`.
@@ -199,6 +200,10 @@ public final class FakeCore: CoreAPI {
         /// The clock (nanoseconds) a playback's position runs on
         /// (`FakePlayback.swift`): the host clock, or a test's manual one.
         public var playbackClock: @Sendable () -> UInt64 = { HostClock.nowNanos() }
+        /// Runs inside `free` after it began (calls are refused) and before
+        /// the tiles stop: a test sends what a tile thread could still send
+        /// there (`flushEvents`), forcing that interleaving.
+        public var onFreeBegan: (@Sendable (FakeCore) -> Void)?
 
         public init(clips: [FakeClip]) { self.clips = clips }
     }
@@ -226,7 +231,10 @@ public final class FakeCore: CoreAPI {
         var nextID: UInt64 = 1
         var devices: [UInt64: Device] = [:]
         var tiles: [UInt64: FakeTile] = [:]
+        /// `free` began: calls are refused with `closed`.
         var freed = false
+        /// `free` returned: no callback may run any more.
+        var freeReturned = false
         /// Tiles whose start was refused (`startRejectedTiers`); a retry
         /// revives them.
         var rejected: Set<UInt64> = []
@@ -298,8 +306,8 @@ public final class FakeCore: CoreAPI {
     }
 
     private func emitEvent(_ json: String) {
-        if world.withLock({ $0.freed }) {
-            violation("event emitted after free")
+        if world.withLock({ $0.freeReturned }) {
+            violation("event emitted after free: \(json)")
             return
         }
         eventLock.lock()
@@ -450,16 +458,20 @@ public final class FakeCore: CoreAPI {
         requireOutsideCallback("nv_core_free")
         // A running search ends with its `discovery_done`, before anything is torn down.
         try? discoverEnd(stopped: true)
-        let tiles = world.withLock { w -> [FakeTile] in
-            if w.freed { return [] }
-            w.freed = true
-            defer {
-                w.tiles.removeAll()
-                w.devices.removeAll()
-            }
-            return Array(w.tiles.values)
+        let began = world.withLock { w -> Bool in
+            defer { w.freed = true }
+            return !w.freed
         }
-        for t in tiles { t.stop() }
+        guard began else { return }
+        options.onFreeBegan?(self)
+        // Until each tile has stopped, its thread may still send what it has
+        // queued (as the core's may until `nv_core_free` returns).
+        for t in world.withLock({ Array($0.tiles.values) }) { t.stop() }
+        world.withLock { w in
+            w.tiles.removeAll()
+            w.devices.removeAll()
+            w.freeReturned = true
+        }
     }
 
     // MARK: ABI 3: device keys
