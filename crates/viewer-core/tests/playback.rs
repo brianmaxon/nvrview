@@ -96,17 +96,54 @@ impl Rig {
             .recordings_want(&json!({"cameras": cams, "days": [t(8, 0, 0, 0)]}).to_string())
             .unwrap();
         let n = nvr.command_count(14);
+        // The latest report counts: an idle one from before the fill began
+        // says nothing about the searches (counted when the mock gets them,
+        // not when it answers).
         self.until("the index", 30, || {
             nvr.command_count(14) >= n + channels.len() as u64
-                && self.rec.events_of("recordings_index").iter().any(|e| {
-                    e["device"] == key.as_str() && e["state"] == "idle" && e["pending_days"] == 0
-                })
+                && self
+                    .rec
+                    .events_of("recordings_index")
+                    .iter()
+                    .rev()
+                    .find(|e| e["device"] == key.as_str())
+                    .is_some_and(|e| e["state"] == "idle" && e["pending_days"] == 0)
         });
         (id, key)
     }
 
     fn until(&self, what: &str, secs: u64, cond: impl FnMut() -> bool) {
         sim_until(&self.sim, &self.core, what, secs, cond);
+    }
+
+    /// Runs a blocking core call on a thread of its own and moves the
+    /// clock in small steps until it returns; fails (instead of hanging)
+    /// if it needs more than `secs` of simulated time. Calls that should
+    /// need no time return before the first step.
+    fn bounded(&self, what: &str, secs: u64, f: impl FnOnce(&Core) + Send + 'static) {
+        let core = Arc::clone(&self.core);
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            f(&core);
+            let _ = done_tx.send(());
+        });
+        let start = self.sim.elapsed();
+        let mut finished = false;
+        self.sim.advance_until(
+            what,
+            Duration::from_secs(secs),
+            Duration::from_millis(10),
+            || {
+                finished = finished || done.try_recv().is_ok();
+                finished
+            },
+        );
+        caller.join().unwrap();
+        let took = self.sim.elapsed() - start;
+        assert!(
+            took < Duration::from_secs(secs),
+            "{what} took {took:?} of simulated time"
+        );
     }
 
     fn open(&self, json: Value) -> (u64, Vec<u64>) {
@@ -638,8 +675,14 @@ fn removing_a_device_or_shutting_down_stops_every_play() {
     let rig = Rig::new();
     let a = archive_mock(&rig.sim, 2, |_| {});
     let b = archive_mock(&rig.sim, 2, |_| {});
+    // A device slow to answer file searches: a start of plays there is
+    // still searching when the core shuts down.
+    let slow = archive_mock(&rig.sim, 1, |a| {
+        a.search_delay = Some(Duration::from_secs(8));
+    });
     let (dev_a, key_a) = rig.add(&a, &[0, 1]);
     let (_dev_b, key_b) = rig.add(&b, &[0, 1]);
+    let (_dev_slow, key_slow) = rig.add(&slow, &[0]);
     let mut cameras = cams(&key_a, &[0, 1], "sub");
     cameras.extend(cams(&key_b, &[0], "sub"));
     let (pb, tiles) = rig.open(json!({
@@ -651,7 +694,9 @@ fn removing_a_device_or_shutting_down_stops_every_play() {
     rig.sim.advance(Duration::from_secs(2));
     assert_eq!((a.active_plays(), b.active_plays()), (2, 1));
     // Device A goes: its two tiles close; the playback goes on with B.
-    rig.core.remove_device(dev_a).unwrap();
+    rig.bounded("the device removal", 5, move |core| {
+        core.remove_device(dev_a).unwrap();
+    });
     rig.sim.settle();
     rig.core.flush_events();
     assert_eq!(a.active_plays(), 0);
@@ -666,13 +711,21 @@ fn removing_a_device_or_shutting_down_stops_every_play() {
     let (pos, state) = rig.position(pb);
     assert_eq!(state, PlaybackState::Playing);
     assert!(pos > ms(8, 10, 0, 12));
-    // A second playback of B alone.
-    let (pb2, tiles2) = rig.open(json!({
+    // A second playback, of B and the slow device, starting.
+    let mut cameras = cams(&key_b, &[1], "sub");
+    cameras.extend(cams(&key_slow, &[0], "sub"));
+    let searches = slow.command_count(14);
+    let (pb2, _) = rig.open(json!({
         "start_ms": ms(8, 12, 0, 0), "end_ms": ms(8, 13, 0, 0),
-        "cameras": cams(&key_b, &[1], "sub"),
+        "cameras": cameras,
     }));
-    let _ = (pb2, tiles2);
-    rig.core.shutdown();
+    rig.until("the slow device's file search", 5, || {
+        slow.command_count(14) > searches
+    });
+    assert!(rig.events("playback_closed", pb2).is_empty());
+    // The shutdown cancels the start in flight instead of waiting for it
+    // to let go of its session (the search alone would take 8 s).
+    rig.bounded("the shutdown", 5, Core::shutdown);
     rig.core.flush_events();
     assert_eq!(b.active_plays(), 0);
     assert_eq!(

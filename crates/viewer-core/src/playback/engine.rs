@@ -380,10 +380,26 @@ struct Dev {
     index: Arc<Mutex<DeviceIndex>>,
     token: Arc<AtomicU64>,
     busy: bool,
+    /// The start in flight (or the last one). It holds the session, so it
+    /// is canceled before the device is given up: a session cannot close
+    /// while a task the engine left behind still holds it.
+    job: Option<JoinHandle<()>>,
     queue: VecDeque<Launch>,
     /// Readers to stop before the next start.
     stopping: Vec<Reader>,
     sub_files: SubFiles,
+}
+
+impl Dev {
+    /// Cancels the start in flight and waits until it has let go of the
+    /// session. A canceled start drops the plays it got, which stops them;
+    /// waiting for it needs no time to pass.
+    async fn cancel_start(&mut self) {
+        if let Some(j) = self.job.take() {
+            j.abort();
+            let _ = j.await;
+        }
+    }
 }
 
 /// The seek being reported.
@@ -490,6 +506,7 @@ impl Engine {
             index: d.index,
             token: Arc::new(AtomicU64::new(0)),
             busy: false,
+            job: None,
             queue: VecDeque::new(),
             stopping: Vec::new(),
             sub_files: Arc::new(Mutex::new(HashMap::new())),
@@ -576,6 +593,7 @@ impl Engine {
         let mut readers = Vec::new();
         for d in self.devices.values_mut() {
             d.token.fetch_add(1, Ordering::SeqCst);
+            d.cancel_start().await;
             readers.append(&mut d.stopping);
         }
         for c in &mut self.cams {
@@ -702,6 +720,7 @@ impl Engine {
     async fn drop_device(&mut self, key: &str) {
         if let Some(mut d) = self.devices.remove(key) {
             d.token.fetch_add(1, Ordering::SeqCst);
+            d.cancel_start().await;
             for r in d.stopping.drain(..) {
                 r.stop().await;
             }
@@ -1011,7 +1030,7 @@ impl Engine {
             stopping: std::mem::take(&mut d.stopping),
             notes: self.notes_tx.clone(),
         };
-        tokio::spawn(job.run());
+        d.job = Some(tokio::spawn(job.run()));
     }
 
     /// Queues a group of one: a camera whose play stopped (buffer full,
