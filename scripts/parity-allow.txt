@@ -99,3 +99,14 @@ recordings-thumbnail        macos    gap: the Windows recordings screens are not
 recordings-window-close     macos    gap: the Windows recordings screens are not built yet (W1): closing the window releases its hold
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
+playback-close              macos    gap: Windows Recordings window not built (W1/W2)
+playback-grid               macos    gap: Windows Recordings window not built (W1/W2)
+playback-open               macos    gap: Windows Recordings window not built (W1/W2)
+playback-real-core          macos    gap: Windows Recordings window not built (W1/W2)
+playback-remove-camera      macos    gap: Windows Recordings window not built (W1/W2)
+playback-scrub              macos    gap: Windows Recordings window not built (W1/W2)
+playback-split-here         macos    gap: Windows Recordings window not built (W1/W2)
+playback-transport          macos    gap: Windows Recordings window not built (W1/W2)
+recordings-calendar-month   macos    gap: Windows Recordings window not built (W1/W2)
+recordings-camera-names     macos    gap: Windows Recordings window not built (W1/W2)
+recordings-layout           macos    gap: Windows Recordings window not built (W1/W2)

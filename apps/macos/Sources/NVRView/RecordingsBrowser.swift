@@ -3,19 +3,29 @@ import NVRCore
 import Observation
 
 /// What one recordings window shows (docs/UX.md "Recordings"): a day of the
-/// enabled cameras, its incidents with the filters, the timeline lanes, and
-/// the month's calendar. Asks the core for the day it shows
-/// (`nv_recordings_want`) and holds today while today is shown, under its
-/// own hold number; releases the hold when it closes or moves to another
-/// day. Every query answers from the core's memory; device work arrives as
-/// events, after which the model calls `reload`.
+/// enabled cameras, its incidents with the filters, the timeline lanes, the
+/// calendar's month, and the player. Asks the core for the day it shows
+/// (`nv_recordings_want`) and for a month the calendar pages to (`months`,
+/// minor 7), and holds today while today is shown, under its own hold
+/// number; releases the hold when it closes or moves to another day. Every
+/// query answers from the core's memory; device work arrives as events,
+/// after which the model calls `reload`. Selecting one incident plays it
+/// (`RecordingsPlayer`).
 @MainActor
 @Observable
 final class RecordingsBrowser {
-    enum Tab: String, CaseIterable, Identifiable {
-        case incidents = "Incidents"
-        case timeline = "Timeline"
+    /// What the middle of the window shows.
+    enum Center: String, CaseIterable, Identifiable {
+        case player = "Player"
         case downloads = "Downloads"
+        var id: String { rawValue }
+    }
+
+    /// The scrubber's span: the selected incident (with its margins) or the
+    /// whole day.
+    enum ScrubScope: String, CaseIterable, Identifiable {
+        case incident = "Incident"
+        case day = "Day"
         var id: String { rawValue }
     }
 
@@ -43,18 +53,36 @@ final class RecordingsBrowser {
     @ObservationIgnored private var token: UUID?
     /// The cameras the shown day was last asked for.
     @ObservationIgnored private var asked: (day: Int64, cameras: Set<RecordingCamera>)?
+    /// The cameras each month was asked for alone (calendar paging).
+    @ObservationIgnored private var askedMonths: [Int64: Set<RecordingCamera>] = [:]
     @ObservationIgnored private var heldCameras: [RecordingCamera] = []
+
+    /// The player of this window.
+    let player: RecordingsPlayer
 
     /// The shown day (device-local, its first second).
     private(set) var day: Int64
-    /// The calendar's month (any second in it).
+    /// The calendar's month (its first second).
     private(set) var month: Int64
-    var tab = Tab.incidents
+    var center = Center.player
+    var scrubScope = ScrubScope.incident
+    /// The side panes the user wants (a narrow window may still hide them;
+    /// `RecordingsPanes.shown`).
+    var showSidebar = true
+    var showInspector = true
+    /// What the window last laid out: its width and the panes it showed.
+    @ObservationIgnored var shownPanes: (width: CGFloat, sidebar: Bool, inspector: Bool)?
     var kindFilters: Set<KindFilter> = [] { didSet { applyFilters() } }
     var scope = Scope.all { didSet { reloadIncidents() } }
     var lockedOnly = false { didSet { applyFilters() } }
-    /// Selected incidents, by key.
-    var selection: Set<String> = []
+    /// Selected incidents, by key. One selected incident plays.
+    var selection: Set<String> = [] {
+        didSet {
+            guard selection != oldValue else { return }
+            player.failedFor = nil
+            syncPlayer()
+        }
+    }
     /// Timeline zoom: 1 shows the whole day in the window's width.
     var zoom: Double = 1
     var showingGroups = false
@@ -72,13 +100,16 @@ final class RecordingsBrowser {
     var message: String?
     /// How often the window re-read the index (the self-test).
     @ObservationIgnored private(set) var reloads = 0
+    /// Months asked for alone, in order (the self-test).
+    @ObservationIgnored private(set) var monthRequests: [Int64] = []
 
     init(model: RecordingsModel) {
         self.model = model
         holdID = model.newHold()
+        player = model.makePlayer()
         let today = model.today
         day = today
-        month = today
+        month = DeviceTime.month(containing: today).start
         token = model.subscribe { [weak self] in self?.reload() }
         show(day: today)
     }
@@ -97,16 +128,35 @@ final class RecordingsBrowser {
         if d != day {
             selection = []
             model.cancelThumbnails()
+            player.close()
         }
         day = d
-        month = d
+        month = DeviceTime.month(containing: d).start
         asked = nil
         reload()
     }
 
+    /// Pages the calendar; a month other than the shown day's is asked for
+    /// alone (its calendar only), once per set of cameras.
     func showMonth(adding months: Int) {
-        month = DeviceTime.month(month, adding: months)
+        let next = DeviceTime.month(containing: DeviceTime.month(month, adding: months)).start
+        guard next <= model.today else { return }
+        month = next
+        askMonth()
         reloadCalendar()
+    }
+
+    private func askMonth() {
+        guard month != DeviceTime.month(containing: day).start else { return }
+        let cams = Set(cameras)
+        let new = cameras.filter { !(askedMonths[month]?.contains($0) ?? false) }
+        guard !new.isEmpty else { return }
+        if let refused = model.want(new, months: [month]) {
+            message = refused
+            return
+        }
+        askedMonths[month, default: []].formUnion(cams)
+        monthRequests.append(month)
     }
 
     func previousDay() { show(day: day - DeviceTime.day) }
@@ -118,8 +168,10 @@ final class RecordingsBrowser {
         asked = (day, Set(cameras))
     }
 
-    /// The window closes: its hold ends, its thumbnail requests are dropped.
+    /// The window closes: its playback closes, its hold ends, its thumbnail
+    /// requests are dropped.
     func close() {
+        player.close()
         if holding { model.hold(holdID, cameras: nil) }
         holding = false
         heldCameras = []
@@ -140,10 +192,12 @@ final class RecordingsBrowser {
             if !new.isEmpty { message = model.want(new, days: [day]) }
             asked = (day, cams)
         }
+        askMonth()
         updateHold()
         reloadCalendar()
         reloadLanes()
         reloadIncidents()
+        syncPlayer()
     }
 
     /// Holds today (for the enabled cameras) while today is shown; the core
@@ -196,9 +250,6 @@ final class RecordingsBrowser {
         incidents = dayIncidents.filter { i in
             KindFilter.passes(i.kinds, kindFilters) && (!lockedOnly || i.locked)
         }
-        // The selection is left alone here: it is the list's binding, and
-        // changing it while the list updates its rows makes AppKit's table
-        // re-enter its delegate. Keys that went away select nothing.
     }
 
     /// The selected keys that name an incident of the day.
@@ -206,6 +257,9 @@ final class RecordingsBrowser {
 
     // MARK: Names
 
+    /// A camera's name as the camera list shows it: the user's override
+    /// (kept with the camera groups), else the device's channel name with
+    /// the lens for a multi-lens camera, else "Channel N".
     func cameraName(_ c: RecordingCamera) -> String {
         if let override = model.groups.cameraNames.first(where: { $0.camera == c }) { return override.name }
         return model.app?.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens))
@@ -214,13 +268,25 @@ final class RecordingsBrowser {
 
     var dayTitle: String { (isToday ? "Today, " : "") + DeviceTime.longDay(day) }
 
-    // MARK: Selection and edits
+    // MARK: Selection and the player
 
     /// The one selected incident, if exactly one is selected.
     var selected: Incident? {
         let keys = selectedKeys
         guard keys.count == 1, let key = keys.first else { return nil }
         return dayIncidents.first { $0.key == key }
+    }
+
+    /// Plays the selected incident from its start when it is not the one
+    /// the player plays; otherwise only follows its cameras (an edit added
+    /// or removed one) without moving the playhead.
+    private func syncPlayer() {
+        guard let incident = selected, incident.key != player.failedFor else { return }
+        if player.incidentKey != incident.key || player.playback == nil {
+            player.show(incident, day: day)
+        } else {
+            player.follow(incident, day: day)
+        }
     }
 
     /// A click on an incident row: selects it alone, or with ⌘ adds or
@@ -233,13 +299,47 @@ final class RecordingsBrowser {
         }
     }
 
-    /// Selects the incident that holds an event (a click on the timeline).
+    /// Selects the incident that holds an event.
     func select(event e: RecordedEvent) {
         if let i = dayIncidents.first(where: { i in
             i.involves(e.camera) && i.events.contains { $0.camera == e.camera && $0.start <= e.end && e.start <= $0.end }
         }) {
             selection = [i.key]
         }
+    }
+
+    /// A click on a lane at `seconds`: the player seeks there when it plays
+    /// that camera; a click on an event of another camera selects (and so
+    /// plays) its incident; anywhere else that camera plays alone from there.
+    func laneClick(_ camera: RecordingCamera, at seconds: Int64, near event: RecordedEvent? = nil) {
+        let ms = seconds * 1000
+        if player.cameras.contains(camera), player.day == day, player.playback != nil {
+            player.seek(to: ms)
+            player.play()
+        } else if let event, dayIncidents.contains(where: { $0.involves(event.camera) }) {
+            select(event: event)
+        } else {
+            selection = []
+            player.show(cameras: [camera], day: day, at: ms)
+        }
+    }
+
+    /// The incident the player is positioned for, if it is still of the day.
+    var playingIncident: Incident? {
+        guard let key = player.incidentKey, player.playback != nil else { return nil }
+        return dayIncidents.first { $0.key == key }
+    }
+
+    /// The second "Split Here" would split `incident` at: the playhead's,
+    /// when the player plays that incident and the playhead is inside it.
+    func splitSecond(_ incident: Incident) -> Int64? {
+        guard player.incidentKey == incident.key, player.playback != nil else { return nil }
+        return IncidentSplit.second(start: incident.start, end: incident.end, playheadMs: player.positionMs)
+    }
+
+    func splitHere(_ incident: Incident) {
+        guard let at = splitSecond(incident) else { return }
+        split(incident.key, at: at)
     }
 
     func merge() {
@@ -250,13 +350,27 @@ final class RecordingsBrowser {
 
     func split(_ key: String, at: Int64) {
         guard let keys = model.edit(.split(key: key, at: at)) else { return }
-        selection = Set(keys.prefix(1))
+        // The part that holds the playhead stays selected (and keeps playing).
+        let parts = keys.compactMap { k in model.incident(k) }
+        let keep = parts.first { $0.start <= at && at <= $0.end && player.positionMs >= $0.start * 1000 }
+        if let keep {
+            player.renamed(to: keep.key)
+            selection = [keep.key]
+        } else {
+            selection = Set(keys.prefix(1))
+        }
     }
 
     func rename(_ key: String, _ name: String) { model.edit(.rename(key: key, name: name)) }
     func revert(_ key: String) { model.edit(.revert(key: key)) }
     func add(_ camera: RecordingCamera, to key: String) { model.edit(.addCamera(key: key, camera: camera)) }
-    func remove(_ camera: RecordingCamera, from key: String) { model.edit(.removeCamera(key: key, camera: camera)) }
+
+    /// Remove from Incident: the camera leaves the incident (and the player).
+    func remove(_ camera: RecordingCamera, from key: String) {
+        guard model.edit(.removeCamera(key: key, camera: camera)) != nil else { return }
+        if player.incidentKey == key { player.remove(camera) }
+    }
+
     func setLocked(_ key: String, _ locked: Bool) { model.lock(key, locked) }
     func download(_ key: String) { model.download(incident: key) }
 
@@ -267,5 +381,15 @@ final class RecordingsBrowser {
     var scopes: [(Scope, String)] {
         [(Scope.all, "All Cameras")] + model.groups.groups.map { (Scope.group($0.name), $0.name) }
             + cameras.map { (Scope.camera($0), cameraName($0)) }
+    }
+
+    /// The scrubber's range in milliseconds: the incident with its margins,
+    /// or the player's day.
+    var scrubRange: (start: Int64, end: Int64)? {
+        guard player.playback != nil else { return nil }
+        if scrubScope == .incident, let i = playingIncident {
+            return ((i.start - i.margin) * 1000, (i.end + i.margin + 1) * 1000)
+        }
+        return (player.startMs, player.endMs)
     }
 }

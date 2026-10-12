@@ -93,7 +93,12 @@ import VideoKit
 ///    downloading, a download pauses, resumes, finishes, shows in the
 ///    Finder, is forgotten, and goes to the Trash (both recorded, not done)
 ///    once the core lets go of it, a camera group joins its cameras'
-///    incidents, and closing the window releases its hold;
+///    incidents, paging the calendar asks for that month alone, the names
+///    are the camera list's, the player plays a selected incident (pictures
+///    decoded and drawn, pause, skip, speed, the grid's views with the
+///    sound following, a lane click seeking, Remove from Incident and Split
+///    Here without reopening), the panes give way in a narrow window, and
+///    closing the window releases its hold and closes the playback;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -2277,7 +2282,7 @@ final class SelfTest {
             problems.append("recordings: nothing to download")
             return recordingsGroups(b, fake, rec, calls)
         }
-        b.tab = .downloads
+        b.center = .downloads
         rec.pause(first.download, true)
         when({ rec.downloads.first?.paused == true }, timeout: 2) { [self] in
             fake.completeRecordingWork()
@@ -2298,7 +2303,7 @@ final class SelfTest {
                             print("recordings: downloads done, forgotten, trashed \(calls.trashed.count)")
                             if calls.trashed.map(\.path) != [folder] { problems.append("recordings: the Trash got \(calls.trashed)") }
                             if !rec.downloads.isEmpty { problems.append("recordings: \(rec.downloads.count) downloads left") }
-                            b.tab = .incidents
+                            b.center = .player
                             recordingsGroups(b, fake, rec, calls)
                         }
                     }
@@ -2321,14 +2326,246 @@ final class SelfTest {
             b.scope = .all
             rec.putGroups(IncidentGroups())
             when({ rec.groups.groups.isEmpty && b.dayIncidents.count == 7 }, timeout: 2) { [self] in
-                // parity: recordings-window-close
-                let hold = b.holdID
-                app.recordingsWindows.first?.window?.close()
-                if fake.recordingsHolds[hold] != nil { problems.append("recordings: closing the window kept its hold") }
-                if !app.recordingsWindows.isEmpty { problems.append("recordings: the window is still listed") }
-                checkLog()
+                recordingsMonth(b, fake, rec)
             }
         }
+    }
+
+    /// Paging the calendar to the previous month asks for that month's
+    /// calendar alone (minor 7) and marks its days; camera names are the
+    /// camera list's.
+    private func recordingsMonth(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: recordings-calendar-month
+        let asked = fake.recordingsMonthRequests
+        let shown = b.month
+        b.showMonth(adding: -1)
+        let previous = b.month
+        when({ fake.recordingsMonthRequests > asked && !b.recordedDays.isEmpty }, timeout: 2) { [self] in
+            let inMonth = b.recordedDays.allSatisfy { DeviceTime.month(containing: $0).start == previous }
+            print("recordings: previous month asked \(fake.recordingsMonthRequests - asked) time(s), \(b.recordedDays.count) days marked")
+            if fake.recordingsMonthRequests != asked + 1 { problems.append("recordings: paging asked \(fake.recordingsMonthRequests - asked) months") }
+            if b.recordedDays.isEmpty || !inMonth { problems.append("recordings: the previous month shows \(b.recordedDays.count) days") }
+            // Paging back and forth asks nothing again.
+            b.showMonth(adding: 1)
+            b.showMonth(adding: -1)
+            if fake.recordingsMonthRequests != asked + 1 { problems.append("recordings: a month already asked was asked again") }
+            b.showMonth(adding: 1)
+            if b.month != shown { problems.append("recordings: the calendar did not come back to the shown day's month") }
+            // parity: recordings-camera-names
+            let names = b.lanes.map(\.name)
+            let listed = b.cameras.map { c in rec.app?.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens)) ?? "" }
+            print("recordings: camera names \(names)")
+            if names != listed { problems.append("recordings: lanes are named \(names), the camera list \(listed)") }
+            recordingsPlayback(b, fake, rec)
+        }
+    }
+
+    /// The player (milestone P, M2): selecting an incident plays its cameras
+    /// from its start less the margin; the pictures decode and reach the
+    /// screen; pause, skip, speed (keyframes only and no sound from 2×), the
+    /// grid's large and single views with the sound following, a lane click
+    /// that seeks, Remove from Incident and Split Here at the playhead
+    /// without reopening the playback, and the playback closed with the
+    /// window.
+    private func recordingsPlayback(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: playback-open
+        let p = b.player
+        // The three cameras' people incidents (a second apart) as one.
+        let people = b.dayIncidents.filter { $0.kinds == ["people"] }.map(\.key)
+        guard people.count == 3 else {
+            problems.append("recordings: \(people.count) people incidents to play, expected 3")
+            return recordingsClose(b, fake)
+        }
+        b.selection = Set(people)
+        b.merge()
+        let opens = p.opens
+        whenPlayback(fake, {
+            p.playback != nil && p.cells.count == 3 && p.cells.allSatisfy { $0.tile.latestPicture() != nil }
+                && (self.app.recordingsWindows.first?.stage?.framesDrawn ?? 0) > 0
+        }, timeout: 5) { [self] in
+            guard let incident = b.selected else { return failPlayback("the merge selected nothing", b, fake) }
+            let start = (incident.start - incident.margin) * 1000
+            print("recordings: playback \(p.playback ?? 0) of \(p.cells.count) cameras, \(p.state.map { "\($0)" } ?? "no state"), opens \(p.opens - opens + 1), frames drawn \(app.recordingsWindows.first?.stage?.framesDrawn ?? 0)")
+            if p.playback == nil || p.cells.count != 3 { return failPlayback("the incident did not play its three cameras", b, fake) }
+            if p.cells.contains(where: { $0.tile.latestPicture() == nil }) {
+                let detail = p.cells.map { "\($0.camera.channel): \($0.state) \($0.tile.snapshot.status) configures \($0.tile.snapshot.configures)" }
+                problems.append("recordings: a playback tile decoded no picture (\(detail))")
+            }
+            if (app.recordingsWindows.first?.stage?.framesDrawn ?? 0) == 0 { problems.append("recordings: the player drew no frame") }
+            if p.positionMs < start || p.positionMs > start + 5_000 { problems.append("recordings: the playback starts at \(p.positionMs), not \(start)") }
+            if !p.transport.isPlaying { problems.append("recordings: the selected incident is not playing") }
+            if p.incidentKey != incident.key { problems.append("recordings: the player plays another incident") }
+            playbackTransport(b, fake, rec)
+        }
+    }
+
+    /// `when` for the playback steps: the fake core sends its queued
+    /// playback events and starts its tiles' streams only when told
+    /// (`Options.recordingWorkIsManual`), so each poll tells it.
+    private func whenPlayback(
+        _ fake: FakeCore, _ condition: @escaping @MainActor () -> Bool, timeout: Double,
+        _ body: @escaping @MainActor () -> Void
+    ) {
+        when({
+            fake.completePlaybackWork()
+            return condition()
+        }, timeout: timeout, body)
+    }
+
+    private func failPlayback(_ why: String, _ b: RecordingsBrowser, _ fake: FakeCore) {
+        problems.append("recordings: " + why)
+        recordingsClose(b, fake)
+    }
+
+    private func playbackTransport(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: playback-transport
+        let p = b.player
+        let opens = p.opens
+        p.pause()
+        whenPlayback(fake, { p.state == .paused }, timeout: 2) { [self] in
+            let before = p.positionMs
+            p.skip(by: TransportState.skipMs)
+            if p.positionMs != min(before + TransportState.skipMs, p.endMs) { problems.append("recordings: +10 s moved to \(p.positionMs) from \(before)") }
+            p.setRate(4)
+            let sound = p.cells.compactMap { fake.audioSetting(tile: $0.tile.id)?.audible }
+            if PlaybackSpeed.hint(p.rate) != "Keyframes only, no sound" || sound.contains(true) {
+                problems.append("recordings: at 4× the hint is \(PlaybackSpeed.hint(p.rate) ?? "none") and sound \(sound)")
+            }
+            p.setRate(1)
+            p.play()
+            whenPlayback(fake, { p.state == .playing && p.rate == 1 }, timeout: 2) { [self] in
+                let audible = p.cells.map { fake.audioSetting(tile: $0.tile.id)?.audible ?? false }
+                print("recordings: paused, skipped 10 s, 4× and back, playing; audible \(audible)")
+                if audible != [true, false, false] { problems.append("recordings: at 1× the sound is \(audible), expected the first camera") }
+                if p.opens != opens { problems.append("recordings: the transport reopened the playback") }
+                playbackGrid(b, fake, rec)
+            }
+        }
+    }
+
+    private func playbackGrid(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: playback-grid
+        let p = b.player
+        let opens = p.opens
+        p.click(1)
+        let emphasis = p.mode
+        let afterClick = p.cells.map { fake.audioSetting(tile: $0.tile.id)?.audible ?? false }
+        p.doubleClick(1)
+        let single = p.mode
+        p.doubleClick(1)
+        print("recordings: grid click \(emphasis), double click \(single), back \(p.mode); sound \(afterClick)")
+        if emphasis != .emphasis(1) || single != .single(1) || p.mode != .grid {
+            problems.append("recordings: the grid went \(emphasis), \(single), \(p.mode)")
+        }
+        if afterClick != [false, true, false] { problems.append("recordings: the large camera's sound did not play (\(afterClick))") }
+        p.muted = true
+        if p.cells.contains(where: { fake.audioSetting(tile: $0.tile.id)?.audible == true }) { problems.append("recordings: muted, a camera is audible") }
+        p.muted = false
+        // parity: playback-scrub
+        guard let lane = b.lanes.first(where: { p.cameras.contains($0.camera) }), let incident = b.playingIncident else {
+            return failPlayback("no lane of a playing camera", b, fake)
+        }
+        let target = incident.end + 2
+        let seeks = p.seeks
+        b.laneClick(lane.camera, at: target)
+        if p.seeks != seeks + 1 || p.positionMs != target * 1000 || p.opens != opens {
+            problems.append("recordings: a lane click went to \(p.positionMs) (seeks \(p.seeks - seeks), opens \(p.opens - opens))")
+        }
+        whenPlayback(fake, { p.state == .playing && p.positionMs >= target * 1000 }, timeout: 2) { [self] in
+            print("recordings: a lane click seeked to \(TransportState.clock(p.positionMs)) and plays")
+            playbackEdits(b, fake, rec)
+        }
+    }
+
+    private func playbackEdits(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: playback-remove-camera
+        let p = b.player
+        let opens = p.opens
+        guard let incident = b.playingIncident, incident.cameras.count == 3, let third = p.cameras.last else {
+            return failPlayback("the playing incident does not have three cameras", b, fake)
+        }
+        b.remove(third, from: incident.key)
+        whenPlayback(fake, { b.playingIncident?.cameras.count == 2 && p.cells.count == 2 }, timeout: 2) { [self] in
+            print("recordings: removed a camera; the player has \(p.cells.count), opens \(p.opens - opens)")
+            if p.cells.count != 2 || p.opens != opens || p.cameras.contains(third) {
+                problems.append("recordings: Remove from Incident left \(p.cells.count) cameras, \(p.opens - opens) opens")
+            }
+            // parity: playback-split-here
+            guard let playing = b.playingIncident else { return failPlayback("nothing plays after the removal", b, fake) }
+            p.seek(to: (playing.start + 1) * 1000)
+            let at = b.splitSecond(playing)
+            if at != playing.start + 1 { problems.append("recordings: Split Here would split at \(String(describing: at))") }
+            let before = b.dayIncidents.count
+            b.splitHere(playing)
+            whenPlayback(fake, { b.dayIncidents.count == before + 1 && p.cells.count == 1 }, timeout: 2) { [self] in
+                print("recordings: split at the playhead; \(b.dayIncidents.count - before) more incident, the player has \(p.cells.count), opens \(p.opens - opens)")
+                if b.dayIncidents.count != before + 1 { problems.append("recordings: Split Here made \(b.dayIncidents.count - before) more incidents") }
+                if p.opens != opens || b.playingIncident == nil || b.playingIncident?.key != b.selected?.key {
+                    problems.append("recordings: after Split Here the player reopened or lost its incident")
+                }
+                recordingsLayout(b, fake)
+            }
+        }
+    }
+
+    /// The window at its smallest and at a large size: the side panes give
+    /// way in a narrow window (inspector first) and come back in a wide
+    /// one, and the window keeps the size it was given. With
+    /// NVRVIEW_RECORDINGS_SNAPSHOTS=<folder>, writes what it looked like.
+    private func recordingsLayout(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-layout
+        guard let window = app.recordingsWindows.first?.window else { return recordingsClose(b, fake) }
+        let saved = window.frame
+        let sizes = [RecordingsPanes.windowMin, CGSize(width: 900, height: 640), CGSize(width: 1400, height: 900)]
+        var results: [String] = []
+        func next(_ i: Int) {
+            guard i < sizes.count else {
+                window.setFrame(saved, display: false)
+                print("recordings: layout \(results.joined(separator: "; "))")
+                return recordingsClose(b, fake)
+            }
+            let size = sizes[i]
+            let want = RecordingsPanes.shown(width: size.width, sidebar: true, inspector: true)
+            window.setContentSize(size)
+            // The panes follow the width SwiftUI lays out (on its next pass).
+            when({ b.shownPanes?.width == size.width }, timeout: 2) { [self] in
+                let got = window.contentLayoutRect.size
+                let panes = b.shownPanes
+                results.append(
+                    "\(Int(size.width))×\(Int(size.height)): \(Int(got.width))×\(Int(got.height)), sidebar \(panes?.sidebar == true), inspector \(panes?.inspector == true)")
+                if abs(got.width - size.width) > 1 || abs(got.height - size.height) > 1 {
+                    problems.append("recordings: the window is \(got) when given \(size)")
+                }
+                if panes?.width != size.width || panes?.sidebar != want.sidebar || panes?.inspector != want.inspector {
+                    problems.append("recordings: at \(size) the panes are \(String(describing: panes)), expected \(want)")
+                }
+                if let dir = ProcessInfo.processInfo.environment["NVRVIEW_RECORDINGS_SNAPSHOTS"] {
+                    // The window as on screen (pictures included); needs the
+                    // screen-recording permission, so only on request.
+                    let path = URL(fileURLWithPath: dir).appendingPathComponent("recordings-\(Int(size.width))x\(Int(size.height)).png").path
+                    let shot = Process()
+                    shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                    shot.arguments = ["-x", "-o", "-l", String(window.windowNumber), path]
+                    try? shot.run()
+                    shot.waitUntilExit()
+                }
+                next(i + 1)
+            }
+        }
+        next(0)
+    }
+
+    private func recordingsClose(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-window-close
+        let hold = b.holdID
+        app.recordingsWindows.first?.window?.close()
+        if fake.recordingsHolds[hold] != nil { problems.append("recordings: closing the window kept its hold") }
+        if !app.recordingsWindows.isEmpty { problems.append("recordings: the window is still listed") }
+        // parity: playback-close
+        if !fake.openPlaybacks.isEmpty || b.player.playback != nil {
+            problems.append("recordings: closing the window left playbacks \(fake.openPlaybacks) open")
+        }
+        checkLog()
     }
 
     /// The recordings window on the real core, against a device with
@@ -2382,6 +2619,37 @@ final class SelfTest {
                 if case .image(let jpeg) = rec.thumbnails[key] { bytes = jpeg.count }
                 print("recordings (real core): thumbnail image \(bytes) bytes, put back \(putBack)")
                 if !putBack { problems.append("recordings: the cover keyframe was not decoded and put back") }
+                recordingsRealPlayback(b, rec, calls)
+            }
+        }
+    }
+
+    /// The player on the real core: the day's first finished incident plays
+    /// through the playback engine against the mock, its pictures decode
+    /// on the tile pipeline, the clock moves, and pausing holds it.
+    private func recordingsRealPlayback(_ b: RecordingsBrowser, _ rec: RecordingsModel, _ calls: SystemCalls) {
+        // parity: playback-real-core
+        let p = b.player
+        guard let incident = b.dayIncidents.first(where: { !$0.growing }) ?? b.dayIncidents.first else {
+            problems.append("recordings: no incident to play on the real core")
+            return recordingsRealDownload(b, rec, calls)
+        }
+        b.click(incident.key, extend: false)
+        var first: Int64?
+        when({
+            guard p.playback != nil, p.cells.allSatisfy({ $0.tile.latestPicture() != nil }) else { return false }
+            if first == nil { first = p.positionMs }
+            return p.positionMs > (first ?? 0) + 500
+        }, timeout: 30) { [self] in
+            print("recordings (real core): playback of \(p.cells.count) camera(s), \(p.cells.map(\.state)), at \(TransportState.clock(p.positionMs)), moved \(p.positionMs - (first ?? p.positionMs)) ms")
+            if p.playback == nil || p.cells.contains(where: { $0.tile.latestPicture() == nil }) {
+                problems.append("recordings: the real core's playback showed no picture (\(p.message ?? "no message"))")
+            } else if p.positionMs <= (first ?? 0) + 500 {
+                problems.append("recordings: the real core's playback clock did not move")
+            }
+            p.pause()
+            when({ p.state == .paused }, timeout: 10) { [self] in
+                if p.state != .paused { problems.append("recordings: the real core's playback did not pause") }
                 recordingsRealDownload(b, rec, calls)
             }
         }
@@ -2389,6 +2657,7 @@ final class SelfTest {
 
     private func recordingsRealDownload(_ b: RecordingsBrowser, _ rec: RecordingsModel, _ calls: SystemCalls) {
         b.previousDay()
+        if b.player.playback != nil { problems.append("recordings: another day kept the playback open") }
         if b.holding { problems.append("recordings: yesterday is held") }
         when({ b.dayIncidents.contains { !$0.growing } && !rec.searching.busy }, timeout: 30) { [self] in
             guard let incident = b.dayIncidents.first(where: { !$0.growing }) else {

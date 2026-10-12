@@ -336,6 +336,94 @@ public final class CoreBridge: Sendable {
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 
+    // MARK: Recorded playback (minor 6)
+
+    /// A playback the bridge opened: its ID and one tile per camera, in
+    /// request order. Its tiles decode like live ones (the same actions,
+    /// generations, and answers), so any renderer of `CoreTile` draws them.
+    public struct OpenedTiles: Sendable {
+        public let id: UInt64
+        public let tiles: [CoreTile]
+    }
+
+    /// `nv_playback_open` (`PlaybackRequest` builds the JSON); `cameras` are
+    /// the request's cameras in order (channel and tier, for the tiles).
+    /// The tiles are registered before any of their actions can arrive.
+    public func openPlayback(json: String, cameras: [(channel: UInt8, tier: StreamTier)]) throws(CoreStatus)
+        -> OpenedTiles
+    {
+        let c = try live()
+        let result: Result<OpenedTiles, CoreStatus> = router.registry.withLock { t in
+            do throws(CoreStatus) {
+                let opened = try c.playbackOpen(json: json)
+                var tiles: [CoreTile] = []
+                for (i, id) in opened.tiles.enumerated() {
+                    let cam = i < cameras.count ? cameras[i] : (channel: 0, tier: .sub)
+                    let tile = CoreTile(router: router, device: 0, channel: cam.channel, tier: cam.tier)
+                    tile.markPlayback()
+                    tile.assign(id: id)
+                    t.byID[id] = tile
+                    tiles.append(tile)
+                }
+                return .success(OpenedTiles(id: opened.playback, tiles: tiles))
+            } catch {
+                return .failure(error)
+            }
+        }
+        switch result {
+        case .success(let o): return o
+        case .failure(let e): throw e
+        }
+    }
+
+    /// `nv_playback_add_camera`: the new camera's tile, registered first.
+    public func addPlaybackCamera(_ playback: UInt64, json: String, channel: UInt8, tier: StreamTier) throws(CoreStatus)
+        -> CoreTile
+    {
+        let c = try live()
+        let tile = CoreTile(router: router, device: 0, channel: channel, tier: tier)
+        tile.markPlayback()
+        let result: Result<Void, CoreStatus> = router.registry.withLock { t in
+            do throws(CoreStatus) {
+                let id = try c.playbackAddCamera(playback, json: json)
+                tile.assign(id: id)
+                t.byID[id] = tile
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        if case .failure(let status) = result { throw status }
+        return tile
+    }
+
+    /// `nv_playback_remove_camera`; the tile's decoder is released.
+    public func removePlaybackCamera(_ playback: UInt64, tile: CoreTile) {
+        if let c = core.withLock({ $0 }) { try? c.playbackRemoveCamera(playback, tile: tile.id) }
+        forgetTiles([tile])
+    }
+
+    /// `nv_playback_close`: every play stops, every tile closes; their
+    /// decoders are released. Unknown (already closed by the core) is fine.
+    public func closePlayback(_ playback: UInt64, tiles: [CoreTile]) {
+        if let c = core.withLock({ $0 }) { try? c.playbackClose(playback) }
+        forgetTiles(tiles)
+    }
+
+    /// Releases tiles the core has already closed (`playback_closed`).
+    public func forgetTiles(_ tiles: [CoreTile]) {
+        for tile in tiles { tile.markClosed() }
+        router.registry.withLock { t in
+            for tile in tiles where t.byID[tile.id] === tile { t.byID.removeValue(forKey: tile.id) }
+        }
+    }
+
+    /// `nv_playback_position`, or nil when the playback or core is gone.
+    public func playbackPosition(_ playback: UInt64) -> PlaybackPosition? {
+        guard let c = core.withLock({ $0 }) else { return nil }
+        return try? c.playbackPosition(playback)
+    }
+
     // MARK: Shutdown
 
     /// Closes everything: stops reporting, frees the core (no callback runs
