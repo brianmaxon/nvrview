@@ -152,6 +152,13 @@ final class SelfTest {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { MainActor.assumeIsolated { body() } }
     }
 
+    /// Runs `body` after everything already queued on the main queue (the
+    /// hops a fake's events and callbacks make), instead of after a
+    /// guessed delay: the queue is first in, first out.
+    private func afterQueued(_ body: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
+    }
+
     private var window: ViewerWindowController? { app.windows.first }
 
     /// Runs `body` once `condition` holds or `timeout` seconds have passed
@@ -193,8 +200,8 @@ final class SelfTest {
         capture("grid") { [self] in resizeStep() }
     }
 
-    /// Resizes the window on every refresh for half a second, like a
-    /// full-screen transition: the grid keeps drawing while the drawable
+    /// Resizes the window in a burst of steps, one per run-loop turn (each
+    /// costs a layout pass), like a full-screen transition: the grid keeps drawing while the drawable
     /// size follows only now and then, and exactly once it settles.
     private func resizeStep() {
         // parity: resize
@@ -211,7 +218,7 @@ final class SelfTest {
             f.size.height += 135 * t
             nsWindow.setFrame(f, display: true)
             if step < steps {
-                after(0.5 / Double(steps)) { advance(step + 1) }
+                afterQueued { advance(step + 1) }
                 return
             }
             // Until the drawable settles at the view's size (it follows on
@@ -349,10 +356,10 @@ final class SelfTest {
         let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
         let layout = model.createLayout(name: "Self-Test", root: LayoutNode.balanced(Array(cameras.prefix(2))))
         // A run-loop turn for the sidebar to take each update.
-        after(0.1) { [self] in
+        afterQueued { [self] in
             model.deleteGroup(group)
             if let layout { model.deleteLayout(layout) }
-            after(0.1) { [self] in revealStep() }
+            afterQueued { [self] in revealStep() }
         }
     }
 
@@ -380,8 +387,9 @@ final class SelfTest {
             if overlay.isShown { problems.append("the sidebar slid in before the dwell") }
             advance(overlay.reveal.dwell / 2)
             if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
-            // A few real refreshes with the overlay sliding in over the stage.
-            after(0.25) { [self] in
+            // A layout pass with the overlay up over the stage (the next
+            // run-loop turn; display refreshes are too slow to wait for).
+            afterQueued { [self] in
                 if grid.bounds.size != size || grid.drawableSize != drawable || grid.drawableResizes != resizes {
                     problems.append("the stage or its drawable changed size while the sidebar overlay was up")
                 }
@@ -898,7 +906,9 @@ final class SelfTest {
                 // Very loud: the short safety duck.
                 fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.8, rms: 0.4))
                 mic.speak(count: 16_000)
-                when({ false }, timeout: 0.3) { [self] in
+                // The samples were processed inside `speak`; any caption they
+                // make is queued behind this hop.
+                afterQueued { [self] in
                     let ducked = youFinals() == fullDuplex
                     model.calls.stopTalking(doorbell)
                     print("echo cancellation on: \(String(describing: state)), note \"\(note)\", captions while the doorbell speaks \(fullDuplex > 0), ducked when very loud \(ducked), prepared at call open \(prepared)")
@@ -932,7 +942,7 @@ final class SelfTest {
             let note = model.calls.note(for: doorbell) ?? "-"
             let gateOn = model.calls.echoGateCancelled(doorbell)
             mic.speak(count: 16_000)
-            when({ false }, timeout: 0.3) { [self] in
+            afterQueued { [self] in
                 let gated = youFinals() == before
                 let pushed = fake.talkPushedMilliseconds(tile: tile.id) - pushedBefore
                 model.calls.stopTalking(doorbell)
@@ -1096,8 +1106,8 @@ final class SelfTest {
             model.popOutCall(doorbell)
             let panel = calls.controller(for: doorbell)?.inset.callPanel
             let windowShows = panel?.keepTalkingShown == true && panel?.replyText == "Be right there"
-            // Any stop or start would arrive as an event: give them a moment.
-            after(0.3) { [self] in
+            // Any stop or start would arrive as an event, queued behind this hop.
+            afterQueued { [self] in
                 let call = model.calls.call(for: doorbell)
                 let kept = call?.talk.isActive == true && fake.isTalking(tile: tile.id) && fake.talkStarts == starts
                 print(
