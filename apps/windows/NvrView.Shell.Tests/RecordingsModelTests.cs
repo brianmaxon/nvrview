@@ -316,6 +316,33 @@ internal static class RecordingsModelTests
             b.Close();
         });
 
+        T.Run("thumbnails: a window that moves on drops the waiting pictures, which are asked for again when shown", () =>
+        {
+            var rig = new Rig();
+            RecordingsService service = rig.Service;
+            service.SetEnabled(new RecordingCamera(Device, 0), true);
+            var b = new RecordingsBrowser(service);
+            rig.Pump();
+            using var queue = new ThumbnailDecodeQueue(k => new RecordedThumbnail(NvThumbKind.Image, 4, 4, k.PtsUs, [0xff, 0xd8, 0xff, 0xd9]), background: false);
+            service.ThumbnailDecoder = queue.Submit;
+            service.ThumbnailDecoderCancel = () => queue.CancelQueued();
+            ThumbnailKey key = b.DayIncidents[0].CoverKeys[0];
+            service.RequestThumbnail(key);
+            rig.Work();
+            T.Check(service.Thumbnails[key] is ThumbnailState.Decoding && queue.Count == 1);
+            service.CancelThumbnails();
+            rig.Pump();
+            T.Check(service.Thumbnails[key] is ThumbnailState.Dropped && queue.Count == 0);
+            service.RequestThumbnail(key);
+            rig.Pump();
+            T.Check(service.Thumbnails[key] is ThumbnailState.Decoding && queue.Count == 1, "asked for again");
+            T.Check(queue.RunNext());
+            rig.Pump();
+            T.Check(service.Thumbnails[key] is ThumbnailState.Image);
+            T.Equal(1, service.ThumbnailsPut);
+            b.Close();
+        });
+
         T.Run("recordings window: the cameras searched are kept between launches", () =>
         {
             string path = Path.Combine(Path.GetTempPath(), "nvrview-shell-tests-" + Environment.ProcessId, "recordings-cameras.json");
