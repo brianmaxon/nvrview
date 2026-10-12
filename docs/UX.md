@@ -722,16 +722,18 @@ the same call themselves without a press ("Start Conversation", below):
   and again in a conversation is never refused: each app tells the core
   when a call opens and ends (FFI.md, "Talk-back", item 5).
 - **Live transcript:** from the press, both sides are transcribed on this
-  computer (a local speech recognition model on both macOS and Windows,
-  possibly a different engine on each; nothing leaves the house): the
-  doorbell's audio and, while talking back, the microphone, labeled by side,
-  so the visitor can be read when the user cannot unmute (in a meeting, for
-  example). Engines (measured 2026-10-10 on doorbell-quality speech: 16 kHz,
-  outdoor noise, low-bitrate AAC): Apple's SpeechAnalyzer on macOS (about 4%
-  word errors on clean speech, about 1% of a core, no model to ship) and
-  Moonshine's streaming models (MIT) on Windows (about 4-5% clean; the tiny
-  and base models are tried first on modest CPUs, with sherpa-onnx as a
-  lighter fallback), behind one engine interface in each app. One session per
+  computer (local speech recognition on both macOS and Windows, a different
+  engine on each; nothing leaves the house): the doorbell's audio and, while
+  talking back, the microphone, labeled by side, so the visitor can be read
+  when the user cannot unmute (in a meeting, for example). Engines: Apple's
+  SpeechAnalyzer on macOS (about 4% word errors on clean speech, measured
+  2026-10-10 on doorbell-quality speech: 16 kHz, outdoor noise, low-bitrate
+  AAC; about 1% of a core, no model to ship). Windows today uses the desktop
+  recognizer of Windows (`System.Speech`, SAPI, dictation grammar), which is
+  older and less accurate, and gives no captions where Windows has no
+  recognizer for the language; Moonshine streaming models (MIT) are the
+  planned replacement (ARCHITECTURE.md, "Live transcription"). Both sit
+  behind one engine interface in each app. One session per
   source (doorbell, microphone), so the speaker label is the source. While
   the user talks, the operating system's echo cancellation removes the
   doorbell's audio playing through the speakers from the microphone, so the
