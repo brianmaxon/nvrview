@@ -270,13 +270,41 @@ struct DeviceCameraToggles: View {
             }
             .disabled(cameras.isEmpty)
             ForEach(cameras, id: \.self) { c in
-                Toggle(isOn: Binding(get: { model.isEnabled(c) }, set: { model.setEnabled(c, $0) })) {
-                    Text(app.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens)))
+                HStack(spacing: 4) {
+                    Toggle(isOn: Binding(get: { model.isEnabled(c) }, set: { model.setEnabled(c, $0) })) {
+                        Text(app.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens)))
+                    }
+                    Spacer(minLength: 0)
+                    ListenToggle(model: model, camera: c)
                 }
                 .padding(.leading, 16)
             }
         }
         .toggleStyle(.checkbox)
+    }
+}
+
+/// A camera's "Listen for sounds" switch (`nv_sound_watch`): its sub-stream
+/// stays open with no tile so its sound is analyzed (loudness, alarms) while
+/// it is not on screen; at most four cameras of a device.
+struct ListenToggle: View {
+    let model: RecordingsModel
+    let camera: RecordingCamera
+
+    var body: some View {
+        let on = model.isListening(camera)
+        let state = model.listenStates[camera]
+        Toggle(isOn: Binding(get: { on }, set: { model.setListening(camera, $0) })) {
+            Image(systemName: state?.state == "refused" ? "ear.trianglebadge.exclamationmark" : "ear")
+        }
+        .toggleStyle(.button)
+        .buttonStyle(.borderless)
+        .controlSize(.mini)
+        .help(
+            on
+                ? "Listen for sounds: \(state.map { SoundListening.describe(state: $0.state, reason: $0.reason) } ?? "starting"). Click to stop."
+                : "Listen for sounds while not on screen (keeps this camera's sub-stream open; at most \(SoundListening.maxPerDevice) per device)")
+        .accessibilityLabel("Listen for sounds")
     }
 }
 
@@ -352,6 +380,23 @@ struct DayCell: View {
 // MARK: Kind badges
 
 /// The live detection badges' symbols, for recorded kinds.
+/// An incident's sounds other than the alarms (those have their own
+/// badges): one waveform, the sounds' names on hover.
+struct SoundBadge: View {
+    let events: [RecordedEvent]
+
+    var body: some View {
+        let names = SoundKinds.names(events.filter { !IndicatorKind(detectionKind: $0.kind).isSound })
+        if !names.isEmpty {
+            Image(systemName: "waveform")
+                .font(.caption2)
+                .foregroundStyle(Color.orange)
+                .help("Sounds: " + names.joined(separator: ", "))
+                .accessibilityLabel("Sounds: " + names.joined(separator: ", "))
+        }
+    }
+}
+
 struct KindBadges: View {
     let kinds: [String]
 
@@ -513,6 +558,7 @@ struct IncidentRow: View {
                     Text(DeviceTime.span(incident.start, incident.end)).font(.caption.monospacedDigit())
                     if incident.growing { Text("ongoing").font(.caption2).foregroundStyle(.secondary) }
                     KindBadges(kinds: incident.kinds)
+                    SoundBadge(events: incident.events)
                 }
                 Text(incident.cameras.map { browser.cameraName($0.camera) }.joined(separator: ", "))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)

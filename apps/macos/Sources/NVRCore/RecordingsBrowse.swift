@@ -110,9 +110,10 @@ public enum DeviceTime {
 /// The recordings screens' kind filters. Event kinds use the live detection
 /// vocabulary (`IndicatorKind`), so the badges are the same; an "animal"
 /// filter matches every animal kind a device reports, today's `dog_cat` and
-/// any finer kind later (FFI-RECORDINGS.md, Decision 10).
+/// any finer kind later (FFI-RECORDINGS.md, Decision 10). "Sounds" matches
+/// the sound kinds and every event from sound (`source` `local_audio`).
 public enum KindFilter: String, CaseIterable, Sendable, Hashable, Codable {
-    case people, vehicle, animal, motion, other
+    case people, vehicle, animal, motion, sound, other
 
     public var label: String {
         switch self {
@@ -120,6 +121,7 @@ public enum KindFilter: String, CaseIterable, Sendable, Hashable, Codable {
         case .vehicle: "Vehicles"
         case .animal: "Animals"
         case .motion: "Motion"
+        case .sound: "Sounds"
         case .other: "Other"
         }
     }
@@ -130,12 +132,17 @@ public enum KindFilter: String, CaseIterable, Sendable, Hashable, Codable {
         case .vehicle: IndicatorKind.vehicle.symbolName
         case .animal: IndicatorKind.animal.symbolName
         case .motion: IndicatorKind.motion.symbolName
+        case .sound: "waveform"
         case .other: IndicatorKind.other.symbolName
         }
     }
 
     /// The filter an event kind belongs to.
     public init(kind: String) {
+        if SoundKinds.all.contains(kind) {
+            self = .sound
+            return
+        }
         switch IndicatorKind(detectionKind: kind) {
         case .person: self = .people
         case .vehicle: self = .vehicle
@@ -150,6 +157,13 @@ public enum KindFilter: String, CaseIterable, Sendable, Hashable, Codable {
     /// Whether any of `kinds` passes `filters` (an empty set passes all).
     public static func passes(_ kinds: [String], _ filters: Set<KindFilter>) -> Bool {
         filters.isEmpty || kinds.contains { filters.contains(KindFilter(kind: $0)) }
+    }
+
+    /// Whether an incident passes `filters`: by its kinds, and for Sounds
+    /// also by any event from sound.
+    public static func passes(_ incident: Incident, _ filters: Set<KindFilter>) -> Bool {
+        passes(incident.kinds, filters)
+            || (filters.contains(.sound) && incident.events.contains { $0.source == SoundKinds.localAudio })
     }
 }
 

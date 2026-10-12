@@ -87,6 +87,26 @@ public abstract record PlayerGridMode
     public static PlayerGridMode Tiled { get; } = new Grid();
 }
 
+/// <summary>
+/// What the player says when the core refuses to open a playback, by status (<c>nv_playback_open</c>,
+/// FFI-RECORDINGS.md section 6). Every camera of an enabled device plays, so a refused camera means its device's
+/// recordings are not searched.
+/// </summary>
+public static class PlaybackOpenMessage
+{
+    /// <summary>The message for <paramref name="status"/>.</summary>
+    public static string Text(NvStatus status) => status switch
+    {
+        NvStatus.Limit => "Too many cameras or playbacks to play this",
+        NvStatus.Unsupported => "This device cannot play its recordings",
+        NvStatus.InvalidArgument => "A camera's device is not searched for recordings",
+        NvStatus.NotConfigured => "Recordings are not set up yet",
+        NvStatus.UnknownId => "That incident changed; select it again",
+        NvStatus.Closed => "The app is closing",
+        _ => $"The recording could not be played (status {(int)status})",
+    };
+}
+
 /// <summary>Where each of the player's cameras goes (at most four).</summary>
 public static class PlayerGrid
 {
@@ -184,6 +204,70 @@ public static class PlayerGrid
 }
 
 /// <summary>
+/// The part of the day the timeline lanes show (docs/UX.md "Recordings"): the zoom (1 is the whole day in the lanes'
+/// width, up to 48x) and the fraction of the day at the left edge. Zooming keeps the time under the pointer where it
+/// is; the visible part never leaves the day. The same rule, with the same test vectors, as the macOS app's
+/// PlayerRules.swift.
+/// </summary>
+public readonly record struct TimelineViewport
+{
+    /// <summary>The whole day.</summary>
+    public const double MinZoom = 1;
+
+    /// <summary>The closest zoom.</summary>
+    public const double MaxZoom = 48;
+
+    /// <summary>A mouse wheel notch zooms by this much.</summary>
+    public const double Notch = 1.25;
+
+    /// <summary>A horizontal notch (Shift and the wheel) pans this much of the visible part.</summary>
+    public const double LineStep = 0.1;
+
+    /// <summary>The whole day.</summary>
+    public TimelineViewport()
+        : this(MinZoom, 0)
+    {
+    }
+
+    /// <summary>A viewport, clamped: the zoom to 1...48 and the start to 0...(1 - 1/zoom).</summary>
+    public TimelineViewport(double zoom, double start = 0)
+    {
+        double z = double.IsFinite(zoom) ? Math.Clamp(zoom, MinZoom, MaxZoom) : MinZoom;
+        Zoom = z;
+        Start = double.IsFinite(start) ? Math.Clamp(start, 0, 1 - 1 / z) : 0;
+    }
+
+    /// <summary>1...48.</summary>
+    public double Zoom { get; }
+
+    /// <summary>The fraction of the day at the left edge.</summary>
+    public double Start { get; }
+
+    /// <summary>How much of the day is visible.</summary>
+    public double Visible => 1 / Zoom;
+
+    /// <summary>The fraction of the day at pointer <paramref name="p"/> (0 at the left edge, 1 at the right).</summary>
+    public double FractionAtPointer(double p) => Start + p / Zoom;
+
+    /// <summary>Zoomed by <paramref name="factor"/> around the pointer <paramref name="p"/> (its time stays under it).</summary>
+    public TimelineViewport ZoomedBy(double factor, double p) => ZoomedTo(Zoom * factor, p);
+
+    /// <summary>Zoomed to <paramref name="z"/> around the pointer <paramref name="p"/>.</summary>
+    public TimelineViewport ZoomedTo(double z, double p)
+    {
+        double t = FractionAtPointer(p);
+        double next = Math.Clamp(z, MinZoom, MaxZoom);
+        return new TimelineViewport(next, t - p / next);
+    }
+
+    /// <summary>Panned by <paramref name="amount"/> visible widths (positive: later in the day).</summary>
+    public TimelineViewport PannedBy(double amount) => new(Zoom, Start + amount / Zoom);
+
+    /// <summary>Mouse wheel notches (positive: away from the user) as a zoom factor.</summary>
+    public static double WheelFactor(double notches) => Math.Pow(Notch, notches);
+}
+
+/// <summary>
 /// How the Recordings window's panes share its width and the center its
 /// height (docs/UX.md "Recordings"). The side panes have fixed sensible
 /// widths; in a window too narrow for all three the inspector gives way
@@ -208,6 +292,15 @@ public static class RecordingsPanes
 
     public const double LaneHeight = 26;
     public const double RulerHeight = 18;
+
+    /// <summary>The loudness strip under each lane.</summary>
+    public const double LoudnessHeight = 10;
+
+    /// <summary>A lane with its loudness strip.</summary>
+    public const double RowHeight = LaneHeight + LoudnessHeight;
+
+    /// <summary>The loudness strips' legend under the lanes.</summary>
+    public const double LegendHeight = 14;
 
     /// <summary>The least height of the player.</summary>
     public const double PlayerMin = 200;
@@ -238,8 +331,8 @@ public static class RecordingsPanes
     /// </summary>
     public static double LanesHeight(double height, int lanes)
     {
-        double want = RulerHeight + Math.Max(lanes, 1) * LaneHeight + 8;
-        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * LaneHeight + 8);
+        double want = RulerHeight + Math.Max(lanes, 1) * RowHeight + LegendHeight + 8;
+        double cap = Math.Max((height - TransportHeight) / 3, RulerHeight + 2 * RowHeight + LegendHeight + 8);
         return Math.Min(want, cap);
     }
 }

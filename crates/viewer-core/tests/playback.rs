@@ -1008,6 +1008,67 @@ fn an_incident_opens_with_its_cameras_and_range_and_bad_requests_are_refused() {
     assert_eq!(nvr.active_plays(), 0);
 }
 
+/// An incident groups every camera its devices' indexes hold events of,
+/// across devices, also one searched before and no longer in the enabled
+/// list: it still plays (only its device must be enabled), as do range
+/// requests of it.
+#[test]
+fn an_incident_of_two_devices_and_a_camera_no_longer_searched_still_opens() {
+    let rig = Rig::new();
+    let ev = |channel: u8, start: DateTime, end: DateTime| mock_nvr::archive::MockEvent {
+        channel,
+        kind: "people".into(),
+        start,
+        end,
+    };
+    let nvr = archive_mock(&rig.sim, 2, |a| {
+        a.events = vec![
+            ev(0, d(8, 10, 0, 5), d(8, 10, 0, 20)),
+            ev(1, d(8, 10, 0, 8), d(8, 10, 0, 25)),
+        ];
+    });
+    let other = archive_mock(&rig.sim, 1, |a| {
+        a.events = vec![ev(0, d(8, 10, 0, 10), d(8, 10, 0, 15))];
+    });
+    let (_dev, key) = rig.add(&nvr, &[0, 1]);
+    rig.add(&other, &[0]);
+    // The user stops searching channel 1; its indexed events stay.
+    rig.core
+        .recordings_enable(
+            &key,
+            Some(&json!({"channels": [{"channel": 0}], "utc_offset_s": OFFSET_S}).to_string()),
+        )
+        .unwrap();
+    let inc: Value = serde_json::from_str(
+        &rig.core
+            .incidents_get(&json!({"start": t(8, 0, 0, 0), "end": t(8, 23, 59, 59)}).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    let inc = &inc["incidents"][0];
+    assert_eq!(inc["cameras"].as_array().unwrap().len(), 3);
+    let k = inc["key"].as_str().unwrap().to_owned();
+    let (pb, tiles) = rig.open(json!({"incident": k, "tier": "sub"}));
+    assert_eq!(tiles.len(), 3);
+    rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
+    rig.core.playback_play(pb).unwrap();
+    rig.until("both cameras play", 20, || {
+        tiles.iter().all(|t| {
+            rig.camera_state(pb, *t)
+                .is_some_and(|e| e["state"] == "playing")
+        })
+    });
+    rig.core.playback_close(pb).unwrap();
+    let (pb, tiles) = rig.open(json!({
+        "start_ms": ms(8, 0, 0, 0), "end_ms": ms(9, 0, 0, 0), "position_ms": ms(8, 10, 0, 0),
+        "cameras": cams(&key, &[0, 1], "sub"),
+    }));
+    assert_eq!(tiles.len(), 2);
+    rig.core.playback_close(pb).unwrap();
+    rig.sim.settle();
+    assert_eq!(nvr.active_plays() + other.active_plays(), 0);
+}
+
 /// What [`watch_sync`] saw over one stage.
 #[derive(Debug, Default)]
 struct SyncWatch {

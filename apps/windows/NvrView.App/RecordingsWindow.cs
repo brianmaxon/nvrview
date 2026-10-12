@@ -42,6 +42,7 @@ internal sealed partial class RecordingsWindow
     private readonly DispatcherQueue _ui = DispatcherQueue.GetForCurrentThread();
     private readonly DispatcherQueueTimer _clock;
     private readonly DispatcherQueueTimer _progress;
+    private readonly DispatcherQueueTimer _loudness;
     private readonly Grid _root = new() { RequestedTheme = ElementTheme.Dark, Background = new SolidColorBrush(PanelBack) };
     private readonly ColumnDefinition _sidebarColumn = new() { Width = new GridLength(0) };
     private readonly ColumnDefinition _inspectorColumn = new() { Width = new GridLength(0) };
@@ -140,6 +141,19 @@ internal sealed partial class RecordingsWindow
         _progress.IsRepeating = true;
         _progress.Tick += (_, _) => Service.FlushProgress();
         _progress.Start();
+        // Today's loudness now and then: live seconds arrive with no event (FFI-RECORDINGS.md section 2a, a pull API).
+        _loudness = _ui.CreateTimer();
+        _loudness.Interval = TimeSpan.FromSeconds(10);
+        _loudness.IsRepeating = true;
+        _loudness.Tick += (_, _) =>
+        {
+            if (Browser.IsToday)
+            {
+                Browser.ReloadLoudness(force: true);
+                RefreshLanes();
+            }
+        };
+        _loudness.Start();
 
         Place();
         Refresh();
@@ -525,6 +539,7 @@ internal sealed partial class RecordingsWindow
         _closed = true;
         _clock.Stop();
         _progress.Stop();
+        _loudness.Stop();
         Browser.Changed -= ScheduleRefresh;
         Browser.Player.Changed -= ScheduleTransport;
         Service.DownloadsChanged -= OnDownloadsChanged;

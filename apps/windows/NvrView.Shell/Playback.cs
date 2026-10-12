@@ -119,7 +119,7 @@ public abstract record PlaybackEvent
                 _ => null,
             };
         }
-        catch (JsonException)
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
         {
             return null;
         }

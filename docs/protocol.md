@@ -506,6 +506,11 @@ camera that frames its circle differently still works.
 
 ## Camera motion control
 
+A second client capture on a newer NVR (same firmware family, a later build)
+repeated the PTZ session: a PTZ camera's panel, the PTZ lens of a multi-lens
+camera with presets and a patrol button, and a motorized-lens camera. Rows
+below cite it as "observed (second capture)".
+
 Commands that move a camera, change its focus, or play sound through its
 speaker. Each is marked with its tier (docs/ARCHITECTURE.md, "Device
 commands"): **viewing** (read-only, always allowed), **motion** (camera
@@ -521,14 +526,20 @@ NVR.
 is only an extension, `<Extension version="1.1"><channelId>N</channelId><chnType>0</chnType></Extension>`
 (the client adds `subChannel` for a second lens), and the client waits up to
 8 s for the reply. (observed for 10, 190, 294, 340 and the channel queries
-527–551; the timeout is reported (client))
+527–551; the timeout is reported (client)) In the second capture the
+requests for the PTZ lens of a multi-lens camera (190, 340, 64) carried
+`<chnType>0</chnType><subChannel>1</subChannel>`, the lens field being
+`subChannel` (observed (second capture)).
 
 Commands that act (18, 19, 295, 201) put their XML body in the *payload*:
 the header's payload offset is the length of an extension
 `<Extension version="1.1"><channelId>N</channelId></Extension>` (no
 `chnType`), and the payload is the `<body>…</body>` XML, encrypted as its own
 unit like any body. Every one of them was answered with an empty reply,
-status 200, carrying no state. (observed)
+status 200, carrying no state. (observed) In the second capture the
+extension of 18, 19 and 20 for the PTZ lens of a multi-lens camera held
+`channelId` and `<subChannel>1</subChannel>` (no `chnType`); for every other
+camera it was the plain `channelId`. (observed (second capture))
 
 **What nvrview must do.** From these observations: build every motion body
 itself from a fixed template (never forward client-supplied XML); send `stop`
@@ -557,10 +568,15 @@ commands per second per camera costs nothing.
 | --- | --- | --- |
 | 433 | `ptzCurPos` with integers `pPos`, `tPos`, `zPos` (pan, tilt, zoom; units and ranges unknown). Not sent by the client in the capture, even while panning a PTZ camera that sets `ptzControl` bit 7. | reported (client) |
 | 294 | `PtzZoomFocus` with `channelId`, then `zoom` and `focus`, each with `maxPos`, `minPos`, `curPos` (integers). Ranges differ by camera: a PTZ lens reported zoom 1000–6000 and focus 1–100; a motorized-lens camera zoom 0–28 and focus 0–164. The units are the camera's own steps. | observed |
+| 294 in the second capture | The same ranges again (zoom 1000–6000 and focus 1–100 on a PTZ camera; 0–28 and 0–164 on a motorized-lens camera), read when each panel opened and once more about 40 s later on the lens camera. The PTZ lens of the multi-lens camera was not read with 294. | observed (second capture) |
 | 294 timing | Read when the PTZ panel opened for a channel and again about 6 s after a preset recall or a zoom move (6.2, 6.2 and 6.4 s seen), but not after focus steps and never on a fixed period. This **contradicts** the static reading of a 6 s poll; it fits a 6 s timer restarted by some actions. | observed (client capture) |
 | 294 state | After a zoom move the camera's focus `curPos` changed by itself (refocus after zoom). After two preset recalls on the PTZ lens the zoom `curPos` was unchanged. | observed (client capture) |
 | 190 | `PtzPreset` with `channelId`, `separateCfg` (holding `preset` 0), `maxPresetNum` (64), `maxPresetPicNum` (64), and `presetList/preset` entries with only `id` (from 0), `name`, `imageName`; no coordinates or `mode`. Read once when the preset list opened. | observed |
-| 340 | `PtzAutoTest` with `testStat` (0 seen): the pan/tilt self-test state. Read once, together with 294, when the PTZ panel opened on the PTZ lens; not read for the zoom-only camera. Viewing tier. | observed (client capture) |
+| 190 in the second capture | For the PTZ lens of a multi-lens camera the request carried `chnType` 0 and `subChannel` 1; the reply carried only `channelId` (no lens field), three presets (ids 0, 1, 2; id 0 had an empty `imageName`) and the same maxima (64, 64). The client read it again, with 64, three times in the next 130 s. | observed (second capture) |
+| 340 | `PtzAutoTest` with `testStat` (0 seen): the pan/tilt self-test state. Read once, together with 294, when the PTZ panel opened on the PTZ lens; not read for the zoom-only camera. Viewing tier. In the second capture the request for a multi-lens camera's PTZ lens carried `subChannel` 1. | observed (client capture; second capture) |
+| 64 | `PtzCruise` (patrol settings; viewing): `channelId`, `intervalTime` (3600), `maxKeyPosCount` (4), `separateCfg/cruise` (1), `defSchedule` (a 168-character string of `1`), and `cruiseList` (empty when no patrol was set). Read with `chnType` 0 and `subChannel` 1 when the patrol panel opened and before each patrol edit. | observed (second capture) |
+| 421 | `imageFileInfo` with `channelId` and `imageName` (`preset_NN`) fetches a preset's picture: the reply gives `fileSize` and `delete` 0, then a binary-data message with the JPEG. Viewing; read once when the preset list opened. | observed (second capture) |
+| 723 | pushed by the device (`id` 0): `coordinatePointList/coordinatePoint` with `channel`, `subChannel` (0 seen, while the user drove lens 1), `xpos`, `ypos` (0–1) and `type` `normal`. Seen on connect and then several times while the multi-lens camera's panel was open, some of them 1–4 s after a recall; not tied to moves. Meaning not established (apparently a point on the other lens's picture). | observed (second capture); meaning open |
 | 224 | `AutoFocus` with `channelId`, `disable` (whether continuous autofocus is off). Not sent in the capture. | reported (client) |
 | 742 | PTZ information: `pt`, `separateCfg`. Not sent in the capture. | reported (client) |
 | 332, 35, 64 | guard (home position) settings, PTZ serial settings, patrol settings | reported (client) |
@@ -582,10 +598,15 @@ commands per second per camera costs nothing.
 | Fact | Provenance |
 | --- | --- |
 | `command` is one of `left`, `right`, `up`, `down`, `leftUp`, `leftDown`, `rightUp`, `rightDown`, `zoomInc`, `zoomDec`, `focusInc`, `focusDec`, `irisInc`, `irisDec`, or `stop`. | reported (client); `left`, `right`, `up`, `down`, `stop` observed |
+| Diagonals: none was sent in the second capture either, so the names `leftUp`, `leftDown`, `rightUp`, `rightDown` remain reported, not observed. | observed (absence) |
+| Speeds in the second capture: 40 for the four directions (left 1.9 s, right 2.1 s, up 2.0 s, down 2.2 s from move to stop), 1 for the lowest slider setting (up, held 3.7 s) and 64 for the highest (up, held 1.3 s). `stop` was always `speed` 1. Replies came in 3–62 ms. | observed (second capture) |
+| The PTZ camera's zoom and focus: no zoom or focus command (18 `zoomInc`/`zoomDec`/`focusInc`/`focusDec`, or 295) was sent to the pan-and-tilt cameras in the second capture, although 294 reported zoom 1000–6000 and focus 1–100 for one of them. How the client zooms a pan-and-tilt camera is therefore still not observed. | observed (absence) |
 | Moves are continuous: the client sent the direction once when a control was pressed and `stop` with `speed` 1 when it was released, 1.3–1.5 s later in the capture; nothing was repeated while the button was held. Each command was answered by an empty status-200 reply in 17–56 ms. A client must therefore always follow a move with `stop`, including on error and disconnect paths. | observed |
 | The move speed in the capture was 40; the client's built-in default is 20 and its speed slider runs 1–64, so 40 was presumably a stored user setting. | observed (40); default and range reported (client) |
-| On a multi-lens camera whose second lens pans and tilts, the client addressed 18 to the plain `channelId` (no `chnType` or `subChannel`) while showing that lens's `externStream`. | observed (client capture) |
-| `auto` (continuous scan) and `startPatrol`/`stopPatrol` (with `patrolId`) are also motion; `clearPatrol` changes settings (configuration). | reported (client) |
+| On a multi-lens camera whose second lens pans and tilts, the client addressed 18 to the plain `channelId` (no `chnType` or `subChannel`) while showing that lens's `externStream`. **On the newer NVR (second capture) it added `subChannel` 1 to the extension of 18, 19 and 20 and to the reads (190, 340, 64) for that lens**, while the body's `channelId` stayed the plain channel. A client that sends the plain channel to such a camera may therefore move the other lens: the form without `subChannel` is observed only in the first capture. | observed (client capture; second capture) |
+| `auto` (continuous scan) is also motion; `clearPatrol` changes settings (configuration). | reported (client) |
+| Patrol: `startPatrol` and `stopPatrol` are 18 bodies with `command`, `patrolId` (0) and `speed` 3 (not the move speed), sent once each and answered empty, status 200, in 28–59 ms. A `startPatrol` was sent five times in one session (one per click of the patrol button) and one `stopPatrol` ended it. No position reading shows what a patrol does or whether it ends by itself. **Document only: nvrview does not send these.** | observed (second capture) |
+| Patrol editing: around the patrol starts the client wrote the patrol list with 20 (`PtzCruise`: `cruiseList/cruise` with `patrolId`, `enable`, `name`, `valueTable`, and 16 `keyPos` slots of `keyPosId`, `presetId` (-1 for an empty slot), `speed` 32, `dwellTime` 10, `trackTime`, `trackEnable`). Three 20 writes were seen (answered empty, 200, in 136–178 ms), each preceded by a 64 read. This is configuration: never sent. | observed (second capture) |
 | No "autofocus now" command exists in the client, and none was sent in the capture. On a camera with a motorized lens, the client's focus buttons did not use 18 `focusInc`/`focusDec`: each click sent 295 `focusPos` with the current focus position plus or minus 1 (below). | reported (client); observed (client capture) |
 
 **Command 19, presets.** One command number for recall, save, and delete;
@@ -608,12 +629,13 @@ only the body's `command` tells them apart:
 | `toPos` recalls a preset: **motion**. `setPos` saves the current position as a preset and `delPos` deletes one: **configuration**. The allowlist cannot judge 19 by its number; nvrview must build recall bodies itself and never forward any other `command`. | reported (client) |
 | A recall as the client sent it: one `preset` with `id`, `command` `toPos`, the preset's `name` (from 190), `xpos`, `ypos`, `height`, `width` all `0.000000e+00`, and `mode` `global`. The reply was empty with status 200 after 106–140 ms, carrying no state; it does not say when the camera arrives. | observed |
 | `imageName` was not sent in a recall. Whether a recall needs more than `id` and `command` is not known. | observed; open |
+| Second capture, the PTZ lens of a multi-lens camera, four recalls (ids 0, 2, 1, 2; each answered empty, status 200, in 89–113 ms): the first two carried the preset's `name` (the second also its `imageName`), the last two carried **only** `id`, `command` `toPos`, the four zero coordinates and `mode` `global` (no `name`, no `imageName`) and were accepted just the same. The extension held `subChannel` 1. The recall form the core builds (with `name`) is also observed. So `name` is optional. | observed (second capture) |
 
 **Other motion commands.**
 
 | Command | Body | Tier | Provenance |
 | --- | --- | --- | --- |
-| 295 | `StartZoomFocus` with `channelId`, `command` (`zoomPos` or `focusPos`), `movePos`: move zoom or focus to an absolute position in the range from 294. Moving the zoom slider sent one 295 per move, not a stream (`movePos` 11, then 0 about 1.3 s later, on a 0–28 range); the focus buttons sent one 295 per click, stepping `movePos` by 1 from the current focus position. Replies were empty, status 200, after 100–220 ms. | motion | observed |
+| 295 | `StartZoomFocus` with `channelId`, `command` (`zoomPos` or `focusPos`), `movePos`: move zoom or focus to an absolute position in the range from 294. In the second capture: zoom clicks stepped `movePos` 1, 2, 3, 2, 1 and a slider drag sent 25 and then 0 (range 0–28); focus went to 0 and 164, the two **edges** of the 0–164 range, and both were answered 200 (empty), then stepped down 29, 28, ... 23 one click at a time. No edge was refused. Replies took 58–250 ms. Moving the zoom slider sent one 295 per move, not a stream (`movePos` 11, then 0 about 1.3 s later, on a 0–28 range); the focus buttons sent one 295 per click, stepping `movePos` by 1 from the current focus position. Replies were empty, status 200, after 100–220 ms. | motion | observed |
 | 468 | `ptzCurPos` with `pPos`, `tPos`, `zPos`: go to absolute coordinates | motion, but nvrview never chooses raw coordinates (it recalls presets instead) | reported (client) |
 | 445 | `Ptz3DLocation` with `topLeftX`, `topLeftY`, `width`, `height` (floats), `speed`, `streamType`: aim at a rectangle drawn on the picture | motion | reported (client) |
 | 545 | `pPos`, `tPos`, `zPos` and a rectangle: move to a tracking area | motion | reported (client) |
@@ -654,7 +676,12 @@ template:
 - **Not sent until observed:** the diagonals (`leftUp`, `leftDown`,
   `rightUp`, `rightDown`), 18 `zoomInc`/`zoomDec` and
   `focusInc`/`focusDec`, `auto`, patrols, 433, 468, 445, 545, 709, and
-  autofocus.
+  autofocus. The second capture newly observed, and the core still does not
+  send: 18 `startPatrol`/`stopPatrol`, 20 (patrol write, configuration), the
+  64 and 421 reads, and the `subChannel` form of the extension for a
+  multi-lens camera's PTZ lens (18, 19, 190, 340). Until the core carries a
+  lens field, a multi-lens camera's second lens cannot be addressed, and the
+  plain-channel form may move the wrong lens on newer NVRs.
 - Which controls a channel gets comes from 199 (`ptzType`, `ptzPreset`;
   see "Capabilities"), so a channel without them is never sent a motion
   command.
@@ -1320,12 +1347,14 @@ port as `N`). Nothing else was sent.
 
 - Camera motion control: 18 (four directions and stop), 19 `toPos`, 295,
   294, 190, 340 and the 201 → 202 → 11 talk sequence are now observed. Still
-  open: the units of `pPos`/`tPos`/`zPos` (433 was never sent, so no
-  position was seen); whether the camera really keeps moving without a stop,
-  and for how long (needs position readings or video analysis); whether a
-  recall needs more than `id` and `command`; how long a recall takes (its
-  reply comes before the camera arrives); diagonal moves, 18 zoom and focus
-  commands, and speeds other than 40 and 1; what 709 does; whether any camera
+  open: the units of `pPos`/`tPos`/`zPos` (433 was never sent, in either
+  capture, so no position was seen); whether the camera really keeps moving
+  without a stop, and for how long (needs position readings or video
+  analysis; `bc-cli ptz-probe` is built to observe it); how long a recall
+  takes (its reply comes before the camera arrives); diagonal moves and 18
+  zoom and focus commands (absent from both captures); what 723 means; how
+  a recall to an id outside the 190 list is answered (the core never sends
+  it); what 709 does; whether any camera
   supports an autofocus command (no channel in the capture advertised
   `autoFocus`); the meaning of the `01wb` prefix `00 01 02 00` in talk
   records (only one record size was seen); whether talk-back needs 202 at

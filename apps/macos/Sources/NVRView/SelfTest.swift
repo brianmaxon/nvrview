@@ -3097,7 +3097,7 @@ final class SelfTest {
             guard i < sizes.count else {
                 window.setFrame(saved, display: false)
                 print("recordings: layout \(results.joined(separator: "; "))")
-                return recordingsClose(b, fake)
+                return recordingsWheelZoom(b, fake)
             }
             let size = sizes[i]
             let want = RecordingsPanes.shown(width: size.width, sidebar: true, inspector: true)
@@ -3128,6 +3128,137 @@ final class SelfTest {
             }
         }
         next(0)
+    }
+
+    /// The timeline lanes' wheel and trackpad, through the lanes' own event
+    /// catcher with real scroll events: a mouse wheel notch zooms around the
+    /// pointer (its time stays under it), many clamp at 48x, a horizontal
+    /// two-finger scroll pans, a vertical one is left to the lanes'
+    /// scrolling, and notches the other way go back to the whole day.
+    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-timeline-wheel-zoom
+        func catcher(in view: NSView?) -> TimelineInputCatcher.CatcherView? {
+            guard let view else { return nil }
+            if let c = view as? TimelineInputCatcher.CatcherView { return c }
+            for v in view.subviews { if let c = catcher(in: v) { return c } }
+            return nil
+        }
+        let window = app.recordingsWindows.first?.window
+        // The lanes are laid out again after the layout step's last resize.
+        when({ catcher(in: window?.contentView).map { !$0.visibleRect.isEmpty } == true }, timeout: 2) { [self] in
+            guard let c = catcher(in: window?.contentView), !c.visibleRect.isEmpty else {
+                problems.append("recordings: no timeline lanes to scroll")
+                return recordingsClose(b, fake)
+            }
+            recordingsWheelZoom(b, c)
+            recordingsListen(b, fake)
+        }
+    }
+
+    /// Listening for sounds: a camera's switch reaches `nv_sound_watch` and
+    /// its `sound_watch` state comes back; a fifth camera of one device is
+    /// refused; switching off takes it off the core's list.
+    private func recordingsListen(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-listen-for-sounds
+        let rec = b.model
+        guard let device = b.cameras.first?.device else { return recordingsClose(b, fake) }
+        let cams = (0..<5).map { RecordingCamera(device: device, channel: $0) }
+        for c in cams.prefix(4) where !rec.setListening(c, true) {
+            problems.append("recordings: listening to \(c) was refused (\(rec.notice ?? ""))")
+        }
+        if rec.setListening(cams[4], true) { problems.append("recordings: a fifth camera of a device listens") }
+        if fake.soundWatched != Array(cams.prefix(4)) { problems.append("recordings: the core listens to \(fake.soundWatched)") }
+        when({ rec.listenStates[cams[0]]?.state == "watching" }, timeout: 2) { [self] in
+            print("recordings: listening to \(rec.listeningCameras.count) cameras, the fifth refused: \(rec.notice ?? "")")
+            if rec.listenStates[cams[0]]?.state != "watching" { problems.append("recordings: no sound_watch state for a listening camera") }
+            for c in cams.dropFirst() { rec.setListening(c, false) }
+            if fake.soundWatched != [cams[0]] { problems.append("recordings: switching off left \(fake.soundWatched) listening") }
+            recordingsLoudness(b, fake, listening: cams[0])
+        }
+    }
+
+    /// The loudness strips: a listening camera's lane has loudness (the fake
+    /// answers a steady level), the others are blank; zooming in asks again
+    /// with a finer bucket.
+    private func recordingsLoudness(_ b: RecordingsBrowser, _ fake: FakeCore, listening: RecordingCamera) {
+        // parity: recordings-loudness-lanes
+        b.timeline = TimelineViewport()
+        b.reloadLoudness(force: true)
+        let whole = b.loudnessBucket
+        let heard = b.lanes.filter { b.loudness(of: $0.camera)?.heard == true }.map(\.camera)
+        print("recordings: loudness at \(whole) s buckets, heard on \(heard)")
+        if heard != [listening] { problems.append("recordings: loudness heard on \(heard), expected \(listening)") }
+        if b.loudness(of: listening)?.bucket != whole { problems.append("recordings: the loudness lane is not at the bucket asked") }
+        let reads = b.loudnessReads
+        b.timeline = TimelineViewport(zoom: 48)
+        if b.loudnessReads != reads + 1 || b.loudness(of: listening)?.bucket != b.loudnessBucket || b.loudnessBucket >= whole {
+            problems.append("recordings: zooming in did not ask for finer loudness (\(b.loudnessBucket) s)")
+        }
+        b.timeline = TimelineViewport()
+        recordingsSoundLabels(b, fake, camera: listening)
+    }
+
+    /// Sound labels (as the app's classifier would put them): a label becomes
+    /// an event from sound on its camera's lane and an incident of its own,
+    /// with the sound badge, which the Sounds filter alone shows.
+    private func recordingsSoundLabels(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
+        // parity: recordings-sound-labels
+        let at = b.day + 10 * 3600
+        let json = #"{"camera":\#(camera.json),"analyzer":"selftest-v1","start":\#(at - 60),"end":\#(at + 60),"labels":[{"kind":"dog_bark","start":\#(at),"end":\#(at + 4),"confidence":0.9,"label":"dog_bark"}]}"#
+        do throws(CoreStatus) {
+            try fake.soundLabelsPut(json: json)
+        } catch {
+            problems.append("recordings: the sound labels were refused (status \(error.code))")
+            return recordingsClose(b, fake)
+        }
+        when({ b.dayIncidents.contains { $0.kinds == ["dog_bark"] } }, timeout: 2) { [self] in
+            let lane = b.lanes.first { $0.camera == camera }
+            let onLane = lane?.events.contains { $0.kind == "dog_bark" && $0.source == SoundKinds.localAudio } == true
+            b.kindFilters = [.sound]
+            let shown = b.incidents.map(\.kinds)
+            let badge = b.incidents.first.map { SoundKinds.names($0.events) } ?? []
+            print("recordings: a sound label on the lane \(onLane), the Sounds filter shows \(shown), badge \(badge)")
+            if !onLane { problems.append("recordings: the sound label is not on its camera's lane") }
+            if shown != [["dog_bark"]] { problems.append("recordings: the Sounds filter shows \(shown)") }
+            if badge != ["Dog barking"] { problems.append("recordings: the sound badge says \(badge)") }
+            b.kindFilters = []
+            b.model.setListening(camera, false)
+            recordingsClose(b, fake)
+        }
+    }
+
+    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ c: TimelineInputCatcher.CatcherView) {
+        func scroll(_ units: CGScrollEventUnit, dy: Int32, dx: Int32 = 0) -> NSEvent? {
+            CGEvent(scrollWheelEvent2Source: nil, units: units, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)
+                .flatMap(NSEvent.init(cgEvent:))
+        }
+        b.timeline = TimelineViewport()
+        let at = NSPoint(x: c.bounds.width * 0.25, y: c.visibleRect.midY)
+        let before = b.timeline.fraction(atPointer: 0.25)
+        guard let notch = scroll(.line, dy: 1), let input = TimelineInput(notch), c.handle(notch, at: at) else {
+            problems.append("recordings: a wheel notch over the lanes was not taken")
+            return
+        }
+        let one = b.timeline
+        print("recordings: a wheel notch (\(notch.scrollingDeltaY) lines) zooms to \(one.zoom)x, input \(input)")
+        if case .zoom(_, true) = input {} else { problems.append("recordings: a wheel notch did not zoom eased (\(input))") }
+        if one.zoom <= 1 || abs(one.fraction(atPointer: 0.25) - before) > 1e-9 {
+            problems.append("recordings: a wheel notch made \(one), the time under the pointer moved")
+        }
+        for _ in 0..<40 { if let e = scroll(.line, dy: 3) { _ = c.handle(e, at: at) } }
+        if b.timeline.zoom != TimelineViewport.maxZoom { problems.append("recordings: the wheel zoomed to \(b.timeline.zoom)x, not 48x") }
+        let zoomed = b.timeline
+        if let pan = scroll(.pixel, dy: 0, dx: -40), c.handle(pan, at: at) {
+            if b.timeline.start <= zoomed.start { problems.append("recordings: a two-finger scroll left did not pan later") }
+        } else {
+            problems.append("recordings: a horizontal two-finger scroll was not taken")
+        }
+        if let vertical = scroll(.pixel, dy: -40), c.handle(vertical, at: at) {
+            problems.append("recordings: a vertical two-finger scroll was taken from the lanes' scrolling")
+        }
+        for _ in 0..<40 { if let e = scroll(.line, dy: -3) { _ = c.handle(e, at: at) } }
+        print("recordings: wheel zoom to 48x panned from \(zoomed.start) and back to \(b.timeline)")
+        if b.timeline != TimelineViewport() { problems.append("recordings: wheeling back left \(b.timeline)") }
     }
 
     private func recordingsClose(_ b: RecordingsBrowser, _ fake: FakeCore) {
