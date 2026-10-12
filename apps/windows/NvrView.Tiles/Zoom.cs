@@ -151,3 +151,41 @@ public readonly record struct TileZoom(double Scale, double CenterX, double Cent
         return new TileZoom(z.Scale, z.CenterX - dx / (z.Scale * b.Width), z.CenterY - dy / (z.Scale * b.Height)).Clamped(b);
     }
 }
+
+/// <summary>
+/// The zoom map (docs/UX.md "Digital zoom"): the small outline of the whole picture, with the
+/// visible region marked, in the bottom left corner of the zoomed picture as drawn. The same rule
+/// as the macOS app's ZoomInsetView.frame.
+/// </summary>
+public static class ZoomMap
+{
+    public const double MaxWidth = 96;
+    public const double Margin = 8;
+
+    /// <summary>
+    /// Where the map sits for a tile whose picture appears in <paramref name="picture"/> (any unit,
+    /// the stage's): its bottom left corner, the picture's shape (<paramref name="aspect"/> is width
+    /// over height), at most a quarter of its width and a third of its height, on whole units.
+    /// Empty when there is no room or no picture.
+    /// </summary>
+    public static UnitRect Frame(UnitRect picture, double aspect)
+    {
+        if (!(picture.Width > 0 && picture.Height > 0 && aspect > 0 && double.IsFinite(aspect)))
+        {
+            return new(0, 0, 0, 0);
+        }
+        double w = Math.Min(MaxWidth, picture.Width / 4), h = w / aspect;
+        if (h > picture.Height / 3)
+        {
+            h = picture.Height / 3;
+            w = h * aspect;
+        }
+        double x = picture.X + Margin, y = picture.Y + picture.Height - Margin - h;
+        double x0 = Math.Floor(x), y0 = Math.Floor(y);
+        return new(x0, y0, Math.Ceiling(x + w) - x0, Math.Ceiling(y + h) - y0);
+    }
+
+    /// <summary>The visible region marked inside a map of the given size, at least 2 units each way (so a deep zoom still shows).</summary>
+    public static UnitRect Region(UnitRect visible, double mapWidth, double mapHeight) =>
+        new(visible.X * mapWidth, visible.Y * mapHeight, Math.Max(visible.Width * mapWidth, 2), Math.Max(visible.Height * mapHeight, 2));
+}

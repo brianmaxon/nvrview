@@ -33,6 +33,7 @@ credential-store            windows  gap: the macOS self-test does not exercise 
 decode-failures             windows  gap: the macOS self-test does not count decode failures
 detection-events            windows  gap: the macOS self-test does not check that detections arrive
 device-loss                 windows  gap: no macOS step simulating a lost GPU device and checking every tile plays again (unverified whether the Metal renderer needs one)
+fill-tiles                  windows  gap: the macOS self-test does not turn Fill Tiles on and read the former letterbox bar
 fisheye-mount-settings      windows  gap: the macOS Settings > Cameras mount picker exists but the self-test does not drive it
 fisheye-pinch               windows  gap: the macOS pinch (magnify) path into the virtual camera is not in the self-test
 fisheye-view-saved          windows  gap: the macOS self-test does not read the view back from the layout leaf
@@ -52,8 +53,12 @@ settings-dialog-opens       windows  gap: the macOS self-test opens Settings onl
 settings-save-remove        windows  gap: saving and removing a device is not in the macOS self-test
 third-party-channel         windows  gap: the macOS fake core does not model a channel waiting for a third-party camera
 tile-reconnect-text         windows  gap: the macOS self-test does not check the reconnecting wording on tiles (StatusTests covers it as a unit)
+unmute-on-ring              windows  gap: the macOS self-test does not ring a doorbell with its unmute-on-ring option on (CallAudio.decide is unit-tested)
 window-restore              windows  gap: the restore record is unit-tested on macOS (WindowRestoreTests), not in the self-test
 wrong-password              windows  gap: the macOS self-test does not log in with a wrong password (StatusTests covers the wording)
+zoom-map                    windows  gap: the macOS self-test does not check the zoom map (ZoomInsetView) while a tile is zoomed
+zoom-reset-control          windows  gap: the macOS self-test does not press the header reset-zoom button
+zoom-touch-pinch            windows  gap: the macOS self-test does not send a magnify gesture to a digitally zoomed tile
 
 # ---- on macOS only ----------------------------------------------------------
 alert-inset-smoke-stays     macos    gap: Windows insets are call cards only, so a smoke alarm does not open one

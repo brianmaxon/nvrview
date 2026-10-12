@@ -34,6 +34,9 @@ internal sealed class ViewSettingsFile
     /// <summary>Cameras the user allowed talk-back to ("deviceKey:channel"); camera motion control, off unless listed.</summary>
     public List<string>? TalkAllowed { get; set; }
 
+    /// <summary>Doorbells whose ring unmutes them even when the user is not listening ("deviceKey:channel"); off unless listed.</summary>
+    public List<string>? UnmuteOnRing { get; set; }
+
     /// <summary>"Open calls in their own window" (docs/UX.md "A call in its own window"); off by default.</summary>
     public bool CallsOpenInWindow { get; set; }
 
@@ -66,6 +69,7 @@ internal sealed class ViewSettings(string? file)
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
+    private HashSet<string> _unmuteOnRing = [];
     private bool _callsInWindow;
     private Dictionary<string, string> _callPresentations = [];
     private CallWindowPlacement.Mode _placement = CallWindowPlacement.Mode.Remembered;
@@ -113,6 +117,25 @@ internal sealed class ViewSettings(string? file)
     {
         Load();
         if (allowed ? !_talkAllowed.Add(MountKey(camera)) : !_talkAllowed.Remove(MountKey(camera)))
+        {
+            return;
+        }
+        Save();
+        Changed?.Invoke();
+    }
+
+    /// <summary>A ring of this doorbell (a channel's, whatever the lens) plays its sound even when the user is not listening to anything.</summary>
+    public bool UnmuteOnRing(CameraRef camera)
+    {
+        Load();
+        return _unmuteOnRing.Contains(MountKey(camera));
+    }
+
+    /// <summary>Turns "unmute on ring" on or off for a doorbell (saved).</summary>
+    public void SetUnmuteOnRing(CameraRef camera, bool on)
+    {
+        Load();
+        if (on ? !_unmuteOnRing.Add(MountKey(camera)) : !_unmuteOnRing.Remove(MountKey(camera)))
         {
             return;
         }
@@ -342,6 +365,7 @@ internal sealed class ViewSettings(string? file)
             _insetCorner = read?.InsetCorner is { } ic ? ChromeCorners.Parse(ic) : null;
             _mounts = read?.FisheyeMounts is { } m ? new Dictionary<string, string>(m) : [];
             _talkAllowed = read?.TalkAllowed is { } t ? [.. t] : [];
+            _unmuteOnRing = read?.UnmuteOnRing is { } u ? [.. u] : [];
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
             _callsInWindow = read?.CallsOpenInWindow ?? false;
             _callPresentations = read?.CallPresentation is { } cp ? new Dictionary<string, string>(cp) : [];
@@ -374,6 +398,7 @@ internal sealed class ViewSettings(string? file)
                     InsetCorner = _insetCorner?.Name(),
                     FisheyeMounts = _mounts.Count > 0 ? new Dictionary<string, string>(_mounts) : null,
                     TalkAllowed = _talkAllowed.Count > 0 ? [.. _talkAllowed.Order(StringComparer.Ordinal)] : null,
+                    UnmuteOnRing = _unmuteOnRing.Count > 0 ? [.. _unmuteOnRing.Order(StringComparer.Ordinal)] : null,
                     SaveCallTranscripts = _saveTranscripts,
                     CallsOpenInWindow = _callsInWindow,
                     CallPresentation = _callPresentations.Count > 0 ? new Dictionary<string, string>(_callPresentations) : null,
