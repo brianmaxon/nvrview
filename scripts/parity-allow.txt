@@ -88,3 +88,7 @@ zoom-reset-key              macos    gap: the Windows self-test resets a digital
 playback-real-core           macos    gap: the Windows playback steps run on the fakes only; a decoded picture from a real playback is not checked on Windows yet
 playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
+edit-download                macos    gap: Windows follow cut and grids are W3
+edit-follow-cut              macos    gap: Windows follow cut and grids are W3
+edit-grid                    macos    gap: Windows follow cut and grids are W3
+edit-back-to-cameras         macos    gap: Windows follow cut and grids are W3

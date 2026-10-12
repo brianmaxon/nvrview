@@ -952,9 +952,11 @@ extension FakeCore {
 // MARK: Edit lists and sound (minor 8)
 //
 // `editCompute` plans a follow cut or a grid over a finished download of the
-// made-up store: every camera of the download is a source of 1920 by 1080
-// h264 that starts at the download range and has a keyframe every 2 s. The
-// follow cut shows each event's camera while it lasts. `soundWatch` keeps a
+// made-up store: every camera of the download is a source of 640 by 360
+// h264 at 10 frames a second from 5 s before its first event to 5 s after
+// its last, with a keyframe every 2 s (`SyntheticRecording` writes such
+// files; the fake itself writes none). The follow cut shows, at each
+// moment, the camera whose event started last. `soundWatch` keeps a
 // list and sends `sound_watch` events; loudness lanes are `null` except for
 // watched cameras (a steady -40 dBFS peak, -50 RMS); `soundLabelsPut` only
 // validates; `soundAnalyzeDay` queues a request that `completeRecordingWork`
@@ -995,7 +997,7 @@ extension FakeCore {
                 return [
                     "source": i, "camera": Self.cameraObject(c), "name": "Camera \(c.channel + 1)",
                     "file": "\(d.folder)/Camera \(c.channel + 1).mp4", "file_start_ms": start, "offset_ms": 0,
-                    "codec": "h264", "width": 1920, "height": 1080, "duration_ms": ends - start,
+                    "codec": "h264", "width": 640, "height": 360, "duration_ms": ends - start,
                 ]
             }
             var plan: [String: Any] = [
@@ -1003,18 +1005,26 @@ extension FakeCore {
                 "suggested_file": "\(d.folder)/\(inc.start) \(kind).mp4",
             ]
             if kind == "follow" {
+                // At each moment the camera whose event started last (section
+                // 7's overlap rule, without priorities, holds, or pre-roll);
+                // where no event runs, the previous shot continues while its
+                // file has video.
+                let events = inc.events.filter { cameras.contains($0.camera) }
+                let bounds = Set(events.flatMap { [$0.start * 1000, $0.end * 1000] }).sorted()
                 var segments: [[String: Any]] = []
-                for e in inc.events.sorted(by: { ($0.start, $0.key) < ($1.start, $1.key) }) {
-                    guard let i = cameras.firstIndex(of: e.camera) else { continue }
-                    let from = max(e.start * 1000, segments.last.map { $0["end_ms"] as! Int64 } ?? 0)
-                    guard from < e.end * 1000 else { continue }
-                    if let last = segments.last, last["source"] as? Int == i {
-                        segments[segments.count - 1]["end_ms"] = e.end * 1000
+                for (a, b) in zip(bounds, bounds.dropFirst()) {
+                    let active = events.filter { $0.start * 1000 <= a && a < $0.end * 1000 }
+                    var pick = active.max { ($0.start, $0.key) < ($1.start, $1.key) }.flatMap { cameras.firstIndex(of: $0.camera) }
+                    if pick == nil, let last = segments.last, last["end_ms"] as? Int64 == a, let i = last["source"] as? Int,
+                        range(cameras[i]).1 * 1000 >= b
+                    {
+                        pick = i
+                    }
+                    guard let i = pick else { continue }
+                    if let last = segments.last, last["source"] as? Int == i, last["end_ms"] as? Int64 == a {
+                        segments[segments.count - 1]["end_ms"] = b
                     } else {
-                        segments.append([
-                            "start_ms": from, "end_ms": e.end * 1000, "source": i,
-                            "source_in_ms": from - (range(cameras[i]).0 * 1000),
-                        ])
+                        segments.append(["start_ms": a, "end_ms": b, "source": i, "source_in_ms": a - range(cameras[i]).0 * 1000])
                     }
                 }
                 guard let first = segments.first, let last = segments.last else { throw .invalidArgument }
