@@ -219,6 +219,31 @@ public protocol CoreAPI: Sendable {
     /// `nv_tile_loudness`: a live tile's newest `capacity` seconds of loudness.
     func tileLoudness(_ tile: UInt64, capacity: Int) throws(CoreStatus) -> TileLoudness
 
+    // MARK: Capture (minor 9; docs/FFI.md "Capture")
+    //
+    // JSON as in docs/FFI.md "Capture"; `recording` events follow. Not from
+    // inside a callback, except `recordAudioEncoded` (also from inside the
+    // encoder's own calls).
+
+    /// `nv_capture_configure`: the live recordings' folder and limits. Call
+    /// it before `recordStart`; the first call recovers what a crash left.
+    func captureConfigure(json: String) throws(CoreStatus)
+    /// `nv_capture_set_encoder`: installs the app's AAC encoder, or removes
+    /// it (nil). Recordings already running keep theirs.
+    func captureSetEncoder(_ encoder: (any CaptureEncoder)?) throws(CoreStatus)
+    /// `nv_record_audio_encoded`: one raw AAC access unit answering
+    /// `CaptureEncoder.encode` (or the flush of `close`), in order.
+    func recordAudioEncoded(recording: UInt64, track: UInt32, unit: UnsafeRawBufferPointer) -> CoreStatus
+    /// `nv_record_start`: a live or call recording of a tile's camera.
+    /// `.limit` errors name the limit; `.notConfigured` before
+    /// `captureConfigure` (or a call without an encoder).
+    func recordStart(_ request: RecordRequest) throws(RecordStartError) -> RecordingStarted
+    /// `nv_record_stop`: stops and finalizes; returns at once.
+    func recordStop(_ recording: UInt64) throws(CoreStatus)
+    /// `nv_record_status`: `{"recordings":[...]}`, the latest `recording`
+    /// event of each running recording.
+    func recordStatus() throws(CoreStatus) -> String
+
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //
     // A playback's tiles deliver actions to the sink like live tiles and are

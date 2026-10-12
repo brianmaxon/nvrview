@@ -1156,6 +1156,7 @@ version = "0.1.0"
 dependencies = [
  "bc-protocol",
  "mock-nvr",
+ "mp4-remux",
  "serde_json",
  "simtime",
  "tempfile",

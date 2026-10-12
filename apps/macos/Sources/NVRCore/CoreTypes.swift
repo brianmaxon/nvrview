@@ -134,6 +134,7 @@ public struct CoreStatus: Sendable, Equatable, Error {
     /// Minor 5: the device's backend cannot do this (also: a core without recordings).
     public static let unsupported = CoreStatus(-8)
     /// Minor 5: recordings are not configured, or there is no downloads folder.
+    /// Minor 9: capture is not configured, or a call recording has no encoder.
     public static let notConfigured = CoreStatus(-9)
     /// Minor 5: accepted; the answer arrives as an event (thumbnails).
     public static let pending = CoreStatus(1)
