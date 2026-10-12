@@ -24,8 +24,8 @@ extern "C" {
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1. Minor 6: recorded playback. Minor 7: "months" in
- * nv_recordings_want. */
-#define NV_ABI_MINOR 7
+ * nv_recordings_want. Minor 8: edit lists and the rest of sound. */
+#define NV_ABI_MINOR 8
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -542,6 +542,36 @@ NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
 /* Live sound settings: {"alarms":true,"loudness_history_s":600} (members
  * left out keep their values); applies to tiles opened afterwards. */
 NvStatus nv_sound_configure(NvCore *core, const char *json);
+
+/* Edit lists and the rest of sound (minor 8; docs/FFI-RECORDINGS.md,
+ * sections 7 and 2a; events sound_watch, sound_analyze). */
+
+/* An edit list for a finished download, as JSON: {"kind":"follow" | "grid",
+ * "download":"<id>", ...}. Pure computation; no device traffic.
+ * NV_ERR_UNSUPPORTED for in_ms, out_ms, and the trim kind (a later minor). */
+NvStatus nv_edit_compute(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+
+/* Keeps a camera's sub-stream open for sound only while enabled. */
+NvStatus nv_sound_watch(NvCore *core, const char *camera, bool enabled);
+
+/* Loudness lanes: {"start","end","bucket_s","cameras"} answers {"revision",
+ * "lanes":[{"camera","bucket_s","start","peak_db","rms_db"}]}. */
+NvStatus nv_recordings_loudness(NvCore *core, const char *query, char *out, size_t cap,
+                                size_t *len);
+
+/* Labels from the app's classifier, merged into the index as events. */
+NvStatus nv_sound_labels_put(NvCore *core, const char *json);
+
+/* Analyze one camera's recorded day: {"camera","day"} answers {"request":N,
+ * "state":"queued"}; cancel it by request. */
+NvStatus nv_sound_analyze_day(NvCore *core, const char *json, char *out, size_t cap, size_t *len);
+NvStatus nv_sound_analyze_cancel(NvCore *core, uint64_t request);
+
+/* A live tile's recent loudness, oldest first, one byte per second and value
+ * (0: no audio; 1..128: dBFS = byte - 128); the newest `cap` when more are
+ * kept; *start_s is the Unix second of the first value. */
+NvStatus nv_tile_loudness(NvCore *core, uint64_t tile, uint8_t *peak, uint8_t *rms, size_t cap,
+                          int64_t *start_s, size_t *len);
 
 /* Recorded playback (minor 6; docs/FFI-RECORDINGS.md, section 6; events
  * playback_state, playback_camera, playback_seek, playback_closed). A

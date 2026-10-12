@@ -389,7 +389,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 7;
+    public const uint AbiMinor = 8;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
