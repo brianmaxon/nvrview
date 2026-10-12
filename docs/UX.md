@@ -659,7 +659,9 @@ not in a separate system window.
   the user moves the column it sits in the default corner (the Settings
   corner, else opposite the corner indicators), and "Reset Position" in an
   inset's menu returns it there. A column never sits over the sidebar's
-  edge-reveal zone or the full-screen toolbar's reveal area.
+  edge-reveal zone or the full-screen toolbar's reveal area. On Windows the
+  same rules move the call cards (DIPs for points; the saved key is
+  `insetAnchor`, as on the Mac).
 
 Details settled while building it (macOS):
 
@@ -858,7 +860,8 @@ Details settled while building it (Windows):
   the only tile) the same controls show along the bottom of the stage
   instead of a card, beside the other calls' cards. Calls are the only
   insets on Windows: smoke, CO and entrance insets, and the swap, are not
-  there yet.
+  there yet. The cards move as one column by their header or picture, as
+  above ("Moving them"; Reset Position is in a card's right-click menu).
 - Talk-back needs the camera's permission, which on Windows is the tile
   menu's "Allow talk-back" (a checked item, off by default, kept in
   `view-settings.json` and passed to the core before every start and when it
