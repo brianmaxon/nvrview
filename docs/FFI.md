@@ -985,10 +985,28 @@ NvStatus nv_sound_configure(NvCore *core, const char *json);
   true, "download": true, "thumbnails": true}`, what the device's backend
   can do (all four for Baichuan devices).
 
+- **A month's calendar alone (minor 7).** `nv_recordings_want` also takes
+  `"months"` (any second within each month, device-local; at most 12): only
+  those months' calendars (142, one request per month for every camera
+  asked), searched after any wanted days, so a calendar paged to another
+  month gets its recording days without searching a day. A past month's
+  calendar fetched after the month ended is not asked again unless
+  `force`; the current month is asked again after `refresh_today_s`.
+  `"days"` and `"months"` may each be left out, not both. A month that
+  could not be searched is reported once by `recordings_month_failed`
+  (not retried); one that was searched is reported by `recordings_changed`
+  over the whole month.
+- **Camera names** in answers (`name` of an incident's cameras, a
+  download's cameras and folder) are the user's override, else the name
+  the device reports for the channel (with " · Lens N" for a multi-lens
+  camera), else "Camera N" until the device has reported its names (after
+  each login; the names are not stored).
+
 Events (FFI-RECORDINGS.md, section 8; ignore unknown types and fields):
 
 ```json
 {"type":"recordings_index","device":"d-3f9a0c1b7e2d4a65","state":"busy","pending_days":11,"revision":40}
+{"type":"recordings_month_failed","device":"d-3f9a0c1b7e2d4a65","cameras":[{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0}],"month":1788220800,"reason":"session closed during the search"}
 {"type":"recordings_day_failed","device":"d-3f9a0c1b7e2d4a65","camera":{"device":"d-3f9a0c1b7e2d4a65","channel":3,"lens":0},"day":1791504000,"reason":"session closed during the search"}
 {"type":"recordings_changed","device":"d-3f9a0c1b7e2d4a65","revision":41,"start":1791590400,"end":1791676799}
 {"type":"incidents_changed","revision":12}
@@ -1124,6 +1142,7 @@ symbol at all, so a bound app checks first):
 | 4 | `nv_talk_set_conversation` (no per-minute talk-back limit while the user has a call open; see "Talk-back") |
 | 5 | recordings, part 1 (see "Recordings"): `nv_recordings_*`, `nv_incident*`, `nv_camera_groups_*`, `nv_thumbnail_*`, `nv_download*`, `nv_sound_configure`, `NvThumbKind`, `NvThumbnail`, `NV_ERR_UNSUPPORTED`, `NV_ERR_NOT_CONFIGURED`, `NV_PENDING`, and the recordings events; `device_info.recordings` |
 | 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
+| 7 | a month's calendar alone: `months` in `nv_recordings_want` and the `recordings_month_failed` event (see "Recordings"); no declaration changed |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Edit lists and export (F3, F4) and stepping a playback

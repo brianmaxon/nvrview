@@ -791,6 +791,12 @@ public final class FakeCore: CoreAPI {
 
     // MARK: Test hooks
 
+    /// What `tileAudioSet` last made of a tile: audible, at which volume
+    /// (nil before any call).
+    public func audioSetting(tile: UInt64) -> (audible: Bool, volume: Float)? {
+        audioTiles.withLock { $0[tile] }.map { ($0.audible, $0.volume) }
+    }
+
     /// Pushes up to `count` access units of the tile's clip through each of
     /// its pipelines (two while a tier switch runs) and emits the resulting
     /// actions on the calling thread, after any queued events. Returns how

@@ -73,6 +73,10 @@ public final class CoreTile: TilePictureSource {
         /// word; actions of a generation can arrive before that event).
         var startedTiers: [UInt32: StreamTier] = [:]
         var latestStarted: UInt32 = 0
+        /// A playback tile (FFI-RECORDINGS.md section 6): every generation
+        /// is shown once the previous one's final Reset arrives, also one
+        /// that has no picture (a seek to a time without recording clears).
+        var playback = false
 
         var current: Generation? { generations.first { $0.number == shown } }
     }
@@ -170,6 +174,12 @@ public final class CoreTile: TilePictureSource {
 
     func assign(id: UInt64) { tileID.value.store(id, ordering: .releasing) }
 
+    /// Marks a playback's tile (before any action reaches it).
+    func markPlayback() { state.withLock { $0.playback = true } }
+
+    /// Whether this tile shows a recorded playback.
+    public var isPlayback: Bool { state.withLock { $0.playback } }
+
     /// Answers an action this version could not carry out.
     func reject(_ failure: CoreDecodeFailure, generation: UInt32) {
         let link = state.withLock { s in s.generations.first { $0.number == generation }?.link }
@@ -242,9 +252,15 @@ public final class CoreTile: TilePictureSource {
     /// is taken as that final Reset; any other Reset is the pipeline's own.
     private func showNewerAfterFinalReset(of generation: UInt32) {
         let released = state.withLock { s -> [Generation] in
+            // A playback's newest generation is ready when the shown one
+            // ends (the core ends it only then); a live tile's newer
+            // generation must have a picture.
+            let playback = s.playback
             guard generation == s.shown,
-                let newer = s.generations.filter({ $0.number > generation && $0.decoder.latestPicture() != nil })
-                    .max(by: { $0.number < $1.number })
+                let newer = s.generations.filter({
+                    $0.number > generation && (playback || $0.decoder.latestPicture() != nil)
+                })
+                .max(by: { $0.number < $1.number })
             else { return [] }
             s.shown = newer.number
             s.shownTier = s.startedTiers[newer.number] ?? newer.tier

@@ -53,6 +53,10 @@ final class FakeRecordingsState: @unchecked Sendable {
         /// Allowed cameras per device key (nil: every channel, first lens).
         var enabled: [String: [RecordingCamera]?] = [:]
         var indexed: [String: Set<Int64>] = [:]
+        /// Days the calendar knows (the months of wanted days, and months
+        /// asked for alone).
+        var calendar: [String: Set<Int64>] = [:]
+        var monthRequests = 0
         var revision = 0
         var incidentsRevision = 0
         var names: [String: String] = [:]
@@ -384,22 +388,45 @@ extension FakeCore {
         }
     }
 
+    /// Every day of the months that hold `seconds`, up to today on this
+    /// computer's clock (the fake records every day all day).
+    private static func calendarDays(_ seconds: Set<Int64>) -> Set<Int64> {
+        let today = DeviceTime.today(now: Date(), utcOffset: TimeZone.current.secondsFromGMT())
+        var out: Set<Int64> = []
+        for s in seconds {
+            let m = DeviceTime.month(containing: s)
+            for d in stride(from: m.start, to: m.next, by: Int(Self.day)) where d <= today { out.insert(d) }
+        }
+        return out
+    }
+
     public func recordingsWant(json: String) throws(CoreStatus) {
         let o = try Self.object(json)
-        guard let rawDays = o["days"] as? [Any] else { throw .invalidArgument }
-        var days: Set<Int64> = []
-        for d in rawDays {
+        let rawDays = o["days"] as? [Any], rawMonths = o["months"] as? [Any]
+        guard rawDays != nil || rawMonths != nil else { throw .invalidArgument }
+        var days: Set<Int64> = [], months: Set<Int64> = []
+        for d in rawDays ?? [] {
             guard let s = (d as? NSNumber)?.int64Value, s >= 0 else { throw .invalidArgument }
             days.insert(s - s % Self.day)
         }
-        guard days.count <= 31 else { throw .limit }
+        for m in rawMonths ?? [] {
+            guard let s = (m as? NSNumber)?.int64Value, s >= 0 else { throw .invalidArgument }
+            months.insert(DeviceTime.month(containing: s).start)
+        }
+        guard days.count <= 31, months.count <= 12 else { throw .limit }
+        // A day's month calendar comes with it, as on the core; months alone
+        // (minor 7) bring only their calendars.
+        let calendar = Self.calendarDays(days.union(months))
         let changed = try configuredWorld { w throws(CoreStatus) -> [(String, Int64, Int64, Int)] in
             let cams = try Self.requestCameras(o, w)
             var out: [(String, Int64, Int64, Int)] = []
             for device in Set(cams.map(\.device)).sorted() {
                 w.indexed[device, default: []].formUnion(days)
+                w.calendar[device, default: []].formUnion(calendar)
+                w.monthRequests += months.count
                 w.revision += 1
-                out.append((device, days.min() ?? 0, (days.max() ?? 0) + Self.day - 1, w.revision))
+                let all = days.union(months.flatMap { [$0, DeviceTime.month(containing: $0).next - 1] })
+                out.append((device, all.min() ?? 0, DeviceTime.dayStart(all.max() ?? 0) + Self.day - 1, w.revision))
             }
             if !out.isEmpty { w.incidentsRevision += 1 }
             return out
@@ -443,6 +470,11 @@ extension FakeCore {
         (try? recordingsWorld { $0.holds }) ?? [:]
     }
 
+    /// How many months were asked for alone, per device and in all (for tests).
+    public var recordingsMonthRequests: Int {
+        (try? recordingsWorld { $0.monthRequests }) ?? 0
+    }
+
     public func recordingsStatus() throws(CoreStatus) -> String {
         try configuredWorld { w throws(CoreStatus) -> String in
             let devices = w.enabled.keys.sorted().map { k -> [String: Any] in
@@ -456,8 +488,9 @@ extension FakeCore {
         let q = try Self.query(query)
         return try configuredWorld { w throws(CoreStatus) -> String in
             var lists: [[String: Any]] = []
-            for (device, days) in w.indexed.sorted(by: { $0.key < $1.key }) {
+            for device in Set(w.indexed.keys).union(w.calendar.keys).sorted() {
                 guard let entry = w.enabled[device] else { continue }
+                let days = (w.indexed[device] ?? []).union(w.calendar[device] ?? [])
                 let cams = entry ?? (0..<4).map { RecordingCamera(device: device, channel: $0) }
                 for c in cams where q.cameras.map({ $0.contains(c) }) ?? true {
                     let inRange = days.filter { $0 + Self.day - 1 >= q.start && $0 <= q.end }.sorted()

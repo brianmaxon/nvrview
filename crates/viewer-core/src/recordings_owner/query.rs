@@ -258,13 +258,14 @@ fn incident_json(
     let growing = inc.is_growing(h.device_now(offset), stores.settings.gap_s);
     let ranges = inc.download_ranges();
     let cam = |c: &CameraId| camera_json(&c.device, c.local());
+    let reported = h.reported();
     let cameras: Vec<Value> = inc
         .intervals()
         .into_iter()
         .map(|(c, iv)| {
             let r = ranges.get(&c).copied().unwrap_or((inc.start(), inc.end()));
             json!({
-                "camera": cam(&c), "name": camera_name(&stores.groups, &c),
+                "camera": cam(&c), "name": camera_name(&stores.groups, &reported, &c),
                 "intervals": iv.iter().map(|(s, e)| json!([s, e])).collect::<Vec<_>>(),
                 "download": [r.0, r.1], "added": inc.extra_cameras.contains(&c),
             })

@@ -336,6 +336,11 @@ extension FakeCore {
         emit(event: Self.playbackJSON(["type": "playback_closed", "playback": playback, "reason": "closed"]))
     }
 
+    /// The playbacks open now (for tests).
+    public var openPlaybacks: [UInt64] {
+        ((try? playbackWorld.locked { Array($0.playbacks.keys) }) ?? []).sorted()
+    }
+
     // MARK: Queued work
 
     private func schedulePlaybackWork() {

@@ -839,3 +839,95 @@ fn caps_refuse_whole_requests_and_store_nothing() {
     );
     sim.run_free(|| core.shutdown());
 }
+
+#[test]
+fn months_alone_fill_the_calendar_and_cameras_carry_reported_names() {
+    let sim = SimRuntime::new();
+    let nvr = archive_mock(&sim, None, None);
+    let (core, rec) = start(config(&sim, None));
+    core.recordings_configure("{}").unwrap();
+    let (_dev, key) = add(&core, &nvr);
+    core.recordings_enable(&key, Some(r#"{"channels":[{"channel":0},{"channel":1}]}"#))
+        .unwrap();
+    let (c0, c1) = (cam(&key, 0), cam(&key, 1));
+    let september = DateTime::new(2026, 9, 14, 0, 0, 0).unwrap().to_naive_secs();
+    let september_first = DateTime::new(2026, 9, 1, 0, 0, 0).unwrap().to_naive_secs();
+
+    // A calendar paged to two months: their calendars only (one 142 each
+    // for both cameras), no day searched; recordings_changed covers them.
+    let months = json!({"cameras": [c0, c1], "months": [september, day(20)]});
+    core.recordings_want(&months.to_string()).unwrap();
+    sim_until(&sim, &core, "the months", 20, || {
+        nvr.command_count(142) == 2 && idle_with_nothing_pending(&rec, &key)
+    });
+    assert_eq!(nvr.command_count(14), 0);
+    let october = json!({"start": day(1), "end": t(31, 23, 59, 59)}).to_string();
+    let cal = parse(core.recordings_calendar(&october));
+    assert_eq!(cal["days"].as_array().unwrap().len(), 2, "{cal}");
+    for c in cal["days"].as_array().unwrap() {
+        assert_eq!(c["days"], json!([day(8), day(9), day(10)]), "{cal}");
+    }
+    sim_until(&sim, &core, "the change event", 5, || {
+        let changed = of(&rec, "recordings_changed", &key);
+        let start = changed.iter().filter_map(|e| e["start"].as_i64()).min();
+        let end = changed.iter().filter_map(|e| e["end"].as_i64()).max();
+        start <= Some(september_first) && end >= Some(day(10))
+    });
+    // A past month fetched after it ended is final; force asks again.
+    core.recordings_want(&months.to_string()).unwrap();
+    sim.advance(Duration::from_secs(5));
+    assert_eq!(nvr.command_count(142), 2);
+    let forced = json!({"cameras": [c0], "months": [september], "force": true});
+    core.recordings_want(&forced.to_string()).unwrap();
+    sim_until(&sim, &core, "the forced month", 10, || {
+        nvr.command_count(142) == 3
+    });
+    // Limits: more than a year of months; neither days nor months.
+    let many: Vec<i64> = (0..13).map(|n| day(1) - n * 32 * 86_400).collect();
+    assert_eq!(
+        core.recordings_want(&json!({"cameras": [c0], "months": many}).to_string()),
+        Err(RecError::Limit)
+    );
+    assert_eq!(
+        core.recordings_want(&json!({"cameras": [c0]}).to_string()),
+        Err(RecError::InvalidArgument)
+    );
+
+    // Camera names: the names the device reports, once known; the user's
+    // override wins.
+    sim_until(&sim, &core, "channel names", 10, || {
+        rec.events_of("channels")
+            .iter()
+            .any(|e| e["channels"][0]["name"].is_string())
+    });
+    core.recordings_want(&json!({"cameras": [c0, c1], "days": [day(9)]}).to_string())
+        .unwrap();
+    sim_until(&sim, &core, "the day", 20, || {
+        idle_with_nothing_pending(&rec, &key) && !incident_keys(&core).is_empty()
+    });
+    let names = |core: &Core| -> Vec<(i64, String)> {
+        let (_, inc) = incident_keys(core).remove(0);
+        inc["cameras"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["camera"]["channel"].as_i64().unwrap(),
+                    c["name"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(&core),
+        vec![(0, "Channel 1".to_owned()), (1, "Channel 2".to_owned())]
+    );
+    let groups = json!({"groups": [], "camera_names": [{"camera": c1, "name": "Side"}]});
+    core.camera_groups_put(&groups.to_string()).unwrap();
+    assert_eq!(
+        names(&core),
+        vec![(0, "Channel 1".to_owned()), (1, "Side".to_owned())]
+    );
+    sim.run_free(|| core.shutdown());
+}

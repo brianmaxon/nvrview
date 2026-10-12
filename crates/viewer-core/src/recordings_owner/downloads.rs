@@ -17,7 +17,7 @@
 //! `paused` when it, or every camera left to work, is paused, `running`
 //! while a camera downloads, `finalizing` while one joins, else `queued`.
 
-use super::{Hub, RecError, camera_name, config, lock, query};
+use super::{Hub, RecError, ReportedNames, camera_name, config, lock, query};
 use crate::recordings_owner::config::DownloadSettings;
 use bc_session::DeviceSession;
 use recordings::finalize::Mp4Finalizer;
@@ -298,13 +298,14 @@ async fn pump(hub: Weak<Hub>, sched: Scheduler) {
 /// The download of `inc`'s `chosen` cameras.
 pub(super) fn incident_request(
     groups: &GroupStore,
+    reported: &ReportedNames,
     inc: Incident,
     chosen: Vec<(CameraId, recordings::Tier)>,
 ) -> IncidentDownload {
     let cameras = chosen
         .into_iter()
         .map(|(c, tier)| CameraSource {
-            name: camera_name(groups, &c),
+            name: camera_name(groups, reported, &c),
             uid: None,
             stream: c.local().stream(tier),
             camera: c,
@@ -379,7 +380,7 @@ impl crate::Core {
                 }
             };
             let groups = &st.stores.as_ref().expect("configured").groups;
-            (sched, incident_request(groups, inc, chosen))
+            (sched, incident_request(groups, &h.reported(), inc, chosen))
         };
         let r = sched.enqueue_incident(&req).map_err(|e| match e {
             EnqueueError::Limit => RecError::Limit,
