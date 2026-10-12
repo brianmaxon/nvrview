@@ -1137,6 +1137,7 @@ dependencies = [
 name = "viewer-core"
 version = "0.1.0"
 dependencies = [
+ "alerts",
  "audio-pipeline",
  "bc-protocol",
  "bc-session",
@@ -1146,6 +1147,7 @@ dependencies = [
  "libc",
  "mock-nvr",
  "mp4-remux",
+ "proptest",
  "recordings",
  "serde_json",
  "simtime",
