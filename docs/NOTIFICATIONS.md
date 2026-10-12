@@ -344,11 +344,12 @@ check and notify. Instead they **elect one smart-alert processor**:
   the local API with mutual pairing as API clients) and only coordinate with
   apps that watch the same devices (a fingerprint of the device set, not the
   devices' identities).
-- **Election.** Candidates rank by a tuple, highest wins: preferred tier (a
-  future always-on headless service ranks above every desktop app), on mains
-  power over battery, has a model runtime, earliest start, then instance id
-  as a tie-break. The rank is computed the same way everywhere, so every
-  candidate agrees without a vote.
+- **Election.** Candidates rank by a tuple, highest wins, computed the same
+  way everywhere so every candidate agrees without a vote (see "Choosing the
+  processing app: measured capability" below): the user's override, preferred
+  tier (a future always-on headless service ranks above every desktop app),
+  measured detector speed, staying power, connection to the devices, current
+  load, then earliest start and instance id as tie-breaks.
 - **Lease.** The processor holds a lease it renews every 5 s; it expires after
   15 s. Followers keep their device sessions (each app already has its own
   login per NVR) but do not wake streams for checks or deliver; they show the
@@ -372,6 +373,31 @@ check and notify. Instead they **elect one smart-alert processor**:
   not watching since hh:mm" (and the standby view the same), never "all
   clear". Phones cannot know this on their own: an optional heartbeat to the
   push service lets the user set up a dead-man check on their side.
+
+### Choosing the processing app: measured capability
+
+When several apps on the local network can process smart alerts, each one
+advertises a capability score, and every app ranks the candidates the same
+way, so they agree without voting:
+
+1. **The user's override** wins: "Prefer this computer for smart alerts".
+2. **Measured detector speed.** On first start and after each update, the app
+   runs the detector on a few synthetic frames and records the time per frame
+   (this captures the GPU, neural engine or NPU, memory and drivers together,
+   which specifications alone do not), plus whether it has the memory for the
+   optional multimodal check.
+3. **Staying power.** On AC power and not set to sleep ranks above a laptop on
+   battery; a computer that has stayed reachable longer, from its own recent
+   history, ranks above one that comes and goes.
+4. **Connection to the devices.** A wired connection on the devices' network
+   ranks above Wi-Fi, which ranks above a VPN.
+5. **Current load.** An app showing a large live grid ranks slightly below an
+   idle one.
+
+A running processor is replaced only when another candidate is clearly
+better (by a margin), so two similar computers do not hand the role back and
+forth. A future always-on service still ranks above every desktop app unless
+the user overrides it.
 
 ### Sessions and logins
 
