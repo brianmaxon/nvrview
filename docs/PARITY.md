@@ -6,7 +6,8 @@ today. The rule (CLAUDE.md, "Engineering habits"): a user-visible feature lands
 on both apps, or this table says why not, and the table is updated in the same
 change.
 
-Values: `yes`, `no`, `partial (what is missing)`, `n/a (why)`. Each cell was
+Values: `yes`, `no`, `no (planned)` (designed, not started), `partial (what
+is missing)`, `n/a (why)`. Each cell was
 read from the code on 2026-10-11 (menus, settings, gesture handlers, the call
 and alert code), not only from the docs; "Notes" says where a cell rests on
 less than that. Nothing here was run on a Windows machine.
@@ -111,6 +112,22 @@ less than that. Nothing here was run on a Windows machine.
 | Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | yes | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin. Windows: a WinUI window with its own swap chain and `StageRenderer` (joins device-loss recovery; checked after a simulated loss), always on top while pinned, shown without activation for a ring. Self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popin-new-window`, `call-popout-end` on both. A call in its own window never ends by inactivity; Pop In restarts the minute. Unverified on Windows: real multi-monitor placement, focus behavior of a real ring, and always-on-top over a full-screen app. |
 | Open calls in their own window: global setting and per-doorbell choice | yes | yes | macOS: Settings > Alerts > Doorbell calls and Settings > Cameras ("Calls open in"). Windows: Settings (the checkbox and an expander with a picker per channel) and the tile menu ("Calls open in"), kept in `view-settings.json`. `CallPresentation.resolve` / `CallPresentations.Resolve` (unit tests); self-test steps `call-default-ring`, `call-default-conversation`. |
 | Call window placement (where I left it, or top right of the active screen) | yes | yes | Settings > "Open call windows" on both; `CallWindowPlacement` (unit tests) and self-test step `call-window-frame`. Windows keeps the frame in physical pixels. |
+
+### Tile header, capture, and camera motion
+
+Planned in [CAPTURE.md](CAPTURE.md); nothing here is built yet. `no
+(planned)` means designed and not started on that app.
+
+| Feature | macOS | Windows | Notes |
+| --- | --- | --- | --- |
+| Responsive tile header: priorities, "…" overflow, right-click menu from the same model | no (planned) | no (planned) | UX.md "Tile header"; shared `TileHeaderLayout` with test vectors. Self-test IDs `header-priority-narrow`, `header-overflow-menu`. |
+| Call window picture as a regular tile (zoom, menu, header) | no (planned) | no (planned) | UX.md "A call in its own window". IDs `call-window-tile-zoom`, `call-window-tile-menu`. |
+| Keys P, Shift+P, R, T, Option/Alt+arrows, Option/Alt with = - and 1–9 | no (planned) | no (planned) | UX.md "Capture and camera keys". macOS: a Camera menu; Windows: the F1 overlay. |
+| Save picture (full frame, zoomed area, fisheye view or original circle; PNG or JPEG; toast) | no (planned) | no (planned) | UX.md "Save picture". IDs `capture-picture-tile`, `capture-picture-zoomed`, `capture-picture-fisheye`, `capture-picture-call`, `capture-picture-text-field`. |
+| Live recording to MP4 (Record from Main or Sub-stream, caps, disk guard, segments, recovery) | no (planned) | no (planned) | UX.md "Recording". IDs `capture-record-tile`, `capture-record-cap`, `capture-record-disk-low`, `capture-record-reconnect`, `capture-record-survives-tile-close`. |
+| Recording indicators (tile pill, call bar pill, window list) | no (planned) | no (planned) | macOS: toolbar item and Camera > Recordings; Windows: "● N recording" in the window header. ID `capture-record-indicator`. |
+| Recording calls (Conversation, Visitor, You tracks; consent note; beside the transcript) | no (planned) | no (planned) | UX.md "Recording calls", AUDIO.md "Recording calls". IDs `capture-call-record-button`, `capture-call-record-auto`, `capture-encoder-priming`. |
+| PTZ pad (press and hold, speed), presets, lens zoom and focus | no (planned) | no (planned) | UX.md "Pan, tilt, and zoom". IDs `ptz-pad-hold`, `ptz-deadman`, `ptz-preset-recall`, `ptz-lens-clamp`. |
 
 ### Devices, settings, and updates
 
