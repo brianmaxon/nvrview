@@ -34,8 +34,9 @@
 # 4. If a check fails, the merge is undone (merge --abort before the commit,
 #    reset to the old HEAD after it) and the script exits 1.
 #
-# Environment: NVRVIEW_WINDOWS_HOST (needed when Windows runs),
-# NVRVIEW_WINDOWS_WORKER, NVRVIEW_WINDOWS_LOCK (see scripts/stamps-lib.sh),
+# Environment: NVRVIEW_WINDOWS_HOST or NVRVIEW_WINDOWS_HOSTS (needed when
+# Windows runs), NVRVIEW_WINDOWS_WORKER, NVRVIEW_WINDOWS_LOCK (see
+# scripts/windows-lock.sh; merges take the lock at priority "merge"),
 # NVRVIEW_FULL_WINDOWS_EVERY. For tests of this script:
 # NVRVIEW_MERGE_MAC_CMD and NVRVIEW_MERGE_WINDOWS_CMD replace the two checks.
 set -eu
@@ -43,6 +44,10 @@ cd "$(git rev-parse --show-toplevel)"
 . scripts/stamps-lib.sh
 
 die() { echo "merge-branch: $*" >&2; exit 1; }
+
+# Merges get the Windows computer before agents' checks (scripts/windows-lock.sh).
+NVRVIEW_WINDOWS_PRIORITY=merge
+export NVRVIEW_WINDOWS_PRIORITY
 
 [ $# -eq 2 ] || { echo "usage: $0 BRANCH \"merge commit message\"" >&2; exit 2; }
 branch="$1"
@@ -54,6 +59,7 @@ win_cmd="${NVRVIEW_MERGE_WINDOWS_CMD:-NVRVIEW_APP_SELFTEST=1 scripts/windows-che
 [ -z "$(git status --porcelain)" ] || die "the working tree is not clean"
 tip=$(git rev-parse --verify "$branch^{commit}") || die "no such branch: $branch"
 pre=$(git rev-parse HEAD)
+scripts/branch-ready.sh "$branch" || true
 dir=$(stamp_dir)
 mkdir -p "$dir"
 counter="$dir/merges-since-windows"
@@ -127,7 +133,7 @@ if [ "$skip" = 1 ]; then
   branch_cached=$(stamp_cached windows "$(git rev-parse "$tip^{tree}")")
   echo "Windows suites the branch's stamp took from the test result cache: ${branch_cached:-none}"
 else
-  : "${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
+  [ -n "$(windows_hosts)" ] || die "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer"
   windows_lock
   try=1
   while :; do

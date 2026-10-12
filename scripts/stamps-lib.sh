@@ -1,6 +1,8 @@
 # Shared decisions about check stamps (sourced by scripts/release.sh and
 # scripts/merge-branch.sh; tested by scripts/test-stamps.sh). POSIX sh.
 #
+# Also the Windows lock helpers (windows_lock, windows_unlock, windows_hosts).
+#
 # Stamps live in <git common dir>/nvrview-checks/ as <tree>.<kind>:
 #   mac, windows    a full check passed on a clean checkout of that exact tree
 #   windows-reused  the merged tree was accepted without a Windows run of its
@@ -106,22 +108,35 @@ windows_flake() { # LOGFILE
   return 1
 }
 
-# Optional exclusive use of the shared Windows computer: when
-# NVRVIEW_WINDOWS_LOCK names a path, take it with mkdir (polling every 60 s)
-# before a Windows run, and give it back with windows_unlock. Without the
-# variable both do nothing.
+# The Windows test computers: NVRVIEW_WINDOWS_HOSTS (space-separated ssh
+# aliases), else NVRVIEW_WINDOWS_HOST. One alias per line; nothing when unset.
+windows_hosts() {
+  # shellcheck disable=SC2086 # split on blanks on purpose
+  for h in ${NVRVIEW_WINDOWS_HOSTS:-${NVRVIEW_WINDOWS_HOST:-}}; do echo "$h"; done
+}
+
+# Exclusive use of a Windows computer (scripts/windows-lock.sh): waits for a
+# free host at priority $NVRVIEW_WINDOWS_PRIORITY (merge or agent, default
+# agent), exports the chosen host as NVRVIEW_WINDOWS_HOST, and marks the lock
+# as held (NVRVIEW_WINDOWS_LOCK_HELD=1) so a nested scripts/windows-check.sh
+# does not take it again. Does nothing when the caller already holds it.
 windows_lock() {
-  [ -n "${NVRVIEW_WINDOWS_LOCK:-}" ] || return 0
-  until mkdir "$NVRVIEW_WINDOWS_LOCK" 2>/dev/null; do
-    echo "waiting for the Windows lock ($NVRVIEW_WINDOWS_LOCK)..."
-    sleep 60
-  done
+  [ "${NVRVIEW_WINDOWS_LOCK_HELD:-0}" = 1 ] && return 0
+  chosen=$(scripts/windows-lock.sh acquire --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid $$) || return 1
+  if [ -n "$chosen" ]; then
+    NVRVIEW_WINDOWS_HOST="$chosen"
+    export NVRVIEW_WINDOWS_HOST
+  fi
+  NVRVIEW_WINDOWS_LOCK_HELD=1
+  export NVRVIEW_WINDOWS_LOCK_HELD
   windows_locked=1
 }
 
 windows_unlock() {
   if [ "${windows_locked:-0}" = 1 ]; then
-    rmdir "$NVRVIEW_WINDOWS_LOCK" 2>/dev/null || true
+    scripts/windows-lock.sh release --owner-pid $$ || true
     windows_locked=0
+    NVRVIEW_WINDOWS_LOCK_HELD=0
+    export NVRVIEW_WINDOWS_LOCK_HELD
   fi
 }
