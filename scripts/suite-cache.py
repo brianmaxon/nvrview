@@ -53,6 +53,7 @@ For tests: NVRVIEW_CACHE_NOW (epoch seconds), NVRVIEW_CACHE_METADATA (a
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -199,7 +200,10 @@ class Tree:
         if meta_file:
             meta = read_json(meta_file)
         else:
-            out = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps", "--offline"],
+            cargo = shutil.which("cargo") or next(
+                (p for p in (os.path.expanduser("~/.cargo/bin/cargo"), "/opt/homebrew/opt/rustup/bin/cargo")
+                 if os.path.exists(p)), "cargo")
+            out = subprocess.run([cargo, "metadata", "--format-version", "1", "--no-deps", "--offline"],
                                  check=True, capture_output=True).stdout
             meta = json.loads(out)
         root = os.path.abspath(meta.get("workspace_root", "."))
