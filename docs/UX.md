@@ -1357,6 +1357,16 @@ section is left. A pane lists the sections, each in a scrolling page:
 - **Updates.** The update source, trusted keys, automatic checks, Check now.
 - **About.** The version and license.
 
+### Update prompt
+
+"NVRView X is available" shows the title, the "You have ..." line, and the
+release notes (plain text, up to 2000 characters) in a text area of bounded
+height (about 220 points) that wraps, is selectable, and scrolls with the
+mouse wheel and, once focused, the arrow, Page, Home, and End keys. Short notes
+get a short area. The title, the line, and the buttons (Download / Not Now)
+never scroll away. macOS: an alert sheet with the notes as its accessory
+view; Windows: a dialog with the same area.
+
 ## Windows notes
 
 The Windows app (`apps/windows/NvrView.App`) follows these requirements
