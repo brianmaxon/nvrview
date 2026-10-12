@@ -41,7 +41,7 @@ public static class TileIdentity
             {
                 continue;
             }
-            var extras = leaf.Extras.WithNode(leaf.Extras.Node.SetItem(TileIds.Member, JsonSerializer.Serialize(ids[i])));
+            var extras = leaf.Extras.WithNode(leaf.Extras.Node.SetItem(TileIds.Member, JsonValue.Create(ids[i])!.ToJsonString()));
             result = result.Replacing(leaves[i].Path, new LayoutLeaf(leaf.Cam, extras)) ?? result;
         }
         return result;

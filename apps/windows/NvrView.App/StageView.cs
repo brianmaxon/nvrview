@@ -1535,15 +1535,15 @@ internal sealed partial class StageView : UserControl
         }
     }
 
-    private static TileViewKey ToTileKey(VirtualKey key) => key switch
+    private static TileKey ToTileKey(VirtualKey key) => key switch
     {
         VirtualKey.Enter => TileKey.Enter,
         VirtualKey.Space => TileKey.Space,
         VirtualKey.M => TileKey.M,
         VirtualKey.L => TileKey.L,
-        VirtualKey.P => TileViewKey.P,
-        VirtualKey.R => TileViewKey.R,
-        VirtualKey.T => TileViewKey.T,
+        VirtualKey.P => TileKey.P,
+        VirtualKey.R => TileKey.R,
+        VirtualKey.T => TileKey.T,
         _ => TileKey.Other,
     };
 

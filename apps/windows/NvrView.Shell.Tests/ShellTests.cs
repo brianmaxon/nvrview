@@ -1,7 +1,6 @@
 // Geometry, leases, the sidebar reveal (on a manual clock: nothing waits for
 // real time), groups, window restore, and drag text.
 
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using NvrView.Tiles;
 
@@ -462,7 +461,7 @@ internal static class StoreTests
                 {
                     JsonArray a = t!.AsArray();
                     CameraRef? camera = a[1] is null ? null : new CameraRef(a[1]!.GetValue<string>(), a[2]!.GetValue<int>(), a[3]!.GetValue<int>());
-                    return LayoutNode.Leaf(camera).SettingMember(NodePath.Root, TileIds.Member, JsonSerializer.Serialize(a[0]!.GetValue<string>()))!;
+                    return LayoutNode.Leaf(camera).SettingMember(NodePath.Root, TileIds.Member, JsonValue.Create(a[0]!.GetValue<string>())!.ToJsonString())!;
                 })];
                 LayoutNode tree = LayoutNode.Chain(SplitAxis.Row, leaves);
                 TileViews<TileViewKey> views = w.PictureViews;
