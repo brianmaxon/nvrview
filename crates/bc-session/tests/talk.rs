@@ -4,7 +4,9 @@
 mod common;
 
 use bc_protocol::talk::{AdpcmEncoder, RECORD_DURATION_US, SAMPLES_PER_RECORD, decode_record};
-use bc_session::{DeviceSession, Refusal, SessionConfig, StopReason, Talk, TalkState};
+use bc_session::{
+    DeviceSession, Refusal, SessionConfig, StopReason, Talk, TalkObserver, TalkState,
+};
 use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::talk::{TalkEnd, TalkLog};
@@ -512,5 +514,89 @@ async fn a_conversation_lifts_the_limit_until_it_ends() {
     assert!(!s.talk_conversation(BELL));
     s.set_motion_allowed(BELL, true);
     assert!(limited(talk_once(&s).await));
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_observer_sees_the_sent_samples_and_the_silent_tail() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |_| {});
+    s.set_motion_allowed(BELL, true);
+    let obs = TalkObserver::new(1000);
+    s.attach_talk_observer(BELL, &obs);
+    let mut talk = s.talk(BELL).await.unwrap();
+    let src = tone(5 * SAMPLES_PER_RECORD);
+    assert_eq!(talk.push(&src), src.len());
+    talk.finish();
+    assert_eq!(
+        ended(&mut talk).await,
+        TalkState::Stopped(StopReason::Finished)
+    );
+    let recs = obs.drain();
+    assert_eq!(recs.len() as u64, talk.stats().records_sent);
+    let audio = 5;
+    assert!(recs.len() > audio);
+    let heard: Vec<i16> = recs[..audio]
+        .iter()
+        .flat_map(|r| r.samples.iter().copied())
+        .collect();
+    assert_eq!(heard, src);
+    assert!(recs[..audio].iter().all(|r| !r.tail));
+    // Paced one record apart on the core clock.
+    for w in recs.windows(2) {
+        assert_eq!(
+            w[1].at.duration_since(w[0].at),
+            Duration::from_micros(RECORD_DURATION_US)
+        );
+    }
+    // The tail is silence and marked.
+    assert!(recs[audio..].iter().all(|r| r.tail
+        && r.samples.len() == SAMPLES_PER_RECORD
+        && r.samples.iter().all(|&x| x == 0)));
+    assert_eq!(obs.dropped(), 0);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_full_observer_drops_the_oldest_and_counts() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |c| c.talk_tail = Duration::ZERO);
+    s.set_motion_allowed(BELL, true);
+    let obs = TalkObserver::new(3);
+    s.attach_talk_observer(BELL, &obs);
+    let mut talk = s.talk(BELL).await.unwrap();
+    let src = tone(8 * SAMPLES_PER_RECORD);
+    talk.push(&src);
+    talk.finish();
+    ended(&mut talk).await;
+    assert_eq!(obs.len(), 3);
+    assert_eq!(obs.dropped(), 5);
+    let recs = obs.drain();
+    // The newest three survive.
+    let heard: Vec<i16> = recs
+        .iter()
+        .flat_map(|r| r.samples.iter().copied())
+        .collect();
+    assert_eq!(heard, src[5 * SAMPLES_PER_RECORD..]);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn detaching_stops_delivery() {
+    let nvr = spawn_mock();
+    let s = session(&nvr, |c| c.talk_tail = Duration::ZERO);
+    s.set_motion_allowed(BELL, true);
+    let obs = TalkObserver::new(100);
+    s.attach_talk_observer(BELL, &obs);
+    let mut talk = s.talk(BELL).await.unwrap();
+    talk.push(&tone(2 * SAMPLES_PER_RECORD));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(obs.len(), 2);
+    s.detach_talk_observer(BELL);
+    talk.push(&tone(2 * SAMPLES_PER_RECORD));
+    talk.finish();
+    ended(&mut talk).await;
+    assert_eq!(talk.stats().records_sent, 4);
+    assert_eq!(obs.len(), 2);
     s.close().await;
 }

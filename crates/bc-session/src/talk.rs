@@ -24,7 +24,7 @@ use bc_protocol::talk::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -390,6 +390,94 @@ impl fmt::Debug for Talk {
     }
 }
 
+/// One talk record as sent: exactly the samples that were ADPCM-encoded,
+/// with the instant the record went out on the core clock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentRecord {
+    /// When the record was handed to the connection (the core clock, which
+    /// is the paused clock in tests).
+    pub at: Instant,
+    /// The 16 kHz mono samples of the record, before ADPCM
+    /// ([`SAMPLES_PER_RECORD`] of them; the last record of a push is padded
+    /// with zeros, as sent).
+    pub samples: Vec<i16>,
+    /// The record belongs to the silent tail of a finishing talk.
+    pub tail: bool,
+}
+
+struct ObserverState {
+    queue: VecDeque<SentRecord>,
+    dropped: u64,
+}
+
+/// A bounded view of the records a channel's talk sends, for a recorder.
+/// Attach it with [`DeviceSession::attach_talk_observer`]; it is cheap to
+/// clone (clones share the queue). When it is full the oldest record is
+/// dropped and counted, so it never blocks the sender.
+#[derive(Clone)]
+pub struct TalkObserver {
+    inner: Arc<(Mutex<ObserverState>, usize)>,
+}
+
+impl TalkObserver {
+    /// An observer holding at most `capacity` records (at least one).
+    pub fn new(capacity: usize) -> TalkObserver {
+        let capacity = capacity.max(1);
+        TalkObserver {
+            inner: Arc::new((
+                Mutex::new(ObserverState {
+                    queue: VecDeque::new(),
+                    dropped: 0,
+                }),
+                capacity,
+            )),
+        }
+    }
+
+    fn offer(&self, rec: SentRecord) {
+        let mut st = lock(&self.inner.0);
+        if st.queue.len() >= self.inner.1 {
+            st.queue.pop_front();
+            st.dropped += 1;
+        }
+        st.queue.push_back(rec);
+    }
+
+    /// The oldest undelivered record.
+    pub fn try_next(&self) -> Option<SentRecord> {
+        lock(&self.inner.0).queue.pop_front()
+    }
+
+    /// Takes every queued record, oldest first.
+    pub fn drain(&self) -> Vec<SentRecord> {
+        lock(&self.inner.0).queue.drain(..).collect()
+    }
+
+    /// Records dropped because the queue was full, since creation.
+    pub fn dropped(&self) -> u64 {
+        lock(&self.inner.0).dropped
+    }
+
+    /// Records waiting.
+    pub fn len(&self) -> usize {
+        lock(&self.inner.0).queue.len()
+    }
+
+    /// Whether no record is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl fmt::Debug for TalkObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TalkObserver")
+            .field("len", &self.len())
+            .field("dropped", &self.dropped())
+            .finish()
+    }
+}
+
 /// Per-device talk-back control shared by the handle and the supervisor:
 /// the channels the caller allowed, the channels in a conversation, and
 /// the start rate limit.
@@ -400,6 +488,10 @@ pub(crate) struct TalkControl {
     conversations: Mutex<HashSet<u8>>,
     starts: Mutex<HashMap<u8, VecDeque<Instant>>>,
     refusal_log: Mutex<Option<Instant>>,
+    /// Sent-audio observers by channel. `observer_count` lets the send path
+    /// skip the lock (and any copy) when none is attached.
+    observers: Mutex<HashMap<u8, TalkObserver>>,
+    observer_count: AtomicUsize,
 }
 
 impl TalkControl {
@@ -409,6 +501,36 @@ impl TalkControl {
             conversations: Mutex::new(HashSet::new()),
             starts: Mutex::new(HashMap::new()),
             refusal_log: Mutex::new(None),
+            observers: Mutex::new(HashMap::new()),
+            observer_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn set_observer(&self, channel: u8, o: Option<TalkObserver>) {
+        let mut m = lock(&self.observers);
+        match o {
+            Some(o) => {
+                m.insert(channel, o);
+            }
+            None => {
+                m.remove(&channel);
+            }
+        }
+        self.observer_count.store(m.len(), Ordering::Release);
+    }
+
+    /// Hands a sent record's samples to the channel's observer, if any.
+    fn observe(&self, channel: u8, at: Instant, block: &[i16], tail: bool) {
+        if self.observer_count.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let o = lock(&self.observers).get(&channel).cloned();
+        if let Some(o) = o {
+            o.offer(SentRecord {
+                at,
+                samples: block.to_vec(),
+                tail,
+            });
         }
     }
 
@@ -683,7 +805,8 @@ impl Talks {
                 }
                 Phase::Active => {
                     let reason = Self::due_to_end(e, session, &self.limits, now).or_else(|| {
-                        match Self::send_due(e, session, &self.limits, now, &mut out) {
+                        match Self::send_due(e, session, &self.limits, &self.control, now, &mut out)
+                        {
                             // Everything buffered went out: close once the
                             // device has acknowledged it, or soon after.
                             Ok(true) => {
@@ -760,6 +883,7 @@ impl Talks {
         e: &mut Entry,
         session: &mut Session,
         limits: &TalkLimits,
+        control: &TalkControl,
         now: Instant,
         out: &mut Outgoing,
     ) -> Result<bool, SessionError> {
@@ -819,6 +943,7 @@ impl Talks {
             let payload = e.encoder.encode_record(&block);
             out.push(session.talk_audio(e.shared.channel, &payload)?);
             e.shared.records_sent.fetch_add(1, Ordering::Relaxed);
+            control.observe(e.shared.channel, now, &block, silent);
             if silent {
                 e.shared.tail_records.fetch_add(1, Ordering::Relaxed);
                 if let Some(left) = e.tail_left.as_mut() {
@@ -978,6 +1103,21 @@ impl DeviceSession {
     /// Whether camera motion control is allowed on `channel`.
     pub fn motion_allowed(&self, channel: u8) -> bool {
         self.talk_control.is_allowed(channel)
+    }
+
+    /// Delivers a copy of every talk record sent on `channel` to
+    /// `observer` (replacing any observer attached there): the exact
+    /// 16 kHz samples before ADPCM, the silent tail included, each with
+    /// its send instant. Costs nothing on channels without one; never
+    /// blocks the talk.
+    pub fn attach_talk_observer(&self, channel: u8, observer: &TalkObserver) {
+        self.talk_control
+            .set_observer(channel, Some(observer.clone()));
+    }
+
+    /// Stops delivery to the channel's observer.
+    pub fn detach_talk_observer(&self, channel: u8) {
+        self.talk_control.set_observer(channel, None);
     }
 
     /// Marks `channel`'s talk-back as part of a conversation the user has
