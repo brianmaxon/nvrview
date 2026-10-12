@@ -418,15 +418,18 @@ public static class EditComposition
 /// </summary>
 public sealed class EditClock
 {
-    private long _anchorMs;
-    private double _anchorHost;
+    // The clock's state as one immutable value, replaced whole, so the render thread reads a consistent position while
+    // the UI thread plays, seeks, and changes the speed.
+    private sealed record Anchor(long Ms, double Host, double Rate, bool Playing);
+
+    private Anchor _anchor;
 
     /// <summary>A clock over a range, at <paramref name="positionMs"/> (the start when null).</summary>
     public EditClock(long startMs, long endMs, long? positionMs = null)
     {
         StartMs = startMs;
         EndMs = Math.Max(endMs, startMs);
-        _anchorMs = Math.Min(Math.Max(positionMs ?? startMs, StartMs), EndMs);
+        _anchor = new Anchor(Math.Min(Math.Max(positionMs ?? startMs, StartMs), EndMs), 0, 1, false);
     }
 
     /// <summary>The range start.</summary>
@@ -436,50 +439,53 @@ public sealed class EditClock
     public long EndMs { get; }
 
     /// <summary>The speed.</summary>
-    public double Rate { get; private set; } = 1;
+    public double Rate => Volatile.Read(ref _anchor).Rate;
 
     /// <summary>Whether the clock runs.</summary>
-    public bool Playing { get; private set; }
+    public bool Playing => Volatile.Read(ref _anchor).Playing;
+
+    private long At(Anchor a, double now)
+    {
+        if (!a.Playing)
+        {
+            return a.Ms;
+        }
+        long moved = (long)Math.Floor((now - a.Host) * 1000 * a.Rate);
+        return Math.Min(Math.Max(a.Ms + Math.Max(moved, 0), StartMs), EndMs);
+    }
 
     /// <summary>The position at host time <paramref name="now"/>.</summary>
-    public long Position(double now)
-    {
-        if (!Playing)
-        {
-            return _anchorMs;
-        }
-        long moved = (long)Math.Floor((now - _anchorHost) * 1000 * Rate);
-        return Math.Min(Math.Max(_anchorMs + Math.Max(moved, 0), StartMs), EndMs);
-    }
+    public long Position(double now) => At(Volatile.Read(ref _anchor), now);
 
     /// <summary>Whether the clock reached the end.</summary>
     public bool Ended(double now) => Position(now) >= EndMs;
 
     /// <summary>The transport's state at <paramref name="now"/>.</summary>
-    public NvPlaybackState State(double now) =>
-        Ended(now) ? NvPlaybackState.Ended : Playing ? NvPlaybackState.Playing : NvPlaybackState.Paused;
+    public NvPlaybackState State(double now)
+    {
+        Anchor a = Volatile.Read(ref _anchor);
+        return At(a, now) >= EndMs ? NvPlaybackState.Ended : a.Playing ? NvPlaybackState.Playing : NvPlaybackState.Paused;
+    }
 
     /// <summary>Plays from where it is (from the start again at the end).</summary>
     public void Play(double now)
     {
-        _anchorMs = Ended(now) ? StartMs : Position(now);
-        _anchorHost = now;
-        Playing = true;
+        Anchor a = _anchor;
+        long from = At(a, now) >= EndMs ? StartMs : At(a, now);
+        Volatile.Write(ref _anchor, a with { Ms = from, Host = now, Playing = true });
     }
 
     /// <summary>Pauses where it is.</summary>
     public void Pause(double now)
     {
-        _anchorMs = Position(now);
-        _anchorHost = now;
-        Playing = false;
+        Anchor a = _anchor;
+        Volatile.Write(ref _anchor, a with { Ms = At(a, now), Host = now, Playing = false });
     }
 
     /// <summary>Moves to a time (kept within the range).</summary>
     public void Seek(long ms, double now)
     {
-        _anchorMs = Math.Min(Math.Max(ms, StartMs), EndMs);
-        _anchorHost = now;
+        Volatile.Write(ref _anchor, _anchor with { Ms = Math.Min(Math.Max(ms, StartMs), EndMs), Host = now });
     }
 
     /// <summary>Changes the speed from where it is.</summary>
@@ -489,9 +495,8 @@ public sealed class EditClock
         {
             return;
         }
-        _anchorMs = Position(now);
-        _anchorHost = now;
-        Rate = rate;
+        Anchor a = _anchor;
+        Volatile.Write(ref _anchor, a with { Ms = At(a, now), Host = now, Rate = rate });
     }
 
     /// <summary>The transport's view at <paramref name="now"/>.</summary>

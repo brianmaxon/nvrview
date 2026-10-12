@@ -106,6 +106,7 @@ internal sealed unsafe class StageRenderer : IDisposable
     private FocusAnimation? _focus;
     private StageLayout _layout = StageLayout.Empty;
     private OverlayTile[] _overlays = [];
+    private EditStage? _edit;
     private TaskCompletionSource<StageCapture>? _capture;
     private string? _recover;
 
@@ -183,6 +184,16 @@ internal sealed unsafe class StageRenderer : IDisposable
     {
         get => Volatile.Read(ref _overlays);
         set => Volatile.Write(ref _overlays, value);
+    }
+
+    /// <summary>
+    /// A follow cut or grid drawn instead of the tiles and overlays (set by the UI thread; null for the tiles). The edit's files
+    /// outlive it: set this to null before disposing them.
+    /// </summary>
+    public EditStage? Edit
+    {
+        get => Volatile.Read(ref _edit);
+        set => Volatile.Write(ref _edit, value);
     }
 
     public void Start() => _thread.Start();
@@ -300,35 +311,55 @@ internal sealed unsafe class StageRenderer : IDisposable
 
         StageLayout layout = Layout;
         OverlayTile[] overlays = Overlays;
-        int count = layout.Tiles.Length + overlays.Length;
+        EditStage? edit = Edit;
+        int count = edit is null ? layout.Tiles.Length + overlays.Length : edit.Files.MaxDraws;
         if (_draws.Length < count)
         {
             _draws = new TileDraw[count];
             _sequences = new ulong[count];
         }
-        using (gpu.Lock())
+        if (edit is not null)
         {
-            int placed = Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
-            PlaceOverlays(overlays, placed, target.Width / dipW, target.Height / dipH);
-            _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
-        }
-        for (int i = 0; i < count; i++)
-        {
-            ulong seq = _sequences[i];
-            StageTile t = (StageTile)_draws[i].Tag!;
-            if (seq != 0 && seq != t.LastSequence)
+            // The follow cut or grid: the pictures of the edit's time, asked for (decoded off this thread) and drawn.
+            long position = edit.Position();
+            edit.Files.Request(position, edit.KeyframesOnly());
+            float bx = target.Width / dipW, by = target.Height / dipH;
+            double inset = EditStage.Inset;
+            var area = new Rect(inset * bx, inset * by, Math.Max(target.Width - 2 * inset * bx, 1), Math.Max(target.Height - 2 * inset * by, 1));
+            using (gpu.Lock())
             {
-                t.Shown++;
+                count = edit.Files.Place(position, area, _draws.AsSpan(0, count));
+                _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
             }
-            t.LastSequence = seq;
+            edit.Frames++;
+        }
+        else
+        {
+            using (gpu.Lock())
+            {
+                int placed = Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
+                PlaceOverlays(overlays, placed, target.Width / dipW, target.Height / dipH);
+                _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                ulong seq = _sequences[i];
+                StageTile t = (StageTile)_draws[i].Tag!;
+                if (seq != 0 && seq != t.LastSequence)
+                {
+                    t.Shown++;
+                }
+                t.LastSequence = seq;
+            }
         }
         if (Interlocked.Exchange(ref _capture, null) is { } capture)
         {
             try
             {
                 RenderedImage image = target.ReadBack();
-                var rects = new (StageTile, float, float, float, float)[count];
-                for (int i = 0; i < count; i++)
+                // An edit's pictures are not tiles.
+                var rects = new (StageTile, float, float, float, float)[edit is null ? count : 0];
+                for (int i = 0; i < rects.Length; i++)
                 {
                     TileDraw d = _draws[i];
                     rects[i] = ((StageTile)d.Tag!, d.DestX, d.DestY, d.DestWidth, d.DestHeight);
@@ -530,6 +561,7 @@ internal sealed unsafe class StageRenderer : IDisposable
     private static void Draw(ref TileDraw d, StageTile t, Rect dest, Rect? view, int pw, int ph, bool hidden, float bx, float by, bool fill)
     {
         d.Tile = hidden ? null : t.Video;
+        d.Picture = null;
         d.Tag = t;
         Rect drawn = dest;
         d.SrcX = 0;

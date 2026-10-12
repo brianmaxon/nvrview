@@ -91,7 +91,3 @@ playback-split-here          macos    gap: the Windows fake store (FakeRecording
 capture-picture-tile        macos    gap: Windows Save Picture is CAP-P2
 capture-picture-zoomed      macos    gap: Windows Save Picture is CAP-P2
 capture-picture-fisheye     macos    gap: Windows Save Picture is CAP-P2
-edit-download                macos    gap: Windows follow cut and grids are W3
-edit-follow-cut              macos    gap: Windows follow cut and grids are W3
-edit-grid                    macos    gap: Windows follow cut and grids are W3
-edit-back-to-cameras         macos    gap: Windows follow cut and grids are W3

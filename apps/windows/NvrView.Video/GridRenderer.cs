@@ -55,6 +55,9 @@ public struct TileDraw
     /// <summary>The tile whose shown picture is drawn; null draws nothing.</summary>
     public VideoTile? Tile;
 
+    /// <summary>A picture to draw instead of the tile's (a recorded file's, for the follow cut and grids); used under the device lock.</summary>
+    public TilePicture? Picture;
+
     /// <summary>Destination, render-target pixels.</summary>
     public float DestX, DestY, DestWidth, DestHeight;
 
@@ -344,7 +347,7 @@ public sealed unsafe class GridRenderer : IDisposable
         for (int i = 0; i < draws.Length; i++)
         {
             ref readonly TileDraw d = ref draws[i];
-            TilePicture? p = d.Tile?.ShownPicture;
+            TilePicture? p = d.Picture ?? d.Tile?.ShownPicture;
             if (p is null || !p.HasPicture || p.LumaView == null)
             {
                 sequences[i] = 0;
@@ -416,6 +419,19 @@ public sealed unsafe class GridRenderer : IDisposable
         ctx->PSSetShaderResources(0, 2, views);
         ctx->Flush();
         Frames++;
+    }
+
+    /// <summary>
+    /// Draws the given rectangles into the offscreen target (an edit's frame, an export's): the pictures are the draws' own
+    /// (<see cref="TileDraw.Picture"/>). Then <see cref="ReadBack"/> reads the frame.
+    /// </summary>
+    public void RenderDraws(ReadOnlySpan<TileDraw> draws, Span<ulong> sequences)
+    {
+        if (_targetView == null)
+        {
+            throw new InvalidOperationException("this renderer has no offscreen target");
+        }
+        Draw(_targetView, Width, Height, draws, sequences);
     }
 
     /// <summary>Reads back the last frame (waits for the GPU). For tests; allocates.</summary>

@@ -55,6 +55,7 @@ internal sealed class ScrubBar : Canvas
     private readonly Rectangle _head = new() { Width = 2, Fill = new SolidColorBrush(TimelineColors.Playhead), IsHitTestVisible = false };
     private long _start, _end, _position;
     private List<TimeMark> _marks = [];
+    private List<long> _cuts = [];
     private bool _drawnMarks;
     private bool _dragging;
 
@@ -73,20 +74,24 @@ internal sealed class ScrubBar : Canvas
     /// <summary>The user pointed at a time: the milliseconds, and whether this is the release (the exact picture).</summary>
     public event Action<long, bool>? Seeked;
 
+    /// <summary>The follow cut's cuts shown as white ticks (self-test).</summary>
+    public IReadOnlyList<long> CutTicks => _cuts;
+
     /// <summary>Whether a drag is on (the position shown is then the pointer's).</summary>
     public bool IsDragging => _dragging;
 
     /// <summary>The range the bar spans, device-local milliseconds.</summary>
     public (long Start, long End) Range => (_start, _end);
 
-    /// <summary>Shows a range, its marks, and the playhead.</summary>
-    public void Set(long start, long end, IEnumerable<TimeMark> marks, long positionMs)
+    /// <summary>Shows a range, its marks, the follow cut's cuts (white ticks), and the playhead.</summary>
+    public void Set(long start, long end, IEnumerable<TimeMark> marks, long positionMs, IReadOnlyList<long> cuts)
     {
         List<TimeMark> list = [.. marks];
-        bool changed = start != _start || end != _end || !list.SequenceEqual(_marks);
+        bool changed = start != _start || end != _end || !list.SequenceEqual(_marks) || !cuts.SequenceEqual(_cuts);
         _start = start;
         _end = end;
         _marks = list;
+        _cuts = [.. cuts];
         if (!_dragging)
         {
             _position = positionMs;
@@ -116,6 +121,22 @@ internal sealed class ScrubBar : Canvas
                 SetLeft(bar, x0);
                 SetTop(bar, h - 14);
                 Children.Add(bar);
+            }
+            foreach (long cut in _cuts)
+            {
+                double x = w * TransportState.Fraction(cut, _start, _end);
+                var tick = new Rectangle
+                {
+                    Width = 2,
+                    Height = 18,
+                    Fill = new SolidColorBrush(Colors.White),
+                    Stroke = new SolidColorBrush(Windows.UI.Color.FromArgb(0x80, 0, 0, 0)),
+                    StrokeThickness = 0.5,
+                    IsHitTestVisible = false,
+                };
+                SetLeft(tick, x - 1);
+                SetTop(tick, h - 18);
+                Children.Add(tick);
             }
             Children.Add(_head);
             _drawnMarks = true;

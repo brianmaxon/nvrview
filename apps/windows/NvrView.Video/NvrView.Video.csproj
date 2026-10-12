@@ -13,6 +13,8 @@
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
     <!-- The fisheye dewarp constants (pure, no platform API). -->
     <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
+    <!-- The edit plans and the MP4 keyframe index (pure, no platform API) that recorded files are decoded by. -->
+    <ProjectReference Include="../NvrView.Shell/NvrView.Shell.csproj" />
     <!-- MIT; raw COM interop for D3D11, DXGI, Media Foundation, and the
          HLSL compiler, with no managed wrapper objects per call. -->
     <PackageReference Include="TerraFX.Interop.Windows" Version="10.0.26100.6" />

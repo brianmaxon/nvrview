@@ -148,7 +148,7 @@ public sealed class EditPlayer : IPlayerTransport
     private readonly IEditFilesFactory _factory;
     private readonly IEditAudio _audio;
     private CancellationTokenSource? _opening;
-    private EditClock _clock = new(0, 0);
+    private volatile EditClock _clock = new(0, 0);
     private int _gridSound;
 
     /// <param name="model">The recordings model (it makes the plans).</param>
