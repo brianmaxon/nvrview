@@ -72,7 +72,8 @@ pub mod replay;
 pub mod talk;
 
 use archive::{
-    ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent, PlayLog,
+    ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent, PlayFaultKind,
+    PlayLog,
 };
 use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
@@ -1919,6 +1920,7 @@ impl Conn {
         if !served || cfg.silent_plays.contains(&ch) {
             return Ok(());
         }
+        let faults = cfg.play_faults.take(ch);
         let thin = PlayPace {
             speed: speed.filter(|s| [1, 2, 4, 8, 16].contains(s)).unwrap_or(1),
             main: matches!(stream, Some(StreamTier::Main | StreamTier::Extern)),
@@ -1931,7 +1933,7 @@ impl Conn {
         let task = self.shared.runtime.spawn(async move {
             let _count = PlayCount(Arc::clone(&shared));
             let _ = serve_play(
-                &shared, &writer, &key, id, &latest, &cfg, ch, at, thin, &stop2,
+                &shared, &writer, &key, id, &latest, &cfg, ch, at, thin, &faults, &stop2,
             )
             .await;
         });
@@ -1992,6 +1994,7 @@ async fn serve_play(
     channel: u8,
     at: bc_protocol::archive::DateTime,
     pace: PlayPace,
+    faults: &[PlayFaultKind],
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
@@ -2018,8 +2021,20 @@ async fn serve_play(
     }
     let gop = i64::from(cfg.gop_secs.max(1));
     let mut window = archive::ts(at).div_euclid(gop) * gop;
+    let mut stall = None;
+    for f in faults {
+        match *f {
+            PlayFaultKind::FirstMediaAfter(d) => tokio::time::sleep(d).await,
+            PlayFaultKind::FirstKeyframeAfter(s) => {
+                window = (archive::ts(at) + i64::from(s) + gop - 1).div_euclid(gop) * gop;
+            }
+            PlayFaultKind::Stall { after_secs, pause } => {
+                stall = Some((i64::from(after_secs), pause));
+            }
+        }
+    }
     let end = cfg.recorded_end();
-    let start = Instant::now();
+    let mut start = Instant::now();
     let speed = i64::from(pace.speed);
     let burst = i64::from(cfg.play_burst_secs) * speed;
     let stride = pace.keyframe_stride();
@@ -2039,6 +2054,11 @@ async fn serve_play(
         window += gop;
         if recs.is_empty() || cfg.missing_at(channel, window - gop) {
             continue;
+        }
+        if let Some((_, pause)) = stall.filter(|(after, _)| played >= *after) {
+            stall = None;
+            tokio::time::sleep(pause).await;
+            start += pause;
         }
         let due_ms = (played - burst).max(0) * 1000 / speed;
         sleep_until(start + Duration::from_millis(due_ms as u64)).await;
