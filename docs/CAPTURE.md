@@ -5,8 +5,8 @@
 > live stream and doorbell calls, and pan, tilt, zoom (PTZ) from the tile.
 > The user-facing rules are in [UX.md](UX.md) ("Tile header", "Save
 > picture", "Recording", "Recording calls", "Pan, tilt, and zoom"); the
-> proposed C interface is in [FFI.md](FFI.md) ("Capture" and "Camera motion
-> (PTZ)"); audio details in [AUDIO.md](AUDIO.md) ("Recording calls"); the
+> C interface is in [FFI.md](FFI.md) ("Capture", minor 9, and the proposed
+> "Camera motion (PTZ)"); audio details in [AUDIO.md](AUDIO.md) ("Recording calls"); the
 > difference from the NVR's own recordings in [PLAYBACK.md](PLAYBACK.md)
 > ("Local captures and the NVR's recordings"); the PTZ commands in
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
@@ -14,7 +14,9 @@
 > macOS the header, its menus and keys (capture and PTZ actions say "coming
 > soon") and the call window's picture as a single fixed tile; in the core,
 > the pure base (`crates/capture`, K2) and the recorders behind a Rust API
-> (K4, below). The C interface and the apps' use of it come next.
+> (K4, below), and the C interface with its Swift and C# bindings (F5,
+> ABI 3 minor 9, below). The apps' AAC encoders and their use of it come
+> next (M5, W5).
 
 ## Implementation status (K2)
 
@@ -147,6 +149,45 @@ silent minute as part 2, a resolution change as part 2, the disk guard at
 start and while recording, the count limits, crash recovery (a cut
 partial recovered, a tiny one deleted, an unlisted one untouched), and
 shutdown or dropping the core mid-recording.
+
+## Implementation status (F5)
+
+The C interface wraps K4's API one to one as ABI 3 minor 9 (FFI.md,
+"Capture", which lists the clarifications): `nv_capture_configure`,
+`nv_capture_set_encoder` (an `NvAudioEncoder` of three C functions adapted
+to `AudioEncoder`; `open` fills an `NV_ASC_MAX`-byte buffer with the
+AudioSpecificConfig), `nv_record_audio_encoded` (allowed inside the
+encoder's own functions), `nv_record_start` (`NV_ERR_LIMIT` with the
+`{"limit": ...}` answer, `NV_ERR_NOT_CONFIGURED`; an answer that does not
+fit stops the recording again), `nv_record_stop`, and `nv_record_status`.
+Free space has no C hook; apps pass `utc_offset_s` and call configure
+first.
+
+Bindings: Swift `CoreAPI` (`captureConfigure`, `captureSetEncoder` with a
+`CaptureEncoder`, `recordAudioEncoded`, `recordStart` with a
+`RecordRequest` and a `RecordStartError` naming the limit, `recordStop`,
+`recordStatus`, the `recording` event as `RecordingEvent`) in `CCore` and
+`FakeCore`; C# `ICapture` and `ICaptureEncoder` on `NvCore` (a limit's
+kind in `NvException.Detail`), `RecordingEvent` and `FakeCapture` in
+NvrView.Shell. Both bindings keep every encoder they install until the
+core is freed, and route `recordAudioEncoded` through a handle that stays
+valid until `nv_core_free` returns.
+
+Tests: `crates/viewer-ffi/tests/ffi_capture.rs` (through the C functions,
+against the mock on the simulated clock: a live tile to a finalized MP4, a
+call through C encoder functions answering from inside them, the limit
+answers, a too-small answer buffer, the status codes); the C smoke test
+(also under AddressSanitizer) and the C# smoke test record the live tile
+and a call with a fake encoder to finalized MP4 files; the Swift tests
+cover the fake and, with the real core, the same against the mock; the C#
+shell tests cover FakeCapture.
+
+What M5 and W5 need: a platform AAC-LC encoder behind `CaptureEncoder` /
+`ICaptureEncoder` (48 kHz mono at the requested bit rate, its
+AudioSpecificConfig and priming from `open`, each encoded frame answered
+in order with `recordAudioEncoded`, the remaining output on a flushing
+`close`), `captureConfigure` at startup and on a settings change, and the
+UI that starts and stops recordings and shows the `recording` events.
 
 ## Principles
 
