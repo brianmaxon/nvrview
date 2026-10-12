@@ -418,6 +418,17 @@ internal sealed partial class SelfTest
             export.TrimExact = wasExact;
             export.RawPoints = default;
             export.DismissJob();
+            // The steps that follow (Analyze Sounds with nothing downloaded) start from no downloads.
+            foreach (DownloadProgress d in service.Downloads.ToList())
+            {
+                service.Forget(d.Download);
+            }
+            bool forgotten = await Until(() =>
+            {
+                fake.CompleteRecordingWork();
+                return service.Downloads.Count == 0;
+            }, 5);
+            Expect(forgotten, $"export: {service.Downloads.Count} downloads were not forgotten");
             try
             {
                 Directory.Delete(dir, recursive: true);
