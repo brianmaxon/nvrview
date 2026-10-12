@@ -1,3 +1,5 @@
+import Foundation
+
 /// The core as Swift sees it: one method per C function of docs/nvrview.h
 /// (names follow `nv_core_new`, `nv_device_add`, `nv_tile_open`, ...).
 ///
@@ -243,6 +245,33 @@ public protocol CoreAPI: Sendable {
     /// `nv_record_status`: `{"recordings":[...]}`, the latest `recording`
     /// event of each running recording.
     func recordStatus() throws(CoreStatus) -> String
+
+    // MARK: Smart alerts (minor 12; docs/FFI.md "Smart alerts")
+    //
+    // JSON as in docs/FFI.md "Smart alerts"; `SmartAlertEvent`s follow. Not
+    // from inside a callback. None waits on a device.
+
+    /// `nv_alerts_configure`: the settings document; the first call starts
+    /// the service (an `alerts_configured` event reports what was clamped).
+    func alertsConfigure(json: String) throws(CoreStatus)
+    /// `nv_alerts_get`: the event log, newest first, filtered by `query`.
+    func alertsGet(query: String?) throws(CoreStatus) -> String
+    /// `nv_alerts_trigger_put`: a trigger from the app; its ID.
+    func alertsTriggerPut(json: String) throws(CoreStatus) -> UInt64
+    /// `nv_alert_frames_get`: a verification request's access units.
+    func alertFramesGet(request: String) throws(CoreStatus) -> AlertFrames
+    /// `nv_alert_detections_put`: the detector's boxes for a request
+    /// (`AlertDetection.json`). A picture that could not be checked is not
+    /// answered.
+    func alertDetectionsPut(request: String, json: String) throws(CoreStatus)
+    /// `nv_alert_snapshot_put`: the app's picture of an alert (JPEG).
+    func alertSnapshotPut(alertID: UInt64, data: Data) throws(CoreStatus)
+    /// `nv_alert_snapshot_get`.
+    func alertSnapshotGet(alertID: UInt64) throws(CoreStatus) -> Data
+    /// `nv_alert_feedback`: `{"alert_id","vote","reason"?}`.
+    func alertFeedback(json: String) throws(CoreStatus)
+    /// `nv_alert_mute`: mutes a camera for `seconds` (0 unmutes).
+    func alertMute(cameraJSON: String, seconds: UInt32) throws(CoreStatus)
 
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //

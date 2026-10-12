@@ -548,6 +548,89 @@ public final class CCore: CoreAPI {
         return try Self.string { nv_record_status(c, $0, $1, $2) }
     }
 
+    // MARK: Smart alerts (minor 12)
+
+    public func alertsConfigure(json: String) throws(CoreStatus) {
+        try check(nv_alerts_configure(try core(), json))
+    }
+
+    public func alertsGet(query: String?) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { out, cap, len in
+            if let query { nv_alerts_get(c, query, out, cap, len) } else { nv_alerts_get(c, nil, out, cap, len) }
+        }
+    }
+
+    public func alertsTriggerPut(json: String) throws(CoreStatus) -> UInt64 {
+        var id: UInt64 = 0
+        try check(nv_alerts_trigger_put(try core(), json, &id))
+        return id
+    }
+
+    public func alertFramesGet(request: String) throws(CoreStatus) -> AlertFrames {
+        let c = try core()
+        var capacity = 256 * 1024
+        for _ in 0..<4 {
+            var info = NvThumbnail()
+            var data = Data(count: capacity)
+            var length = 0
+            let status = CoreStatus(
+                data.withUnsafeMutableBytes { b in
+                    nv_alert_frames_get(c, request, &info, b.bindMemory(to: UInt8.self).baseAddress, b.count, &length)
+                })
+            if status == .bufferTooSmall {
+                capacity = max(length, 1)
+                continue
+            }
+            if !status.isOK { throw status }
+            guard let kind = ThumbnailKind(rawValue: info.kind.rawValue) else { throw .internal }
+            return AlertFrames(
+                kind: kind, width: info.width, height: info.height, ptsMicros: info.pts_us,
+                data: data.prefix(length))
+        }
+        throw .internal
+    }
+
+    public func alertDetectionsPut(request: String, json: String) throws(CoreStatus) {
+        try check(nv_alert_detections_put(try core(), request, json))
+    }
+
+    public func alertSnapshotPut(alertID: UInt64, data: Data) throws(CoreStatus) {
+        let c = try core()
+        let status = data.withUnsafeBytes { b in
+            nv_alert_snapshot_put(c, alertID, b.bindMemory(to: UInt8.self).baseAddress, b.count)
+        }
+        try check(status)
+    }
+
+    public func alertSnapshotGet(alertID: UInt64) throws(CoreStatus) -> Data {
+        let c = try core()
+        var capacity = 64 * 1024
+        for _ in 0..<4 {
+            var data = Data(count: capacity)
+            var length = 0
+            let status = CoreStatus(
+                data.withUnsafeMutableBytes { b in
+                    nv_alert_snapshot_get(c, alertID, b.bindMemory(to: UInt8.self).baseAddress, b.count, &length)
+                })
+            if status == .bufferTooSmall {
+                capacity = max(length, 1)
+                continue
+            }
+            if !status.isOK { throw status }
+            return data.prefix(length)
+        }
+        throw .internal
+    }
+
+    public func alertFeedback(json: String) throws(CoreStatus) {
+        try check(nv_alert_feedback(try core(), json))
+    }
+
+    public func alertMute(cameraJSON: String, seconds: UInt32) throws(CoreStatus) {
+        try check(nv_alert_mute(try core(), cameraJSON, seconds))
+    }
+
     // MARK: Recorded playback (minor 6)
 
     public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {

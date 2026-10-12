@@ -250,6 +250,7 @@ public final class FakeCore: CoreAPI {
     let recordings = FakeRecordingsState()
     let playbackWorld = FakePlaybackState()
     let captureWorld = FakeCaptureState()
+    let alertsWorld = FakeAlertsState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()

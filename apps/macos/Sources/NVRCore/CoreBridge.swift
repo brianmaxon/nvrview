@@ -338,6 +338,11 @@ public final class CoreBridge: Sendable {
     /// `recordAudioEncoded`. `.closed` after `shutdown`.
     public func capture() throws(CoreStatus) -> any CoreAPI { try live() }
 
+    /// The core, for the smart-alert calls (minor 12; docs/FFI.md "Smart
+    /// alerts"): they never wait on a device. Not from inside a callback.
+    /// `.closed` after `shutdown`.
+    public func smartAlerts() throws(CoreStatus) -> any CoreAPI { try live() }
+
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 
