@@ -198,6 +198,118 @@ public sealed unsafe class TilePicture : IDisposable
         }
     }
 
+    /// <summary>
+    /// Copies the visible picture to memory as its planes: <paramref name="luma"/> (rows of <paramref name="width"/>
+    /// bytes) and <paramref name="chroma"/> (interleaved Cb, Cr at half the size, rounded up, starting at the visible
+    /// origin halved). For checking what the renderer draws against a CPU conversion (the self-test); waits for the
+    /// GPU and allocates. Call under the device lock. False without a picture.
+    /// </summary>
+    public bool ReadYuv(out int width, out int height, out byte[] luma, out byte[] chroma)
+    {
+        width = 0;
+        height = 0;
+        luma = [];
+        chroma = [];
+        if (!HasPicture || (_nv12 == null && _luma == null))
+        {
+            return false;
+        }
+        NvRect v = Visible;
+        int x0 = (int)Math.Min(v.X, TextureWidth), y0 = (int)Math.Min(v.Y, TextureHeight);
+        width = (int)Math.Min(v.Width, TextureWidth - (uint)x0);
+        height = (int)Math.Min(v.Height, TextureHeight - (uint)y0);
+        if (width <= 0 || height <= 0)
+        {
+            width = 0;
+            height = 0;
+            return false;
+        }
+        int cw = (width + 1) / 2, ch = (height + 1) / 2, cx0 = x0 / 2, cy0 = y0 / 2;
+        luma = new byte[width * height];
+        chroma = new byte[cw * ch * 2];
+        ID3D11DeviceContext* ctx = _gpu.Context;
+        if (_nv12 != null)
+        {
+            ID3D11Texture2D* staging = Staging(_nv12);
+            try
+            {
+                ctx->CopyResource((ID3D11Resource*)staging, (ID3D11Resource*)_nv12);
+                D3D11_MAPPED_SUBRESOURCE mapped;
+                GpuDevice.Check(ctx->Map((ID3D11Resource*)staging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(yuv readback)");
+                try
+                {
+                    // The chroma plane follows the luma plane's rows in an NV12 surface.
+                    byte* chromaBase = (byte*)mapped.pData + (long)mapped.RowPitch * TextureHeight;
+                    CopyPlane((byte*)mapped.pData, mapped.RowPitch, x0, y0, width, height, 1, luma);
+                    CopyPlane(chromaBase, mapped.RowPitch, cx0, cy0, cw, ch, 2, chroma);
+                }
+                finally
+                {
+                    ctx->Unmap((ID3D11Resource*)staging, 0);
+                }
+            }
+            finally
+            {
+                staging->Release();
+            }
+            return true;
+        }
+        ID3D11Texture2D* lumaStaging = Staging(_luma);
+        ID3D11Texture2D* chromaStaging = Staging(_chroma);
+        try
+        {
+            ctx->CopyResource((ID3D11Resource*)lumaStaging, (ID3D11Resource*)_luma);
+            ctx->CopyResource((ID3D11Resource*)chromaStaging, (ID3D11Resource*)_chroma);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            GpuDevice.Check(ctx->Map((ID3D11Resource*)lumaStaging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(luma readback)");
+            CopyPlane((byte*)mapped.pData, mapped.RowPitch, x0, y0, width, height, 1, luma);
+            ctx->Unmap((ID3D11Resource*)lumaStaging, 0);
+            GpuDevice.Check(ctx->Map((ID3D11Resource*)chromaStaging, 0, D3D11_MAP.D3D11_MAP_READ, 0, &mapped), "Map(chroma readback)");
+            CopyPlane((byte*)mapped.pData, mapped.RowPitch, cx0, cy0, cw, ch, 2, chroma);
+            ctx->Unmap((ID3D11Resource*)chromaStaging, 0);
+        }
+        finally
+        {
+            lumaStaging->Release();
+            chromaStaging->Release();
+        }
+        return true;
+    }
+
+    /// <summary>The color matrix's 12 coefficients, row-major 3x4 (for a CPU conversion in the self-test).</summary>
+    public float[] ColorRows()
+    {
+        var rows = new float[12];
+        for (int i = 0; i < 12; i++)
+        {
+            rows[i] = Color.M[i];
+        }
+        return rows;
+    }
+
+    private ID3D11Texture2D* Staging(ID3D11Texture2D* source)
+    {
+        D3D11_TEXTURE2D_DESC desc;
+        source->GetDesc(&desc);
+        desc.Usage = D3D11_USAGE.D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = (uint)D3D11_CPU_ACCESS_FLAG.D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ID3D11Texture2D* staging = null;
+        GpuDevice.Check(_gpu.Device->CreateTexture2D(&desc, null, &staging), "CreateTexture2D(readback)");
+        return staging;
+    }
+
+    // Copies a w x h window (origin x0, y0) of a plane with bytesPerTexel bytes per texel into dest, rows packed.
+    private static void CopyPlane(byte* plane, uint pitch, int x0, int y0, int w, int h, int bytesPerTexel, byte[] dest)
+    {
+        int row = w * bytesPerTexel;
+        for (int y = 0; y < h; y++)
+        {
+            new ReadOnlySpan<byte>(plane + (long)(y0 + y) * pitch + x0 * bytesPerTexel, row).CopyTo(dest.AsSpan(y * row, row));
+        }
+    }
+
     /// <summary>Drops the picture (the tile draws black); keeps the textures for reuse.</summary>
     public void Clear()
     {

@@ -70,7 +70,7 @@ internal static class HeaderTests
 
     private static void Sections()
     {
-        Check.Equal("Devices, Cameras, Alerts & calls, Updates, About", string.Join(", ", SettingsSections.All.Select(s => s.Title())), "titles");
+        Check.Equal("Devices, Cameras, Alerts & calls, Capture, Updates, About", string.Join(", ", SettingsSections.All.Select(s => s.Title())), "titles");
         Check.True(SettingsSections.All.All(s => s.Glyph().Length == 1), "one glyph each");
     }
 
