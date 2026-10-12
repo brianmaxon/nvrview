@@ -428,3 +428,38 @@ fn in_memory(nvr: &mock_nvr::MockNvr) -> impl bc_session::Connector + use<> {
     let addr = nvr.addr();
     FnConnector(move || mock_nvr::connect(addr))
 }
+
+fn fnv(d: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in d {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// A download's join and finalize give the same bytes as the single-track
+/// writer did before multi-track audio was added to `mp4-remux` (length and
+/// FNV-1a digest of the fragmented and the final file, recorded then).
+#[test]
+fn joined_download_bytes_are_unchanged() {
+    let fx = Fixture::load(&fixture_path("h264-basic.h264")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    write_chunk(dir.path(), 0, &fx, 0..30);
+    write_chunk(dir.path(), 1, &fx, 20..50);
+    write_chunk(dir.path(), 2, &fx, 40..60);
+    let joined = dir.path().join(JOINED_NAME);
+    join_chunks(dir.path(), 3, &joined, false).unwrap();
+    let frag = std::fs::read(&joined).unwrap();
+    let mp4 = dir.path().join("out.mp4");
+    recover_fragmented(&joined, &mp4, true).unwrap();
+    let fin = std::fs::read(&mp4).unwrap();
+    let got = [(frag.len(), fnv(&frag)), (fin.len(), fnv(&fin))];
+    assert_eq!(
+        got,
+        [
+            (0xdc80, 0x3ffc_b61e_619f_462d),
+            (0xd7ce, 0x160a_9324_3249_18b7)
+        ]
+    );
+}
