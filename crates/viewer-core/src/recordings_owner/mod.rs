@@ -353,6 +353,10 @@ struct Incidents {
     /// end), to tell them from device events in incident JSON.
     local: HashSet<(CameraId, String, Secs, Secs)>,
     locks: locks::Matched,
+    /// Each device's index revision when last grouped (sorted by key), so a
+    /// query regroups when an index changed since, without waiting for the
+    /// rate-limited `recordings_changed` that marks them dirty.
+    grouped: Vec<(String, u64)>,
 }
 
 #[derive(Default)]
@@ -897,10 +901,12 @@ impl Hub {
         };
         let mut events: Vec<CameraEvent> = Vec::new();
         let mut local = HashSet::new();
+        let mut grouped = Vec::new();
         let mut keys: Vec<&String> = st.devices.keys().collect();
         keys.sort();
         for key in keys {
             let idx = lock(&st.devices[key].index);
+            grouped.push((key.clone(), idx.revision()));
             events.extend(idx.events(&all).into_iter().map(|e| {
                 let camera = CameraId::with_lens(key.clone(), e.channel, e.lens);
                 if e.source == recordings::index::EventSource::LocalAudio {
@@ -915,6 +921,7 @@ impl Hub {
             }));
         }
         st.incidents.local = local;
+        st.incidents.grouped = grouped;
         // Edits older than the index keeps refer to nothing any more.
         let oldest =
             self.device_now(0) - (i64::from(stores.settings.index.max_age_days) + 1) * 86_400;
@@ -933,8 +940,10 @@ impl Hub {
         }
     }
 
+    /// Regroups if anything marked the incidents dirty or any index changed
+    /// since they were grouped, so they always cover what the indexes return.
     fn fresh_incidents(&self, st: &mut State) {
-        if st.incidents.dirty {
+        if st.incidents.dirty || index_changed(st) {
             self.regroup(st);
         }
     }
@@ -943,6 +952,18 @@ impl Hub {
         st.incidents.dirty = true;
         self.wake.notify_one();
     }
+}
+
+/// Whether the set of indexes, or any index's revision, differs from what
+/// the incidents were grouped from.
+fn index_changed(st: &State) -> bool {
+    let grouped = &st.incidents.grouped;
+    grouped.len() != st.devices.len()
+        || grouped.iter().any(|(key, revision)| {
+            st.devices
+                .get(key)
+                .is_none_or(|d| lock(&d.index).revision() != *revision)
+        })
 }
 
 fn tier_name(t: recordings::Tier) -> &'static str {

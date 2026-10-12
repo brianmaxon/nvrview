@@ -34,6 +34,15 @@ const DAY: i64 = 86_400;
 /// channel 1 on the 9th, and motion on channel 1 that runs from just before
 /// noon on the 10th (when the clock starts) for a minute.
 fn archive_mock(sim: &SimRuntime, file_minutes: u32) -> mock_nvr::MockNvr {
+    archive_mock_with(sim, file_minutes, None)
+}
+
+/// [`archive_mock`] whose file searches each take `search_delay`.
+fn archive_mock_with(
+    sim: &SimRuntime,
+    file_minutes: u32,
+    search_delay: Option<std::time::Duration>,
+) -> mock_nvr::MockNvr {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
     let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
@@ -41,6 +50,7 @@ fn archive_mock(sim: &SimRuntime, file_minutes: u32) -> mock_nvr::MockNvr {
     let mut a = ArchiveConfig::new(vec![d(8, 0, 0, 0), d(9, 0, 0, 0), d(10, 0, 0, 0)]);
     a.events_per_day = 0;
     a.file_minutes = file_minutes;
+    a.search_delay = search_delay;
     let ev = |channel: u8, kind: &str, start: DateTime, end: DateTime| MockEvent {
         channel,
         kind: kind.into(),
@@ -334,4 +344,39 @@ fn a_locked_day_is_evicted_last_when_the_index_is_over_its_size() {
     assert!(size("2026-10-08.json") * 2 > 1_048_576, "the 9th was over");
     assert_eq!(by_start(&core, t(8, 20, 0, 0)).unwrap()["locked"], true);
     sim.run_free(|| core.shutdown());
+}
+
+/// Incidents are derived from the index as it is when they are asked for:
+/// once the index returns an event, the incidents group it too, even while
+/// the owner holds back `recordings_changed` (at most one a second while
+/// filling) for the camera-day that brought it.
+#[test]
+fn incidents_include_every_event_the_index_returns() {
+    let sim = SimRuntime::new();
+    // Searches 200 ms apart: each camera-day is indexed well within a
+    // second of the one before.
+    let nvr = archive_mock_with(&sim, 60, Some(std::time::Duration::from_millis(200)));
+    let (core, _rec) = start(config(&sim, None, 0));
+    core.recordings_configure("{}").unwrap();
+    let key = add(&core, &nvr);
+    core.recordings_enable(&key, Some(ENABLE)).unwrap();
+    let q = json!({"start": day(8), "end": day(9) + DAY - 1}).to_string();
+    // (events the index returns, events in incidents) at every step of the
+    // fill, until both are in or the incidents lag.
+    let mut last = (0, 0);
+    fill(&sim, &core, &key, &[day(8), day(9)], false, || {
+        let events = parse(core.recordings_events(&q))["events"]
+            .as_array()
+            .unwrap()
+            .len();
+        let grouped: usize = incidents(&core)
+            .iter()
+            .filter(|i| i["start"].as_i64().unwrap() < day(10))
+            .map(|i| i["events"].as_array().unwrap().len())
+            .sum();
+        last = (events, grouped);
+        events != grouped || events == 2
+    });
+    sim.run_free(|| core.shutdown());
+    assert_eq!(last, (2, 2), "the incidents lag the index");
 }

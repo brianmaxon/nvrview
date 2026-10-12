@@ -31,6 +31,13 @@ struct Ctx {
     gen_resets: [AtomicU64; 2],
 }
 
+/// The callbacks' context, never freed. The core may call back until
+/// `nv_core_free` returns, and a failing assertion unwinds past that call:
+/// a context dropped then would be used after free by the core's threads.
+fn leaked_ctx() -> &'static Ctx {
+    Box::leak(Box::default())
+}
+
 unsafe extern "C" fn on_action(context: *mut c_void, tile: u64, action: *const NvAction) {
     // SAFETY: the test passes a pointer to a Ctx that outlives the core, and
     // the core passes a valid action for the duration of the call.
@@ -135,11 +142,11 @@ fn abi_version() {
 #[test]
 fn a_tile_plays_through_the_c_interface() {
     let nvr = mock();
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     // SAFETY: valid callbacks and out pointer; `ctx` outlives the core.
     assert_eq!(
-        unsafe { nv_core_new(ptr::null(), callbacks(&ctx), &mut core) },
+        unsafe { nv_core_new(ptr::null(), callbacks(ctx), &mut core) },
         NvStatus::NV_OK
     );
     assert!(!core.is_null());
@@ -269,17 +276,17 @@ fn a_tile_plays_through_the_c_interface() {
 
 #[test]
 fn invalid_arguments_are_refused() {
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     let no_action = NvCallbacks {
         on_action: None,
-        ..callbacks(&ctx)
+        ..callbacks(ctx)
     };
     let bad_utf8 = [0xffu8, 0xfe, 0];
     // SAFETY: every pointer is null or valid; out pointers are valid.
     unsafe {
         assert_eq!(
-            nv_core_new(ptr::null(), callbacks(&ctx), ptr::null_mut()),
+            nv_core_new(ptr::null(), callbacks(ctx), ptr::null_mut()),
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
         assert_eq!(
@@ -293,12 +300,12 @@ fn invalid_arguments_are_refused() {
             data_dir: ptr::null(),
         };
         assert_eq!(
-            nv_core_new(&config, callbacks(&ctx), &mut core),
+            nv_core_new(&config, callbacks(ctx), &mut core),
             NvStatus::NV_ERR_INVALID_ARGUMENT
         );
         assert!(core.is_null());
         assert_eq!(
-            nv_core_new(ptr::null(), callbacks(&ctx), &mut core),
+            nv_core_new(ptr::null(), callbacks(ctx), &mut core),
             NvStatus::NV_OK
         );
 
@@ -509,7 +516,7 @@ fn layouts_and_device_keys_through_the_c_interface() {
         log_max_total_bytes: 0,
         data_dir: data_dir.as_ptr(),
     };
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     // Nothing listens there: the device never connects, which is fine here.
     let host = CString::new("127.0.0.1").unwrap();
@@ -519,7 +526,7 @@ fn layouts_and_device_keys_through_the_c_interface() {
     // the core is live until freed once at the end.
     unsafe {
         assert_eq!(
-            nv_core_new(&config, callbacks(&ctx), &mut core),
+            nv_core_new(&config, callbacks(ctx), &mut core),
             NvStatus::NV_OK
         );
         let mut dev = 0u64;
@@ -608,11 +615,11 @@ fn talk_back_through_the_c_interface() {
     cfg.channels = 2;
     cfg.talk_channels = vec![1];
     let nvr = mock_nvr::spawn(cfg).unwrap();
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     // SAFETY: valid callbacks and out pointer; `ctx` outlives the core.
     assert_eq!(
-        unsafe { nv_core_new(ptr::null(), callbacks(&ctx), &mut core) },
+        unsafe { nv_core_new(ptr::null(), callbacks(ctx), &mut core) },
         NvStatus::NV_OK
     );
     ctx.core.store(core, Ordering::SeqCst);
@@ -720,7 +727,7 @@ fn talk_back_through_the_c_interface() {
 
 #[test]
 fn discovery_through_the_c_interface() {
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     let json = |s: &str| CString::new(s).unwrap();
     let done_events = |ctx: &Ctx| -> Vec<String> {
@@ -736,7 +743,7 @@ fn discovery_through_the_c_interface() {
     // is live until freed once at the end.
     unsafe {
         assert_eq!(
-            nv_core_new(ptr::null(), callbacks(&ctx), &mut core),
+            nv_core_new(ptr::null(), callbacks(ctx), &mut core),
             NvStatus::NV_OK
         );
         assert_eq!(
@@ -761,8 +768,8 @@ fn discovery_through_the_c_interface() {
         let request = json("{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}");
         assert_eq!(nv_discover_start(core, request.as_ptr()), NvStatus::NV_OK);
         assert_eq!(nv_discover_stop(core), NvStatus::NV_OK);
-        wait_until("discovery_done", || !done_events(&ctx).is_empty());
-        let done = done_events(&ctx);
+        wait_until("discovery_done", || !done_events(ctx).is_empty());
+        let done = done_events(ctx);
         assert_eq!(done.len(), 1, "{done:?}");
         assert!(done[0].contains("\"search\":1") && done[0].contains("\"stopped\":true"));
 
@@ -770,7 +777,7 @@ fn discovery_through_the_c_interface() {
         assert_eq!(nv_discover_start(core, ptr::null()), NvStatus::NV_OK);
         nv_core_free(core);
     }
-    assert_eq!(done_events(&ctx).len(), 2);
+    assert_eq!(done_events(ctx).len(), 2);
     assert!(!ctx.bad.load(Ordering::SeqCst));
 }
 
@@ -824,7 +831,7 @@ fn updates_through_the_c_interface() {
     let public = key.public().to_text();
     let source = src.path().to_str().unwrap();
 
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
     let cstr = |s: &str| CString::new(s).unwrap();
     let finals = |ctx: &Ctx| -> Vec<String> {
@@ -886,7 +893,7 @@ fn updates_through_the_c_interface() {
         );
 
         assert_eq!(
-            nv_core_new(ptr::null(), callbacks(&ctx), &mut core),
+            nv_core_new(ptr::null(), callbacks(ctx), &mut core),
             NvStatus::NV_OK
         );
         // Nothing running: cancel is fine.
@@ -908,8 +915,8 @@ fn updates_through_the_c_interface() {
         }
         let check = update_request(source, &public, None);
         assert_eq!(nv_update_check(core, check.as_ptr()), NvStatus::NV_OK);
-        wait_until("the check", || !finals(&ctx).is_empty());
-        let f = finals(&ctx);
+        wait_until("the check", || !finals(ctx).is_empty());
+        let f = finals(ctx);
         assert!(
             f[0].contains("\"available\"") && f[0].contains("\"version\":\"0.4.0\""),
             "{f:?}"
@@ -919,8 +926,8 @@ fn updates_through_the_c_interface() {
         let staging = work.path().join("staging");
         let download = update_request(source, &public, Some(staging.to_str().unwrap()));
         assert_eq!(nv_update_download(core, download.as_ptr()), NvStatus::NV_OK);
-        wait_until("the download", || finals(&ctx).len() == 2);
-        let f = finals(&ctx);
+        wait_until("the download", || finals(ctx).len() == 2);
+        let f = finals(ctx);
         assert!(f[1].contains("\"ready\""), "{f:?}");
         assert_eq!(
             std::fs::read(staging.join("content/App/hello.txt")).unwrap(),

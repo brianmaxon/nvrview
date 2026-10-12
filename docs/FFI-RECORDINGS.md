@@ -356,7 +356,10 @@ that call.
 
 Incidents are derived, not stored: `recordings::incident::group` over the
 index's events with the configured grouping and camera groups, then the
-user's stored edits replayed in order.
+user's stored edits replayed in order. They follow the index as it is when
+asked for: an event that `nv_recordings_events` has returned is grouped by
+the next `nv_incidents_get`, even before the `recordings_changed` for its
+day arrives.
 
 ```c
 /* Incidents overlapping [start, end], newest first. Query as in section 2
