@@ -42,6 +42,7 @@
 //!   are never logged; addresses only at debug level.
 
 pub mod audio;
+mod capture_owner;
 pub mod clock;
 mod device;
 pub mod discover;
@@ -58,6 +59,10 @@ pub mod update;
 
 pub use bc_protocol::stream::StreamTier;
 pub use bc_session::{BackoffConfig, Connector};
+pub use capture::LimitKind;
+pub use capture_owner::{
+    AudioEncoder, CaptureError, EncoderOpened, FINALIZE_WAIT, FreeSpace, SystemFreeSpace,
+};
 pub use playback::{MAX_CAMERAS, MAX_PLAYBACKS, PlaybackPending, PlaybackState, SeekMode};
 pub use recordings_owner::{
     AudioChunk, DayAudioSource, MAX_LABELS_PER_DAY, PATTERN_ANALYZER, RecError, SOUND_KINDS,
@@ -355,6 +360,8 @@ pub struct Core {
     recordings: recordings_owner::RecordingsHub,
     /// Recorded playbacks (docs/FFI-RECORDINGS.md, section 6).
     playback: playback::PlaybackHub,
+    /// Live and call recordings (docs/CAPTURE.md).
+    capture: capture_owner::CaptureHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -440,6 +447,13 @@ impl Core {
         // Sound analysis of tiles also feeds the recordings (loudness
         // envelope and sound labels), and lets it listen without tiles.
         recordings.attach_sound(tile_ctx.sound.clone());
+        let capture = capture_owner::CaptureHub::new(
+            handle.clone(),
+            event_sink.clone(),
+            clock.clone(),
+            config.data_dir.clone(),
+            config.test_runtime.is_none(),
+        );
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -464,6 +478,7 @@ impl Core {
             update,
             recordings,
             playback: playback::PlaybackHub::new(),
+            capture,
         })
     }
 
@@ -772,6 +787,8 @@ impl Core {
             .filter_map(|id| reg.tiles.remove(&id).map(|t| (id, t)))
             .collect();
         drop(reg);
+        // Its recordings end (and let go of the session) first.
+        self.capture.device_removed(device);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
         // Its plays stop before the session closes.
         self.playback_device_removed(&dev.key);
@@ -973,6 +990,7 @@ impl Core {
         }
         for (id, _) in &tiles {
             self.talk.tile_closed(*id);
+            self.capture.tile_closed(*id);
         }
         for (id, mut t) in tiles {
             t.end(reason);
@@ -1228,6 +1246,10 @@ impl Core {
         drop(reg);
         self.talk
             .set_conversation(tile, device, channel, open, session.as_ref());
+        if !open {
+            // A call recording follows its call.
+            self.capture.call_ended(tile);
+        }
         info!(tile, device, channel, open, "talk-back conversation set");
         Ok(())
     }
@@ -1274,6 +1296,111 @@ impl Core {
         Ok(())
     }
 
+    /// Sets the capture settings (docs/FFI.md, "Capture",
+    /// `nv_capture_configure`): the live recordings' folder, caps, disk
+    /// thresholds, count limits, the "Record from" tier, and share-safe
+    /// names, for recordings started afterwards. The first call also
+    /// finalizes or deletes the partial files a crash left (one `recording`
+    /// event `recovered` for each finalized file); it runs before the call
+    /// returns.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] for bad JSON or a relative
+    /// `live_dir`, or from inside a callback; [`CaptureError::Closed`].
+    pub fn capture_configure(&self, json: &str) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.configure(json)
+    }
+
+    /// Installs the app's AAC encoder, or removes it (`None`). Recordings
+    /// already running keep the encoder they started with.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] from inside a callback,
+    /// [`CaptureError::Closed`].
+    pub fn capture_set_encoder(
+        &self,
+        encoder: Option<Arc<dyn AudioEncoder>>,
+    ) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.set_encoder(encoder)
+    }
+
+    /// Replaces how free space is read ([`SystemFreeSpace`] by default) for
+    /// recordings started afterwards. Platforms may supply their own; tests
+    /// inject a fake.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] from inside a callback,
+    /// [`CaptureError::Closed`].
+    pub fn capture_set_free_space(&self, free: Arc<dyn FreeSpace>) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.set_free_space(free)
+    }
+
+    /// One encoded AAC access unit for `track` of `recording`, in order,
+    /// answering [`AudioEncoder::encode`]. Allowed from any thread,
+    /// including inside the encoder's own calls, until its `close` returns.
+    ///
+    /// # Errors
+    /// [`CaptureError::UnknownId`] for a recording that ended,
+    /// [`CaptureError::InvalidArgument`] for an empty or oversized unit.
+    pub fn record_audio_encoded(
+        &self,
+        recording: u64,
+        track: u32,
+        data: &[u8],
+    ) -> Result<(), CaptureError> {
+        self.capture.audio_encoded(recording, track, data)
+    }
+
+    /// Starts a live or call recording of a tile's camera (docs/FFI.md,
+    /// "Capture", `nv_record_start`); answers
+    /// `{"recording":12,"file":"...","state":"waiting_keyframe"}`. The
+    /// recording has its own subscription at its own tier and outlives the
+    /// tile (a call recording ends with its call: the tile's conversation
+    /// closing, or the tile closing).
+    ///
+    /// # Errors
+    /// [`CaptureError::Limit`] (see [`CaptureError::limit_answer`]),
+    /// [`CaptureError::NotConfigured`] (no settings, or a call without an
+    /// encoder), [`CaptureError::UnknownId`] (no such tile),
+    /// [`CaptureError::InvalidArgument`], [`CaptureError::Closed`],
+    /// [`CaptureError::Internal`].
+    pub fn record_start(&self, request: &str) -> Result<String, CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        let p = capture_owner::StartParams::parse(request)?;
+        let src = {
+            let reg = lock(&self.registry);
+            let t = reg.tiles.get(&p.tile).ok_or(CaptureError::UnknownId)?;
+            capture_owner::TileSource {
+                device: t.device,
+                channel: t.channel,
+                tile_tier: t.tier,
+                session: reg.devices.get(&t.device).and_then(|d| d.handle.session()),
+            }
+        };
+        let id = self.new_id();
+        self.capture.start(id, &p, src)
+    }
+
+    /// Stops a recording and finalizes it; returns at once (`recording`
+    /// events `finalizing`, then `finished`).
+    ///
+    /// # Errors
+    /// [`CaptureError::UnknownId`], [`CaptureError::Closed`],
+    /// [`CaptureError::InvalidArgument`] from inside a callback.
+    pub fn record_stop(&self, recording: u64) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.stop(recording)
+    }
+
+    /// `{"recordings":[...]}`: the latest `recording` event of each
+    /// recording that has not ended.
+    pub fn record_status(&self) -> String {
+        self.capture.status()
+    }
+
     /// Now on the core's clock, nanoseconds: the host clock ([`clock`]), or
     /// a test runtime's simulated clock ([`TestRuntime`]). Render host
     /// times ([`Core::render_audio`]) are on this clock.
@@ -1318,6 +1445,9 @@ impl Core {
         let tiles: Vec<(u64, TileHandle)> = reg.tiles.drain().collect();
         let devices: Vec<(u64, Device)> = reg.devices.drain().collect();
         drop(reg);
+        // Recordings stop first (`core_shutdown`) and finalize within
+        // FINALIZE_WAIT; what is left is recovered at the next configure.
+        self.capture.shutdown();
         // Their tile_closed events are delivered before this returns.
         self.end_tiles(tiles, CloseReason::CoreShutdown);
         // Playbacks stop their plays and close their tiles.
@@ -1365,6 +1495,13 @@ impl Drop for Core {
 impl fmt::Debug for Core {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Core").finish_non_exhaustive()
+    }
+}
+
+fn capture_error(e: CoreError) -> CaptureError {
+    match e {
+        CoreError::Closed => CaptureError::Closed,
+        _ => CaptureError::InvalidArgument,
     }
 }
 

@@ -572,7 +572,9 @@ NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
 
    A live recording records the tile's camera (device, channel, lens) on
    its own subscription; `quality` overrides the configured tier, `name` is
-   the camera name for the file, `share_safe` overrides the setting. A call
+   the camera name for the file, `share_safe` overrides the setting, and
+   `utc_offset_s` (optional, default 0) is the computer's local offset, for
+   the local time in the file name. A call
    recording writes to the path the app reserved beside the transcript.
    The answer: `{"recording": 12, "file": "<absolute path>",
    "state": "waiting_keyframe"}`. Errors: `NV_ERR_LIMIT` (the count limits,
@@ -603,6 +605,10 @@ NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
   `file` and `segment` name it), `finalizing`, `finished`, `failed`,
   `recovered`. Sent at once on a change and about once a second while
   recording.
+- `dropped_frames`: video frames lost on the way (a slow recorder's
+  queue, or out of order); `fragmented` (on `finished` and `failed`): the
+  fragmented file was published as the `.mp4` because finalizing had no
+  room or failed.
 - `audio`: `passthrough`, `encoded`, `none` (the camera sends no audio),
   `unsupported` (not AAC and no encoder). A call recording's `tracks` are
   `video`, `Conversation`, `Visitor`, `You`.
