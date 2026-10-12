@@ -257,6 +257,55 @@ internal static class RevealTests
             clock.Advance(0.15);
             T.Check(r.Tick(clock.Now) && r.IsShown);
         });
+
+        T.Run("header: always visible in a normal window; nothing is revealed", () =>
+        {
+            var clock = new ManualViewerClock(1000);
+            var h = new HeaderChrome();
+            T.Check(h.IsDocked && h.IsVisible && !h.IsOverlayShown);
+            h.Pointer(true, false, clock.Now);
+            clock.Advance(1);
+            T.Check(!h.Tick(clock.Now) && h.IsVisible && h.Deadline is null);
+        });
+
+        T.Run("header: full screen hides it; resting at the top reveals it; it slides away after the pointer leaves", () =>
+        {
+            var clock = new ManualViewerClock(1000);
+            var h = new HeaderChrome();
+            h.SetFullScreen(true);
+            T.Check(!h.IsVisible && !h.IsDocked, "hidden at once");
+            h.Pointer(true, false, clock.Now);
+            clock.Advance(0.14);
+            T.Check(!h.Tick(clock.Now) && !h.IsVisible, "a pass over the edge");
+            clock.Advance(0.02);
+            T.Check(h.Tick(clock.Now) && h.IsVisible && h.IsOverlayShown, "shown after 150 ms");
+            h.Pointer(false, true, clock.Now);
+            clock.Advance(5);
+            T.Check(!h.Tick(clock.Now) && h.IsVisible, "stays while the pointer is on it");
+            h.Pointer(false, false, clock.Now);
+            clock.Advance(0.49);
+            T.Check(!h.Tick(clock.Now) && h.IsVisible);
+            clock.Advance(0.01);
+            T.Check(h.Tick(clock.Now) && !h.IsVisible, "hidden half a second after");
+        });
+
+        T.Run("header: an open menu holds it; leaving full screen docks it", () =>
+        {
+            var clock = new ManualViewerClock(1000);
+            var h = new HeaderChrome();
+            h.SetFullScreen(true);
+            h.Pointer(true, false, clock.Now);
+            clock.Advance(0.15);
+            T.Check(h.Tick(clock.Now) && h.IsVisible);
+            h.Pointer(false, false, clock.Now);
+            clock.Advance(0.5);
+            T.Check(!h.Tick(clock.Now, RevealHolds.Menu) && h.IsVisible, "held by the menu");
+            clock.Advance(0.25);
+            T.Check(h.Tick(clock.Now) && !h.IsVisible, "released");
+            h.Pointer(true, false, clock.Now);
+            h.SetFullScreen(false);
+            T.Check(h.IsDocked && h.IsVisible && !h.IsOverlayShown && h.Deadline is null, "docked again, nothing pending");
+        });
     }
 
     private static SidebarReveal Shown(ManualViewerClock clock)
