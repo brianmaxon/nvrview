@@ -61,10 +61,6 @@ alert-inset-swap            macos    gap: Windows call cards do not swap with th
 appkit-warnings             macos    n/a: checks AppKit's forbidden log lines
 call-conversation-end       macos    gap: the Windows self-test closes a press call only, not a conversation
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
-inset-drag-multi            macos    gap: Windows call cards cannot be moved yet (docs/UX.md "Alert insets", "Moving them")
-inset-drag-resize           macos    gap: Windows call cards cannot be moved yet, so no position kept across a resize
-inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window
-inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
