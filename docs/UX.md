@@ -124,6 +124,44 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 - Measured against the budgets in ARCHITECTURE.md: the interface must never
   cost frames. Overlays are lightweight layers above the Metal surface.
 
+## Tile header
+
+> **Planned** (CAPTURE.md, "The tile header"; not built yet). Today's
+> headers keep their current buttons until then.
+
+Every tile's hover header carries its actions as buttons, in an order that
+survives narrow tiles: what does not fit moves into a "…" menu, never off
+the edge. Both apps compute it with the same model and test vectors
+(`TileHeaderLayout`).
+
+| Priority | Item | Shown for |
+| --- | --- | --- |
+| 0 | Recording pill ("● REC 1:23") | a recorded camera; an indicator, never in the overflow, visible without hover |
+| 0 | Alert strip and Dismiss | an active alert (see "Alerts"); never in the overflow |
+| 1 | Title (camera name) | every tile; truncated before it is dropped |
+| 2 | Speaker (listen or mute) | a camera with audio |
+| 3 | Record or Stop | every camera |
+| 4 | Save picture | a tile with a picture |
+| 5 | Start or End Conversation | a doorbell, or a camera with talk-back (`ipcAudioTalk` 1); for other cameras it is in the menu only |
+| 6 | PTZ pad | a pan-and-tilt camera (`ptzType` 3) |
+| 7 | Presets | a camera with presets (`ptzPreset` bit 0) |
+| 8 | Lens zoom and focus | `ptzType` 1 or 3, when the camera reports ranges |
+| 9 | Reset zoom | a tile zoomed past 1x (or a moved virtual camera) |
+| 10 | Quality | every camera (the menu of "Stream quality per tile") |
+| 11 | Fisheye view | a fisheye camera |
+| | "…" | whenever anything is hidden; also holds the long tail: Pop Out or Pop In, Allow talk-back, Entrance, Calls open in, Save Picture As…, Save Zoomed Area, Save Original Fisheye Picture, Record Main Stream, Record Sub-stream |
+
+- Items are placed by priority until the width runs out; once one is
+  hidden, room for "…" is kept. A change of under 8 pt does not reflow it,
+  so dragging a divider does not make buttons flicker. Below 120 pt only the
+  recording pill, the title and "…" show.
+- Under a no-picture message ("Connecting", "Reconnecting") the header
+  shows only the title and "…"; Retry stays in the message (see "Tiles
+  without a picture").
+- The right-click menu is the full list, in the same order, so nothing is
+  only in the header.
+- Corner indicators are unchanged and do not compete for header space.
+
 ## Tiles without a picture
 
 A tile that has no picture says why in words over the tile: "Connecting",
@@ -164,6 +202,34 @@ in either case.
 Selection is visible as a thin outline that fades with the other chrome, and
 follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
+
+### Capture and camera keys
+
+> **Planned** with the tile header (CAPTURE.md). They act on the selected
+> tile, never while text is edited, and toggles ignore key repeat.
+
+| Key | Action |
+| --- | --- |
+| P | Save picture (see "Save picture"). |
+| Shift+P | Save Picture As… (choose the place and format). |
+| R | Start or stop recording the selected tile's camera (from the "Record from" setting). |
+| T | Start or End Conversation. |
+| Option+arrows (macOS), Alt+arrows (Windows) | Move a PTZ camera while held; it stops when the key is released. |
+| Option or Alt with = and - | Lens zoom in and out. |
+| Option or Alt with 1 to 9 | Recall preset 1 to 9 (the order of the camera's list). |
+| ⇧⌘P / Ctrl+Shift+P | Save picture in a call window, where P may be typed into the reply (also accepted in viewer windows). |
+| ⇧⌘R / Ctrl+Shift+R | Start or stop the call recording in a call window (also accepted in viewer windows, for the selected tile). |
+
+The keys are read by key position, not by the character typed, so Option
+with = or a digit works on every keyboard layout that has those keys.
+
+- **macOS:** a new **Camera** menu lists them: Save Picture, Save Picture
+  As…, Start Recording (Stop Recording while recording), Start
+  Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
+  of the running recordings, each with Stop), Stop All Recordings, Open
+  Pictures Folder, Open Recordings Folder.
+- **Windows:** the F1 help overlay lists them, and the keys are mapped in
+  one place (`TileKeyMap`) as the other tile keys are.
 
 ### Start Conversation (no press)
 
@@ -401,6 +467,90 @@ that camera while it asks, as focus does. Changing quality uses the aligned
 tier switch, so the picture sharpens in place without a gap. A tile not on
 Auto shows its quality in its hover header, and the menu notes that the main
 stream on many tiles costs the device and this computer much more.
+
+## Save picture
+
+> **Planned** (CAPTURE.md, "Save picture"; not built yet).
+
+- **Where:** the header's camera button, the right-click menu, P (and
+  Shift+P for Save Picture As…), the call window's tile, and later playback
+  tiles.
+- **What:** the full frame of the stream the tile shows, at its own size
+  (the menu says the pixel size), whatever the zoom. While zoomed, "Save
+  Zoomed Area" saves only the visible region, at the source's resolution,
+  never enlarged. A fisheye tile saves its current view (dewarped), and
+  "Save Original Fisheye Picture" the circle as the camera sends it.
+- **Files:** PNG by default, or JPEG (Settings); to `~/Pictures/NVRView` or
+  `Pictures\NvrView` ("Save pictures to"), named
+  `2026-10-11 17.02.03.250 Camera 1.png`; with "Share-safe names" the
+  camera is `Camera A`. No metadata; an optional time and name label burned
+  in, off by default.
+- **Feedback:** a brief shutter flash on the tile and a "Picture saved"
+  toast with Show in Finder or Show in Explorer. A failure names the file,
+  not the folder path.
+
+## Recording
+
+> **Planned** (CAPTURE.md, "Live recording"; not built yet).
+
+Recording saves a camera's live stream on this computer as an MP4 (video
+as received, the camera's audio).
+
+- **Start and stop:** the header's Record button, R, the right-click menu,
+  or the Camera menu (macOS). The recording starts at the next keyframe
+  (usually within a second or two) and records the camera, not the tile: it
+  keeps going if the tile closes, the layout changes, or the tile's quality
+  changes. Stop with the same button (it becomes Stop), R, the window's
+  recording list, or Stop All.
+- **Stream:** Settings, **"Record from"**: Main stream (the default) or
+  Sub-stream. The Record menu and the overflow also offer "Record Main
+  Stream" and "Record Sub-stream" for one recording. A device records from
+  its main stream at most twice at a time; a third is refused with an offer
+  to record the sub-stream instead.
+- **Indicators:** while a camera is recorded, every tile showing it (every
+  window, full screen too) shows a "● REC 1:23" pill, always visible, in the
+  corner opposite the corner indicators. On Windows the window's header
+  shows "● N recording" with the list, Stop and Stop All; on macOS a
+  toolbar item and the Camera menu's Recordings submenu.
+- **Limits:** a recording stops by itself after 60 minutes or 4 GB (both in
+  Settings), when free disk space runs low (it does not start with under
+  2 GB free), when the device is removed, or at quit. At most four live
+  recordings at a time. A short reconnect keeps the same file (the last
+  picture holds through the gap); a long one, or a change of resolution,
+  continues in `… (part 2).mp4`.
+- **Files:** `~/Movies/NVRView` or `Videos\NvrView` ("Save recordings to"),
+  named `2026-10-11 17.02.03 Camera 1.mp4` (`Camera A` with share-safe
+  names). A file is always playable, even after a crash; an unfinished one
+  is completed at the next launch.
+- These are this computer's recordings of what it received, gaps included,
+  not the NVR's own recordings (PLAYBACK.md, "Local captures and the NVR's
+  recordings").
+
+## Pan, tilt, and zoom
+
+> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"; not built yet).
+
+Steering a camera that can move is the user's own action and needs no
+enable step (camera motion control, docs/ARCHITECTURE.md "Device
+commands"); every command is still rate-limited (far above what hands can
+do) and logged.
+
+- **Pan and tilt** (`ptzType` 3): the header's PTZ button opens a popover
+  with a pad of four directions (diagonals only once observed on a camera).
+  Press and hold to move; letting go stops it. A speed slider runs 1 to 64,
+  default 20. When the camera reports lens ranges, zoom − and + and focus −
+  and + sit below the pad.
+- **Presets** (`ptzPreset` bit 0): a popover listing the camera's presets
+  by name, with the 1 to 9 key hint; a click recalls one. Saving or
+  deleting presets is a device setting and is not offered.
+- **Lens only** (`ptzType` 1): a popover with zoom and focus sliders. A
+  drag sends a position at most five times a second and once when it ends,
+  within the range the camera reported.
+- The positions are read again about 6 s after a zoom or a preset recall
+  (when the camera has settled), as the official client does.
+- Errors and refusals show in the popover, with the camera's name. There is
+  no permission prompt; automation (the local API, automatic correction)
+  needs its own per-camera grant.
 
 ## Alerts
 
@@ -700,6 +850,33 @@ Details settled while building it (Windows):
 - Not on Windows yet: a per-doorbell "unmute on ring" (a press unmutes only
   if the user was already listening, else Unmute shows).
 
+### Recording calls
+
+> **Planned** (CAPTURE.md, "Recording calls"; not built yet).
+
+- **Setting:** Settings > Alerts > Doorbell calls, **"Record calls"**, off
+  by default, and per doorbell Default, Always, or Never. Turning it on the
+  first time shows: "Recording a conversation may need the other person's
+  consent where you live. The visitor is not told that the call is
+  recorded." Nothing is announced to the visitor (that would be talk-back
+  the user did not ask for).
+- **When:** with the setting on for the doorbell, recording starts when the
+  call opens (a press or Start Conversation). The call's Record button (and
+  ⇧⌘R or Ctrl+Shift+R) starts or stops it at any time, with or without the
+  setting; starting again in the same call continues in `(part 2)`.
+- **What:** the doorbell's video and three audio tracks: "Conversation"
+  (both sides mixed, the one players play), "Visitor", and "You" (exactly
+  what was sent through the doorbell's speaker, where it played). The
+  visitor's track may hold an echo of the user's words from the doorbell's
+  speaker (AUDIO.md, "Recording calls"). The stream follows "Record from".
+- **Where:** beside the call transcripts, with the transcript's name
+  (`2026-10-11 17.02.03 Camera 1.mp4` next to `... Camera 1.txt`). The
+  folder keeps the newest 100 recordings and at most 10 GB of them; "Open
+  Call Recordings Folder" sits next to the setting. Share-safe names do not
+  apply here.
+- **Shown:** the call bar's "● Recording 0:42" pill, and the "● REC" pill on
+  the doorbell's tiles everywhere.
+
 ### A call in its own window
 
 A call can leave the viewer windows and live in a small call window of its
@@ -764,6 +941,18 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
+- **Layout (planned, CAPTURE.md "The call window is a regular tile"):**
+  the picture becomes the viewer's own tile in a single-tile mode (no
+  layout editing, split, swap, focus, Show Camera, Remove or Clear; the
+  window keeps its own lease), so zoom, the zoom map, fisheye views,
+  Quality, Save picture and Record behave as in the grid. Top to bottom: a
+  call bar (camera name, a press or a conversation, elapsed time, the
+  "● Recording" pill, pin, Pop In, close); the tile with its hover header
+  (Save picture, Record, Speaker or Unmute, PTZ, Quality, "…") and the
+  Unmute cover as a veil inside it; the captions; the Talk row (Talk, Keep
+  talking, the echo status); the reply field and Send. Record there is the
+  call recording. Insets and call cards keep their drawing for now, with
+  the same header buttons.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows),
