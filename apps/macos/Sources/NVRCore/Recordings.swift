@@ -352,6 +352,12 @@ public struct TileLoudness: Equatable, Sendable {
     }
 }
 
+// Cores older than minor 10 refuse export.
+extension CoreAPI {
+    public func downloadRange(json: String) throws(CoreStatus) -> String { throw .unsupported }
+    public func stillPlan(json: String) throws(CoreStatus) -> String { throw .unsupported }
+}
+
 // Cores older than minor 8 refuse edit lists and the rest of sound.
 extension CoreAPI {
     public func editCompute(json: String) throws(CoreStatus) -> String { throw .unsupported }

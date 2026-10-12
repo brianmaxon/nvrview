@@ -24,8 +24,9 @@ extern "C" {
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1. Minor 6: recorded playback. Minor 7: "months" in
- * nv_recordings_want. Minor 8: edit lists and the rest of sound. */
-#define NV_ABI_MINOR 8
+ * nv_recordings_want. Minor 8: edit lists and the rest of sound. Minor 10:
+ * export (nv_download_range, nv_still_plan, the trim kind). */
+#define NV_ABI_MINOR 10
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -548,8 +549,20 @@ NvStatus nv_sound_configure(NvCore *core, const char *json);
 
 /* An edit list for a finished download, as JSON: {"kind":"follow" | "grid",
  * "download":"<id>", ...}. Pure computation; no device traffic.
- * NV_ERR_UNSUPPORTED for in_ms, out_ms, and the trim kind (a later minor). */
+ * Minor 10 added the "trim" kind, in_ms and out_ms, dest, and share_safe. */
 NvStatus nv_edit_compute(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+
+/* Export (minor 10; docs/FFI-RECORDINGS.md, section 7a). Queues the download
+ * of a time range of chosen cameras ({"start","end","cameras":[{"camera",
+ * "tier"}],"name","dest","share_safe"} -> {"download","folder","existing"};
+ * made even when the answer does not fit, as nv_download_incident). */
+NvStatus nv_download_range(NvCore *core, const char *request, char *out, size_t cap,
+                           size_t *len);
+
+/* Plans still images from a playback's tiles ({"playback","tiles","format",
+ * "dest","share_safe"}) or from a position in a finished file
+ * ({"download","camera","at_ms","exact","format"}). */
+NvStatus nv_still_plan(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
 
 /* Keeps a camera's sub-stream open for sound only while enabled. */
 NvStatus nv_sound_watch(NvCore *core, const char *camera, bool enabled);
