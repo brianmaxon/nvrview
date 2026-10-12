@@ -201,9 +201,10 @@ public protocol CoreAPI: Sendable {
     // JSON in and out as in docs/FFI-RECORDINGS.md, sections 7 and 2a. Not
     // from inside a callback, except nothing here is allowed there.
 
-    /// `nv_edit_compute`: the edit list (follow cut or grid) of a finished
-    /// download. `in_ms`, `out_ms`, and the trim kind are `.unsupported`
-    /// until export.
+    /// `nv_edit_compute`: the edit list (follow cut or grid) or the trim of a
+    /// finished download. Minor 10 added the `trim` kind, `in_ms` and
+    /// `out_ms` on follow and grid, and `dest` and `share_safe` (a core older
+    /// than that answers `.unsupported` or `.invalidArgument`).
     func editCompute(json: String) throws(CoreStatus) -> String
     /// `nv_sound_watch`: keeps a camera's sub-stream open for sound only.
     func soundWatch(camera: String, enabled: Bool) throws(CoreStatus)
@@ -243,6 +244,18 @@ public protocol CoreAPI: Sendable {
     /// `nv_record_status`: `{"recordings":[...]}`, the latest `recording`
     /// event of each running recording.
     func recordStatus() throws(CoreStatus) -> String
+    // MARK: Export (minor 10; docs/FFI.md "Export (minor 10)")
+    //
+    // JSON in and out as in docs/FFI-RECORDINGS.md, section 7a. The core plans;
+    // the app decodes, encodes, and writes. Not from inside a callback.
+
+    /// `nv_download_range`: queues the download of a time range of chosen
+    /// cameras (`{"start","end","cameras":[{"camera","tier"}],"name","dest",
+    /// "share_safe"}`) and answers `{"download","folder","existing"}`.
+    func downloadRange(json: String) throws(CoreStatus) -> String
+    /// `nv_still_plan`: which picture to save and what to call it, from a
+    /// playback's tiles or a position in a finished file.
+    func stillPlan(json: String) throws(CoreStatus) -> String
 
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //

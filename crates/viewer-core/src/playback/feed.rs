@@ -57,6 +57,9 @@ pub(crate) struct FeedShared {
     backlog: AtomicU64,
     /// Set once the generation is the tile's shown one.
     shown: AtomicBool,
+    /// Timestamp of the newest picture the app answered as decoded for
+    /// this generation ([`NO_TARGET`] before the first).
+    decoded_pts: AtomicU64,
     /// Items dropped by the queue's own bound.
     dropped: AtomicU64,
 }
@@ -76,6 +79,7 @@ pub(crate) fn feed() -> (FeedTx, FeedRx) {
         latency_us: AtomicU64::new(0),
         backlog: AtomicU64::new(0),
         shown: AtomicBool::new(false),
+        decoded_pts: AtomicU64::new(NO_TARGET),
         dropped: AtomicU64::new(0),
     });
     (FeedTx(shared.clone()), FeedRx(shared))
@@ -160,6 +164,11 @@ impl FeedTx {
     pub(crate) fn shown(&self) -> bool {
         self.0.shown.load(Ordering::SeqCst)
     }
+
+    /// The newest decoded picture's timestamp, if one was answered.
+    pub(crate) fn decoded(&self) -> Option<u64> {
+        Some(self.0.decoded_pts.load(Ordering::SeqCst)).filter(|t| *t != NO_TARGET)
+    }
 }
 
 /// The tile's end of a feed.
@@ -193,6 +202,11 @@ impl FeedRx {
     /// Publishes the pipeline's backlog.
     pub(crate) fn set_backlog(&self, n: u64) {
         self.0.backlog.store(n, Ordering::Relaxed);
+    }
+
+    /// Notes the picture the app answered as decoded.
+    pub(crate) fn set_decoded(&self, pts: u64) {
+        self.0.decoded_pts.store(pts, Ordering::SeqCst);
     }
 
     /// Marks the generation shown.

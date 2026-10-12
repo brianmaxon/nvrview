@@ -338,7 +338,7 @@ static void edit_and_sound(NvCore *core, const char *key, const char *download, 
         problem("nv_edit_compute follow");
     }
     snprintf(json, sizeof json, "{\"kind\":\"follow\",\"download\":\"%s\",\"in_ms\":1}", download);
-    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_ERR_UNSUPPORTED ||
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_OK ||
         nv_edit_compute(core, "{\"kind\":\"follow\",\"download\":\"nope\"}", plan, 1 << 20, &len) !=
             NV_ERR_UNKNOWN_ID ||
         nv_edit_compute(core, "{", plan, 1 << 20, &len) != NV_ERR_INVALID_ARGUMENT ||
@@ -381,6 +381,93 @@ static void edit_and_sound(NvCore *core, const char *key, const char *download, 
     if (nv_tile_loudness(core, 987654321, peak, rms, sizeof peak, &first, &len) != NV_ERR_UNKNOWN_ID ||
         nv_tile_loudness(core, 987654321, peak, rms, sizeof peak, NULL, &len) != NV_ERR_INVALID_ARGUMENT) {
         problem("nv_tile_loudness");
+    }
+    free(plan);
+}
+
+/* Export (minor 10) against the finished incident download and a range
+ * download of the same camera: a trim plan on each, a still plan from a file,
+ * and the refusals. `start` is a time (seconds) the camera recorded. */
+static void export_plans(NvCore *core, const char *key, const char *download, long long start) {
+    char json[1024], answer[4096], range[128];
+    size_t len = 0;
+    char *plan = malloc(1 << 20);
+    if (plan == NULL) {
+        problem("export_plans: out of memory");
+        return;
+    }
+    /* Both files cover these points: they clip to the file. */
+    snprintf(json, sizeof json,
+             "{\"kind\":\"trim\",\"download\":\"%s\",\"in_ms\":%lld,\"out_ms\":%lld}", download,
+             (start - 100000) * 1000, (start + 100000) * 1000);
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_OK ||
+        strstr(plan, "\"kind\":\"trim\"") == NULL || strstr(plan, "\"outputs\"") == NULL ||
+        strstr(plan, "\"copy_possible\":true") == NULL) {
+        problem("nv_edit_compute trim");
+    }
+    snprintf(json, sizeof json,
+             "{\"kind\":\"trim\",\"download\":\"%s\",\"in_ms\":5,\"out_ms\":5}", download);
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_edit_compute trim with an empty window");
+    }
+
+    snprintf(json, sizeof json,
+             "{\"start\":%lld,\"end\":%lld,\"cameras\":[{\"camera\":{\"device\":\"%s\",\"channel\":0},"
+             "\"tier\":\"sub\"}],\"share_safe\":true}",
+             start, start + 8, key);
+    if (nv_download_range(core, json, answer, sizeof answer, &len) != NV_OK ||
+        !string_member(answer, "download", range, sizeof range) || strstr(answer, "\"folder\"") == NULL ||
+        strstr(answer, "\"existing\":false") == NULL) {
+        problem("nv_download_range");
+        free(plan);
+        return;
+    }
+    if (nv_download_range(core, json, answer, sizeof answer, &len) != NV_OK ||
+        strstr(answer, "\"existing\":true") == NULL || strstr(answer, range) == NULL) {
+        problem("nv_download_range again");
+    }
+    bool done = false;
+    for (int i = 0; i < 3000 && !done; i++) {
+        char *all = query_json(core, downloads_fn, NULL);
+        done = all != NULL && strstr(all, range) != NULL && settled(all) &&
+               strstr(all, "\"range\":{") != NULL;
+        free(all);
+        if (!done) {
+            sleep_ms(10);
+        }
+    }
+    if (!done) {
+        problem("the range download did not finish");
+    }
+    snprintf(json, sizeof json,
+             "{\"kind\":\"trim\",\"download\":\"%s\",\"in_ms\":%lld,\"out_ms\":%lld,\"cut\":\"exact\","
+             "\"share_safe\":true}",
+             range, (start + 2) * 1000, (start + 6) * 1000);
+    if (nv_edit_compute(core, json, plan, 1 << 20, &len) != NV_OK ||
+        strstr(plan, "\"Camera A\"") == NULL || strstr(plan, "\"copy_possible\":false") == NULL) {
+        problem("nv_edit_compute trim of a range");
+    }
+    snprintf(json, sizeof json,
+             "{\"download\":\"%s\",\"camera\":{\"device\":\"%s\",\"channel\":0},\"at_ms\":%lld,"
+             "\"format\":\"jpeg\"}",
+             range, key, (start + 3) * 1000);
+    if (nv_still_plan(core, json, plan, 1 << 20, &len) != NV_OK || strstr(plan, "\"stills\"") == NULL ||
+        strstr(plan, ".jpg") == NULL) {
+        problem("nv_still_plan from a file");
+    }
+    if (nv_still_plan(core, "{\"playback\":987654321}", plan, 1 << 20, &len) != NV_ERR_UNKNOWN_ID ||
+        nv_still_plan(core, "{", plan, 1 << 20, &len) != NV_ERR_INVALID_ARGUMENT ||
+        nv_still_plan(core, json, plan, 1 << 20, NULL) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_still_plan status codes");
+    }
+    snprintf(json, sizeof json,
+             "{\"start\":%lld,\"end\":%lld,\"cameras\":[{\"camera\":{\"device\":\"%s\",\"channel\":0}}],"
+             "\"dest\":\"relative\"}",
+             start, start + 8, key);
+    if (nv_download_range(core, json, answer, sizeof answer, &len) != NV_ERR_INVALID_ARGUMENT ||
+        nv_download_range(core, "{\"start\":5,\"end\":4,\"cameras\":[]}", answer, sizeof answer, &len) !=
+            NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_download_range refusals");
     }
     free(plan);
 }
@@ -562,6 +649,7 @@ static void recordings(NvCore *core, const char *key, const char *work) {
         problem("the download did not finish");
     }
     edit_and_sound(core, key, download, day);
+    export_plans(core, key, download, start);
     if (nv_incident_lock(core, incident, true, answer, sizeof answer, &len) != NV_OK ||
         strstr(answer, "\"existing\"") == NULL || strstr(answer, download) == NULL) {
         problem("nv_incident_lock");

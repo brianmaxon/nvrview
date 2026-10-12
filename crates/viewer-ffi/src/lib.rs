@@ -37,8 +37,10 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
 /// calendar alone) and the recordings_month_failed event. Minor 8: edit
 /// lists (section 7) and the rest of sound (section 2a). Minor 9: capture
-/// (live and call recordings; docs/FFI.md, "Capture").
-pub const NV_ABI_MINOR: u32 = 9;
+/// (live and call recordings; docs/FFI.md, "Capture"). Minor 10: export
+/// (section 7a): nv_download_range, nv_still_plan, the trim kind and in_ms and
+/// out_ms of nv_edit_compute, and dest and share_safe on export requests.
+pub const NV_ABI_MINOR: u32 = 10;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -2127,7 +2129,8 @@ pub unsafe extern "C" fn nv_thumbnail_cancel(core: *mut NvCore, key: *const c_ch
 }
 
 /// Queues an incident's download ({"incident":"<key>","cameras":[{"camera":
-/// {...},"tier":"main"}]}, cameras optional) and answers {"download":"<id>",
+/// {...},"tier":"main"}],"dest":"<absolute directory>","share_safe":false},
+/// all but incident optional) and answers {"download":"<id>",
 /// "folder":"<absolute path>","existing":bool}. An unfinished download of
 /// the same incident key, or a finished one of the unchanged incident, is
 /// returned instead. NV_ERR_NOT_CONFIGURED without downloads_dir;
@@ -2152,6 +2155,66 @@ pub unsafe extern "C" fn nv_download_incident(
             Ok(c.download_incident(arg(request)?)?)
         })
     }
+}
+
+/// Queues the download of a time range of chosen cameras ({"start":..,
+/// "end":..,"cameras":[{"camera":{...},"tier":"main"}],"name":null,
+/// "dest":"<absolute directory>","share_safe":false}; seconds, device-local)
+/// through the same scheduler as nv_download_incident, and answers
+/// {"download":"<id>","folder":"<absolute path>","existing":bool}. The same
+/// cameras, tiers, and range return the existing download.
+/// NV_ERR_NOT_CONFIGURED without downloads_dir (or without a data directory
+/// when dest is elsewhere); NV_ERR_LIMIT beyond 16 cameras, 24 hours, or 1000
+/// known downloads; NV_ERR_INVALID_ARGUMENT for an empty range or a camera
+/// that nv_recordings_enable does not allow. As for nv_incident_edit, the
+/// download is queued even when the answer does not fit. Added in minor 10.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_download_range(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(
+            core,
+            out,
+            cap,
+            len,
+            |c| Ok(c.download_range(arg(request)?)?),
+        )
+    }
+}
+
+/// Plans still images and answers their sources and suggested files as JSON
+/// (section 7a). {"playback":<id>,"tiles":[..],"format":"png","dest":..,
+/// "share_safe":false} names the picture each playback tile shows (the
+/// newest one the app answered with nv_tile_decoded); {"download":"<id>",
+/// "camera":{...},"at_ms":..,"exact":true,"format":"jpeg"} names a position
+/// in a finished file. Answers from memory. NV_ERR_UNKNOWN_ID for an unknown
+/// playback, tile, or download; NV_ERR_INVALID_ARGUMENT for invalid JSON or
+/// values, a time outside the file, or a tile that has shown nothing.
+/// Out-buffer rules as nv_recordings_calendar. Added in minor 10.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_still_plan(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_answer(core, out, cap, len, |c| Ok(c.still_plan(arg(request)?)?)) }
 }
 
 /// Pauses or resumes a whole download (camera NULL) or one camera of it
@@ -2285,9 +2348,11 @@ pub unsafe extern "C" fn nv_sound_configure(core: *mut NvCore, json: *const c_ch
 /// optional. Pure computation over the incident and its finished files; no
 /// device traffic. NV_ERR_UNKNOWN_ID for an unknown download;
 /// NV_ERR_INVALID_ARGUMENT for invalid JSON or values or when no camera has
-/// a finished file; NV_ERR_UNSUPPORTED for in_ms, out_ms, or the trim kind
-/// (export, a later minor). Out-buffer rules as nv_recordings_calendar. Added
-/// in minor 8.
+/// a finished file. Minor 10 added the "trim" kind
+/// ({"kind":"trim","download":"<id>","cameras":[...],"in_ms":..,"out_ms":..,
+/// "cut":"keyframe"|"exact"}), in_ms and out_ms on follow and grid, and dest
+/// and share_safe on every kind (section 7a); a range download takes trim
+/// only. Out-buffer rules as nv_recordings_calendar. Added in minor 8.
 ///
 /// # Safety
 /// `core` is a live handle; `request` is a NUL-terminated string; `out` is

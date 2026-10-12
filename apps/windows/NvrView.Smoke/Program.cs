@@ -1199,10 +1199,37 @@ internal sealed class Smoke(Options options)
             }
         }
         if (StatusOf(() => sound.EditCompute("""{"kind":"follow","download":"nope"}""")) != NvStatus.UnknownId ||
-            StatusOf(() => sound.EditCompute($$"""{"kind":"follow","download":"{{download}}","in_ms":1}""")) != NvStatus.Unsupported ||
+            StatusOf(() => sound.EditCompute($$"""{"kind":"trim","download":"{{download}}","in_ms":5,"out_ms":5}""")) != NvStatus.InvalidArgument ||
             StatusOf(() => sound.EditCompute("{")) != NvStatus.InvalidArgument)
         {
             Problem("nv_edit_compute status codes");
+        }
+
+        // Export (minor 10): a trim over the finished files, a range download
+        // that is answered again as existing, and the refusals.
+        IExport export = core;
+        using (JsonDocument trim = JsonDocument.Parse(sound.EditCompute(
+            $$"""{"kind":"trim","download":"{{download}}","in_ms":0,"out_ms":4000000000000,"share_safe":true}""")))
+        {
+            JsonElement outputs = trim.RootElement.GetProperty("outputs");
+            if (trim.RootElement.GetProperty("kind").GetString() != "trim" || outputs.GetArrayLength() == 0 ||
+                outputs[0].GetProperty("name").GetString() != "Camera A")
+            {
+                Problem("nv_edit_compute trim");
+            }
+        }
+        string range = $$"""{"start":{{day}},"end":{{day + 60}},"cameras":[{"camera":{{camera}},"tier":"sub"}],"share_safe":true}""";
+        string first = export.DownloadRange(range);
+        if (!first.Contains("\"existing\":false", StringComparison.Ordinal) ||
+            !export.DownloadRange(range).Contains("\"existing\":true", StringComparison.Ordinal))
+        {
+            Problem($"nv_download_range: {first}");
+        }
+        if (StatusOf(() => export.DownloadRange("""{"start":5,"end":4,"cameras":[]}""")) != NvStatus.InvalidArgument ||
+            StatusOf(() => export.StillPlan("""{"playback":987654321}""")) != NvStatus.UnknownId ||
+            StatusOf(() => export.StillPlan("{")) != NvStatus.InvalidArgument)
+        {
+            Problem("export status codes");
         }
 
         sound.SoundWatch(camera, true);
