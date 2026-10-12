@@ -79,6 +79,19 @@ internal static class RecordingsTests
             T.Equal(new RecordingsEvent.DownloadRemoved("a", true, "/d/x"), Parse("""{"type":"download_removed","download":"a","trash":true,"folder":"/d/x"}"""));
         });
 
+        T.Run("recordings: sound events and loudness bytes", () =>
+        {
+            T.Equal(new RecordingsEvent.SoundWatch(cam, "refused", "no_audio"),
+                Parse($$"""{"type":"sound_watch","camera":{"device":"{{Device}}","channel":3,"lens":0},"state":"refused","reason":"no_audio"}"""));
+            T.Equal(new RecordingsEvent.SoundAnalyze(4, cam, 1791590400, "done", null, 86000, 3),
+                Parse($$"""{"type":"sound_analyze","request":4,"camera":{"device":"{{Device}}","channel":3,"lens":0},"day":1791590400,"state":"done","seconds":86000,"labels":3}"""));
+            T.Check(Parse("""{"type":"sound_analyze","state":"done"}""") is null);
+            T.Check(Parse("""{"type":"sound_watch","state":"watching"}""") is null);
+            T.Check(TileLoudness.Decibels(0) is null);
+            T.Equal(-127, TileLoudness.Decibels(1));
+            T.Equal(0, TileLoudness.Decibels(128));
+        });
+
         T.Run("recordings: device_info flags", () =>
         {
             T.Equal(new RecordingSupport(true, true, true, true), RecordingSupport.FromDeviceInfo(Encoding.UTF8.GetBytes(
@@ -178,6 +191,48 @@ internal static class RecordingsTests
             T.Equal("queued,running,done", string.Join(",", events.OfType<RecordingsEvent.Download>().Select(d => d.Progress.State)));
             T.Check(events.OfType<RecordingsEvent.Download>().Last().Progress.Cameras[0].Output is not null);
             T.Equal(id, T.NotNull(DownloadProgress.ParseList(rec.DownloadsGet()))[0].Download);
+            // Edit lists over the finished download, and sound (minor 8).
+            IEditSound sound = fake;
+            T.Equal(NvStatus.UnknownId, StatusOf(() => sound.EditCompute("""{"kind":"follow","download":"nope"}""")));
+            T.Equal(NvStatus.Unsupported, StatusOf(() => sound.EditCompute($$"""{"kind":"trim","download":"{{id}}"}""")));
+            T.Equal(NvStatus.Unsupported, StatusOf(() => sound.EditCompute($$"""{"kind":"grid","download":"{{id}}","in_ms":1}""")));
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute($$"""{"kind":"nonsense","download":"{{id}}"}""")));
+            using (JsonDocument follow = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"follow","download":"{{id}}"}""")))
+            {
+                T.Equal("follow", follow.RootElement.GetProperty("kind").GetString());
+                T.Equal(1, follow.RootElement.GetProperty("segments").GetArrayLength());
+            }
+            using (JsonDocument grid = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"grid","download":"{{id}}","layout":"4up"}""")))
+            {
+                T.Equal(1, grid.RootElement.GetProperty("cells").GetArrayLength());
+            }
+
+            string cam1 = $$"""{"device":"{{Device}}","channel":1,"lens":0}""";
+            events.Clear();
+            sound.SoundWatch(cam1, true);
+            sound.SoundWatch(cam1, true);
+            sound.SoundWatch(cam1, false);
+            T.Equal("watching,stopped", string.Join(",", events.OfType<RecordingsEvent.SoundWatch>().Select(w => w.State)));
+            using (JsonDocument lanes = JsonDocument.Parse(sound.RecordingsLoudness($$"""{"start":{{day}},"end":{{day + 119}},"bucket_s":60}""")))
+            {
+                T.Equal(0, lanes.RootElement.GetProperty("lanes").GetArrayLength());
+            }
+            T.Equal(NvStatus.Limit, StatusOf(() => sound.RecordingsLoudness("""{"start":0,"end":200000,"bucket_s":1}""")));
+            sound.SoundLabelsPut($$"""{"camera":{{cam1}},"analyzer":"soundanalysis-v1","start":{{day}},"end":{{day + 600}},"labels":[{"kind":"dog_bark","start":{{day + 100}},"end":{{day + 105}}}]}""");
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.SoundLabelsPut(
+                $$"""{"camera":{{cam1}},"analyzer":"pattern-v1","start":{{day}},"end":{{day + 600}},"labels":[]}""")));
+            ulong request;
+            using (JsonDocument analysis = JsonDocument.Parse(sound.SoundAnalyzeDay($$"""{"camera":{{cam1}},"day":{{day}}}""")))
+            {
+                T.Equal("queued", analysis.RootElement.GetProperty("state").GetString());
+                request = analysis.RootElement.GetProperty("request").GetUInt64();
+            }
+            events.Clear();
+            fake.CompleteRecordingWork();
+            T.Equal("running,done", string.Join(",", events.OfType<RecordingsEvent.SoundAnalyze>().Where(a => a.Request == (long)request).Select(a => a.State)));
+            T.Equal(NvStatus.UnknownId, StatusOf(() => sound.SoundAnalyzeCancel(request)));
+            T.Equal(NvStatus.UnknownId, StatusOf(() => sound.GetTileLoudness(987654321, 8)));
+
             string locked = rec.IncidentLock(incident, true);
             T.Check(locked.Contains("\"download_status\":\"existing\"", StringComparison.Ordinal) && locked.Contains(id, StringComparison.Ordinal));
             T.Equal(NvStatus.UnknownId, StatusOf(() => rec.DownloadPause("no-such-download", null, true)));

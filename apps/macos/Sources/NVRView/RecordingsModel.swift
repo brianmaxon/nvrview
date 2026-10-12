@@ -613,6 +613,8 @@ final class RecordingsModel {
                     }
                 }
             }
+        case .soundWatch, .soundAnalyze:
+            break  // the loudness lanes (M3) read the envelope on demand
         case .downloadRemoved(let id, let trash, let folder):
             if let folder = board.removed(id, trash: trash, folder: folder) {
                 trasher(URL(fileURLWithPath: folder))

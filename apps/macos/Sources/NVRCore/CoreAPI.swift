@@ -196,6 +196,29 @@ public protocol CoreAPI: Sendable {
     /// `nv_sound_configure`: live sound settings (JSON).
     func soundConfigure(json: String) throws(CoreStatus)
 
+    // MARK: Edit lists and sound (minor 8; docs/FFI.md "Edit lists and sound (minor 8)")
+    //
+    // JSON in and out as in docs/FFI-RECORDINGS.md, sections 7 and 2a. Not
+    // from inside a callback, except nothing here is allowed there.
+
+    /// `nv_edit_compute`: the edit list (follow cut or grid) of a finished
+    /// download. `in_ms`, `out_ms`, and the trim kind are `.unsupported`
+    /// until export.
+    func editCompute(json: String) throws(CoreStatus) -> String
+    /// `nv_sound_watch`: keeps a camera's sub-stream open for sound only.
+    func soundWatch(camera: String, enabled: Bool) throws(CoreStatus)
+    /// `nv_recordings_loudness`: loudness lanes for the timeline.
+    func recordingsLoudness(query: String) throws(CoreStatus) -> String
+    /// `nv_sound_labels_put`: labels the app's classifier produced.
+    func soundLabelsPut(json: String) throws(CoreStatus)
+    /// `nv_sound_analyze_day`: asks for a recorded day's sound to be
+    /// analyzed (`{"request":N,"state":"queued"}`; `sound_analyze` events follow).
+    func soundAnalyzeDay(json: String) throws(CoreStatus) -> String
+    /// `nv_sound_analyze_cancel`.
+    func soundAnalyzeCancel(_ request: UInt64) throws(CoreStatus)
+    /// `nv_tile_loudness`: a live tile's newest `capacity` seconds of loudness.
+    func tileLoudness(_ tile: UInt64, capacity: Int) throws(CoreStatus) -> TileLoudness
+
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //
     // A playback's tiles deliver actions to the sink like live tiles and are

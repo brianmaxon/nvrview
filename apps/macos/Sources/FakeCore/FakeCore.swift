@@ -740,6 +740,19 @@ public final class FakeCore: CoreAPI {
         return AudioLevel(peak: max(peak, 0.02), rms: max(peak, 0.02) * 0.6)
     }
 
+    /// ABI 3 minor 8 `nv_tile_loudness`: a made-up second-by-second history
+    /// (at most 10 s) for a tile with audio, empty for one without; the
+    /// `.unknownID` of a tile that is not known.
+    public func tileLoudness(_ tile: UInt64, capacity: Int) throws(CoreStatus) -> TileLoudness {
+        if isFreed { throw .closed }
+        guard let known = world.withLock({ $0.tiles[tile] }) else { throw .unknownID }
+        guard known.hasAudio, capacity > 0 else { return TileLoudness() }
+        let n = min(capacity, 10)
+        let now = Int64(Date().timeIntervalSince1970)
+        let level = (0..<n).map { UInt8(88 + ($0 % 5) * 3) }
+        return TileLoudness(startSeconds: now - Int64(n), peak: level, rms: level.map { $0 - 10 })
+    }
+
     /// Fixes the level `tileAudioLevel` reports for a tile with audio.
     public func setAudioLevel(tile: UInt64, _ level: AudioLevel?) {
         levels.withLock { $0[tile] = level }

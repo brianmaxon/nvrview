@@ -45,6 +45,7 @@
 
 mod config;
 mod downloads;
+mod edit;
 mod locks;
 mod query;
 mod sound;

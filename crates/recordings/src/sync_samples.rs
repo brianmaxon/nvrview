@@ -73,6 +73,44 @@ pub struct SyncSamples {
     pub keyframes_ms: Vec<u64>,
     /// Number of video samples.
     pub samples: u64,
+    /// The first sample entry's codec and picture size (`stsd`), when the
+    /// file has a sample description this reader knows.
+    pub video: Option<VideoInfo>,
+}
+
+/// The codec and picture size of a file's video track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoInfo {
+    /// `h264` or `h265`.
+    pub codec: &'static str,
+    /// Picture width.
+    pub width: u32,
+    /// Picture height.
+    pub height: u32,
+}
+
+/// Reads the first video sample entry of an `stsd` box: its type names the
+/// codec, and its visual fields hold the size.
+fn video_info(stsd: &[u8]) -> Option<VideoInfo> {
+    // Full-box header (4), entry count (4), then the first entry: size (4),
+    // type (4), 6 reserved + data reference index (8), 16 bytes of
+    // predefined and reserved, width (2), height (2).
+    let entry = stsd.get(8..)?;
+    let codec = match entry.get(4..8)? {
+        b"avc1" | b"avc3" => "h264",
+        b"hvc1" | b"hev1" => "h265",
+        _ => return None,
+    };
+    let at = |o: usize| {
+        entry
+            .get(o..o + 2)
+            .map(|b| u32::from(b[0]) << 8 | u32::from(b[1]))
+    };
+    Some(VideoInfo {
+        codec,
+        width: at(32)?,
+        height: at(34)?,
+    })
 }
 
 /// Reads the keyframes of the MP4 at `path`.
@@ -336,6 +374,7 @@ fn sample_tables(
         duration_ms: ms(i128::from(total_ticks)),
         keyframes_ms,
         samples,
+        video: find(stbl, b"stsd").and_then(video_info),
     })
 }
 
@@ -441,6 +480,22 @@ mod tests {
         // Sample 11 starts after ten 100 ms samples; 15 after four 50 ms more.
         assert_eq!(s.keyframes_ms, vec![0, 1000, 1200]);
         assert_eq!(s.duration_ms, 1500);
+    }
+
+    #[test]
+    fn reads_codec_and_size_from_the_sample_description() {
+        let mut entry = vec![0u8; 78];
+        entry[4..8].copy_from_slice(b"hvc1");
+        entry[32..34].copy_from_slice(&2560u16.to_be_bytes());
+        entry[34..36].copy_from_slice(&1440u16.to_be_bytes());
+        let mut stsd = u32s(&[0, 1]);
+        stsd.extend(entry);
+        let v = video_info(&stsd).unwrap();
+        assert_eq!((v.codec, v.width, v.height), ("h265", 2560, 1440));
+        stsd[12..16].copy_from_slice(b"mp4v");
+        assert_eq!(video_info(&stsd), None);
+        assert_eq!(video_info(&[0; 10]), None);
+        assert_eq!(read(mp4(&base())).unwrap().video, None);
     }
 
     #[test]
@@ -559,5 +614,8 @@ mod tests {
         assert!(!expected.is_empty());
         assert_eq!(s.keyframes_ms, expected);
         assert_eq!(s.duration_ms, frames.len() as u64 * 40);
+        let v = s.video.expect("the finalized file names its codec");
+        assert_eq!(v.codec, "h264");
+        assert!(v.width > 0 && v.height > 0);
     }
 }

@@ -25,9 +25,10 @@
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
  * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
- * calendar alone) and the recordings_month_failed event.
+ * calendar alone) and the recordings_month_failed event. Minor 8: edit
+ * lists (section 7) and the rest of sound (section 2a).
  */
-#define NV_ABI_MINOR 7
+#define NV_ABI_MINOR 8
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -1173,6 +1174,128 @@ enum NvStatus nv_downloads_get(struct NvCore *core, char *out, size_t cap, size_
  * `core` is a live handle; `json` is a NUL-terminated string.
  */
 enum NvStatus nv_sound_configure(struct NvCore *core, const char *json);
+
+/**
+ * Computes an edit list for a finished download, as JSON (section 7):
+ * {"kind":"follow","download":"<id>","min_hold_ms":2000,"pre_roll_ms":1000,
+ *  "cut":"keyframe","priority":[{...}],"labels":{"name":true,"time":true}} or
+ * {"kind":"grid","download":"<id>","layout":"4up","canvas":{...},"fit":"fit",
+ *  "cameras":[...],"offsets_ms":[...]}; every member but kind and download
+ * optional. Pure computation over the incident and its finished files; no
+ * device traffic. NV_ERR_UNKNOWN_ID for an unknown download;
+ * NV_ERR_INVALID_ARGUMENT for invalid JSON or values or when no camera has
+ * a finished file; NV_ERR_UNSUPPORTED for in_ms, out_ms, or the trim kind
+ * (export, a later minor). Out-buffer rules as nv_recordings_calendar. Added
+ * in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_edit_compute(struct NvCore *core,
+                              const char *request,
+                              char *out,
+                              size_t cap,
+                              size_t *len);
+
+/**
+ * Keeps a camera's sub-stream open for sound analysis while `enabled`, with
+ * no tile and no video decoding: `camera` is {"device","channel","lens"}.
+ * Standing by while a tile shows the channel. `sound_watch` events report
+ * watching, stopped, or refused (reason no_audio, device_closed,
+ * sound_off). At most 64 cameras; the core does not store the list. The
+ * device need not be added yet. NV_ERR_NOT_CONFIGURED before
+ * nv_recordings_configure. Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `camera` is a NUL-terminated string.
+ */
+enum NvStatus nv_sound_watch(struct NvCore *core, const char *camera, bool enabled);
+
+/**
+ * Loudness lanes for the timeline: {"start":S,"end":E,"bucket_s":60,
+ * "cameras":[{"device","channel"}]} (bucket_s 1 to 3600, default 60;
+ * cameras left out means every camera with loudness) answers {"revision":N,
+ * "lanes":[{"camera","bucket_s","start","peak_db":[...],"rms_db":[...]}]},
+ * whole dBFS or null where no audio was analyzed. Answers from memory;
+ * NV_ERR_LIMIT beyond 100000 buckets per lane. Out-buffer rules as
+ * nv_recordings_calendar. Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `query` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_recordings_loudness(struct NvCore *core,
+                                     const char *query,
+                                     char *out,
+                                     size_t cap,
+                                     size_t *len);
+
+/**
+ * Labels the app's classifier produced for one camera and a time range:
+ * {"camera":{...},"analyzer":"soundanalysis-v1","start":S,"end":E,
+ *  "labels":[{"kind","start","end","confidence","label"}]}. The core merges
+ * them into the index as events of source local_audio, replacing earlier
+ * labels of the same analyzer in the range. The analyzer pattern-v1 is the
+ * core's. NV_ERR_INVALID_ARGUMENT for invalid values or a device that is
+ * not enabled for recordings; NV_ERR_LIMIT beyond 20000 labels or 31 days.
+ * Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string.
+ */
+enum NvStatus nv_sound_labels_put(struct NvCore *core, const char *json);
+
+/**
+ * Asks for the sound of one camera's recorded day to be analyzed:
+ * {"camera":{...},"day":S} (any second of the day, device-local). Answers
+ * {"request":N,"state":"queued"}, or the existing request for the same
+ * camera-day; sound_analyze events follow (running, done with seconds and
+ * labels, failed with a reason, canceled). At most 32 requests, one running
+ * per device. Asking again for a queued camera-day returns its request, so
+ * a too-small buffer can be retried. Out-buffer rules as
+ * nv_recordings_calendar. Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string; `out` is null
+ * or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_sound_analyze_day(struct NvCore *core,
+                                   const char *json,
+                                   char *out,
+                                   size_t cap,
+                                   size_t *len);
+
+/**
+ * Cancels an analysis request that is queued or running (a running one
+ * stops at its next chunk and stores nothing). NV_ERR_UNKNOWN_ID for an
+ * unknown or finished request. Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_sound_analyze_cancel(struct NvCore *core, uint64_t request);
+
+/**
+ * A live tile's recent loudness, oldest first, one byte per second and
+ * value (0: no audio analyzed; 1..128: -127..0 dBFS, dBFS = byte - 128).
+ * Writes at most `cap` values to each of `peak` and `rms` (the newest when
+ * more are kept), the Unix second of the first to `*start_s`, and the count
+ * to `*len` (0 before any audio). NV_ERR_UNKNOWN_ID for an unknown tile;
+ * `peak` and `rms` may be NULL with `cap` 0 to learn only the count. Any
+ * thread outside callbacks. Added in minor 8.
+ *
+ * # Safety
+ * `core` is a live handle; `peak` and `rms` are null or valid for writing
+ * `cap` bytes each; `start_s` and `len` are valid for one write each.
+ */
+enum NvStatus nv_tile_loudness(struct NvCore *core,
+                               uint64_t tile,
+                               uint8_t *peak,
+                               uint8_t *rms,
+                               size_t cap,
+                               int64_t *start_s,
+                               size_t *len);
 
 /**
  * Opens a playback (docs/FFI-RECORDINGS.md, section 6), paused at

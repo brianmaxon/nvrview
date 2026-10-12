@@ -18,7 +18,7 @@ using NvrView.Interop;
 namespace NvrView.Shell;
 
 /// <summary>A made-up recording store answering <see cref="IRecordings"/>; events go to the sink as JSON.</summary>
-public sealed class FakeRecordings(Action<string> sink) : IRecordings
+public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, IEditSound
 {
     private const long Day = 86_400;
     private readonly object _gate = new();
@@ -998,6 +998,7 @@ public sealed class FakeRecordings(Action<string> sink) : IRecordings
                 d.State = "done";
                 EmitDownload(d);
             }
+            CompleteSoundAnalyses();
         }
     }
 }

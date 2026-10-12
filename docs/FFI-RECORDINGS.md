@@ -3,8 +3,10 @@
 > **Sections 1 to 5, 8, 9, and `nv_sound_configure` are implemented**
 > (slice F1: FFI.md, "Recordings (minor 5)", and the header), and so is
 > **section 6, recorded playback, as minor 6** (slice F2: FFI.md, "Recorded
-> playback (minor 6)"; without `nv_playback_step`); the rest is still a
-> proposal (edit lists and sound F3, export F4). This
+> playback (minor 6)"; without `nv_playback_step`), and **sections 7 and 2a
+> as minor 8** (slice F3: FFI.md, "Edit lists and sound (minor 8)"; without
+> `in_ms`/`out_ms` and the `trim` kind); the rest is still a
+> proposal (export F4). This
 > was the contract for review before the core and the apps were built in
 > parallel, as [FFI-ABI3.md](FFI-ABI3.md) was for M3. Everything in
 > [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h) still holds; the additions
@@ -321,7 +323,10 @@ counting allocator), so it needs no queue or thread of its own.
   the "always listen" list and `nv_sound_labels_put` exist on `Core`
   (`sound_watch`, `sound_labels_put`), and recorded days can be analyzed on
   request; see "Clarifications from the implementation (C12)" at the end.
-- **Not done yet**: the C functions below.
+- **C functions**: `nv_sound_watch`, `nv_recordings_loudness`,
+  `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
+  and `nv_tile_loudness` are minor 8 (slice F3; see "Clarifications from the
+  implementation (F3)").
 
 Why a pull API for the live envelope and not a `sound_level` event: the
 app needs the envelope only while it draws a lane (a tile's level meter
@@ -1941,3 +1946,64 @@ What wrapping section 6 in C functions (MILESTONE-P.md, F2) settled.
    `nv_playback_close` wait (bounded, about 10 s) for the engine; the
    others return at once, and `NV_ERR_LIMIT` means 64 requests already wait
    for that playback's engine.
+
+## Clarifications from the implementation (F3, 2026-10-12)
+
+What wrapping sections 7 and 2a in C functions (MILESTONE-P.md, F3) settled.
+The Rust calls are `Core::edit_compute` (new, over `recordings::edl`) and
+those of the C12 clarifications.
+
+1. **Minor 8.** F1, F2, and the months addition took minors 5, 6, and 7, so
+   `nv_edit_compute`, `nv_sound_watch`, `nv_recordings_loudness`,
+   `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`,
+   `nv_tile_loudness`, and the `sound_watch` and `sound_analyze` events are
+   minor 8 (FFI.md, "Versioning"). Section 13's list is to be read without
+   them. No declaration of an earlier minor changed.
+2. **`nv_edit_compute` and the trim.** Only the `follow` and `grid` kinds
+   exist. `in_ms`, `out_ms` (section 7's last bullet) and the `trim` kind are
+   F4's: C14 has not put them into the planners (`edl` has no trim
+   parameters), so a request carrying either answers
+   `NV_ERR_UNSUPPORTED` rather than ignoring them. `dest` and `share_safe`
+   are ignored until F4. The `kind` member and the download's ID are
+   required; every other member is the planner's request type
+   (`FollowRequest`, `GridRequest`: unknown members are ignored).
+3. **What the plan is computed from.** The download's incident is the
+   incident with the download's key as it is now (so renames and camera
+   changes since the download apply), and the sources are the cameras of
+   the download whose job is `done` and whose file the MP4 reader can open,
+   at most 16. Each source's codec (`h264` or `h265`), width, and height are
+   read from the file's sample description, and its keyframes from its sync
+   samples (`recordings::sync_samples`, which now also reports the sample
+   description). A file whose description is not `avc1`, `avc3`, `hvc1`, or
+   `hev1` is left out. **Time seam (B7):** `file_start_ms` is still the
+   download range's start (`edl::fallback_file_start_ms`), so cuts are as
+   accurate as that is until the first picture's keyframe-clock time
+   replaces it. The plan's `offset_ms` per source is 0 for `follow`; a grid
+   takes the request's `offsets_ms`.
+4. **Errors.** `NV_ERR_UNKNOWN_ID`: no such download, or its incident is gone.
+   `NV_ERR_INVALID_ARGUMENT`: invalid JSON or values, an unknown `kind`, a
+   download that has not finished, no source with a readable file, a canvas
+   beyond 16384, an incident without events, or no event inside any file's
+   footage (the planner's `EdlError`s; the answer does not say which).
+   `NV_ERR_NOT_CONFIGURED`: no `downloads_dir`.
+5. **`nv_sound_labels_put` answers nothing in C.** The Rust call returns how
+   many days of the index changed (C12, item 6); the C function returns only
+   the status, as section 2a declares it.
+6. **`nv_sound_analyze_day`** changes state like the downloads' calls, but
+   asking again for the same camera-day returns the existing request, so a
+   binding that lost an answer to a too-small buffer may call again (its
+   `state` is then `queued` or `running`, whichever it is by then, so a size
+   probe with a NULL buffer is best avoided: pass room for the short answer
+   at once, as for the other calls that change state). With no
+   audio source for recorded days (C10 and the downloads provide it later)
+   every request ends `failed` with `no_source`; the events and the cancel
+   work as C12 describes.
+7. **`nv_tile_loudness`** is as proposed in section 2a: `cap` 0 with NULL
+   arrays reads only the count; `cap` above 0 needs both arrays; `start_s` and
+   `len` are required. A tile that is not known is `NV_ERR_UNKNOWN_ID`; a
+   tile without audio so far is `NV_OK` with `*len` 0. When more seconds are
+   kept than `cap`, the newest `cap` are written and `*start_s` is the
+   Unix second of the first of those.
+8. **Events** are the C12 ones; `sound_watch` and `sound_analyze` come
+   through `on_event` like the other recordings events, and carry the
+   camera as `{"device","channel","lens"}`.
