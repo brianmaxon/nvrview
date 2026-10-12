@@ -58,8 +58,8 @@ extension StageView {
         var region = whole
         if kind == .zoomedArea, let leaf = frames.leaves.first(where: { $0.path == path }) {
             region = PictureRegion.visible(
-                layoutSize: layout, offset: offset, tile: leaf.rect.size, fill: fills(camera),
-                zoom: state.views.zoom(camera)) ?? whole
+                layoutSize: layout, offset: offset, tile: leaf.rect.size, fill: fills(atTile: path),
+                zoom: zoom(atTile: path)) ?? whole
         }
         return PictureRender(
             picture: picture, color: color, source: region.rect, width: region.width, height: region.height)
