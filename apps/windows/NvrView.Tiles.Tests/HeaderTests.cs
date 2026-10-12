@@ -48,7 +48,7 @@ internal static class HeaderTests
     private static void AppWide()
     {
         foreach (string t in new[] { "Settings…", "Keyboard shortcuts", "Full screen", "Leave full screen", "Fill tiles", "Hide diagnostics",
-                     "Show sidebar", "New window", "Indicator corner", "Edit layout", "Done editing", "Save as layout…", "New layout…",
+                     "Show sidebar", "New window", "Recordings", "Indicator corner", "Edit layout", "Done editing", "Save as layout…", "New layout…",
                      "Check for updates…", "Update to 1.2.3…", "Switch to 1.2.3…", "Find devices" })
         {
             Check.True(HeaderActions.IsAppWideTitle(t), $"\"{t}\" is app-wide");

@@ -1089,15 +1089,23 @@ example to keep it beside other work. Both apps follow these rules.
 The NVR's own recordings, found by what happened and played back
 ([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
-(milestone P, M1 and M2); the Windows app follows (W1, W2). The sound lanes
+(milestone P, M1 and M2) and on Windows (W1, W2). The sound lanes
 (M3) and exports (M4) come later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
   brings it forward. It is a window of its own, not a sidebar section:
   live view stays as it is while recordings are searched and played, and
   the window can sit on another screen. The menu item is disabled with a
-  core that has no recordings. Proposed for the Windows app (W1): the
-  right-click menu and Ctrl+Alt+R.
+  core that has no recordings. On Windows it is **Ctrl+Alt+R** or
+  **Recordings** in the header's "…" menu (the tile menu holds no app-wide
+  items); the window is one instance, opening it again brings it forward,
+  and it hosts its own render thread and swap chain for the player (a
+  panel never moves between windows), so a GPU device loss recovers it with
+  the other windows. On Windows the pane buttons are the
+  hamburger and the details icons, Ctrl-click adds an incident to the
+  selection, Show in Explorer and the Recycle Bin (through `IFileOperation`)
+  stand for Finder and the Trash, and the timeline zooms with Ctrl and the
+  wheel.
 - **Layout:** seeing the clip comes first, so the **player** is the middle
   of the window, with the **transport** under it and the day's **timeline
   lanes** under that. On the left, collapsible, the month's calendar, the
@@ -1284,7 +1292,7 @@ menu bar (docs/PARITY.md): this is a Windows-only part.
   tiles (a toggle, per window, not kept), and Full screen (F).
 - **Right.** A spot reserved for a future "N recording" indicator (hidden until
   recording is reported), Settings (Ctrl+,), and a "…" menu with the rest:
-  New window (Ctrl+N), Show or Hide sidebar (S), Indicator corner, Show or
+  New window (Ctrl+N), Recordings (Ctrl+Alt+R), Show or Hide sidebar (S), Indicator corner, Show or
   Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
 - **Full screen.** The header is hidden and slides over the stage from the top
   edge like the sidebar does from the left: resting the pointer in a thin strip

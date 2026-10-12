@@ -81,29 +81,14 @@ fisheye-ptz-drag            macos    gap: the Windows self-test does not simulat
 header-overflow-menu        macos    gap: the Windows tile header does not use TileHeaderLayout yet, so no "…" menu or model-built tile menu
 header-priority-narrow      macos    gap: the Windows tile header does not use TileHeaderLayout yet (the model and its vectors are tested)
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
-recordings-animal-filter    macos    gap: the Windows recordings screens are not built yet (MILESTONE-P.md W1); the animal filter groups every animal kind
-recordings-calendar-lanes   macos    gap: the Windows recordings screens are not built yet (W1): calendar days and timeline lanes from the index
-recordings-downloads        macos    gap: the Windows recordings screens are not built yet (W1): downloads panel, pause, resume, forget, Recycle Bin
-recordings-edits            macos    gap: the Windows recordings screens are not built yet (W1): rename, merge, split, add and remove a camera, revert
-recordings-enable           macos    gap: the Windows recordings screens are not built yet (W1): choosing the cameras to search
-recordings-groups           macos    gap: the Windows recordings screens are not built yet (W1): camera groups join incidents
-recordings-hold-today       macos    gap: the Windows recordings screens are not built yet (W1): a window holds today under its own hold
-recordings-lock             macos    gap: the Windows recordings screens are not built yet (W1): lock queues the download and says so
-recordings-navigate-day     macos    gap: the Windows recordings screens are not built yet (W1): another day is asked for, not held
-recordings-real-core        macos    gap: the Windows recordings screens are not built yet (W1); the macOS self-test also runs them on the real core against tools/mock-nvr
-recordings-thumbnail        macos    gap: the Windows recordings screens are not built yet (W1): keyframe decoded with Media Foundation and WIC, put back
-recordings-window-close     macos    gap: the Windows recordings screens are not built yet (W1): closing the window releases its hold
+recordings-animal-filter     macos    gap: the Windows fake store has no animal events; the filter rule itself is unit-tested (RecordingsBrowseTests, the same vectors)
+recordings-edits             macos    gap: the Windows fake store (FakeRecordings) does not model merge, split, or camera edits (rename and revert work); the edits are one call each on the core
+recordings-groups            macos    gap: the Windows fake store (FakeRecordings) does not model camera groups joining events; groups are saved and read back in the unit tests
+recordings-real-core         macos    gap: the Windows recordings steps run on the fakes only; the real core with tools/mock-nvr is not driven from the Windows self-test yet
+recordings-thumbnail         macos    gap: the Windows keyframe-to-JPEG decoder (Media Foundation and WIC) is not built yet; the pipeline around it (ask, decode callback, put back) is unit-tested
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
 sidebar-system-peek         macos    n/a: guards against AppKit's own peek of a collapsed NSSplitView sidebar; the Windows sidebar is the app's own layout
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
-playback-close              macos    gap: Windows Recordings window not built (W1/W2)
-playback-grid               macos    gap: Windows Recordings window not built (W1/W2)
-playback-open               macos    gap: Windows Recordings window not built (W1/W2)
-playback-real-core          macos    gap: Windows Recordings window not built (W1/W2)
-playback-remove-camera      macos    gap: Windows Recordings window not built (W1/W2)
-playback-scrub              macos    gap: Windows Recordings window not built (W1/W2)
-playback-split-here         macos    gap: Windows Recordings window not built (W1/W2)
-playback-transport          macos    gap: Windows Recordings window not built (W1/W2)
-recordings-calendar-month   macos    gap: Windows Recordings window not built (W1/W2)
-recordings-camera-names     macos    gap: Windows Recordings window not built (W1/W2)
-recordings-layout           macos    gap: Windows Recordings window not built (W1/W2)
+playback-real-core           macos    gap: the Windows playback steps run on the fakes only; a decoded picture from a real playback is not checked on Windows yet
+playback-remove-camera       macos    gap: the Windows fake store (FakeRecordings) does not model camera edits, so Remove from Incident is not driven
+playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested

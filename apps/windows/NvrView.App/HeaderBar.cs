@@ -253,6 +253,7 @@ internal sealed class HeaderBar
     {
         menu.Items.Clear();
         AddAction(menu.Items, HeaderAction.NewWindow);
+        AddAction(menu.Items, HeaderAction.Recordings);
         AddAction(menu.Items, HeaderAction.ToggleSidebar, on: _window.SidebarDocked);
         menu.Items.Add(_window.Stage.IndicatorCornerMenu());
         AddAction(menu.Items, HeaderAction.Diagnostics, on: _window.Stage.Diagnostics);

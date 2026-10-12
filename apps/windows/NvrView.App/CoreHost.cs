@@ -265,6 +265,84 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         }
     }
 
+    /// <summary>Opens a playback with its tiles' decoders made before any action can reach them (docs/FFI-RECORDINGS.md section 12).</summary>
+    public OpenedPlayback OpenPlayback(string json)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_tilesLock)
+            {
+                OpenedPlayback opened = Core.PlaybackOpen(json);
+                foreach (ulong id in opened.Tiles)
+                {
+                    _byId[id] = new VideoTile(Gpu, Core, id, _allowHardware);
+                }
+                return opened;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    /// <summary>Adds a camera to a playback, with its tile's decoder made first.</summary>
+    public ulong AddPlaybackCamera(ulong playback, string json)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_tilesLock)
+            {
+                ulong id = Core.PlaybackAddCamera(playback, json);
+                _byId[id] = new VideoTile(Gpu, Core, id, _allowHardware);
+                return id;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
+    /// <summary>Releases the decoders of playback tiles the core has closed (no action for them runs any more).</summary>
+    public void ReleaseTiles(IEnumerable<ulong> ids)
+    {
+        foreach (ulong id in ids)
+        {
+            VideoTile? video;
+            lock (_tilesLock)
+            {
+                _byId.Remove(id, out video);
+            }
+            if (video is not null)
+            {
+                _gate.EnterReadLock();
+                try
+                {
+                    video.Dispose();
+                }
+                finally
+                {
+                    _gate.ExitReadLock();
+                }
+            }
+        }
+    }
+
+    /// <summary>The decoder and pictures of an open tile, or null.</summary>
+    public VideoTile? VideoOf(ulong id)
+    {
+        lock (_tilesLock)
+        {
+            return _byId.GetValueOrDefault(id);
+        }
+    }
+
+    /// <summary>Gets the recordings and playback events (set once by the app; they arrive on the UI thread).</summary>
+    public RecordingsService? Recordings { get; set; }
+
     /// <summary>Closes a tile (no action for it runs after this) and releases its decoders.</summary>
     public void CloseTile(ulong id)
     {
@@ -368,6 +446,19 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
 
     public override void OnEvent(NvCore core, ReadOnlySpan<byte> json)
     {
+        if (Recordings is { } recordings)
+        {
+            RecordingsEvent? r = RecordingsEvent.Parse(json);
+            PlaybackEvent? p = r is null ? PlaybackEvent.Parse(json) : null;
+            if (r is not null)
+            {
+                _ = _ui.TryEnqueue(() => recordings.Apply(r));
+            }
+            else if (p is not null)
+            {
+                _ = _ui.TryEnqueue(() => recordings.Apply(p));
+            }
+        }
         CoreEvent? e = CoreEvent.Parse(json);
         if (e is null || _sink is not { } sink)
         {
