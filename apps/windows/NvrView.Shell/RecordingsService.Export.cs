@@ -21,10 +21,6 @@ public sealed partial class RecordingsService
 {
     private readonly Dictionary<string, List<Action<DownloadProgress>>> _finishWaiters = [];
 
-    /// <summary>An incident's finished download (the newest), whose files an export is made from.</summary>
-    public DownloadProgress? FinishedDownload(string incidentKey) =>
-        Downloads.LastOrDefault(d => d.Incident == incidentKey && d.State == "done");
-
     /// <summary>The newest finished range download that holds <paramref name="camera"/> for the whole of the span.</summary>
     public DownloadProgress? FinishedRange(RecordingCamera camera, long startMs, long endMs) =>
         Downloads.LastOrDefault(d => d.State == "done" && d.Range is { } r && r.Start * 1000 <= startMs && endMs <= r.End * 1000
