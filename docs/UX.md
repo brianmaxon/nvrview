@@ -833,7 +833,10 @@ user types a password instead of an address. The core does the searching
   resized or redrawn. It slides away about half a second after the pointer
   leaves it; clicking or dragging cameras from it works as usual. S, or a pin
   control in the overlay, docks it again (which resizes the stage as before).
-  The same works in full screen.
+  The same works in full screen. On macOS the system's own peek of a
+  collapsed sidebar (macOS 26 opens it into the window when the pointer rests
+  near the edge, pushing the stage aside) is turned off; the edge reveal
+  takes its place.
 
 ## Windows notes
 

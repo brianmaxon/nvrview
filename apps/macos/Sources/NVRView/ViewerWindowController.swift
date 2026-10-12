@@ -42,7 +42,7 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
     private let editItem = NSToolbarItem.Identifier("edit")
     private let fullScreenItem = NSToolbarItem.Identifier("fullscreen")
     private weak var editButton: NSButton?
-    private let split = NSSplitViewController()
+    private let split = ViewerSplitViewController()
     private var sidebarItem: NSSplitViewItem!
     private var sidebarHost: NSView?
     /// The user's choice for the sidebar, saved with the window. Full
@@ -394,6 +394,26 @@ final class ViewerWindowController: NSWindowController, NSWindowDelegate, StageD
         window?.contentView?.layoutSubtreeIfNeeded()
     }
 
+    /// The split view's arranged views (sidebar, stage) in window
+    /// coordinates, for the self-test to see that nothing moved.
+    var splitFramesForTest: [CGRect] {
+        split.splitView.arrangedSubviews.map { $0.convert($0.bounds, to: nil) }
+    }
+
+    /// Whether AppKit would peek the collapsed sidebar now (nil where AppKit
+    /// has no such question to ask). See `ViewerSplitViewController`.
+    var systemSidebarPeekAllowedForTest: Bool? {
+        ViewerSplitViewController.systemPeekAllowed(split.splitView)
+    }
+
+    /// Rests the pointer, as far as AppKit's own collapsed-sidebar hover is
+    /// concerned, `x` points from the window's leading edge (`inside`), or
+    /// takes it away. Returns false when this AppKit has no such hover.
+    @discardableResult
+    func hoverCollapsedSidebarEdgeForTest(x: CGFloat, inside: Bool) -> Bool {
+        ViewerSplitViewController.hoverCollapsedEdge(split.splitView, x: x, inside: inside)
+    }
+
     /// Applies the saved choice when a window is reopened.
     func restoreSidebar(collapsed: Bool) {
         sidebarCollapsedPreference = collapsed
@@ -654,6 +674,62 @@ final class ViewerWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if onEvent(event) { return }
         super.sendEvent(event)
+    }
+}
+
+/// The viewer window's split view controller (sidebar, stage).
+///
+/// On macOS 26, a split view peeks a collapsed sidebar by itself when the
+/// pointer rests a moment (under a second) 3 to 15 points from the window's
+/// leading edge while the window is key: it uncollapses the sidebar into the
+/// split view, so the stage moves right and narrows. That gesture is our edge
+/// reveal's, whose overlay must never move or resize the stage (docs/UX.md
+/// "Sidebar"), and the two ran together: the overlay over a stage pushed
+/// aside. AppKit's hover only counts in the key window and after the pointer
+/// rests inside that band, so the same gesture did it only some of the time.
+///
+/// AppKit offers no public switch for it (the sidebar behavior turns it on;
+/// spring loading, collapse behavior and the other item settings do not
+/// change it), so this answers the split view's own question "may this
+/// arranged view peek?" with no. An AppKit without that question never asks
+/// it, and the self-test step `sidebar-system-peek` would then show whether
+/// the peek came back some other way.
+@MainActor
+final class ViewerSplitViewController: NSSplitViewController {
+    @objc(_splitView:canProactivePeekArrangedView:)
+    func declineSystemPeek(_ splitView: NSSplitView, canProactivePeekArrangedView view: NSView) -> Bool { false }
+
+    /// AppKit's answer to "can the sidebar peek now?" (nil without one).
+    static func systemPeekAllowed(_ splitView: NSSplitView) -> Bool? {
+        let selector = NSSelectorFromString("_canDoSidebarProactivePeek")
+        guard splitView.responds(to: selector), let imp = splitView.method(for: selector) else { return nil }
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        return unsafeBitCast(imp, to: Getter.self)(splitView, selector)
+    }
+
+    /// Feeds AppKit's collapsed-sidebar hover view at the leading edge an
+    /// enter and a move at `x` points from the edge, or an exit. Its
+    /// tracking area is active only in the key window; the self-test's
+    /// window is never key, so it calls the view directly.
+    static func hoverCollapsedEdge(_ splitView: NSSplitView, x: CGFloat, inside: Bool) -> Bool {
+        guard
+            let hover = splitView.subviews.first(where: {
+                NSStringFromClass(type(of: $0)).contains("CollapsedInteractionsView") && $0.frame.minX <= 0
+            }), let window = splitView.window
+        else { return false }
+        let p = splitView.convert(CGPoint(x: x, y: splitView.bounds.midY), to: nil)
+        guard
+            let event = NSEvent.mouseEvent(
+                with: .mouseMoved, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)
+        else { return false }
+        if inside {
+            hover.mouseEntered(with: event)
+            hover.mouseMoved(with: event)
+        } else {
+            hover.mouseExited(with: event)
+        }
+        return true
     }
 }
 

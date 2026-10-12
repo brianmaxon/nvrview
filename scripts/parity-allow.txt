@@ -67,4 +67,5 @@ inset-drag-restore          macos    gap: Windows call cards cannot be moved yet
 inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
+sidebar-system-peek         macos    n/a: guards against AppKit's own peek of a collapsed NSSplitView sidebar; the Windows sidebar is the app's own layout
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
