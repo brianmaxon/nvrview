@@ -221,6 +221,12 @@ impl Final {
         }
     }
 
+    /// Whether the final event was sent (the operation no longer holds the
+    /// core's update slot).
+    fn is_sent(&self) -> bool {
+        *self.sent.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn canceled(&self) -> bool {
         self.send(event(self.op, self.action, "canceled"))
     }
@@ -261,11 +267,21 @@ impl UpdateHub {
     /// first), [`CoreError::Internal`] if the thread cannot start.
     pub(crate) fn start(&self, request: Request) -> Result<u64, CoreError> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        if running.as_ref().is_some_and(|r| !r.thread.is_finished()) {
+        // The slot is free once the final event went out, even while the
+        // worker thread is still returning: the app may start the next
+        // operation from that event.
+        if running
+            .as_ref()
+            .is_some_and(|r| !r.thread.is_finished() && !r.last.is_sent())
+        {
             return Err(CoreError::Limit);
         }
         if let Some(r) = running.take() {
-            let _ = r.thread.join();
+            // Join only a thread that already ended; one past its final
+            // event is just returning, and needs no waiting for.
+            if r.thread.is_finished() {
+                let _ = r.thread.join();
+            }
         }
         let op = self.next_op.fetch_add(1, Ordering::Relaxed);
         let cancel = Cancel::new();
@@ -294,7 +310,11 @@ impl UpdateHub {
         };
         let thread = std::thread::Builder::new()
             .name("nvrview-update".into())
-            .spawn(move || worker.run(request))
+            .spawn(move || {
+                worker.run(request);
+                #[cfg(test)]
+                tests::exit_hold();
+            })
             .map_err(|_| CoreError::Internal)?;
         info!(op, action, "update operation started");
         *running = Some(Running {
@@ -506,6 +526,14 @@ impl Worker {
 mod tests {
     use super::*;
 
+    /// Held by a test to keep every update worker thread alive after its
+    /// final event.
+    static EXIT_HOLD: Mutex<()> = Mutex::new(());
+
+    pub(super) fn exit_hold() {
+        drop(EXIT_HOLD.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
     fn key() -> String {
         updates::SecretKey::from_seed([3; 32]).public().to_text()
     }
@@ -586,6 +614,46 @@ mod tests {
             .map(|j| serde_json::from_str::<Value>(j).unwrap()["state"].to_string())
             .collect();
         assert_eq!(states, [r#""downloading""#, r#""canceled""#]);
+    }
+
+    /// A new operation is accepted as soon as the previous one's final
+    /// event is out, while its worker thread has not returned yet.
+    #[test]
+    fn slot_is_free_at_the_final_event() {
+        struct Collect(Mutex<std::sync::mpsc::Sender<Value>>);
+        impl crate::Callbacks for Collect {
+            fn on_action(&self, _: u64, _: u32, _: &crate::Action<'_>) {}
+            fn on_event(&self, json: &str) {
+                let _ = self
+                    .0
+                    .lock()
+                    .unwrap()
+                    .send(serde_json::from_str(json).unwrap());
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut thread =
+            crate::events::EventThread::spawn(Arc::new(Collect(Mutex::new(tx)))).unwrap();
+        let hub = UpdateHub::new(thread.sink(), None, HostClock::Host);
+        // No keys: the check fails at once.
+        let request =
+            || parse_request(r#"{"source":"/srv/u","keys":[],"current":"0.3.0"}"#, false).unwrap();
+        let hold = EXIT_HOLD.lock().unwrap();
+        let first = hub.start(request()).unwrap();
+        loop {
+            let e = rx.recv().unwrap();
+            if e["op"] == first && e["state"] != "started" {
+                assert_eq!(e["state"], "failed");
+                break;
+            }
+        }
+        // The first worker is parked past its final event.
+        let second = hub
+            .start(request())
+            .expect("slot free after the final event");
+        assert_ne!(first, second);
+        drop(hold);
+        thread.stop();
     }
 
     #[test]
