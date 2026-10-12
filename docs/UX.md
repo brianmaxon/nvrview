@@ -127,8 +127,8 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture is built on both apps (see "Save picture");
-> recording and PTZ are not built yet: their buttons and menu
+> the keys). Save picture and recording are built on both apps (see "Save
+> picture" and "Recording"); PTZ is not built yet: its buttons and menu
 > items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
@@ -171,11 +171,10 @@ Details settled while building it (macOS; Windows does the same except where
   the title takes what is left from the left edge. Quality, Fisheye View
   and "…" open their menus under the button; the Speaker button still
   listens to several cameras with Option-click.
-- **Not built yet:** Record, the PTZ pad, Presets, Lens, and
-  the long tail's record items are shown in their final places
-  (so the layout and the overflow are the final ones), dimmed, with "coming
-  soon" in the tooltip. A click, the key (R) or the menu item
-  shows "Start Recording is coming soon" (and so on) over the stage for
+- **Not built yet:** the PTZ pad, Presets and Lens are shown in their final
+  places (so the layout and the overflow are the final ones), dimmed, with
+  "coming soon" in the tooltip. A click, the key or the menu item
+  shows "Presets is coming soon" (and so on) over the stage for
   2.5 s and does nothing else. Hiding them behind a flag was rejected: the
   narrow-tile behavior would change again when they land.
 - The alert's Dismiss stays in the alert strip under the title, beside
@@ -253,12 +252,13 @@ overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
 
-> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; P, Shift+P,
-> ⇧⌘P and T work, R says "… is coming soon" until recording lands, and the
-> Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`); P, Shift+P, Ctrl+Shift+P and T work, R and
-> Ctrl+Shift+R say "… is coming soon"; there is no Camera menu (the window's header has no menu bar) and
-> the Alt keys come with PTZ. They act on the selected tile,
+> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist and
+> work; the Option keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
+> Ctrl+Shift+R exist (`TileKeyMap`) and work (Ctrl+Shift+R records the
+> selected tile's call while its call is open, and is R otherwise); there is
+> no Camera menu (the window's header has no menu bar: Stop all recordings
+> and Open recordings folder are in its "…" menu) and the Alt keys come with
+> PTZ. They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -280,9 +280,11 @@ with = or a digit works on every keyboard layout that has those keys.
   As…, Start Recording (Stop Recording while recording), Start
   Conversation, Pan and Tilt…, Presets (a submenu), Recordings (a submenu
   of the running recordings, each with Stop), Stop All Recordings, Open
-  Pictures Folder, Open Recordings Folder. Until recording and PTZ land,
-  Presets and Recordings hold a disabled placeholder, Stop All Recordings
-  is disabled, and the other items say "coming soon". Pan and Tilt… is
+  Pictures Folder, Open Recordings Folder. Recordings lists the running
+  recordings ("Stop Channel 1 (0:42)"), Stop All Recordings is enabled
+  while any runs; until PTZ lands, Presets holds a disabled placeholder
+  and Pan and Tilt… says "coming soon". In a viewer window ⇧⌘R records
+  the selected tile's call while its call is open, and is R otherwise. Pan and Tilt… is
   enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
   so they also work in a call window.
 - **Windows:** the F1 help overlay lists them, the keys are mapped in
@@ -633,7 +635,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Recording
 
-> **Planned** (CAPTURE.md, "Live recording"; not built yet).
+> **Built on both apps** (CAPTURE.md, "Live recording", "Implementation
+> status (M5, W5)").
 
 Recording saves a camera's live stream on this computer as an MP4 (video
 as received, the camera's audio).
@@ -667,6 +670,46 @@ as received, the camera's audio).
 - These are this computer's recordings of what it received, gaps included,
   not the NVR's own recordings (PLAYBACK.md, "Local captures and the NVR's
   recordings").
+
+Details settled while building it (macOS):
+
+- **Settings > Capture > Recordings:** "Save recordings to" (Choose… and
+  Reset), "Record from" (Main stream or Sub-stream), "Stop after" (1 minute
+  to 12 hours) and "or at" (0.1 to 64 GB). "Share-safe names" in Pictures
+  applies to live recordings too. Every change is sent to the core at once
+  and applies to recordings started afterwards.
+- **Record or Stop on a grid tile** stops every recording of that camera
+  (a call recording included) or starts a live one from "Record from";
+  "Record Main Stream" and "Record Sub-stream" are in the "…" and
+  right-click menus while the camera is not recorded.
+- **The pill** sits outside the hover header, so it stays when the header
+  fades: in the corner opposite the corner indicators, except that the top
+  right (where the header's buttons are) becomes the top left. The title
+  starts after it there.
+- **Messages** over the stage of the windows showing the camera (else the
+  active window): a refused start says which limit ("Already recording 4
+  cameras…", "Not enough free disk space to record: at least 2 GB is
+  needed.", "This device already records two main streams…" with a
+  "Record Sub-stream" button that starts the sub-stream instead); an end
+  says why ("Recording saved", "Recording stopped at its 60 minutes
+  limit", "… the disk is almost full", …) with Show in Finder when the
+  file is there. Nothing is said for the recordings a quit stops.
+- **Toolbar:** "● N recording" while any runs; its menu lists them with
+  Stop, then Stop All Recordings and Open Recordings Folder.
+
+Windows does the same with these differences: the pill is placed by
+`RecordingIndicator.PillCorner` (the top left where macOS would use the
+header's top right, and the sound badges keep clear of it), the message
+over the stage is a toast with an optional button ("Show in folder",
+"Record Sub-stream"; it stays 6 s instead of 2.5 s), the window header's
+"● N recording" is a button whose menu lists the recordings with Stop, then
+Stop all recordings and Open recordings folder (both are also in the
+header's "…" menu, Stop all only while one runs), and the settings are in
+Settings > Capture: "Save recordings to" (Choose… and Reset; Videos\nvrview
+by default), "Record from", "Stop a recording after (minutes)", "or when it
+reaches (GB)", below the pictures' settings; the pictures' "Share-safe
+names" applies to recordings too. A given data directory or a test run
+records into its own `Recordings` folder.
 
 ## Pan, tilt, and zoom
 
@@ -1001,7 +1044,9 @@ Details settled while building it (Windows):
 
 ### Recording calls
 
-> **Planned** (CAPTURE.md, "Recording calls"; not built yet).
+> **Built on both apps** (CAPTURE.md, "Recording calls", "Implementation
+> status (M5, W5)"), except the per-doorbell Default, Always, Never: "Record
+> calls" is one setting for every doorbell.
 
 - **Setting:** Settings > Alerts > Doorbell calls, **"Record calls"**, off
   by default, and per doorbell Default, Always, or Never. Turning it on the
@@ -1113,8 +1158,9 @@ example to keep it beside other work. Both apps follow these rules.
     Call, Save Picture with ⇧⌘R and ⇧⌘P), with no layout items; focus,
     split and dropping a camera do nothing. The tile asks for the main
     stream while its picture, zoom included, is drawn wider than the
-    sub-stream's (`CallWindowQuality`). Save Picture and Record Call say
-    "coming soon" until capture lands; no recording pill yet.
+    sub-stream's (`CallWindowQuality`). Record Call (the header button, the
+    menus, ⇧⌘R) starts and stops the call recording, and the call bar shows
+    "● Recording 0:42" before its text while it runs.
 
 - **Windows:** the call window is a WinUI window of its own with its own
   swap chain and renderer (a swap chain is never moved between windows).
@@ -1146,7 +1192,8 @@ The NVR's own recordings, found by what happened and played back
 ([PLAYBACK.md](PLAYBACK.md), "Finding" and "Review mode"; the calls are
 [FFI-RECORDINGS.md](FFI-RECORDINGS.md) sections 1 to 6). Built on macOS
 (milestone P, M1 and M2) and on Windows (W1, W2); sound (M3: loudness
-strips, sound events, listening for sounds) on both. Exports (M4) come
+strips, sound events, listening for sounds) on both; the follow cut and
+grids on both (M3 and W3). Exports (M4 and W4) come
 later.
 
 - **Where:** Window > Recordings (⌥⌘R) opens the Recordings window, or
@@ -1234,6 +1281,55 @@ later.
   incident with its margins (or the whole day, with the Incident and Day
   switch) with the events marked by kind; dragging shows keyframes, the
   release the exact picture.
+- **Follow and Grid** (macOS M3, Windows W3): the view menu at the right of the
+  transport switches the player between **Cameras** (the device playback
+  above) and three views made of the incident's **downloaded** files:
+  **Follow Cut** (one picture that cuts to the camera with the action, the
+  core's edit list, FFI-RECORDINGS.md section 7), **2-Up**, and **4-Up**
+  (the cameras composed on a 1920 by 1080 canvas, letterboxed into the
+  player; a cell is black where its camera has no video). The three are
+  disabled, with "Download the incident for a follow cut or a grid", until
+  the incident has a finished download. They start at the playhead; the
+  device playback pauses meanwhile (nothing is closed), and going back to
+  Cameras continues it from the edit's position. Selecting another
+  downloaded incident shows its own edit; one not downloaded goes back to
+  Cameras. The pictures are the files decoded by VideoToolbox and drawn by
+  the same Metal grid renderer as live view, nothing re-encoded; seeking is
+  frame accurate (decoding from the keyframe before the position), and while
+  dragging the scrubber and from 2× up only keyframes are decoded, as the
+  device does. The same transport drives it: play and pause (Space), back
+  and forward 10 s, the speeds, mute and volume, and the scrubber, which
+  spans the edit's range with the incident's events and, in the follow cut,
+  each cut as a white mark. A lane click inside the edit's range on one of
+  its cameras seeks the edit; elsewhere the cameras come back. The follow
+  cut's label is the shown camera's name and the device time; each grid
+  cell has its camera's name. **Sound** follows the picture: in the follow
+  cut the shown camera's, cutting with it; in a grid the first cell's, or
+  the cell clicked; at 1× only, as in Cameras. A file that cannot be opened
+  draws black and the player says so. The same drawing serves exports (M4):
+  `EditSession` renders any time of the edit offscreen at any size.
+  **On Windows** the view menu is a drop-down button in the second row of
+  the transport (Cameras, Follow Cut, 2-Up, 4-Up; the three disabled with
+  the same words until the incident has a finished download). The files are
+  decoded by Media Foundation (an `IMFSourceReader` per file on the shared
+  D3D11 device's DXGI manager, so on the GPU where it can, else on the CPU)
+  into the same kind of picture the live tiles use and drawn by the window's
+  own `StageRenderer` in place of its tiles, so the look matches the live
+  grid. The keyframes the seeks start from are read from the MP4's sample
+  tables (`Mp4Index`: sync samples, composition offsets, and the edit list,
+  the timeline the plan's `source_in_ms` uses); the decoding is the macOS
+  one (frame accurate from the keyframe at or before, keyframes only while
+  dragging and from 2×, the newest request winning on a pool thread per
+  file, at most the picture chosen and the one read past it held). The
+  sound is a Windows `MediaPlayer` per file, the audible one kept within
+  250 ms of the picture. Space plays and pauses what the player shows after
+  a click on it; clicking a grid's cell picks the cell whose sound plays.
+  Cuts are white ticks on the scrubber, labels are the shown camera's name
+  (and the time in the follow cut) with a speaker mark on the audible one,
+  and a cell without video says "No recording at this time" or "This file
+  could not be opened". The same drawing serves exports (W4):
+  `EditFiles.Render` draws any time of the edit into a `GridRenderer`'s
+  offscreen frame of any size.
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the
@@ -1330,8 +1426,8 @@ later.
 - **Never in the way:** every query reads the core's memory; device work
   (searches, thumbnails, downloads, plays) reports by events; the player's
   position is read ten times a second from memory; decoding runs off the
-  main thread. Self-test steps `recordings-*` and `playback-*` (the fake
-  core) and `recordings-real-core` and `playback-real-core`
+  main thread. Self-test steps `recordings-*`, `playback-*`, and `edit-*`
+  (the fake core) and `recordings-real-core` and `playback-real-core`
   (`scripts/macos-real-selftest.sh`, against the mock).
 
 ## Finding devices
@@ -1403,9 +1499,11 @@ menu bar (docs/PARITY.md): this is a Windows-only part.
 - **Middle.** The app-wide quick actions: Find devices (opens Settings on
   Devices and searches the network), Edit layout (Ctrl+E, a toggle), Fill
   tiles (a toggle, per window, not kept), and Full screen (F).
-- **Right.** A spot reserved for a future "N recording" indicator (hidden until
-  recording is reported), Settings (Ctrl+,), and a "…" menu with the rest:
-  New window (Ctrl+N), Recordings (Ctrl+Alt+R), Show or Hide sidebar (S), Indicator corner, Show or
+- **Right.** The "● N recording" indicator (hidden until something records; a
+  button whose menu lists the recordings with Stop, then Stop all recordings
+  and Open recordings folder), Settings (Ctrl+,), and a "…" menu with the rest:
+  New window (Ctrl+N), Recordings (Ctrl+Alt+R), Stop all recordings (while one
+  runs), Open recordings folder, Show or Hide sidebar (S), Indicator corner, Show or
   Hide diagnostics (Ctrl+D), Keyboard shortcuts (F1), and the update entry.
 - **Full screen.** The header is hidden and slides over the stage from the top
   edge like the sidebar does from the left: resting the pointer in a thin strip
@@ -1435,7 +1533,11 @@ section is left. A pane lists the sections, each in a scrolling page:
   talk-back (off until allowed; every use is logged), and for fisheye cameras
   the mount.
 - **Alerts & calls.** The corner of the detection symbols and of the call cards,
-  calls in their own window and where those open, and saved transcripts.
+  calls in their own window and where those open, saved transcripts, and
+  "Record calls" with its consent note ("Recording calls").
+- **Capture.** Where saved pictures go, their format and share-safe names
+  ("Save picture"), and below them where recordings go, "Record from" and
+  when a recording stops by itself ("Recording").
 - **Updates.** The update source, trusted keys, automatic checks, Check now.
 - **About.** The version and license.
 

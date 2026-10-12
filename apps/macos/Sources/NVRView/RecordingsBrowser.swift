@@ -29,6 +29,25 @@ final class RecordingsBrowser {
         var id: String { rawValue }
     }
 
+    /// What the player shows: the device playback of the incident's cameras,
+    /// or, from its downloaded files, a follow cut or a 2-up or 4-up grid.
+    enum PlayerView: String, CaseIterable, Identifiable {
+        case cameras = "Cameras"
+        case follow = "Follow Cut"
+        case grid2 = "2-Up"
+        case grid4 = "4-Up"
+        var id: String { rawValue }
+
+        var edit: EditPlayer.Kind? {
+            switch self {
+            case .cameras: nil
+            case .follow: .follow
+            case .grid2: .grid("2up")
+            case .grid4: .grid("4up")
+            }
+        }
+    }
+
     /// Which incidents the list shows: all, a camera group's, or a camera's.
     enum Scope: Hashable {
         case all
@@ -59,6 +78,12 @@ final class RecordingsBrowser {
 
     /// The player of this window.
     let player: RecordingsPlayer
+    /// The follow cut and grids of a downloaded incident.
+    let editPlayer: EditPlayer
+    /// What the player shows.
+    private(set) var playerView = PlayerView.cameras
+    /// The follow cut's and grid's picture view, once shown (the self-test).
+    @ObservationIgnored weak var editStage: EditStageView?
 
     /// The shown day (device-local, its first second).
     private(set) var day: Int64
@@ -123,6 +148,7 @@ final class RecordingsBrowser {
         self.model = model
         holdID = model.newHold()
         player = model.makePlayer()
+        editPlayer = EditPlayer(model: model, cameras: player)
         let today = model.today
         day = today
         month = DeviceTime.month(containing: today).start
@@ -152,6 +178,7 @@ final class RecordingsBrowser {
         if d != day {
             selection = []
             model.cancelThumbnails()
+            closeEdit()
             player.close()
         }
         day = d
@@ -197,6 +224,7 @@ final class RecordingsBrowser {
     func close() {
         loudnessTimer?.invalidate()
         loudnessTimer = nil
+        closeEdit()
         player.close()
         if holding { model.hold(holdID, cameras: nil) }
         holding = false
@@ -344,11 +372,68 @@ final class RecordingsBrowser {
     /// or removed one) without moving the playhead.
     private func syncPlayer() {
         guard let incident = selected, incident.key != player.failedFor else { return }
-        if player.incidentKey != incident.key || player.playback == nil {
+        let switched = player.incidentKey != incident.key || player.playback == nil
+        if switched {
             player.show(incident, day: day)
         } else {
             player.follow(incident, day: day)
         }
+        syncEdit(started: switched)
+    }
+
+    // MARK: Follow cut and grids
+
+    /// The transport the controls drive now.
+    var driver: any PlayerTransportDriver { playerView == .cameras ? player : editPlayer }
+
+    /// The incident a follow cut or grid would be made of, and its finished download.
+    var editable: (incident: Incident, download: DownloadProgress)? {
+        guard let incident = playingIncident ?? selected, let d = model.finishedDownload(of: incident.key) else { return nil }
+        return (incident, d)
+    }
+
+    /// Shows the device playback, or a follow cut or grid of the incident's
+    /// downloaded files from the playhead (the device playback pauses
+    /// meanwhile and continues from the edit's position afterward).
+    func show(view: PlayerView) {
+        guard let kind = view.edit else {
+            guard playerView != .cameras else { return }
+            let at = editPlayer.positionMs
+            let wasPlaying = editPlayer.transport.isPlaying
+            closeEdit()
+            if player.playback != nil, at > 0 {
+                player.seek(to: at)
+                if wasPlaying { player.play() }
+            }
+            return
+        }
+        guard view != playerView else { return }
+        guard let e = editable else {
+            message = "Download the incident to see a follow cut or a grid"
+            return
+        }
+        let at = playerView == .cameras ? player.positionMs : editPlayer.positionMs
+        player.pause()
+        playerView = view
+        editPlayer.open(kind, download: e.download.download, at: at)
+        if let refused = editPlayer.message { message = refused }
+    }
+
+    /// Another incident selected while a follow cut or grid shows: its own
+    /// edit when it is downloaded, else back to the cameras.
+    private func syncEdit(started: Bool) {
+        guard let kind = playerView.edit else { return }
+        guard let e = editable else { return closeEdit() }
+        // The device playback just started for the new incident waits.
+        if started || player.transport.isPlaying { player.pause() }
+        if editPlayer.download != e.download.download || editPlayer.kind != kind {
+            editPlayer.open(kind, download: e.download.download, at: nil)
+        }
+    }
+
+    private func closeEdit() {
+        editPlayer.close()
+        playerView = .cameras
     }
 
     /// A click on an incident row: selects it alone, or with ⌘ adds or
@@ -375,6 +460,18 @@ final class RecordingsBrowser {
     /// plays) its incident; anywhere else that camera plays alone from there.
     func laneClick(_ camera: RecordingCamera, at seconds: Int64, near event: RecordedEvent? = nil) {
         let ms = seconds * 1000
+        if playerView != .cameras {
+            // Inside the follow cut's or grid's range, for one of its
+            // cameras: it seeks there. Anywhere else the cameras come back.
+            if let plan = editPlayer.plan, plan.sources.contains(where: { $0.camera == camera }),
+                plan.startMs <= ms, ms <= plan.endMs
+            {
+                editPlayer.seek(to: ms)
+                editPlayer.play()
+                return
+            }
+            show(view: .cameras)
+        }
         if player.cameras.contains(camera), player.day == day, player.playback != nil {
             player.seek(to: ms)
             player.play()
@@ -448,6 +545,10 @@ final class RecordingsBrowser {
     /// The scrubber's range in milliseconds: the incident with its margins,
     /// or the player's day.
     var scrubRange: (start: Int64, end: Int64)? {
+        if playerView != .cameras {
+            guard let plan = editPlayer.plan else { return nil }
+            return (plan.startMs, plan.endMs)
+        }
         guard player.playback != nil else { return nil }
         if scrubScope == .incident, let i = playingIncident {
             return ((i.start - i.margin) * 1000, (i.end + i.margin + 1) * 1000)

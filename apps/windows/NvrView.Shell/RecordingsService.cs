@@ -565,6 +565,35 @@ public sealed class RecordingsService
         cameras.Count == 0 || _core is not IEditSound sound ? null
             : Query(() => sound.RecordingsLoudness(LoudnessScale.Query(start, end, bucket, cameras)), LoudnessAnswer.Parse);
 
+    /// <summary>An incident's finished download (the newest), whose files a follow cut or a grid is made from.</summary>
+    public DownloadProgress? FinishedDownload(string incident) =>
+        Downloads.LastOrDefault(d => d.Incident == incident && d.State == "done");
+
+    /// <summary><c>nv_edit_compute</c>: the plan, or why there is none (the words the player shows).</summary>
+    public (EditPlan? Plan, string? Refusal) ComputeEdit(string json)
+    {
+        if (!Usable || _core is not IEditSound sound)
+        {
+            return (null, "Recordings are not available");
+        }
+        try
+        {
+            return EditPlan.Parse(sound.EditCompute(json)) is { } plan
+                ? (plan, null)
+                : (null, "The core's edit list could not be read");
+        }
+        catch (NvException e)
+        {
+            return (null, e.Status switch
+            {
+                NvStatus.UnknownId => "The download or its incident is gone",
+                NvStatus.NotConfigured => "There is no downloads folder",
+                NvStatus.InvalidArgument => "No camera of this download has video where the incident happened",
+                _ => $"No edit could be made (status {(int)e.Status})",
+            });
+        }
+    }
+
     /// <summary>The core named a device differently (first connection): its cameras follow.</summary>
     public void Rekey(string old, string next)
     {

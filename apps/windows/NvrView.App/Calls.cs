@@ -102,6 +102,9 @@ internal sealed class CallSession(Call call)
 
     /// <summary>The camera tile the core was told is in this call (its talk starts skip the per-minute limit while the call is open).</summary>
     public CameraTile? ConversationTile { get; set; }
+
+    /// <summary>"Record calls" was on when the call opened: its recording starts once the doorbell's tile is open.</summary>
+    public bool AutoRecord { get; set; }
 }
 
 internal sealed class ViewerCalls
@@ -260,7 +263,7 @@ internal sealed class ViewerCalls
     // Opens the call: lease, audio, and the visitor's transcript.
     private void Open(CameraRef camera, DateTime at, CallAudioDecision audio, CallOrigin origin, CallPresentation presentation)
     {
-        var session = new CallSession(new Call(camera, at, Now, audio, origin, presentation));
+        var session = new CallSession(new Call(camera, at, Now, audio, origin, presentation)) { AutoRecord = _viewer.Settings.RecordCalls };
         _sessions[camera] = session;
         _ = _viewer.Leases.Acquire(camera);
         if (audio.Audible)
@@ -326,6 +329,12 @@ internal sealed class ViewerCalls
         }
         MarkConversation(s);
         CameraTile? tile = _viewer.Leases.Tile(s.Call.Camera);
+        if (s.AutoRecord && tile is not null)
+        {
+            // "Record calls": recorded from the moment the call's tile is open.
+            s.AutoRecord = false;
+            _viewer.Capture.StartCall(s.Call.Camera);
+        }
         if (s.Tapped is { } old && old != tile)
         {
             _viewer.Host.Taps.Remove(old.Id);
@@ -819,10 +828,12 @@ internal sealed class ViewerCalls
         DateTime endedAt = _viewer.WallClock();
         bool save = _viewer.Settings.SaveCallTranscripts;
         AppLog.Info(s.Call.LogText(endedAt, saveTranscript: save) + $" ({reason})");
-        // And as a text file of its own (nothing when nothing was transcribed).
+        // And as a text file of its own (nothing when nothing was transcribed); a recorded call's transcript takes its recording's name.
+        string? stem = _viewer.Capture.ReservedCallStem(s.Call.Camera);
+        _viewer.Capture.CallEnded(s.Call.Camera);
         if (save && s.Call.TranscriptFile(_viewer.CameraName(s.Call.Camera), endedAt, TimeZoneInfo.Local) is { } file)
         {
-            AppLog.Info(_viewer.Transcripts.Save(file.Name, file.Text) is { } path
+            AppLog.Info(_viewer.Transcripts.Save(stem is null ? file.Name : stem + ".txt", file.Text) is { } path
                 ? $"Transcript saved: {Path.GetFileName(path)}"
                 : "Transcript not saved: the Transcripts folder could not be written");
         }

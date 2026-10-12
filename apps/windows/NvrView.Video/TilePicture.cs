@@ -36,6 +36,35 @@ public unsafe struct ColorMatrix
     }
 
     /// <summary>
+    /// The matrix for luma coefficients <paramref name="kr"/> and <paramref name="kb"/> over 8-bit samples read as code / 255,
+    /// video or full range (the same as the macOS app's YCbCrToRGB.standard), for pictures decoded outside the core.
+    /// </summary>
+    public static ColorMatrix Standard(float kr, float kb, bool fullRange)
+    {
+        float kg = 1 - kr - kb;
+        float ys = fullRange ? 1 : 255f / 219f, yo = fullRange ? 0 : -16f / 219f;
+        float cs = fullRange ? 1 : 255f / 224f, co = fullRange ? -128f / 255f : -128f / 224f;
+        float crR = 2 * (1 - kr), cbB = 2 * (1 - kb);
+        float cbG = -2 * kb * (1 - kb) / kg, crG = -2 * kr * (1 - kr) / kg;
+        ColorMatrix m = default;
+        float[] rows =
+        [
+            ys, 0, crR * cs, yo + crR * co,
+            ys, cbG * cs, crG * cs, yo + (cbG + crG) * co,
+            ys, cbB * cs, 0, yo + cbB * co,
+        ];
+        for (int i = 0; i < 12; i++)
+        {
+            m.M[i] = rows[i];
+        }
+        return m;
+    }
+
+    /// <summary>BT.601 (<paramref name="bt709"/> false) or BT.709 coefficients.</summary>
+    public static ColorMatrix Of(bool bt709, bool fullRange) =>
+        bt709 ? Standard(0.2126f, 0.0722f, fullRange) : Standard(0.299f, 0.114f, fullRange);
+
+    /// <summary>
     /// BT.601 video range, for pictures decoded outside the core (benchmarks);
     /// the core always supplies its own.
     /// </summary>

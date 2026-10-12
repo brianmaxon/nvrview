@@ -43,6 +43,9 @@ final class DoorbellCalls {
         /// The doorbell tile the core was told is in this conversation (its
         /// talk starts skip the per-minute limit while the call is open).
         var conversationTile: CoreTile?
+        /// "Record calls" was on when the call opened: its recording starts
+        /// once the doorbell's tile is open.
+        var autoRecord = false
 
         init(call: DoorbellCall) { self.call = call }
     }
@@ -176,6 +179,7 @@ final class DoorbellCalls {
                 camera: camera, startedAt: date, now: model.clock.now, audio: audio, origin: origin,
                 presentation: model.callPresentation(for: camera)))
         sessions[camera] = s
+        s.autoRecord = model.recordCalls
         // Echo cancellation's slow setup, ahead of Talk (no microphone yet).
         services.microphone.prepare(true)
         model.leases.acquire(camera)
@@ -216,6 +220,10 @@ final class DoorbellCalls {
     func tileChanged(_ camera: CameraRef) {
         guard let s = sessions[camera.firstLens] else { return }
         markConversation(s)
+        if s.autoRecord, model.leases.tile(for: s.call.camera) != nil {
+            s.autoRecord = false
+            model.capture.startCall(s.call.camera)
+        }
         let tile = model.leases.tile(for: camera.firstLens)
         if let old = s.tapped, old !== tile {
             taps.remove(old.id)
@@ -586,10 +594,13 @@ final class DoorbellCalls {
         let text = s.call.logText(endedAt: endedAt, saveTranscript: model.saveCallTranscripts)
         model.logEvent(text + " (\(reason))", transcriptFollows: model.saveCallTranscripts && !s.call.transcript.finals.isEmpty)
         // And as a text file of its own (nothing when nothing was transcribed).
+        // A recorded call's transcript takes its recording's name.
+        let stem = model.capture.reservedCallStem(s.call.camera)
+        model.capture.callEnded(s.call.camera)
         if model.saveCallTranscripts,
             let file = s.call.transcriptFile(cameraName: model.name(of: s.call.camera), endedAt: endedAt)
         {
-            if let url = model.transcripts.save(name: file.name, text: file.text) {
+            if let url = model.transcripts.save(name: stem.map { $0 + ".txt" } ?? file.name, text: file.text) {
                 model.logEvent("Transcript saved: \(url.lastPathComponent)")
             } else {
                 model.logEvent("Transcript not saved: the Transcripts folder could not be written")

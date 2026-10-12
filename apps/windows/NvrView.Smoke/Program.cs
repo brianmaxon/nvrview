@@ -1345,6 +1345,11 @@ internal sealed class Smoke(Options options)
         {
             Problem("the live recording did not end as a finalized MP4");
         }
+        else if (NvrView.Shell.Mp4Inspector.Inspect(File.ReadAllBytes(started.File)) is not { Fragmented: false } liveInfo ||
+            liveInfo.Video.Count() != 1 || liveInfo.Video.Single() is not { Samples: > 0, FirstSampleIsSync: true })
+        {
+            Problem("the live recording's video is not one track starting on a keyframe");
+        }
 
         var encoder = new SmokeEncoder(cap);
         cap.CaptureSetEncoder(encoder);
@@ -1357,6 +1362,12 @@ internal sealed class Smoke(Options options)
         if (!AllEnded() || !FinalizedMp4(call.File))
         {
             Problem("the call recording did not end as a finalized MP4");
+        }
+        else if (NvrView.Shell.Mp4Inspector.Inspect(File.ReadAllBytes(call.File)) is not { } callInfo ||
+            callInfo.Video.Count() != 1 || string.Join(",", callInfo.Audio.Select(a => a.Enabled)) != "True,False,False" ||
+            callInfo.Audio.Any(a => a.Samples == 0))
+        {
+            Problem("the call recording is not one video track and three sound tracks with only the first enabled");
         }
         if (encoder.Opened < 2 || encoder.Flushed != encoder.Opened || encoder.Frames < encoder.Opened * 40 ||
             encoder.Refused != 0)

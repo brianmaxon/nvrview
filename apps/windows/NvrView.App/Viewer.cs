@@ -377,6 +377,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
         Settings = settings ?? new ViewSettings(null);
         Leases = new TileLeases<CameraTile>(this);
         Calls = new ViewerCalls(this, callServices ?? CallServices.Real());
+        Capture = new CaptureController(this);
         Groups = _groupStore.Load();
         host.SetSink(Apply);
         host.Tiers.HasMiddleTier = HasMiddleTier;
@@ -395,6 +396,12 @@ internal sealed class Viewer : ITileBackend<CameraTile>
 
     /// <summary>One core tile per camera any window shows.</summary>
     public TileLeases<CameraTile> Leases { get; }
+
+    /// <summary>Live and call recordings (docs/CAPTURE.md "Live recording").</summary>
+    public CaptureController Capture { get; }
+
+    /// <summary>Tells the windows something they show changed (a recording started or ended).</summary>
+    internal void RaiseChanged() => Changed?.Invoke();
 
     /// <summary>The calls in progress: doorbell presses and the user's conversations (docs/UX.md "Doorbell calls").</summary>
     public ViewerCalls Calls { get; }
@@ -652,6 +659,7 @@ internal sealed class Viewer : ITileBackend<CameraTile>
     private void AdoptCoreKey(DeviceEntry device, string key)
     {
         string old = device.Key;
+        Capture.Board.Rekey(old, key);
         Leases.CloseTiles(old);
         device.Config.CoreKey = key;
         _store.Save(_devices.Select(x => x.Config));
@@ -1387,6 +1395,12 @@ internal sealed class Viewer : ITileBackend<CameraTile>
                     audio.AudioStats = e.Raw;
                 }
                 return;
+            case "recording":
+                if (e.Recording is { } recording)
+                {
+                    Capture.Apply(recording);
+                }
+                break;
             case "tile_closed":
                 if (e.Reason != "closed" && FindTile(e.Tile) is { } closed)
                 {

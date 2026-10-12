@@ -650,6 +650,33 @@ final class RecordingsModel {
         downloads = board.downloads
     }
 
+    // MARK: Edit lists (minor 8)
+
+    /// An incident's finished download (the newest), whose files a follow
+    /// cut or a grid is made from.
+    func finishedDownload(of incident: String) -> DownloadProgress? {
+        downloads.last { $0.incident == incident && $0.state == "done" }
+    }
+
+    /// `nv_edit_compute`: the plan, or why there is none.
+    func editPlan(json: String) -> Result<EditPlan, EditPlanRefusal> {
+        guard available, let core = core() else { return .failure(.init(text: "Recordings are not available")) }
+        do throws(CoreStatus) {
+            guard let plan = EditPlan.parse(try core.editCompute(json: json)) else {
+                return .failure(.init(text: "The core's edit list could not be read"))
+            }
+            return .success(plan)
+        } catch {
+            let text: String = switch error {
+            case .unknownID: "The download or its incident is gone"
+            case .notConfigured: "There is no downloads folder"
+            case .invalidArgument: "No camera of this download has video where the incident happened"
+            default: "No edit could be made (status \(error.code))"
+            }
+            return .failure(.init(text: text))
+        }
+    }
+
     // MARK: Playback (minor 6)
 
     /// A weak reference to a window's player, for routing events.

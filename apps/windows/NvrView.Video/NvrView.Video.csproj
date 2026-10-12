@@ -13,7 +13,8 @@
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
     <!-- The fisheye dewarp constants (pure, no platform API). -->
     <ProjectReference Include="../NvrView.Tiles/NvrView.Tiles.csproj" />
-    <!-- The NV12 shrinking and sizing of cover pictures (pure, tested on Linux). -->
+    <!-- The edit plans and the MP4 keyframe index that recorded files are decoded by, and the NV12
+         shrinking and sizing of cover pictures (pure, no platform API, tested on Linux). -->
     <ProjectReference Include="../NvrView.Shell/NvrView.Shell.csproj" />
     <!-- MIT; raw COM interop for D3D11, DXGI, Media Foundation, and the
          HLSL compiler, with no managed wrapper objects per call. -->

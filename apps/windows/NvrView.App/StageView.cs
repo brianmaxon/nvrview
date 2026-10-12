@@ -209,7 +209,9 @@ internal sealed partial class StageView : UserControl
                     "Wheel, pinch, drag           digital zoom and pan; 0 or the header's button resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
-                    "P, Shift+P, R                save picture, save picture as, record (coming soon)",
+                    "P, Shift+P                   save picture, save picture as",
+                    "R                            record the selected tile's camera (again to stop)",
+                    "Ctrl+Shift+R                 record the selected tile's call, in a call window too",
                     "T                            start or end a conversation on the selected tile",
                     "Menu key, Shift+F10          the selected tile's menu",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
@@ -1804,7 +1806,8 @@ internal sealed partial class StageView : UserControl
     private void RefreshChrome(TileChrome c)
     {
         (string? text, TileMessage kind) = StatusOf(c.Tile);
-        c.Refresh(TitleOf(c.Tile), text, c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null, HeaderTileOf(c.Tile));
+        c.Refresh(TitleOf(c.Tile), text, c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null, HeaderTileOf(c.Tile),
+            c.Tile.CameraOrNone is { } camera ? _viewer.Capture.Board.Pill(camera) : null);
         c.SetRetry(_retryWatch.Offered(c.Tile, kind, _viewer.Clock.Now));
     }
 

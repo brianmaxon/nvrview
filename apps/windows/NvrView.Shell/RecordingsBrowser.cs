@@ -57,11 +57,14 @@ public sealed class RecordingsBrowser
     private HashSet<string> _selection = [];
 
     /// <param name="model">The shared recordings model.</param>
-    public RecordingsBrowser(RecordingsService model)
+    /// <param name="files">Opens the files of a follow cut or grid (none: they cannot be opened).</param>
+    /// <param name="audio">The edit's sound (none: silent).</param>
+    public RecordingsBrowser(RecordingsService model, IEditFilesFactory? files = null, IEditAudio? audio = null)
     {
         Model = model;
         HoldId = model.NewHold();
         Player = new RecordingsPlayer(model);
+        EditPlayer = new EditPlayer(model, Player, files ?? new NoEditFiles(), audio ?? new NoEditAudio());
         long today = model.Today;
         Day = today;
         Month = DeviceTime.Month(today).Start;
@@ -77,6 +80,12 @@ public sealed class RecordingsBrowser
 
     /// <summary>The player of this window.</summary>
     public RecordingsPlayer Player { get; }
+
+    /// <summary>The follow cut and grids of this window.</summary>
+    public EditPlayer EditPlayer { get; }
+
+    /// <summary>What the player shows now.</summary>
+    public PlayerView PlayerView { get; private set; } = PlayerView.Cameras;
 
     /// <summary>Raised on the UI thread when anything the window shows changed.</summary>
     public event Action? Changed;
@@ -279,6 +288,7 @@ public sealed class RecordingsBrowser
         {
             _selection = [];
             Model.CancelThumbnails();
+            CloseEdit();
             Player.Close();
         }
         Day = d;
@@ -344,6 +354,7 @@ public sealed class RecordingsBrowser
     /// <summary>The window closes: its playback closes, its hold ends, its thumbnail requests are dropped.</summary>
     public void Close()
     {
+        CloseEdit();
         Player.Close();
         if (Holding)
         {
@@ -478,7 +489,8 @@ public sealed class RecordingsBrowser
         {
             return;
         }
-        if (Player.IncidentKey != incident.Key || Player.Playback is null)
+        bool switched = Player.IncidentKey != incident.Key || Player.Playback is null;
+        if (switched)
         {
             Player.Show(incident, Day);
         }
@@ -486,6 +498,92 @@ public sealed class RecordingsBrowser
         {
             Player.Follow(incident, Day);
         }
+        SyncEdit(switched);
+    }
+
+    // ---- follow cut and grids ----
+
+    /// <summary>The transport the controls drive now.</summary>
+    public IPlayerTransport Driver => PlayerView == PlayerView.Cameras ? Player : EditPlayer;
+
+    /// <summary>The incident a follow cut or grid would be made of, and its finished download.</summary>
+    public (Incident Incident, DownloadProgress Download)? Editable =>
+        (PlayingIncident ?? Selected) is { } incident && Model.FinishedDownload(incident.Key) is { } d ? (incident, d) : null;
+
+    /// <summary>
+    /// Shows the device playback, or a follow cut or grid of the incident's downloaded files from the playhead
+    /// (the device playback pauses meanwhile and continues from the edit's position afterward).
+    /// </summary>
+    public void ShowView(PlayerView view)
+    {
+        if (view == PlayerView.Cameras)
+        {
+            if (PlayerView == PlayerView.Cameras)
+            {
+                return;
+            }
+            long at = EditPlayer.PositionMs;
+            bool wasPlaying = EditPlayer.Transport.IsPlaying;
+            CloseEdit();
+            if (Player.Playback is not null && at > 0)
+            {
+                Player.Seek(at);
+                if (wasPlaying)
+                {
+                    Player.Play();
+                }
+            }
+            Changed?.Invoke();
+            return;
+        }
+        if (view == PlayerView)
+        {
+            return;
+        }
+        if (Editable is not { } e)
+        {
+            Message = "Download the incident to see a follow cut or a grid";
+            Changed?.Invoke();
+            return;
+        }
+        long from = PlayerView == PlayerView.Cameras ? Player.PositionMs : EditPlayer.PositionMs;
+        Player.Pause();
+        PlayerView = view;
+        EditPlayer.Open(view, e.Download.Download, from);
+        if (EditPlayer.Message is { } refused)
+        {
+            Message = refused;
+        }
+        Changed?.Invoke();
+    }
+
+    // Another incident selected while a follow cut or grid shows: its own edit when it is downloaded, else back to the cameras.
+    private void SyncEdit(bool started)
+    {
+        if (PlayerView == PlayerView.Cameras)
+        {
+            return;
+        }
+        if (Editable is not { } e)
+        {
+            CloseEdit();
+            return;
+        }
+        // The device playback just started for the new incident waits.
+        if (started || Player.Transport.IsPlaying)
+        {
+            Player.Pause();
+        }
+        if (EditPlayer.Download != e.Download.Download || EditPlayer.View != PlayerView)
+        {
+            EditPlayer.Open(PlayerView, e.Download.Download, null);
+        }
+    }
+
+    private void CloseEdit()
+    {
+        EditPlayer.Close();
+        PlayerView = PlayerView.Cameras;
     }
 
     /// <summary>A click on an incident row: selects it alone, or with Ctrl adds or removes it (several selected incidents can be merged).</summary>
@@ -524,6 +622,17 @@ public sealed class RecordingsBrowser
     public void LaneClick(RecordingCamera camera, long seconds, RecordedEvent? near = null)
     {
         long ms = seconds * 1000;
+        if (PlayerView != PlayerView.Cameras)
+        {
+            // Inside the follow cut's or grid's range, for one of its cameras: it seeks there. Anywhere else the cameras come back.
+            if (EditPlayer.Plan is { } plan && plan.Involves(camera) && plan.StartMs <= ms && ms <= plan.EndMs)
+            {
+                EditPlayer.Seek(ms);
+                EditPlayer.Play();
+                return;
+            }
+            ShowView(PlayerView.Cameras);
+        }
         if (Player.Cameras.Contains(camera) && Player.Day == Day && Player.Playback is not null)
         {
             Player.Seek(ms);
@@ -634,6 +743,10 @@ public sealed class RecordingsBrowser
     {
         get
         {
+            if (PlayerView != PlayerView.Cameras)
+            {
+                return EditPlayer.Plan is { } plan ? (plan.StartMs, plan.EndMs) : null;
+            }
             if (Player.Playback is null)
             {
                 return null;

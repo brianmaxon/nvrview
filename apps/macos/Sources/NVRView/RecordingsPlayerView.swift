@@ -14,8 +14,14 @@ struct PlayerColumn: View {
         GeometryReader { geo in
             let lanes = RecordingsPanes.lanesHeight(height: geo.size.height, lanes: browser.lanes.count)
             VStack(spacing: 0) {
-                PlayerArea(browser: browser, player: browser.player, onStage: onStage)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Group {
+                    if browser.playerView == .cameras {
+                        PlayerArea(browser: browser, player: browser.player, onStage: onStage)
+                    } else {
+                        EditArea(browser: browser, player: browser.editPlayer, onStage: { [browser] in browser.editStage = $0 })
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 TransportBar(browser: browser, player: browser.player)
                     .frame(height: RecordingsPanes.transportHeight)
@@ -155,12 +161,14 @@ struct TransportBar: View {
     @Bindable var player: RecordingsPlayer
 
     var body: some View {
-        let t = player.transport
-        let enabled = player.playback != nil
+        // The device playback's transport, or the follow cut's or grid's.
+        let d = browser.driver
+        let t = d.transport
+        let cameras = browser.playerView == .cameras
         VStack(spacing: 6) {
             HStack(spacing: 8) {
-                Scrubber(browser: browser, player: player)
-                if player.playback != nil, browser.playingIncident != nil {
+                Scrubber(browser: browser, driver: d)
+                if cameras, player.playback != nil, browser.playingIncident != nil {
                     Picker("", selection: $browser.scrubScope) {
                         ForEach(RecordingsBrowser.ScrubScope.allCases) { Text($0.rawValue).tag($0) }
                     }
@@ -173,82 +181,129 @@ struct TransportBar: View {
             }
             .frame(height: 30)
             HStack(spacing: 10) {
-                Button { player.skip(by: -TransportState.skipMs) } label: { Image(systemName: "gobackward.10") }
-                    .help("Back 10 seconds")
-                Button { player.togglePlay() } label: {
-                    Image(systemName: t.showsPlay ? "play.fill" : "pause.fill").frame(width: 18)
-                }
-                .help(t.showsPlay ? "Play (Space)" : "Pause (Space)")
-                Button { player.skip(by: TransportState.skipMs) } label: { Image(systemName: "goforward.10") }
-                    .help("Forward 10 seconds")
-                Text(TransportState.clock(t.positionMs)).font(.callout.monospacedDigit())
-                    .help("The device's own time at the playhead")
-                if t.state == .buffering { ProgressView().controlSize(.small).help("Loading") }
-                if t.state == .ended { Text("End").font(.caption).foregroundStyle(.secondary) }
-                Menu(PlaybackSpeed.label(player.rate)) {
-                    ForEach(PlaybackSpeed.all, id: \.self) { r in
-                        Button {
-                            player.setRate(r)
-                        } label: {
-                            if r == player.rate { Label(PlaybackSpeed.label(r), systemImage: "checkmark") } else { Text(PlaybackSpeed.label(r)) }
+                Group {
+                    Button { d.skip(by: -TransportState.skipMs) } label: { Image(systemName: "gobackward.10") }
+                        .help("Back 10 seconds")
+                    Button { d.togglePlay() } label: {
+                        Image(systemName: t.showsPlay ? "play.fill" : "pause.fill").frame(width: 18)
+                    }
+                    .help(t.showsPlay ? "Play (Space)" : "Pause (Space)")
+                    Button { d.skip(by: TransportState.skipMs) } label: { Image(systemName: "goforward.10") }
+                        .help("Forward 10 seconds")
+                    Text(TransportState.clock(t.positionMs)).font(.callout.monospacedDigit())
+                        .help("The device's own time at the playhead")
+                    if t.state == .buffering { ProgressView().controlSize(.small).help("Loading") }
+                    if t.state == .ended { Text("End").font(.caption).foregroundStyle(.secondary) }
+                    Menu(PlaybackSpeed.label(d.rate)) {
+                        ForEach(PlaybackSpeed.all, id: \.self) { r in
+                            Button {
+                                d.setRate(r)
+                            } label: {
+                                if r == d.rate { Label(PlaybackSpeed.label(r), systemImage: "checkmark") } else { Text(PlaybackSpeed.label(r)) }
+                            }
                         }
                     }
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Playback speed")
-                if let hint = PlaybackSpeed.hint(player.rate) {
-                    Text(hint).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                        .help("From 2× up the device sends keyframes only and no sound; below 1× there is no sound either")
-                }
-                Spacer(minLength: 4)
-                if let incident = browser.playingIncident {
-                    let at = browser.splitSecond(incident)
-                    Button { browser.splitHere(incident) } label: { Label("Split Here", systemImage: "scissors") }
-                        .disabled(at == nil)
-                        .help(SplitHelp.text)
-                }
-                Button { player.muted.toggle() } label: {
-                    Image(systemName: player.muted ? "speaker.slash.fill" : "speaker.wave.2.fill").frame(width: 18)
-                }
-                .help(player.muted ? "Unmute" : "Mute")
-                Slider(value: Binding(get: { Double(player.volume) }, set: { player.volume = Float($0) }), in: 0...1)
-                    .frame(width: 80)
-                    .controlSize(.small)
-                    .disabled(player.muted)
-                    .help("Volume")
-                if player.cells.count > 1 {
-                    Button {
-                        let i = PlayerGrid.audibleIndex(player.mode, count: player.cells.count) ?? 0
-                        player.doubleClick(i)
-                    } label: {
-                        Image(systemName: {
-                            if case .single = PlayerGrid.normalized(player.mode, count: player.cells.count) { return "square.grid.2x2" }
-                            return "square"
-                        }())
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Playback speed")
+                    if let hint = PlaybackSpeed.hint(d.rate) {
+                        Text(hint).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            .help("From 2× up only keyframes show and there is no sound; below 1× there is no sound either")
                     }
-                    .help("One camera, or all cameras")
+                    Spacer(minLength: 4)
+                    if cameras, let incident = browser.playingIncident {
+                        let at = browser.splitSecond(incident)
+                        Button { browser.splitHere(incident) } label: { Label("Split Here", systemImage: "scissors") }
+                            .disabled(at == nil)
+                            .help(SplitHelp.text)
+                    }
+                    Button { d.muted.toggle() } label: {
+                        Image(systemName: d.muted ? "speaker.slash.fill" : "speaker.wave.2.fill").frame(width: 18)
+                    }
+                    .help(d.muted ? "Unmute" : "Mute")
+                    Slider(value: Binding(get: { Double(d.volume) }, set: { d.volume = Float($0) }), in: 0...1)
+                        .frame(width: 80)
+                        .controlSize(.small)
+                        .disabled(d.muted)
+                        .help("Volume")
+                    if cameras, player.cells.count > 1 {
+                        Button {
+                            let i = PlayerGrid.audibleIndex(player.mode, count: player.cells.count) ?? 0
+                            player.doubleClick(i)
+                        } label: {
+                            Image(systemName: {
+                                if case .single = PlayerGrid.normalized(player.mode, count: player.cells.count) { return "square.grid.2x2" }
+                                return "square"
+                            }())
+                        }
+                        .help("One camera, or all cameras")
+                    }
                 }
+                .disabled(!d.canPlay)
+                PlayerViewMenu(browser: browser)
             }
             .buttonStyle(.borderless)
-            .disabled(!enabled)
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 }
 
-/// The scrubber across the incident (with its margins) or the day: the
-/// events marked by kind, the playhead, drag to scrub (keyframes while
+/// The player's view menu: the incident's cameras as the device plays them,
+/// or, once the incident is downloaded, a follow cut or a 2-up or 4-up grid
+/// made of its files.
+struct PlayerViewMenu: View {
+    let browser: RecordingsBrowser
+
+    var body: some View {
+        let editable = browser.editable != nil
+        Menu {
+            ForEach(RecordingsBrowser.PlayerView.allCases) { v in
+                Button {
+                    browser.show(view: v)
+                } label: {
+                    let title = v == .cameras ? "Cameras (Device Playback)" : v.rawValue
+                    if v == browser.playerView { Label(title, systemImage: "checkmark") } else { Text(title) }
+                }
+                .disabled(v != .cameras && !editable)
+                if v == .cameras { Divider() }
+            }
+            if !editable {
+                Divider()
+                Text("Download the incident for a follow cut or a grid")
+            }
+        } label: {
+            Label(browser.playerView.rawValue, systemImage: Self.symbol(browser.playerView))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("What the player shows: the cameras, or a follow cut or grid of the downloaded incident")
+    }
+
+    static func symbol(_ v: RecordingsBrowser.PlayerView) -> String {
+        switch v {
+        case .cameras: "rectangle.grid.2x2"
+        case .follow: "film.stack"
+        case .grid2: "rectangle.split.2x1"
+        case .grid4: "square.grid.2x2"
+        }
+    }
+}
+
+/// The scrubber across the incident (with its margins) or the day, or the
+/// follow cut's or grid's range: the events marked by kind, the follow cut's
+/// cuts as white ticks, the playhead, drag to scrub (keyframes while
 /// dragging, the exact picture on release).
 struct Scrubber: View {
     let browser: RecordingsBrowser
-    let player: RecordingsPlayer
+    let driver: any PlayerTransportDriver
     @State private var lastSent = Date.distantPast
 
     var body: some View {
         GeometryReader { geo in
             let range = browser.scrubRange
             let events = scrubEvents
+            let cuts = browser.playerView == .follow ? browser.editPlayer.cuts : []
+            let position = driver.transport.positionMs
             Canvas { ctx, size in
                 let track = CGRect(x: 0, y: size.height / 2 - 4, width: size.width, height: 8)
                 ctx.fill(Path(roundedRect: track, cornerRadius: 4), with: .color(.secondary.opacity(0.18)))
@@ -259,7 +314,13 @@ struct Scrubber: View {
                     let r = CGRect(x: x0, y: track.minY, width: max(3, x1 - x0), height: track.height)
                     ctx.fill(Path(roundedRect: r, cornerRadius: 2), with: .color(IndicatorKind(detectionKind: e.kind).laneColor))
                 }
-                let x = TransportState.fraction(player.positionMs, from: range.start, to: range.end) * size.width
+                for c in cuts {
+                    let x = TransportState.fraction(c, from: range.start, to: range.end) * size.width
+                    let tick = CGRect(x: x - 1, y: track.minY - 4, width: 2, height: track.height + 8)
+                    ctx.fill(Path(tick), with: .color(.white))
+                    ctx.stroke(Path(tick), with: .color(.black.opacity(0.5)), lineWidth: 0.5)
+                }
+                let x = TransportState.fraction(position, from: range.start, to: range.end) * size.width
                 ctx.fill(Path(CGRect(x: x - 1, y: 2, width: 2, height: size.height - 4)), with: .color(.primary))
                 ctx.fill(Path(ellipseIn: CGRect(x: x - 5, y: size.height / 2 - 5, width: 10, height: 10)), with: .color(.primary))
             }
@@ -273,23 +334,30 @@ struct Scrubber: View {
                         // coalesces them too); keyframes are enough there.
                         if Date().timeIntervalSince(lastSent) >= 0.1 {
                             lastSent = Date()
-                            player.seek(to: ms, exact: false)
+                            driver.seek(to: ms, exact: false)
                         }
                     }
                     .onEnded { v in
                         guard let range else { return }
                         lastSent = .distantPast
-                        player.seek(to: TransportState.time(atFraction: v.location.x / geo.size.width, from: range.start, to: range.end))
+                        driver.seek(to: TransportState.time(atFraction: v.location.x / geo.size.width, from: range.start, to: range.end), exact: true)
                     })
-            .help(range.map { "\(TransportState.clock($0.start))–\(TransportState.clock($0.end))" } ?? "")
+            .help(scrubHelp(range: range, cuts: cuts.count))
         }
+    }
+
+    private func scrubHelp(range: (start: Int64, end: Int64)?, cuts: Int) -> String {
+        guard let range else { return "" }
+        let span = "\(TransportState.clock(range.start))–\(TransportState.clock(range.end))"
+        return cuts > 0 ? "\(span); white marks are the follow cut's cuts" : span
     }
 
     /// The events the scrubber marks: the incident's, or the day's of the
     /// cameras playing.
     private var scrubEvents: [RecordedEvent] {
+        if browser.playerView != .cameras { return browser.editable?.incident.events ?? [] }
         if browser.scrubScope == .incident, let i = browser.playingIncident { return i.events }
-        let cams = Set(player.cameras)
+        let cams = Set(browser.player.cameras)
         return browser.lanes.filter { cams.contains($0.camera) }.flatMap(\.events)
     }
 }
@@ -558,9 +626,11 @@ struct Playhead: View, @preconcurrency Animatable {
 
     var body: some View {
         let player = browser.player
+        let edit = browser.playerView != .cameras
+        let position = edit ? browser.editPlayer.positionMs : player.positionMs
         Canvas { ctx, size in
-            guard player.playback != nil, player.day == browser.day else { return }
-            let x = TimelineMap(day: browser.day, zoom: zoom, start: start, width: size.width).x(ms: player.positionMs)
+            guard edit || (player.playback != nil && player.day == browser.day) else { return }
+            let x = TimelineMap(day: browser.day, zoom: zoom, start: start, width: size.width).x(ms: position)
             guard x >= -2, x <= size.width + 2 else { return }
             ctx.fill(Path(CGRect(x: x - 0.75, y: 0, width: 1.5, height: size.height)), with: .color(.red))
         }

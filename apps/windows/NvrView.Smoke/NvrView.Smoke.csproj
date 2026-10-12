@@ -9,5 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
+    <!-- Mp4Inspector, to read back the recordings the core wrote. -->
+    <ProjectReference Include="../NvrView.Shell/NvrView.Shell.csproj" />
   </ItemGroup>
 </Project>

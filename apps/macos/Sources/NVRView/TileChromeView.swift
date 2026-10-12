@@ -21,6 +21,9 @@ struct TileChromeContent: Equatable {
     /// What the hover header shows (docs/UX.md "Tile header"); nil for a
     /// tile without a camera.
     var header: TileHeaderTile?
+    /// "● REC 1:23" while the camera is recorded (always shown, not hover
+    /// chrome; docs/CAPTURE.md "Indicators").
+    var recordingPill: String? = nil
     var selected: Bool
     var editing: Bool
     var dropTarget: Bool
@@ -63,6 +66,9 @@ final class TileChromeView: NSView {
     /// The title's natural width, for the string it was measured for.
     private var titleMeasure: (text: String, width: Double)?
     private let cornerView = CornerIndicatorView()
+    /// The recording pill, outside the header so it stays when the header
+    /// fades.
+    private let pill = NSTextField(labelWithString: "")
     /// The alert's red border (blinks, or stays steady with Reduce Motion).
     private let alertBorder = CALayer()
     private let alertStrip = NSView()
@@ -134,6 +140,17 @@ final class TileChromeView: NSView {
         header.addSubview(rates)
 
         addSubview(cornerView)
+
+        pill.font = .monospacedDigitSystemFont(ofSize: 10, weight: .bold)
+        pill.textColor = .white
+        pill.alignment = .center
+        pill.wantsLayer = true
+        pill.drawsBackground = false
+        pill.layer?.backgroundColor = NSColor.systemRed.withAlphaComponent(0.85).cgColor
+        pill.layer?.cornerRadius = 8
+        pill.isHidden = true
+        pill.setAccessibilityLabel("Recording")
+        addSubview(pill)
 
         veil.wantsLayer = true
         veil.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.055, blue: 0.063, alpha: 0.78).cgColor
@@ -247,6 +264,9 @@ final class TileChromeView: NSView {
             needsLayout = true
         }
         cornerView.corner = c.corner
+        pill.stringValue = c.recordingPill ?? ""
+        pill.isHidden = c.recordingPill == nil || !c.hasCamera
+        pill.setAccessibilityValue(c.recordingPill)
         setAlert(c.alertLines)
         cornerView.set(active: c.indicators)
         veil.isHidden = c.veil == nil || !c.hasCamera
@@ -320,7 +340,15 @@ final class TileChromeView: NSView {
         let buttonsLeft = layoutHeaderButtons(width: w)
         // The title keeps clear of the indicators when they share its edge.
         let taken = cornerView.occupiedWidth()
-        let titleLeft: CGFloat = 10 + (cornerView.corner == .topLeft ? taken : 0)
+        let pillCorner = Self.pillCorner(cornerView.corner)
+        let pillWidth = CGFloat(headerLayout?.metrics.pill ?? 64)
+        if !pill.isHidden {
+            let x = pillCorner == .bottomRight ? w - pillWidth - 8 : 8
+            let y = pillCorner == .topLeft ? 6 : h - 24
+            pill.frame = CGRect(x: x, y: y, width: pillWidth, height: 17)
+        }
+        let pillLeft: CGFloat = !pill.isHidden && pillCorner == .topLeft ? pillWidth + 4 : 0
+        let titleLeft: CGFloat = 10 + pillLeft + (cornerView.corner == .topLeft ? taken : 0)
         let titleRight = buttonsLeft - 4 - (cornerView.corner == .topRight ? taken : 0)
         title.frame = CGRect(x: titleLeft, y: 7, width: max(titleRight - titleLeft, 0), height: 16)
         subtitle.frame = CGRect(x: 10, y: 22, width: max(w - 20, 0), height: 14)
@@ -379,9 +407,20 @@ final class TileChromeView: NSView {
         return left
     }
 
+    /// Where the recording pill goes: the corner opposite the corner
+    /// indicators, except that the top right (the header's buttons) moves
+    /// to the top left.
+    static func pillCorner(_ indicators: ChromeCorner) -> ChromeCorner {
+        let opposite = indicators.opposite
+        return opposite == .topRight ? .topLeft : opposite
+    }
+
+    /// The pill's text while it shows (self-test).
+    var pillText: String? { pill.isHidden ? nil : pill.stringValue }
+
     /// The pill, the title and Dismiss are not buttons of the row: the
-    /// alert's Dismiss stays in its strip below the title, and nothing is
-    /// recorded yet, so there is no pill.
+    /// alert's Dismiss stays in its strip below the title, and the pill is
+    /// drawn on the tile itself (it stays when the header fades).
     private static func isButton(_ item: TileHeaderItem) -> Bool {
         switch item {
         case .recordingPill, .title, .dismissAlert: false

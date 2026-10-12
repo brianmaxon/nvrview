@@ -898,7 +898,7 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
                     foreach (JsonNode? n in list)
                     {
                         RecordingCamera c = Camera(n?["camera"], F);
-                        if (c != e.Camera)
+                        if (ConcurrentEvent(e, c) is null)
                         {
                             throw Error(NvStatus.InvalidArgument, F);
                         }

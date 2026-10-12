@@ -65,7 +65,7 @@
 //    header is the title bar with its quick actions, Settings, the "…" menu, and the layout picker, and
 //    hands its controls to the system; in full screen it hides and is revealed at the top edge on a
 //    manual clock; the tile menu holds none of the app-wide items; Settings is one window of its own
-//    with a pane of five sections, a section taller than the window scrolls to its last control, a
+//    with a pane of six sections, a section taller than the window scrolls to its last control, a
 //    second open brings the same window forward, its size is remembered, and it closes with the app;
 // 12. with --credential-test, a throwaway credential is written, read back,
 //    and deleted in Credential Manager.
@@ -896,6 +896,8 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             w.Refresh();
         }
 
+        await EditSteps(v, w, b, fake, playback, service, cams);
+
         // parity: recordings-layout
         // The window at its smallest and at a large size: the side panes give way in a narrow window (inspector first)
         // and come back in a wide one.
@@ -1049,6 +1051,281 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         Expect(shown && service.ThumbnailsPut > putBefore && cached?.Kind == NvThumbKind.Image,
             "recordings: the incident's row did not show the decoded cover, or it was not put back in the core's cache");
     }
+
+    // 11e. The follow cut and grids of a downloaded incident (docs/UX.md "Recordings", "Follow and Grid"; milestone P,
+    // W3), on the fake store's plans over synthetic files written where its download says they are: each camera's
+    // pictures are its own color with the frame number in a strip (SyntheticRecording). Frames are drawn offscreen with
+    // D3D11 from Media Foundation-decoded files (a second set of the plan's files, so the window's render thread cannot
+    // move the pictures meanwhile) and checked at sample times for which camera is shown and which of its frames; then
+    // the cuts, the sound following the shown camera, the transport on a simulated clock, the picture on screen, the
+    // window's view menu, and the way back to the cameras.
+    private async Task EditSteps(
+        Viewer v, RecordingsWindow w, RecordingsBrowser b, FakeRecordings fake, FakePlayback playback, RecordingsService service, RecordingCamera[] cams)
+    {
+        Task<bool> Playing(Func<bool> condition, double seconds) => Until(() =>
+        {
+            playback.CompletePlaybackWork();
+            return condition();
+        }, seconds);
+        RecordingsPlayer p = b.Player;
+        EditPlayer ep = b.EditPlayer;
+        Func<double> realClock = ep.Now;
+
+        // parity: edit-download
+        Incident? incident = b.DayIncidents.FirstOrDefault(i => i.Kinds.SequenceEqual(["vehicle"]) && i.Cameras[0].Camera == cams[0]);
+        if (incident is null)
+        {
+            _problems.Add("edits: no vehicle incident of the first camera");
+            return;
+        }
+        long s = incident.Start * 1000;
+        b.Selection = new HashSet<string> { incident.Key };
+        await Playing(() => b.Selected?.Key == incident.Key && p.Playback is not null, 5);
+        w.Refresh();
+        (string title, List<PlayerView> offered, bool hint) = w.ViewMenuShown();
+        Expect(b.Editable is null && offered.SequenceEqual([PlayerView.Cameras]) && hint && title == "Cameras",
+            $"edits: an incident not downloaded offers {string.Join(", ", offered)} (hint {hint})");
+        b.ShowView(PlayerView.Follow);
+        Expect(b.PlayerView == PlayerView.Cameras, "edits: Follow Cut showed without a download");
+        b.Message = null;
+        // The fake store has one camera per incident; its download of three cameras with video along with this one's stands for an edited incident.
+        string request = $$"""{"incident":"{{incident.Key}}","cameras":[{{string.Join(",", cams.Select(c => $$"""{"camera":{{c.Json}}}"""))}}]}""";
+        fake.DownloadIncident(request);
+        bool downloaded = await Until(() =>
+        {
+            fake.CompleteRecordingWork();
+            return service.FinishedDownload(incident.Key) is not null;
+        }, 5);
+        DownloadProgress? d = service.FinishedDownload(incident.Key);
+        var files = new List<(string File, int Source, long DurationMs)>();
+        if (downloaded && d is not null)
+        {
+            using var raw = System.Text.Json.JsonDocument.Parse(fake.EditCompute($$"""{"kind":"follow","download":"{{d.Download}}"}"""));
+            foreach (System.Text.Json.JsonElement src in raw.RootElement.GetProperty("sources").EnumerateArray())
+            {
+                files.Add((src.GetProperty("file").GetString()!, src.GetProperty("source").GetInt32(), src.GetProperty("duration_ms").GetInt64()));
+            }
+        }
+        string? writeFailure = null;
+        try
+        {
+            await Task.Run(() =>
+            {
+                foreach ((string file, int source, long ms) in files)
+                {
+                    SyntheticRecording.Write(new SyntheticRecording.Spec(Frames: (int)(ms / 100) + 1, Color: source), file);
+                }
+            });
+        }
+        catch (Exception e) when (e is VideoException or IOException)
+        {
+            writeFailure = e.Message;
+        }
+        w.Refresh();
+        (title, offered, hint) = w.ViewMenuShown();
+        Say($"edits: downloaded {d?.Download}, {files.Count} synthetic files written{(writeFailure is null ? "" : ", failed: " + writeFailure)}; the view menu offers {string.Join(", ", offered)}");
+        Expect(writeFailure is null, $"edits: the synthetic files were not written ({writeFailure})");
+        Expect(downloaded && files.Count == 3, $"edits: the download has {files.Count} files, expected 3");
+        Expect(b.Editable is not null && offered.Count == 4 && !hint, "edits: a finished download does not offer the follow cut and grids");
+        if (!downloaded || d is null || files.Count != 3 || writeFailure is not null)
+        {
+            return;
+        }
+
+        // parity: edit-follow-cut
+        double now = 1000;
+        ep.Now = () => now;
+        b.ShowView(PlayerView.Follow);
+        bool opened = await Until(() => ep.Files is not null && (w.EditShown?.Frames ?? 0) > 0, 10);
+        if (!opened || ep.Plan is not { } plan || ep.Files is not EditFiles live)
+        {
+            _problems.Add($"edits: the follow cut did not open ({ep.Message ?? b.Message ?? "no message"})");
+            ep.Now = realClock;
+            b.ShowView(PlayerView.Cameras);
+            return;
+        }
+        Say($"edits: follow cut {string.Join(", ", plan.Segments.Select(g => $"{g.Source}@{g.StartMs - s}"))}, cuts {string.Join(", ", ep.Cuts.Select(c => c - s))}, frames drawn {w.EditShown?.Frames}");
+        // The device playback's pause arrives as a core event, and the edit
+        // can draw its first frame before it.
+        await Until(() => !p.Transport.IsPlaying, 5);
+        Expect(b.PlayerView == PlayerView.Follow && !p.Transport.IsPlaying, "edits: the device playback still plays under the follow cut");
+        Expect(live.Failures.Count == 0, $"edits: files not opened: {string.Join("; ", live.Failures.Select(f => $"{f.Key}: {f.Value}"))}");
+        Expect(ep.Cuts.SequenceEqual([s + 1000, s + 2000]) && plan.Segments.Select(g => g.Source).SequenceEqual([0, 1, 2]),
+            $"edits: the follow cut cuts at {string.Join(",", ep.Cuts.Select(c => c - s))} to {string.Join(",", plan.Segments.Select(g => g.Source))}");
+        w.Refresh();
+        Expect(w.Scrubber.CutTicks.SequenceEqual(ep.Cuts) && w.ViewMenuShown().Title == "Follow Cut", "edits: the scrubber's cut marks or the view menu's title are not those of the follow cut");
+        Expect(w.LabelTexts().Any(t => t.StartsWith("Camera 1", StringComparison.Ordinal)), $"edits: the follow cut's label is {string.Join("; ", w.LabelTexts())}");
+
+        // Frames of every camera at sample times, drawn offscreen from files of their own.
+        using (var probe = EditFiles.Open(plan, () => v.Host.Gpu))
+        using (var renderer = new GridRenderer(v.Host.Gpu, 320, 180))
+        {
+            const long n = 24;
+            long[] samples =
+            [
+                .. Enumerable.Range(0, (int)n).Select(k => plan.StartMs + k * (plan.EndMs - plan.StartMs) / (n - 1)),
+                s + 500, s + 999, s + 1000, s + 1500, s + 1999, s + 2000, s + 2100, s + 700,
+            ];
+            List<string> bad = EditMismatches(probe, plan, renderer, samples);
+            Say($"edits: follow cut rendered {samples.Length} frames, {bad.Count} wrong");
+            Expect(bad.Count == 0, $"edits: follow cut pictures: {string.Join("; ", bad.Take(4))}");
+        }
+
+        // The transport on the simulated clock, and the sound following the picture.
+        ep.Pause();
+        ep.SetRate(1);
+        ep.Seek(s + 500);
+        ep.Play();
+        var heard = new List<int?> { ep.PlayingSoundSource };
+        now += 1;
+        ep.Tick();
+        heard.Add(ep.PlayingSoundSource);
+        now += 1;
+        ep.Tick();
+        heard.Add(ep.PlayingSoundSource);
+        long position = ep.PositionMs;
+        ep.SetRate(4);
+        heard.Add(ep.PlayingSoundSource);
+        bool keyframes = ep.KeyframesOnly;
+        ep.SetRate(1);
+        ep.Muted = true;
+        heard.Add(ep.PlayingSoundSource);
+        ep.Muted = false;
+        ep.Pause();
+        string heardText = string.Join(", ", heard.Select(h => h?.ToString() ?? "none"));
+        Say($"edits: played 2 s on the simulated clock to {position - s} ms; sound from {heardText}");
+        Expect(position == s + 2500, $"edits: 2 s of play moved to {position - s} ms, expected 2500");
+        Expect(heardText == "0, 1, 2, none, none" && keyframes, $"edits: the sound came from {heardText} (keyframes at 4x {keyframes}), expected 0, 1, 2, none, none");
+
+        // On screen: the third camera's picture at 2.5 s, from the window's own renderer.
+        bool shown = await Until(() => live.File(2)?.ShownPositionMs == 5500, 5);
+        if (w.Renderer is { } stage)
+        {
+            StageCapture capture = await stage.CaptureAsync();
+            (int r, int g, int bl) = capture.Image.Rgb(capture.Image.Width / 2, capture.Image.Height / 2);
+            (int R, int G, int B) want = SyntheticRecording.Palette[2];
+            Say($"edits: on screen ({r}, {g}, {bl}), expected {want}; the third camera's file at {live.File(2)?.ShownPositionMs} ms");
+            Expect(shown && Math.Abs(r - want.R) <= 40 && Math.Abs(g - want.G) <= 40 && Math.Abs(bl - want.B) <= 40,
+                $"edits: the screen shows ({r}, {g}, {bl}) at 2.5 s, expected the third camera's {want}");
+        }
+
+        // A lane click inside the edit's range on one of its cameras seeks the edit (and plays); another place brings the cameras back.
+        b.LaneClick(cams[1], incident.Start + 4);
+        Expect(b.PlayerView == PlayerView.Follow && ep.PositionMs == s + 4000, $"edits: a lane click in the range went to {ep.PositionMs - s} ms in {b.PlayerView}");
+        ep.Pause();
+
+        // parity: edit-grid
+        b.ShowView(PlayerView.Grid4);
+        bool gridOpened = await Until(() => ep.Files is not null && ep.Plan?.Kind == EditKind.Grid && (w.EditShown?.Frames ?? 0) > 0, 10);
+        if (!gridOpened || ep.Plan is not { } grid)
+        {
+            _problems.Add($"edits: the grid did not open ({ep.Message ?? "no message"})");
+        }
+        else
+        {
+            Say($"edits: grid {grid.Layout} of {grid.Cells.Count} cells on {grid.Canvas?.Width}x{grid.Canvas?.Height}");
+            Expect(grid.Layout == "4up" && grid.Cells.Count == 3 && grid.Canvas == new EditCanvas(1920, 1080),
+                $"edits: the 4-up grid is {grid.Layout} with {grid.Cells.Count} cells");
+            using (var probe = EditFiles.Open(grid, () => v.Host.Gpu))
+            using (var renderer = new GridRenderer(v.Host.Gpu, 640, 360))
+            {
+                const long n = 16;
+                long[] samples =
+                [
+                    .. Enumerable.Range(0, (int)n).Select(k => grid.StartMs + k * (grid.EndMs - grid.StartMs) / (n - 1)),
+                    grid.StartMs + 500, grid.StartMs + 1500,
+                ];
+                List<string> bad = EditMismatches(probe, grid, renderer, samples);
+                Say($"edits: grid rendered {samples.Length} frames, {bad.Count} wrong");
+                Expect(bad.Count == 0, $"edits: grid pictures: {string.Join("; ", bad.Take(4))}");
+            }
+            w.Refresh();
+            Expect(w.EditCells.Count == 3 && w.LabelTexts().Count(t => t.StartsWith("Camera ", StringComparison.Ordinal)) >= 3,
+                $"edits: the grid's cells or labels are {w.EditCells.Count}, {string.Join("; ", w.LabelTexts())}");
+            ep.Seek(grid.StartMs);
+            w.Refresh();
+            int absent = w.MessageTexts().Count(m => m == "No recording at this time");
+            Expect(absent == 2, $"edits: {absent} cells say there is no recording at the start, expected the two later cameras'");
+            ep.Seek(grid.StartMs + 6000);
+            ep.Play();
+            int? first = ep.PlayingSoundSource;
+            ep.GridSound = 1;
+            int? second = ep.PlayingSoundSource;
+            ep.Pause();
+            ep.GridSound = 0;
+            Expect(first == 0 && second == 1, $"edits: the grid's sound came from {first?.ToString() ?? "none"}, then {second?.ToString() ?? "none"}");
+        }
+
+        // parity: edit-back-to-cameras
+        long at = ep.PositionMs;
+        ep.Now = realClock;
+        b.ShowView(PlayerView.Cameras);
+        w.Refresh();
+        Say($"edits: back to the cameras at {TransportState.Clock(p.PositionMs)}");
+        Expect(b.PlayerView == PlayerView.Cameras && ep.Files is null && w.EditShown is null, "edits: the edit did not close");
+        if (p.Playback is not null)
+        {
+            Expect(p.PositionMs == at, $"edits: the cameras continue at {p.PositionMs}, not the edit's {at}");
+        }
+        try
+        {
+            if (d.Folder is { } folder)
+            {
+                Directory.Delete(folder, recursive: true);
+            }
+        }
+        catch (IOException)
+        {
+        }
+    }
+
+    // Renders the samples of a plan offscreen from a second set of its files and returns what did not match.
+    private static List<string> EditMismatches(EditFiles files, EditPlan plan, GridRenderer renderer, long[] samples)
+    {
+        var bounds = new NvrView.Shell.Rect(0, 0, renderer.Width, renderer.Height);
+        var bad = new List<string>();
+        foreach (long t in samples)
+        {
+            RenderedImage image = files.Render(t, renderer);
+            if (plan.Kind == EditKind.Follow)
+            {
+                if (EditTimeline.Shot(plan, t) is not { } shot)
+                {
+                    continue;
+                }
+                (int? color, int frame) = SyntheticRecording.Read(image, bounds);
+                if (color != shot.Source || frame != shot.FilePositionMs / 100)
+                {
+                    bad.Add($"{t - plan.StartMs} ms: camera {color?.ToString() ?? "none"} frame {frame}, expected {shot.Source} frame {shot.FilePositionMs / 100}");
+                }
+                continue;
+            }
+            List<NvrView.Shell.Rect> rects = EditComposition.CellRects(plan, bounds);
+            for (int i = 0; i < 4; i++)
+            {
+                var cell = i < rects.Count ? rects[i] : new NvrView.Shell.Rect(bounds.Width / 2, bounds.Height / 2, bounds.Width / 2, bounds.Height / 2);
+                if (i < plan.Cells.Count && EditTimeline.CellPosition(plan, i, t) is { } position)
+                {
+                    NvrView.Shell.Rect picture = PictureFit.Of(640, 360, cell, fill: false).Destination;
+                    (int? color, int frame) = SyntheticRecording.Read(image, picture);
+                    if (color != plan.Cells[i].Source || frame != position / 100)
+                    {
+                        bad.Add($"{t - plan.StartMs} ms cell {i}: camera {color?.ToString() ?? "none"} frame {frame}, expected {plan.Cells[i].Source} frame {position / 100}");
+                    }
+                }
+                else
+                {
+                    (int r, int g, int bl) = image.Rgb((int)cell.MidX, (int)cell.MidY);
+                    if (Math.Max(r, Math.Max(g, bl)) > 40)
+                    {
+                        bad.Add($"{t - plan.StartMs} ms cell {i}: ({r}, {g}, {bl}), expected black");
+                    }
+                }
+            }
+        }
+        return bad;
+    }
+
 
     private static CoreEvent Alarm(DeviceEntry device, int channel, string kind, bool start) => new()
     {
@@ -1323,6 +1600,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         v.Transcripts.Folder = transcriptsBefore;
 
         await CallWindowSteps(v, stage, camera, device, clock, mic);
+        await CallRecordingEndsWithCall(v, camera);
 
         // parity: call-permission-revoke
         // Revoking the permission is the user's too.
@@ -1720,13 +1998,8 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         stage.Split(SplitAxis.Row);
         bool fixedStill = !stage.IsFocused && stage.State.Tree.LeafCount == 1 && stage.Selected == tile;
         IReadOnlyList<TileHeaderItem> shownButtons = chrome.ShownButtons;
-        // Ctrl+Shift+R is the call recording, which is not built yet.
-        stage.ApplyAction(TileAction.ToggleRecording, tile);
-        string? toast = stage.ToastText;
-        clock.Advance(StageView.ToastSeconds + 0.1);
-        stage.Tick();
         Say($"call window tile menu: the model's {want.Count} items {menu.Take(want.Count).SequenceEqual(want)}, call items {callItems}, layout items [{string.Join(", ", layoutItems)}], " +
-            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}], Record Call: {toast ?? "nothing"}");
+            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}]");
         Expect(menu.SequenceEqual(want) && callItems, $"the call window tile's menu is not the header model's call menu: {string.Join(" / ", menu)}");
         Expect(layoutItems.Length == 0, $"the call window tile's menu offers {string.Join(", ", layoutItems)}");
         Expect(fixedStill, "focus or split changed the call window's single tile");
@@ -1735,7 +2008,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         bool Reachable(TileHeaderItem i) => shownButtons.Contains(i) || overflow.Any(e => e.Item == i);
         Expect(Reachable(TileHeaderItem.Speaker) && Reachable(TileHeaderItem.Quality), "the call window's header has no speaker or quality control, in the header or its \"...\" menu");
         Expect(!shownButtons.Contains(TileHeaderItem.SavePicture) || shownButtons.Contains(TileHeaderItem.Speaker), "the call window's header hides the speaker while Save Picture shows");
-        Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
+        await CallRecordButton(v, cw, camera, tile);
     }
 
     // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
@@ -1812,28 +2085,14 @@ internal sealed partial class SelfTest(App app, AppOptions options)
                 && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
             Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
             Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
-            // A button whose action is not built yet says so; so does R (Save Picture works: SavePictures).
-            At(1000);
-            chrome.PressHeader(TileHeaderItem.Record);
-            string? clicked = stage.ToastText;
-            clock.Advance(StageView.ToastSeconds + 0.1);
-            stage.Tick();
-            bool gone = stage.ToastText is null;
-            stage.Select(tile.Path);
-            stage.HandleKey(Windows.System.VirtualKey.R, false, false);
-            string? keyR = stage.ToastText;
-            clock.Advance(StageView.ToastSeconds + 0.1);
-            stage.Tick();
-            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, R {keyR ?? "nothing"}");
-            Expect(clicked == "Start Recording is coming soon" && gone, "Record's button did not say it is coming soon");
-            Expect(keyR == "Start Recording is coming soon", "R did not reach the header's actions");
+            // Every header action but PTZ's is built, and no mock camera moves: nothing is left to say "coming soon".
         }
         finally
         {
             chrome.ForceWidth(null);
             v.UseClock(new SystemViewerClock());
         }
-        await Task.CompletedTask;
+        await CaptureRecordSteps(v, stage, tile);
     }
 
     // The call card's picture: one more tile of this window's grid, drawn last from the camera's

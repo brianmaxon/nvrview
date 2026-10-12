@@ -1,8 +1,10 @@
 #!/bin/bash
 # Runs the macOS app's self-test on the real core (the Rust library through
 # NVRViewCore.xcframework) against a local tools/mock-nvr with three
-# channels and three days of recordings, so the recordings window's real-core
-# step runs too (SelfTest.swift, `recordings-real-core`). Never a real NVR:
+# channels, three days of recordings and AAC audio, so the recordings
+# window's and the capture's real-core steps run too (SelfTest.swift,
+# `recordings-real-core`, `capture-record-real-core`,
+# `capture-call-record-real-core`). Never a real NVR:
 # the device is the mock on 127.0.0.1, with made-up credentials, and the
 # app's data directory is a throwaway one.
 #

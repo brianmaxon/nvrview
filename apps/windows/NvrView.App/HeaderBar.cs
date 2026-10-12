@@ -2,8 +2,8 @@
 // drawn by the app. Left: the app name and the current layout with a picker
 // (switch layouts, new layout, save as layout). Middle: the app-wide quick
 // actions that used to hide in the right-click menu (Find devices, Edit layout,
-// Fill tiles, Full screen). Right: a reserved spot for a future "N recording"
-// indicator, Settings, and a "…" menu for the rest. The system's caption buttons
+// Fill tiles, Full screen). Right: the "N recording" indicator (shown while recordings
+// run; its menu stops one or all), Settings, and a "…" menu for the rest. The system's caption buttons
 // stay (and so do snap layouts); the header leaves room for them and tells the
 // system which of its controls take the pointer instead of dragging the window.
 // What each action is and where it lives is NvrView.Tiles HeaderActions; the
@@ -35,7 +35,16 @@ internal sealed class HeaderBar
     private readonly DropDownButton _picker = new();
     private readonly Dictionary<HeaderAction, ButtonBase> _buttons = [];
     private readonly Button _overflow;
-    private readonly TextBlock _recording = new() { VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 0, 8, 0) };
+    private readonly Button _recording = new()
+    {
+        VerticalAlignment = VerticalAlignment.Center,
+        Visibility = Visibility.Collapsed,
+        Margin = new Thickness(0, 0, 8, 0),
+        Padding = new Thickness(8, 4, 8, 4),
+        Background = new SolidColorBrush(Colors.Transparent),
+        BorderThickness = new Thickness(0),
+        Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0xFF, 0x5A, 0x5A)),
+    };
 
     public HeaderBar(ViewerWindow window, Viewer viewer)
     {
@@ -69,9 +78,14 @@ internal sealed class HeaderBar
         Grid.SetColumn(middle, 2);
         Root.Children.Add(middle);
 
-        // Right: the recording spot (reserved), Settings, the overflow menu.
+        // Right: the recording indicator, Settings, the overflow menu.
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Margin = new Thickness(8, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
-        AutomationProperties.SetName(_recording, "Recording");
+        AutomationProperties.SetName(_recording, "Recordings");
+        ToolTipService.SetToolTip(_recording, "The recordings running now: stop one or all");
+        var recordingMenu = new MenuFlyout();
+        recordingMenu.Opening += (_, _) => FillRecordingMenu(recordingMenu);
+        Track(recordingMenu);
+        _recording.Flyout = recordingMenu;
         right.Children.Add(_recording);
         right.Children.Add(Make(HeaderAction.Settings, "", toggle: false));
         _overflow = new Button { Content = new FontIcon { Glyph = "", FontSize = 14 }, Width = 40, Height = 36, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0) };
@@ -126,7 +140,7 @@ internal sealed class HeaderBar
         Set(HeaderAction.FillTiles, _window.State.Fill);
         Set(HeaderAction.FullScreen, _window.Stage.IsFullScreen, toggleState: false);
         string? recording = RecordingIndicator.Text(_window.RecordingCount);
-        _recording.Text = recording ?? "";
+        _recording.Content = recording ?? "";
         _recording.Visibility = recording is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -154,7 +168,7 @@ internal sealed class HeaderBar
     /// <summary>The controls that take the pointer instead of dragging the window, in units relative to the window's content.</summary>
     public IEnumerable<WindowRect> InteractiveBounds()
     {
-        var elements = new List<FrameworkElement> { _picker, _overflow };
+        var elements = new List<FrameworkElement> { _picker, _overflow, _recording };
         elements.AddRange(_buttons.Values);
         foreach (FrameworkElement e in elements)
         {
@@ -254,6 +268,8 @@ internal sealed class HeaderBar
         menu.Items.Clear();
         AddAction(menu.Items, HeaderAction.NewWindow);
         AddAction(menu.Items, HeaderAction.Recordings);
+        AddAction(menu.Items, HeaderAction.StopAllRecordings).IsEnabled = _viewer.Capture.Board.Running.Count > 0;
+        AddAction(menu.Items, HeaderAction.OpenRecordingsFolder);
         AddAction(menu.Items, HeaderAction.ToggleSidebar, on: _window.SidebarDocked);
         menu.Items.Add(_window.Stage.IndicatorCornerMenu());
         AddAction(menu.Items, HeaderAction.Diagnostics, on: _window.Stage.Diagnostics);
@@ -265,7 +281,7 @@ internal sealed class HeaderBar
     }
 
     /// <summary>One catalog action as a menu item; <paramref name="on"/> picks the wording of a toggle that is on.</summary>
-    private void AddAction(IList<MenuFlyoutItemBase> into, HeaderAction action, bool on = false)
+    private MenuFlyoutItem AddAction(IList<MenuFlyoutItemBase> into, HeaderAction action, bool on = false)
     {
         HeaderItem h = HeaderActions.Of(action);
         // The wording says what a click does: "Hide sidebar" while it is docked.
@@ -276,6 +292,34 @@ internal sealed class HeaderBar
         }
         item.Click += (_, _) => _window.RunHeaderAction(action);
         into.Add(item);
+        return item;
+    }
+
+    /// <summary>The recording indicator's menu for the recordings now running (also built by the self-test): each with Stop, then Stop all and Open recordings folder.</summary>
+    public MenuFlyout BuildRecordingMenu()
+    {
+        var menu = new MenuFlyout();
+        FillRecordingMenu(menu);
+        return menu;
+    }
+
+    private void FillRecordingMenu(MenuFlyout menu)
+    {
+        menu.Items.Clear();
+        foreach (BoardEntry r in _viewer.Capture.Board.List)
+        {
+            ulong id = r.Id;
+            string what = r.Camera is { } camera ? _viewer.CameraName(camera) : "recording";
+            var stop = new MenuFlyoutItem { Text = $"Stop {(r.IsCall ? "call recording of " : "")}{what} ({RecordingText.Elapsed(r.DurationMs)})" };
+            stop.Click += (_, _) => _viewer.Capture.Stop(id);
+            menu.Items.Add(stop);
+        }
+        if (menu.Items.Count > 0)
+        {
+            menu.Items.Add(new MenuFlyoutSeparator());
+        }
+        AddAction(menu.Items, HeaderAction.StopAllRecordings).IsEnabled = _viewer.Capture.Board.Running.Count > 0;
+        AddAction(menu.Items, HeaderAction.OpenRecordingsFolder);
     }
 
     // ---- the self-test ----
@@ -286,8 +330,11 @@ internal sealed class HeaderBar
 
     public string LayoutLabel => _layoutName.Text;
 
-    /// <summary>Whether the reserved recording spot is in the header (hidden until something records).</summary>
+    /// <summary>Whether the recording indicator shows (hidden until something records).</summary>
     public bool RecordingSpotVisible => _recording.Visibility == Visibility.Visible;
+
+    /// <summary>The indicator's words while it shows (self-test).</summary>
+    public string? RecordingSpotText => RecordingSpotVisible ? _recording.Content as string : null;
 
     public bool HasRecordingSpot => _recording.Parent is not null;
 

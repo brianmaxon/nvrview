@@ -48,9 +48,12 @@ internal sealed class TileChrome
     private static readonly SolidColorBrush AlertRed = new(Color.FromArgb(0xFF, 0xE0, 0x24, 0x24));
     private static readonly SolidColorBrush AlertStripBrush = new(Color.FromArgb(0xE0, 0x8C, 0x0D, 0x0D));
     private static readonly SolidColorBrush White = new(Colors.White);
+    private static readonly SolidColorBrush RecordingBrush = new(Color.FromArgb(0xD9, 0xE0, 0x24, 0x24));
     private static readonly SolidColorBrush OutlineBrush = new(Color.FromArgb(0xE0, 0x3A, 0x96, 0xDD));
 
     private readonly TextBlock _title;
+    private readonly Border _pill;
+    private readonly TextBlock _pillText;
     private readonly StackPanel _buttons;
     private readonly Dictionary<TileHeaderItem, Button> _buttonFor = [];
     private TileHeaderLayout? _layout;
@@ -137,6 +140,20 @@ internal sealed class TileChrome
             Margin = new Thickness(TitleLeft, 0, 4, 0),
         };
         _header.Children.Add(_title);
+        // The recording pill: on the tile itself (not in the header), so it stays when the header fades.
+        _pillText = new TextBlock { Foreground = White, FontSize = 10, FontWeight = FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Center };
+        _pill = new Border
+        {
+            Background = RecordingBrush,
+            CornerRadius = new CornerRadius(8),
+            Height = 17,
+            MinWidth = TileHeaderMetrics.Standard.Pill,
+            Padding = new Thickness(4, 0, 4, 0),
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+            Child = _pillText,
+        };
+        AutomationProperties.SetName(_pill, "Recording");
         // The buttons sit together at the right end in priority order; the title takes what is left.
         _buttons = new StackPanel
         {
@@ -147,6 +164,7 @@ internal sealed class TileChrome
         Grid.SetColumn(_buttons, 1);
         _header.Children.Add(_buttons);
         Root.Children.Add(_header);
+        Root.Children.Add(_pill);
 
         // The zoom map: the whole picture's outline with the visible region marked, in the bottom left of
         // the zoomed picture (it can lie outside the 1x picture's rectangle, so it is moved, not clipped).
@@ -299,6 +317,58 @@ internal sealed class TileChrome
 
         Root.Children.Add(_indicators);
         PlaceIndicators();
+    }
+
+    /// <summary>The recording pill's text while it shows (self-test); the pill is not part of the hover header, so it stays when the header fades.</summary>
+    public string? PillText => _pill.Visibility == Visibility.Visible ? _pillText.Text : null;
+
+    /// <summary>The corner the recording pill sits in now.</summary>
+    public ChromeCorner PillCorner => RecordingIndicator.PillCorner(_corner);
+
+    /// <summary>The pill's frame in the tile's coordinates (self-test); empty when it is not shown.</summary>
+    public Windows.Foundation.Rect PillFrame =>
+        _pill.Visibility == Visibility.Visible && _pill.ActualWidth > 0
+            ? _pill.TransformToVisual(Root).TransformBounds(new Windows.Foundation.Rect(0, 0, _pill.ActualWidth, _pill.ActualHeight))
+            : default;
+
+    private string? _pillShown;
+
+    private void SetPill(string? text)
+    {
+        if (text == _pillShown)
+        {
+            return;
+        }
+        _pillShown = text;
+        if (text is null)
+        {
+            _pill.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            _pillText.Text = text;
+            _pill.Visibility = Visibility.Visible;
+            _pill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        }
+        PlacePill();
+    }
+
+    // The pill sits in the corner opposite the indicators (the top left instead of the header's top right), clear of the alert strip
+    // and the sound badges; the title starts after it when it is in the top left.
+    private void PlacePill()
+    {
+        ChromeCorner corner = RecordingIndicator.PillCorner(_corner);
+        bool left = corner.IsLeft(), top = corner.IsTop();
+        _pill.HorizontalAlignment = left ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        _pill.VerticalAlignment = top ? VerticalAlignment.Top : VerticalAlignment.Bottom;
+        double alert = AlertShown && top ? AlertStripHeight : 0;
+        _pill.Margin = new Thickness(left ? 8 : 0, top ? 8 + alert : 0, left ? 0 : 8, top ? 0 : 30);
+        double lead = _pill.Visibility == Visibility.Visible && corner == ChromeCorner.TopLeft ? Math.Ceiling(_pill.DesiredSize.Width) + 4 : 0;
+        var margin = new Thickness(TitleLeft + lead, 0, 4, 0);
+        if (!_title.Margin.Equals(margin))
+        {
+            _title.Margin = margin;
+        }
     }
 
     /// <summary>Raised when the alert strip's Dismiss button is clicked.</summary>
@@ -551,8 +621,9 @@ internal sealed class TileChrome
     }
 
     /// <summary>Text, badges and the header's model after a state change (not per frame).</summary>
-    public void Refresh(string title, string? status, bool audible, string? diagnostics, TileHeaderTile? header)
+    public void Refresh(string title, string? status, bool audible, string? diagnostics, TileHeaderTile? header, string? pill = null)
     {
+        SetPill(pill);
         if (_title.Text != title)
         {
             _title.Text = title;
@@ -632,6 +703,7 @@ internal sealed class TileChrome
         {
             _corner = corner;
             PlaceIndicators();
+            PlacePill();
         }
         double reserve = _corner == ChromeCorner.TopRight ? _indicators.OccupiedWidth + 8 : 0;
         if (Math.Abs(reserve - _reserve) > 0.5)
@@ -781,6 +853,7 @@ internal sealed class TileChrome
             _blinking = false;
             _header.Margin = new Thickness(0);
             PlaceIndicators();
+            PlacePill();
             return;
         }
         string text = string.Join("\n", lines);
@@ -796,6 +869,7 @@ internal sealed class TileChrome
             if (first)
             {
                 PlaceIndicators();
+                PlacePill();
             }
         }
         if (blinking != _blinking || (blinking && _blink.GetCurrentState() == ClockState.Stopped))

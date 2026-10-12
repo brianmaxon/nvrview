@@ -76,7 +76,8 @@ internal sealed partial class RecordingsWindow
         Created++;
         Window = new Window { Title = "Recordings - nvrview" };
         AppWindow = Window.AppWindow;
-        Browser = new RecordingsBrowser(service);
+        NvrView.Video.AppLogHook.Sink ??= line => AppLog.Limited("recorded-file", 5, line);
+        Browser = new RecordingsBrowser(service, new NvrView.Video.EditFilesFactory(() => host.Gpu), new EditAudio());
 
         BuildHeader(out Grid header);
         BuildSidebar();
@@ -126,6 +127,7 @@ internal sealed partial class RecordingsWindow
 
         Browser.Changed += ScheduleRefresh;
         Browser.Player.Changed += ScheduleTransport;
+        Browser.EditPlayer.Changed += ScheduleTransport;
         Service.DownloadsChanged += OnDownloadsChanged;
         AppWindow.Changed += OnAppWindowChanged;
         Window.Closed += (_, _) => OnClosed();
@@ -134,7 +136,14 @@ internal sealed partial class RecordingsWindow
         _clock = _ui.CreateTimer();
         _clock.Interval = TimeSpan.FromMilliseconds(100);
         _clock.IsRepeating = true;
-        _clock.Tick += (_, _) => Browser.Player.Tick();
+        _clock.Tick += (_, _) =>
+        {
+            Browser.Player.Tick();
+            if (Browser.EditPlayer.IsActive)
+            {
+                Browser.EditPlayer.Tick();
+            }
+        };
         _clock.Start();
         // Download progress alone redraws at most four times a second.
         _progress = _ui.CreateTimer();
@@ -551,6 +560,7 @@ internal sealed partial class RecordingsWindow
         _loudness.Stop();
         Browser.Changed -= ScheduleRefresh;
         Browser.Player.Changed -= ScheduleTransport;
+        Browser.EditPlayer.Changed -= ScheduleTransport;
         Service.DownloadsChanged -= OnDownloadsChanged;
         AppWindow.Changed -= OnAppWindowChanged;
         ClosePlayerView();

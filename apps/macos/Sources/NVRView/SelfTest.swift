@@ -1006,8 +1006,8 @@ final class SelfTest {
     /// order, inside the tile and clear of the title; "…" holds the rest
     /// and the right-click menu is the model's list. Capabilities from the
     /// `channels` event put Start Conversation in a doorbell's header and
-    /// the PTZ buttons in a moving camera's. Recording is not
-    /// built yet: its button and key say "coming soon".
+    /// the PTZ buttons in a moving camera's. Then the recording steps
+    /// (`recordStep`).
     private func headerStep() {
         guard let model = app.model, let window else { return insetStep() }
         let stage = window.stage
@@ -1074,23 +1074,143 @@ final class SelfTest {
             && context.contains("Split Side by Side") && more.contains("Entrance") && !more.contains("Listen")
         print("header menus: … \(more), right-click starts with the model's \(wantContext.count) items \(menusOK)")
         if !menusOK { problems.append("the … or right-click menu is not the header model's list (\(more) vs \(wantMore))") }
-        // A button whose action is not built yet (Record) says so; so does R.
-        _ = at(1000)
-        chrome.pressHeader(.record)
-        let clicked = stage.toastText
-        advance(ToastView.duration + 0.1)
-        let gone = stage.toastText == nil
-        window.window?.makeFirstResponder(stage)
-        window.state.selected = leaf.path
-        press("r", keyCode: 15)
-        let keyR = stage.toastText
-        advance(ToastView.duration + 0.1)
         chrome.frame = saved
         stage.relayoutChrome()
-        print("header stubs: click \(clicked ?? "nothing"), gone after \(ToastView.duration) s \(gone), R \(keyR ?? "nothing")")
-        if clicked?.hasSuffix("is coming soon") != true || !gone { problems.append("Record's button did not say it is coming soon") }
-        if keyR != "Start Recording is coming soon" { problems.append("R did not reach the header's actions") }
-        pictureStep()
+        recordStep(leaf.path, camera)
+    }
+
+    // MARK: Recording (docs/CAPTURE.md "Live recording")
+
+    /// Runs `body` once the capture board says `done` (the fake core's
+    /// queued `recording` events are sent first, on each poll).
+    private func whenCapture(
+        _ timeout: Double, _ done: @escaping @MainActor (RecordingBoard) -> Bool,
+        _ body: @escaping @MainActor () -> Void
+    ) {
+        guard let model = app.model else { return body() }
+        when({
+            model.fake?.completeCaptureWork()
+            return done(model.capture.board)
+        }, timeout: timeout, body)
+    }
+
+    /// R records the selected tile's camera from the next keyframe: the
+    /// pill ("● REC") on its tile stays when the header fades and at any
+    /// width, the header's Record says Stop, the toolbar and the Camera
+    /// menu list it, and the header's Stop ends it ("Recording saved").
+    /// Then a start under the free-space guard says why, and a device's
+    /// third main-stream recording offers the sub-stream instead. Both
+    /// cores (the fake writes nothing; the real one writes into the
+    /// self-test's folder).
+    private func recordStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let model = app.model, let window, let chrome = window.stage.chromes[path] else { return pictureStep() }
+        let stage = window.stage
+        // parity: capture-encoder-priming
+        do {
+            let (reported, measured) = try AACCaptureEncoder.measurePriming()
+            print("capture: AAC priming reported \(reported), impulse back at \(measured.map { $0 - 4096 } ?? -1)")
+            if measured.map({ abs($0 - 4096 - Int(reported)) > 48 }) ?? true {
+                problems.append("capture: the encoder's priming \(reported) is not where the audio comes back")
+            }
+        } catch {
+            problems.append("capture: the AAC round trip failed (\(error))")
+        }
+        if model.capture.encoder == nil || !model.capture.configured {
+            problems.append("capture: the encoder was not installed or the core not configured")
+        }
+        // parity: capture-record-tile
+        window.window?.makeFirstResponder(stage)
+        window.state.selected = path
+        press("r", keyCode: 15)
+        let started = model.capture.board.live(of: camera)
+        whenCapture(20, { $0.live(of: camera)?.state == "recording" }) { [self] in
+            stage.refreshChrome()
+            let entry = model.capture.board.live(of: camera)
+            let tile = stage.headerTile(camera, path: path)
+            let label = tile.flatMap { TileHeaderLayout.menu(for: $0).first { $0.item == .record }?.label }
+            print(
+                "capture: R started \(started.map { ($0.file as NSString).lastPathComponent } ?? "nothing"), "
+                    + "state \(entry?.state ?? "none"), Record says \(label ?? "?")")
+            if started == nil { problems.append("capture: R did not start a recording (\(stage.toastText ?? "no message"))") }
+            if entry?.state != "recording" { problems.append("capture: the recording did not reach its first keyframe") }
+            if label != "Stop Recording" { problems.append("capture: the header's Record did not become Stop") }
+            if let f = started?.file, !f.hasPrefix(model.recordingsFolder.path) {
+                problems.append("capture: the recording is not in the recordings folder")
+            }
+            // parity: capture-record-indicator
+            let pill = chrome.pillText
+            chrome.fadeOut()
+            let stays = chrome.pillText != nil
+            chrome.showChrome()
+            let narrow = tile.map {
+                TileHeaderLayout.compute(width: 100, titleWidth: 200, tile: $0, previous: nil).visible.contains(.recordingPill)
+            }
+            let toolbar = window.recordingItemTitle
+            let menu = NSMenu()
+            RecordingsMenu.shared.fill(menu)
+            let listed = menu.items.filter { $0.action == #selector(ViewerWindowController.stopRecordingItem(_:)) }.count
+            print(
+                "capture: pill \(pill ?? "none"), stays when the header fades \(stays), at 100 pt \(narrow ?? false), "
+                    + "toolbar \(toolbar ?? "none"), Camera menu lists \(listed)")
+            if pill?.hasPrefix("● REC") != true || !stays { problems.append("capture: the tile's pill did not show or did not stay") }
+            if narrow != true { problems.append("capture: a narrow header dropped the recording pill") }
+            if toolbar != "● 1 recording" { problems.append("capture: the toolbar item said \(toolbar ?? "nothing")") }
+            if listed != 1 { problems.append("capture: the Recordings submenu listed \(listed) recordings") }
+            chrome.pressHeader(.record)
+            whenCapture(15, { $0.running.isEmpty }) { [self] in
+                stage.refreshChrome()
+                let ended = model.capture.board.ended.last
+                let toast = stage.toastText
+                print("capture: Stop ended it \(ended?.state ?? "no") (\(ended?.reason ?? "-")), message \(toast ?? "none")")
+                if ended?.state != "finished" || ended?.reason != "stopped" { problems.append("capture: Stop did not finish the recording") }
+                if toast != "Recording saved" { problems.append("capture: the end said \(toast ?? "nothing")") }
+                if chrome.pillText != nil { problems.append("capture: the pill stayed after the recording ended") }
+                advance(ToastView.actionDuration + 0.1)
+                recordLimitsStep(path, camera)
+            }
+        }
+    }
+
+    /// The free-space guard and the main-stream limit, as messages.
+    private func recordLimitsStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let model = app.model, let window else { return pictureStep() }
+        let stage = window.stage
+        // parity: capture-record-disk-low
+        model.capture.minFreeOverride = 1 << 62
+        model.fake?.setCaptureFreeBytes(1)
+        stage.performHeaderItem(.record, at: path, from: nil)
+        let refused = stage.toastText
+        let none = model.capture.board.running.isEmpty
+        model.capture.minFreeOverride = nil
+        model.fake?.setCaptureFreeBytes(.max)
+        advance(ToastView.actionDuration + 0.1)
+        print("capture: low disk says \(refused ?? "nothing"), nothing started \(none)")
+        if refused?.contains("free disk space") != true || !none { problems.append("capture: low disk did not refuse with its reason") }
+        // parity: capture-record-main-limit
+        let cameras = stage.frames.leaves.compactMap(\.camera).filter { $0.device == camera.device && $0.lens == 0 }
+        guard cameras.count >= 3 else {
+            print("capture: fewer than three cameras of one device, the main-stream limit is not checked")
+            return pictureStep()
+        }
+        model.capture.startLive(cameras[0], quality: .main)
+        model.capture.startLive(cameras[1], quality: .main)
+        model.capture.startLive(cameras[2], quality: .main)
+        let message = stage.toastText ?? "nothing"
+        let action = stage.toast.actionTitle
+        if action == "Record Sub-stream" { stage.toast.pressAction() }
+        let third = model.capture.board.live(of: cameras[2])
+        print("capture: a third main stream says \(message), offers \(action ?? "nothing"), then \(third?.tier ?? "nothing")")
+        if !message.contains("two main streams") || action != "Record Sub-stream" || third?.tier != "sub" {
+            problems.append("capture: the main-stream limit did not offer the sub-stream")
+        }
+        whenCapture(20, { b in b.list.count == 3 && b.list.allSatisfy { $0.state == "recording" } }) { [self] in
+            window.stopAllRecordings(nil)
+            whenCapture(15, { $0.running.isEmpty }) { [self] in
+                if !model.capture.board.running.isEmpty { problems.append("capture: Stop All left recordings running") }
+                advance(ToastView.actionDuration + 0.1)
+                pictureStep()
+            }
+        }
     }
 
     // MARK: Save picture (docs/CAPTURE.md "Save picture")
@@ -1802,18 +1922,59 @@ final class SelfTest {
         stage.split(.row)
         let fixed = stage.state.focused == nil && stage.state.tree.leafCount == 1 && stage.selectedPath == leaf.path
         let header = stage.chromes[leaf.path]?.shownHeaderButtons ?? []
-        c.captureRecord(nil)
-        let toast = stage.toastText
-        advance(ToastView.duration + 0.1)
         print(
             "call window tile menu: the model's \(want.count) items \(menu == want), call items \(callItems), "
-                + "layout items \(layoutItems), focus and split ignored \(fixed), header \(header.map(\.rawValue)), ⇧⌘R \(toast ?? "nothing")")
+                + "layout items \(layoutItems), focus and split ignored \(fixed), header \(header.map(\.rawValue))")
         if menu != want || !callItems { problems.append("the call window tile's menu is not the header model's call menu: \(menu)") }
         if !layoutItems.isEmpty { problems.append("the call window tile's menu offers \(layoutItems)") }
         if !fixed { problems.append("focus or split changed the call window's single tile") }
         if !header.contains(.conversation) { problems.append("the doorbell's call window header has no conversation button") }
-        if toast != "Record Call is coming soon" { problems.append("⇧⌘R in the call window did not reach Record Call") }
-        next()
+        callRecordStep(c, doorbell, next)
+    }
+
+    /// ⇧⌘R in a call window records the call (docs/CAPTURE.md "Recording
+    /// calls"): beside the transcripts under the stem the transcript will
+    /// take, the four tracks through the app's AAC encoder, the call bar's
+    /// "● Recording" pill, and ⇧⌘R again stops it.
+    private func callRecordStep(_ c: CallWindowController, _ doorbell: CameraRef, _ next: @escaping @MainActor () -> Void) {
+        guard let model = app.model else { return next() }
+        // parity: capture-call-record-button
+        let answeredBefore = model.capture.encoder?.answered ?? 0
+        c.captureRecord(nil)
+        let entry = model.capture.callRecording(doorbell)
+        let stem = model.capture.reservedCallStem(doorbell)
+        whenCapture(20, { $0.call(of: doorbell)?.state == "recording" }) { [self] in
+            c.refresh()
+            let pill = c.inset.recordingText
+            let header = c.stage.headerTile(doorbell, path: c.stage.frames.leaves.first?.path ?? [])
+            let label = header.flatMap { TileHeaderLayout.menu(for: $0).first { $0.item == .record }?.label }
+            let file = entry.map { URL(fileURLWithPath: $0.file) }
+            let besideTranscripts = file?.deletingLastPathComponent().path == model.transcripts.folder.path
+            let named = stem.map { file?.lastPathComponent == $0 + ".mp4" } ?? false
+            c.captureRecord(nil)
+            whenCapture(15, { $0.call(of: doorbell) == nil }) { [self] in
+                let ended = model.capture.board.ended.last
+                let answered = (model.capture.encoder?.answered ?? 0) - answeredBefore
+                print(
+                    "call recording: \(file?.lastPathComponent ?? "none"), beside the transcripts \(besideTranscripts), "
+                        + "named for the transcript \(named), pill \(pill ?? "none"), Record says \(label ?? "?"), "
+                        + "tracks \(ended?.tracks ?? []), ended \(ended?.state ?? "no"), encoder answered \(answered)")
+                if entry == nil { problems.append("call recording: ⇧⌘R did not start it (\(c.stage.toastText ?? "no message"))") }
+                if !besideTranscripts || !named { problems.append("call recording: not beside the transcripts under its stem") }
+                if pill?.hasPrefix("● Recording") != true { problems.append("call recording: the call bar showed no pill") }
+                if label != "Stop Recording Call" { problems.append("call recording: Record Call did not become Stop") }
+                if ended?.kind != "call" || ended?.tracks != ["video", "Conversation", "Visitor", "You"] {
+                    problems.append("call recording: the tracks were \(ended?.tracks ?? [])")
+                }
+                if answered <= 0 || (model.capture.encoder?.refused ?? 1) != 0 {
+                    problems.append("call recording: the AAC encoder answered \(answered) units")
+                }
+                c.refresh()
+                if c.inset.recordingText != nil { problems.append("call recording: the pill stayed after it stopped") }
+                advance(ToastView.actionDuration + 0.1)
+                next()
+            }
+        }
     }
 
     /// Lays out a call window and runs one display refresh's preparation
@@ -2528,11 +2689,16 @@ final class SelfTest {
 
     private var discoveryChecked = false
     private var retryChecked = false
+    private var captureRealChecked = false
 
     private func checkLog() {
         if !retryChecked, app.model?.fake != nil {
             retryChecked = true
             return retryStep()
+        }
+        if !captureRealChecked, app.model.map({ $0.fake == nil }) == true {
+            captureRealChecked = true
+            return captureRealStep()
         }
         if !recordingsChecked, app.model?.recordings.available == true {
             recordingsChecked = true
@@ -3071,8 +3237,244 @@ final class SelfTest {
                 if p.opens != opens || b.playingIncident == nil || b.playingIncident?.key != b.selected?.key {
                     problems.append("recordings: after Split Here the player reopened or lost its incident")
                 }
-                recordingsLayout(b, fake)
+                editViews(b, fake, rec)
             }
+        }
+    }
+
+    // MARK: Follow cut and grids (milestone P, M3)
+
+    /// The edit player's simulated host clock (seconds).
+    private final class ManualClock {
+        var now: Double = 1000
+    }
+
+    /// Synthetic files being written.
+    private final class Writing {
+        var done = false
+        var failure: String?
+    }
+
+    /// The follow cut and the 4-up grid of a downloaded incident, on the fake
+    /// core's plans (`editCompute`) over synthetic files written where its
+    /// download says they are: each camera's pictures are its own color with
+    /// the frame number in a strip (`SyntheticRecording`). Frames of each are
+    /// drawn with Metal from the VideoToolbox-decoded files and checked at
+    /// sample times for which camera is shown and which of its frames; then
+    /// the cuts, the sound following the shown camera, the transport on a
+    /// simulated clock, the picture on screen, and the way back to the
+    /// cameras.
+    private func editViews(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
+        // parity: edit-download
+        let vehicles = b.dayIncidents.filter { $0.kinds == ["vehicle"] }.map(\.key)
+        guard vehicles.count == 3 else {
+            problems.append("edits: \(vehicles.count) vehicle incidents, expected 3")
+            return recordingsLayout(b, fake)
+        }
+        b.selection = Set(vehicles)
+        b.merge()
+        when({ b.selected?.cameras.count == 3 }, timeout: 2) { [self] in
+            guard let incident = b.selected, incident.cameras.count == 3 else {
+                problems.append("edits: the vehicle incidents did not merge")
+                return recordingsLayout(b, fake)
+            }
+            if b.editable != nil { problems.append("edits: an incident not downloaded offers a follow cut") }
+            b.show(view: .follow)
+            if b.playerView != .cameras { problems.append("edits: Follow Cut showed without a download") }
+            b.message = nil
+            b.download(incident.key)
+            when({
+                fake.completeRecordingWork()
+                return rec.finishedDownload(of: incident.key) != nil
+            }, timeout: 3) { [self] in
+                guard let d = rec.finishedDownload(of: incident.key),
+                    let raw = try? fake.editCompute(json: #"{"kind":"follow","download":"\#(d.download)"}"#),
+                    let object = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
+                    let sources = object["sources"] as? [[String: Any]]
+                else {
+                    problems.append("edits: the incident did not download, or the fake planned nothing")
+                    return recordingsLayout(b, fake)
+                }
+                let files = sources.compactMap { s -> (URL, SyntheticRecording.Spec)? in
+                    guard let file = s["file"] as? String, let n = s["source"] as? Int,
+                        let ms = (s["duration_ms"] as? NSNumber)?.intValue
+                    else { return nil }
+                    return (URL(fileURLWithPath: file), SyntheticRecording.Spec(frames: ms / 100 + 1, color: n))
+                }
+                let writing = Writing()
+                Task { @MainActor in
+                    do {
+                        for (url, spec) in files { try await SyntheticRecording.write(spec, to: url) }
+                    } catch {
+                        writing.failure = String(describing: error)
+                    }
+                    writing.done = true
+                }
+                when({ writing.done }, timeout: 30) { [self] in
+                    print("edits: downloaded \(d.download), \(files.count) synthetic files written\(writing.failure.map { ", failed: \($0)" } ?? "")")
+                    if let f = writing.failure { problems.append("edits: the synthetic files were not written (\(f))") }
+                    if files.count != 3 { problems.append("edits: the download has \(files.count) files, expected 3") }
+                    editFollow(b, fake, rec, incident, folder: d.folder)
+                }
+            }
+        }
+    }
+
+    /// Renders `samples` of a plan offscreen and returns what did not match.
+    private func editMismatches(
+        _ session: EditSession, _ renderer: GridRenderer, samples: [Int64], width: Int, height: Int
+    ) -> [String] {
+        let plan = session.plan
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        var out: [String] = []
+        for t in samples {
+            guard let image = session.render(at: t, width: width, height: height, with: renderer) else {
+                out.append("\(t): nothing rendered")
+                continue
+            }
+            switch plan.kind {
+            case .follow:
+                guard let shot = EditTimeline.shot(plan, at: t) else { continue }
+                let got = SyntheticRecording.read(image, picture: bounds)
+                if got.color != shot.source || got.frame != Int(shot.filePositionMs / 100) {
+                    out.append("\(t - plan.startMs) ms: camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(shot.source) frame \(shot.filePositionMs / 100)")
+                }
+            case .grid:
+                let rects = EditComposition.cellRects(plan, in: bounds)
+                for i in 0..<4 {
+                    let cell = i < rects.count ? rects[i] : CGRect(x: width / 2, y: height / 2, width: width / 2, height: height / 2)
+                    if i < plan.cells.count, let p = EditTimeline.cellPosition(plan, cell: i, at: t) {
+                        let picture = PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination
+                        let got = SyntheticRecording.read(image, picture: picture)
+                        if got.color != plan.cells[i].source || got.frame != Int(p / 100) {
+                            out.append("\(t - plan.startMs) ms cell \(i): camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(plan.cells[i].source) frame \(p / 100)")
+                        }
+                    } else {
+                        let c = image.rgb(x: Int(cell.midX), y: Int(cell.midY))
+                        if max(c.x, c.y, c.z) > 40 { out.append("\(t - plan.startMs) ms cell \(i): \(c), expected black") }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    private func editFollow(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ incident: Incident, folder: String?) {
+        // parity: edit-follow-cut
+        let ep = b.editPlayer
+        let clock = ManualClock()
+        ep.now = { clock.now }
+        b.show(view: .follow)
+        // The device playback's pause arrives as a core event, so it is
+        // waited for too (the edit can draw its first frame before it).
+        when({ ep.session != nil && (b.editStage?.framesDrawn ?? 0) > 0 && !b.player.transport.isPlaying }, timeout: 5) { [self] in
+            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
+                problems.append("edits: the follow cut did not open (\(ep.message ?? b.message ?? "no message"))")
+                return editBack(b, fake, folder: folder)
+            }
+            let s = incident.start * 1000
+            print("edits: follow cut \(plan.segments.map { "\($0.source)@\($0.startMs - s)" }), cuts \(ep.cuts.map { $0 - s }), frames drawn \(b.editStage?.framesDrawn ?? 0)")
+            if b.playerView != .follow || b.player.transport.isPlaying { problems.append("edits: the device playback still plays under the follow cut") }
+            if !session.failures.isEmpty { problems.append("edits: files not opened: \(session.failures)") }
+            if ep.cuts != [s + 1000, s + 2000] || plan.segments.map(\.source) != [0, 1, 2] {
+                problems.append("edits: the follow cut cuts at \(ep.cuts.map { $0 - s }) to \(plan.segments.map(\.source))")
+            }
+            let n: Int64 = 24
+            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) }
+                + [s + 500, s + 999, s + 1000, s + 1500, s + 1999, s + 2000, s + 2100, s + 700]
+            let bad = editMismatches(session, renderer, samples: samples, width: 320, height: 180)
+            print("edits: follow cut rendered \(samples.count) frames, \(bad.count) wrong")
+            if !bad.isEmpty { problems.append("edits: follow cut pictures: \(bad.prefix(4).joined(separator: "; "))") }
+            // The transport on the simulated clock, and the sound following the picture.
+            ep.pause()
+            ep.setRate(1)
+            ep.seek(to: s + 500)
+            ep.play()
+            var heard: [Int?] = [ep.playingSoundSource]
+            clock.now += 1
+            ep.tick()
+            heard.append(ep.playingSoundSource)
+            clock.now += 1
+            ep.tick()
+            heard.append(ep.playingSoundSource)
+            let position = ep.positionMs
+            ep.setRate(4)
+            heard.append(ep.playingSoundSource)
+            ep.setRate(1)
+            ep.muted = true
+            heard.append(ep.playingSoundSource)
+            ep.muted = false
+            ep.pause()
+            print("edits: played 2 s on the simulated clock to \(position - s) ms; sound from \(heard)")
+            if position != s + 2500 { problems.append("edits: 2 s of play moved to \(position - s) ms, expected 2500") }
+            if heard != [0, 1, 2, nil, nil] { problems.append("edits: the sound came from \(heard), expected [0, 1, 2, nil, nil]") }
+            // On screen: the third camera's picture at 2.5 s.
+            when({ session.files[2]?.shownPositionMs == 5500 }, timeout: 3) { [self] in
+                var seen: SIMD3<Int>?
+                b.editStage?.grid?.captureNextFrame { image in seen = image.rgb(x: image.width / 2, y: image.height / 2) }
+                when({ seen != nil }, timeout: 2) { [self] in
+                    let want = SyntheticRecording.palette[2]
+                    print("edits: on screen \(seen.map { "\($0)" } ?? "nothing"), expected \(want)")
+                    if let c = seen, abs(c.x - want.x) > 40 || abs(c.y - want.y) > 40 || abs(c.z - want.z) > 40 {
+                        problems.append("edits: the screen shows \(c) at 2.5 s, expected the third camera's \(want)")
+                    } else if seen == nil {
+                        problems.append("edits: the screen drew no frame")
+                    }
+                    editGrid(b, fake, folder: folder)
+                }
+            }
+        }
+    }
+
+    private func editGrid(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
+        // parity: edit-grid
+        let ep = b.editPlayer
+        b.show(view: .grid4)
+        when({ ep.session != nil && ep.plan?.kind == .grid }, timeout: 5) { [self] in
+            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
+                problems.append("edits: the grid did not open (\(ep.message ?? "no message"))")
+                return editBack(b, fake, folder: folder)
+            }
+            print("edits: grid \(plan.layout ?? "?") of \(plan.cells.count) cells on \(plan.canvas.map { "\($0.width)×\($0.height)" } ?? "no canvas")")
+            if plan.layout != "4up" || plan.cells.count != 3 || plan.canvas != .init(width: 1920, height: 1080) {
+                problems.append("edits: the 4-up grid is \(plan.layout ?? "none") with \(plan.cells.count) cells")
+            }
+            let n: Int64 = 16
+            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) } + [plan.startMs + 500, plan.startMs + 1500]
+            let bad = editMismatches(session, renderer, samples: samples, width: 640, height: 360)
+            print("edits: grid rendered \(samples.count) frames, \(bad.count) wrong")
+            if !bad.isEmpty { problems.append("edits: grid pictures: \(bad.prefix(4).joined(separator: "; "))") }
+            ep.seek(to: plan.startMs + 6000)
+            ep.play()
+            let first = ep.playingSoundSource
+            ep.gridSound = 1
+            let second = ep.playingSoundSource
+            ep.pause()
+            ep.gridSound = 0
+            if first != 0 || second != 1 { problems.append("edits: the grid's sound came from \(String(describing: first)), then \(String(describing: second))") }
+            editBack(b, fake, folder: folder)
+        }
+    }
+
+    /// Back to the cameras: the edit closes, the device playback continues from its position.
+    private func editBack(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
+        // parity: edit-back-to-cameras
+        let at = b.editPlayer.positionMs
+        b.show(view: .cameras)
+        print("edits: back to the cameras at \(TransportState.clock(b.player.positionMs))")
+        if b.playerView != .cameras || b.editPlayer.session != nil { problems.append("edits: the edit did not close") }
+        if b.player.playback != nil, b.player.positionMs != at {
+            problems.append("edits: the cameras continue at \(b.player.positionMs), not the edit's \(at)")
+        }
+        b.editPlayer.now = { CACurrentMediaTime() }
+        if let folder { try? FileManager.default.removeItem(at: URL(fileURLWithPath: folder)) }
+        // The edit's download is forgotten, so the analysis steps start
+        // with nothing downloaded for the day.
+        let rec = b.model
+        for d in rec.downloads { rec.forget(d.download) }
+        when({ rec.downloads.isEmpty }, timeout: 2) { [self] in
+            if !rec.downloads.isEmpty { problems.append("edits: the edit's download was not forgotten") }
+            recordingsLayout(b, fake)
         }
     }
 
@@ -3457,6 +3859,112 @@ final class SelfTest {
                         recordingsRealClose(b)
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: Recording on the real core
+
+    /// A live tile and a call recorded by the real core against the mock
+    /// (never a real device: the step runs only for a device on this
+    /// computer), each file read back with AVFoundation: the live one has
+    /// the video and the camera's AAC, starts on a keyframe and lasts what
+    /// the events said; the call has the video and the three audio tracks,
+    /// only Conversation enabled, every one decoding, and it ends with the
+    /// call.
+    private func captureRealStep() {
+        guard let model = app.model, let window,
+            let device = model.devices.first(where: { $0.link.state == .connected && !$0.channels.isEmpty }),
+            ["127.0.0.1", "localhost", "::1"].contains(device.config.host),
+            let camera = window.stage.frames.leaves.compactMap(\.camera).first(where: { $0.device == device.key }),
+            model.leases.tile(for: camera) != nil
+        else { return checkLog() }
+        // parity: capture-record-real-core
+        model.capture.startLive(camera)
+        guard let id = model.capture.board.live(of: camera)?.id else {
+            problems.append("capture (real core): the live recording did not start (\(model.capture.lastRefusal ?? "?"))")
+            return checkLog()
+        }
+        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 3000 }) { [self] in
+            model.capture.stop(id)
+            whenCapture(20, { $0.running[id] == nil }) { [self] in
+                guard let end = model.capture.board.ended.last(where: { $0.recording == id }) else {
+                    problems.append("capture (real core): the live recording did not end")
+                    return checkLog()
+                }
+                inspectRecording(end) { [self] r in
+                    if let r {
+                        let aac = r.audio.first
+                        print(
+                            "capture (real core): live \((end.file as NSString).lastPathComponent), \(r.videoTracks) video, "
+                                + "\(r.audio.count) audio (\(end.audio)), \(String(format: "%.2f", r.duration)) s for "
+                                + "\(end.durationMs) ms, keyframe start \(r.startsOnKeyframe), AAC decoded \(aac?.decodedFrames ?? 0) frames")
+                        if r.videoTracks != 1 || !r.startsOnKeyframe { problems.append("capture (real core): the live file's video is wrong") }
+                        if abs(r.duration - Double(end.durationMs) / 1000) > 0.5 {
+                            problems.append("capture (real core): the file lasts \(r.duration) s, the events said \(end.durationMs) ms")
+                        }
+                        if end.audio == "passthrough" && (r.audio.count != 1 || (aac?.decodedFrames ?? 0) == 0) {
+                            problems.append("capture (real core): the camera's AAC is not in the file or does not decode")
+                        }
+                    }
+                    captureRealCallStep(camera)
+                }
+            }
+        }
+    }
+
+    private func captureRealCallStep(_ camera: CameraRef) {
+        guard let model = app.model else { return checkLog() }
+        // parity: capture-call-record-real-core
+        model.calls.startConversation(camera.firstLens, at: Date())
+        model.capture.startCall(camera.firstLens)
+        guard let id = model.capture.callRecording(camera)?.id else {
+            problems.append("capture (real core): the call recording did not start (\(model.capture.lastRefusal ?? "?"))")
+            model.calls.end(camera.firstLens, reason: "closed")
+            return checkLog()
+        }
+        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 2500 }) { [self] in
+            // The recording ends with the call.
+            model.calls.end(camera.firstLens, reason: "closed")
+            whenCapture(20, { $0.running[id] == nil }) { [self] in
+                guard let end = model.capture.board.ended.last(where: { $0.recording == id }) else {
+                    problems.append("capture (real core): the call recording did not end with the call")
+                    return checkLog()
+                }
+                inspectRecording(end) { [self] r in
+                    if let r {
+                        let enabled = r.audio.map(\.enabled)
+                        let decoded = r.audio.map(\.decodedFrames)
+                        print(
+                            "capture (real core): call \((end.file as NSString).lastPathComponent) ended \(end.state) "
+                                + "(\(end.reason ?? "-")), tracks \(end.tracks), \(r.videoTracks) video, audio enabled \(enabled), "
+                                + "decoded \(decoded) frames, peaks \(r.audio.map { String(format: "%.2f", $0.peak) })")
+                        if end.state != "finished" || end.reason != "stopped" {
+                            problems.append("capture (real core): the call recording ended \(end.state) (\(end.reason ?? "-"))")
+                        }
+                        if r.videoTracks != 1 || enabled != [true, false, false] {
+                            problems.append("capture (real core): the call file's tracks are \(r.videoTracks) video, audio \(enabled)")
+                        }
+                        if decoded.count != 3 || decoded.contains(0) {
+                            problems.append("capture (real core): a call track did not decode (\(decoded))")
+                        }
+                        if !r.startsOnKeyframe { problems.append("capture (real core): the call file does not start on a keyframe") }
+                    }
+                    checkLog()
+                }
+            }
+        }
+    }
+
+    /// Reads a finished recording back (nil, and a problem, if it cannot).
+    private func inspectRecording(_ end: RecordingEvent, _ body: @escaping @MainActor (RecordingFileCheck?) -> Void) {
+        let url = URL(fileURLWithPath: end.file)
+        Task { @MainActor [self] in
+            do {
+                body(try await RecordingFileCheck.inspect(url))
+            } catch {
+                problems.append("capture (real core): \(url.lastPathComponent) could not be read (\(error))")
+                body(nil)
             }
         }
     }
