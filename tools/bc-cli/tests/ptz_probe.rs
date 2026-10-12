@@ -260,3 +260,21 @@ async fn a_refused_move_is_reported_and_leaves_the_camera_still() {
     wait_still(&nvr, PTZ).await;
     s.close().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_core_refusal_before_sending_is_not_reported_as_sent() {
+    let nvr = spawn_mock();
+    // The probe's own capabilities read succeeds (it ignores the status),
+    // the core's fact check for the commands does not.
+    nvr.set_support_status(500);
+    let mut cfg = ProbeConfig::new(PTZ);
+    cfg.steps = vec![Step::HeldMove, Step::UnknownPreset];
+    let s = session(&nvr, &cfg).await;
+    let (r, out) = run_with(&s, &cfg, "yes\n").await;
+    let report = r.unwrap();
+    assert_eq!(report.unknown_preset, Some(Err(PtzRefusal::QueryFailed)));
+    assert!(out.contains("the core never sent it"), "{out}");
+    assert!(!out.contains("core sent it"), "{out}");
+    assert!(controls(&nvr, PTZ).is_empty());
+    s.close().await;
+}

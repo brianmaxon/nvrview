@@ -421,15 +421,18 @@ async fn steps<W: Write>(
                 let r = session
                     .ptz_recall(cfg.channel, id, MotionOrigin::Manual)
                     .await;
-                let sent = !matches!(r, Err(e) if e.is_refusal());
-                log.line(&format!(
-                    "(b) recall of unlisted preset {id}: {}; {}",
-                    refusal_text(&r),
-                    if sent {
-                        "the core SENT it (the device's answer is above)"
-                    } else {
+                let reached = match &r {
+                    Ok(_) | Err(PtzRefusal::DeviceRefused(_)) => {
+                        "the core sent it (the device's answer is above)"
+                    }
+                    Err(e) if e.sent_nothing() => {
                         "the core never sent it (nothing to report from the device)"
                     }
+                    Err(_) => "the core may have sent it (no answer arrived)",
+                };
+                log.line(&format!(
+                    "(b) recall of unlisted preset {id}: {}; {reached}",
+                    refusal_text(&r),
                 ));
                 report.unknown_preset = Some(r);
             }
