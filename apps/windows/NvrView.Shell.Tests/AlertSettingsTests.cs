@@ -24,10 +24,10 @@ internal static class AlertSettingsTests
             JsonObject doc = T.NotNull(JsonNode.Parse(built.Json)?.AsObject());
             JsonArray cameras = T.NotNull(doc["cameras"]?.AsArray());
             T.Equal(1, cameras.Count);
-            T.Equal(7, (int)T.NotNull(cameras[0]?["camera"]?["device"]));
+            T.Equal(7, T.NotNull(cameras[0]?["camera"]?["device"]).GetValue<int>());
             T.Check(!built.Json.Contains("device_key", StringComparison.Ordinal));
             T.Equal(1, built.Skipped);
-            T.Equal(-300, (int)T.NotNull(doc["utc_offset_min"]));
+            T.Equal(-300, T.NotNull(doc["utc_offset_min"]).GetValue<int>());
             T.Check(built.Enabled);
         });
 
@@ -40,8 +40,8 @@ internal static class AlertSettingsTests
             BuiltAlertSettings built = T.NotNull(AlertSettingsDocument.Build(Stored, _ => 1UL, 0, secrets));
             JsonObject found = T.NotNull(JsonNode.Parse(built.Json)?["secrets"]?.AsObject());
             T.Equal(2, found.Count);
-            T.Equal("mqtt-password-example", (string)T.NotNull(found["sensor-1"]));
-            T.Equal("token-example", (string)T.NotNull(found["ha"]));
+            T.Equal("mqtt-password-example", T.NotNull(found["sensor-1"]).GetValue<string>());
+            T.Equal("token-example", T.NotNull(found["ha"]).GetValue<string>());
             T.Check(!built.Json.Contains("from-the-file", StringComparison.Ordinal));
             BuiltAlertSettings none = T.NotNull(AlertSettingsDocument.Build(Stored, _ => 1UL, 0, new MemoryAlertSecrets()));
             T.Check(JsonNode.Parse(none.Json)?["secrets"] is null);
