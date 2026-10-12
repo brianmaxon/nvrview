@@ -17,7 +17,8 @@ use crate::fixture::Fixture;
 use bc_protocol::archive::{DateTime, Element};
 use bc_protocol::media::{encode_audio, encode_info, encode_video};
 use bc_protocol::stream::StreamTier;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// An explicit event in the fake store.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +125,57 @@ pub struct ArchiveConfig {
     /// Channels whose plays are accepted but send nothing (a fault for
     /// tests of a play that never delivers).
     pub silent_plays: Vec<u8>,
+    /// Faults for the next plays of chosen channels (for tests of how
+    /// cameras of one playback are kept together). Shared: a test keeps a
+    /// clone and adds faults while the mock runs.
+    pub play_faults: PlayFaults,
+}
+
+/// How one play misbehaves (a fault for tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlayFaultKind {
+    /// The play's first media comes this long after the play started (a
+    /// camera slow to start); its pacing starts then.
+    FirstMediaAfter(Duration),
+    /// The play begins at the first keyframe at least this many seconds
+    /// after the seek time instead of the one at or before it (devices were
+    /// seen starting a play at a keyframe after the seek time,
+    /// docs/protocol.md, "Rates, keyframes, and how a play ends").
+    FirstKeyframeAfter(u32),
+    /// After this many seconds of video the play sends nothing for `pause`,
+    /// then goes on at its pace, that much later than before.
+    Stall {
+        /// Seconds of video sent before the stall.
+        after_secs: u32,
+        /// How long nothing is sent.
+        pause: Duration,
+    },
+}
+
+/// Faults waiting for the next served play of a channel; each is used by
+/// one play.
+#[derive(Clone, Debug, Default)]
+pub struct PlayFaults(Arc<Mutex<Vec<(u8, PlayFaultKind)>>>);
+
+impl PlayFaults {
+    /// Adds a fault for the next served play of `channel`.
+    pub fn add(&self, channel: u8, kind: PlayFaultKind) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((channel, kind));
+    }
+
+    /// Takes the faults waiting for a play of `channel`.
+    pub(crate) fn take(&self, channel: u8) -> Vec<PlayFaultKind> {
+        let mut v = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mine, rest): (Vec<_>, Vec<_>) = v.drain(..).partition(|(c, _)| *c == channel);
+        *v = rest;
+        mine.into_iter().map(|(_, k)| k).collect()
+    }
 }
 
 /// One play (command 5) the fake served, for test assertions.
@@ -173,6 +225,7 @@ impl ArchiveConfig {
             play_end_message: true,
             missing: Vec::new(),
             silent_plays: Vec::new(),
+            play_faults: PlayFaults::default(),
         }
     }
 

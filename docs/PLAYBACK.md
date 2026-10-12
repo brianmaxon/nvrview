@@ -353,6 +353,40 @@ the official client does. Earlier designs paused live view for three or
 four cameras; the measurements made that unnecessary, so there is no pause
 and no setting for it.
 
+## Keeping cameras together
+
+Synchronized playback means the same moment shows on every camera, also
+right after a seek or a rate change, when each camera's play starts anew and
+some start slower than others. A hardware run with four cameras of an NVR
+showed them seconds apart after a seek and after rate changes, because one
+camera's play began at a keyframe after the target and its first picture was
+shown at once, a moment ahead of the others, and a camera that fell behind
+was never brought back. The policy (details and bounds in
+[FFI-RECORDINGS.md](FFI-RECORDINGS.md), C10 clarifications, items 1, 7, 9,
+and 15):
+
+- **Ask for a little more.** An exact seek starts the device's plays 2 s
+  before the target (inside the file that holds it), because a device may
+  start a play at a keyframe a few seconds after the seek time; the pictures
+  before the target are decoded and never shown.
+- **Start together.** After a seek or a rate change the shared clock waits
+  until every camera has decoded up to the target, up to 6 s; a camera that
+  delivers nothing by then is shown as without recording, and the others
+  go on.
+- **Never show a camera ahead.** If a camera's first picture still lies
+  after the target, it waits for the clock while playing (the tile keeps its
+  previous picture until then); paused, it is shown at once, the nearest
+  picture there is.
+- **Wait briefly, then bring a camera back.** While playing, the clock
+  waits up to 2 s for a camera with nothing at the position; then the
+  camera is shown `late`, the others go on, and its play alone restarts at
+  the position (again every 2 s it stays behind, at most 3 times a minute).
+  A camera that never comes costs the others at most 2 s per stall and is
+  never waited for while `late`.
+- **Fast rates show keyframes.** From 8x only keyframes are shown, so the
+  cameras agree to within the spacing of the keyframes they are sent (the
+  GOP, times 2 at 8x and 4 at 16x on a main stream), not closer.
+
 ## Measured goals
 
 | Measure | Target |

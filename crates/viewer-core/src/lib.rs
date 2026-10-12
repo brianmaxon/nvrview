@@ -37,11 +37,18 @@
 //!   with [`CoreError::NotPermitted`] unless the app enabled the channel
 //!   ([`Core::set_talk_permission`], off by default); the device session
 //!   rate-limits, paces, logs, and closes it on every exit path.
+//! - **Camera motion** ([`Core::ptz_move`] and its siblings) names its
+//!   origin: the app's own controls ([`MotionOrigin::Manual`]) need no
+//!   enable; automation needs a per-camera grant
+//!   ([`Core::set_motion_grant`]). The device session rate-limits, logs,
+//!   and stops every move on every path; a tile that started a move stops
+//!   it when it closes.
 //! - **Logging.** With a log directory, the core installs `viewer-log`
 //!   (rotation capped by file count and total size, rate-limited). Passwords
 //!   are never logged; addresses only at debug level.
 
 pub mod audio;
+mod capture_owner;
 pub mod clock;
 mod device;
 pub mod discover;
@@ -49,6 +56,7 @@ mod events;
 mod json;
 mod lens;
 mod playback;
+pub mod ptz;
 mod recordings_owner;
 pub mod sound;
 pub mod store;
@@ -56,8 +64,13 @@ pub mod talk;
 mod tile;
 pub mod update;
 
+pub use bc_protocol::ptz::{Direction as PtzDirection, LensAxis};
 pub use bc_protocol::stream::StreamTier;
-pub use bc_session::{BackoffConfig, Connector};
+pub use bc_session::{BackoffConfig, Connector, MotionOrigin};
+pub use capture::LimitKind;
+pub use capture_owner::{
+    AudioEncoder, CaptureError, EncoderOpened, FINALIZE_WAIT, FreeSpace, SystemFreeSpace,
+};
 pub use playback::{MAX_CAMERAS, MAX_PLAYBACKS, PlaybackPending, PlaybackState, SeekMode};
 pub use recordings_owner::{
     AudioChunk, DayAudioSource, MAX_LABELS_PER_DAY, PATTERN_ANALYZER, RecError, SOUND_KINDS,
@@ -347,6 +360,8 @@ pub struct Core {
     lens: lens::LensContext,
     /// Talk-back permissions and every tile's talk.
     talk: talk::TalkHub,
+    /// Camera motion from tiles.
+    ptz: ptz::PtzHub,
     /// The one LAN device search ([`discover`]).
     discover: discover::DiscoverHub,
     /// The one update check or download ([`update`]).
@@ -355,6 +370,8 @@ pub struct Core {
     recordings: recordings_owner::RecordingsHub,
     /// Recorded playbacks (docs/FFI-RECORDINGS.md, section 6).
     playback: playback::PlaybackHub,
+    /// Live and call recordings (docs/CAPTURE.md).
+    capture: capture_owner::CaptureHub,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -428,6 +445,7 @@ impl Core {
             },
         };
         let talk = talk::TalkHub::new(event_sink.clone(), handle.clone());
+        let ptz = ptz::PtzHub::new(event_sink.clone(), handle.clone());
         let discover = discover::DiscoverHub::new(event_sink.clone(), handle.clone());
         let update =
             update::UpdateHub::new(event_sink.clone(), config.data_dir.clone(), clock.clone());
@@ -440,6 +458,13 @@ impl Core {
         // Sound analysis of tiles also feeds the recordings (loudness
         // envelope and sound labels), and lets it listen without tiles.
         recordings.attach_sound(tile_ctx.sound.clone());
+        let capture = capture_owner::CaptureHub::new(
+            handle.clone(),
+            event_sink.clone(),
+            clock.clone(),
+            config.data_dir.clone(),
+            config.test_runtime.is_none(),
+        );
         info!("core started");
         Ok(Core {
             runtime: Mutex::new(runtime),
@@ -460,10 +485,12 @@ impl Core {
             device_keys: Mutex::new(device_keys),
             lens,
             talk,
+            ptz,
             discover,
             update,
             recordings,
             playback: playback::PlaybackHub::new(),
+            capture,
         })
     }
 
@@ -772,10 +799,13 @@ impl Core {
             .filter_map(|id| reg.tiles.remove(&id).map(|t| (id, t)))
             .collect();
         drop(reg);
+        // Its recordings end (and let go of the session) first.
+        self.capture.device_removed(device);
         self.end_tiles(tiles, CloseReason::DeviceRemoved);
         // Its plays stop before the session closes.
         self.playback_device_removed(&dev.key);
         self.talk.forget_device(device);
+        self.ptz.forget_device(device);
         // Recordings let go of the session before it closes.
         self.recordings.device_removed(&dev.key, device);
         dev.handle.close_blocking(&self.handle);
@@ -973,6 +1003,8 @@ impl Core {
         }
         for (id, _) in &tiles {
             self.talk.tile_closed(*id);
+            self.capture.tile_closed(*id);
+            self.ptz.tile_closed(*id);
         }
         for (id, mut t) in tiles {
             t.end(reason);
@@ -1228,6 +1260,10 @@ impl Core {
         drop(reg);
         self.talk
             .set_conversation(tile, device, channel, open, session.as_ref());
+        if !open {
+            // A call recording follows its call.
+            self.capture.call_ended(tile);
+        }
         info!(tile, device, channel, open, "talk-back conversation set");
         Ok(())
     }
@@ -1271,6 +1307,267 @@ impl Core {
         if !self.talk.stop(tile, drain) && !lock(&self.registry).tiles.contains_key(&tile) {
             return Err(CoreError::UnknownId);
         }
+        Ok(())
+    }
+
+    /// Sets the capture settings (docs/FFI.md, "Capture",
+    /// `nv_capture_configure`): the live recordings' folder, caps, disk
+    /// thresholds, count limits, the "Record from" tier, and share-safe
+    /// names, for recordings started afterwards. The first call also
+    /// finalizes or deletes the partial files a crash left (one `recording`
+    /// event `recovered` for each finalized file); it runs before the call
+    /// returns.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] for bad JSON or a relative
+    /// `live_dir`, or from inside a callback; [`CaptureError::Closed`].
+    pub fn capture_configure(&self, json: &str) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.configure(json)
+    }
+
+    /// Installs the app's AAC encoder, or removes it (`None`). Recordings
+    /// already running keep the encoder they started with.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] from inside a callback,
+    /// [`CaptureError::Closed`].
+    pub fn capture_set_encoder(
+        &self,
+        encoder: Option<Arc<dyn AudioEncoder>>,
+    ) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.set_encoder(encoder)
+    }
+
+    /// Replaces how free space is read ([`SystemFreeSpace`] by default) for
+    /// recordings started afterwards. Platforms may supply their own; tests
+    /// inject a fake.
+    ///
+    /// # Errors
+    /// [`CaptureError::InvalidArgument`] from inside a callback,
+    /// [`CaptureError::Closed`].
+    pub fn capture_set_free_space(&self, free: Arc<dyn FreeSpace>) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.set_free_space(free)
+    }
+
+    /// One encoded AAC access unit for `track` of `recording`, in order,
+    /// answering [`AudioEncoder::encode`]. Allowed from any thread,
+    /// including inside the encoder's own calls, until its `close` returns.
+    ///
+    /// # Errors
+    /// [`CaptureError::UnknownId`] for a recording that ended,
+    /// [`CaptureError::InvalidArgument`] for an empty or oversized unit.
+    pub fn record_audio_encoded(
+        &self,
+        recording: u64,
+        track: u32,
+        data: &[u8],
+    ) -> Result<(), CaptureError> {
+        self.capture.audio_encoded(recording, track, data)
+    }
+
+    /// Starts a live or call recording of a tile's camera (docs/FFI.md,
+    /// "Capture", `nv_record_start`); answers
+    /// `{"recording":12,"file":"...","state":"waiting_keyframe"}`. The
+    /// recording has its own subscription at its own tier and outlives the
+    /// tile (a call recording ends with its call: the tile's conversation
+    /// closing, or the tile closing).
+    ///
+    /// # Errors
+    /// [`CaptureError::Limit`] (see [`CaptureError::limit_answer`]),
+    /// [`CaptureError::NotConfigured`] (no settings, or a call without an
+    /// encoder), [`CaptureError::UnknownId`] (no such tile),
+    /// [`CaptureError::InvalidArgument`], [`CaptureError::Closed`],
+    /// [`CaptureError::Internal`].
+    pub fn record_start(&self, request: &str) -> Result<String, CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        let p = capture_owner::StartParams::parse(request)?;
+        let src = {
+            let reg = lock(&self.registry);
+            let t = reg.tiles.get(&p.tile).ok_or(CaptureError::UnknownId)?;
+            capture_owner::TileSource {
+                device: t.device,
+                channel: t.channel,
+                tile_tier: t.tier,
+                session: reg.devices.get(&t.device).and_then(|d| d.handle.session()),
+            }
+        };
+        let id = self.new_id();
+        self.capture.start(id, &p, src)
+    }
+
+    /// Stops a recording and finalizes it; returns at once (`recording`
+    /// events `finalizing`, then `finished`).
+    ///
+    /// # Errors
+    /// [`CaptureError::UnknownId`], [`CaptureError::Closed`],
+    /// [`CaptureError::InvalidArgument`] from inside a callback.
+    pub fn record_stop(&self, recording: u64) -> Result<(), CaptureError> {
+        self.check_api().map_err(capture_error)?;
+        self.capture.stop(recording)
+    }
+
+    /// `{"recordings":[...]}`: the latest `recording` event of each
+    /// recording that has not ended.
+    pub fn record_status(&self) -> String {
+        self.capture.status()
+    }
+
+    /// A tile's device, channel and session, for camera motion.
+    fn ptz_target(
+        &self,
+        tile: u64,
+    ) -> Result<(u64, u8, Arc<bc_session::DeviceSession>), CoreError> {
+        let reg = lock(&self.registry);
+        let t = reg.tiles.get(&tile).ok_or(CoreError::UnknownId)?;
+        let (device, channel) = (t.device, t.channel);
+        let session = reg
+            .devices
+            .get(&device)
+            .and_then(|d| d.handle.session())
+            .ok_or(CoreError::UnknownId)?;
+        Ok((device, channel, session))
+    }
+
+    fn ptz_send(
+        &self,
+        tile: u64,
+        command: bc_session::PtzCommand,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        self.check_api()?;
+        if let MotionOrigin::Automation(c) = &origin
+            && !valid_client(c)
+        {
+            return Err(CoreError::InvalidArgument);
+        }
+        let (device, channel, session) = self.ptz_target(tile)?;
+        self.ptz
+            .send(tile, device, channel, &session, command, origin);
+        Ok(())
+    }
+
+    /// Reads what a tile's camera can do and where its lens is (199, 294,
+    /// 190, 340: viewing tier only) and returns the `nv_ptz_info` JSON
+    /// (docs/FFI.md, "Camera motion (PTZ)"). Blocks until the device
+    /// answers, at most [`PTZ_INFO_TIMEOUT`].
+    ///
+    /// # Errors
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`],
+    /// [`CoreError::InvalidArgument`] from inside a callback,
+    /// [`CoreError::Internal`] when the device did not answer.
+    pub fn ptz_info(&self, tile: u64) -> Result<String, CoreError> {
+        self.check_api()?;
+        let (_, channel, session) = self.ptz_target(tile)?;
+        let read = self.handle.block_on(async move {
+            tokio::time::timeout(PTZ_INFO_TIMEOUT, session.ptz_info(channel)).await
+        });
+        match read {
+            Ok(Ok(info)) => Ok(ptz::info_json(&info)),
+            Ok(Err(e)) => {
+                debug!(tile, reason = e.name(), "camera motion info not read");
+                Err(CoreError::Internal)
+            }
+            Err(_) => Err(CoreError::Internal),
+        }
+    }
+
+    /// Starts or renews a pan or tilt move of a tile's camera at `speed`
+    /// (1 to 64). The app renews it at least every 500 ms while its control
+    /// is held (renewals are not sent to the camera); the camera stops 1 s
+    /// after the last renewal, after 30 s of holding, on
+    /// [`Core::ptz_stop`], when the tile closes, and on every other exit
+    /// path. Returns at once; the outcome comes as a `ptz` event.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for a speed outside 1–64, an empty or
+    /// overlong automation name, or a call from inside a callback;
+    /// [`CoreError::UnknownId`], [`CoreError::Closed`].
+    pub fn ptz_move(
+        &self,
+        tile: u64,
+        direction: PtzDirection,
+        speed: u32,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        let speed = u8::try_from(speed)
+            .ok()
+            .filter(|s| ptz::SPEEDS.contains(s))
+            .ok_or(CoreError::InvalidArgument)?;
+        self.ptz_send(
+            tile,
+            bc_session::PtzCommand::Move { direction, speed },
+            origin,
+        )
+    }
+
+    /// Stops a tile's camera at once. Never rate-limited.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_stop(&self, tile: u64, origin: MotionOrigin) -> Result<(), CoreError> {
+        self.ptz_send(tile, bc_session::PtzCommand::Stop, origin)
+    }
+
+    /// Moves a tile's lens zoom or focus to `position`, clamped to the
+    /// range the camera reported.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_lens(
+        &self,
+        tile: u64,
+        axis: LensAxis,
+        position: i32,
+        origin: MotionOrigin,
+    ) -> Result<(), CoreError> {
+        self.ptz_send(
+            tile,
+            bc_session::PtzCommand::Lens { axis, position },
+            origin,
+        )
+    }
+
+    /// Recalls preset `id` (from [`Core::ptz_info`]) on a tile's camera.
+    /// Saving or deleting presets is not possible.
+    ///
+    /// # Errors
+    /// As [`Core::ptz_move`].
+    pub fn ptz_preset(&self, tile: u64, id: u32, origin: MotionOrigin) -> Result<(), CoreError> {
+        self.ptz_send(tile, bc_session::PtzCommand::Preset { id }, origin)
+    }
+
+    /// Grants or withdraws camera motion control on one channel of a device
+    /// for an automation: a local API client by name, or
+    /// [`MotionOrigin::AUTO_CORRECTION`]. None is granted until granted,
+    /// for this run of the core (the app stores the user's grants and
+    /// passes them after adding the device). Withdrawing stops that
+    /// automation's move. The app's own controls need no grant.
+    ///
+    /// # Errors
+    /// [`CoreError::InvalidArgument`] for an empty or overlong name or from
+    /// inside a callback, [`CoreError::UnknownId`], [`CoreError::Closed`].
+    pub fn set_motion_grant(
+        &self,
+        device: u64,
+        channel: u8,
+        client: &str,
+        granted: bool,
+    ) -> Result<(), CoreError> {
+        self.check_api()?;
+        if !valid_client(client) {
+            return Err(CoreError::InvalidArgument);
+        }
+        let session = lock(&self.registry)
+            .devices
+            .get(&device)
+            .ok_or(CoreError::UnknownId)?
+            .handle
+            .session()
+            .ok_or(CoreError::UnknownId)?;
+        session.set_motion_grant(channel, client, granted);
         Ok(())
     }
 
@@ -1318,6 +1615,9 @@ impl Core {
         let tiles: Vec<(u64, TileHandle)> = reg.tiles.drain().collect();
         let devices: Vec<(u64, Device)> = reg.devices.drain().collect();
         drop(reg);
+        // Recordings stop first (`core_shutdown`) and finalize within
+        // FINALIZE_WAIT; what is left is recovered at the next configure.
+        self.capture.shutdown();
         // Their tile_closed events are delivered before this returns.
         self.end_tiles(tiles, CloseReason::CoreShutdown);
         // Playbacks stop their plays and close their tiles.
@@ -1325,6 +1625,7 @@ impl Core {
         // No on_audio_tap after this; the renderer renders silence.
         self.tile_ctx.audio.shutdown();
         self.talk.shutdown();
+        self.ptz.shutdown();
         // A running search ends with its `discovery_done` (stopped).
         self.discover.stop();
         // A running update check or download is canceled (its folder
@@ -1366,6 +1667,22 @@ impl fmt::Debug for Core {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Core").finish_non_exhaustive()
     }
+}
+
+fn capture_error(e: CoreError) -> CaptureError {
+    match e {
+        CoreError::Closed => CaptureError::Closed,
+        _ => CaptureError::InvalidArgument,
+    }
+}
+
+/// Longest wait of [`Core::ptz_info`].
+pub const PTZ_INFO_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// An automation name: 1 to [`ptz::MAX_CLIENT_NAME`] bytes, no control
+/// characters.
+fn valid_client(c: &str) -> bool {
+    !c.is_empty() && c.len() <= ptz::MAX_CLIENT_NAME && !c.chars().any(char::is_control)
 }
 
 fn layout_error(e: store::LayoutError) -> CoreError {

@@ -8,7 +8,12 @@
 //! "Live view and plays on one session"). So the plays of one device are
 //! always started together ([`bc_session::DeviceSession::play_group`]):
 //! the running ones are stopped (7), every camera is seeked to one time
-//! (123), and after about half a second all are played (5). A seek, a rate
+//! (123), and after about half a second all are played (5). An exact seek
+//! asks the device for a little media before the target (the seek lead,
+//! 2 s, kept inside the file that holds the target): devices may start a
+//! play at a keyframe after the seek time (docs/protocol.md, "Rates,
+//! keyframes, and how a play ends"), and with the lead a camera nearly
+//! always has a picture at the target. A seek, a rate
 //! change, a tier switch, an offset change, and adding or removing a camera
 //! restart the device's group that way. A camera whose recording does not
 //! hold the time is not started; it shows `no_recording` and starts again
@@ -40,12 +45,23 @@
 //! shows the new generation once the target picture is decoded (the
 //! keyframe, for a keyframe seek).
 //!
-//! **Synchronization.** With `wait`, the clock holds while a camera has
-//! nothing at the position yet: up to the first-media limit after a start,
-//! up to 2 s while playing; a camera still behind then is `late` and the
-//! clock goes on; it catches up by dropping to its next keyframe at the
-//! position. With `free` the clock never holds. A camera that delivers
-//! nothing within the first-media limit is `no_recording` (unavailable).
+//! **Synchronization.** The same moment shows on every camera. With
+//! `wait`, the clock holds while a camera is not ready at the position:
+//! after a start (a seek, a rate change, a restart) until it has media
+//! there *and* has decoded up to its target, up to the first-media limit
+//! (6 s); while playing, until it has media there again, up to 2 s. A
+//! camera still behind then is `late` and the clock goes on without it.
+//! Its play (stalled, or running behind the clock) alone starts again at
+//! the position then (a group of one, with the seek lead), and again each
+//! further 2 s it stays behind, at most `restarts_per_minute` times a
+//! minute; it rejoins by dropping to its first keyframe at the position,
+//! and otherwise stays `late`. A camera whose first picture after a start
+//! lies after the target (the play began at a later keyframe) is not shown
+//! ahead of the others: while playing, that picture waits for the clock
+//! (the tile keeps its previous picture until then); paused, it is shown at
+//! once, as the nearest picture there is. With `free` the clock never
+//! holds. A camera that delivers nothing within the first-media limit is
+//! `no_recording` (unavailable).
 //!
 //! **Rates.** 0.25, 0.5, 1, 2, 4, 8, and 16. The device is asked for
 //! `playSpeed` 1 below 1 (paced slower here) and the rate itself from 1 up
@@ -112,8 +128,14 @@ pub(crate) struct Tuning {
     pub(crate) prefetch_ms: i64,
     /// Longest wait for a play's stop (7) to be sent.
     pub(crate) stop_wait: Duration,
-    /// Restarts after a stall or a lost connection, per camera and minute.
+    /// Restarts after a stall or a lost connection, or of a camera left
+    /// behind, per camera and minute.
     pub(crate) restarts_per_minute: u32,
+    /// An exact seek asks the device for this much media time before the
+    /// target (within the file that holds it), so that a play starts at a
+    /// keyframe at or before the target although devices may start at one
+    /// after the seek time.
+    pub(crate) seek_lead_ms: i64,
 }
 
 impl Default for Tuning {
@@ -129,6 +151,7 @@ impl Default for Tuning {
             prefetch_ms: 1_000,
             stop_wait: Duration::from_secs(2),
             restarts_per_minute: 3,
+            seek_lead_ms: 2_000,
         }
     }
 }
@@ -314,6 +337,9 @@ struct Cam {
     last_released_pts: Option<u64>,
     /// Late: dropping to the next keyframe.
     dropping: bool,
+    /// Its first picture of the generation lies after the target (the play
+    /// began at a later keyframe): held until the clock reaches it.
+    ahead: bool,
     /// When its play started (for the first-media limit).
     started: Option<Instant>,
     /// Since when it has had nothing at the position.
@@ -535,6 +561,7 @@ impl Engine {
             target_reached: false,
             last_released_pts: None,
             dropping: false,
+            ahead: false,
             started: None,
             behind_since: None,
             suspended: false,
@@ -916,6 +943,10 @@ impl Engine {
             (self.end_ms + 999).div_euclid(1000),
         );
         let mut seek_ms = i64::MAX;
+        // The latest start of the files that hold the cameras' targets: the
+        // seek time stays inside every one of them.
+        let mut floor_ms = i64::MIN;
+        let lead = self.seek_lead_ms();
         let mut tiles = Vec::new();
         let mut stopping = Vec::new();
         let max_ms = (self.tuning.buffer_ms as f64 * self.play_clock.rate().max(1.0)) as i64;
@@ -942,6 +973,7 @@ impl Engine {
             c.target_reached = false;
             c.last_released_pts = None;
             c.dropping = false;
+            c.ahead = false;
             c.started = None;
             c.behind_since = None;
             c.suspended = false;
@@ -950,7 +982,8 @@ impl Engine {
             c.pending = false;
             if !has_session {
                 fail(c, "session_closed");
-            } else if c.covered(target) {
+            } else if let Some(f) = c.file_at(target.div_euclid(1000)) {
+                floor_ms = floor_ms.max(f.start * 1000);
                 c.state = CamState::Buffering;
                 c.pending = true;
                 seek_ms = seek_ms.min(target);
@@ -959,6 +992,7 @@ impl Engine {
                 no_recording(c, i64::MIN);
             }
         }
+        let seek_ms = seek_ms.saturating_sub(lead).max(floor_ms).min(seek_ms);
         let d = self.devices.get_mut(key).expect("checked");
         d.stopping.append(&mut stopping);
         if !tiles.is_empty() {
@@ -969,6 +1003,15 @@ impl Engine {
         }
         let key = key.to_owned();
         self.launch_next(&key);
+    }
+
+    /// How far before its target an exact seek starts the device's plays.
+    fn seek_lead_ms(&self) -> i64 {
+        if self.mode == SeekMode::Exact {
+            self.tuning.seek_lead_ms
+        } else {
+            0
+        }
     }
 
     /// Starts the device's next queued launch unless one is in flight.
@@ -1048,6 +1091,7 @@ impl Engine {
         c.pending = true;
         c.started = None;
         c.suspended = false;
+        c.ahead = false;
         let (key, tile) = (c.device.clone(), c.tile);
         if let Some(d) = self.devices.get_mut(&key) {
             d.queue.push_back(Launch {
@@ -1086,7 +1130,13 @@ impl Engine {
                     continue;
                 }
                 let at = pos + c.offset_ms;
-                if c.has_data_at(at) || !c.covered(at) {
+                // Ready: it holds media at the position and has reached its
+                // generation's target (or holds a first picture after it
+                // for its time). A camera still decoding up to its target
+                // is waited for like one with nothing yet, so a seek starts
+                // every camera at the same moment.
+                let ready = c.has_data_at(at) && (c.target_reached || c.ahead);
+                if ready || !c.covered(at) {
                     c.behind_since = None;
                     if c.state == CamState::Late {
                         c.state = CamState::Playing;
@@ -1236,6 +1286,49 @@ impl Engine {
             // The play went on across the gap by itself.
             c.state = CamState::Playing;
         }
+        // Left behind: nothing at the position for the wait limit (its
+        // play stalled or runs behind the clock), so it is `late`. Its play
+        // alone starts again at the position, so it rejoins the others
+        // instead of trailing them; again after each further wait limit
+        // behind, a few times a minute at most, then it stays `late`.
+        let lead = self.seek_lead_ms();
+        let c = &mut self.cams[i];
+        if c.state == CamState::Late
+            && !c.pending
+            && !c.suspended
+            && !c.stream_done
+            && !self.ended
+            && c.behind_since
+                .is_some_and(|s| now.duration_since(s) >= tuning.wait_limit)
+        {
+            c.behind_since = Some(now);
+            while c
+                .restarts
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+            {
+                c.restarts.pop_front();
+            }
+            if c.restarts.len() < tuning.restarts_per_minute as usize {
+                c.restarts.push_back(now);
+                let floor = c
+                    .file_at(at.div_euclid(1000))
+                    .map_or(at, |f| f.start * 1000);
+                let from = (at - lead).max(floor).min(at);
+                if let Some(r) = c.reader.take()
+                    && let Some(d) = self.devices.get_mut(&c.device)
+                {
+                    d.stopping.push(r);
+                }
+                info!(
+                    playback = self.id,
+                    tile = c.tile,
+                    "camera left behind; its play restarts"
+                );
+                self.start_single(i, from.div_euclid(1000), false);
+                return;
+            }
+        }
         // A stopped play (buffer full, stall) starts again from the newest
         // second held once the buffer has drained.
         let c = &mut self.cams[i];
@@ -1245,12 +1338,20 @@ impl Engine {
                 (b.low_water(), b.horizon_ms())
             };
             if low {
-                let from = horizon.unwrap_or(at).max(at - 1000).div_euclid(1000);
-                if c.end_ms().is_some_and(|e| from * 1000 >= e) {
+                // From the newest picture held, less the seek lead (its
+                // recorded time is known to within a second, and a device
+                // may start at a later keyframe); what is held already is
+                // skipped.
+                let newest = horizon.unwrap_or(at).max(at - 1000);
+                if c.end_ms().is_some_and(|e| newest >= e) {
                     c.suspended = false;
                     c.stream_done = true;
                 } else {
-                    self.start_single(i, from, true);
+                    let floor = c
+                        .file_at(newest.div_euclid(1000))
+                        .map_or(newest, |f| f.start * 1000);
+                    let from = (newest - tuning.seek_lead_ms).max(floor).min(newest);
+                    self.start_single(i, from.div_euclid(1000), true);
                 }
             }
         }
@@ -1273,6 +1374,7 @@ impl Engine {
         };
         let due = at + latency_ms;
         let audio_ok = running && (rate - 1.0).abs() < f64::EPSILON;
+        let playing = self.playing;
         let keyframes_only = rate >= 8.0;
         let buf = c.buf.clone();
         let mut b = lock(&buf);
@@ -1309,8 +1411,19 @@ impl Engine {
                     }
                     continue;
                 }
+                if playing && rec > due && c.last_released_pts.is_none() {
+                    // The first picture lies after the target (the play
+                    // began at a later keyframe): shown when the clock
+                    // reaches it, not ahead of the other cameras. Paused, it
+                    // is shown at once (the nearest picture there is).
+                    c.ahead = true;
+                    break;
+                }
+                c.ahead = false;
                 c.target_reached = true;
-                if rec == c.target_ms || c.last_released_pts.is_none() {
+                if (rec == c.target_ms || c.last_released_pts.is_none())
+                    && !(keyframes_only && !key)
+                {
                     let e = b.pop().expect("front");
                     feed.push(FeedItem::Item(Item::Media(e.record)));
                     c.last_released_pts = Some(pts);

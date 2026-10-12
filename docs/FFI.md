@@ -572,7 +572,9 @@ NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
 
    A live recording records the tile's camera (device, channel, lens) on
    its own subscription; `quality` overrides the configured tier, `name` is
-   the camera name for the file, `share_safe` overrides the setting. A call
+   the camera name for the file, `share_safe` overrides the setting, and
+   `utc_offset_s` (optional, default 0) is the computer's local offset, for
+   the local time in the file name. A call
    recording writes to the path the app reserved beside the transcript.
    The answer: `{"recording": 12, "file": "<absolute path>",
    "state": "waiting_keyframe"}`. Errors: `NV_ERR_LIMIT` (the count limits,
@@ -603,6 +605,10 @@ NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
   `file` and `segment` name it), `finalizing`, `finished`, `failed`,
   `recovered`. Sent at once on a change and about once a second while
   recording.
+- `dropped_frames`: video frames lost on the way (a slow recorder's
+  queue, or out of order); `fragmented` (on `finished` and `failed`): the
+  fragmented file was published as the `.mp4` because finalizing had no
+  room or failed.
 - `audio`: `passthrough`, `encoded`, `none` (the camera sends no audio),
   `unsupported` (not AAC and no encoder). A call recording's `tracks` are
   `video`, `Conversation`, `Visitor`, `You`.
@@ -622,6 +628,27 @@ The `channels` event gains, without an ABI change, from each channel's
 > preset recall for [CAPTURE.md](CAPTURE.md) "Pan, tilt, and zoom"; the
 > commands are in protocol.md, "What nvrview will send". Its own minor,
 > the next free one when it lands ("Versioning").
+>
+> **Implementation status (Z1).** The Rust side exists on `Core`:
+> `ptz_info`, `ptz_move`, `ptz_stop`, `ptz_lens`, `ptz_preset` (each
+> taking a `MotionOrigin`; the C functions will pass `Manual`) and
+> `set_motion_grant`, with the `ptz` events below. The C functions are
+> not exported yet: minors are numbered in the order they land and other
+> additions in flight are taking the next ones, so they come with the
+> apps' PTZ controls (Z2) on the next free minor then. As built, beyond the shapes
+> below: a renewal sends nothing and reports nothing; a lens move's `sent`
+> event carries the clamped `position`; `refused` (the core's rules:
+> `not_granted`, `user_steering`, `rate_limited` with `retry_after_ms`,
+> `max_hold`, `not_supported`, `unknown_preset`) is told apart from
+> `failed` (`device_refused` with `status`, `connection_lost`,
+> `timed_out`, `session_closed`, `query_failed`); and the session's own
+> stops come on the tile that started the move as `{"type":"ptz",
+> "tile":7,"action":"stop","state":"sent","reason":"deadman"}`, with
+> `reason` one of `released` (an `nv_ptz_stop`), `deadman`, `max_hold`,
+> `replaced`, `device_refused`, `grant_withdrawn`, `session_closed`,
+> `reconnected`. A speed outside 1–64, or an automation name that is empty,
+> longer than 64 bytes or holds control characters, is
+> `NV_ERR_INVALID_ARGUMENT`. `nv_ptz_info` blocks for at most 20 s.
 
 ```c
 NvStatus nv_ptz_info(NvCore *core, const char *request, char *out, size_t cap, size_t *len);

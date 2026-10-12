@@ -54,6 +54,12 @@
 //!   talk (201, audio 202, close 11) whose received records are logged
 //!   ([`MockNvr::talk_log`]) so tests can decode and time them.
 //!
+//! - optionally, cameras that move ([`ptz`]): pan and tilt (18), preset
+//!   recall (19), lens zoom and focus (295), and the reads 294, 190 and
+//!   340, for the channels of [`Config::ptz`]; every request is logged
+//!   ([`MockNvr::ptz_log`]) and each camera's position and moving state
+//!   are exposed ([`MockNvr::ptz_state`]).
+//!
 //! - optionally, fisheye cameras ([`FisheyeConfig`]): `fishEye` 1 and
 //!   `channelType` `fisheye_ipc` in their 199 items (every other item says
 //!   0 and `ipc`), a square stream-info entry, and their own looping
@@ -68,11 +74,13 @@ pub mod alarms;
 pub mod archive;
 pub mod audio;
 pub mod fixture;
+pub mod ptz;
 pub mod replay;
 pub mod talk;
 
 use archive::{
-    ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent, PlayLog,
+    ArchiveConfig, DownloadFault, DownloadLog, FaultKind, FileEntry, MockEvent, PlayFaultKind,
+    PlayLog,
 };
 use audio::{AudioConfig, Item, Jitter, Schedule};
 use bc_protocol::crypto::{SessionKey, credential_hash, md5_hex_upper_31, xor_obfuscate};
@@ -181,6 +189,10 @@ pub struct Config {
     pub lens_ptz_types: Vec<Vec<u32>>,
     /// If set, these channels are fisheye cameras.
     pub fisheye: Option<FisheyeConfig>,
+    /// Cameras that move ([`ptz`]), by channel. Their 199 `ptzType` and
+    /// `ptzPreset` follow the model unless [`Config::ptz_types`] or
+    /// [`Config::ptz_presets`] name the channel.
+    pub ptz: HashMap<u8, ptz::PtzCamera>,
 }
 
 /// Fisheye camera channels (docs/protocol.md, "Fisheye cameras"): flagged in
@@ -292,6 +304,7 @@ impl Config {
             ptz_presets: Vec::new(),
             lens_ptz_types: Vec::new(),
             fisheye: None,
+            ptz: HashMap::new(),
         }
     }
 
@@ -338,6 +351,8 @@ struct Shared {
     talk_open_status: AtomicU32,
     /// Status for talk audio replies (202); 200 accepts.
     talk_audio_status: AtomicU32,
+    /// Every camera's motion state and the PTZ request log.
+    ptz: ptz::PtzBoard,
     /// While set, a preview start is accepted and then never answered or
     /// fed (a stream that is silent).
     silent_previews: AtomicBool,
@@ -463,6 +478,7 @@ pub fn spawn_in(config: Config, runtime: &Handle) -> MockNvr {
 fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
     let (alarm_tx, alarm_rx) = mpsc::unbounded_channel();
     let alarms = alarms::Board::new(config.channels, alarm_tx);
+    let ptz = ptz::PtzBoard::new(config.ptz.clone());
     let shared = Arc::new(Shared {
         config,
         shutdown: watch::Sender::new(false),
@@ -481,6 +497,7 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         talks: Mutex::new(Vec::new()),
         talk_open_status: AtomicU32::new(200),
         talk_audio_status: AtomicU32::new(200),
+        ptz,
         silent_previews: AtomicBool::new(false),
         refuse_connections: AtomicBool::new(false),
         kill: tokio::sync::broadcast::channel(4).0,
@@ -653,6 +670,29 @@ impl MockNvr {
         self.shared
             .talk_audio_status
             .store(u32::from(status), Ordering::SeqCst);
+    }
+
+    /// A moving camera's position and moving state now ([`ptz`]); `None`
+    /// for a channel without one.
+    pub fn ptz_state(&self, channel: u8) -> Option<ptz::PtzState> {
+        self.shared.ptz.state(channel)
+    }
+
+    /// Every PTZ request received so far (18, 19, 295, 294, 190, 340),
+    /// oldest first, with the status answered.
+    pub fn ptz_log(&self) -> Vec<ptz::PtzLogEntry> {
+        self.shared.ptz.log()
+    }
+
+    /// Preset saves or deletes received (configuration: must stay 0).
+    pub fn ptz_config_requests(&self) -> u64 {
+        self.shared.ptz.config_requests()
+    }
+
+    /// Answers later moves, recalls and lens moves with this status
+    /// instead of acting (200, the default, acts). Stops are always obeyed.
+    pub fn set_ptz_status(&self, status: u16) {
+        self.shared.ptz.set_status(status);
     }
 
     /// Sessions subscribed to alarm pushes (command 192) right now.
@@ -1135,6 +1175,15 @@ impl Conn {
             3 => self.start_preview(m).await,
             4 => self.stop_preview(m).await,
             10 | 11 | 201 | 202 => self.talk_command(m).await,
+            18 | 19 | 295 | 294 | 190 | 340 => {
+                let channel = self.ext_channel(m);
+                let body = self.payload_text(m);
+                let (status, reply) =
+                    self.shared
+                        .ptz
+                        .handle(self.id, m.header.command, channel, &body);
+                self.reply_xml(m.header.command, id, status, &reply).await
+            }
             other => self.reply_xml(other, id, 400, "").await,
         }
     }
@@ -1230,8 +1279,19 @@ impl Conn {
             } else {
                 ("ipc", 0)
             };
-            let ptz = cfg.ptz_types.get(usize::from(c)).copied().unwrap_or(0);
-            let preset = cfg.ptz_presets.get(usize::from(c)).copied().unwrap_or(0);
+            let model = cfg.ptz.get(&c);
+            let ptz = cfg
+                .ptz_types
+                .get(usize::from(c))
+                .copied()
+                .or(model.map(ptz::PtzCamera::ptz_type))
+                .unwrap_or(0);
+            let preset = cfg
+                .ptz_presets
+                .get(usize::from(c))
+                .copied()
+                .or(model.map(ptz::PtzCamera::ptz_preset))
+                .unwrap_or(0);
             s.push_str(&format!(
                 "<item>\n<chnID>{c}</chnID>\n<aitype>{ai}</aitype>\n<aiAnimalType>0</aiAnimalType>\n\
                  <ipcAudioTalk>{talk}</ipcAudioTalk>\n<channelType>{kind}</channelType>\n\
@@ -1919,6 +1979,7 @@ impl Conn {
         if !served || cfg.silent_plays.contains(&ch) {
             return Ok(());
         }
+        let faults = cfg.play_faults.take(ch);
         let thin = PlayPace {
             speed: speed.filter(|s| [1, 2, 4, 8, 16].contains(s)).unwrap_or(1),
             main: matches!(stream, Some(StreamTier::Main | StreamTier::Extern)),
@@ -1931,7 +1992,7 @@ impl Conn {
         let task = self.shared.runtime.spawn(async move {
             let _count = PlayCount(Arc::clone(&shared));
             let _ = serve_play(
-                &shared, &writer, &key, id, &latest, &cfg, ch, at, thin, &stop2,
+                &shared, &writer, &key, id, &latest, &cfg, ch, at, thin, &faults, &stop2,
             )
             .await;
         });
@@ -1992,6 +2053,7 @@ async fn serve_play(
     channel: u8,
     at: bc_protocol::archive::DateTime,
     pace: PlayPace,
+    faults: &[PlayFaultKind],
     stop: &AtomicBool,
 ) -> io::Result<()> {
     let enc_err = |e| io::Error::new(io::ErrorKind::InvalidInput, e);
@@ -2018,8 +2080,20 @@ async fn serve_play(
     }
     let gop = i64::from(cfg.gop_secs.max(1));
     let mut window = archive::ts(at).div_euclid(gop) * gop;
+    let mut stall = None;
+    for f in faults {
+        match *f {
+            PlayFaultKind::FirstMediaAfter(d) => tokio::time::sleep(d).await,
+            PlayFaultKind::FirstKeyframeAfter(s) => {
+                window = (archive::ts(at) + i64::from(s) + gop - 1).div_euclid(gop) * gop;
+            }
+            PlayFaultKind::Stall { after_secs, pause } => {
+                stall = Some((i64::from(after_secs), pause));
+            }
+        }
+    }
     let end = cfg.recorded_end();
-    let start = Instant::now();
+    let mut start = Instant::now();
     let speed = i64::from(pace.speed);
     let burst = i64::from(cfg.play_burst_secs) * speed;
     let stride = pace.keyframe_stride();
@@ -2039,6 +2113,11 @@ async fn serve_play(
         window += gop;
         if recs.is_empty() || cfg.missing_at(channel, window - gop) {
             continue;
+        }
+        if let Some((_, pause)) = stall.filter(|(after, _)| played >= *after) {
+            stall = None;
+            tokio::time::sleep(pause).await;
+            start += pause;
         }
         let due_ms = (played - burst).max(0) * 1000 / speed;
         sleep_until(start + Duration::from_millis(due_ms as u64)).await;

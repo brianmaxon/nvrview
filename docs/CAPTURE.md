@@ -12,7 +12,9 @@
 > [protocol.md](protocol.md) ("What nvrview will send"). Parity status is in
 > [PARITY.md](PARITY.md). Built so far: the header model on both apps, and on
 > macOS the header, its menus and keys (capture and PTZ actions say "coming
-> soon") and the call window's picture as a single fixed tile.
+> soon") and the call window's picture as a single fixed tile; in the core,
+> the pure base (`crates/capture`, K2) and the recorders behind a Rust API
+> (K4, below). The C interface and the apps' use of it come next.
 
 ## Implementation status (K2)
 
@@ -59,6 +61,90 @@ lists its rules; the choices made where this page is silent are:
 Not in the crate: the muxer driver, threads, the free-space shim, the
 event JSON, the C interface (K4), and `fixtures/synthetic/capture-names.json`
 (the names are tested from tables in the crate).
+
+## Implementation status (K4)
+
+`viewer-core` owns the recordings (`src/capture_owner`), behind a Rust API
+on `Core` that the C interface (F5) will wrap one to one:
+`capture_configure`, `capture_set_encoder` (an `AudioEncoder` trait with
+`open`, `encode`, `close`, the `NvAudioEncoder` of FFI.md),
+`record_audio_encoded`, `record_start`, `record_stop`, `record_status`,
+and `capture_set_free_space` (a `FreeSpace` trait; the default,
+`SystemFreeSpace`, asks `statvfs` or `GetDiskFreeSpaceExW`). Errors are a
+`CaptureError` (`Limit` carries its `LimitKind`; `limit_answer` writes
+`{"limit": ...}`). Events are the `recording` objects of FFI.md. The choices
+made where the contract is silent:
+
+- **Threads.** One OS thread per recorder (a task on the runtime in tests
+  on the simulated clock). The loop runs on the core's runtime; once it
+  ends, the subscription and the talk observer are released and the
+  finalize runs without the runtime, so it can finish during shutdown.
+  Shutdown, dropping the core, and removing a device stop their
+  recordings (`core_shutdown`, `device_removed`) before tiles and
+  sessions close, and wait up to 5 s (`FINALIZE_WAIT`); a recorder still
+  finalizing then finishes on its own thread, or is recovered at the next
+  launch. A session that ends on its own (a refused login) ends its
+  recordings with `login_failed`.
+- **Audio probe.** Tracks are declared before the first frame, so the
+  recorder holds the stream from the first keyframe until the first
+  camera audio record (its codec and AAC format decide), or 1.5 s of
+  video, 3 s of host time, or 8 MiB (no audio). Later parts reuse the
+  decision. Audio records are stamped with the playout's own method
+  (`audio_pipeline::timestamp`) and placed with the epoch timeline.
+- **Tracks.** Live: the camera's AAC passed through; other codecs decoded
+  and sent to the encoder; without an encoder, or when it refuses the
+  track, video only (`audio` `unsupported`, `tracks` `["video"]`). Call:
+  Conversation and You always encoded; Visitor passed through when the
+  camera sends AAC, else encoded from the decoded audio (silent when the
+  camera sends none); `audio` reports the Visitor track; a call whose
+  encoder refuses a track fails with `encoder_failed`.
+- **Encoder bridge.** `track` is the audio track's index in the file
+  (live 0; call 0 Conversation, 1 Visitor, 2 You). Each part opens its
+  encoded tracks when it starts and closes them with flush when it ends;
+  a recording keeps the encoder it started with. The `k`th unit returned
+  for a track is placed at the `k`th 1024-sample block's time (the
+  priming rule of `mp4-remux`). At most 10 s of frames are with the
+  encoder unanswered and 10 s more wait in the queue (then silence); the
+  units waiting to be placed are capped at 10 s of three tracks (then
+  dropped). `encode_dropped_ms` is the worst track's plus those drops.
+- **Calls.** A call recording ends when its tile's conversation closes
+  (`set_talk_conversation` false) or its tile closes, with `stopped`. One
+  call recording per camera at a time (the talk observer is per channel);
+  another is refused as the `calls` limit. `file` must be an absolute
+  `.mp4` path; when it (or its partial file) exists, the next free
+  `(part N)` of its stem is used, so starting again in one call writes
+  part 2.
+- **Live names.** `name` defaults to `Camera <channel + 1>`; the start
+  request may carry `utc_offset_s` (the app's local offset, default 0),
+  since the name uses local time. The tier follows the tile's lens: the
+  main or sub stream of the first lens, or the `extern` or `mobile`
+  stream of the second.
+- **Counts.** A recording that is finalizing no longer counts against the
+  limits. Free space that cannot be read counts as plenty (logged once).
+- **Events.** `waiting_keyframe` at the start, `recording` at the first
+  keyframe, `segment` when a later part opens, about once a second while
+  nothing changes (as diagnostics, which a full event queue drops first),
+  then `finalizing` and `finished` or `failed`. `segment` is at least 1,
+  `bytes` counts every part, and two fields are added: `dropped_frames`
+  (frames the subscription's queue dropped plus frames out of order) and,
+  on the last event, `fragmented` (the fragmented file was published
+  because finalizing had no room or failed). `record_status` lists the
+  recordings that have not ended; `record_stop` returns at once.
+- **Crash safety.** The registry lives at `data_dir/capture/partials.json`
+  (in memory only without a data directory: no recovery). Only the first
+  `capture_configure` recovers, before it returns; a partial file that
+  cannot be finalized is left as it is and no longer listed. A part whose
+  parameter sets change in a way the format hash missed (the muxer
+  refuses the frame) also starts the next part.
+
+Tests: `crates/viewer-core/tests/capture.rs`, against `tools/mock-nvr` on
+the simulated clock (one on threads in real time): a live tile to a
+finalized MP4 (tracks, durations, keyframe start), a call with both sides
+and You placed within 40 ms of its send time, a 3 s outage as a gap and a
+silent minute as part 2, a resolution change as part 2, the disk guard at
+start and while recording, the count limits, crash recovery (a cut
+partial recovered, a tiny one deleted, an unlisted one untouched), and
+shutdown or dropping the core mid-recording.
 
 ## Principles
 
@@ -356,6 +442,12 @@ doorbell's speaker (AUDIO.md, "Recording calls").
   and the Camera menu's Recordings submenu. No menu-bar status item.
 
 ## Pan, tilt, and zoom
+
+> **Implementation status (Z1).** The core's side is built and tested
+> against the mock NVR's PTZ model (`tools/mock-nvr`, `ptz`):
+> ARCHITECTURE.md, "Device commands" has what it does, FFI.md "Camera
+> motion (PTZ)" the Rust API and events. Not built: the C functions and
+> the apps' controls and self-test steps (Z2).
 
 Moving a PTZ camera, its lens zoom and focus, and recalling its presets from
 the tile. It is camera motion control (ARCHITECTURE.md, "Device commands"):

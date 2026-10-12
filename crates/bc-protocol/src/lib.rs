@@ -18,6 +18,10 @@
 //! - [`talk`]: talk-back to a camera's speaker: which channels can talk,
 //!   the ability reply, request texts, and the IMA ADPCM coding of the
 //!   audio (the session builds the messages, motion tier only).
+//! - [`ptz`]: camera motion control: pan and tilt moves and their stop,
+//!   preset recall, and lens zoom and focus, from fixed templates, and the
+//!   read-only PTZ replies (the session builds the messages and checks them
+//!   against what the device reported).
 //! - [`recording`]: a file format for a received stream with arrival times,
 //!   for replaying real streams in development.
 //! - [`crypto`], [`xml`], [`stream`]: the building blocks used by the above.
@@ -30,6 +34,7 @@ pub mod detection;
 pub mod framer;
 pub mod header;
 pub mod media;
+pub mod ptz;
 pub mod recording;
 pub mod session;
 pub mod stream;

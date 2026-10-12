@@ -638,7 +638,9 @@ as received, the camera's audio).
 
 ## Pan, tilt, and zoom
 
-> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"; not built yet).
+> **Planned** (CAPTURE.md, "Pan, tilt, and zoom"). The core's side is
+> built (Z1: commands, limits, the stop on every path, grants); the apps'
+> controls are not.
 
 Steering a camera that can move is the user's own action and needs no
 enable step (camera motion control, docs/ARCHITECTURE.md "Device

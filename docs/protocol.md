@@ -626,9 +626,14 @@ only the body's `command` tells them apart:
 
 ### What nvrview will send
 
-> **Planned, not yet implemented** (docs/CAPTURE.md, "Pan, tilt, and zoom";
-> docs/FFI.md, "Camera motion (PTZ)"). None of these commands is on the
-> allowlist yet; each joins it with a fixed template and an allowlist test.
+> **Implemented in the core (Z1); not yet reachable from the apps**
+> (docs/CAPTURE.md, "Pan, tilt, and zoom"; docs/FFI.md, "Camera motion
+> (PTZ)"). 18, 19 and 295 are on the allowlist in the motion tier and 294,
+> 190 and 340 in the viewing tier, each with a fixed template
+> (`bc_protocol::ptz`) and an allowlist test. Tested only against the mock
+> NVR's PTZ model, never on hardware: the mock's answers to what was not
+> observed (a refused command, an out-of-range position, an unknown preset)
+> are its own choices, not facts.
 
 Only the forms observed above, each built by the core from a fixed
 template:
