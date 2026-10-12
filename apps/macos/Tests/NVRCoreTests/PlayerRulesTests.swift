@@ -21,6 +21,14 @@ import Testing
         #expect(PlaybackSpeed.slower(than: 1) == 0.5 && PlaybackSpeed.slower(than: 0.25) == nil)
     }
 
+    @Test func openRefusalsSayWhy() {
+        #expect(PlaybackOpenMessage.text(.invalidArgument) == "A camera's device is not searched for recordings")
+        #expect(PlaybackOpenMessage.text(.limit) == "Too many cameras or playbacks to play this")
+        #expect(PlaybackOpenMessage.text(.notConfigured) == "Recordings are not set up yet")
+        #expect(PlaybackOpenMessage.text(.unknownID) == "That incident changed; select it again")
+        #expect(PlaybackOpenMessage.text(.internal) == "The recording could not be played (status -5)")
+    }
+
     @Test func transport() {
         let t = TransportState(startMs: 1_000_000, endMs: 1_060_000, positionMs: 1_055_000, state: .paused, rate: 1)
         #expect(t.showsPlay && !t.isPlaying)

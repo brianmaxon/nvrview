@@ -87,6 +87,26 @@ public abstract record PlayerGridMode
     public static PlayerGridMode Tiled { get; } = new Grid();
 }
 
+/// <summary>
+/// What the player says when the core refuses to open a playback, by status (<c>nv_playback_open</c>,
+/// FFI-RECORDINGS.md section 6). Every camera of an enabled device plays, so a refused camera means its device's
+/// recordings are not searched.
+/// </summary>
+public static class PlaybackOpenMessage
+{
+    /// <summary>The message for <paramref name="status"/>.</summary>
+    public static string Text(NvStatus status) => status switch
+    {
+        NvStatus.Limit => "Too many cameras or playbacks to play this",
+        NvStatus.Unsupported => "This device cannot play its recordings",
+        NvStatus.InvalidArgument => "A camera's device is not searched for recordings",
+        NvStatus.NotConfigured => "Recordings are not set up yet",
+        NvStatus.UnknownId => "That incident changed; select it again",
+        NvStatus.Closed => "The app is closing",
+        _ => $"The recording could not be played (status {(int)status})",
+    };
+}
+
 /// <summary>Where each of the player's cameras goes (at most four).</summary>
 public static class PlayerGrid
 {

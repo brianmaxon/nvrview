@@ -186,6 +186,15 @@ internal static class RecordingsBrowseTests
             T.Check(board[keys[0]] is null && board.PendingKeys.Count == 0);
         });
 
+        T.Run("player: open refusals say why", () =>
+        {
+            T.Equal("A camera's device is not searched for recordings", PlaybackOpenMessage.Text(NvStatus.InvalidArgument));
+            T.Equal("Too many cameras or playbacks to play this", PlaybackOpenMessage.Text(NvStatus.Limit));
+            T.Equal("Recordings are not set up yet", PlaybackOpenMessage.Text(NvStatus.NotConfigured));
+            T.Equal("That incident changed; select it again", PlaybackOpenMessage.Text(NvStatus.UnknownId));
+            T.Equal("The recording could not be played (status -5)", PlaybackOpenMessage.Text(NvStatus.Internal));
+        });
+
         T.Run("player: speeds", () =>
         {
             T.Check(PlaybackSpeed.All.SequenceEqual([0.25, 0.5, 1, 2, 4, 8, 16]));

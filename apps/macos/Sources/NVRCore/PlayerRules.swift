@@ -91,6 +91,24 @@ extension Int64 {
     public func floorDiv(_ d: Int64) -> Int64 { (self - ((self % d) + d) % d) / d }
 }
 
+/// What the player says when the core refuses to open a playback, by
+/// status (`nv_playback_open`, FFI-RECORDINGS.md section 6). Every camera
+/// of an enabled device plays, so a refused camera means its device's
+/// recordings are not searched.
+public enum PlaybackOpenMessage {
+    public static func text(_ status: CoreStatus) -> String {
+        switch status {
+        case .limit: "Too many cameras or playbacks to play this"
+        case .unsupported: "This device cannot play its recordings"
+        case .invalidArgument: "A camera's device is not searched for recordings"
+        case .notConfigured: "Recordings are not set up yet"
+        case .unknownID: "That incident changed; select it again"
+        case .closed: "The app is closing"
+        default: "The recording could not be played (status \(status.code))"
+        }
+    }
+}
+
 /// How the player shows its cameras.
 public enum PlayerGridMode: Equatable, Sendable {
     /// All cameras the same size: one, side by side, or two by two.
