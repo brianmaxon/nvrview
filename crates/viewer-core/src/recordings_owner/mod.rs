@@ -44,6 +44,7 @@
 //! beside it.
 
 mod config;
+mod day_audio;
 mod downloads;
 mod edit;
 mod exports;

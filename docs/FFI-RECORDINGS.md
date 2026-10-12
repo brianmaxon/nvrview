@@ -1671,9 +1671,10 @@ F3.
    `seconds` and `labels`, `failed` a `reason`: `no_source`, `no_audio`,
    `source_unavailable`, `not_enabled`, `index`, `internal`). At most 32
    requests, one running per device; asking again for a queued camera-day
-   returns its request. The audio comes from a `DayAudioSource` the app or
-   the downloads set; none exists yet, so requests fail with `no_source` until
-   C10 or the downloads provide one. Proposed C surface for F3:
+   returns its request. The audio comes from a `DayAudioSource` set with
+   `Core::set_sound_day_source`, or, when none is set, from the finished
+   downloads of that camera-day (see "Sound from downloaded days" below).
+   Proposed C surface for F3:
    `nv_sound_analyze_day(core, json, out, cap, len)` and
    `nv_sound_analyze_cancel(core, request)`.
 
@@ -1873,7 +1874,8 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
     (`NV_ERR_LIMIT`); a camera twice in one playback is
     `NV_ERR_INVALID_ARGUMENT`.
 14. **Not done in C10.** `nv_playback_step`; stills from a playback (C14's
-    `ShownPicture`); a `DayAudioSource` fed by playback; and `playback_closed`
+    `ShownPicture`); a `DayAudioSource` fed by playback (not done, see "Sound from downloaded
+    days"); and `playback_closed`
     with `login_failed`: a refused login shows the device's cameras
     `failed` (`session_closed`), and the app closes the playback. A camera of
     a device that is enabled but not added when the playback opens is
@@ -1998,9 +2000,10 @@ those of the C12 clarifications.
    `state` is then `queued` or `running`, whichever it is by then, so a size
    probe with a NULL buffer is best avoided: pass room for the short answer
    at once, as for the other calls that change state). With no
-   audio source for recorded days (C10 and the downloads provide it later)
-   every request ends `failed` with `no_source`; the events and the cancel
-   work as C12 describes.
+   audio source set and no downloads folder configured every request ends
+   `failed` with `no_source`; with downloads configured it reads the
+   downloaded files (see "Sound from downloaded days"); the events and the
+   cancel work as C12 describes.
 7. **`nv_tile_loudness`** is as proposed in section 2a: `cap` 0 with NULL
    arrays reads only the count; `cap` above 0 needs both arrays; `start_s` and
    `len` are required. A tile that is not known is `NV_ERR_UNKNOWN_ID`; a
@@ -2105,3 +2108,47 @@ downloads.
     one camera. The C smoke test covers a range download, a trim, and a still
     from a file; stills from a playback are tested through the Rust C-function
     tests (`ffi_export.rs`) only.
+
+## Sound from downloaded days (SOUND-DAY, 2026-10-12)
+
+`nv_sound_analyze_day` now has a source of its own; no C function and no
+ABI change (minor stays 8). What the core does:
+
+1. **Source.** A `DayAudioSource` set with `Core::set_sound_day_source`
+   still wins (tests, a later playback source). With none set, the core reads
+   the finished downloads (`done` camera jobs whose files exist) of that
+   camera and lens whose download range reaches into the day. Without a
+   downloads folder the request fails `no_source`; with one but no
+   download covering the day, `no_audio`.
+2. **Reading.** The first AAC track of each file (`recordings::audio_track`,
+   reading only `moov`), each frame wrapped in an ADTS header and decoded by
+   the same decoder as live audio (`audio-pipeline`), mixed to mono, and
+   resampled to 16 kHz when it is not already. A frame that fails to decode
+   counts as silence of its length. Where two downloads overlap, the later
+   one is cut; a file that crosses midnight is cut at the day's edges.
+3. **Time seam.** A file's start is the start of its download range on the
+   index's clock plus the audio track's own delay, the same seam as the
+   edit planners (`file_start_ms`, B7): the first picture's keyframe-clock
+   time replaces it later, so times can be off by up to the margin of the
+   first chunk until then.
+4. **Results.** As for live listening: one-second peak and RMS go to the
+   envelope store, `smoke_alarm` and `co_alarm` labels (`local_audio`,
+   analyzer `pattern-v1`) replace the detector's earlier labels over the
+   audio analyzed, so asking again does not duplicate them. Events are as
+   in item 8 of the C12 clarifications; `done` carries `seconds` (seconds
+   with audio) and `labels`. The work runs on a blocking thread, one request
+   per device at a time, and checks the cancel flag every second of audio.
+5. **No replay from the device.** When nothing is downloaded the day could
+   be played back from the NVR for its audio, but audio is carried only at
+   1x (docs/protocol.md), so a day costs up to a day of real time on one of
+   the device's few play slots, per camera. That is not worth building as an
+   automatic fallback; it stays a possible opt-in for short windows (an
+   event's range) and is not done.
+
+**What the apps need (follow-up).** An "Analyze this day" action on a
+camera-day (timeline or day view) that is enabled when the camera has a
+finished download covering the day: call `nv_sound_analyze_day`, show
+progress from the `sound_analyze` events (`queued`, `running`, `done` with
+`labels`, `failed` with `no_audio` as "nothing downloaded for this day"),
+offer cancel through `nv_sound_analyze_cancel`, and refresh the loudness
+lane and event queries on `done`. Nothing else changes in the contract.

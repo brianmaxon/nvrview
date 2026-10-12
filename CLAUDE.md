@@ -116,6 +116,19 @@ self-test parity check, and the secret scan, and says so. Any other change, or
 stamp (stamps come only from full runs on a clean tree; `scripts/release.sh`
 needs them).
 
+**Windows check and merging.** Run the final
+`NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh` on a *clean committed tree*
+(commit first): only then does it leave a stamp (shared through the common git
+directory) that `scripts/merge-branch.sh` can reuse, so the merge does not run
+the Windows check again. Commit nothing after it that touches code; a later
+change means a new Windows run. The lead merges with
+`scripts/merge-branch.sh <branch> "<message>"`: merge without committing, full
+Mac check, then the Windows check only when the branch's stamp does not cover
+the result (rules in the script header; every 5th merge always runs it). To
+check Mac and Windows together, use `scripts/release-check.sh`.
+`scripts/test-stamps.sh` tests these rules with fake checks (part of
+`scripts/check.sh`).
+
 When chaining checks in a shell, make failures stop the chain (`set -e`, and
 `set -o pipefail` when piping output); a filtered pipeline can otherwise hide
 a failing step.
