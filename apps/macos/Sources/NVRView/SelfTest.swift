@@ -8,6 +8,10 @@ import VideoKit
 /// `--selftest SECONDS`: runs the real app (its window behind all others, no
 /// focus, muted), then checks, in order:
 ///
+/// 0. right after launch, with the sidebar collapsed as a restored window
+///    collapses it, the pointer resting at the left edge (fed to both the
+///    edge reveal and AppKit's own collapsed-sidebar hover) shows the
+///    overlay while the sidebar stays collapsed and the stage does not move;
 /// 1. a device is connected, a tile is playing, and a non-flat picture is on
 ///    screen (once every tile plays and its rates are measured, or after
 ///    SECONDS at most);
@@ -99,6 +103,11 @@ import VideoKit
 ///    sound following, a lane click seeking, Remove from Incident and Split
 ///    Here without reopening), the panes give way in a narrow window, and
 ///    closing the window releases its hold and closes the playback;
+/// 14f. bundled update defaults (docs/UPDATES.md): an `update-defaults.json` in a
+///    throwaway app folder, with a throwaway key and source, makes the key
+///    trusted and the source the default, listed as bundled; a user key,
+///    turning the bundled key off, and the user's own source override it,
+///    and with no file nothing is trusted;
 /// 15. AppKit logged none of the warnings in `forbiddenLog` during the run.
 ///
 /// The viewer's clock is a manual one here (`AppDelegate.testClock`):
@@ -133,10 +142,57 @@ final class SelfTest {
     func start(seconds: Double) {
         // Line by line, also into a pipe (a run that hangs still shows how far it got).
         setvbuf(stdout, nil, _IOLBF, 0)
-        when({ [self] in gridReady }, timeout: seconds) { [self] in checkGrid() }
+        launchPeekStep { [self] in
+            when({ [self] in gridReady }, timeout: seconds) { [self] in checkGrid() }
+        }
         // A hard limit for the whole run (the steps after the grid take a few
         // seconds: tier switches and display refreshes are real).
         after(seconds + 30) { [self] in finish(problems + ["timed out"]) }
+    }
+
+    /// Right after launch, with the sidebar collapsed the way a restored
+    /// window collapses it: the pointer resting at the left edge, as both our
+    /// edge reveal and AppKit's own collapsed-sidebar hover see it, shows the
+    /// overlay and leaves the sidebar collapsed and the stage where it was
+    /// (AppKit's peek used to push the stage aside; see
+    /// `ViewerSplitViewController`).
+    private func launchPeekStep(then next: @escaping @MainActor () -> Void) {
+        guard let window else { return next() }
+        // parity: sidebar-system-peek
+        window.restoreSidebar(collapsed: true)
+        window.window?.contentView?.layoutSubtreeIfNeeded()
+        let framesBefore = window.splitFramesForTest
+        let overlay = window.sidebarOverlay
+        if window.systemSidebarPeekAllowedForTest == true {
+            problems.append("AppKit may still peek the collapsed sidebar into the split view")
+        }
+        let hovered = window.hoverCollapsedSidebarEdgeForTest(x: 5, inside: true)
+        overlay.simulatedPointer = CGPoint(x: 2, y: 200)
+        overlay.pointerAt(CGPoint(x: 2, y: 200))
+        advance(overlay.reveal.dwell)
+        if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge right after launch") }
+        // A fixed wait, to show that nothing happens: AppKit's hover runs on
+        // its own real-time timer (it peeked about 0.75 s after the pointer
+        // came to rest), which the test cannot advance.
+        after(hovered ? 1.5 : 0) { [self] in
+            let framesAfter = window.splitFramesForTest
+            let stage = framesAfter.last.map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "none"
+            print(
+                "launch peek: AppKit hover \(hovered ? "driven" : "absent"), peek allowed "
+                    + "\(window.systemSidebarPeekAllowedForTest.map(String.init) ?? "n/a"), overlay shown \(overlay.isShown), "
+                    + "stage \(stage)\(framesAfter == framesBefore ? " unchanged" : " moved from \(framesBefore)")")
+            if framesAfter != framesBefore {
+                problems.append("the stage moved or the sidebar opened while the edge reveal was up after launch")
+            }
+            if hovered { window.hoverCollapsedSidebarEdgeForTest(x: 5, inside: false) }
+            overlay.simulatedPointer = CGPoint(x: 900, y: 200)
+            overlay.pointerAt(CGPoint(x: 900, y: 200))
+            advance(overlay.reveal.hideDelay)
+            overlay.simulatedPointer = nil
+            window.restoreSidebar(collapsed: false)
+            window.window?.contentView?.layoutSubtreeIfNeeded()
+            next()
+        }
     }
 
     /// Advances the viewer's clock and steps every window at the new time
@@ -402,7 +458,10 @@ final class SelfTest {
             overlay.pointerAt(CGPoint(x: 2, y: 200))
             advance(overlay.reveal.dwell / 2)
             if overlay.isShown { problems.append("the sidebar slid in before the dwell") }
-            advance(overlay.reveal.dwell / 2)
+            // To the dwell's deadline exactly: two half steps can land one
+            // rounding step short of it, depending on the clock's start.
+            let now = app.testClock?.now ?? 0
+            advance(overlay.reveal.deadline.map { max(0, $0 - now) } ?? overlay.reveal.dwell / 2)
             if !overlay.isShown { problems.append("the sidebar did not slide in at the left edge") }
             // A layout pass with the overlay up over the stage (the next
             // run-loop turn; display refreshes are too slow to wait for).
@@ -2689,6 +2748,8 @@ final class SelfTest {
     }
 
     private func checkLogNow() {
+        // parity: updates-bundled-defaults
+        if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
         // parity: appkit-warnings
         if let watch = app.logWatch {
             for p in watch.patterns {

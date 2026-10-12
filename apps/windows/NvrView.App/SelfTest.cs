@@ -120,6 +120,15 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"self-test threw: {e}");
         }
+        try
+        {
+            // parity: updates-bundled-defaults
+            _problems.AddRange(UpdateDefaultsSelfTest.Run(app.Viewer!, line => Say(line)));
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the bundled update defaults step threw: {e}");
+        }
         Finish(_problems);
     }
 
@@ -624,6 +633,11 @@ internal sealed class SelfTest(App app, AppOptions options)
             await CallOverTheStage(v, stage, card, camera, leasesBefore);
         }
 
+        if (card is not null)
+        {
+            await CallInsetDrag(v, stage, card, camera);
+        }
+
         // parity: call-press-joins-conversation
         // 6. A doorbell press joins the call.
         v.Apply(Alarm(device, 0, "visitor", true));
@@ -1114,6 +1128,174 @@ internal sealed class SelfTest(App app, AppOptions options)
     }
 
     private static bool Near(double a, double b) => Math.Abs(a - b) < 1.5;
+
+    // ---- moving the call insets (docs/UX.md "Alert insets", "Moving them") ----
+    // The pointer is not injected: the steps drive the card's own DragPress/DragMove/DragRelease,
+    // which its pointer handlers call with the pointer's place in the stack.
+
+    private static (double X, double Y) MeasuredAnchor(InsetFrame column, double w, double h)
+    {
+        double m = InsetGeometry.Margin;
+        double fx = w - 2 * m - column.Width, fy = h - 2 * m - column.Height;
+        return (fx > 0 ? (column.X - m) / fx : 0, fy > 0 ? (column.Y - m) / fy : 0);
+    }
+
+    private static bool NearAnchor((double X, double Y) a, InsetAnchor b) => Math.Abs(a.X - b.X) < 0.01 && Math.Abs(a.Y - b.Y) < 0.01;
+
+    // A drag of the card by (dx, dy) from a point on its header or picture, in steps.
+    private static void DragCard(CallCard card, double fromX, double fromY, double dx, double dy, bool onHeader)
+    {
+        card.DragPress(new Windows.Foundation.Point(fromX, fromY), onHeader);
+        const int steps = 5;
+        for (int i = 1; i <= steps; i++)
+        {
+            card.DragMove(new Windows.Foundation.Point(fromX + dx * i / steps, fromY + dy * i / steps));
+        }
+        card.DragRelease();
+    }
+
+    // Moves the column so its top left lands on (x, y), grabbing the card's header.
+    private static void DragColumnTo(CallStack cards, CallCard grab, double x, double y)
+    {
+        InsetFrame start = cards.Column!.Value;
+        InsetFrame f = grab.Frame;
+        DragCard(grab, f.X + 40, f.Y + 8, x - start.X, y - start.Y, onHeader: true);
+        cards.UpdateLayout();
+    }
+
+    private async Task CallInsetDrag(Viewer v, StageView stage, CallCard card, CameraRef camera)
+    {
+        CallStack cards = stage.CallCards;
+        ViewerWindow window = app.Windows.First(w => w.Stage == stage);
+        cards.UpdateLayout();
+        double m = InsetGeometry.Margin;
+        int changes = 0;
+        void Count() => changes++;
+        cards.AnchorChanged += Count;
+        try
+        {
+            // parity: inset-drag-snap
+            // The header dragged to 10 DIPs from the right edge snaps there and 40% down does not; a
+            // small move on the picture is a click and moves nothing; the picture past the slop drags.
+            double w = cards.ActualWidth, h = cards.ActualHeight;
+            InsetFrame column = cards.Column ?? default;
+            bool atDefault = cards.Anchor is null && NearAnchor(MeasuredAnchor(column, w, h), InsetAnchor.FromCorner(v.Settings.InsetCorner));
+            InsetFrame f0 = card.Frame;
+            DragCard(card, f0.X + 60, f0.Y + 120, 3, 2, onHeader: false);
+            bool clickMoved = cards.Anchor is not null || changes != 0;
+            double freeX = w - 2 * m - column.Width, freeY = h - 2 * m - column.Height;
+            DragColumnTo(cards, card, m + freeX - 10, m + 0.4 * freeY);
+            InsetAnchor? anchor = cards.Anchor;
+            bool snapped = anchor is { X: 1 } a && Math.Abs(a.Y - 0.4) < 0.01;
+            bool placed = cards.Column is { } c1 && Math.Abs(c1.Right - (w - m)) < 0.5;
+            bool saved = window.ToSaved() is { InsetX: 1, InsetY: { } sy } && Math.Abs(sy - 0.4) < 0.01 && changes == 1;
+            InsetFrame pic = card.Frame;
+            DragCard(card, pic.X + 100, pic.Y + 120, -40, 0, onHeader: false);
+            cards.UpdateLayout();
+            bool pictureDrag = cards.Anchor is { } pa && Math.Abs(pa.X - (freeX - 40) / freeX) < 0.01 && Math.Abs(pa.Y - 0.4) < 0.01;
+            Say($"inset drag: default corner {atDefault}, small move on the picture moves nothing {!clickMoved}, header drag snaps x {snapped} (anchor {anchor}, right edge {placed}), " +
+                $"saved with the window {saved}, picture drag past the slop {pictureDrag}");
+            Expect(atDefault, "the call card column did not start in the default corner");
+            Expect(!clickMoved, "a small move on the card's picture moved the column");
+            Expect(snapped && placed, "dragging the card's header did not snap to the right edge and keep 40% down");
+            Expect(saved, "the moved column was not saved with the window");
+            Expect(pictureDrag, "dragging the card's picture past the slop did not move the column");
+
+            // parity: inset-drag-resize
+            // Resizing the window keeps the column at the same fraction of the free space.
+            InsetAnchor? keep = cards.Anchor;
+            SizeInt32 size = window.AppWindow.Size;
+            var results = new List<bool>();
+            foreach ((int dw, int dh) in new[] { (220, 120), (-120, -60) })
+            {
+                double before = cards.ActualWidth;
+                window.AppWindow.Resize(new SizeInt32(size.Width + dw, size.Height + dh));
+                await Until(() => Math.Abs(cards.ActualWidth - before) > 1, 5);
+                cards.UpdateLayout();
+                results.Add(keep is { } k && cards.Anchor == keep && cards.Column is { } cc && NearAnchor(MeasuredAnchor(cc, cards.ActualWidth, cards.ActualHeight), k));
+            }
+            double last = cards.ActualWidth;
+            window.AppWindow.Resize(size);
+            await Until(() => Math.Abs(cards.ActualWidth - last) > 1, 5);
+            cards.UpdateLayout();
+            Say($"inset drag: the column keeps its place when the window grows {results[0]} and shrinks {results[1]}");
+            Expect(results.All(r => r), "resizing the window moved the call column off its fraction");
+
+            // parity: inset-drag-restore
+            // The position is saved with the window: the record reads back, a window opened from it puts
+            // the column there, and Reset Position returns it to the default corner.
+            SavedWindow record = WindowStore.FromJson(System.Text.Json.Nodes.JsonNode.Parse(WindowStore.ToJson([window.ToSaved()])))[0];
+            bool readsBack = keep is { } kp && record.InsetX == kp.X && record.InsetY == kp.Y;
+            ViewerWindow second = app.OpenWindow(window.State.Content, record);
+            bool there = false;
+            try
+            {
+                CallStack other = second.Stage.CallCards;
+                other.Sync();
+                bool shown = await Until(() => other.Cards.Count == 1 && other.Column is not null, 10);
+                other.UpdateLayout();
+                there = shown && other.Anchor == keep && other.Column is { } oc && keep is { } ok && NearAnchor(MeasuredAnchor(oc, other.ActualWidth, other.ActualHeight), ok);
+            }
+            finally
+            {
+                second.Window.Close();
+                await Until(() => app.Windows.Count == 1, 5);
+            }
+            card.ResetPosition();
+            cards.UpdateLayout();
+            bool reset = cards.Anchor is null && cards.Column is { } rc && NearAnchor(MeasuredAnchor(rc, cards.ActualWidth, cards.ActualHeight), InsetAnchor.FromCorner(v.Settings.InsetCorner))
+                && window.ToSaved() is { InsetX: null, InsetY: null };
+            Say($"inset drag: saved record reads back {readsBack}, a window opened from it puts the column there {there}, Reset Position {reset}");
+            Expect(readsBack, "the window's saved record lost the call column's position");
+            Expect(there, "a window opened from the record did not put its call column there");
+            Expect(reset, "Reset Position did not return the call column to the default corner");
+
+            // parity: inset-drag-multi
+            // Two cards move as one column: at the bottom the newest is at the bottom and the other stacks
+            // upward, at the top the reverse. They need the room for two, so the window is made taller.
+            var second2 = new CameraRef(camera.Device, camera.Channel + 1);
+            v.Calls.StartConversation(second2);
+            cards.Sync();
+            SizeInt32 tall = window.AppWindow.Size;
+            double heightBefore = cards.ActualHeight;
+            window.AppWindow.Resize(new SizeInt32(tall.Width, tall.Height + 600));
+            await Until(() => Math.Abs(cards.ActualHeight - heightBefore) > 1, 5);
+            bool two = await Until(() => { cards.UpdateLayout(); return cards.Cards.Count == 2 && cards.Cards.All(c => c.Placed); }, 5);
+            if (two)
+            {
+                w = cards.ActualWidth;
+                h = cards.ActualHeight;
+                CallCard newest = cards.Cards[1], oldest = cards.Cards[0];
+                InsetFrame start = cards.Column!.Value;
+                DragColumnTo(cards, newest, 15, h - start.Height - 15);
+                double gap = InsetGeometry.Gap;
+                bool upward = cards.Anchor == new InsetAnchor(0, 1) && Math.Abs(newest.Frame.X - m) < 0.5 && Math.Abs(oldest.Frame.X - m) < 0.5
+                    && Math.Abs(newest.Frame.Bottom - (h - m)) < 0.5 && Math.Abs(oldest.Frame.Bottom - (newest.Frame.Y - gap)) < 0.5;
+                InsetFrame now = cards.Column!.Value;
+                DragColumnTo(cards, newest, m + (w - 2 * m - now.Width) / 3, 20);
+                bool downward = cards.Anchor is { Y: 0 } ta && Math.Abs(ta.X - 1.0 / 3) < 0.01 && Math.Abs(newest.Frame.X - oldest.Frame.X) < 0.5
+                    && Math.Abs(newest.Frame.Y - m) < 0.5 && Math.Abs(oldest.Frame.Y - (newest.Frame.Bottom + gap)) < 0.5;
+                Say($"inset drag with two cards: one column, bottom grows upward {upward}, top grows downward {downward}");
+                Expect(upward, $"two cards at the bottom did not stack upward from it in one column: {newest.Frame} {oldest.Frame}");
+                Expect(downward, $"two cards at the top did not stack downward from it in one column: {newest.Frame} {oldest.Frame}");
+            }
+            else
+            {
+                Say($"inset drag with two cards: both did not fit in {cards.ActualWidth:0}x{cards.ActualHeight:0} ({string.Join(", ", cards.Cards.Select(c => c.Frame))})");
+                Expect(false, "two call cards did not fit the stage even after making the window taller");
+            }
+            v.Calls.End(second2, "closed");
+            cards.Sync();
+            cards.ResetPosition();
+            window.AppWindow.Resize(tall);
+            await Until(() => Math.Abs(cards.ActualHeight - heightBefore) < 1, 5);
+            cards.UpdateLayout();
+        }
+        finally
+        {
+            cards.AnchorChanged -= Count;
+        }
+    }
 
     // parity: zoom-fills-tile
     // A letterboxed tile zoomed past the point where its picture fills the

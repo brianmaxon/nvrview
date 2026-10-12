@@ -659,7 +659,9 @@ not in a separate system window.
   the user moves the column it sits in the default corner (the Settings
   corner, else opposite the corner indicators), and "Reset Position" in an
   inset's menu returns it there. A column never sits over the sidebar's
-  edge-reveal zone or the full-screen toolbar's reveal area.
+  edge-reveal zone or the full-screen toolbar's reveal area. On Windows the
+  same rules move the call cards (DIPs for points; the saved key is
+  `insetAnchor`, as on the Mac).
 
 Details settled while building it (macOS):
 
@@ -858,7 +860,8 @@ Details settled while building it (Windows):
   the only tile) the same controls show along the bottom of the stage
   instead of a card, beside the other calls' cards. Calls are the only
   insets on Windows: smoke, CO and entrance insets, and the swap, are not
-  there yet.
+  there yet. The cards move as one column by their header or picture, as
+  above ("Moving them"; Reset Position is in a card's right-click menu).
 - Talk-back needs the camera's permission, which on Windows is the tile
   menu's "Allow talk-back" (a checked item, off by default, kept in
   `view-settings.json` and passed to the core before every start and when it
@@ -1200,7 +1203,10 @@ user types a password instead of an address. The core does the searching
   resized or redrawn. It slides away about half a second after the pointer
   leaves it; clicking or dragging cameras from it works as usual. S, or a pin
   control in the overlay, docks it again (which resizes the stage as before).
-  The same works in full screen.
+  The same works in full screen. On macOS the system's own peek of a
+  collapsed sidebar (macOS 26 opens it into the window when the pointer rests
+  near the edge, pushing the stage aside) is turned off; the edge reveal
+  takes its place.
 
 ## Windows header
 

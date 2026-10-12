@@ -36,22 +36,166 @@ public struct UpdateEvent: Sendable, Equatable, Decodable {
     }
 }
 
-/// What the user set in Settings, Updates. Kept with the app's settings in
-/// the data directory; the updater itself never writes there.
-public struct UpdateSettings: Codable, Equatable, Sendable {
-    /// A folder or URL; empty: updates are off.
-    public var source = ""
+/// The public keys and update source a build bundles (docs/UPDATES.md,
+/// "Bundled defaults"): `update-defaults.json`, written by the packaging
+/// scripts, so a fresh install needs no setup. Source builds have none and
+/// trust nothing.
+public struct BundledUpdateDefaults: Equatable, Sendable {
+    /// The file's name: in the app's Resources folder on macOS, next to the
+    /// executable on Windows.
+    public static let fileName = "update-defaults.json"
+
     /// Canonical public key lines (`nvrview-ed25519-pub <hex>`).
+    public var keys: [String]
+    /// A folder path or http(s) URL; empty: none bundled.
+    public var source: String
+
+    public init(keys: [String] = [], source: String = "") {
+        self.keys = keys
+        self.source = source
+    }
+
+    public static let none = BundledUpdateDefaults()
+
+    public var isEmpty: Bool { keys.isEmpty && source.isEmpty }
+
+    /// A key line in canonical form (`nvrview-ed25519-pub` and 64 lowercase
+    /// hex digits), or nil. The core still checks the key itself when it is
+    /// used.
+    public static func canonicalKey(_ line: String) -> String? {
+        let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard parts.count == 2, parts[0] == "nvrview-ed25519-pub" else { return nil }
+        let hex = parts[1].lowercased()
+        guard hex.count == 64, hex.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return nil }
+        return "nvrview-ed25519-pub \(hex)"
+    }
+
+    /// An absolute folder path (POSIX, a Windows drive, or a UNC share) or an
+    /// `http://` / `https://` URL without a user name or password.
+    public static func isValidSource(_ text: String) -> Bool {
+        guard !text.isEmpty, text == text.trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.contains(where: { $0.isNewline || $0 == "\0" })
+        else { return false }
+        let lower = text.lowercased()
+        for scheme in ["https://", "http://"] where lower.hasPrefix(scheme) {
+            let authority = lower.dropFirst(scheme.count).prefix(while: { $0 != "/" && $0 != "?" && $0 != "#" })
+            return !authority.isEmpty && !authority.contains("@") && !text.contains(" ")
+        }
+        if text.hasPrefix("/") || text.hasPrefix("\\\\") { return text.count > 1 }
+        let chars = Array(text)
+        return chars.count >= 3 && chars[0].isASCII && chars[0].isLetter && chars[1] == ":" && (chars[2] == "\\" || chars[2] == "/")
+    }
+
+    /// Reads `update-defaults.json`. Lenient: a missing or malformed file,
+    /// or an entry that does not validate, gives nothing for that entry.
+    public static func parse(_ data: Data) -> BundledUpdateDefaults {
+        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return .none }
+        var d = BundledUpdateDefaults()
+        for case let line as String in (o["keys"] as? [Any]) ?? [] {
+            if let key = canonicalKey(line), !d.keys.contains(key) { d.keys.append(key) }
+        }
+        if let source = o["source"] as? String, isValidSource(source) { d.source = source }
+        return d
+    }
+
+    /// The defaults file in `directory`, or none.
+    public static func load(from directory: URL?) -> BundledUpdateDefaults {
+        guard let directory, let data = try? Data(contentsOf: directory.appendingPathComponent(fileName)),
+            data.count <= 64 * 1024
+        else { return .none }
+        return parse(data)
+    }
+
+    /// The file's contents (what the packaging script writes).
+    public func encoded() -> Data {
+        var o: [String: Any] = ["keys": keys]
+        if !source.isEmpty { o["source"] = source }
+        return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+    }
+}
+
+/// What the user set in Settings, Updates, merged with what the build
+/// bundles. Kept with the app's settings in the data directory; the updater
+/// itself never writes there. Only the user's own choices are stored: the
+/// bundled defaults are read from the app on every start.
+public struct UpdateSettings: Codable, Equatable, Sendable {
+    /// The user's source (a folder or URL). Empty: the bundled source, if any;
+    /// otherwise updates are off.
+    public var source = ""
+    /// The keys the user added (canonical public key lines,
+    /// `nvrview-ed25519-pub <hex>`).
     public var keys: [String] = []
+    /// Bundled keys the user turned off (they cannot be deleted).
+    public var disabledBundledKeys: [String] = []
     /// Check at startup and about every 24 hours.
     public var automatic = false
     /// When the last check finished (any outcome), wall-clock time.
     public var lastCheck: Date?
+    /// What this build bundles; read from the app, never stored.
+    public var bundled = BundledUpdateDefaults.none
 
     public init() {}
 
-    /// A source and at least one key: a check can run.
-    public var canCheck: Bool { !source.trimmingCharacters(in: .whitespaces).isEmpty && !keys.isEmpty }
+    private enum CodingKeys: String, CodingKey { case source, keys, disabledBundledKeys, automatic, lastCheck }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
+        keys = try c.decodeIfPresent([String].self, forKey: .keys) ?? []
+        disabledBundledKeys = try c.decodeIfPresent([String].self, forKey: .disabledBundledKeys) ?? []
+        automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
+        lastCheck = try c.decodeIfPresent(Date.self, forKey: .lastCheck)
+    }
+
+    /// The source a check uses: the user's, else the bundled default.
+    public var effectiveSource: String {
+        let mine = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        return mine.isEmpty ? bundled.source : mine
+    }
+
+    /// True when the source in use is the bundled default (the user has none).
+    public var sourceIsBundled: Bool {
+        source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !bundled.source.isEmpty
+    }
+
+    /// The note under the source field.
+    public var sourceNote: String { sourceIsBundled ? "Bundled default" : "" }
+
+    /// One key as Settings lists it.
+    public struct KeyRow: Equatable, Sendable {
+        public var key: String
+        public var isBundled: Bool
+        /// Bundled keys can be turned off; a user key is always on while listed.
+        public var isOn: Bool
+        public init(key: String, isBundled: Bool, isOn: Bool) {
+            self.key = key
+            self.isBundled = isBundled
+            self.isOn = isOn
+        }
+        /// "Bundled with this build" for a bundled key.
+        public var note: String { isBundled ? "Bundled with this build" : "" }
+    }
+
+    /// The bundled keys, then the user's own (a user key equal to a bundled
+    /// one is listed once, as bundled).
+    public var keyRows: [KeyRow] {
+        bundled.keys.map { KeyRow(key: $0, isBundled: true, isOn: !disabledBundledKeys.contains($0)) }
+            + keys.filter { !bundled.keys.contains($0) }.map { KeyRow(key: $0, isBundled: false, isOn: true) }
+    }
+
+    /// The keys a check trusts: the bundled ones not turned off, and the
+    /// user's.
+    public var trustedKeys: [String] { keyRows.filter(\.isOn).map(\.key) }
+
+    /// Turns a bundled key on or off.
+    public mutating func setBundledKey(_ key: String, on: Bool) {
+        guard bundled.keys.contains(key) else { return }
+        disabledBundledKeys.removeAll { $0 == key }
+        if !on { disabledBundledKeys.append(key) }
+    }
+
+    /// A source and at least one trusted key: a check can run.
+    public var canCheck: Bool { !effectiveSource.isEmpty && !trustedKeys.isEmpty }
 }
 
 /// When automatic checks run: once shortly after launch, then about every
@@ -147,8 +291,8 @@ public enum UpdateRequest {
         _ settings: UpdateSettings, current: String, download: (version: String, staging: String)? = nil
     ) -> String {
         var o: [String: Any] = [
-            "source": settings.source.trimmingCharacters(in: .whitespacesAndNewlines),
-            "keys": settings.keys,
+            "source": settings.effectiveSource,
+            "keys": settings.trustedKeys,
             "current": current,
         ]
         if let d = download {

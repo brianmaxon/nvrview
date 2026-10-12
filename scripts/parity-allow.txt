@@ -80,10 +80,6 @@ call-conversation-end       macos    gap: the Windows self-test closes a press c
 fisheye-ptz-drag            macos    gap: the Windows self-test does not simulate a drag turning the virtual camera
 header-overflow-menu        macos    gap: the Windows tile header does not use TileHeaderLayout yet, so no "…" menu or model-built tile menu
 header-priority-narrow      macos    gap: the Windows tile header does not use TileHeaderLayout yet (the model and its vectors are tested)
-inset-drag-multi            macos    gap: Windows call cards cannot be moved yet (docs/UX.md "Alert insets", "Moving them")
-inset-drag-resize           macos    gap: Windows call cards cannot be moved yet, so no position kept across a resize
-inset-drag-restore          macos    gap: Windows call cards cannot be moved yet, so no position saved with the window
-inset-drag-snap             macos    gap: Windows call cards cannot be moved yet, so no drag or edge snap
 key-space-focus             macos    gap: the Windows self-test does not send Space to focus and unfocus
 recordings-animal-filter    macos    gap: the Windows recordings screens are not built yet (MILESTONE-P.md W1); the animal filter groups every animal kind
 recordings-calendar-lanes   macos    gap: the Windows recordings screens are not built yet (W1): calendar days and timeline lanes from the index
@@ -98,6 +94,7 @@ recordings-real-core        macos    gap: the Windows recordings screens are not
 recordings-thumbnail        macos    gap: the Windows recordings screens are not built yet (W1): keyframe decoded with Media Foundation and WIC, put back
 recordings-window-close     macos    gap: the Windows recordings screens are not built yet (W1): closing the window releases its hold
 sidebar-rows-update         macos    n/a: guards the NSTableView row-height re-entrancy of the macOS sidebar
+sidebar-system-peek         macos    n/a: guards against AppKit's own peek of a collapsed NSSplitView sidebar; the Windows sidebar is the app's own layout
 zoom-reset-key              macos    gap: the Windows self-test resets a digitally zoomed tile by calling ResetZoom, not by pressing 0
 playback-close              macos    gap: Windows Recordings window not built (W1/W2)
 playback-grid               macos    gap: Windows Recordings window not built (W1/W2)

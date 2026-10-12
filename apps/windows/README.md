@@ -861,6 +861,14 @@ data directory are never modified, and nothing needs administrator rights.
 Shortcuts keep pointing at the old folder until you repoint them.
 `scripts/windows-app.sh update` tests the whole path.
 
+A release package can bundle the maintainer's public key and update source in
+`update-defaults.json` next to `NvrView.App.exe` (read at every start; Settings
+shows them as "Bundled with this build" and "Bundled default"; the user can
+turn a bundled key off or override the source). `scripts/release.sh` adds it
+to the zip through `scripts/windows-check.sh --package <dir>
+[--trusted-key-file FILE] [--update-source SOURCE]`; a build from source has
+no such file and trusts nothing. See "Bundled defaults" in docs/UPDATES.md.
+
 ## Running the tests
 
 ### On macOS or Linux, in Docker (no .NET needed)

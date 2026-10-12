@@ -52,7 +52,8 @@ final class Updater {
 
     init(
         bridge: CoreBridge, store: JSONFileStore<UpdateSettings>, automaticAllowed: Bool,
-        bundleURL: URL = Bundle.main.bundleURL, current: String? = nil, now: @escaping () -> Date = Date.init
+        bundleURL: URL = Bundle.main.bundleURL, current: String? = nil, now: @escaping () -> Date = Date.init,
+        bundled: BundledUpdateDefaults? = nil
     ) {
         self.bridge = bridge
         self.store = store
@@ -62,6 +63,10 @@ final class Updater {
         self.now = now
         launchedAt = now()
         settings = store.load().first ?? UpdateSettings()
+        // What the build bundles (docs/UPDATES.md, "Bundled defaults"): read
+        // from the app's Resources on every start, never from the user's file.
+        settings.bundled =
+            bundled ?? BundledUpdateDefaults.load(from: bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true))
     }
 
     /// Cleans staging leftovers, reports what the last install did, and
@@ -126,15 +131,26 @@ final class Updater {
         guard let json = bridge.updateParseKey(text), let o = Self.object(json), let key = o["key"] as? String else {
             return "That is not an NVRView update public key."
         }
-        if !settings.keys.contains(key) {
+        if settings.bundled.keys.contains(key) {
+            // Adding a bundled key again turns it back on.
+            settings.setBundledKey(key, on: true)
+            save()
+        } else if !settings.keys.contains(key) {
             settings.keys.append(key)
             save()
         }
         return nil
     }
 
+    /// Removes a key the user added. A bundled key cannot be deleted, only
+    /// turned off (`setBundledKey`).
     func removeKey(_ key: String) {
         settings.keys.removeAll { $0 == key }
+        save()
+    }
+
+    func setBundledKey(_ key: String, on: Bool) {
+        settings.setBundledKey(key, on: on)
         save()
     }
 
