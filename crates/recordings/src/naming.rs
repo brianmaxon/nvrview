@@ -62,7 +62,8 @@ pub fn sanitize(name: &str) -> String {
     if out.is_empty() { "_".into() } else { out }
 }
 
-pub(crate) fn minute_stamp(t: Secs) -> String {
+/// A time as `2026-10-10 07.42`.
+pub fn minute_stamp(t: Secs) -> String {
     let d = date_time(t);
     format!(
         "{:04}-{:02}-{:02} {:02}.{:02}",
@@ -70,7 +71,8 @@ pub(crate) fn minute_stamp(t: Secs) -> String {
     )
 }
 
-pub(crate) fn second_stamp(t: Secs) -> String {
+/// A time as `2026-10-10 07.42.11` (device-local naive seconds).
+pub fn second_stamp(t: Secs) -> String {
     let d = date_time(t);
     format!(
         "{:04}-{:02}-{:02} {:02}.{:02}.{:02}",
