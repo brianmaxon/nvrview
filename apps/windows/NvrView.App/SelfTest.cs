@@ -717,6 +717,34 @@ internal sealed class SelfTest(App app, AppOptions options)
             }
         }
 
+        // parity: recordings-timeline-wheel-zoom
+        // The lanes' wheel as the window gets it: a notch zooms around the pointer (its time stays under it), many
+        // clamp at 48x, Shift and the wheel pans, and notches the other way go back to the whole day.
+        {
+            LanesView lanes = w.LanesShown;
+            b.Timeline = new TimelineViewport();
+            w.Refresh();
+            double before = lanes.Viewport.FractionAtPointer(0.25);
+            lanes.Wheel(120, horizontal: false, shift: false, 0.25);
+            TimelineViewport one = b.Timeline;
+            Expect(Math.Abs(one.Zoom - 1.25) < 1e-9 && Math.Abs(one.FractionAtPointer(0.25) - before) < 1e-9,
+                $"recordings: a wheel notch made {one}, the time under the pointer moved");
+            for (int i = 0; i < 40; i++)
+            {
+                lanes.Wheel(360, horizontal: false, shift: false, 0.25);
+            }
+            TimelineViewport zoomed = b.Timeline;
+            Expect(zoomed.Zoom == TimelineViewport.MaxZoom, $"recordings: the wheel zoomed to {zoomed.Zoom}x, not 48x");
+            lanes.Wheel(-120, horizontal: false, shift: true, 0.25);
+            Expect(b.Timeline.Start > zoomed.Start && b.Timeline.Zoom == zoomed.Zoom, "recordings: Shift and the wheel did not pan later");
+            for (int i = 0; i < 40; i++)
+            {
+                lanes.Wheel(-360, horizontal: false, shift: false, 0.25);
+            }
+            Say($"recordings: wheel zoom {one.Zoom}x, to 48x, panned from {zoomed.Start:0.000}, back to {b.Timeline}");
+            Expect(b.Timeline == new TimelineViewport(), $"recordings: wheeling back left {b.Timeline}");
+        }
+
         // parity: recordings-layout
         // The window at its smallest and at a large size: the side panes give way in a narrow window (inspector first)
         // and come back in a wide one.

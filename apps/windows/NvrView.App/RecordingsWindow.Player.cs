@@ -178,9 +178,9 @@ internal sealed partial class RecordingsWindow
 
         _lanes.Margin = new Thickness(10, 0, 10, 6);
         _lanes.LaneClicked += (camera, second, near) => Browser.LaneClick(camera, second, near);
-        _lanes.ZoomRequested += zoom =>
+        _lanes.ViewportRequested += view =>
         {
-            Browser.Zoom = zoom;
+            Browser.Timeline = view;
             RefreshLanes();
         };
         Grid.SetRow(_lanes, 3);
@@ -259,7 +259,7 @@ internal sealed partial class RecordingsWindow
             _scrub.Set(0, 0, [], 0);
             _scrubStart.Text = _scrubEnd.Text = "";
         }
-        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Zoom, open ? t.PositionMs : null);
+        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Timeline, open ? t.PositionMs : null);
         _emptyText.Text = open ? ""
             : Browser.Player.Message is { } m ? m
             : Browser.Cameras.Count == 0 ? "Choose cameras to search, then pick an incident to play."
@@ -271,7 +271,7 @@ internal sealed partial class RecordingsWindow
     {
         double height = Math.Max(_playerColumn.ActualHeight, RecordingsPanes.WindowMinHeight - 80);
         _lanesRow.Height = new GridLength(RecordingsPanes.LanesHeight(height, Browser.Lanes.Count));
-        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Zoom, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null);
+        _lanes.Set(Browser.Lanes, Browser.Day, Browser.Timeline, Browser.Player.Playback is not null ? Browser.Player.PositionMs : null);
     }
 
     // ---- the picture area ----

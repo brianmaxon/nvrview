@@ -195,6 +195,32 @@ internal static class RecordingsBrowseTests
             T.Equal("The recording could not be played (status -5)", PlaybackOpenMessage.Text(NvStatus.Internal));
         });
 
+        // The same vectors as the macOS app's PlayerRulesTests.timelineViewport.
+        T.Run("player: timeline viewport", () =>
+        {
+            static bool Near(double a, double b) => Math.Abs(a - b) < 1e-9;
+            var whole = new TimelineViewport();
+            T.Check(whole.Zoom == 1 && whole.Start == 0 && whole.Visible == 1);
+            TimelineViewport a = whole.ZoomedBy(TimelineViewport.Notch, 0.5);
+            T.Check(Near(a.Zoom, 1.25) && Near(a.Start, 0.1) && Near(a.FractionAtPointer(0.5), 0.5));
+            var b = new TimelineViewport(4, 0.3);
+            TimelineViewport b2 = b.ZoomedBy(1.25, 0.25);
+            T.Check(Near(b2.Zoom, 5) && Near(b2.Start, 0.3125));
+            T.Check(Near(b.FractionAtPointer(0.25), b2.FractionAtPointer(0.25)));
+            TimelineViewport c = new TimelineViewport(40, 0.5).ZoomedBy(2, 0);
+            T.Check(c.Zoom == 48 && Near(c.Start, 0.5));
+            TimelineViewport d = new TimelineViewport(2, 0.5).ZoomedBy(0.25, 1);
+            T.Check(d.Zoom == 1 && d.Start == 0);
+            TimelineViewport e = whole.ZoomedBy(2, 1);
+            T.Check(e.Zoom == 2 && Near(e.Start, 0.5));
+            T.Check(Near(new TimelineViewport(2).PannedBy(5).Start, 0.5));
+            T.Check(new TimelineViewport(2, 0.25).PannedBy(-5).Start == 0);
+            T.Check(Near(new TimelineViewport(4, 0.25).PannedBy(0.5).Start, 0.375));
+            var f = new TimelineViewport(100, 2);
+            T.Check(f.Zoom == 48 && Near(f.Start, 1 - 1.0 / 48));
+            T.Check(Near(TimelineViewport.WheelFactor(2), 1.5625) && Near(TimelineViewport.WheelFactor(-1), 0.8));
+        });
+
         T.Run("player: speeds", () =>
         {
             T.Check(PlaybackSpeed.All.SequenceEqual([0.25, 0.5, 1, 2, 4, 8, 16]));

@@ -2931,7 +2931,7 @@ final class SelfTest {
             guard i < sizes.count else {
                 window.setFrame(saved, display: false)
                 print("recordings: layout \(results.joined(separator: "; "))")
-                return recordingsClose(b, fake)
+                return recordingsWheelZoom(b, fake)
             }
             let size = sizes[i]
             let want = RecordingsPanes.shown(width: size.width, sidebar: true, inspector: true)
@@ -2962,6 +2962,65 @@ final class SelfTest {
             }
         }
         next(0)
+    }
+
+    /// The timeline lanes' wheel and trackpad, through the lanes' own event
+    /// catcher with real scroll events: a mouse wheel notch zooms around the
+    /// pointer (its time stays under it), many clamp at 48x, a horizontal
+    /// two-finger scroll pans, a vertical one is left to the lanes'
+    /// scrolling, and notches the other way go back to the whole day.
+    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-timeline-wheel-zoom
+        func catcher(in view: NSView?) -> TimelineInputCatcher.CatcherView? {
+            guard let view else { return nil }
+            if let c = view as? TimelineInputCatcher.CatcherView { return c }
+            for v in view.subviews { if let c = catcher(in: v) { return c } }
+            return nil
+        }
+        let window = app.recordingsWindows.first?.window
+        // The lanes are laid out again after the layout step's last resize.
+        when({ catcher(in: window?.contentView).map { !$0.visibleRect.isEmpty } == true }, timeout: 2) { [self] in
+            guard let c = catcher(in: window?.contentView), !c.visibleRect.isEmpty else {
+                problems.append("recordings: no timeline lanes to scroll")
+                return recordingsClose(b, fake)
+            }
+            recordingsWheelZoom(b, c)
+            recordingsClose(b, fake)
+        }
+    }
+
+    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ c: TimelineInputCatcher.CatcherView) {
+        func scroll(_ units: CGScrollEventUnit, dy: Int32, dx: Int32 = 0) -> NSEvent? {
+            CGEvent(scrollWheelEvent2Source: nil, units: units, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)
+                .flatMap(NSEvent.init(cgEvent:))
+        }
+        b.timeline = TimelineViewport()
+        let at = NSPoint(x: c.bounds.width * 0.25, y: c.visibleRect.midY)
+        let before = b.timeline.fraction(atPointer: 0.25)
+        guard let notch = scroll(.line, dy: 1), let input = TimelineInput(notch), c.handle(notch, at: at) else {
+            problems.append("recordings: a wheel notch over the lanes was not taken")
+            return
+        }
+        let one = b.timeline
+        print("recordings: a wheel notch (\(notch.scrollingDeltaY) lines) zooms to \(one.zoom)x, input \(input)")
+        if case .zoom(_, true) = input {} else { problems.append("recordings: a wheel notch did not zoom eased (\(input))") }
+        if one.zoom <= 1 || abs(one.fraction(atPointer: 0.25) - before) > 1e-9 {
+            problems.append("recordings: a wheel notch made \(one), the time under the pointer moved")
+        }
+        for _ in 0..<40 { if let e = scroll(.line, dy: 3) { _ = c.handle(e, at: at) } }
+        if b.timeline.zoom != TimelineViewport.maxZoom { problems.append("recordings: the wheel zoomed to \(b.timeline.zoom)x, not 48x") }
+        let zoomed = b.timeline
+        if let pan = scroll(.pixel, dy: 0, dx: -40), c.handle(pan, at: at) {
+            if b.timeline.start <= zoomed.start { problems.append("recordings: a two-finger scroll left did not pan later") }
+        } else {
+            problems.append("recordings: a horizontal two-finger scroll was not taken")
+        }
+        if let vertical = scroll(.pixel, dy: -40), c.handle(vertical, at: at) {
+            problems.append("recordings: a vertical two-finger scroll was taken from the lanes' scrolling")
+        }
+        for _ in 0..<40 { if let e = scroll(.line, dy: -3) { _ = c.handle(e, at: at) } }
+        print("recordings: wheel zoom to 48x panned from \(zoomed.start) and back to \(b.timeline)")
+        if b.timeline != TimelineViewport() { problems.append("recordings: wheeling back left \(b.timeline)") }
     }
 
     private func recordingsClose(_ b: RecordingsBrowser, _ fake: FakeCore) {

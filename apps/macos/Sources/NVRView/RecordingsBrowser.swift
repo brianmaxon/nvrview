@@ -83,8 +83,9 @@ final class RecordingsBrowser {
             syncPlayer()
         }
     }
-    /// Timeline zoom: 1 shows the whole day in the window's width.
-    var zoom: Double = 1
+    /// The part of the day the timeline lanes show (zoom 1: the whole day
+    /// in the lanes' width).
+    var timeline = TimelineViewport()
     var showingGroups = false
 
     /// Days of the calendar's month that have recordings on an enabled camera.

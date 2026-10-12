@@ -204,6 +204,70 @@ public static class PlayerGrid
 }
 
 /// <summary>
+/// The part of the day the timeline lanes show (docs/UX.md "Recordings"): the zoom (1 is the whole day in the lanes'
+/// width, up to 48x) and the fraction of the day at the left edge. Zooming keeps the time under the pointer where it
+/// is; the visible part never leaves the day. The same rule, with the same test vectors, as the macOS app's
+/// PlayerRules.swift.
+/// </summary>
+public readonly record struct TimelineViewport
+{
+    /// <summary>The whole day.</summary>
+    public const double MinZoom = 1;
+
+    /// <summary>The closest zoom.</summary>
+    public const double MaxZoom = 48;
+
+    /// <summary>A mouse wheel notch zooms by this much.</summary>
+    public const double Notch = 1.25;
+
+    /// <summary>A horizontal notch (Shift and the wheel) pans this much of the visible part.</summary>
+    public const double LineStep = 0.1;
+
+    /// <summary>The whole day.</summary>
+    public TimelineViewport()
+        : this(MinZoom, 0)
+    {
+    }
+
+    /// <summary>A viewport, clamped: the zoom to 1...48 and the start to 0...(1 - 1/zoom).</summary>
+    public TimelineViewport(double zoom, double start = 0)
+    {
+        double z = double.IsFinite(zoom) ? Math.Clamp(zoom, MinZoom, MaxZoom) : MinZoom;
+        Zoom = z;
+        Start = double.IsFinite(start) ? Math.Clamp(start, 0, 1 - 1 / z) : 0;
+    }
+
+    /// <summary>1...48.</summary>
+    public double Zoom { get; }
+
+    /// <summary>The fraction of the day at the left edge.</summary>
+    public double Start { get; }
+
+    /// <summary>How much of the day is visible.</summary>
+    public double Visible => 1 / Zoom;
+
+    /// <summary>The fraction of the day at pointer <paramref name="p"/> (0 at the left edge, 1 at the right).</summary>
+    public double FractionAtPointer(double p) => Start + p / Zoom;
+
+    /// <summary>Zoomed by <paramref name="factor"/> around the pointer <paramref name="p"/> (its time stays under it).</summary>
+    public TimelineViewport ZoomedBy(double factor, double p) => ZoomedTo(Zoom * factor, p);
+
+    /// <summary>Zoomed to <paramref name="z"/> around the pointer <paramref name="p"/>.</summary>
+    public TimelineViewport ZoomedTo(double z, double p)
+    {
+        double t = FractionAtPointer(p);
+        double next = Math.Clamp(z, MinZoom, MaxZoom);
+        return new TimelineViewport(next, t - p / next);
+    }
+
+    /// <summary>Panned by <paramref name="amount"/> visible widths (positive: later in the day).</summary>
+    public TimelineViewport PannedBy(double amount) => new(Zoom, Start + amount / Zoom);
+
+    /// <summary>Mouse wheel notches (positive: away from the user) as a zoom factor.</summary>
+    public static double WheelFactor(double notches) => Math.Pow(Notch, notches);
+}
+
+/// <summary>
 /// How the Recordings window's panes share its width and the center its
 /// height (docs/UX.md "Recordings"). The side panes have fixed sensible
 /// widths; in a window too narrow for all three the inspector gives way

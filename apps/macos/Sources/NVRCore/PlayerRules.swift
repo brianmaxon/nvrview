@@ -201,6 +201,59 @@ public enum PlayerGrid {
     public static func cameras<T>(_ all: [T]) -> [T] { Array(all.prefix(maxCameras)) }
 }
 
+/// The part of the day the timeline lanes show (docs/UX.md "Recordings"):
+/// the zoom (1 is the whole day in the lanes' width, up to 48x) and the
+/// fraction of the day at the left edge. Zooming keeps the time under the
+/// pointer where it is; the visible part never leaves the day. The same
+/// rule, with the same test vectors, as the Windows app's PlayerRules.cs.
+public struct TimelineViewport: Equatable, Sendable {
+    public static let minZoom = 1.0
+    public static let maxZoom = 48.0
+    /// A mouse wheel notch zooms by this much.
+    public static let notch = 1.25
+    /// A line-based horizontal notch (Shift and the wheel) pans this much of
+    /// the visible part.
+    public static let lineStep = 0.1
+
+    /// 1...48.
+    public private(set) var zoom: Double
+    /// The fraction of the day at the left edge, 0...(1 - 1/zoom).
+    public private(set) var start: Double
+
+    public init(zoom: Double = 1, start: Double = 0) {
+        let z = zoom.isFinite ? min(max(zoom, Self.minZoom), Self.maxZoom) : Self.minZoom
+        self.zoom = z
+        self.start = start.isFinite ? min(max(start, 0), 1 - 1 / z) : 0
+    }
+
+    /// How much of the day is visible.
+    public var visible: Double { 1 / zoom }
+
+    /// The fraction of the day at a pointer `p` (0 at the left edge, 1 at
+    /// the right edge of the visible part).
+    public func fraction(atPointer p: Double) -> Double { start + p / zoom }
+
+    /// Zoomed by `factor` around the pointer `p` (its time stays under it).
+    public func zoomed(by factor: Double, at p: Double) -> TimelineViewport {
+        zoomed(to: zoom * factor, at: p)
+    }
+
+    /// Zoomed to `z` around the pointer `p`.
+    public func zoomed(to z: Double, at p: Double) -> TimelineViewport {
+        let t = fraction(atPointer: p)
+        let new = min(max(z, Self.minZoom), Self.maxZoom)
+        return TimelineViewport(zoom: new, start: t - p / new)
+    }
+
+    /// Panned by `amount` visible widths (positive: later in the day).
+    public func panned(by amount: Double) -> TimelineViewport {
+        TimelineViewport(zoom: zoom, start: start + amount / zoom)
+    }
+
+    /// Mouse wheel notches (positive: away from the user) as a zoom factor.
+    public static func wheelFactor(notches: Double) -> Double { pow(notch, notches) }
+}
+
 /// How the Recordings window's panes share its width and the center its
 /// height (docs/UX.md "Recordings"). The side panes have fixed sensible
 /// widths; in a window too narrow for all three the inspector gives way

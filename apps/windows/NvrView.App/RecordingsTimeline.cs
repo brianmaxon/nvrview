@@ -3,8 +3,8 @@
 // the whole day, with the events marked by kind; dragging shows keyframes,
 // the release the exact picture) and the day's timeline lanes (one lane per
 // camera: recording spans in gray, events as bars colored by kind, an hour
-// ruler, zoom from the whole day to 48x with Ctrl and the wheel, and the
-// playhead). Both only draw what the browser hands them and report where the
+// ruler, zoom from the whole day to 48x with the wheel around the pointer, and
+// the playhead). Both only draw what the browser hands them and report where the
 // user pointed; the browser and the player decide what that means.
 
 using Microsoft.UI;
@@ -186,7 +186,10 @@ internal sealed class LanesView : Grid
     private readonly List<TextBlock> _labels = [];
     private IReadOnlyList<TimelineLane> _lanes = [];
     private long _day;
-    private double _zoom = 1;
+    private TimelineViewport _view = new();
+    // Scrolls of ours still to land (their ViewChanged is not the user's), and retries left.
+    private bool _scrolling;
+    private int _retries;
     private long? _playheadSec;
     private bool _drawn;
 
@@ -195,7 +198,7 @@ internal sealed class LanesView : Grid
         Children.Add(_scroll);
         _scroll.Content = _canvas;
         _scroll.SizeChanged += (_, _) => Rebuild();
-        _scroll.ViewChanged += (_, _) => PlaceLabels();
+        _scroll.ViewChanged += OnViewChanged;
         _canvas.Tapped += OnTapped;
         _canvas.PointerWheelChanged += OnWheel;
     }
@@ -203,18 +206,24 @@ internal sealed class LanesView : Grid
     /// <summary>A click on a lane: the camera, the second, and the event under the pointer if any.</summary>
     public event Action<RecordingCamera, long, RecordedEvent?>? LaneClicked;
 
-    /// <summary>The user zoomed with Ctrl and the wheel.</summary>
-    public event Action<double>? ZoomRequested;
+    /// <summary>The user zoomed (the wheel) or panned (Shift and the wheel, a horizontal wheel, the scroll bar).</summary>
+    public event Action<TimelineViewport>? ViewportRequested;
 
-    private double ContentWidth => Math.Max(_scroll.ActualWidth - 4, 100) * _zoom;
+    /// <summary>The lanes' visible width.</summary>
+    private double ViewportWidth => Math.Max(_scroll.ActualWidth - 4, 100);
 
-    /// <summary>Shows the lanes of a day.</summary>
-    public void Set(IReadOnlyList<TimelineLane> lanes, long day, double zoom, long? playheadMs)
+    private double ContentWidth => ViewportWidth * _view.Zoom;
+
+    /// <summary>The part of the day shown.</summary>
+    public TimelineViewport Viewport => _view;
+
+    /// <summary>Shows the lanes of a day, <paramref name="view"/>'s part of it.</summary>
+    public void Set(IReadOnlyList<TimelineLane> lanes, long day, TimelineViewport view, long? playheadMs)
     {
-        bool changed = !ReferenceEquals(lanes, _lanes) || day != _day || zoom != _zoom || !_drawn;
+        bool changed = !ReferenceEquals(lanes, _lanes) || day != _day || view.Zoom != _view.Zoom || !_drawn;
         _lanes = lanes;
         _day = day;
-        _zoom = zoom;
+        _view = view;
         _playheadSec = playheadMs is { } ms ? DeviceTime.FloorDiv(ms, 1000) : null;
         if (changed)
         {
@@ -223,6 +232,52 @@ internal sealed class LanesView : Grid
         else
         {
             PlaceHead();
+        }
+        ScrollToView();
+    }
+
+    /// <summary>Scrolls to the viewport's start (the content is the whole day at the zoom).</summary>
+    private void ScrollToView()
+    {
+        if (_scroll.ActualWidth <= 0)
+        {
+            return;
+        }
+        double x = _view.Start * ContentWidth;
+        if (Math.Abs(_scroll.HorizontalOffset - x) > 0.5)
+        {
+            _scrolling = true;
+            _ = _scroll.ChangeView(x, null, null, true);
+        }
+    }
+
+    private void OnViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        PlaceLabels();
+        if (e.IsIntermediate || _scroll.ActualWidth <= 0)
+        {
+            return;
+        }
+        if (_scrolling)
+        {
+            // Ours landed (or was clamped while the canvas was still being laid out at the new width: once more).
+            _scrolling = false;
+            if (Math.Abs(_scroll.HorizontalOffset - _view.Start * ContentWidth) > 0.5 && _retries++ < 1)
+            {
+                ScrollToView();
+            }
+            else
+            {
+                _retries = 0;
+            }
+            return;
+        }
+        // The scroll bar or a touchpad moved the lanes: the viewport follows.
+        var moved = new TimelineViewport(_view.Zoom, _scroll.HorizontalOffset / ContentWidth);
+        if (Math.Abs(moved.Start - _view.Start) * ContentWidth > 0.5)
+        {
+            _view = moved;
+            ViewportRequested?.Invoke(moved);
         }
     }
 
@@ -240,7 +295,7 @@ internal sealed class LanesView : Grid
         _canvas.Width = w;
         _canvas.Height = height;
         // Hour ruler: every 6 hours at the whole day, finer as it zooms.
-        int step = _zoom >= 8 ? 1 : _zoom >= 4 ? 2 : _zoom >= 2 ? 3 : 6;
+        int step = _view.Zoom >= 8 ? 1 : _view.Zoom >= 4 ? 2 : _view.Zoom >= 2 ? 3 : 6;
         for (int hour = 0; hour <= 24; hour += step)
         {
             double x = w * hour / 24.0;
@@ -330,26 +385,31 @@ internal sealed class LanesView : Grid
         e.Handled = true;
     }
 
+    // The wheel zooms around the pointer, each notch 1.25x (as on macOS);
+    // Shift and the wheel, or a horizontal wheel, pans.
     private void OnWheel(object sender, PointerRoutedEventArgs e)
     {
-        if (!InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down))
-        {
-            return;
-        }
-        int delta = e.GetCurrentPoint(_canvas).Properties.MouseWheelDelta;
-        double zoom = Math.Clamp(_zoom * Math.Pow(1.25, delta / 120.0), 1, 48);
-        if (zoom == _zoom)
-        {
-            e.Handled = true;
-            return;
-        }
-        // Keep the time under the pointer where it is.
-        double px = e.GetCurrentPoint(_scroll).Position.X;
-        double fraction = (_scroll.HorizontalOffset + px) / ContentWidth;
-        ZoomRequested?.Invoke(zoom);
-        double newWidth = Math.Max(_scroll.ActualWidth - 4, 100) * zoom;
-        _ = _scroll.ChangeView(Math.Max(fraction * newWidth - px, 0), null, null, true);
+        PointerPointProperties props = e.GetCurrentPoint(_canvas).Properties;
+        bool shift = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift).HasFlag(CoreVirtualKeyStates.Down);
+        Wheel(props.MouseWheelDelta, props.IsHorizontalMouseWheel, shift, e.GetCurrentPoint(_scroll).Position.X / ViewportWidth);
         e.Handled = true;
+    }
+
+    /// <summary>
+    /// A wheel turn of <paramref name="delta"/> (120 a notch, positive away from the user or to the right) at the
+    /// pointer <paramref name="pointer"/> (0 at the lanes' left edge, 1 at their right), as the window gets it (the
+    /// self-test calls it too).
+    /// </summary>
+    public void Wheel(int delta, bool horizontal, bool shift, double pointer)
+    {
+        double notches = delta / 120.0;
+        TimelineViewport next = horizontal ? _view.PannedBy(notches * TimelineViewport.LineStep)
+            : shift ? _view.PannedBy(-notches * TimelineViewport.LineStep)
+            : _view.ZoomedBy(TimelineViewport.WheelFactor(notches), Math.Clamp(pointer, 0, 1));
+        if (next != _view)
+        {
+            ViewportRequested?.Invoke(next);
+        }
     }
 
     /// <summary>Clicks a lane as a user would (self-test).</summary>

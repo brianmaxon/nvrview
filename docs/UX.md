@@ -1135,8 +1135,8 @@ The NVR's own recordings, found by what happened and played back
   the other windows. On Windows the pane buttons are the
   hamburger and the details icons, Ctrl-click adds an incident to the
   selection, Show in Explorer and the Recycle Bin (through `IFileOperation`)
-  stand for Finder and the Trash, and the timeline zooms with Ctrl and the
-  wheel.
+  stand for Finder and the Trash, and the timeline's wheel zoom is not
+  eased and has no pinch (the scroll bar and a touchpad pan it).
 - **Layout:** seeing the clip comes first, so the **player** is the middle
   of the window, with the **transport** under it and the day's **timeline
   lanes** under that. On the left, collapsible, the month's calendar, the
@@ -1211,7 +1211,14 @@ The NVR's own recordings, found by what happened and played back
 - **Timeline:** one lane per camera for the day under the player, recording
   spans in gray, events as bars colored by kind with the kind's symbol when
   there is room, an hour ruler, zoom from the whole day to 48×, and the
-  playhead. A click on a lane of a camera that plays seeks there; a click on
+  playhead. The lanes zoom as a tile's digital zoom does ("Digital zoom"):
+  a mouse wheel zooms around the pointer (the time under it stays put),
+  each notch 1.25×, eased; Shift and the wheel pans; a horizontal
+  two-finger scroll pans and a pinch (or Option and a two-finger scroll)
+  zooms; a vertical two-finger scroll scrolls the lanes when there are more
+  than fit. The zoom buttons zoom around the middle. The lanes draw only the
+  visible part of the day, and the ruler's ticks get finer as it zooms (down
+  to 5 minutes). A click on a lane of a camera that plays seeks there; a click on
   an event of another camera selects its incident; anywhere else that
   camera plays alone from there.
 - **The selected incident (inspector):** its name (Rename; an empty name

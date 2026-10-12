@@ -99,8 +99,8 @@ public sealed class RecordingsBrowser
     /// <summary>The inspector the user wants.</summary>
     public bool ShowInspector { get; set; } = true;
 
-    /// <summary>Timeline zoom: 1 shows the whole day in the window's width.</summary>
-    public double Zoom { get; set; } = 1;
+    /// <summary>The part of the day the timeline lanes show (zoom 1: the whole day in the lanes' width).</summary>
+    public TimelineViewport Timeline { get; set; } = new();
 
     /// <summary>Days of the calendar's month that have recordings on an enabled camera.</summary>
     public IReadOnlySet<long> RecordedDays { get; private set; } = new HashSet<long>();
