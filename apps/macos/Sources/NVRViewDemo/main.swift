@@ -3,12 +3,15 @@ import SwiftUI
 import VideoKit
 
 // NVRViewDemo [--renderer metal|layer] [--tiles N] [--fps F]
-//             [--selftest SECONDS [--window behind|front|offscreen]] file.h264|file.h265 ...
+//             [--selftest SECONDS [--until-frames N] [--window behind|front|offscreen]]
+//             file.h264|file.h265 ...
 // Plays Annex-B files in a loop, one per tile (files are reused round-robin).
 // With --selftest, plays for that long, checks that every tile is showing a
 // changing picture, prints a report, and exits 0 or 1. Its window opens
 // behind all other windows (it still draws there, at a throttled rate) and
 // never takes focus or shows a Dock icon. Off screen it cannot draw at all.
+// With --until-frames N, the run ends as soon as every tile has shown 2N
+// frames instead of after SECONDS, which then only guards against a hang.
 //
 // Renderers:
 //   metal (default)  a CoreBridge over FakeCore (a Swift double of the C core)
@@ -38,6 +41,7 @@ struct Options {
     var tiles = 4
     var fps = 20.0
     var selfTestSeconds: Double?
+    var selfTestFrames: Int?
     var placement = WindowPlacement.behind
     var files: [URL] = []
 
@@ -52,6 +56,8 @@ struct Options {
             case "--window": guard let v = it.next().flatMap(WindowPlacement.init) else { return nil }; o.placement = v
             case "--selftest":
                 guard let v = it.next().flatMap(Double.init), v > 0 else { return nil }; o.selfTestSeconds = v
+            case "--until-frames":
+                guard let v = it.next().flatMap(Int.init), v > 0 else { return nil }; o.selfTestFrames = v
             default: o.files.append(URL(fileURLWithPath: a))
             }
         }
@@ -225,7 +231,7 @@ final class DemoDelegate: NSObject, NSApplicationDelegate {
 func runDemo() {
     guard let options = Options.parse(CommandLine.arguments) else {
         FileHandle.standardError.write(Data(
-            "usage: NVRViewDemo [--renderer metal|layer] [--tiles N] [--fps F] [--selftest SECONDS [--window behind|front|offscreen]] file.h264|file.h265 ...\n".utf8))
+            "usage: NVRViewDemo [--renderer metal|layer] [--tiles N] [--fps F] [--selftest SECONDS [--until-frames N] [--window behind|front|offscreen]] file.h264|file.h265 ...\n".utf8))
         exit(2)
     }
     let app = NSApplication.shared
@@ -256,7 +262,7 @@ func layerDemo(_ options: Options) -> DemoDelegate {
         SelfTest(
             players: players,
             names: players.indices.map { options.files[$0 % options.files.count].lastPathComponent },
-            seconds: seconds)
+            seconds: seconds, untilFrames: options.selfTestFrames)
     }
     return DemoDelegate(
         content: {
@@ -282,7 +288,7 @@ func metalDemo(_ options: Options) -> DemoDelegate {
         FileHandle.standardError.write(Data("cannot set up Metal: \(error)\n".utf8))
         exit(1)
     }
-    let selfTest = options.selfTestSeconds.map { MetalSelfTest(grid: grid, seconds: $0) }
+    let selfTest = options.selfTestSeconds.map { MetalSelfTest(grid: grid, seconds: $0, untilFrames: options.selfTestFrames) }
     return DemoDelegate(
         content: { grid.view },
         selfTest: selfTest.map { test in { test.start(window: $0) } },

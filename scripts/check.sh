@@ -127,10 +127,10 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   elif [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
     step "macOS demo self-test, Metal renderer"
     (cd apps/macos && swift build --product NVRViewDemo &&
-      .build/debug/NVRViewDemo --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+      .build/debug/NVRViewDemo --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
     step "macOS demo self-test, display-layer renderer"
     (cd apps/macos &&
-      .build/debug/NVRViewDemo --renderer layer --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+      .build/debug/NVRViewDemo --renderer layer --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
   else
     step "macOS demo self-tests skipped (no desktop session)"
   fi
