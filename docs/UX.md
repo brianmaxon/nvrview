@@ -397,11 +397,12 @@ look at a detail.
 - Mouse wheel or trackpad pinch zooms around the pointer; trackpad
   two-finger scroll, or dragging, pans while zoomed. Zoom ranges from 1x to
   about 8x, smoothly, at display rate.
-- The zoom belongs to the tile: it survives layout changes and focus, and
-  when focus switches the camera to the main stream the same region is
-  shown, now with the main stream's detail (the region is kept in picture
-  coordinates, independent of resolution). It is saved with the window
-  (see "Fill Tiles").
+- The zoom belongs to the tile: two tiles of the same camera are
+  independent views (one wide, one zoomed on a detail). It survives layout
+  changes and focus, and when focus switches the camera to the main stream
+  the same region is shown, now with the main stream's detail (the region
+  is kept in picture coordinates, independent of resolution). It is saved
+  with the window (see "Fill Tiles").
 - Double-click keeps its meaning (focus); 0 or a small reset control in the
   hover header returns to 1x (and a filled picture's crop to the middle);
   zoom never changes what is recorded or streamed.
@@ -437,9 +438,18 @@ Details settled while building it (macOS):
   the next refreshes. Precise scrolling (trackpad, Magic Mouse) pans a zoomed
   tile and does nothing at 1x; with Option held it zooms instead, for devices
   without a pinch. A pinch zooms continuously.
-- The zoom is kept per camera in each window, so it follows the picture
-  through swaps, layout changes, focus and stream switches; two tiles of the
-  same camera in one window share it.
+- The zoom is kept per tile: per window, per layout, and per tile of the
+  layout (with the camera the tile shows). Each tile of a layout has a
+  stable identity, its `tile` member in the stored layout, which stays put
+  when other tiles are split, removed or swapped (a split keeps the old
+  tile's identity and gives the new tile one of its own; a layout stored
+  before tiles had identities gets the same ones on every launch, `t<n>` by
+  reading order). A swap moves each tile's zoom, crop and Fill choice with
+  its camera (the view travels with what was dragged); focus, layout
+  switches and the switch between sub-stream and main stream keep it; Show
+  Camera, a camera dropped on the tile or any other change of the tile's
+  camera starts that tile at 1x, centered, following the window's Fill
+  Tiles. Removing a tile forgets its view.
 - The inset map is an outline of the whole picture with the visible region
   marked, drawn as overlay layers (no second picture, so no extra drawing or
   texture work), in the bottom left corner of the picture as drawn.
@@ -455,7 +465,8 @@ does not fit is cropped.
   clears the tiles' own choices, so all tiles follow it.
 - **Fill Tile** in a tile's menu (macOS: the right-click menu and the
   header's "…"; Windows: the right-click menu, "Fill Tile") fills or fits
-  that camera's tiles in this window only, checked while it fills. While
+  that tile only (another tile of the same camera keeps its own choice),
+  checked while it fills. While
   some tiles differ from the window's switch, the macOS menu item shows a
   mixed state; the Windows toggle shows the window's own setting.
 - **Choosing the part shown**: on a filled tile whose picture is partly
@@ -477,20 +488,25 @@ does not fit is cropped.
   menu, shown while a filled crop is moved at 1x, brings it back to the
   middle; 0 and the header's reset control (shown while zoomed) also
   recenter it.
-- **Remembered**: the window's switch, and per camera its zoom (scale and
+- **Remembered**: the window's switch, and per tile its zoom (scale and
   center), crop position and own Fill choice, are saved with the window
-  and restored on relaunch (windows.json, `fill` and `tileViews`, written
-  only when not the default). They are per camera within a window, so the
-  same camera in two tiles of one window shares them and they follow the
-  camera through swaps and layout changes; the same camera in another
-  window has its own. Positions are fractions of the picture, so the
-  sub-stream and the main stream show the same part. A window keeps at
-  most 256 cameras (the one changed longest ago is dropped first); saved
-  values are clamped when read, and entries that cannot be read are
-  skipped. The rule and its vectors (`TileViews`,
-  `fixtures/synthetic/tile-views.json`) are shared by both apps.
+  and restored on relaunch (windows.json: `fill`, and `tiles`, entries of
+  `layout` (`layout:<id>`, `group:<id>` or `scratch`), `tile` (the tile's
+  identity), `camera`, `scale`, `x`, `y`, `fill`; written only when not
+  the default). They are per window, per layout and per tile (see "Digital
+  zoom" for what keeps or resets them); the same layout in another window
+  has its own. Positions are fractions of the picture, so the sub-stream
+  and the main stream show the same part. A window keeps at most 256
+  tiles across its layouts (the one changed longest ago is dropped first);
+  saved values are clamped when read, and entries that cannot be read are
+  skipped. A file from before views were per tile (`tileViews`, per
+  camera) is read once: each camera's view goes to every tile of the
+  window's layout showing it, and the window is saved in the new form. The
+  rule and its vectors (`TileViews`, `fixtures/synthetic/tile-views.json`)
+  are shared by both apps.
 - **Fisheye and multi-lens cameras**: each lens of a multi-lens camera is a
-  camera of its own here (its own zoom, crop and Fill choice). A fisheye
+  camera of its own here (its tiles have their own zoom, crop and Fill
+  choice). A fisheye
   tile in Original fills, pans and zooms like any tile; a dewarped view
   (Panorama, Double panorama, Quad, Virtual PTZ) always covers its tile and
   a drag turns the view instead (see "Fisheye cameras"), so its Fill choice
