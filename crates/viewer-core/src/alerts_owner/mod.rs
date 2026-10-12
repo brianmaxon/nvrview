@@ -1061,11 +1061,15 @@ impl Inner {
                     c.outstanding.remove(key);
                 }
             }
+            let period = recheck_period(st);
             if r.purpose == Purpose::Recheck
                 && let Some(h) = st.wakes.get_mut(&r.camera).and_then(|w| w.hold.as_mut())
                 && h.pending.as_deref() == Some(key)
             {
+                // Unanswered or canceled: the next re-check waits a period
+                // like an answered one (not the very next keyframe).
                 h.pending = None;
+                h.next = h.next.max(Instant::now() + period);
             }
             self.send(json!({"type": "verify_request_done", "request": key, "result": result}));
         }

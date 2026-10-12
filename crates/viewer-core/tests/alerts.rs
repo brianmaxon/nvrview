@@ -58,9 +58,19 @@ fn fixture() -> mock_nvr::fixture::Fixture {
 
 impl Harness {
     fn new(channels: u8, wall_s: i64, data_dir: bool) -> Harness {
+        Harness::with(channels, wall_s, data_dir, |_| {})
+    }
+
+    fn with(
+        channels: u8,
+        wall_s: i64,
+        data_dir: bool,
+        edit: impl FnOnce(&mut mock_nvr::Config),
+    ) -> Harness {
         let sim = SimRuntime::new();
         let mut cfg = mock_nvr::Config::new(fixture());
         cfg.channels = channels;
+        edit(&mut cfg);
         let nvr = sim_spawn(&sim, cfg);
         let dir = data_dir.then(|| tempfile::tempdir().unwrap());
         let (core, rec) = start(on_sim(
@@ -565,6 +575,32 @@ fn snapshots_feedback_and_the_log() {
     assert_eq!(log["entries"][0]["snapshot"], true);
     assert_eq!(log["entries"][0]["feedback"]["reason"], "nothing_there");
     assert_eq!(h.core.alerts_get("[1]"), Err(AlertError::InvalidArgument));
+}
+
+/// A camera whose live stream gives no picture: after the first-picture
+/// timeout the recording's cover image of the last seconds is checked
+/// instead.
+#[test]
+fn a_cover_image_stands_in_when_the_stream_is_silent() {
+    let mut h = Harness::with(1, NOON_S, false, |cfg| {
+        let day = bc_protocol::archive::DateTime::new(2026, 6, 10, 0, 0, 0).unwrap();
+        cfg.archive = Some(mock_nvr::archive::ArchiveConfig::new(vec![day]));
+    });
+    h.nvr.set_silent_previews(true);
+    h.configure(json!({"cameras": [{"camera": h.cam(0)}], "acquisition": {"recheck": false}}));
+    h.core
+        .alerts_trigger_put(
+            &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
+        )
+        .unwrap();
+    h.run_until_with("a decision", 30, &mut |_, _| Answer::Person, |h| {
+        !h.decisions().is_empty()
+    });
+    let req = &h.rec.events_of("verify_request")[0];
+    assert_eq!(req["from_cover"], true, "{req}");
+    assert_eq!(h.nvr.command_count(298), 1);
+    let steps = step_names(&h.decisions()[0]);
+    assert!(steps.contains(&"frame_sampled".to_owned()), "{steps:?}");
 }
 
 /// Before the first configure nothing is checked; turning the service off
