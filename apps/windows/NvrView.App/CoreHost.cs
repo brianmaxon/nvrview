@@ -133,6 +133,9 @@ internal sealed class CoreEvent
     }
 }
 
+/// <summary>What a camera's motion hardware has (the `ptz` of the channels event); not what the user allowed.</summary>
+internal readonly record struct PtzCaps(bool PanTilt, bool Presets, bool ZoomFocus);
+
 /// <summary>One channel of a device, from a channels event.</summary>
 internal sealed class ChannelInfo
 {
@@ -145,6 +148,28 @@ internal sealed class ChannelInfo
 
     /// <summary>A fisheye camera (the core's "fisheye"; docs/FFI.md): the app dewarps its circular picture.</summary>
     public bool Fisheye;
+
+    /// <summary>What the camera has (docs/FFI.md "channels"): talk-back, a doorbell, and what moves. Capabilities, not permissions.</summary>
+    public bool Talk, Doorbell;
+
+    public PtzCaps Ptz;
+
+    /// <summary>Per lens, for a multi-lens camera (null: the channel's own entry applies to lens 0 only).</summary>
+    public bool[]? LensTalk;
+
+    public PtzCaps[]? LensPtz;
+
+    /// <summary>Talk-back of one lens: its own entry when the core listed lenses, else the channel's item.</summary>
+    public bool TalkOf(int lens) => LensTalk is { } t && lens < t.Length ? t[lens] : lens == 0 && Talk;
+
+    /// <summary>What one lens can move, by the same rule.</summary>
+    public PtzCaps PtzOf(int lens) => LensPtz is { } p && lens < p.Length ? p[lens] : lens == 0 ? Ptz : default;
+
+    private static PtzCaps PtzFrom(JsonElement e)
+    {
+        static bool Flag(JsonElement o, string name) => o.ValueKind == JsonValueKind.Object && o.TryGetProperty(name, out JsonElement v) && v.ValueKind is JsonValueKind.True;
+        return new PtzCaps(Flag(e, "pan_tilt"), Flag(e, "presets"), Flag(e, "zoom_focus"));
+    }
 
     public static ChannelInfo? From(JsonElement c)
     {
@@ -172,6 +197,20 @@ internal sealed class ChannelInfo
         if (c.TryGetProperty("fisheye", out JsonElement fe) && fe.ValueKind is JsonValueKind.True)
         {
             info.Fisheye = true;
+        }
+        info.Talk = c.TryGetProperty("talk", out JsonElement talk) && talk.ValueKind is JsonValueKind.True;
+        info.Doorbell = c.TryGetProperty("doorbell", out JsonElement bell) && bell.ValueKind is JsonValueKind.True;
+        if (c.TryGetProperty("ptz", out JsonElement ptz))
+        {
+            info.Ptz = PtzFrom(ptz);
+        }
+        if (c.TryGetProperty("lens_talk", out JsonElement lt) && lt.ValueKind == JsonValueKind.Array)
+        {
+            info.LensTalk = [.. lt.EnumerateArray().Select(x => x.ValueKind is JsonValueKind.True)];
+        }
+        if (c.TryGetProperty("lens_ptz", out JsonElement lp) && lp.ValueKind == JsonValueKind.Array)
+        {
+            info.LensPtz = [.. lp.EnumerateArray().Select(PtzFrom)];
         }
         if (c.TryGetProperty("lenses", out JsonElement l) && l.TryGetInt32(out int lenses))
         {

@@ -77,6 +77,7 @@ internal sealed class CallCard : UserControl
     private readonly ToggleButton _keep = new() { Content = "Keep talking" };
     private readonly TextBox _reply = new() { PlaceholderText = "Type a reply to speak", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly Button _send = new() { Content = "Send" };
+    private readonly MenuFlyout _menu;
     private bool _holding;
     private bool _unmuteInPicture;
     private bool _updating;
@@ -110,7 +111,8 @@ internal sealed class CallCard : UserControl
         AutomationProperties.SetName(_pin, "Keep the call window on top");
         ToolTipService.SetToolTip(_pin, "Keep the call window on top of other windows");
         // The card's menu (right-click on the header, the picture, or the controls).
-        ContextFlyout = BuildMenu();
+        _menu = BuildMenu();
+        ContextFlyout = _menu;
 
         _unmute.Click += (_, _) => _viewer.Calls.Unmute(Camera);
         AutomationProperties.SetName(_unmute, "Unmute the camera");
@@ -350,6 +352,9 @@ internal sealed class CallCard : UserControl
             _picture.Visibility = inset ? Visibility.Visible : Visibility.Collapsed;
             _frame.BorderBrush = inset && !window ? Accent : null;
             _frame.BorderThickness = new Thickness(inset && !window ? BorderWidth : 0);
+            // In the call window the picture is a regular tile with its own menu; the card's menu stays on the call bar.
+            ContextFlyout = window ? null : _menu;
+            _header.ContextFlyout = window ? _menu : null;
             _frame.CornerRadius = new CornerRadius(window ? 0 : 8);
             _header.CornerRadius = window ? new CornerRadius(0) : new CornerRadius(inset ? 6 : 8, inset ? 6 : 8, 0, 0);
             _body.CornerRadius = window ? new CornerRadius(0) : new CornerRadius(0, 0, inset ? 6 : 8, inset ? 6 : 8);
@@ -423,6 +428,16 @@ internal sealed class CallCard : UserControl
             reset.Visibility = _mode == CallCardMode.Inset ? Visibility.Visible : Visibility.Collapsed;
         };
         return menu;
+    }
+
+    /// <summary>
+    /// The call window's picture: the window's stage in single fixed tile mode takes the place of the hole
+    /// (docs/UX.md "A call in its own window"). Unmute stays above it as the veil inside the tile.
+    /// </summary>
+    public void HostStage(UIElement stage)
+    {
+        _hole.Visibility = Visibility.Collapsed;
+        _picture.Children.Insert(0, stage);
     }
 
     /// <summary>The picture size the hole was last sized for.</summary>

@@ -1,6 +1,8 @@
 // The overlay drawn above one tile's video (docs/UX.md, "Chrome" and
-// "Listening from any tile"): a header with the speaker button and the
-// camera's name that fades in on hover and out a few seconds later, a thin
+// "Tile header"): a header with the camera's name and its buttons, laid out by
+// the shared TileHeaderLayout (what does not fit goes into the "..." menu;
+// StageView builds the menus and does what a button says), that fades in on
+// hover and out a few seconds later, a thin
 // level meter along the top (green while the tile is audible and always
 // shown then; white on gray while hovering a muted tile, fading with the
 // header), the selection outline, a status line in words (connecting,
@@ -33,6 +35,7 @@ internal sealed class TileChrome
 {
     public const double HeaderHeight = 32;
     private const double MeterHeight = 3;
+    private const double TitleLeft = 8;
 
     private static readonly SolidColorBrush HeaderBrush = new(Color.FromArgb(0x99, 0, 0, 0));
     private static readonly SolidColorBrush ListeningBrush = new(Color.FromArgb(0xD0, 0x34, 0xC7, 0x59));
@@ -47,8 +50,14 @@ internal sealed class TileChrome
     private static readonly SolidColorBrush White = new(Colors.White);
     private static readonly SolidColorBrush OutlineBrush = new(Color.FromArgb(0xE0, 0x3A, 0x96, 0xDD));
 
-    private readonly FontIcon _speakerIcon;
     private readonly TextBlock _title;
+    private readonly StackPanel _buttons;
+    private readonly Dictionary<TileHeaderItem, Button> _buttonFor = [];
+    private TileHeaderLayout? _layout;
+    private TileHeaderTile? _headerTile;
+    private double _titleWidth;
+    private bool _resetNow;
+    private float? _forcedWidth;
     private readonly Rectangle _track;
     private readonly Rectangle _bar;
     private readonly Border _statusBox;
@@ -58,7 +67,6 @@ internal sealed class TileChrome
     private readonly TextBlock _diagnostics;
     private readonly Border _outline;
     private readonly Grid _header;
-    private readonly Button _reset;
     private readonly Border _map;
     private readonly Border _mapRegion;
     private readonly IndicatorStrip _indicators = new();
@@ -80,7 +88,7 @@ internal sealed class TileChrome
     /// <summary>Height of the pinned alert strip (four lines and padding).</summary>
     public const double AlertStripHeight = 4 * 15 + 14;
 
-    public TileChrome(StageTile tile, Action<StageTile> speakerClicked)
+    public TileChrome(StageTile tile)
     {
         Tile = tile;
         Root = new Grid { IsHitTestVisible = true, Background = null };
@@ -118,46 +126,26 @@ internal sealed class TileChrome
             Opacity = 0,
             OpacityTransition = new ScalarTransition { Duration = TimeSpan.FromMilliseconds(200) },
         };
-        _header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         _header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         _header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        _speakerIcon = new FontIcon { Glyph = "", FontSize = 14, Foreground = White };
-        Speaker = new Button
-        {
-            Content = _speakerIcon,
-            Background = new SolidColorBrush(Colors.Transparent),
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 4, 8, 4),
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        ToolTipService.SetToolTip(Speaker, "Listen (Ctrl+click to add)");
-        Speaker.Click += (_, _) => speakerClicked(Tile);
-        _header.Children.Add(Speaker);
         _title = new TextBlock
         {
             Foreground = White,
             FontSize = 13,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Margin = new Thickness(2, 0, 8, 0),
+            Margin = new Thickness(TitleLeft, 0, 4, 0),
         };
-        Grid.SetColumn(_title, 1);
         _header.Children.Add(_title);
-        // The reset-zoom control (docs/UX.md "Digital zoom"): shown while the tile is zoomed, or its virtual camera moved.
-        _reset = new Button
+        // The buttons sit together at the right end in priority order; the title takes what is left.
+        _buttons = new StackPanel
         {
-            Content = new FontIcon { Glyph = "\uE71E", FontSize = 14, Foreground = White },
-            Background = new SolidColorBrush(Colors.Transparent),
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(8, 4, 8, 4),
+            Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Visibility = Visibility.Collapsed,
+            Margin = new Thickness(0, 0, TileHeaderMetrics.Standard.Padding, 0),
         };
-        ToolTipService.SetToolTip(_reset, "Reset zoom (0)");
-        AutomationProperties.SetName(_reset, "Reset zoom");
-        _reset.Click += (_, _) => ResetClicked?.Invoke(Tile);
-        Grid.SetColumn(_reset, 2);
-        _header.Children.Add(_reset);
+        Grid.SetColumn(_buttons, 1);
+        _header.Children.Add(_buttons);
         Root.Children.Add(_header);
 
         // The zoom map: the whole picture's outline with the visible region marked, in the bottom left of
@@ -331,18 +319,72 @@ internal sealed class TileChrome
     /// <summary>The symbols now shown in the corner.</summary>
     public IReadOnlyList<IndicatorItem> Indicators => _indicators.Items;
 
-    /// <summary>Raised when the header's reset-zoom control is clicked.</summary>
-    public Action<StageTile>? ResetClicked { get; set; }
+    /// <summary>A header button was clicked: the item and the button (a menu opens under it). Set by the stage.</summary>
+    public Action<StageTile, TileHeaderItem, FrameworkElement?>? ItemClicked { get; set; }
+
+    /// <summary>The header's state changed on its own (the zoom came or went): the stage rebuilds the header model for the tile.</summary>
+    public Action<StageTile>? HeaderStateChanged { get; set; }
+
+    /// <summary>The header as last laid out (kept for the model's hysteresis).</summary>
+    public TileHeaderLayout? HeaderLayout => _layout;
+
+    /// <summary>The room the corner indicators take from the header's right end (DIPs).</summary>
+    public double Reserve => _reserve;
+
+    /// <summary>
+    /// Lays the tile out at a width of the test's choosing (null: the tile's own again), so the header can be
+    /// checked at narrow widths without resizing a window (self-test). Synchronous.
+    /// </summary>
+    public void ForceWidth(double? width)
+    {
+        _forcedWidth = (float?)width;
+        if (_forcedWidth is { } w)
+        {
+            Root.Width = w;
+            _w = w;
+            LayoutHeader();
+            Root.UpdateLayout();
+        }
+    }
+
+    /// <summary>The header items shown as buttons, left to right, "..." last (self-test).</summary>
+    public IReadOnlyList<TileHeaderItem> ShownButtons => [.. _buttons.Children.OfType<Button>().Select(b => (TileHeaderItem)b.Tag)];
+
+    /// <summary>A shown button's frame in the tile's coordinates (self-test); null when it is not shown.</summary>
+    public Windows.Foundation.Rect? ButtonFrame(TileHeaderItem item)
+    {
+        if (!_buttonFor.TryGetValue(item, out Button? b) || b.Parent is null || b.ActualWidth < 1)
+        {
+            return null;
+        }
+        return b.TransformToVisual(Root).TransformBounds(new Windows.Foundation.Rect(0, 0, b.ActualWidth, b.ActualHeight));
+    }
+
+    /// <summary>The title's frame in the tile's coordinates (self-test).</summary>
+    public Windows.Foundation.Rect TitleFrame =>
+        _title.TransformToVisual(Root).TransformBounds(new Windows.Foundation.Rect(0, 0, _title.ActualWidth, _title.ActualHeight));
+
+    /// <summary>The button of an item, if it is shown (self-test, and where a menu opens).</summary>
+    public Button? ButtonFor(TileHeaderItem item) => _buttonFor.GetValueOrDefault(item) is { Parent: not null } b ? b : null;
 
     /// <summary>Whether the header's reset-zoom control shows.</summary>
-    public bool ResetShown => _reset.Visibility == Visibility.Visible;
+    public bool ResetShown => ButtonFor(TileHeaderItem.ResetZoom) is not null;
 
     /// <summary>Presses the reset-zoom control as a click would (the self-test).</summary>
     public void PressReset()
     {
         if (ResetShown)
         {
-            ResetClicked?.Invoke(Tile);
+            PressHeader(TileHeaderItem.ResetZoom);
+        }
+    }
+
+    /// <summary>Clicks a shown header button as the pointer would (the self-test).</summary>
+    public void PressHeader(TileHeaderItem item)
+    {
+        if (ButtonFor(item) is { } b)
+        {
+            ItemClicked?.Invoke(Tile, item, b);
         }
     }
 
@@ -363,8 +405,6 @@ internal sealed class TileChrome
 
     public Grid Root { get; }
 
-    public Button Speaker { get; }
-
     /// <summary>The header's opacity target (hover), 0 or 1.</summary>
     public bool HeaderShown { get; private set; }
 
@@ -382,7 +422,7 @@ internal sealed class TileChrome
         {
             return;
         }
-        float x = t.X, y = t.Y, w = t.Width, h = t.Height;
+        float x = t.X, y = t.Y, w = _forcedWidth ?? t.Width, h = t.Height;
         if (x != _x || y != _y)
         {
             Root.Translation = new Vector3(x, y, 0);
@@ -395,6 +435,7 @@ internal sealed class TileChrome
             Root.Height = h;
             _w = w;
             _h = h;
+            LayoutHeader();
         }
         PlaceZoom(t);
     }
@@ -405,11 +446,10 @@ internal sealed class TileChrome
         bool dewarped = t.Fisheye is { } fe && fe.Mode.Dewarps();
         bool moved = dewarped && t.FisheyeSetting.Aim is not null;
         bool zoomed = !dewarped && t.Zoom > 1.0001f && t.PictureWidth > 0 && t.PictureHeight > 0 && t.ViewWidth > 0 && t.ViewHeight > 0;
-        Visibility reset = zoomed || moved ? Visibility.Visible : Visibility.Collapsed;
-        if (_reset.Visibility != reset)
+        if ((zoomed || moved) != _resetNow)
         {
-            _reset.Visibility = reset;
-            UpdateHeaderMargins();
+            _resetNow = zoomed || moved;
+            HeaderStateChanged?.Invoke(Tile);
         }
         if (!zoomed)
         {
@@ -458,6 +498,8 @@ internal sealed class TileChrome
     {
         HeaderShown = header;
         _header.Opacity = header ? 1 : 0;
+        // A faded header takes no clicks, as on macOS.
+        _header.IsHitTestVisible = header;
         _outline.Opacity = selected && header ? 1 : selected ? 0.5 : 0;
         UpdateMeterLook();
     }
@@ -501,18 +543,26 @@ internal sealed class TileChrome
         }
     }
 
-    /// <summary>Text and badges after a state change (not per frame).</summary>
-    public void Refresh(string title, string? status, bool audible, string? diagnostics)
+    /// <summary>Text, badges and the header's model after a state change (not per frame).</summary>
+    public void Refresh(string title, string? status, bool audible, string? diagnostics, TileHeaderTile? header)
     {
         if (_title.Text != title)
         {
             _title.Text = title;
+            _title.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+            _titleWidth = Math.Ceiling(_title.DesiredSize.Width);
+            _layout = null;
+            LayoutHeader();
         }
         if (_audible != audible)
         {
             _audible = audible;
-            _speakerIcon.Glyph = audible ? "" : "";
             UpdateMeterLook();
+        }
+        if (header != _headerTile)
+        {
+            _headerTile = header;
+            LayoutHeader();
         }
         if (status is null)
         {
@@ -577,24 +627,121 @@ internal sealed class TileChrome
             PlaceIndicators();
         }
         double reserve = _corner == ChromeCorner.TopRight ? _indicators.OccupiedWidth + 8 : 0;
-        _reserve = reserve;
-        UpdateHeaderMargins();
+        if (Math.Abs(reserve - _reserve) > 0.5)
+        {
+            _reserve = reserve;
+            // The top right indicators sit over the header: the buttons end before them.
+            _buttons.Margin = new Thickness(0, 0, reserve + TileHeaderMetrics.Standard.Padding, 0);
+            LayoutHeader();
+        }
     }
 
-    // The top right indicators sit over the header: the reset control (or the title, without it) ends before them.
-    private void UpdateHeaderMargins()
+    // ---- the header's buttons (docs/UX.md "Tile header") ----
+
+    // Segoe MDL2 glyphs.
+    private static string Glyph(TileHeaderItem item, TileHeaderTile tile) => item switch
     {
-        Thickness m = _reset.Margin;
-        if (Math.Abs(m.Right - _reserve) > 0.5)
+        TileHeaderItem.Speaker => tile.Listening ? "" : "",
+        TileHeaderItem.Record => tile.Recording ? "" : "",
+        TileHeaderItem.SavePicture => "",
+        TileHeaderItem.Conversation => tile.Conversation ? "" : "",
+        TileHeaderItem.PanTilt => "",
+        TileHeaderItem.Presets => "",
+        TileHeaderItem.Lens => "",
+        TileHeaderItem.ResetZoom => "",
+        TileHeaderItem.Quality => "",
+        TileHeaderItem.Fisheye => "",
+        _ => "",
+    };
+
+    private static bool IsButton(TileHeaderItem item) =>
+        item is not (TileHeaderItem.RecordingPill or TileHeaderItem.Title or TileHeaderItem.DismissAlert);
+
+    /// <summary>Lays the header out with the shared model at the tile's width and places the buttons. Not per frame: on a size, text or state change.</summary>
+    private void LayoutHeader()
+    {
+        if (_headerTile is not { } tile || _w <= 0)
         {
-            _reset.Margin = new Thickness(0, 0, _reserve, 0);
+            if (_buttons.Children.Count > 0)
+            {
+                _buttons.Children.Clear();
+            }
+            _layout = null;
+            return;
         }
-        Thickness tm = _title.Margin;
-        double titleRight = 8 + (_reset.Visibility == Visibility.Visible ? 0 : _reserve);
-        if (Math.Abs(tm.Right - titleRight) > 0.5)
+        TileHeaderLayout layout = TileHeaderLayout.Compute(Math.Max(_w - _reserve, 0), _titleWidth, tile, null, _layout);
+        _layout = layout;
+        TileHeaderItem[] shown = [.. layout.Visible.Where(IsButton)];
+        TileHeaderMenuEntry[] menu = [.. TileHeaderLayout.Menu(tile)];
+        bool same = shown.Length == _buttons.Children.Count;
+        for (int i = 0; same && i < shown.Length; i++)
         {
-            _title.Margin = new Thickness(2, 0, titleRight, 0);
+            same = (TileHeaderItem)((Button)_buttons.Children[i]).Tag == shown[i];
         }
+        if (!same)
+        {
+            _buttons.Children.Clear();
+            foreach (TileHeaderItem item in shown)
+            {
+                _buttons.Children.Add(ButtonOf(item));
+            }
+        }
+        foreach (TileHeaderItem item in shown)
+        {
+            Style(_buttonFor[item], item, tile, menu.FirstOrDefault(e => e.Item == item));
+        }
+    }
+
+    private Button ButtonOf(TileHeaderItem item)
+    {
+        if (_buttonFor.TryGetValue(item, out Button? b))
+        {
+            return b;
+        }
+        b = new Button
+        {
+            Content = new FontIcon { FontSize = 14, Foreground = White },
+            Tag = item,
+            Width = TileHeaderMetrics.Standard.Icon,
+            Height = 28,
+            MinWidth = 0,
+            MinHeight = 0,
+            Padding = new Thickness(0),
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Button button = b;
+        b.Click += (_, _) => ItemClicked?.Invoke(Tile, item, button);
+        _buttonFor[item] = b;
+        return b;
+    }
+
+    // The symbol, label and tooltip of a header button in the tile's state; an action that is not built yet is dimmed.
+    private static void Style(Button b, TileHeaderItem item, TileHeaderTile tile, TileHeaderMenuEntry? entry)
+    {
+        string label = entry?.Label ?? (item == TileHeaderItem.More ? "More" : "");
+        string hint = entry?.WindowsShortcut ?? "";
+        bool pending = TileActionStub.IsPending(item);
+        string tip = hint.Length == 0 ? label : $"{label} ({hint})";
+        if (item == TileHeaderItem.Speaker)
+        {
+            tip += " · Ctrl+click to listen to several";
+        }
+        if (pending)
+        {
+            tip += " · coming soon";
+        }
+        if (b.Content is FontIcon icon && icon.Glyph != Glyph(item, tile))
+        {
+            icon.Glyph = Glyph(item, tile);
+        }
+        b.Opacity = pending ? 0.45 : 1;
+        if (!Equals(ToolTipService.GetToolTip(b), tip))
+        {
+            ToolTipService.SetToolTip(b, tip);
+        }
+        AutomationProperties.SetName(b, item == TileHeaderItem.Speaker ? (tile.Listening ? "Stop listening" : "Listen") : label);
     }
 
     private void PlaceIndicators()

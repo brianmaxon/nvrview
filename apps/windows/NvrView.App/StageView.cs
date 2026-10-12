@@ -3,7 +3,7 @@
 //
 // - the window's split tree (WindowState.Tree) laid out into cells; one
 //   StageTile per leaf, pointing at its camera's shared core tile;
-// - hover shows a tile's header (speaker, name) and fades it 3 s after the
+// - hover shows a tile's header (its buttons from the shared TileHeaderLayout, and the name) and fades it 3 s after the
 //   pointer stops or leaves; a click selects; a double-click (or Space, or
 //   Enter) focuses the tile with an animation of the same live tile and,
 //   once it ends, has the leases switch its camera to the focus tier;
@@ -31,6 +31,8 @@ using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -96,6 +98,8 @@ internal sealed partial class StageView : UserControl
         MaxWidth = 520,
     };
     private readonly Border _help;
+    private readonly Border _toast;
+    private readonly TextBlock _toastText;
     private readonly CallStack _calls;
     private readonly List<TileChrome> _chromes = [];
     private readonly List<Rectangle> _outlines = [];
@@ -130,15 +134,17 @@ internal sealed partial class StageView : UserControl
     private StageTile? _panTile;
     private TileZoom _panFrom;
 
-    public StageView(Viewer viewer, AppWindow appWindow, WindowState state)
+    /// <param name="fixedTile">The call window's mode (docs/UX.md "A call in its own window"): one tile, always selected, with the header, menu and digital zoom of any tile but no layout editing, focus, swap or drops, and no call cards.</param>
+    public StageView(Viewer viewer, AppWindow appWindow, WindowState state, bool fixedTile = false)
     {
         _viewer = viewer;
         _appWindow = appWindow;
+        FixedTile = fixedTile;
         _idle = new ChromeIdle(viewer.Clock);
         State = state;
         IsTabStop = true;
         UseSystemFocusVisuals = false;
-        AllowDrop = true;
+        AllowDrop = !fixedTile;
         Background = new SolidColorBrush(Colors.Black);
         var root = new Grid();
         root.Children.Add(_panel);
@@ -173,8 +179,11 @@ internal sealed partial class StageView : UserControl
                     "Wheel, pinch, drag           digital zoom and pan; 0 or the header's button resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
+                    "P, Shift+P, R                save picture, save picture as, record (coming soon)",
+                    "T                            start or end a conversation on the selected tile",
+                    "Menu key, Shift+F10          the selected tile's menu",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
-                    "Right-click > Start conversation   captions, Talk, and a typed reply",
+                    "Right-click > Start Conversation   captions, Talk, and a typed reply",
                     "Ctrl+E                       edit the layout (drag dividers and tiles)",
                     "Delete                       remove the selected tile while editing",
                     "Ctrl+N                       new window",
@@ -184,8 +193,26 @@ internal sealed partial class StageView : UserControl
             },
         };
         _calls = new CallStack(viewer, () => FillingCamera);
-        root.Children.Add(_calls);
+        if (!fixedTile)
+        {
+            root.Children.Add(_calls);
+        }
         root.Children.Add(_help);
+        _toastText = new TextBlock { Foreground = new SolidColorBrush(Colors.White), FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.Medium, TextTrimming = TextTrimming.CharacterEllipsis };
+        _toast = new Border
+        {
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0xD9, 0x1A, 0x1A, 0x1A)),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14, 7, 14, 7),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(12, 12, 12, 22),
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false,
+            Child = _toastText,
+        };
+        AutomationProperties.SetLiveSetting(_toast, AutomationLiveSetting.Polite);
+        root.Children.Add(_toast);
         Content = root;
 
         Renderer = null!;
@@ -196,12 +223,18 @@ internal sealed partial class StageView : UserControl
         };
         _panel.CompositionScaleChanged += (_, _) => PushSize();
         _viewer.Changed += RefreshAll;
-        _viewer.CallsChanged += _calls.Sync;
+        if (!fixedTile)
+        {
+            _viewer.CallsChanged += _calls.Sync;
+        }
         _viewer.Leases.TileChanged += OnTileChanged;
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
         // The call cards' corner follows the setting (and the indicators', when it is opposite them).
-        _viewer.Settings.Changed += _calls.InvalidateArrange;
+        if (!fixedTile)
+        {
+            _viewer.Settings.Changed += _calls.InvalidateArrange;
+        }
         // A mount chosen in Settings (or another window) reaches this window's tiles at once.
         _viewer.Settings.Changed += PublishAllFisheye;
         // A touch screen's two-finger pinch (a touchpad's arrives as Ctrl+wheel).
@@ -216,6 +249,12 @@ internal sealed partial class StageView : UserControl
 
     /// <summary>The window's arrangement.</summary>
     public WindowState State { get; }
+
+    /// <summary>The call window's single fixed tile mode (see the constructor).</summary>
+    public bool FixedTile { get; }
+
+    /// <summary>The panel's DIP-to-pixel scale (the call window sizes its stream demand by pixels drawn).</summary>
+    public double PanelScale => _panel.CompositionScaleX;
 
     /// <summary>The call cards over the stage (self-test).</summary>
     public CallStack CallCards => _calls;
@@ -242,12 +281,6 @@ internal sealed partial class StageView : UserControl
     /// <summary>A zoom, a crop or a Fill choice changed (the window saves its record).</summary>
     public event Action? ViewsChanged;
 
-    /// <summary>
-    /// Called while a tile's context menu is built, after the tile's own
-    /// entries (Listen, Focus, Reset zoom) and before the layout entries, so
-    /// other features can add theirs (a Quality submenu, for one).
-    /// </summary>
-    public static event Action<MenuFlyout, StageTile, StageView>? TileMenuOpening;
 
     /// <summary>This window's tiles, one per leaf, in reading order.</summary>
     public StageTile[] Tiles => _tiles;
@@ -316,6 +349,11 @@ internal sealed partial class StageView : UserControl
         {
             State.Selected = null;
         }
+        if (FixedTile)
+        {
+            // The selection is always that tile.
+            State.Selected = State.Tree.Leaves.FirstOrDefault().Path;
+        }
         if (Renderer.Focus is { } f && Array.IndexOf(next, f.Tile) < 0)
         {
             CancelFocus();
@@ -375,6 +413,10 @@ internal sealed partial class StageView : UserControl
 
     public void Split(SplitAxis axis)
     {
+        if (FixedTile)
+        {
+            return;
+        }
         if (Target is { } path && State.Tree.Splitting(path, axis) is { } s)
         {
             State.Selected = s.NewLeaf;
@@ -384,23 +426,37 @@ internal sealed partial class StageView : UserControl
 
     public void RemoveSelected()
     {
-        if (State.Selected is { } path && State.Tree.Removing(path) is { } r)
+        if (!FixedTile && State.Selected is { } path && State.Tree.Removing(path) is { } r)
         {
             State.Selected = r.Tree[r.Survivor] is LayoutLeaf ? r.Survivor : null;
             Edit(_ => r.Tree);
         }
     }
 
-    public void Assign(CameraRef? camera, NodePath path) => Edit(t => t.Assigning(camera, path));
+    public void Assign(CameraRef? camera, NodePath path)
+    {
+        if (!FixedTile)
+        {
+            Edit(t => t.Assigning(camera, path));
+        }
+    }
 
     public void Swap(NodePath from, NodePath to)
     {
+        if (FixedTile)
+        {
+            return;
+        }
         State.Selected = to;
         Edit(t => t.Swapping(from, to));
     }
 
     public void ApplyPreset(LayoutPreset preset)
     {
+        if (FixedTile)
+        {
+            return;
+        }
         List<CameraRef> cameras = [.. State.Tree.CameraList.OfType<CameraRef>()];
         State.Selected = null;
         Edit(_ => preset.Tree(cameras));
@@ -420,7 +476,7 @@ internal sealed partial class StageView : UserControl
     /// <summary>Enters or leaves Edit Layout mode.</summary>
     public void SetEditing(bool editing)
     {
-        if (State.Editing == editing)
+        if (State.Editing == editing || FixedTile)
         {
             return;
         }
@@ -442,6 +498,10 @@ internal sealed partial class StageView : UserControl
 
     public void ToggleFocus(StageTile tile)
     {
+        if (FixedTile)
+        {
+            return;
+        }
         if (Renderer.Focus is { Entering: true } f && f.Tile == tile)
         {
             Unfocus();
@@ -454,7 +514,7 @@ internal sealed partial class StageView : UserControl
 
     public void FocusOn(StageTile tile)
     {
-        if (State.Editing)
+        if (State.Editing || FixedTile)
         {
             return;
         }
@@ -517,7 +577,10 @@ internal sealed partial class StageView : UserControl
     {
         Renderer.Focus = null;
         SetFocusDemand(null);
-        _calls.Sync();
+        if (!FixedTile)
+        {
+            _calls.Sync();
+        }
     }
 
     // The focused tile asks the tier planner for the focus tier (Auto: main).
@@ -677,7 +740,7 @@ internal sealed partial class StageView : UserControl
     private static bool Contains(StageTile t, Point p) =>
         p.X >= t.ViewX && p.Y >= t.ViewY && p.X < t.ViewX + t.ViewWidth && p.Y < t.ViewY + t.ViewHeight;
 
-    private bool CanEditLayout => Renderer.Focus is null;
+    private bool CanEditLayout => !FixedTile && Renderer.Focus is null;
 
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
@@ -1090,8 +1153,9 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>
-    /// The context menu of a tile: its camera's actions (focus, listen, conversation, zoom, quality, fisheye,
-    /// dismiss), its layout actions while editing, and what other features add; null when it would be empty.
+    /// The context menu of a tile: the header model's list for its camera (the same order and wording as the header; docs/UX.md
+    /// "Tile header"), then the layout's own items (Focus, split, remove, clear, show camera, presets); none of those in the call
+    /// window's tile. Null when it would be empty.
     /// </summary>
     internal MenuFlyout? BuildTileMenu(StageTile t)
     {
@@ -1103,50 +1167,35 @@ internal sealed partial class StageView : UserControl
             into.Add(item);
             return item;
         }
-        if (t is { CameraOrNone: { } camera })
+        if (t.CameraOrNone is { } camera && HeaderTileOf(t) is { } tile)
         {
-            Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the grid" : "Focus", () => ToggleFocus(t), !State.Editing);
-            Item(menu.Items, t.Audible ? "Stop listening" : "Listen", () => _viewer.ToggleListening(camera, false));
-            AddConversationItems(menu, camera);
-            var unmute = new ToggleMenuFlyoutItem { Text = "Unmute on ring", IsChecked = _viewer.Settings.UnmuteOnRing(camera) };
-            unmute.Click += (_, _) => _viewer.Settings.SetUnmuteOnRing(camera, unmute.IsChecked);
-            ToolTipService.SetToolTip(unmute, "When this camera rings, unmute it even if you are not listening");
-            menu.Items.Add(unmute);
-            Item(menu.Items, "Reset zoom", () => ResetZoom(t), t.Zoom > 1);
-            if (t.DigitalZoom.IsPanned && Fills(t) && !(t.Fisheye is { } dewarp && dewarp.Mode.Dewarps()))
+            foreach (TileHeaderMenuEntry entry in TileHeaderLayout.Menu(tile))
             {
-                Item(menu.Items, "Reset position", () => ResetZoom(t));
-            }
-            var fill = new ToggleMenuFlyoutItem { Text = "Fill tile", IsChecked = Fills(t) };
-            fill.Click += (_, _) => SetTileFill(t, fill.IsChecked);
-            ToolTipService.SetToolTip(fill, "Crop this camera's picture to fill its tile; drag the picture to choose the part shown");
-            menu.Items.Add(fill);
-            menu.Items.Add(QualityMenu.Create(t.Quality, _viewer.OffersBalanced(t), q => SetQuality(t, q)));
-            if (_viewer.IsFisheye(camera))
-            {
-                menu.Items.Add(FisheyeViewMenu(t));
-                menu.Items.Add(FisheyeMountMenu(camera));
-            }
-            if (_viewer.Alerts.IsActive(camera))
-            {
-                Item(menu.Items, "Dismiss alert", () => _viewer.DismissAlert(camera));
+                menu.Items.Add(MenuItemFor(entry, t, camera));
             }
         }
-        TileMenuOpening?.Invoke(menu, t, this);
+        if (FixedTile)
+        {
+            return menu.Items.Count > 0 ? menu : null;
+        }
+        if (menu.Items.Count > 0)
+        {
+            menu.Items.Add(new MenuFlyoutSeparator());
+        }
+        if (!t.IsEmpty)
+        {
+            Item(menu.Items, IsFocused && Renderer.Focus?.Tile == t ? "Back to the Grid" : "Focus", () => ToggleFocus(t), !State.Editing);
+        }
         if (CanEditLayout)
         {
-            if (menu.Items.Count > 0)
-            {
-                menu.Items.Add(new MenuFlyoutSeparator());
-            }
-            Item(menu.Items, "Split side by side", () => Split(SplitAxis.Row), CanSplit);
-            Item(menu.Items, "Split stacked", () => Split(SplitAxis.Col), CanSplit);
-            Item(menu.Items, "Remove tile", RemoveSelected, State.Tree.LeafCount > 1 || !t.IsEmpty);
+            Item(menu.Items, "Split Side by Side", () => Split(SplitAxis.Row), CanSplit);
+            Item(menu.Items, "Split Stacked", () => Split(SplitAxis.Col), CanSplit);
+            Item(menu.Items, "Remove Tile", RemoveSelected, State.Tree.LeafCount > 1 || !t.IsEmpty);
             if (!t.IsEmpty)
             {
-                Item(menu.Items, "Clear tile", () => Assign(null, t.Path));
+                Item(menu.Items, "Clear Tile", () => Assign(null, t.Path));
             }
-            var show = new MenuFlyoutSubItem { Text = "Show camera" };
+            var show = new MenuFlyoutSubItem { Text = "Show Camera" };
             foreach (DeviceEntry d in _viewer.Devices)
             {
                 List<CameraRef> cameras = [.. _viewer.ListedChannels(d).SelectMany(c => Viewer.CamerasOf(d, c))];
@@ -1168,7 +1217,7 @@ internal sealed partial class StageView : UserControl
             }
             show.IsEnabled = show.Items.Count > 0;
             menu.Items.Add(show);
-            var presets = new MenuFlyoutSubItem { Text = "Layout preset" };
+            var presets = new MenuFlyoutSubItem { Text = "Layout Preset" };
             foreach (LayoutPreset preset in LayoutPresets.All)
             {
                 Item(presets.Items, preset.Title(), () => ApplyPreset(preset));
@@ -1176,65 +1225,6 @@ internal sealed partial class StageView : UserControl
             menu.Items.Add(presets);
         }
         return menu.Items.Count > 0 ? menu : null;
-    }
-
-    // ---- conversations (docs/UX.md "Doorbell calls") ----
-
-    /// <summary>
-    /// Start (or end) a conversation with the camera: the call's captions, Talk, and typed reply with
-    /// no doorbell press. Offered on every camera, because the core learns whether a camera has a
-    /// speaker only when talk-back starts; the call then says so. Allow talk-back is the user's
-    /// permission for the camera's speaker (camera motion control, off by default).
-    /// </summary>
-    internal void AddConversationItems(MenuFlyout menu, CameraRef camera)
-    {
-        bool open = _viewer.Calls.CallFor(camera) is not null;
-        var conversation = new MenuFlyoutItem { Text = open ? "End conversation" : "Start conversation" };
-        conversation.Click += (_, _) =>
-        {
-            if (open)
-            {
-                _viewer.Calls.End(camera, "closed");
-            }
-            else
-            {
-                _viewer.Calls.StartConversation(camera);
-            }
-        };
-        ToolTipService.SetToolTip(conversation, "Captions of what the camera hears, Talk, and typed replies spoken through its speaker");
-        menu.Items.Add(conversation);
-        if (_viewer.Calls.CallFor(camera) is { } call)
-        {
-            bool popped = call.Presentation == CallPresentation.Window;
-            var pop = new MenuFlyoutItem { Text = popped ? "Pop In Call" : "Pop Out Call" };
-            pop.Click += (_, _) =>
-            {
-                if (popped)
-                {
-                    _viewer.CallWindows?.PopIn(camera);
-                }
-                else
-                {
-                    _viewer.CallWindows?.PopOut(camera);
-                }
-            };
-            menu.Items.Add(pop);
-        }
-        // Where this camera's calls open (a doorbell's own choice beats "Open calls in their own window").
-        var opens = new MenuFlyoutSubItem { Text = "Calls open in" };
-        CallPresentation? chosen = _viewer.Settings.CallPresentationFor(camera);
-        foreach ((string title, CallPresentation? value) in CallPresentationMenu.Choices(_viewer.Settings.CallsOpenInWindow))
-        {
-            CallPresentation? choice = value;
-            var item = new RadioMenuFlyoutItem { Text = title, GroupName = "call-opens-in", IsChecked = chosen == choice };
-            item.Click += (_, _) => _viewer.Settings.SetCallPresentation(camera, choice);
-            opens.Items.Add(item);
-        }
-        menu.Items.Add(opens);
-        var allow = new ToggleMenuFlyoutItem { Text = "Allow talk-back", IsChecked = _viewer.Settings.TalkAllowed(camera) };
-        allow.Click += (_, _) => _viewer.SetTalkAllowed(camera, allow.IsChecked);
-        ToolTipService.SetToolTip(allow, "Lets Talk and typed replies play through this camera's speaker. Off until you allow it; every use is logged.");
-        menu.Items.Add(allow);
     }
 
     // ---- fisheye views (docs/UX.md "Fisheye cameras") ----
@@ -1435,10 +1425,19 @@ internal sealed partial class StageView : UserControl
                 ApplyAction(action, s);
                 return true;
             }
+            // The context-menu key and Shift+F10 open the tile's menu at its header.
+            if (key == VirtualKey.Application || (key == VirtualKey.F10 && Down(VirtualKey.Shift)))
+            {
+                if (BuildTileMenu(s) is { } menu)
+                {
+                    menu.ShowAt(this, new Windows.Foundation.Point(s.X + Math.Min(s.Width, 120) / 2, s.Y + TileChrome.HeaderHeight));
+                }
+                return true;
+            }
         }
         switch (key)
         {
-            case VirtualKey.F when !ctrl && !repeat:
+            case VirtualKey.F when !ctrl && !repeat && !FixedTile:
                 ToggleFullScreen();
                 return true;
             case VirtualKey.Escape:
@@ -1506,6 +1505,9 @@ internal sealed partial class StageView : UserControl
         VirtualKey.Space => TileKey.Space,
         VirtualKey.M => TileKey.M,
         VirtualKey.L => TileKey.L,
+        VirtualKey.P => TileKey.P,
+        VirtualKey.R => TileKey.R,
+        VirtualKey.T => TileKey.T,
         _ => TileKey.Other,
     };
 
@@ -1517,7 +1519,10 @@ internal sealed partial class StageView : UserControl
             case TileAction.Dismiss:
                 _viewer.DismissAlert(tile.Camera);
                 break;
-            case TileAction.ToggleFocus when !State.Editing:
+            case TileAction.SavePicture or TileAction.SavePictureAs or TileAction.ToggleRecording or TileAction.ToggleConversation:
+                ApplyItemAction(action, tile);
+                break;
+            case TileAction.ToggleFocus when !State.Editing && !FixedTile:
                 ToggleFocus(tile);
                 break;
             case TileAction.ToggleListening when !tile.IsEmpty:
@@ -1576,17 +1581,6 @@ internal sealed partial class StageView : UserControl
 
     // ---- chrome ----
 
-    private void SpeakerClicked(StageTile tile)
-    {
-        if (tile.CameraOrNone is not { } camera)
-        {
-            return;
-        }
-        bool ctrl = InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Control).HasFlag(CoreVirtualKeyStates.Down);
-        _viewer.ToggleListening(camera, ctrl);
-        Select(tile.Path);
-    }
-
     private void SyncChromes()
     {
         _chromeLayer.Children.Clear();
@@ -1594,8 +1588,13 @@ internal sealed partial class StageView : UserControl
         _chromes.Clear();
         foreach (StageTile t in _tiles)
         {
-            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked, ResetClicked = ResetTile };
-            chrome.Speaker.Visibility = t.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
+            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t)
+            {
+                DismissClicked = tile => _viewer.DismissAlert(tile.Camera),
+                RetryClicked = RetryClicked,
+                ItemClicked = HeaderItemClicked,
+                HeaderStateChanged = tile => { if (ChromeFor(tile) is { } c) { RefreshChrome(c); } },
+            };
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
         }
@@ -1611,7 +1610,10 @@ internal sealed partial class StageView : UserControl
         }
         SyncOverlays();
         // A tile that fills the stage (focus, a one-tile layout) moves its call over the stage.
-        _calls.Sync();
+        if (!FixedTile)
+        {
+            _calls.Sync();
+        }
         bool empty = _viewer.Devices.Count == 0 && State.Tree.Cameras.Count == 0;
         _empty.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         if (empty)
@@ -1709,7 +1711,7 @@ internal sealed partial class StageView : UserControl
     private void RefreshChrome(TileChrome c)
     {
         (string? text, TileMessage kind) = StatusOf(c.Tile);
-        c.Refresh(TitleOf(c.Tile), text, c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null);
+        c.Refresh(TitleOf(c.Tile), text, c.Tile.Audible, _diagnostics ? DiagnosticsText(c.Tile) : null, HeaderTileOf(c.Tile));
         c.SetRetry(_retryWatch.Offered(c.Tile, kind, _viewer.Clock.Now));
     }
 
@@ -1847,6 +1849,7 @@ internal sealed partial class StageView : UserControl
             }
         }
         UpdateCursor();
+        TickToast(_viewer.Clock.Now);
         // Countdowns and fades that depend on time alone; status lines that
         // follow the video (starting, recovering).
         UpdateHover();
@@ -1864,6 +1867,11 @@ internal sealed partial class StageView : UserControl
     {
         _idle.Interact();
         UpdateCursor();
+        // Using the call window's tile is using the call.
+        if (FixedTile && _tiles.Length > 0 && _tiles[0].CameraOrNone is { } call)
+        {
+            _viewer.Calls.Use(call);
+        }
     }
 
     /// <summary>Whether the pointer is hidden (full screen, idle).</summary>
@@ -1894,7 +1902,7 @@ internal sealed partial class StageView : UserControl
     {
         ChromeFrames++;
         StepFisheyeZoom(_viewer.Clock.Now);
-        if (Renderer is not null)
+        if (Renderer is not null && !FixedTile)
         {
             _calls.Publish(Renderer, _panel);
         }

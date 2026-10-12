@@ -1,10 +1,12 @@
 // A doorbell call in its own window (docs/UX.md "A call in its own window"). The call stays in
 // Viewer.Calls; its Presentation says where it shows. CallWindows opens and closes the windows
-// from it; each CallWindow is a WinUI window with its own SwapChainPanel and StageRenderer that
-// draws the doorbell's shared tile (the same decoded pictures as every viewer window; no swap
-// chain is ever moved between windows) into the transparent hole of the call card, the same
-// card the viewer windows show as an inset. Like a viewer window's renderer, it recovers from a
-// lost GPU device on its own and rebuilds its swap chain.
+// from it; each CallWindow is a WinUI window whose picture is a regular tile: a StageView in
+// single fixed tile mode (the same hover header, menu and digital zoom as in a viewer window)
+// with its own StageRenderer, drawing the doorbell's shared tile (the same decoded pictures as
+// every viewer window; no swap chain is ever moved between windows) inside the call card, the
+// same card the viewer windows show as an inset, with the call bar above it and the captions,
+// Talk row and reply below. Like a viewer window's renderer, it recovers from a lost GPU device
+// on its own and rebuilds its swap chain.
 //
 // Leases: the window holds its own lease on the doorbell and takes it before the viewer windows
 // let their insets go (Pop Out), and the viewer windows take theirs before the window lets its
@@ -307,9 +309,7 @@ internal sealed class CallWindow
     private readonly CallWindows _owner;
     private readonly Viewer _viewer;
     private readonly bool _background;
-    private readonly SwapChainPanel _panel = new();
     private readonly Grid _root = new() { Background = new SolidColorBrush(Microsoft.UI.Colors.Black) };
-    private OverlayTile[] _published = [];
     private WindowRect? _placed;
     private bool _placing;
     private bool _released;
@@ -331,7 +331,6 @@ internal sealed class CallWindow
         Card = new CallCard(viewer, camera) { Mode = CallCardMode.Window, Placed = true };
         Card.PinChanged += on => owner.Pinned = on;
         _root.RequestedTheme = ElementTheme.Dark;
-        _root.Children.Add(_panel);
         _root.Children.Add(Card);
         _root.KeyDown += (_, e) =>
         {
@@ -340,11 +339,11 @@ internal sealed class CallWindow
         };
         Window.Content = _root;
 
-        // The doorbell's tile stays open while the window shows it; its demand starts at the sub stream.
-        Card.Tile.Shared = viewer.Leases.Acquire(camera);
-        viewer.UpdateDemand(Card.Tile);
-        viewer.Leases.TileChanged += OnTileChanged;
-
+        // The doorbell's tile stays open while the window shows it (this window's own lease, taken before
+        // the stage looks the tile up); its demand starts at the sub stream.
+        _ = viewer.Leases.Acquire(camera);
+        var state = new WindowState(new WindowContent.Scratch("Call", LayoutNode.Leaf(camera)), "", LayoutNode.Leaf(camera));
+        Stage = new StageView(viewer, AppWindow, state, fixedTile: true);
         DispatcherQueue ui = DispatcherQueue.GetForCurrentThread();
         Renderer = new StageRenderer(host, chain => ui.TryEnqueue(() =>
         {
@@ -356,10 +355,12 @@ internal sealed class CallWindow
                 }
                 return;
             }
-            SwapChainAttach.To(_panel, chain);
+            Stage.AttachSwapChain(chain);
         }));
-        _panel.SizeChanged += (_, _) => PushSize();
-        _panel.CompositionScaleChanged += (_, _) => PushSize();
+        Stage.Renderer = Renderer;
+        Renderer.Circles = viewer.Circles;
+        Card.HostStage(Stage);
+        Stage.Reload();
         AppWindow.Changed += OnAppWindowChanged;
         Window.Closed += (_, _) =>
         {
@@ -382,7 +383,13 @@ internal sealed class CallWindow
 
     public StageRenderer Renderer { get; }
 
-    /// <summary>The call's card in its Window mode: header with Pop In and the pin, the picture, captions, Talk, and the reply.</summary>
+    /// <summary>The picture: the doorbell's tile in a stage in single fixed tile mode.</summary>
+    public StageView Stage { get; }
+
+    /// <summary>The picture's tile (the stage's only one).</summary>
+    public StageTile Tile => Stage.Tiles[0];
+
+    /// <summary>The call's card in its Window mode: call bar with Pop In and the pin, the picture's stage, captions, Talk, and the reply.</summary>
     public CallCard Card { get; }
 
     /// <summary>Whether the window asks for the main stream now (self-test).</summary>
@@ -398,17 +405,6 @@ internal sealed class CallWindow
     public WindowRect CurrentFrame => new(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
 
     public bool IsReleased => _released;
-
-    private void PushSize() =>
-        Renderer.SetPanelSize(_panel.ActualWidth, _panel.ActualHeight, _panel.CompositionScaleX, _panel.CompositionScaleY);
-
-    private void OnTileChanged(CameraRef camera, CameraTile? tile)
-    {
-        if (!_released && camera.ChannelKey == Camera)
-        {
-            Card.Tile.Shared = tile;
-        }
-    }
 
     // ---- placement and showing ----
 
@@ -473,7 +469,7 @@ internal sealed class CallWindow
         {
             return;
         }
-        double scale = _panel.XamlRoot?.RasterizationScale ?? 1;
+        double scale = Stage.XamlRoot?.RasterizationScale ?? 1;
         if (args.DidSizeChange && (AppWindow.Size.Width < MinWidth * scale || AppWindow.Size.Height < MinHeight * scale))
         {
             _placing = true;
@@ -513,26 +509,19 @@ internal sealed class CallWindow
         }
     }
 
-    // Every UI frame: where the picture's hole is (handed to this window's renderer), and the
-    // stream demand for the size it is drawn at.
+    // Every UI frame: the stream demand for the size the picture is drawn at.
     private void OnRendering(object? sender, object e)
     {
-        if (_released)
+        if (_released || Stage.Tiles.Length == 0)
         {
             return;
         }
-        Rect? hole = Card.HoleIn(_panel);
-        OverlayTile[] now = hole is { } r ? [new OverlayTile(Card.Tile, r)] : [];
-        if (!now.SequenceEqual(_published))
+        StageTile tile = Tile;
+        if (tile.PictureWidth > 0 && tile.ShownTier == "sub")
         {
-            _published = now;
-            Renderer.Overlays = now;
+            _subWidth = tile.PictureWidth;
         }
-        if (Card.Tile.PictureWidth > 0 && Card.Tile.ShownTier == "sub")
-        {
-            _subWidth = Card.Tile.PictureWidth;
-        }
-        UpdateDemand((hole?.Width ?? 0) * _panel.CompositionScaleX);
+        UpdateDemand(tile.Width * Stage.PanelScale);
     }
 
     /// <summary>Auto for the window: the main stream while the picture area is wider than the sub-stream's pictures.</summary>
@@ -542,7 +531,7 @@ internal sealed class CallWindow
         if (main != _askedMain)
         {
             _askedMain = main;
-            _viewer.SetFocused(Card.Tile, main);
+            _viewer.SetFocused(Tile, main);
         }
     }
 
@@ -555,6 +544,13 @@ internal sealed class CallWindow
     /// </summary>
     public bool HandleKey(VirtualKey key)
     {
+        // The tile's keys (M, 0, T, Ctrl+Shift+P and R): never while the reply is being typed, except the Ctrl+Shift forms.
+        static bool Down(VirtualKey k) => InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        bool ctrl = Down(VirtualKey.Control);
+        if (Stage.Tiles.Length > 0 && key != VirtualKey.Escape && ((ctrl && Down(VirtualKey.Shift)) || !Card.IsEditingReply) && Stage.HandleTileKey(key, ctrl))
+        {
+            return true;
+        }
         if (key == VirtualKey.Escape)
         {
             if (Card.IsEditingReply)
@@ -591,13 +587,10 @@ internal sealed class CallWindow
     {
         _released = true;
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
-        _viewer.Leases.TileChanged -= OnTileChanged;
         AppWindow.Changed -= OnAppWindowChanged;
-        Card.Tile.Shared = null;
-        Renderer.Overlays = [];
+        Stage.TearDown();
         Renderer.Dispose();
-        SwapChainAttach.To(_panel, 0);
-        _viewer.WithdrawDemand(Card.Tile);
+        Stage.AttachSwapChain(0);
         _viewer.Leases.Release(Camera);
     }
 }

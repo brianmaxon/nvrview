@@ -306,9 +306,11 @@ to need it.
 Other options: `--gpu auto|hardware|warp`, `--software` (CPU decoding),
 `--no-audio`, `--lib PATH` (another `nvrview.dll`).
 
-Using it: hover a tile for its header (speaker and name; it fades 3 s after
-the pointer stops); click the speaker to listen (Ctrl+click to listen to
-several); double-click, Space, or Enter focuses the selected tile and back;
+Using it: hover a tile for its header (its buttons, laid out by
+`TileHeaderLayout`: what does not fit goes into the "…" menu; the name; it
+fades 3 s after the pointer stops); click the speaker to listen (Ctrl+click
+to listen to several); P, Shift+P and R say "coming soon", T starts or ends
+a conversation; double-click, Space, or Enter focuses the selected tile and back;
 arrow keys move the selection by position (in focus they switch the
 focused camera); F is full screen, Esc leaves focus and then full screen;
 the mouse wheel (or a touchpad pinch) zooms around the pointer, dragging
@@ -613,11 +615,13 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   windows' cards (`ViewerCalls.InsetCameras`) or a call window. `CallWindows`
   follows `Viewer.CallsChanged`: it opens a `CallWindow` for each call shown
   in a window and closes it when the call ends. A `CallWindow` is a WinUI
-  `Window` with its own `SwapChainPanel` and `StageRenderer` (no swap chain
-  is ever moved between windows; it recovers from a lost device like the
-  viewer windows' renderers) and the same `CallCard` in its Window mode:
-  the card's hole is published as the renderer's one overlay, so the window
-  draws exactly the doorbell's shared tile. Its stream demand is Auto
+  `Window` with its own `StageRenderer` (no swap chain is ever moved
+  between windows; it recovers from a lost device like the viewer windows'
+  renderers) and the same `CallCard` in its Window mode, whose picture is a
+  `StageView` in single fixed tile mode (`fixedTile: true`): one leaf, the
+  header, "…" and right-click menus of any tile (no layout items), digital
+  zoom, and no call cards, so the window draws exactly the doorbell's
+  shared tile. Its stream demand is Auto
   (`CallWindowQuality.WantsMain`: the main stream while the picture is drawn
   wider than the sub-stream's). **Leases:** Pop Out opens the window (its
   lease taken) before the call's presentation changes and the viewer windows
@@ -708,7 +712,8 @@ Windows-only (macOS keeps its menu bar; docs/PARITY.md), described in
 | `NvrView.Tiles` | the pure logic behind them (see the table at the top); `CoreHost.Tiers` is the one `TierPlanner` every window shares |
 | `AudioOutput` | WASAPI shared-mode output of the core's mix |
 | `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |
-| `CallWindows`, `CallWindow` | the call windows: one per call shown in its own window, with its own swap chain and renderer (see "Calls") |
+| `CallWindows`, `CallWindow` | the call windows: one per call shown in its own window, with its own swap chain, renderer and fixed-tile `StageView` (see "Calls") |
+| `StageView.Header.cs` | what each `TileHeaderItem` does for a tile (buttons, "…" and right-click menus built from `TileHeaderLayout.Menu`, the P/R/T keys, the "coming soon" message) |
 | `WindowsCredentials`, `DeviceStore` | passwords in Credential Manager, the device list in `settings.json` |
 | `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
 
