@@ -86,9 +86,10 @@ rereads, so take fewer, better-aimed steps.
 - **Logs to files.** Send build, test, and self-test output to a log file and
   read the summary and the failures (`tail`, `grep -E 'FAIL|error|panicked'`),
   never a whole log. Read source files by range when you know where to look.
-- **Wait in one command.** When waiting for the Windows lock or a long job,
-  block in a single command (a loop with a sleep, or a background command),
-  not in repeated short checks.
+- **Wait in one command.** `scripts/windows-check.sh` takes the Windows lock
+  itself and waits for it inside that one command (agents queue behind any
+  waiting merge); do not take the lock by hand or loop on `mkdir`. For any
+  other long wait, block in a single command, not in repeated short checks.
 - **Use the pointers you are given.** Prompts name files, types, and fixtures;
   start there instead of surveying the tree. Search with `rg` before opening
   files.
@@ -145,6 +146,31 @@ check (cached suites allowed and listed), then the Windows check only when the
 branch's stamp does not cover the result or no full Windows run passed in 72
 hours (rules in the script header). To
 check Mac and Windows together, use `scripts/release-check.sh`.
+
+**Merge trains.** `scripts/merge-train.sh BRANCH[=MESSAGE]...` merges several
+finished branches (each with its own merge commit and message) on a temporary
+branch, runs the Mac check once and the Windows check once on the result (the
+reuse rules above apply to each merge step), and fast-forwards main. A branch
+that conflicts is skipped and reported (a conflict only in `Cargo.lock` is
+resolved by regenerating it); when a check fails, the train is bisected until
+the failing branch is isolated, and the others merge. It prints a table of
+merged / skipped / failed.
+
+**Windows lock and hosts.** `scripts/windows-lock.sh` (taken by
+`windows-check.sh`, `merge-branch.sh`, `merge-train.sh`, `release-check.sh`) is
+the one lock for the Windows computer. Merges and releases wait at priority
+`merge`, agents at `agent`: while a merge waits, no agent check starts. The lock
+records its owner; one whose process has been gone for 2 minutes is broken
+with a log line. `NVRVIEW_WINDOWS_HOSTS="host-a host-b"` makes a pool with one
+lock per host (setup: apps/windows/README.md); stamps and the cache are keyed
+by tree and platform, so any host's result counts.
+
+**Branches arrive with a Windows result.** Before reporting a branch finished,
+run `scripts/branch-ready.sh <branch>`. If the Windows stamp is missing
+because of an environmental failure (a flaky self-test step, a lost
+connection), rerun `windows-check.sh` until the final committed tree has one,
+and report the stamp's tree hash (printed by `branch-ready.sh`). Merges and
+trains print this readiness for each branch.
 `scripts/test-stamps.sh` tests these rules with fake checks (part of
 `scripts/check.sh`).
 
