@@ -49,14 +49,130 @@ public sealed record UpdateEvent(
         r.TryGetProperty(name, out JsonElement v) && v.TryGetUInt64(out ulong n) ? n : null;
 }
 
-/// <summary>What the user set in Settings, Updates; kept in update-settings.json with the other settings.</summary>
+/// <summary>
+/// The public keys and update source a build bundles (docs/UPDATES.md,
+/// "Bundled defaults"): <c>update-defaults.json</c> next to the executable,
+/// written by the packaging scripts so a fresh install needs no setup. Source
+/// builds have none and trust nothing.
+/// </summary>
+public sealed record BundledUpdateDefaults(IReadOnlyList<string> Keys, string Source)
+{
+    public const string FileName = "update-defaults.json";
+
+    public static readonly BundledUpdateDefaults None = new([], "");
+
+    public bool IsEmpty => Keys.Count == 0 && Source.Length == 0;
+
+    /// <summary>A key line in canonical form (<c>nvrview-ed25519-pub</c> and 64 lowercase hex digits), or null. The core still checks the key itself when it is used.</summary>
+    public static string? CanonicalKey(string line)
+    {
+        string[] parts = line.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2 || parts[0] != "nvrview-ed25519-pub" || parts[1].Length != 64 || !parts[1].All(Uri.IsHexDigit))
+        {
+            return null;
+        }
+        return "nvrview-ed25519-pub " + parts[1].ToLowerInvariant();
+    }
+
+    /// <summary>An absolute folder path (POSIX, a Windows drive, or a UNC share) or an http:// / https:// URL without a user name or password.</summary>
+    public static bool IsValidSource(string text)
+    {
+        if (text.Length == 0 || text != text.Trim() || text.Any(c => c is '\r' or '\n' or '\0'))
+        {
+            return false;
+        }
+        foreach (string scheme in new[] { "https://", "http://" })
+        {
+            if (text.StartsWith(scheme, StringComparison.OrdinalIgnoreCase))
+            {
+                string rest = text[scheme.Length..];
+                int end = rest.IndexOfAny(['/', '?', '#']);
+                string authority = end < 0 ? rest : rest[..end];
+                return authority.Length > 0 && !authority.Contains('@', StringComparison.Ordinal) && !text.Contains(' ', StringComparison.Ordinal);
+            }
+        }
+        if (text.StartsWith('/') || text.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return text.Length > 1;
+        }
+        return text.Length >= 3 && char.IsAsciiLetter(text[0]) && text[1] == ':' && (text[2] is '\\' or '/');
+    }
+
+    /// <summary>Reads the file's text. Lenient: malformed JSON, or an entry that does not validate, gives nothing for that entry.</summary>
+    public static BundledUpdateDefaults Parse(string json)
+    {
+        try
+        {
+            if (JsonNode.Parse(json) is not JsonObject o)
+            {
+                return None;
+            }
+            var keys = new List<string>();
+            if (o["keys"] is JsonArray array)
+            {
+                foreach (JsonNode? node in array)
+                {
+                    if (node is JsonValue v && v.TryGetValue(out string? line) && CanonicalKey(line) is { } key && !keys.Contains(key))
+                    {
+                        keys.Add(key);
+                    }
+                }
+            }
+            string source = o["source"] is JsonValue sv && sv.TryGetValue(out string? text) && IsValidSource(text) ? text : "";
+            return new BundledUpdateDefaults(keys, source);
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException)
+        {
+            return None;
+        }
+    }
+
+    /// <summary>The defaults file in <paramref name="directory"/>, or none.</summary>
+    public static BundledUpdateDefaults Load(string? directory)
+    {
+        if (directory is null)
+        {
+            return None;
+        }
+        try
+        {
+            string file = System.IO.Path.Combine(directory, FileName);
+            return File.Exists(file) && new FileInfo(file).Length <= 64 * 1024 ? Parse(File.ReadAllText(file)) : None;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return None;
+        }
+    }
+
+    /// <summary>The file's contents (what the packaging script writes).</summary>
+    public string Encode()
+    {
+        var o = new JsonObject { ["keys"] = new JsonArray([.. Keys.Select(k => (JsonNode?)JsonValue.Create(k))]) };
+        if (Source.Length > 0)
+        {
+            o["source"] = Source;
+        }
+        return o.ToJsonString();
+    }
+}
+
+/// <summary>
+/// What the user set in Settings, Updates, merged with what the build
+/// bundles; kept in update-settings.json with the other settings. Only the
+/// user's own choices are stored: the bundled defaults are read from the app
+/// folder on every start.
+/// </summary>
 public sealed class UpdateSettings
 {
-    /// <summary>A folder or URL; empty: updates are off.</summary>
+    /// <summary>The user's source (a folder or URL). Empty: the bundled source, if any; otherwise updates are off.</summary>
     public string Source { get; set; } = "";
 
-    /// <summary>Canonical public key lines (<c>nvrview-ed25519-pub &lt;hex&gt;</c>).</summary>
+    /// <summary>The keys the user added (canonical public key lines, <c>nvrview-ed25519-pub &lt;hex&gt;</c>).</summary>
     public List<string> Keys { get; set; } = [];
+
+    /// <summary>Bundled keys the user turned off (they cannot be deleted).</summary>
+    public List<string> DisabledBundledKeys { get; set; } = [];
 
     /// <summary>Check at startup and about every 24 hours.</summary>
     public bool Automatic { get; set; }
@@ -64,8 +180,51 @@ public sealed class UpdateSettings
     /// <summary>When the last check finished, wall-clock time.</summary>
     public DateTimeOffset? LastCheck { get; set; }
 
-    /// <summary>A source and at least one key: a check can run.</summary>
-    public bool CanCheck => !string.IsNullOrWhiteSpace(Source) && Keys.Count > 0;
+    /// <summary>What this build bundles; read from the app folder, never stored.</summary>
+    public BundledUpdateDefaults Bundled { get; set; } = BundledUpdateDefaults.None;
+
+    /// <summary>The source a check uses: the user's, else the bundled default.</summary>
+    public string EffectiveSource => Source.Trim().Length > 0 ? Source.Trim() : Bundled.Source;
+
+    /// <summary>True when the source in use is the bundled default (the user has none).</summary>
+    public bool SourceIsBundled => Source.Trim().Length == 0 && Bundled.Source.Length > 0;
+
+    /// <summary>The note under the source field.</summary>
+    public string SourceNote => SourceIsBundled ? "Bundled default" : "";
+
+    /// <summary>One key as Settings lists it.</summary>
+    public sealed record KeyRow(string Key, bool IsBundled, bool IsOn)
+    {
+        /// <summary>"Bundled with this build" for a bundled key.</summary>
+        public string Note => IsBundled ? "Bundled with this build" : "";
+    }
+
+    /// <summary>The bundled keys, then the user's own (a user key equal to a bundled one is listed once, as bundled).</summary>
+    public IReadOnlyList<KeyRow> KeyRows =>
+    [
+        .. Bundled.Keys.Select(k => new KeyRow(k, true, !DisabledBundledKeys.Contains(k))),
+        .. Keys.Where(k => !Bundled.Keys.Contains(k)).Select(k => new KeyRow(k, false, true)),
+    ];
+
+    /// <summary>The keys a check trusts: the bundled ones not turned off, and the user's.</summary>
+    public IReadOnlyList<string> TrustedKeys => [.. KeyRows.Where(r => r.IsOn).Select(r => r.Key)];
+
+    /// <summary>Turns a bundled key on or off.</summary>
+    public void SetBundledKey(string key, bool on)
+    {
+        if (!Bundled.Keys.Contains(key))
+        {
+            return;
+        }
+        DisabledBundledKeys.RemoveAll(k => k == key);
+        if (!on)
+        {
+            DisabledBundledKeys.Add(key);
+        }
+    }
+
+    /// <summary>A source and at least one trusted key: a check can run.</summary>
+    public bool CanCheck => EffectiveSource.Length > 0 && TrustedKeys.Count > 0;
 
     public static UpdateSettings Load(string? file)
     {
@@ -84,6 +243,10 @@ public sealed class UpdateSettings
             if (o["keys"] is JsonArray keys)
             {
                 s.Keys = [.. keys.Select(k => k?.GetValue<string>()).OfType<string>()];
+            }
+            if (o["disabled_bundled_keys"] is JsonArray disabled)
+            {
+                s.DisabledBundledKeys = [.. disabled.Select(k => k?.GetValue<string>()).OfType<string>()];
             }
             s.Automatic = o["automatic"]?.GetValue<bool>() ?? false;
             if (o["last_check"]?.GetValue<string>() is { } last &&
@@ -109,6 +272,7 @@ public sealed class UpdateSettings
         {
             ["source"] = Source,
             ["keys"] = new JsonArray([.. Keys.Select(k => (JsonNode?)JsonValue.Create(k))]),
+            ["disabled_bundled_keys"] = new JsonArray([.. DisabledBundledKeys.Select(k => (JsonNode?)JsonValue.Create(k))]),
             ["automatic"] = Automatic,
         };
         if (LastCheck is { } at)
@@ -216,8 +380,8 @@ public static class UpdateRequest
     {
         var o = new JsonObject
         {
-            ["source"] = s.Source.Trim(),
-            ["keys"] = new JsonArray([.. s.Keys.Select(k => (JsonNode?)JsonValue.Create(k))]),
+            ["source"] = s.EffectiveSource,
+            ["keys"] = new JsonArray([.. s.TrustedKeys.Select(k => (JsonNode?)JsonValue.Create(k))]),
             ["current"] = current,
             ["platform"] = "win-x64",
         };

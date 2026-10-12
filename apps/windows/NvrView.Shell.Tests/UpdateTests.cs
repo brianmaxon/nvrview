@@ -72,6 +72,97 @@ internal static class UpdateTests
             T.Equal("C:/x", dl.RootElement.GetProperty("staging_dir").GetString());
         });
 
+        string keyA = "nvrview-ed25519-pub " + new string('a', 32) + new string('b', 32);
+        string keyB = "nvrview-ed25519-pub " + new string('c', 32) + new string('d', 32);
+
+        T.Run("updates: bundled key and source validation", () =>
+        {
+            T.Equal(keyA, BundledUpdateDefaults.CanonicalKey("  nvrview-ed25519-pub  " + new string('A', 32) + new string('B', 32)));
+            foreach (string bad in new[] { "", "nvrview-ed25519-pub", "nvrview-ed25519-pub abcd", "nvrview-ed25519-sec " + new string('a', 64), "nvrview-ed25519-pub " + new string('z', 64), new string('a', 64) })
+            {
+                T.Check(BundledUpdateDefaults.CanonicalKey(bad) is null, bad);
+            }
+            foreach (string good in new[] { "/Volumes/share/nvrview", "https://updates.example.com/nvrview/", "http://192.0.2.10/u", @"C:\updates", @"\\server\share\nvrview" })
+            {
+                T.Check(BundledUpdateDefaults.IsValidSource(good), good);
+            }
+            foreach (string bad in new[] { "", "relative/path", "ftp://example.com/u", "https://user:pw@example.com/u", "https://", " /x", "file:///x" })
+            {
+                T.Check(!BundledUpdateDefaults.IsValidSource(bad), bad);
+            }
+        });
+
+        T.Run("updates: the defaults file is read leniently and from a folder", () =>
+        {
+            BundledUpdateDefaults d = BundledUpdateDefaults.Parse($$"""{"keys":["{{keyA}}","junk","{{keyA}}","{{keyB}}"],"source":"/srv/updates"}""");
+            T.Equal(2, d.Keys.Count);
+            T.Equal("/srv/updates", d.Source);
+            T.Check(BundledUpdateDefaults.Parse("{not json").IsEmpty);
+            T.Check(BundledUpdateDefaults.Parse("""{"keys":[],"source":"relative"}""").IsEmpty);
+            T.Equal(d.Encode(), BundledUpdateDefaults.Parse(d.Encode()).Encode());
+            string dir = Directory.CreateTempSubdirectory("nvrview-defaults-test").FullName;
+            try
+            {
+                T.Check(BundledUpdateDefaults.Load(dir).IsEmpty);
+                T.Check(BundledUpdateDefaults.Load(null).IsEmpty);
+                File.WriteAllText(Path.Combine(dir, BundledUpdateDefaults.FileName), new BundledUpdateDefaults([keyA], "/srv/u").Encode());
+                BundledUpdateDefaults back = BundledUpdateDefaults.Load(dir);
+                T.Equal(keyA, back.Keys[0]);
+                T.Equal("/srv/u", back.Source);
+            }
+            finally
+            {
+                Directory.Delete(dir, true);
+            }
+        });
+
+        T.Run("updates: bundled defaults merge with the user's settings", () =>
+        {
+            var none = new UpdateSettings();
+            T.Check(!none.CanCheck && none.TrustedKeys.Count == 0 && none.EffectiveSource.Length == 0 && !none.SourceIsBundled);
+            var s = new UpdateSettings { Bundled = new BundledUpdateDefaults([keyA], "/srv/bundled") };
+            T.Check(s.CanCheck && s.EffectiveSource == "/srv/bundled" && s.SourceIsBundled && s.SourceNote == "Bundled default");
+            T.Equal("Bundled with this build", s.KeyRows[0].Note);
+            using JsonDocument json = JsonDocument.Parse(UpdateRequest.Json(s, "0.3.0"));
+            T.Equal("/srv/bundled", json.RootElement.GetProperty("source").GetString());
+            T.Equal(keyA, json.RootElement.GetProperty("keys")[0].GetString());
+            s.Source = " /srv/mine ";
+            T.Check(s.EffectiveSource == "/srv/mine" && !s.SourceIsBundled && s.SourceNote.Length == 0, "the user's source wins");
+            s.Source = "";
+            T.Equal("/srv/bundled", s.EffectiveSource);
+            s.SetBundledKey(keyA, false);
+            T.Check(!s.CanCheck && s.KeyRows.Count == 1 && !s.KeyRows[0].IsOn, "turned off, not deleted");
+            s.Keys = [keyB, keyA];
+            T.Equal(1, s.TrustedKeys.Count);
+            T.Equal(keyB, s.TrustedKeys[0]);
+            s.SetBundledKey(keyA, true);
+            T.Equal(2, s.TrustedKeys.Count);
+            s.SetBundledKey(keyB, false);
+            T.Check(s.DisabledBundledKeys.Count == 0, "a user key is not a bundled key");
+        });
+
+        T.Run("updates: only the user's choices are stored", () =>
+        {
+            string dir = Directory.CreateTempSubdirectory("nvrview-update-test").FullName;
+            try
+            {
+                string file = Path.Combine(dir, "update-settings.json");
+                var s = new UpdateSettings { Bundled = new BundledUpdateDefaults([keyA], "/srv/bundled"), Automatic = true };
+                s.SetBundledKey(keyA, false);
+                s.Save(file);
+                T.Check(!File.ReadAllText(file).Contains("/srv/bundled", StringComparison.Ordinal));
+                UpdateSettings back = UpdateSettings.Load(file);
+                T.Check(back.Bundled.IsEmpty && back.DisabledBundledKeys.Count == 1 && back.Automatic);
+                File.WriteAllText(file, """{"source":"/s","keys":["k"],"automatic":true}""");
+                UpdateSettings old = UpdateSettings.Load(file);
+                T.Check(old.Source == "/s" && old.Keys.Count == 1 && old.DisabledBundledKeys.Count == 0);
+            }
+            finally
+            {
+                Directory.Delete(dir, true);
+            }
+        });
+
         T.Run("updates: settings round-trip", () =>
         {
             string dir = Directory.CreateTempSubdirectory("nvrview-update-test").FullName;

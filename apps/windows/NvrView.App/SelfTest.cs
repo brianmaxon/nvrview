@@ -120,6 +120,15 @@ internal sealed class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"self-test threw: {e}");
         }
+        try
+        {
+            // parity: updates-bundled-defaults
+            _problems.AddRange(UpdateDefaultsSelfTest.Run(app.Viewer!, line => Say(line)));
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the bundled update defaults step threw: {e}");
+        }
         Finish(_problems);
     }
 

@@ -4,6 +4,7 @@
 
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using NvrView.Shell;
 
 namespace NvrView.App;
 
@@ -21,8 +22,11 @@ internal static class UpdateSettingsPanel
             Text = updater.Settings.Source,
             MinWidth = 420,
         };
-        var sourceNote = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxWidth = 520 };
-        source.LostFocus += (_, _) => sourceNote.Text = updater.SetSource(source.Text) ?? "";
+        string BundledNote() => updater.Settings.SourceIsBundled
+            ? $"Bundled default: {updater.Settings.EffectiveSource}. Type another to override it; clear the field to return to it."
+            : "";
+        var sourceNote = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxWidth = 520, Text = BundledNote() };
+        source.LostFocus += (_, _) => sourceNote.Text = updater.SetSource(source.Text) ?? BundledNote();
         panel.Children.Add(source);
         panel.Children.Add(sourceNote);
 
@@ -55,7 +59,7 @@ internal static class UpdateSettingsPanel
         var check = new Button { Content = "Check now" };
         check.Click += (_, _) =>
         {
-            sourceNote.Text = updater.SetSource(source.Text) ?? "";
+            sourceNote.Text = updater.SetSource(source.Text) ?? BundledNote();
             updater.Check(userAsked: true);
         };
         var statusRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
@@ -73,13 +77,24 @@ internal static class UpdateSettingsPanel
         void Refresh()
         {
             keys.Children.Clear();
-            foreach (string key in updater.Settings.Keys.ToArray())
+            foreach (UpdateSettings.KeyRow keyRow in updater.Settings.KeyRows)
             {
+                string key = keyRow.Key;
                 var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
                 row.Children.Add(new TextBlock { Text = $"Key {Updater.KeyId(key)}", VerticalAlignment = VerticalAlignment.Center });
-                var remove = new Button { Content = "Remove" };
-                remove.Click += (_, _) => updater.RemoveKey(key);
-                row.Children.Add(remove);
+                if (keyRow.IsBundled)
+                {
+                    row.Children.Add(new TextBlock { Text = keyRow.Note, Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
+                    var trust = new CheckBox { Content = "Trust", IsChecked = keyRow.IsOn };
+                    trust.Click += (_, _) => updater.SetBundledKey(key, trust.IsChecked == true);
+                    row.Children.Add(trust);
+                }
+                else
+                {
+                    var remove = new Button { Content = "Remove" };
+                    remove.Click += (_, _) => updater.RemoveKey(key);
+                    row.Children.Add(remove);
+                }
                 keys.Children.Add(row);
             }
             status.Text = updater.Status.Line(updater.Current);

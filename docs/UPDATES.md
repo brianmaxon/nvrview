@@ -6,9 +6,11 @@ vendor signing key, and no GitHub release feed: whoever hosts the updates
 signs them with their own Ed25519 key, and each app accepts only what one of
 the keys its user installed has signed.
 
-Off by default. Nothing is fetched until the user sets an update source and
-installs at least one trusted key, and nothing is applied until the user says
-so.
+Off by default. Nothing is fetched until there is an update source and at
+least one trusted key, and nothing is applied until the user says so. A build
+from source has neither. A release build made by `scripts/release.sh` bundles
+the maintainer's public key and, optionally, the update source, so a fresh
+install of it needs no setup ("Bundled defaults").
 
 ## The parts
 
@@ -177,8 +179,9 @@ settings).
 1. Fetch `updates.json` and `updates.json.sig` (size-limited).
 2. Verify a signature line against the trusted keys. No trusted key, or no
    line that verifies, is a failure (`no_trusted_keys`, `bad_signature`):
-   there is no trust on first use, and no key ships with the app or the
-   repository.
+   there is no trust on first use, and no key ships in the repository or in a
+   build from source (a release build bundles its maintainer's public key,
+   "Bundled defaults").
 3. Parse and validate the manifest (only after the signature verified).
 4. Check its dates ("Dates and replays" below): `expired`,
    `not_yet_valid`, `stale_manifest`, `unpublished`.
@@ -352,6 +355,45 @@ per source ("Dates and replays").
   folders) back in place of `NVRView.app`.
 - Windows: start the previous folder's `NvrView.App.exe`.
 
+## Bundled defaults
+
+A release build can carry the maintainer's public key(s) and update source in
+a small file, `update-defaults.json`, so users of that build need no setup:
+
+```json
+{"keys":["nvrview-ed25519-pub <64 hex digits>"],"source":"https://updates.example.com/nvrview/"}
+```
+
+- **Where**: macOS `NVRView.app/Contents/Resources/update-defaults.json`,
+  written before code signing so the signature covers it; Windows
+  `update-defaults.json` next to `NvrView.App.exe` at the top of the package.
+- **Who writes it**: `scripts/update-defaults.py`, which validates before
+  writing (every key line parses; the source is an absolute folder path or an
+  `http://` / `https://` URL without a user name or password). The inputs are
+  never committed: `scripts/package-macos.sh` and `scripts/windows-check.sh
+  --package` take `--trusted-key-file FILE` (one or more public key lines;
+  repeatable) and `--update-source SOURCE`. Without them a build is unchanged.
+  The Windows package is built on the Windows computer and the file is added
+  to the fetched zip on the Mac.
+- **Trust model**: a build from source trusts nothing. A release build trusts
+  exactly the keys its maintainer bundled; the file sits inside the signed
+  macOS bundle, and an update replaces it with the new version's own file. A
+  key is still only a key: updates must be signed by it, and the source is
+  only where they are fetched from (every fetch is signature-checked).
+- **In the apps**: the bundled file is read at every start, never copied into
+  the user's settings. Bundled keys are trusted and listed in Settings,
+  Updates as "Bundled with this build"; the user can turn one off (a
+  checkbox, remembered) but not delete it, and adds or removes their own keys
+  as before (adding a bundled key again turns it back on). The bundled
+  source is used while the user has not set one and is shown as "Bundled
+  default"; typing another overrides it, and clearing the field returns to
+  it. A bad entry in the file is ignored, not trusted.
+- **Rotating keys**: bundle both keys while moving (`--trusted-key-file`
+  accepts several lines) and sign the manifest with both (`sign --append`).
+  A build that bundled only the old key keeps trusting it until the user
+  turns it off; a lost or leaked key cannot be revoked remotely, so release a
+  build that no longer bundles it and tell users to turn it off.
+
 ## Settings and checks in the apps
 
 - **Settings, Updates** (a tab on macOS; the Updates section of the
@@ -397,7 +439,8 @@ clean tree; a passing run leaves a stamp that `scripts/checked.sh --mac
 --windows` looks for) and `VERSION` set:
 
 ```sh
-NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes notes.txt
+NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes notes.txt \
+    [--update-source https://updates.example.com/nvrview/]
 ```
 
 `scripts/release.sh` refuses unless the working tree is clean and the stamps
@@ -405,14 +448,17 @@ exist for HEAD's tree (it does not rerun the checks), and refuses if the
 signing key (`--key-file`, default `~/.config/nvrview-signing/update.key`) is
 missing; it never prints the key. Then it:
 
-1. builds the macOS package (`scripts/package-macos.sh`);
+1. derives the public key from the signing key and builds the macOS package
+   (`scripts/package-macos.sh`), bundling that key and, with
+   `--update-source`, the source ("Bundled defaults");
 2. builds the Windows app on the Windows computer and fetches
    `NvrView-<version>-win-x64.zip` (`scripts/windows-check.sh --package`; the
    package is the app folder zipped with Windows' own tar, the same as
-   `scripts/windows-app.sh update` tests);
+   `scripts/windows-app.sh update` tests) and adds the same
+   `update-defaults.json`;
 3. puts both in `dist/<version>/` (git-ignored; `--out DIR` picks another
    empty folder);
-4. runs `sign-update manifest` (`--notes-file`, `--expires-in 90`), `sign-update
+4. checks both packages contain the public key, then runs `sign-update manifest` (`--notes-file`, `--expires-in 90`), `sign-update
    sign`, and `sign-update check --source <folder> --current 0.0.0` with the
    public key derived from the secret one;
 5. prints the files and the upload order.
