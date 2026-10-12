@@ -3,10 +3,13 @@
  * it with a fake decoder that answers every Decode from inside the
  * callback, switches it to the main stream (a second generation), renders
  * its audio from a separate (audio-device-like) thread with a tap attached
- * and reads its level, stores a layout, and checks the shutdown guarantees. Built and run by
- * scripts/test-c-ffi.sh against a spawned mock-nvr.
+ * and reads its level, stores a layout, goes through the recordings
+ * functions (index, incidents, a thumbnail, a download, a lock, the Trash),
+ * and checks the shutdown guarantees. Built and run by scripts/test-c-ffi.sh
+ * against a spawned mock-nvr with recordings.
  *
- * usage: smoke HOST PORT   (password from NVRVIEW_TEST_PASSWORD)
+ * usage: smoke HOST PORT WORKDIR   (password from NVRVIEW_TEST_PASSWORD;
+ * WORKDIR: an empty directory for the core's data and the downloads)
  */
 /* nanosleep is POSIX; strict C11 on glibc hides it without this. */
 #define _POSIX_C_SOURCE 200809L
@@ -28,6 +31,9 @@ static atomic_ulong g_taps, g_renders, g_loud;
 /* Answered decodes and resets of generations 0 and 1. */
 static atomic_ulong g_gen_answered[2], g_gen_resets[2];
 static atomic_bool g_stop_render;
+/* Recordings events seen. */
+static atomic_ulong g_rec_changed, g_thumb_ready, g_download_done, g_download_trashed;
+static atomic_ulong g_device_info_rec;
 /* nv_tile_open writes the ID here, and only then lets actions run, so the
  * callback may read it without further synchronization. */
 static uint64_t g_tile;
@@ -40,6 +46,16 @@ static void sleep_ms(long ms) {
 static void problem(const char *what) {
     fprintf(stderr, "smoke: %s\n", what);
     atomic_fetch_add(&g_problems, 1);
+}
+
+static bool contains(const char *text, size_t len, const char *needle) {
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= len; i++) {
+        if (memcmp(text + i, needle, n) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static void on_action(void *context, uint64_t tile, const NvAction *action) {
@@ -108,12 +124,25 @@ static void on_event(void *context, const char *json, size_t len) {
     if (len < 10 || json[0] != '{' || json[len - 1] != '}') {
         problem("event is not a JSON object");
     }
-    static const char closed[] = "\"type\":\"tile_closed\"";
-    for (size_t i = 0; i + sizeof closed - 1 <= len; i++) {
-        if (memcmp(json + i, closed, sizeof closed - 1) == 0) {
-            atomic_fetch_add(&g_tile_closed, 1);
-            break;
-        }
+    if (contains(json, len, "\"type\":\"tile_closed\"")) {
+        atomic_fetch_add(&g_tile_closed, 1);
+    }
+    if (contains(json, len, "\"type\":\"recordings_changed\"")) {
+        atomic_fetch_add(&g_rec_changed, 1);
+    }
+    if (contains(json, len, "\"type\":\"thumbnail\"") && contains(json, len, "\"state\":\"ready\"")) {
+        atomic_fetch_add(&g_thumb_ready, 1);
+    }
+    /* "download" with the closing quote, so not download_removed. */
+    if (contains(json, len, "\"type\":\"download\"") && contains(json, len, "\"state\":\"done\"")) {
+        atomic_fetch_add(&g_download_done, 1);
+    }
+    if (contains(json, len, "\"type\":\"download_removed\"") && contains(json, len, "\"trash\":true")) {
+        atomic_fetch_add(&g_download_trashed, 1);
+    }
+    if (contains(json, len, "\"type\":\"device_info\"") &&
+        contains(json, len, "\"recordings\":{")) {
+        atomic_fetch_add(&g_device_info_rec, 1);
     }
 }
 
@@ -154,11 +183,302 @@ static void *render_thread(void *arg) {
     return NULL;
 }
 
+/* ---- Recordings (minor 5) ------------------------------------------- */
+
+typedef NvStatus (*query_fn)(NvCore *, const char *, char *, size_t, size_t *);
+
+/* A query's answer in a malloc'd, NUL-terminated buffer (NULL on failure),
+ * with the out-buffer loop every binding uses: ask for the size, retry with
+ * a larger buffer while the answer grows. */
+static char *query_json(NvCore *core, query_fn f, const char *query) {
+    size_t len = 0;
+    char *buf = NULL;
+    NvStatus s = f(core, query, NULL, 0, &len);
+    while (s == NV_ERR_BUFFER_TOO_SMALL) {
+        free(buf);
+        buf = malloc(len + 1);
+        if (buf == NULL) {
+            return NULL;
+        }
+        s = f(core, query, buf, len + 1, &len);
+    }
+    if (s != NV_OK) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+static NvStatus status_fn(NvCore *core, const char *query, char *out, size_t cap, size_t *len) {
+    (void)query;
+    return nv_recordings_status(core, out, cap, len);
+}
+
+static NvStatus downloads_fn(NvCore *core, const char *query, char *out, size_t cap, size_t *len) {
+    (void)query;
+    return nv_downloads_get(core, out, cap, len);
+}
+
+static NvStatus groups_fn(NvCore *core, const char *query, char *out, size_t cap, size_t *len) {
+    (void)query;
+    return nv_camera_groups_get(core, out, cap, len);
+}
+
+/* Copies the string value after `"name":"` in text into out (no escapes in
+ * the values read here). */
+static bool string_member(const char *text, const char *name, char *out, size_t cap) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\":\"", name);
+    const char *p = strstr(text, needle);
+    if (p == NULL) {
+        return false;
+    }
+    p += strlen(needle);
+    const char *end = strchr(p, '"');
+    if (end == NULL || (size_t)(end - p) >= cap) {
+        return false;
+    }
+    memcpy(out, p, (size_t)(end - p));
+    out[end - p] = 0;
+    return true;
+}
+
+static bool number_member(const char *text, const char *name, long long *out) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\":", name);
+    const char *p = strstr(text, needle);
+    if (p == NULL) {
+        return false;
+    }
+    *out = strtoll(p + strlen(needle), NULL, 10);
+    return true;
+}
+
+/* The first object of the array named `name`, as a malloc'd string. */
+static char *first_object(const char *text, const char *name) {
+    char needle[64];
+    snprintf(needle, sizeof needle, "\"%s\":[{", name);
+    const char *p = strstr(text, needle);
+    if (p == NULL) {
+        return NULL;
+    }
+    p += strlen(needle) - 1;
+    int depth = 0;
+    for (const char *q = p; *q; q++) {
+        if (*q == '{') {
+            depth++;
+        } else if (*q == '}' && --depth == 0) {
+            size_t n = (size_t)(q - p) + 1;
+            char *o = malloc(n + 1);
+            if (o != NULL) {
+                memcpy(o, p, n);
+                o[n] = 0;
+            }
+            return o;
+        }
+    }
+    return NULL;
+}
+
+static bool settled(const char *downloads) {
+    return strstr(downloads, "\"state\":\"done\"") != NULL &&
+           strstr(downloads, "\"state\":\"running\"") == NULL &&
+           strstr(downloads, "\"state\":\"queued\"") == NULL &&
+           strstr(downloads, "\"state\":\"finalizing\"") == NULL &&
+           strstr(downloads, "\"state\":\"waiting_device\"") == NULL &&
+           strstr(downloads, "\"state\":\"failed\"") == NULL;
+}
+
+/* Configures recordings, asks for yesterday's index, queries it, edits and
+ * locks an incident, fetches a thumbnail from pending to ready, downloads
+ * an incident to the end, and hands it to the Trash, with the events of
+ * each step. */
+static void recordings(NvCore *core, const char *key, const char *work) {
+    char json[1024], answer[4096], incident[256], download[128];
+    size_t len = 0;
+    long long day = ((long long)time(NULL) / 86400 - 1) * 86400;
+    char cams[512];
+    snprintf(cams, sizeof cams, "[{\"device\":\"%s\",\"channel\":0},{\"device\":\"%s\",\"channel\":1}]",
+             key, key);
+
+    snprintf(json, sizeof json, "{\"channels\":[{\"channel\":0},{\"channel\":1}]}");
+    if (nv_recordings_enable(core, key, json) != NV_ERR_NOT_CONFIGURED) {
+        problem("nv_recordings_enable before nv_recordings_configure");
+    }
+    if (nv_recordings_configure(core, "{") != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_recordings_configure accepted invalid JSON");
+    }
+    char config[600];
+    snprintf(config, sizeof config, "{\"downloads_dir\":\"%s/downloads\"}", work);
+    if (nv_recordings_configure(core, config) != NV_OK ||
+        nv_recordings_enable(core, key, json) != NV_OK ||
+        nv_sound_configure(core, "{\"alarms\":true}") != NV_OK) {
+        problem("recordings configuration");
+        return;
+    }
+
+    snprintf(json, sizeof json, "{\"cameras\":%s,\"days\":[%lld],\"force\":false}", cams, day);
+    if (nv_recordings_want(core, json) != NV_OK) {
+        problem("nv_recordings_want");
+        return;
+    }
+    char query[128];
+    snprintf(query, sizeof query, "{\"start\":%lld,\"end\":%lld}", day, day + 86399);
+    char *events = NULL;
+    for (int i = 0; i < 2000; i++) {
+        free(events);
+        events = query_json(core, nv_recordings_events, query);
+        if (events != NULL && strstr(events, "\"kind\"") != NULL &&
+            atomic_load(&g_rec_changed) > 0) {
+            break;
+        }
+        sleep_ms(10);
+    }
+    char *first = events ? first_object(events, "events") : NULL;
+    long long channel = -1, start = 0, end = 0;
+    if (first == NULL || !number_member(first, "channel", &channel) ||
+        !number_member(first, "start", &start) || !number_member(first, "end", &end)) {
+        problem("no events indexed, or no recordings_changed");
+        free(first);
+        free(events);
+        return;
+    }
+    free(first);
+    free(events);
+
+    {
+        char small[8];
+        char *calendar = query_json(core, nv_recordings_calendar, query);
+        char *spans = query_json(core, nv_recordings_spans, query);
+        char *status = query_json(core, status_fn, NULL);
+        if (nv_recordings_calendar(core, query, small, sizeof small, &len) != NV_ERR_BUFFER_TOO_SMALL ||
+            len < sizeof small || calendar == NULL || strstr(calendar, "\"days\"") == NULL ||
+            spans == NULL || strstr(spans, "\"causes\"") == NULL || status == NULL ||
+            strstr(status, key) == NULL) {
+            problem("calendar, spans, or status");
+        }
+        free(calendar);
+        free(spans);
+        free(status);
+    }
+    snprintf(json, sizeof json, "{\"cameras\":%s}", cams);
+    if (nv_recordings_hold_today(core, 1, json) != NV_OK ||
+        nv_recordings_hold_today(core, 1, NULL) != NV_OK ||
+        nv_recordings_hold_today(core, 0, json) != NV_ERR_INVALID_ARGUMENT) {
+        problem("nv_recordings_hold_today");
+    }
+
+    /* Incidents: the newest, renamed, then locked. */
+    char *incidents = query_json(core, nv_incidents_get, query);
+    if (incidents == NULL || !string_member(incidents, "key", incident, sizeof incident)) {
+        problem("nv_incidents_get");
+        free(incidents);
+        return;
+    }
+    free(incidents);
+    if (nv_incident_get(core, "i-unknown", answer, sizeof answer, &len) != NV_ERR_UNKNOWN_ID ||
+        nv_incident_get(core, incident, answer, sizeof answer, &len) != NV_OK ||
+        strstr(answer, incident) == NULL) {
+        problem("nv_incident_get");
+    }
+    snprintf(json, sizeof json, "{\"op\":\"rename\",\"key\":\"%s\",\"name\":\"Delivery\"}", incident);
+    if (nv_incident_edit(core, json, answer, sizeof answer, &len) != NV_OK ||
+        strstr(answer, "\"keys\"") == NULL) {
+        problem("nv_incident_edit");
+    }
+    char *groups = query_json(core, groups_fn, NULL);
+    if (groups == NULL || nv_camera_groups_put(core, "{\"groups\":[]}") != NV_OK) {
+        problem("camera groups");
+    }
+    free(groups);
+
+    /* A thumbnail of the first event: pending, then ready. */
+    char thumb[512];
+    snprintf(thumb, sizeof thumb,
+             "{\"camera\":{\"device\":\"%s\",\"channel\":%lld},\"tier\":\"sub\",\"start\":%lld,"
+             "\"end\":%lld}",
+             key, channel, start, end);
+    NvThumbnail info = {0};
+    if (nv_thumbnail_get(core, thumb, &info, NULL, 0, &len) != NV_PENDING || len != 0) {
+        problem("a thumbnail not cached yet was not pending");
+    }
+    for (int i = 0; i < 2000 && atomic_load(&g_thumb_ready) == 0; i++) {
+        sleep_ms(10);
+    }
+    uint8_t *bytes = NULL;
+    if (nv_thumbnail_get(core, thumb, &info, NULL, 0, &len) != NV_ERR_BUFFER_TOO_SMALL || len < 5 ||
+        info.kind != NV_THUMB_H264_KEYFRAME || (bytes = malloc(len)) == NULL ||
+        nv_thumbnail_get(core, thumb, &info, bytes, len, &len) != NV_OK || bytes[0] != 0 ||
+        bytes[1] != 0) {
+        problem("thumbnail from pending to ready");
+    }
+    free(bytes);
+    {
+        static const uint8_t image[4] = {0xff, 0xd8, 0xff, 0xd9};
+        NvThumbnail small = {NV_THUMB_IMAGE, 64, 36, 0};
+        uint8_t back[16];
+        if (nv_thumbnail_put(core, thumb, &small, image, sizeof image) != NV_OK ||
+            nv_thumbnail_get(core, thumb, &info, back, sizeof back, &len) != NV_OK ||
+            info.kind != NV_THUMB_IMAGE || len != sizeof image || memcmp(back, image, len) != 0 ||
+            nv_thumbnail_cancel(core, NULL) != NV_OK) {
+            problem("nv_thumbnail_put");
+        }
+    }
+
+    /* A download to the end, then locked (the same download comes back),
+     * then handed to the Trash. */
+    snprintf(json, sizeof json, "{\"incident\":\"%s\"}", incident);
+    if (nv_download_incident(core, json, answer, sizeof answer, &len) != NV_OK ||
+        !string_member(answer, "download", download, sizeof download) ||
+        strstr(answer, work) == NULL) {
+        problem("nv_download_incident");
+        return;
+    }
+    bool done = false;
+    for (int i = 0; i < 3000 && !done; i++) {
+        char *all = query_json(core, downloads_fn, NULL);
+        done = all != NULL && strstr(all, download) != NULL && settled(all) &&
+               atomic_load(&g_download_done) > 0;
+        free(all);
+        if (!done) {
+            sleep_ms(10);
+        }
+    }
+    if (!done) {
+        problem("the download did not finish");
+    }
+    if (nv_incident_lock(core, incident, true, answer, sizeof answer, &len) != NV_OK ||
+        strstr(answer, "\"existing\"") == NULL || strstr(answer, download) == NULL) {
+        problem("nv_incident_lock");
+    }
+    if (nv_download_pause(core, "no-such-download", NULL, true) != NV_ERR_UNKNOWN_ID ||
+        nv_download_retry(core, download, NULL) != NV_OK) {
+        problem("download control");
+    }
+    if (nv_download_trash(core, download, answer, sizeof answer, &len) != NV_OK ||
+        strstr(answer, "\"folder\"") == NULL) {
+        problem("nv_download_trash");
+    }
+    for (int i = 0; i < 2000 && atomic_load(&g_download_trashed) == 0; i++) {
+        sleep_ms(10);
+    }
+    char *after = query_json(core, downloads_fn, NULL);
+    if (atomic_load(&g_download_trashed) == 0 || after == NULL || strstr(after, download) != NULL ||
+        nv_download_forget(core, download, false) != NV_ERR_UNKNOWN_ID) {
+        problem("download_removed after the Trash");
+    }
+    free(after);
+    if (atomic_load(&g_device_info_rec) == 0) {
+        problem("device_info without recordings flags");
+    }
+}
+
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: smoke HOST PORT\n");
+    if (argc != 4) {
+        fprintf(stderr, "usage: smoke HOST PORT WORKDIR\n");
         return 2;
     }
+    const char *work = argv[3];
     const char *password = getenv("NVRVIEW_TEST_PASSWORD");
     if (password == NULL) {
         password = "example-password";
@@ -174,7 +494,8 @@ int main(int argc, char **argv) {
 
     NvCallbacks cb = {NULL, on_action, on_event, on_audio_tap};
     NvCore *core = NULL;
-    if (nv_core_new(NULL, cb, &core) != NV_OK || core == NULL) {
+    NvConfig config = {NULL, 0, 0, work};
+    if (nv_core_new(&config, cb, &core) != NV_OK || core == NULL) {
         fprintf(stderr, "smoke: nv_core_new failed\n");
         return 1;
     }
@@ -267,6 +588,7 @@ int main(int argc, char **argv) {
             nv_layout_delete(core, "smoke") != NV_ERR_UNKNOWN_ID) {
             problem("nv_layout_delete");
         }
+        recordings(core, key, work);
     }
 
     if (nv_tile_close(core, tile) != NV_OK) {
@@ -338,10 +660,13 @@ int main(int argc, char **argv) {
     nv_core_free(NULL);
 
     printf("smoke: configures=%lu decodes=%lu answered=%lu events=%lu tile_closed=%lu "
-           "renders=%lu audible_renders=%lu tap_blocks=%lu\n",
+           "renders=%lu audible_renders=%lu tap_blocks=%lu recordings_changed=%lu "
+           "thumbnails_ready=%lu downloads_done=%lu trashed=%lu\n",
            atomic_load(&g_configures), atomic_load(&g_decodes), decoded,
            atomic_load(&g_events), atomic_load(&g_tile_closed), atomic_load(&g_renders),
-           atomic_load(&g_loud), atomic_load(&g_taps));
+           atomic_load(&g_loud), atomic_load(&g_taps), atomic_load(&g_rec_changed),
+           atomic_load(&g_thumb_ready), atomic_load(&g_download_done),
+           atomic_load(&g_download_trashed));
     if (atomic_load(&g_renders) < 20) {
         problem("the render thread barely ran");
     }

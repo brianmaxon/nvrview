@@ -116,6 +116,8 @@ public enum CoreEvent: Sendable, Equatable {
     case discoveryDone(DiscoveryEnd)
     /// Minor 2: an update check or download progressed or ended.
     case update(UpdateEvent)
+    /// Minor 5: recordings (index, incidents, groups, thumbnails, downloads).
+    case recordings(RecordingsEvent)
 
     /// The `discovered` event's own shape (its `channels` is a number, unlike
     /// the `channels` event's list).
@@ -202,7 +204,13 @@ public enum CoreEvent: Sendable, Equatable {
 
     /// Nil for malformed JSON, an unknown type, or a known type missing the
     /// fields it cannot do without.
+    private struct TypeWire: Decodable { var type: String }
+
     public static func parse(_ json: Data) -> CoreEvent? {
+        // Recordings events name devices by key (a string), not by ID.
+        if let t = try? JSONDecoder().decode(TypeWire.self, from: json), RecordingsEvent.types.contains(t.type) {
+            return RecordingsEvent.parse(json).map(CoreEvent.recordings)
+        }
         guard let w = try? JSONDecoder().decode(Wire.self, from: json) else { return nil }
         switch w.type {
         case "update":

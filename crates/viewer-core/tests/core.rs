@@ -404,6 +404,10 @@ fn channels_and_device_info_events() {
     assert_eq!(info["device"], dev);
     assert_eq!(info["name"], "Mock NVR");
     assert_eq!(info["model"], "MOCK-NVR");
+    assert_eq!(
+        info["recordings"],
+        serde_json::json!({"search": true, "playback": true, "download": true, "thumbnails": true})
+    );
     sim.run_free(|| core.shutdown());
 }
 

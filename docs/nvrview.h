@@ -22,8 +22,9 @@ extern "C" {
 /* Bumped for each addition that leaves every existing declaration unchanged
  * (new functions, events, status codes); resets to 0 with a new
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
- * nv_tile_retry. Minor 4: nv_talk_set_conversation. */
-#define NV_ABI_MINOR 4
+ * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
+ * part 1. */
+#define NV_ABI_MINOR 5
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -35,6 +36,9 @@ typedef enum NvStatus {
     NV_ERR_INTERNAL = -5,
     NV_ERR_BUFFER_TOO_SMALL = -6, /* the output buffer is too small; *len holds the size needed */
     NV_ERR_NOT_PERMITTED = -7,    /* talk-back (camera motion control) is not enabled for that camera */
+    NV_ERR_UNSUPPORTED = -8,      /* the device's backend cannot do this (minor 5) */
+    NV_ERR_NOT_CONFIGURED = -9,   /* nv_recordings_configure not called, or no downloads_dir (minor 5) */
+    NV_PENDING = 1,               /* accepted; the answer arrives as an event (nv_thumbnail_get; minor 5) */
 } NvStatus;
 
 typedef enum NvCodec {
@@ -427,6 +431,115 @@ typedef struct NvTileLayout {
 
 NvStatus nv_grid_layout(uint32_t tile_count, NvSize viewport, uint32_t gap,
                         const NvSize *picture_sizes, bool fill, NvTileLayout *out);
+
+/* Recordings, part 1 (minor 5; docs/FFI-RECORDINGS.md, sections 1 to 5;
+ * events in its section 8). JSON in is UTF-8, NUL-terminated, and copied
+ * before the call returns; JSON out follows the out-buffer rules of
+ * nv_layouts_get. None of these waits on the network: device work runs on
+ * core threads and reports by event. Any thread, never inside a callback.
+ * Cameras are {"device":"<device key>","channel":3,"lens":0} (lens
+ * optional); times are device-local seconds. */
+
+/* Sets the recordings configuration (JSON, every member optional, unknown
+ * members ignored): downloads_dir, index, grouping, thumbnails, downloads,
+ * playback, naming. Call once after nv_core_new and again to change it.
+ * Starts resuming unfinished downloads of an earlier run. */
+NvStatus nv_recordings_configure(NvCore *core, const char *json);
+
+/* Allows (json non-NULL) or stops (json NULL) indexing one device by its
+ * stable key: {"channels":[...]|"all","utc_offset_s":0,"background":{...}}.
+ * Nothing is searched until a view asks, unless "background" is set.
+ * NV_ERR_NOT_CONFIGURED before nv_recordings_configure; NV_ERR_UNSUPPORTED
+ * if the device's backend has no recordings. */
+NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *json);
+
+/* Queries ({"start","end","cameras","kinds","limit"}), answered from
+ * memory; they never cause a search. The index may change between two
+ * calls, so loop until the answer fits. */
+NvStatus nv_recordings_calendar(NvCore *core, const char *query, char *out, size_t cap,
+                                size_t *len);
+NvStatus nv_recordings_spans(NvCore *core, const char *query, char *out, size_t cap,
+                             size_t *len);
+NvStatus nv_recordings_events(NvCore *core, const char *query, char *out, size_t cap,
+                              size_t *len);
+
+/* Asks for cameras' days to be in the index ({"cameras","days","force"});
+ * returns at once, recordings_changed follows. NV_ERR_LIMIT beyond 31 days
+ * or a full queue (nothing queued); NV_ERR_INVALID_ARGUMENT for a camera
+ * nv_recordings_enable does not allow. */
+NvStatus nv_recordings_want(NvCore *core, const char *json);
+
+/* Keeps today fresh for these cameras while hold (any nonzero number the
+ * app chooses per window) lasts: json {"cameras":[...]} sets or replaces
+ * its cameras, NULL releases it. */
+NvStatus nv_recordings_hold_today(NvCore *core, uint64_t hold, const char *json);
+
+/* {"revision":N,"devices":[{"device","state","pending_days","revision"}]}. */
+NvStatus nv_recordings_status(NvCore *core, char *out, size_t cap, size_t *len);
+
+/* Incidents overlapping the query's range, newest first; one by key
+ * (NV_ERR_UNKNOWN_ID if none has it now). */
+NvStatus nv_incidents_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_get(NvCore *core, const char *key, char *out, size_t cap, size_t *len);
+
+/* Applies, stores, and answers one edit ({"revision":N,"keys":[...]});
+ * locks or unlocks an incident (locking queues its download). These, and
+ * nv_download_incident and nv_download_trash, make their change even when
+ * the answer does not fit: NV_ERR_BUFFER_TOO_SMALL then only says the
+ * answer was not written, so do not repeat the call to read it. */
+NvStatus nv_incident_edit(NvCore *core, const char *edit, char *out, size_t cap, size_t *len);
+NvStatus nv_incident_lock(NvCore *core, const char *key, bool locked, char *out, size_t cap,
+                          size_t *len);
+
+/* Camera groups and name overrides; put replaces the whole list
+ * (NV_ERR_LIMIT beyond 64 groups of 64 cameras, 4096 names, 256-byte
+ * names). */
+NvStatus nv_camera_groups_get(NvCore *core, char *out, size_t cap, size_t *len);
+NvStatus nv_camera_groups_put(NvCore *core, const char *json);
+
+typedef enum NvThumbKind {
+    NV_THUMB_H264_KEYFRAME = 1, /* Annex-B, parameter sets included */
+    NV_THUMB_H265_KEYFRAME = 2, /* Annex-B, parameter sets included */
+    NV_THUMB_IMAGE = 3,         /* the app's own small image (for example JPEG) */
+} NvThumbKind;
+
+typedef struct NvThumbnail {
+    NvThumbKind kind;
+    uint32_t width; /* of the picture the bytes decode to (0 when unknown) */
+    uint32_t height;
+    int64_t pts_us; /* the keyframe's stream timestamp */
+} NvThumbnail;
+
+/* Thumbnail keys are {"camera":{...},"tier":"sub","start":S,"end":E}.
+ * get: NV_OK fills *info, out, and *len; NV_PENDING (a fetch is queued, a
+ * thumbnail event follows; *len is 0); NV_ERR_BUFFER_TOO_SMALL fills *info
+ * and *len (out NULL or cap < *len; bytes have no terminator). put copies
+ * the bytes (NV_ERR_LIMIT beyond the cache's byte limit). cancel drops
+ * queued fetches of one key, or all when key is NULL. */
+NvStatus nv_thumbnail_get(NvCore *core, const char *key, NvThumbnail *info, uint8_t *out,
+                          size_t cap, size_t *len);
+NvStatus nv_thumbnail_put(NvCore *core, const char *key, const NvThumbnail *info,
+                          const uint8_t *data, size_t len);
+NvStatus nv_thumbnail_cancel(NvCore *core, const char *key);
+
+/* Downloads: queue an incident's ({"incident","cameras"} ->
+ * {"download","folder","existing"}; NV_ERR_NOT_CONFIGURED without
+ * downloads_dir), pause or resume, retry failed cameras (camera NULL: all,
+ * else a JSON camera object), forget one with no job running, hand one to
+ * the Trash ({"folder"}; the app moves it after download_removed), list
+ * every known one ({"downloads":[...]}). */
+NvStatus nv_download_incident(NvCore *core, const char *request, char *out, size_t cap,
+                              size_t *len);
+NvStatus nv_download_pause(NvCore *core, const char *download, const char *camera, bool paused);
+NvStatus nv_download_retry(NvCore *core, const char *download, const char *camera);
+NvStatus nv_download_forget(NvCore *core, const char *download, bool delete_partial);
+NvStatus nv_download_trash(NvCore *core, const char *download, char *out, size_t cap,
+                           size_t *len);
+NvStatus nv_downloads_get(NvCore *core, char *out, size_t cap, size_t *len);
+
+/* Live sound settings: {"alarms":true,"loudness_history_s":600} (members
+ * left out keep their values); applies to tiles opened afterwards. */
+NvStatus nv_sound_configure(NvCore *core, const char *json);
 
 #ifdef __cplusplus
 }

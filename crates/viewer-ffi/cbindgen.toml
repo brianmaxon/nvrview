@@ -19,13 +19,14 @@ sort_by = "None"
 
 [export]
 # Used only through the integer aliases below; emit them anyway.
-include = ["NvStreamTier", "NvDecodeFailure"]
+include = ["NvStreamTier", "NvDecodeFailure", "NvThumbKind"]
 # Integers received from C, shown in the header as the enum they carry.
-exclude = ["NvStreamTierValue", "NvDecodeFailureValue"]
+exclude = ["NvStreamTierValue", "NvDecodeFailureValue", "NvThumbKindValue"]
 
 [export.rename]
 "NvStreamTierValue" = "NvStreamTier"
 "NvDecodeFailureValue" = "NvDecodeFailure"
+"NvThumbKindValue" = "NvThumbKind"
 
 [fn]
 sort_by = "None"

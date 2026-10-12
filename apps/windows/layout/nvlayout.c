@@ -89,6 +89,12 @@ int main(void) {
     OFF(NvTileLayout, dest);
     OFF(NvTileLayout, source);
 
+    SIZE(NvThumbnail);
+    OFF(NvThumbnail, kind);
+    OFF(NvThumbnail, width);
+    OFF(NvThumbnail, height);
+    OFF(NvThumbnail, pts_us);
+
     VAL(NV_OK);
     VAL(NV_ERR_INVALID_ARGUMENT);
     VAL(NV_ERR_UNKNOWN_ID);
@@ -97,6 +103,9 @@ int main(void) {
     VAL(NV_ERR_INTERNAL);
     VAL(NV_ERR_BUFFER_TOO_SMALL);
     VAL(NV_ERR_NOT_PERMITTED);
+    VAL(NV_ERR_UNSUPPORTED);
+    VAL(NV_ERR_NOT_CONFIGURED);
+    VAL(NV_PENDING);
     VAL(NV_ACTION_CONFIGURE);
     VAL(NV_ACTION_DECODE);
     VAL(NV_ACTION_FLUSH);
@@ -123,6 +132,9 @@ int main(void) {
     VAL(NV_FAIL_SUBMIT_FAILED);
     VAL(NV_FAIL_DECODE_ERROR);
     VAL(NV_FAIL_NO_PICTURE);
+    VAL(NV_THUMB_H264_KEYFRAME);
+    VAL(NV_THUMB_H265_KEYFRAME);
+    VAL(NV_THUMB_IMAGE);
 
     /* C enums are int-sized; the bindings declare them as 32-bit. */
     printf("size enum %u\n", (unsigned)sizeof(NvStatus));

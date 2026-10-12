@@ -118,6 +118,13 @@ impl Object {
         self
     }
 
+    /// Adds an object member.
+    pub(crate) fn object(mut self, key: &str, value: Object) -> Object {
+        self.key(key);
+        self.buf.push_str(&value.finish());
+        self
+    }
+
     /// Adds an array of objects.
     pub(crate) fn objects(mut self, key: &str, values: impl IntoIterator<Item = Object>) -> Object {
         self.key(key);

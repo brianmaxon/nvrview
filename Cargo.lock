@@ -1136,7 +1136,9 @@ dependencies = [
 name = "viewer-ffi"
 version = "0.1.0"
 dependencies = [
+ "bc-protocol",
  "mock-nvr",
+ "serde_json",
  "simtime",
  "tempfile",
  "updates",
