@@ -180,7 +180,10 @@ internal sealed class StageTile(Viewer viewer, NodePath path, CameraRef? camera,
     }
 
     /// <summary>How the picture sits in the tile's area at 1x (from what the render thread published).</summary>
-    public ZoomBase ZoomBase => ZoomBase.Of(PictureWidth, PictureHeight, ViewWidth, ViewHeight);
+    public ZoomBase ZoomBase => ZoomBase.Of(PictureWidth, PictureHeight, ViewWidth, ViewHeight, Fill);
+
+    /// <summary>The picture is cropped to fill the tile (Fill Tiles) instead of fitted; published by the render thread.</summary>
+    public volatile bool Fill;
 
     // Written by the render thread each frame, read by the UI thread: where
     // the picture is drawn at 1x (the chrome sits on it), in panel units

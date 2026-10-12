@@ -54,6 +54,9 @@ internal sealed class WindowState(WindowContent content, string name, LayoutNode
     public NodePath? Selected { get; set; }
 
     public bool Editing { get; set; }
+
+    /// <summary>Fill Tiles (docs/UX.md "Digital zoom"): pictures are cropped to fill their tiles instead of fitted. Per window, not kept.</summary>
+    public bool Fill { get; set; }
 }
 
 internal sealed partial class StageView : UserControl
@@ -156,7 +159,7 @@ internal sealed partial class StageView : UserControl
                     "F                            full screen",
                     "S                            show or hide the sidebar",
                     "Esc                          leave focus, editing, then full screen",
-                    "Mouse wheel, drag            digital zoom and pan; 0 resets",
+                    "Wheel, pinch, drag           digital zoom and pan; 0 or the header's button resets",
                     "M, Ctrl+L, speaker button    listen (Ctrl+click on the speaker listens to several)",
                     "Enter                        dismiss the selected tile's alert (else focus)",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
@@ -330,6 +333,7 @@ internal sealed partial class StageView : UserControl
         }
         if (Renderer is not null)
         {
+            Renderer.Fill = State.Fill;
             Renderer.Layout = new StageLayout(_tiles, cells, w, h);
         }
         PlaceOutlines();
@@ -806,6 +810,12 @@ internal sealed partial class StageView : UserControl
             _gesture = GestureKind.None;
             _panTile = null;
         }
+        // The same for a digital zoom's pan: the pinch's zoom must not be overwritten by the drag's starting zoom.
+        else if (_gesture == GestureKind.Pan)
+        {
+            _gesture = GestureKind.None;
+            _panTile = null;
+        }
     }
 
     protected override void OnManipulationDelta(ManipulationDeltaRoutedEventArgs e)
@@ -816,6 +826,26 @@ internal sealed partial class StageView : UserControl
             e.Handled = true;
             Interact();
         }
+        else if (TileAt(e.Position) is { } t && !(t.Fisheye is { } fe && fe.Mode.Dewarps()))
+        {
+            PinchDigital(t, e.Position.X, e.Position.Y, e.Delta.Scale);
+            e.Handled = true;
+            Interact();
+        }
+    }
+
+    /// <summary>
+    /// One pinch step on a touch screen zooms the tile's digital zoom around the point between the fingers
+    /// (<paramref name="x"/>, <paramref name="y"/> in the stage's units), as the wheel does around the pointer.
+    /// </summary>
+    public void PinchDigital(StageTile t, double x, double y, double scale)
+    {
+        if (t.ViewWidth <= 0 || t.ViewHeight <= 0 || t.PictureWidth <= 0)
+        {
+            return;
+        }
+        double fx = Math.Clamp((x - t.ViewX) / t.ViewWidth, 0, 1), fy = Math.Clamp((y - t.ViewY) / t.ViewHeight, 0, 1);
+        ZoomAround(t, fx, fy, FisheyePinch.Factor(scale));
     }
 
     /// <summary>One pinch step on a tile (<paramref name="scale"/> above 1 spreads: zooms in); only Virtual PTZ zooms.</summary>
@@ -983,6 +1013,9 @@ internal sealed partial class StageView : UserControl
         }
         WindowMenu?.Invoke(menu);
         menu.Items.Add(IndicatorCornerMenu());
+        var fillItem = new ToggleMenuFlyoutItem { Text = "Fill tiles", IsChecked = State.Fill };
+        fillItem.Click += (_, _) => SetFill(!State.Fill);
+        menu.Items.Add(fillItem);
         Item(menu.Items, IsFullScreen ? "Leave full screen" : "Full screen", ToggleFullScreen);
         Item(menu.Items, _diagnostics ? "Hide diagnostics" : "Show diagnostics", ToggleDiagnostics);
         Item(menu.Items, "Keyboard shortcuts", ToggleHelp);
@@ -1367,6 +1400,17 @@ internal sealed partial class StageView : UserControl
         return n >= 0 ? _tiles[n] : null;
     }
 
+    /// <summary>Fill Tiles on or off for this window: pictures crop to fill their tiles, or fit with bars.</summary>
+    public void SetFill(bool fill)
+    {
+        if (State.Fill == fill)
+        {
+            return;
+        }
+        State.Fill = fill;
+        Relayout();
+    }
+
     private void ToggleDiagnostics()
     {
         _diagnostics = !_diagnostics;
@@ -1396,7 +1440,7 @@ internal sealed partial class StageView : UserControl
         _chromes.Clear();
         foreach (StageTile t in _tiles)
         {
-            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked };
+            TileChrome chrome = kept.GetValueOrDefault(t) ?? new TileChrome(t, SpeakerClicked) { DismissClicked = tile => _viewer.DismissAlert(tile.Camera), RetryClicked = RetryClicked, ResetClicked = ResetTile };
             chrome.Speaker.Visibility = t.IsEmpty ? Visibility.Collapsed : Visibility.Visible;
             _chromes.Add(chrome);
             _chromeLayer.Children.Add(chrome.Root);
@@ -1516,6 +1560,16 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>The Retry button was pressed (or invoked by the self-test).</summary>
+    // The header's reset control: a moved virtual camera goes back to its default, else the digital zoom to 1x.
+    private void ResetTile(StageTile tile)
+    {
+        if (!ResetFisheye(tile))
+        {
+            ResetZoom(tile);
+        }
+        Interact();
+    }
+
     private void RetryClicked(StageTile tile)
     {
         _retryWatch.Restart(tile, _viewer.Clock.Now);
@@ -1610,6 +1664,7 @@ internal sealed partial class StageView : UserControl
             // The outline fades with the chrome, but stays while editing the layout.
             bool isSelected = c.Tile.Path == selected && (recent || State.Editing);
             c.SetHover(header, isSelected);
+            c.SetMapShown(recent);
         }
     }
 

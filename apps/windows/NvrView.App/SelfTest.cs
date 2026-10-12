@@ -344,6 +344,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
         StageView.ResetZoom(zoomed);
         await CheckZoomFillsTile();
+        await CheckZoomChrome();
+        await CheckFillTiles();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -671,6 +673,39 @@ internal sealed class SelfTest(App app, AppOptions options)
         v.Calls.End(camera, "closed");
         Expect(v.Calls.CallFor(camera) is null && !v.IsAudible(camera), "closing the call did not end it and mute the camera");
         Expect(ringCaptioned && v.Transcripts.Names().Length == 1, "a call with saving off wrote a transcript file");
+
+        // parity: unmute-on-ring
+        // The doorbell's "Unmute on ring even when not listening": with it on, a press plays the doorbell at once
+        // (no Unmute control); it is a view setting that reads back from view-settings.json.
+        v.Settings.SetUnmuteOnRing(camera, true);
+        v.Apply(Alarm(device, 0, "visitor", true));
+        Call? loud = v.Calls.CallFor(camera);
+        bool loudAudible = loud is { ShowsUnmute: false, Audible: true } && v.IsAudible(camera);
+        v.Calls.End(camera, "closed");
+        bool loudEnded = v.Calls.CallFor(camera) is null && !v.IsAudible(camera);
+        v.Apply(Alarm(device, 0, "visitor", false));
+        v.Settings.SetUnmuteOnRing(camera, false);
+        v.Apply(Alarm(device, 0, "visitor", true));
+        bool quietAgain = v.Calls.CallFor(camera) is { ShowsUnmute: true, Audible: false } && !v.IsAudible(camera);
+        v.Calls.End(camera, "closed");
+        v.Apply(Alarm(device, 0, "visitor", false));
+        string unmuteFile = Path.Combine(Path.GetTempPath(), $"nvrview-selftest-view-settings-{Guid.NewGuid():N}.json");
+        bool unmuteSaved;
+        try
+        {
+            new ViewSettings(unmuteFile).SetUnmuteOnRing(camera, true);
+            var reread = new ViewSettings(unmuteFile);
+            unmuteSaved = reread.UnmuteOnRing(camera) && !reread.UnmuteOnRing(new CameraRef(camera.Device, camera.Channel + 1));
+        }
+        finally
+        {
+            File.Delete(unmuteFile);
+        }
+        Say($"calls: unmute on ring: audible at once {loudAudible}, ended {loudEnded}, silent again when off {quietAgain}, setting reads back {unmuteSaved}");
+        Expect(loudAudible, "with Unmute on ring on, a press did not play the doorbell at once");
+        Expect(loudEnded, "ending the unmuted call left the doorbell audible");
+        Expect(quietAgain, "with Unmute on ring off again, a press did not open a silent call");
+        Expect(unmuteSaved, "the unmute-on-ring setting did not read back from view-settings.json");
         try
         {
             Directory.Delete(transcriptFolder, recursive: true);
@@ -1094,6 +1129,121 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(before is < 0.02, "the letterbox bar was not black at 1x");
         Expect(zoomed is >= 0.5, "zoomed past filling the tile, the letterbox bar still shows no picture");
         Expect(after is < 0.02, "back at 1x, the letterbox bar is not black");
+    }
+
+    // parity: zoom-map
+    // parity: zoom-reset-control
+    // parity: zoom-touch-pinch
+    // The zoom map and the header's reset control follow a tile's zoom, and a touch screen's pinch zooms
+    // the digital zoom around the point between the fingers.
+    private async Task CheckZoomChrome()
+    {
+        StageView stage = app.Stage!;
+        StageTile? t = Tiles.FirstOrDefault(x => !(x.Fisheye is { } f && f.Mode.Dewarps()) && x.PictureWidth > 0 && x.ViewWidth > 0 && x.ZoomBase.Width > 0.99);
+        TileChrome? chrome = t is null ? null : stage.ChromeFor(t);
+        if (t is null || chrome is null)
+        {
+            _problems.Add("no ordinary tile to check the zoom map on");
+            return;
+        }
+        StageView.ResetZoom(t);
+        stage.Interact();
+        stage.Tick();
+        await Task.Delay(100);
+        bool idleHidden = !chrome.MapShown && !chrome.ResetShown;
+        // The pinch: spreading zooms in around the point between the fingers; closing zooms back out; junk changes nothing.
+        double cx = t.ViewX + t.ViewWidth * 0.25, cy = t.ViewY + t.ViewHeight * 0.25;
+        stage.PinchDigital(t, cx, cy, 2);
+        bool pinchedIn = Math.Abs(t.Zoom - 2) < 0.01;
+        double pointX = t.CenterX;
+        stage.PinchDigital(t, cx, cy, double.NaN);
+        bool junkIgnored = Math.Abs(t.Zoom - 2) < 0.01;
+        for (int i = 0; i < 8; i++)
+        {
+            stage.PinchDigital(t, cx, cy, 2);
+        }
+        bool bounded = Math.Abs(t.Zoom - TileZoom.MaxScale) < 0.01;
+        for (int i = 0; i < 8; i++)
+        {
+            stage.PinchDigital(t, cx, cy, 0.5);
+        }
+        bool pinchedOut = t.Zoom <= 1.0001f;
+        Say($"zoom touch pinch: in {pinchedIn} (center x {pointX:0.00}), junk ignored {junkIgnored}, bounded at {TileZoom.MaxScale:0}x {bounded}, back out {pinchedOut}");
+        Expect(pinchedIn && pointX < 0.5, $"a pinch spread did not zoom in around the fingers (zoom {t.Zoom:0.00}, center x {pointX:0.00})");
+        Expect(junkIgnored, "a pinch step of NaN changed the zoom");
+        Expect(bounded, $"pinching past the limit did not stop at the maximum zoom ({t.Zoom:0.00})");
+        Expect(pinchedOut, $"pinching closed did not return to 1x ({t.Zoom:0.00})");
+
+        // The map and the reset control, zoomed.
+        StageView.ZoomAround(t, 0.25, 0.25, 2);
+        stage.Interact();
+        stage.Tick();
+        bool shown = await Until(() => chrome.MapShown && chrome.ResetShown, 3);
+        (UnitRect frame, UnitRect visible) = chrome.MapGeometry;
+        TileZoom zoom = t.DigitalZoom;
+        UnitRect d = zoom.Destination(t.ZoomBase);
+        double left = t.ViewX + d.X * t.ViewWidth, bottom = t.ViewY + (d.Y + d.Height) * t.ViewHeight;
+        bool corner = Math.Abs(frame.X - left - ZoomMap.Margin) < 1.5 && Math.Abs(bottom - ZoomMap.Margin - (frame.Y + frame.Height)) < 1.5;
+        bool shape = frame.Height > 0 && Math.Abs(frame.Width / frame.Height - t.PictureWidth / (double)t.PictureHeight) < 0.1;
+        UnitRect want = zoom.Visible(t.ZoomBase);
+        bool region = Math.Abs(visible.X - want.X) < 1e-6 && Math.Abs(visible.Width - want.Width) < 1e-6 && visible.Width < 1;
+        Say($"zoom map: shown {shown}, frame {frame.Width:0}x{frame.Height:0}, bottom left corner {corner}, picture shape {shape}, marks the visible region {region}");
+        Expect(shown, "zoomed and active, the tile shows no zoom map or no reset control");
+        Expect(corner && shape && region, $"the zoom map is misplaced or marks the wrong region: frame {frame}, visible {visible}, wanted corner at {left:0},{bottom:0}");
+
+        // It fades with the chrome (a few idle seconds) and returns with the pointer.
+        bool faded = await Until(() =>
+        {
+            stage.Tick();
+            return !chrome.MapShown;
+        }, ChromeIdle.HideAfterSeconds + 4);
+        stage.Interact();
+        stage.Tick();
+        bool back = await Until(() => chrome.MapShown, 3);
+        Say($"zoom map: fades with the chrome {faded}, returns with the pointer {back}, hidden at 1x before {idleHidden}");
+        Expect(faded && back, "the zoom map did not fade with the chrome and return with the pointer");
+        Expect(idleHidden, "at 1x the tile showed a zoom map or a reset control");
+
+        // The header's reset control returns the tile to 1x and takes the map and itself away.
+        chrome.PressReset();
+        bool reset = t.Zoom <= 1.0001f && t.CenterX == 0.5f && t.CenterY == 0.5f;
+        bool gone = await Until(() => !chrome.MapShown && !chrome.ResetShown, 3);
+        Say($"zoom reset control: back to 1x {reset}, control and map gone {gone}");
+        Expect(reset, $"the reset control did not return the tile to 1x ({t.Zoom:0.00})");
+        Expect(gone, "after the reset the tile still shows the reset control or the zoom map");
+    }
+
+    // parity: fill-tiles
+    // Fill Tiles crops the picture to fill its tile (the former letterbox bar shows picture) and
+    // turning it off fits it again; a zoom still works from the crop.
+    private async Task CheckFillTiles()
+    {
+        StageView stage = app.Stage!;
+        StageRenderer r = app.Renderer!;
+        StageTile? boxed = Tiles.FirstOrDefault(t => !(t.Fisheye is { } f && f.Mode.Dewarps()) && ZoomBar(t) is not null);
+        if (boxed is null || ZoomBar(boxed) is not { } bar)
+        {
+            _problems.Add("no letterboxed tile to check Fill Tiles on");
+            return;
+        }
+        double? fitted = await BarLit(r, bar);
+        stage.SetFill(true);
+        double? filled = await BarLit(r, bar);
+        ZoomBase b = boxed.ZoomBase;
+        bool crop = boxed.Fill && Math.Max(b.Width, b.Height) > 1.01 && Math.Min(b.Width, b.Height) > 0.999;
+        bool tileArea = Near(boxed.X, boxed.ViewX) && Near(boxed.Width, boxed.ViewWidth) && Near(boxed.Y, boxed.ViewY) && Near(boxed.Height, boxed.ViewHeight);
+        StageView.ZoomAround(boxed, 0.5, 0.5, 2);
+        double? zoomedFilled = await BarLit(r, bar);
+        bool reaches = boxed.DigitalZoom.Visible(boxed.ZoomBase).Width < 1;
+        StageView.ResetZoom(boxed);
+        stage.SetFill(false);
+        double? fittedAgain = await BarLit(r, bar);
+        Say($"fill tiles: bar lit {fitted:0.00} fitted, {filled:0.00} filled, {zoomedFilled:0.00} filled and zoomed, {fittedAgain:0.00} fitted again; base {b.Width:0.00}x{b.Height:0.00}, tile area {tileArea}");
+        Expect(fitted is < 0.02, "the letterbox bar was not black before Fill Tiles");
+        Expect(filled is >= 0.5, "with Fill Tiles the former letterbox bar still shows no picture");
+        Expect(crop && tileArea, $"Fill Tiles did not crop the picture to the tile (base {b.Width:0.00}x{b.Height:0.00}, tile area {tileArea})");
+        Expect(zoomedFilled is >= 0.5 && reaches, "zooming from the filled crop lost the picture");
+        Expect(fittedAgain is < 0.02 && !boxed.Fill, "turning Fill Tiles off did not fit the picture again");
     }
 
     // One of a tile's bars at 1x (DIPs, a unit in from its edges), or null if the picture fills it.

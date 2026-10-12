@@ -31,7 +31,7 @@ less than that. Nothing here was run on a Windows machine.
 | Sidebar: devices, channels, detection symbols per camera | yes | yes | |
 | Sidebar collapse and edge reveal with pin | yes | yes | Same timing (`SidebarReveal` on both). |
 | Hide offline channels | yes | yes | macOS: View menu; Windows: checkbox in the sidebar. |
-| Fill Tiles (picture fills the tile instead of fitting) | yes | no | macOS Layout menu, `state.fill`. Windows has no equivalent. |
+| Fill Tiles (picture fills the tile instead of fitting) | yes | yes | Per window, not kept. macOS: Layout menu, `state.fill`. Windows: "Fill tiles" in the right-click menu (`WindowState.Fill`, `StageRenderer.Fill`); the 1x crop is `ZoomBase.Of(..., fill: true)` drawn through the zoom rule. Windows self-test step `fill-tiles` (the macOS self-test has none). |
 | Menu bar | yes | n/a (Windows uses the right-click menu and a help overlay) | UX.md "Windows notes". |
 | Keyboard shortcut help | yes | yes | macOS lists keys in the menus; Windows has the F1 overlay. |
 
@@ -50,10 +50,10 @@ less than that. Nothing here was run on a Windows machine.
 | Tile status in words (connecting, reconnecting with countdown, waiting) | yes | yes | |
 | Frame rate display | yes | partial (diagnostics overlay, Ctrl+D) | macOS: View > Show Frame Rates; the Windows overlay is a different readout. |
 | Digital zoom: mouse wheel, drag to pan | yes | yes | |
-| Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Windows has no Fill Tiles, so only the fitted case applies there. |
-| Trackpad or touchpad pinch zooms | yes | partial (touchpad pinch arrives as Ctrl+wheel and works; a touch screen's two-finger pinch does not zoom digital zoom) | UX.md "Windows notes". |
-| Zoom map (outline of the visible region) | yes | no | `ZoomInsetView` exists on macOS only. |
-| Reset zoom control in the tile header | yes | partial (0 key and the right-click "Reset zoom" item only) | |
+| Zoomed picture grows over the bars until it fills the tile (or the full-screen stage), then crops | yes | yes | Same geometry and test vectors (TileZoom in NVRCore and NvrView.Tiles); self-test step `zoom-fills-tile` on both. Fill Tiles uses the same rule from the filled base on both. |
+| Trackpad or touchpad pinch zooms | yes | yes | Windows: a touchpad pinch arrives as Ctrl+wheel; a touch screen's two-finger pinch zooms around the point between the fingers (`StageView.PinchDigital`, steps bounded as the Virtual PTZ pinch is). Windows self-test step `zoom-touch-pinch`. |
+| Zoom map (outline of the visible region) | yes | yes | macOS `ZoomInsetView`; Windows a map in `TileChrome` placed by `ZoomMap.Frame` (same rule: bottom left of the zoomed picture as drawn, at most 96 wide, a quarter of its width, a third of its height), fading with the chrome. Windows self-test step `zoom-map`. |
+| Reset zoom control in the tile header | yes | yes | A magnifier button at the header's right, shown while the tile is zoomed (or a virtual camera moved); also resets the virtual camera, as 0 does. Windows self-test step `zoom-reset-control`. |
 | Quality per tile: Auto, Clear, Fluent, Balanced; saved in the layout | yes | yes | Auto follows zoom past 2x on both. |
 | Second lens of a multi-lens camera as its own tile | yes | yes | |
 
@@ -105,7 +105,7 @@ less than that. Nothing here was run on a Windows machine.
 | Live captions of both sides | yes | partial (older desktop recognizer; none where Windows lacks one for the language) | macOS: Apple SpeechTranscriber; Windows: `System.Speech` stand-in for the planned Moonshine engine. |
 | Caption echo filter: the visitor caption that repeats our own talk-back or typed reply (the doorbell hears its speaker) is hidden, not saved, not activity | yes | yes | UX.md "Captions and echo". Pure `CaptionEcho` (NVRCore) and `CaptionEcho` (NvrView.Tiles) with the same test vectors; self-test step `call-caption-echo`. |
 | Call ends after 60 s of inactivity, gives audio back | yes | yes | |
-| Unmute on ring even when not listening (per doorbell) | yes | no | Windows README "Not yet on Windows". |
+| Unmute on ring even when not listening (per doorbell) | yes | yes | macOS: Settings > Cameras (`CameraOptions.unmuteOnRing`). Windows: Settings, "Unmute on ring even when not listening, per doorbell" (a check box per camera), kept in `view-settings.json` as `unmuteOnRing`; `CallAudio.Press`. Windows self-test step `unmute-on-ring`. |
 | Save call transcripts (event log and one text file per call, bounded folder, Open Transcripts Folder) | yes | yes | UX.md "Transcript files". macOS: Settings > Alerts; Windows: Settings. Pure naming, text and pruning in `CallTranscriptFile` (NVRCore) and `TranscriptFiles` (NvrView.Tiles) with the same test vectors. Self-test step `call-transcript-file`. |
 | Swap an inset with the stage (click, Tab, Esc) | yes | no | Depends on alert insets. |
 | Call pop-out window (Pop Out / Pop In, the call kept whole) | yes | yes | UX.md "A call in its own window". macOS: a non-activating panel, on top with a remembered pin. Windows: a WinUI window with its own swap chain and `StageRenderer` (joins device-loss recovery; checked after a simulated loss), always on top while pinned, shown without activation for a ring. Self-test steps `call-popout-open`, `call-popout-talk`, `call-popin`, `call-popin-new-window`, `call-popout-end` on both. A call in its own window never ends by inactivity; Pop In restarts the minute. Unverified on Windows: real multi-monitor placement, focus behavior of a real ring, and always-on-top over a full-screen app. |
@@ -135,9 +135,6 @@ What the table shows that is not just a platform difference:
 
 - Windows insets are call cards only: no smoke, CO or entrance insets, no
   swap with the stage, and no Entrance option.
-- Windows lacks "unmute on ring".
-- Windows has no zoom map, no header reset-zoom control, no Fill Tiles, and
-  digital zoom does not follow a touch screen's pinch.
 - The layout preset lists on the two apps were not compared.
 - Windows' captions use an older engine than the Mac's.
 

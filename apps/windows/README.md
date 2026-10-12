@@ -625,7 +625,16 @@ reply, opened by a doorbell press or by the user (right-click a camera tile
   at most 50 MB are kept. Names, text and pruning are `TranscriptFiles` in
   NvrView.Tiles, tested with the Mac's vectors; "Open transcripts folder"
   shows the folder. Self-test step `call-transcript-file`.
-- **Not yet on Windows:** a per-doorbell "unmute on ring" setting.
+- **Unmute on ring:** Settings has a check box per camera ("Unmute on ring
+  even when not listening"), kept in `view-settings.json` as `unmuteOnRing`;
+  with it on, a press plays the doorbell at once instead of showing Unmute.
+  Self-test step `unmute-on-ring`.
+- **Zoom chrome and Fill Tiles:** a zoomed tile shows a zoom map (bottom left
+  of the zoomed picture, `ZoomMap`) and a reset button in its header; a touch
+  screen's two-finger pinch zooms ordinary tiles around the fingers; "Fill
+  tiles" in the right-click menu crops pictures to fill their tiles (per
+  window). Self-test steps `zoom-map`, `zoom-reset-control`,
+  `zoom-touch-pinch`, `fill-tiles`.
 
 ### How it works
 

@@ -848,8 +848,16 @@ with Windows conventions:
 - A touchpad pinch arrives as Ctrl+mouse wheel and zooms like the wheel
   (digital zoom, or the field of view of a Virtual PTZ tile). A touch
   screen's two-finger pinch zooms a Virtual PTZ tile by the pinch's scale
-  (the field of view is divided by it, 120° to 20°, each step bounded); it
-  does not zoom a tile's digital zoom yet.
+  (the field of view is divided by it, 120° to 20°, each step bounded); on
+  other tiles it zooms the digital zoom around the point between the
+  fingers, with the same bounded steps.
+- Fill Tiles is "Fill tiles" in the right-click menu (per window, not kept).
+  The zoom map sits in the tile's chrome and the reset control is a
+  magnifier button at the right of the hover header, shown while the tile
+  is zoomed (or a virtual camera was moved).
+- Settings lists "Unmute on ring even when not listening" with a check box
+  per camera (the macOS Settings > Cameras option), kept with the other
+  view settings.
 - Settings lists each fisheye camera with a Mount picker (Ceiling, Wall,
   Desk; default Ceiling), kept with the other view settings like the
   right-click menu's Fisheye mount, and tiles in every window follow it at
