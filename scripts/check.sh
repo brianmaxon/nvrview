@@ -55,6 +55,7 @@ end_step() {
     printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
     if [ -n "$run_file" ] && [ "$step_row" != "-" ]; then sc pass "$run_file" "$((now - step_start))" "$step_row"; fi
   fi
+  step_name=""
 }
 step() { # ROW LABEL ("-" for no row)
   end_step
@@ -65,13 +66,15 @@ step() { # ROW LABEL ("-" for no row)
 }
 # Runs the step for SUITE unless it is cached (then it prints why and fails).
 want() { # SUITE LABEL
+  end_step
   if [ -n "$run_file" ] && ! sc want "$run_file" "$1"; then return 1; fi
   step "$1" "$2"
 }
-# Cargo arguments for the crates of a Rust family that must run (empty: all
-# cached); the cached ones are printed.
+# Sets args to the cargo arguments for the crates of a Rust family that must
+# run (empty: all cached); the cached ones are printed.
 crates() { # FAMILY
-  if [ -n "$run_file" ]; then sc crates "$run_file" "$1"; else echo --workspace; fi
+  end_step
+  if [ -n "$run_file" ]; then args=$(sc crates "$run_file" "$1"); else args=--workspace; fi
 }
 on_exit() {
   rc=$?
@@ -179,7 +182,7 @@ cargo fmt --all --check
 
 # The Rust families run only the crates whose fingerprint missed the cache
 # (--workspace when all did). Arguments are lists of "-p crate".
-args=$(crates clippy)
+crates clippy
 if [ -n "$args" ]; then
   step clippy "clippy ($args)"
   cargo clippy $args --all-targets -- -D warnings
@@ -187,12 +190,12 @@ fi
 
 # nextest fails a test that runs past its limit (.config/nextest.toml) and
 # names it; it does not run doctests, so those run separately.
-args=$(crates test)
+crates test
 if [ -n "$args" ]; then
   step test "tests, per-test time limit ($args)"
   cargo nextest run $args
 fi
-args=$(crates doctest)
+crates doctest
 if [ -n "$args" ]; then
   step doctest "doctests ($args)"
   cargo test $args --doc
@@ -219,14 +222,14 @@ if [ "$(uname)" = "Darwin" ] && want c-smoke-asan "C interface smoke test, Addre
   scripts/test-c-ffi.sh --asan
 fi
 
-args=$(crates wincheck)
+crates wincheck
 if [ -n "$args" ]; then
   step wincheck "Windows compile check ($args)"
   cargo check $args --all-targets --target x86_64-pc-windows-msvc
 fi
 
 if rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
-  args=$(crates linuxcheck)
+  crates linuxcheck
   if [ -n "$args" ]; then
     step linuxcheck "Linux compile check ($args)"
     cargo check $args --all-targets --target x86_64-unknown-linux-gnu

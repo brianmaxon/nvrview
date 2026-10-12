@@ -385,9 +385,14 @@ def cmd_crates(args):
     for c in names:
         e = cached_entry(base, run, "%s.%s" % (fam, c))
         (todo if e is None else cached).append((c, e))
-    for c, e in cached:
-        print("cached pass %s.%s (%s, key %s)" % (fam, c, age(now() - e["time"]),
-                                                 run["suites"]["%s.%s" % (fam, c)]["key"][:10]), file=sys.stderr)
+    if len(cached) <= 3:
+        for c, e in cached:
+            print("cached pass %s.%s (%s, key %s)" % (fam, c, age(now() - e["time"]),
+                                                     run["suites"]["%s.%s" % (fam, c)]["key"][:10]), file=sys.stderr)
+    else:
+        ages = sorted(now() - e["time"] for _, e in cached)
+        print("cached pass %s for %d crates: %s (%s to %s old)" % (
+            fam, len(cached), ", ".join(c for c, _ in cached), age(ages[0]), age(ages[-1])), file=sys.stderr)
     run["selected"][fam] = [c for c, _ in todo]
     run["rows"].append([fam, "cached %d of %d crates" % (len(cached), len(names)), 0])
     write_json(path, run)
