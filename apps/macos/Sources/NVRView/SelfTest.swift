@@ -3365,7 +3365,9 @@ final class SelfTest {
         let clock = ManualClock()
         ep.now = { clock.now }
         b.show(view: .follow)
-        when({ ep.session != nil && (b.editStage?.framesDrawn ?? 0) > 0 }, timeout: 5) { [self] in
+        // The device playback's pause arrives as a core event, so it is
+        // waited for too (the edit can draw its first frame before it).
+        when({ ep.session != nil && (b.editStage?.framesDrawn ?? 0) > 0 && !b.player.transport.isPlaying }, timeout: 5) { [self] in
             guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
                 problems.append("edits: the follow cut did not open (\(ep.message ?? b.message ?? "no message"))")
                 return editBack(b, fake, folder: folder)
