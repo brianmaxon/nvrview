@@ -341,6 +341,20 @@ struct TimelineLanes: View {
                                             Image(systemName: "ear").font(.system(size: 8)).foregroundStyle(.secondary)
                                                 .help("Listening for sounds")
                                         }
+                                        if let analysis = browser.analysis(of: lane.camera) {
+                                            ProgressView().controlSize(.mini).scaleEffect(0.7)
+                                                .help(SoundAnalysis.progress(analysis) ?? "")
+                                            Button { browser.cancelAnalysis(lane.camera) } label: {
+                                                Image(systemName: "xmark.circle.fill").font(.system(size: 9))
+                                            }
+                                            .buttonStyle(.borderless)
+                                            .help("Cancel analyzing this camera's sound")
+                                            .accessibilityLabel("Cancel sound analysis")
+                                        }
+                                    }
+                                    .contextMenu {
+                                        Button("Analyze Sounds") { browser.analyzeSound(lane.camera) }
+                                            .disabled(browser.model.isAnalyzing(lane.camera, day: browser.day))
                                     }
                                     .frame(width: labelWidth - 8, height: laneHeight, alignment: .leading)
                                     .padding(.bottom, rowHeight - laneHeight)
@@ -722,7 +736,7 @@ struct LoudnessStrip: View, @preconcurrency Animatable {
         if lane?.heard == true { return "Loudness: light is the loudest second, dark the average" }
         return listening
             ? "No sound analyzed on this day yet"
-            : "No sound analyzed: sound is analyzed while the camera is on screen or listens for sounds"
+            : "No sound analyzed: sound is analyzed while the camera is on screen or listens for sounds, or for a downloaded day with Analyze Sounds"
     }
 }
 

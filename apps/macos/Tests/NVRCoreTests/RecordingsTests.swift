@@ -165,6 +165,76 @@ private final class EventLog: CoreSink, @unchecked Sendable {
         try #require(try JSONSerialization.jsonObject(with: Data(s.utf8)) as? [String: Any])
     }
 
+    /// Analyzing a day from the synthetic downloads, as the core does from
+    /// finished ones: `no_source` without a downloads folder, `no_audio`
+    /// without a finished download, then heard seconds, a label, and a cancel.
+    @Test func analyzingADayFromDownloads() throws {
+        let device = "d-3f9a0c1b7e2d4a65"
+        let day: Int64 = 1_791_590_400
+        let cam = RecordingCamera(device: device, channel: 0)
+
+        func make(downloads: Bool) throws -> (any CoreAPI, FakeCore, EventLog) {
+            let log = EventLog()
+            var options = FakeCore.Options(clips: [])
+            options.recordingWorkIsManual = true
+            let core: any CoreAPI = FakeCore(options: options, sink: log)
+            let fake = try #require(core as? FakeCore)
+            try core.recordingsConfigure(json: downloads ? #"{"downloads_dir":"/downloads"}"# : "{}")
+            try core.recordingsEnable(deviceKey: device, json: #"{"channels":[{"channel":0},{"channel":1}]}"#)
+            try core.recordingsWant(
+                json: #"{"cameras":[\#(cam.json)],"days":[\#(day + 100)],"force":false}"#)
+            _ = log.take()
+            return (core, fake, log)
+        }
+        func analyze(_ core: any CoreAPI, _ fake: FakeCore, _ log: EventLog) throws -> [SoundAnalysis.Entry] {
+            _ = log.take()
+            _ = try core.soundAnalyzeDay(json: SoundAnalysis.query(camera: cam, day: day))
+            fake.completeRecordingWork()
+            var entry: SoundAnalysis.Entry?
+            var all: [SoundAnalysis.Entry] = []
+            for e in log.take() {
+                guard case .soundAnalyze(let r, _, _, let state, let reason, let seconds, let labels) = e,
+                    let s = SoundAnalysis.State(rawValue: state)
+                else { continue }
+                entry = SoundAnalysis.fold(entry, request: r, state: s, reason: reason, seconds: seconds, labels: labels)
+                all.append(entry!)
+            }
+            return all
+        }
+
+        let (noSource, noSourceFake, noSourceLog) = try make(downloads: false)
+        #expect(try analyze(noSource, noSourceFake, noSourceLog).map(\.state) == [.queued, .failed])
+        #expect(try analyze(noSource, noSourceFake, noSourceLog).last?.reason == "no_source")
+
+        let (core, fake, log) = try make(downloads: true)
+        let none = try analyze(core, fake, log)
+        #expect(none.map(\.state) == [.queued, .failed] && none.last?.reason == "no_audio")
+        let loud = #"{"start":\#(day),"end":\#(day + 86_399),"bucket_s":3600,"cameras":[\#(cam.json)]}"#
+        func heardBuckets() throws -> Int {
+            let lanes = try #require(try object(try core.recordingsLoudness(query: loud))["lanes"] as? [[String: Any]])
+            return (lanes.first?["peak_db"] as? [Any])?.filter { !($0 is NSNull) }.count ?? -1
+        }
+        #expect(try heardBuckets() == 0)
+
+        let incidents = try #require(
+            try object(try core.incidentsGet(query: #"{"start":\#(day),"end":\#(day + 86_399)}"#))["incidents"] as? [[String: Any]])
+        let key = try #require(incidents.first { ($0["cameras"] as? [[String: Any]])?.contains { ($0["camera"] as? [String: Any])?["channel"] as? Int == 0 } == true }?["key"] as? String)
+        _ = try core.downloadIncident(json: #"{"incident":"\#(key)"}"#)
+        // Queued, not finished: still nothing to hear.
+        _ = try core.soundAnalyzeDay(json: SoundAnalysis.query(camera: cam, day: day))
+        try core.soundAnalyzeCancel(try #require(log.take().compactMap { e -> UInt64? in
+            if case .soundAnalyze(let r, _, _, "queued", _, _, _) = e { r } else { nil }
+        }.first))
+        #expect(try heardBuckets() == 0)
+        fake.completeRecordingWork()
+        _ = log.take()
+        let done = try analyze(core, fake, log)
+        #expect(done.map(\.state) == [.queued, .running, .done])
+        #expect((done.last?.seconds ?? 0) > 0 && done.last?.labels == 1)
+        #expect(try heardBuckets() > 0)
+        #expect(SoundAnalysis.outcome(done.last!)?.hasPrefix("Analyzed ") == true)
+    }
+
     @Test func fromConfigureToTheTrash() throws {
         let log = EventLog()
         var options = FakeCore.Options(clips: [])
@@ -289,7 +359,9 @@ private final class EventLog: CoreSink, @unchecked Sendable {
         let states = log.take().compactMap { e -> String? in
             if case .soundAnalyze(let r, _, _, let state, _, _, _) = e, r == UInt64(request) { state } else { nil }
         }
-        #expect(states == ["queued", "running", "done"])
+        // Analyzed from the finished download when it holds that camera.
+        let downloadedCam1 = progress.last?.cameras.contains { $0.camera == RecordingCamera(device: device, channel: 1) } == true
+        #expect(states == (downloadedCam1 ? ["queued", "running", "done"] : ["queued", "failed"]))
         #expect(throws: CoreStatus.unknownID) { try core.soundAnalyzeCancel(UInt64(request)) }
         #expect(throws: CoreStatus.unknownID) { try core.tileLoudness(987_654_321, capacity: 8) }
 

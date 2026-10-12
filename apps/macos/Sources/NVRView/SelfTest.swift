@@ -3216,6 +3216,84 @@ final class SelfTest {
             if badge != ["Dog barking"] { problems.append("recordings: the sound badge says \(badge)") }
             b.kindFilters = []
             b.model.setListening(camera, false)
+            recordingsAnalyzeNoAudio(b, fake)
+        }
+    }
+
+    /// Analyze Sounds with nothing downloaded for the day: the analysis
+    /// fails `no_audio` with its message, the lane shows no progress and no
+    /// loudness.
+    private func recordingsAnalyzeNoAudio(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-analyze-no-audio
+        let rec = b.model
+        guard let camera = b.lanes.first?.camera else { return recordingsClose(b, fake) }
+        if !rec.downloads.isEmpty { problems.append("recordings: \(rec.downloads.count) downloads before the analysis steps") }
+        b.analyzeSound(camera)
+        if b.analysis(of: camera)?.state != .queued { problems.append("recordings: Analyze Sounds queued nothing on the lane") }
+        when({ fake.completeRecordingWork(); return rec.analysis(camera, day: b.day)?.state == .failed }, timeout: 2) { [self] in
+            let message = SoundAnalysis.failure(reason: "no_audio")
+            print("recordings: analyze with nothing downloaded: \(rec.analysis(camera, day: b.day)?.reason ?? "no result"), \(rec.notice ?? "no message")")
+            if rec.analysis(camera, day: b.day)?.reason != "no_audio" { problems.append("recordings: the analysis did not fail no_audio") }
+            if rec.notice != message { problems.append("recordings: the no_audio message was \(rec.notice ?? "missing")") }
+            if b.analysis(of: camera) != nil { problems.append("recordings: a failed analysis still shows progress") }
+            b.reloadLoudness(force: true)
+            if b.loudness(of: camera)?.heard == true { problems.append("recordings: loudness appeared without audio") }
+            recordingsAnalyzeDay(b, fake)
+        }
+    }
+
+    /// Analyze Sounds after a download: progress, then loudness and a sound
+    /// label on the lane and the done message.
+    private func recordingsAnalyzeDay(_ b: RecordingsBrowser, _ fake: FakeCore) {
+        // parity: recordings-analyze-day
+        let rec = b.model
+        guard let incident = b.dayIncidents.first(where: { $0.kinds == ["vehicle"] }) ?? b.dayIncidents.first(where: { !$0.cameras.isEmpty }),
+            let camera = incident.cameras.first?.camera
+        else {
+            problems.append("recordings: no incident to download for the analysis")
+            return recordingsClose(b, fake)
+        }
+        b.download(incident.key)
+        when({ fake.completeRecordingWork(); return rec.downloads.contains { $0.state == "done" } }, timeout: 2) { [self] in
+            b.analyzeSound(camera)
+            // The day header's action skips the camera that is already being analyzed.
+            if !rec.isAnalyzing(camera, day: b.day) { problems.append("recordings: Analyze Sounds shows no progress") }
+            when({ fake.completeRecordingWork(); return rec.analysis(camera, day: b.day)?.state == .done }, timeout: 2) { [self] in
+                let entry = rec.analysis(camera, day: b.day)
+                print("recordings: analyzed \(entry?.seconds ?? 0) s, \(entry?.labels ?? 0) labels; \(rec.notice ?? "no message")")
+                if (entry?.seconds ?? 0) <= 0 || entry?.labels != 1 { problems.append("recordings: the analysis found \(String(describing: entry))") }
+                if b.analysis(of: camera) != nil { problems.append("recordings: a finished analysis still shows progress") }
+                if rec.notice != entry.flatMap(SoundAnalysis.outcome) { problems.append("recordings: the done message was \(rec.notice ?? "missing")") }
+                when({ b.loudness(of: camera)?.heard == true && b.lanes.first { $0.camera == camera }?.events.contains { $0.kind == "smoke_alarm" && $0.source == SoundKinds.localAudio } == true }, timeout: 2) { [self] in
+                    if b.loudness(of: camera)?.heard != true { problems.append("recordings: no loudness after the analysis") }
+                    let onLane = b.lanes.first { $0.camera == camera }?.events.contains { $0.kind == "smoke_alarm" && $0.source == SoundKinds.localAudio } == true
+                    if !onLane { problems.append("recordings: no sound label on the lane after the analysis") }
+                    recordingsAnalyzeCancel(b, fake, camera: camera)
+                }
+            }
+        }
+    }
+
+    /// Canceling an analysis before it runs: it ends canceled, shows no
+    /// progress, and does not come back when the core's work is done.
+    private func recordingsAnalyzeCancel(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
+        // parity: recordings-analyze-cancel
+        let rec = b.model
+        // Another camera, so the finished analysis above does not stand in for this one.
+        guard let other = b.lanes.map(\.camera).first(where: { $0 != camera }) else { return recordingsClose(b, fake) }
+        b.analyzeSound(other)
+        if b.analysis(of: other) == nil { problems.append("recordings: nothing to cancel") }
+        b.cancelAnalysis(other)
+        when({ rec.analysis(other, day: b.day)?.state == .canceled }, timeout: 2) { [self] in
+            fake.completeRecordingWork()
+            print("recordings: analysis canceled: \(rec.notice ?? "no message")")
+            if rec.analysis(other, day: b.day)?.state != .canceled { problems.append("recordings: the analysis did not end canceled") }
+            if b.analysis(of: other) != nil { problems.append("recordings: a canceled analysis still shows progress") }
+            if rec.notice != SoundAnalysis.outcome(SoundAnalysis.Entry(request: 0, state: .canceled)) {
+                problems.append("recordings: the cancel message was \(rec.notice ?? "missing")")
+            }
+            if b.loudness(of: other)?.heard == true { problems.append("recordings: a canceled analysis left loudness") }
+            for d in rec.downloads { rec.forget(d.download) }
             recordingsClose(b, fake)
         }
     }
@@ -3371,13 +3449,42 @@ final class SelfTest {
                 }
                 print("recordings (real core): lock \(rec.notice ?? ""), download \(d.stateText), \(d.outputs.count) files")
                 if d.state != "done" || d.outputs.isEmpty { problems.append("recordings: the download ended \(d.stateText)") }
-                rec.trash(d.download)
-                when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
-                    if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
-                    b.setLocked(incident.key, false)
-                    recordingsRealClose(b)
+                recordingsRealAnalyze(b, rec, camera: d.cameras.first?.camera) { [self] in
+                    rec.trash(d.download)
+                    when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
+                        if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
+                        b.setLocked(incident.key, false)
+                        recordingsRealClose(b)
+                    }
                 }
             }
+        }
+    }
+
+    /// Analyze Sounds on the real core over the day just downloaded from the
+    /// mock (which records the same synthetic audio on every channel): the
+    /// core reads the files' audio, and the lane has loudness. Skipped (and
+    /// said so) when the mock was started without audio.
+    private func recordingsRealAnalyze(
+        _ b: RecordingsBrowser, _ rec: RecordingsModel, camera: RecordingCamera?, then next: @escaping @MainActor () -> Void
+    ) {
+        // parity: recordings-analyze-real-core
+        guard let camera, b.lanes.contains(where: { $0.camera == camera }) else {
+            problems.append("recordings: no lane for the downloaded camera")
+            return next()
+        }
+        b.analyzeSound(camera)
+        when({ !rec.isAnalyzing(camera, day: b.day) && rec.analysis(camera, day: b.day)?.active == false }, timeout: 60) { [self] in
+            let entry = rec.analysis(camera, day: b.day)
+            print("recordings (real core): analyzed \(entry?.seconds ?? 0) s, \(entry?.labels ?? 0) labels, \(entry?.state.rawValue ?? "no result"): \(rec.notice ?? "no message")")
+            if entry?.state != .done {
+                problems.append("recordings: the real core's analysis ended \(String(describing: entry))")
+                return next()
+            }
+            if (entry?.seconds ?? 0) <= 0 { problems.append("recordings: the real core heard no seconds of the download") }
+            b.reloadLoudness(force: true)
+            if b.loudness(of: camera)?.heard != true { problems.append("recordings: no loudness on the lane after the real analysis") }
+            next()
         }
     }
 

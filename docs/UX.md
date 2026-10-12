@@ -1274,10 +1274,24 @@ later.
   tooltip says what the core answered (listening, no sound from this
   camera, the device is not connected). The list is kept with the cameras
   to search (`listen` in `recordings-cameras.json`) and given to the core
-  at each launch. Not built yet: analyzing a recorded day
-  (`nv_sound_analyze_day` answers `no_source` until the core has a source
-  for recorded audio), and the app classifiers that put labels (SoundAnalysis
-  on macOS, a model on Windows).
+  at each launch. **Analyze Sounds** finds the sounds in a day's
+  *downloaded* video (`nv_sound_analyze_day`; the core reads the audio of
+  finished downloads, FFI-RECORDINGS.md "Sound from downloaded days"): the
+  day header's button does it for all the searched cameras, a lane's menu
+  (right click on Windows, context menu on macOS) for that camera. A lane
+  being analyzed shows a small progress indicator and a Cancel beside its
+  name (the progress is not a percentage: the core reports queued, running,
+  and done); when it is done the lane's loudness strip and sound labels
+  (the smoke and CO alarms the core's detector finds) are read again, and
+  the message line says how much sound was analyzed and how many sounds
+  were found. Nothing downloaded for that day and camera says "Nothing
+  downloaded for this day — download the day or an incident first" (no
+  download is started for the user, and a day is not played back from the
+  device for its sound); no downloads folder says "Set a downloads folder in
+  Settings". Asking again for a camera already being analyzed does nothing.
+  There is no export yet, so nothing disables the action while one runs.
+  Not built yet: the app classifiers that put labels (SoundAnalysis on
+  macOS, a model on Windows).
 - **The selected incident (inspector):** its name (Rename; an empty name
   goes back to time and kinds), time span and date, badges, and camera
   group; Locked (locking keeps it: its video is downloaded and nothing about

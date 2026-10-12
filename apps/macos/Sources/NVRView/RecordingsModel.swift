@@ -43,6 +43,9 @@ final class RecordingsModel {
     private(set) var listening: [String: [RecordingCamera]] = [:]
     /// Each listening camera's latest `sound_watch` state and reason.
     private(set) var listenStates: [RecordingCamera: (state: String, reason: String?)] = [:]
+    /// Each camera-day's latest sound analysis (`nv_sound_analyze_day`), by
+    /// camera as asked and the day's start.
+    private(set) var soundAnalyses: [AnalysisKey: SoundAnalysis.Entry] = [:]
     /// Each enabled device's search lane: `idle`, `busy`, `waiting_device`, `ended`.
     private(set) var indexStates: [String: (state: String, pendingDays: Int)] = [:]
     /// Grows with every `recordings_changed` (and enablement change).
@@ -224,6 +227,72 @@ final class RecordingsModel {
                 RecordingsEnablement(
                     device: $0, cameras: enabled[$0] ?? [], listen: listening[$0].flatMap { $0.isEmpty ? nil : $0 })
             })
+    }
+
+    // MARK: Analyzing a day's sound
+
+    struct AnalysisKey: Hashable {
+        var camera: RecordingCamera
+        var day: Int64
+    }
+
+    /// The analysis of a camera's day, if one was asked for.
+    func analysis(_ camera: RecordingCamera, day: Int64) -> SoundAnalysis.Entry? {
+        soundAnalyses[AnalysisKey(camera: camera, day: DeviceTime.dayStart(day))]
+    }
+
+    /// Whether a camera's day is waiting for or being analyzed.
+    func isAnalyzing(_ camera: RecordingCamera, day: Int64) -> Bool { analysis(camera, day: day)?.active == true }
+
+    /// Asks for the sound of these cameras' day to be analyzed from the
+    /// downloaded video (`nv_sound_analyze_day`); progress and the outcome
+    /// come back as `sound_analyze` events. Sets `notice` when nothing can
+    /// be asked.
+    func analyzeSound(of cameras: [RecordingCamera], day: Int64) {
+        guard let core = core() else { return }
+        guard downloadsFolder != nil else {
+            notice = SoundAnalysis.failure(reason: "no_source")
+            return
+        }
+        notice = nil
+        for camera in cameras where !isAnalyzing(camera, day: day) {
+            let key = AnalysisKey(camera: camera, day: DeviceTime.dayStart(day))
+            do throws(CoreStatus) {
+                let answer = try core.soundAnalyzeDay(json: SoundAnalysis.query(camera: camera, day: day))
+                let request = (try? JSONSerialization.jsonObject(with: Data(answer.utf8)) as? [String: Any])?["request"]
+                if soundAnalyses[key]?.active != true, let id = (request as? NSNumber)?.uint64Value {
+                    soundAnalyses[key] = SoundAnalysis.Entry(request: id, state: .queued)
+                }
+            } catch {
+                notice = SoundAnalysis.refusal(error)
+            }
+        }
+        changed()
+    }
+
+    /// Cancels a camera's analysis (`nv_sound_analyze_cancel`).
+    func cancelAnalysis(_ camera: RecordingCamera, day: Int64) {
+        guard let core = core(), let e = analysis(camera, day: day), e.active else { return }
+        do throws(CoreStatus) { try core.soundAnalyzeCancel(e.request) } catch {
+            // Already over: its own event says how.
+            if error != .unknownID { notice = "Could not cancel (status \(error.code))" }
+        }
+    }
+
+    private func applyAnalysis(
+        _ request: UInt64, _ camera: RecordingCamera, _ day: Int64?, _ name: String, _ reason: String?,
+        _ seconds: Int?, _ labels: Int?
+    ) {
+        guard let day, let state = SoundAnalysis.State(rawValue: name) else { return }
+        let key = AnalysisKey(camera: camera, day: DeviceTime.dayStart(day))
+        let entry = SoundAnalysis.fold(
+            soundAnalyses[key], request: request, state: state, reason: reason, seconds: seconds, labels: labels)
+        guard entry != soundAnalyses[key] else { return }
+        soundAnalyses[key] = entry
+        if !entry.active, let message = SoundAnalysis.outcome(entry) { notice = message }
+        // What the analysis stored (loudness, sound labels) is read again.
+        if state == .done { indexRevision += 1 }
+        changed()
     }
 
     // MARK: Listening for sounds
@@ -694,8 +763,8 @@ final class RecordingsModel {
                 listenStates[camera] = (state, reason)
                 changed()
             }
-        case .soundAnalyze:
-            break  // no recorded day can be analyzed yet (no day audio source)
+        case .soundAnalyze(let request, let camera, let day, let state, let reason, let seconds, let labels):
+            applyAnalysis(request, camera, day, state, reason, seconds, labels)
         case .downloadRemoved(let id, let trash, let folder):
             if let folder = board.removed(id, trash: trash, folder: folder) {
                 trasher(URL(fileURLWithPath: folder))

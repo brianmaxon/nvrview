@@ -59,6 +59,37 @@ internal static class RecordingsSoundTests
             T.Check(!new LoudnessLane(a, 60, 0, [null], [null]).Heard);
         });
 
+        T.Run("sound: analyzing a day", () =>
+        {
+            var cam = new RecordingCamera(D, 3);
+            T.Equal("""{"camera":{"device":"d-example","channel":3,"lens":0},"day":86400}""", SoundAnalysis.Query(cam, 86_400));
+            // The words for each way it fails.
+            T.Equal("Nothing downloaded for this day — download the day or an incident first", SoundAnalysis.Failure("no_audio"));
+            T.Equal("Set a downloads folder in Settings", SoundAnalysis.Failure("no_source"));
+            T.Equal("Could not analyze the sound (index)", SoundAnalysis.Failure("index"));
+            T.Equal("Could not analyze the sound", SoundAnalysis.Failure(null));
+            T.Equal("Set a downloads folder in Settings", SoundAnalysis.Refusal(NvrView.Interop.NvStatus.NotConfigured));
+            T.Check(SoundAnalysis.Refusal(NvrView.Interop.NvStatus.Limit).StartsWith("Too many", StringComparison.Ordinal));
+            // Events fold into an entry; a late queued or running never undoes a finished state.
+            AnalysisEntry e = SoundAnalysis.Fold(null, 4, AnalysisState.Queued, null, null, null);
+            T.Check(e.Active && SoundAnalysis.Progress(e) == "Waiting to analyze sound" && SoundAnalysis.Outcome(e) is null);
+            e = SoundAnalysis.Fold(e, 4, AnalysisState.Running, null, null, null);
+            T.Equal("Analyzing sound", SoundAnalysis.Progress(e));
+            AnalysisEntry done = SoundAnalysis.Fold(e, 4, AnalysisState.Done, null, 5_400, 2);
+            T.Check(!done.Active && SoundAnalysis.Progress(done) is null);
+            T.Equal("Analyzed 1 h 30 min of sound; found 2 sounds", SoundAnalysis.Outcome(done));
+            T.Equal(done, SoundAnalysis.Fold(done, 4, AnalysisState.Running, null, null, null));
+            // A new request replaces a finished one.
+            T.Check(SoundAnalysis.Fold(done, 5, AnalysisState.Queued, null, null, null).Active);
+            T.Equal("No sound found in the downloaded video", SoundAnalysis.Outcome(new AnalysisEntry(4, AnalysisState.Done, null, 0, 0)));
+            T.Equal("Analyzed 45 s of sound; found 1 sound", SoundAnalysis.Outcome(new AnalysisEntry(4, AnalysisState.Done, null, 45, 1)));
+            T.Equal("Sound analysis canceled", SoundAnalysis.Outcome(new AnalysisEntry(4, AnalysisState.Canceled)));
+            T.Equal(SoundAnalysis.Failure("no_audio"), SoundAnalysis.Outcome(new AnalysisEntry(4, AnalysisState.Failed, "no_audio")));
+            T.Equal("59 s", SoundAnalysis.Duration(59));
+            T.Equal("12 min", SoundAnalysis.Duration(720));
+            T.Equal("2 h", SoundAnalysis.Duration(7_200));
+        });
+
         T.Run("sound: listening", () =>
         {
             RecordingCamera[] four = [.. Enumerable.Range(0, 4).Select(i => new RecordingCamera(D, i))];

@@ -142,6 +142,19 @@ public sealed class RecordingsBrowser
     /// <summary>The loudness a lane shows (its camera's microphone), if any.</summary>
     public LoudnessLane? LoudnessOf(RecordingCamera camera) => _loudness.GetValueOrDefault(LoudnessScale.Microphone(camera));
 
+    /// <summary>Analyzes the shown day's sound from the downloaded video, for one lane's camera or for all the searched cameras (the lanes).</summary>
+    public void AnalyzeSound(RecordingCamera? camera = null) =>
+        Model.AnalyzeSound(camera is { } c ? [c] : [.. Lanes.Select(l => l.Camera)], Day);
+
+    /// <summary>Cancels a lane's analysis.</summary>
+    public void CancelAnalysis(RecordingCamera camera) => Model.CancelAnalysis(camera, Day);
+
+    /// <summary>A lane's sound analysis while it waits or runs.</summary>
+    public AnalysisEntry? AnalysisOf(RecordingCamera camera) => Model.Analysis(camera, Day) is { Active: true } e ? e : null;
+
+    /// <summary>Whether any lane can still be asked to analyze.</summary>
+    public bool CanAnalyze => Lanes.Any(l => !Model.IsAnalyzing(l.Camera, Day));
+
     /// <summary>
     /// Reads the shown day's loudness lanes when the day, the cameras, the bucket, or the index changed
     /// (<paramref name="force"/>: also when nothing did; the window does so now and then for today, since live

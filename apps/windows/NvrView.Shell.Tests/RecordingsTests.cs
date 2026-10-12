@@ -100,6 +100,87 @@ internal static class RecordingsTests
                 RecordingSupport.FromDeviceInfo(Encoding.UTF8.GetBytes("""{"type":"device_info","device":1}""")));
         });
 
+        // Analyzing a day from the synthetic downloads, as the core does from finished ones: no_source without a
+        // downloads folder, no_audio without a finished download, then heard seconds, a label, and a cancel.
+        T.Run("fake recordings: analyzing a day from downloads", () =>
+        {
+            const long day = 1791590400;
+            var camera = new RecordingCamera(Device, 0);
+            (FakeRecordings Fake, List<RecordingsEvent> Events) Make(bool downloads)
+            {
+                var events = new List<RecordingsEvent>();
+                var fake = new FakeRecordings(json =>
+                {
+                    if (RecordingsEvent.Parse(Encoding.UTF8.GetBytes(json)) is { } e)
+                    {
+                        events.Add(e);
+                    }
+                })
+                { RecordingWorkIsManual = true };
+                IRecordings r = fake;
+                r.RecordingsConfigure(downloads ? """{"downloads_dir":"/downloads"}""" : "{}");
+                r.RecordingsEnable(Device, """{"channels":[{"channel":0},{"channel":1}]}""");
+                r.RecordingsWant($$"""{"cameras":[{{camera.Json}}],"days":[{{day + 100}}],"force":false}""");
+                events.Clear();
+                return (fake, events);
+            }
+            List<AnalysisEntry> Analyze(FakeRecordings fake, List<RecordingsEvent> events)
+            {
+                events.Clear();
+                _ = ((IEditSound)fake).SoundAnalyzeDay(SoundAnalysis.Query(camera, day));
+                fake.CompleteRecordingWork();
+                AnalysisEntry? entry = null;
+                List<AnalysisEntry> all = [];
+                foreach (RecordingsEvent.SoundAnalyze a in events.OfType<RecordingsEvent.SoundAnalyze>())
+                {
+                    entry = SoundAnalysis.Fold(entry, (ulong)a.Request, SoundAnalysis.ParseState(a.State)!.Value, a.Reason, a.Seconds, a.Labels);
+                    all.Add(entry);
+                }
+                return all;
+            }
+
+            (FakeRecordings noSource, List<RecordingsEvent> noSourceEvents) = Make(downloads: false);
+            List<AnalysisEntry> none = Analyze(noSource, noSourceEvents);
+            T.Equal("Queued,Failed", string.Join(",", none.Select(a => a.State)));
+            T.Equal("no_source", none[^1].Reason);
+
+            (FakeRecordings fake, List<RecordingsEvent> events) = Make(downloads: true);
+            IRecordings rec = fake;
+            List<AnalysisEntry> noAudio = Analyze(fake, events);
+            T.Equal("Queued,Failed", string.Join(",", noAudio.Select(a => a.State)));
+            T.Equal("no_audio", noAudio[^1].Reason);
+            string loud = $$"""{"start":{{day}},"end":{{day + 86399}},"bucket_s":3600,"cameras":[{{camera.Json}}]}""";
+            int Heard()
+            {
+                using JsonDocument lanes = JsonDocument.Parse(((IEditSound)fake).RecordingsLoudness(loud));
+                return lanes.RootElement.GetProperty("lanes")[0].GetProperty("peak_db").EnumerateArray().Count(v => v.ValueKind != JsonValueKind.Null);
+            }
+            T.Equal(0, Heard());
+
+            string key;
+            using (JsonDocument doc = JsonDocument.Parse(rec.IncidentsGet($$"""{"start":{{day}},"end":{{day + 86399}}}""")))
+            {
+                key = doc.RootElement.GetProperty("incidents").EnumerateArray()
+                    .First(i => i.GetProperty("cameras")[0].GetProperty("camera").GetProperty("channel").GetInt32() == 0)
+                    .GetProperty("key").GetString()!;
+            }
+            _ = rec.DownloadIncident($$"""{"incident":"{{key}}"}""");
+            // Queued, not finished: still nothing to hear; and a request canceled before the work is never answered.
+            events.Clear();
+            _ = ((IEditSound)fake).SoundAnalyzeDay(SoundAnalysis.Query(camera, day));
+            ulong request = (ulong)events.OfType<RecordingsEvent.SoundAnalyze>().First(a => a.State == "queued").Request;
+            ((IEditSound)fake).SoundAnalyzeCancel(request);
+            T.Equal(NvStatus.UnknownId, StatusOf(() => ((IEditSound)fake).SoundAnalyzeCancel(request)));
+            T.Equal(0, Heard());
+            fake.CompleteRecordingWork();
+            T.Equal("queued,canceled", string.Join(",", events.OfType<RecordingsEvent.SoundAnalyze>().Select(a => a.State)));
+            List<AnalysisEntry> done = Analyze(fake, events);
+            T.Equal("Queued,Running,Done", string.Join(",", done.Select(a => a.State)));
+            T.Check(done[^1].Seconds > 0 && done[^1].Labels == 1);
+            T.Check(Heard() > 0);
+            T.Check(SoundAnalysis.Outcome(done[^1])!.StartsWith("Analyzed ", StringComparison.Ordinal));
+        });
+
         T.Run("fake recordings: from configure to the Recycle Bin", () =>
         {
             var events = new List<RecordingsEvent>();
@@ -190,6 +271,7 @@ internal static class RecordingsTests
             fake.CompleteRecordingWork();
             T.Equal("queued,running,done", string.Join(",", events.OfType<RecordingsEvent.Download>().Select(d => d.Progress.State)));
             T.Check(events.OfType<RecordingsEvent.Download>().Last().Progress.Cameras[0].Output is not null);
+            bool downloadedCam1 = events.OfType<RecordingsEvent.Download>().Last().Progress.Cameras.Any(c => c.Camera == new RecordingCamera(Device, 1));
             T.Equal(id, T.NotNull(DownloadProgress.ParseList(rec.DownloadsGet()))[0].Download);
             // Edit lists over the finished download, and sound (minor 8).
             IEditSound sound = fake;
@@ -232,7 +314,8 @@ internal static class RecordingsTests
             }
             events.Clear();
             fake.CompleteRecordingWork();
-            T.Equal("running,done", string.Join(",", events.OfType<RecordingsEvent.SoundAnalyze>().Where(a => a.Request == (long)request).Select(a => a.State)));
+            // Analyzed from the finished download when it holds that camera.
+            T.Equal(downloadedCam1 ? "running,done" : "failed", string.Join(",", events.OfType<RecordingsEvent.SoundAnalyze>().Where(a => a.Request == (long)request).Select(a => a.State)));
             T.Equal(NvStatus.UnknownId, StatusOf(() => sound.SoundAnalyzeCancel(request)));
             T.Equal(NvStatus.UnknownId, StatusOf(() => sound.GetTileLoudness(987654321, 8)));
 
