@@ -249,6 +249,7 @@ public final class FakeCore: CoreAPI {
     let updates = FakeUpdateState()
     let recordings = FakeRecordingsState()
     let playbackWorld = FakePlaybackState()
+    let captureWorld = FakeCaptureState()
     private let sink: any CoreSink
     private let world = Mutex(World())
     private let eventLock = NSLock()
@@ -889,7 +890,13 @@ public final class FakeCore: CoreAPI {
 
     // MARK: Playback tiles (FakePlayback.swift)
 
-    /// A new ID from the space tiles and playbacks share.
+    /// A live tile's device, channel, and whether its camera sends audio
+    /// (FakeCapture.swift).
+    func captureSource(tile: UInt64) -> (device: UInt64, channel: UInt8, hasAudio: Bool)? {
+        world.withLock { w in w.tiles[tile].map { ($0.device, $0.channel, $0.hasAudio) } }
+    }
+
+    /// A new ID from the space tiles, playbacks, and recordings share.
     func newID() throws(CoreStatus) -> UInt64 {
         try world.withLock { w throws(CoreStatus) in
             if w.freed { throw .closed }

@@ -18,6 +18,15 @@ public final class CCore: CoreAPI {
     }
     private let handle: Mutex<Handle>
 
+    /// The handle `recordAudioEncoded` uses: valid until `nv_core_free`
+    /// returns (an encoder may answer while the core finalizes during
+    /// `free`), and the encoders handed to the core, released only then.
+    private struct Capture: @unchecked Sendable {
+        var core: OpaquePointer?
+        var encoders: [Unmanaged<EncoderBox>] = []
+    }
+    private let capture: Mutex<Capture>
+
     /// `nv_abi_version` and the header's `NV_ABI_VERSION` must agree
     /// (docs/FFI.md Versioning): checked here, at startup.
     /// The minor version may be newer than the header's, never older (the
@@ -50,6 +59,7 @@ public final class CCore: CoreAPI {
             throw status.isOK ? .internal : status
         }
         handle = Mutex(Handle(core: out, context: context))
+        capture = Mutex(Capture(core: out))
     }
 
     deinit { free() }
@@ -466,6 +476,78 @@ public final class CCore: CoreAPI {
         return TileLoudness(startSeconds: start, peak: Array(peak.prefix(count)), rms: Array(rms.prefix(count)))
     }
 
+    // MARK: Capture (minor 9)
+
+    public func captureConfigure(json: String) throws(CoreStatus) {
+        try check(nv_capture_configure(try core(), json))
+    }
+
+    public func captureSetEncoder(_ encoder: (any CaptureEncoder)?) throws(CoreStatus) {
+        let c = try core()
+        guard let encoder else {
+            try check(nv_capture_set_encoder(c, nil))
+            return
+        }
+        // The core may call the encoder until it is freed: kept until then.
+        let box = Unmanaged.passRetained(EncoderBox(encoder))
+        capture.withLock { $0.encoders.append(box) }
+        var e = NvAudioEncoder(
+            context: box.toOpaque(), open: encoderOpen, encode: encoderEncode, close: encoderClose)
+        try check(nv_capture_set_encoder(c, &e))
+    }
+
+    public func recordAudioEncoded(recording: UInt64, track: UInt32, unit: UnsafeRawBufferPointer) -> CoreStatus {
+        // Held across the call so `free` cannot finish underneath it; the
+        // call never blocks.
+        capture.withLock { s in
+            guard let c = s.core else { return .closed }
+            return CoreStatus(
+                nv_record_audio_encoded(
+                    c, recording, track, unit.baseAddress?.assumingMemoryBound(to: UInt8.self), unit.count))
+        }
+    }
+
+    public func recordStart(_ request: RecordRequest) throws(RecordStartError) -> RecordingStarted {
+        let c: OpaquePointer
+        do throws(CoreStatus) {
+            c = try core()
+        } catch {
+            throw RecordStartError(error)
+        }
+        let json = request.json
+        // Room for the path; an answer that does not fit stops that
+        // recording again, so starting once more is right.
+        var capacity = 4096
+        for _ in 0..<4 {
+            var buffer = [CChar](repeating: 0, count: capacity)
+            var length = 0
+            let status = CoreStatus(
+                buffer.withUnsafeMutableBufferPointer { nv_record_start(c, json, $0.baseAddress, $0.count, &length) })
+            if status == .bufferTooSmall {
+                capacity = length + 1
+                continue
+            }
+            let text =
+                length < capacity
+                ? buffer.withUnsafeBufferPointer { b in
+                    String(decoding: UnsafeRawBufferPointer(start: b.baseAddress, count: length), as: UTF8.self)
+                } : ""
+            if !status.isOK { throw RecordStartError(status, answer: text) }
+            guard let started = RecordingStarted.parse(text) else { throw RecordStartError(.internal) }
+            return started
+        }
+        throw RecordStartError(.internal)
+    }
+
+    public func recordStop(_ recording: UInt64) throws(CoreStatus) {
+        try check(nv_record_stop(try core(), recording))
+    }
+
+    public func recordStatus() throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_record_status(c, $0, $1, $2) }
+    }
+
     // MARK: Recorded playback (minor 6)
 
     public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {
@@ -562,5 +644,45 @@ public final class CCore: CoreAPI {
         guard let core = taken.core else { return }
         nv_core_free(core)  // joins the core's threads; no callback runs after it
         taken.context?.release()
+        let encoders = capture.withLock { s -> [Unmanaged<EncoderBox>] in
+            s.core = nil
+            defer { s.encoders = [] }
+            return s.encoders
+        }
+        for e in encoders { e.release() }
     }
+}
+
+// MARK: The encoder's C functions
+
+/// A `CaptureEncoder` behind `NvAudioEncoder.context`.
+final class EncoderBox: Sendable {
+    let encoder: any CaptureEncoder
+    init(_ encoder: any CaptureEncoder) { self.encoder = encoder }
+
+    static func from(_ context: UnsafeMutableRawPointer?) -> (any CaptureEncoder)? {
+        context.map { Unmanaged<EncoderBox>.fromOpaque($0).takeUnretainedValue().encoder }
+    }
+}
+
+private let encoderOpen: NvEncoderOpen = {
+    context, recording, track, sampleRate, channels, bitRate, asc, ascCap, ascLength, priming in
+    guard let encoder = EncoderBox.from(context), let asc, let ascLength, let priming,
+        let opened = encoder.open(
+            recording: recording, track: track, sampleRate: sampleRate, channels: channels, bitRate: bitRate),
+        !opened.audioSpecificConfig.isEmpty, opened.audioSpecificConfig.count <= ascCap
+    else { return false }
+    for (i, b) in opened.audioSpecificConfig.enumerated() { asc[i] = b }
+    ascLength.pointee = opened.audioSpecificConfig.count
+    priming.pointee = opened.primingFrames
+    return true
+}
+
+private let encoderEncode: NvEncoderEncode = { context, recording, track, pcm, frames in
+    guard let encoder = EncoderBox.from(context), let pcm else { return }
+    encoder.encode(recording: recording, track: track, pcm: UnsafeBufferPointer(start: pcm, count: frames))
+}
+
+private let encoderClose: NvEncoderClose = { context, recording, track, flush in
+    EncoderBox.from(context)?.close(recording: recording, track: track, flush: flush)
 }

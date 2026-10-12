@@ -505,29 +505,38 @@ NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open); /* mi
 
 ## Capture
 
-> **Proposed, not yet implemented.** The contract for
-> [CAPTURE.md](CAPTURE.md) (live recordings and call recordings; pictures
-> are rendered and written by the apps and need nothing here). It takes the
-> next free minor when it lands ("Versioning").
+> **Minor 9.** The contract for [CAPTURE.md](CAPTURE.md) (live recordings
+> and call recordings; pictures are rendered and written by the apps and
+> need nothing here). The core side is `viewer_core::capture_owner` (K4);
+> the C functions wrap it one to one (F5). "Clarifications from the
+> implementation (F5)", after the events, lists what wrapping it settled.
+> The apps' AAC encoders and their use of these calls come with M5 and W5.
 
 ```c
-NvStatus nv_capture_configure(NvCore *core, const char *json);
+#define NV_ASC_MAX 64
+
+typedef bool (*NvEncoderOpen)(void *context, uint64_t recording, uint32_t track,
+                              uint32_t sample_rate, uint32_t channels, uint32_t bit_rate,
+                              uint8_t *asc, size_t asc_cap, size_t *asc_len,
+                              uint32_t *priming_frames);
+typedef void (*NvEncoderEncode)(void *context, uint64_t recording, uint32_t track,
+                                const float *pcm, size_t frames);
+typedef void (*NvEncoderClose)(void *context, uint64_t recording, uint32_t track, bool flush);
 
 typedef struct NvAudioEncoder {
     void *context;
     /* Opens an AAC-LC encoder for one track of a recording. Writes the
-     * AudioSpecificConfig into asc (asc_len bytes, at most asc_cap) and the
-     * encoder's priming in frames. Returns false if it cannot. */
-    bool (*open)(void *context, uint64_t recording, uint32_t track,
-                 uint32_t sample_rate, uint32_t channels, uint32_t bit_rate,
-                 uint8_t *asc, size_t asc_cap, size_t *asc_len,
-                 uint32_t *priming_frames);
+     * AudioSpecificConfig into asc (asc_len bytes, 1 to asc_cap, which is
+     * NV_ASC_MAX) and the encoder's priming in frames. Returns false if it
+     * cannot. */
+    NvEncoderOpen open;
     /* One frame of 1024 mono float samples, on the recorder's thread. */
-    void (*encode)(void *context, uint64_t recording, uint32_t track,
-                   const float *pcm, size_t frames);
+    NvEncoderEncode encode;
     /* Ends the track; with flush, the encoder's remaining output first. */
-    void (*close)(void *context, uint64_t recording, uint32_t track, bool flush);
+    NvEncoderClose close;
 } NvAudioEncoder;
+
+NvStatus nv_capture_configure(NvCore *core, const char *json);
 
 NvStatus nv_capture_set_encoder(NvCore *core, const NvAudioEncoder *encoder);
 NvStatus nv_record_audio_encoded(NvCore *core, uint64_t recording, uint32_t track,
@@ -616,6 +625,46 @@ NvStatus nv_record_status(NvCore *core, char *out, size_t cap, size_t *len);
   `max_size`, `disk_low`, `device_removed`, `login_failed`,
   `core_shutdown`, `write_failed`, `encoder_failed`, `no_video`,
   `format_changed`, `long_gap`.
+
+### Clarifications from the implementation (F5)
+
+- **Configure first.** Until `nv_capture_configure` succeeds,
+  `nv_record_start` answers `NV_ERR_NOT_CONFIGURED`. `live_dir` must be
+  absolute; the core creates it.
+- **Free space** is read by the core itself (`statvfs`, or
+  `GetDiskFreeSpaceExW` on Windows); there is no C hook for it.
+- **`utc_offset_s`** in a live start request is how an app gets its local
+  time into the file name; the core has no time zone of its own. Apps pass
+  the computer's current offset.
+- **Status mapping.** `CaptureError` maps one to one: `InvalidArgument`
+  (bad JSON or values, a relative `live_dir` or call `file`, or a call
+  from inside a callback), `UnknownId`, `Closed`, `Limit`,
+  `NotConfigured`, `Internal`.
+- **The limit answer.** On `NV_ERR_LIMIT`, `nv_record_start` writes
+  `{"limit": ...}` to `out` when it fits and sets `*len` either way (a
+  limit is reported even with a zero `cap`). For every other error `*len`
+  is 0.
+- **An answer that does not fit.** The recording has started by the time
+  its answer is known, so when the answer does not fit the core stops it
+  again and returns `NV_ERR_BUFFER_TOO_SMALL` with `*len` set; its events,
+  for an ID never handed out, may follow (ignore them like any unknown ID),
+  and starting again with a larger buffer is right. Pass a buffer of a few
+  KiB (the bindings use 4096) so this does not happen.
+- **The encoder** is checked when installed: a `NULL` function pointer is
+  `NV_ERR_INVALID_ARGUMENT`. Its functions and context stay in use until
+  `nv_core_free` returns (a recording keeps the encoder it started with,
+  and recordings finalize during `nv_core_free`), so the bindings keep
+  every encoder they install until then. `open` writes into a buffer of
+  `NV_ASC_MAX` bytes; an `asc_len` of 0 or above `asc_cap` refuses the
+  track. `encode` always gets 1024 frames.
+- **`nv_record_audio_encoded`** is allowed inside the encoder's own
+  functions (no inside-callback refusal) and from any other thread; it
+  takes a unit of 1 to 8192 bytes. A unit for a recording that has ended
+  but is not yet forgotten is accepted and ignored; `NV_ERR_UNKNOWN_ID`
+  is an unknown recording.
+- **Stopping** a recording that is already ending does nothing (`NV_OK`);
+  `NV_ERR_UNKNOWN_ID` is an unknown one. `nv_record_status` may be called
+  from any thread outside callbacks.
 
 The `channels` event gains, without an ABI change, from each channel's
 `Support` item: `"talk": true` (`ipcAudioTalk` 1), `"doorbell": true`
@@ -1233,12 +1282,12 @@ symbol at all, so a bound app checks first):
 | 6 | recorded playback (see "Recorded playback"): `nv_playback_open`, `nv_playback_add_camera`, `nv_playback_remove_camera`, `nv_playback_play`, `nv_playback_pause`, `nv_playback_seek`, `nv_playback_set_rate`, `nv_playback_set_offset`, `nv_playback_position`, `nv_playback_status`, `nv_playback_close`, `NvSeekMode`, `NvPlaybackState`, and the `playback_state`, `playback_camera`, `playback_seek`, and `playback_closed` events |
 | 7 | a month's calendar alone: `months` in `nv_recordings_want` and the `recordings_month_failed` event (see "Recordings"); no declaration changed |
 | 8 | edit lists and sound (see "Edit lists and sound (minor 8)"): `nv_edit_compute`, `nv_sound_watch`, `nv_recordings_loudness`, `nv_sound_labels_put`, `nv_sound_analyze_day`, `nv_sound_analyze_cancel`, `nv_tile_loudness`, and the `sound_watch` and `sound_analyze` events |
+| 9 | capture (see "Capture"): `nv_capture_configure`, `nv_capture_set_encoder`, `nv_record_audio_encoded`, `nv_record_start`, `nv_record_stop`, `nv_record_status`, `NvAudioEncoder` (and its `NvEncoderOpen`, `NvEncoderEncode`, `NvEncoderClose`), `NV_ASC_MAX`, and the `recording` event |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Export (F4) and stepping a playback (`nv_playback_step`)
-take the next free minors. Capture ("Capture") and camera motion ("Camera motion
-(PTZ)") are proposed and take the next free minors when they land, each its
-own.
+take the next free minors. Camera motion ("Camera motion (PTZ)") is
+proposed and takes the next free minor when it lands.
 
 ## Builds
 

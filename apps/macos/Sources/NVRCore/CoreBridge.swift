@@ -333,6 +333,11 @@ public final class CoreBridge: Sendable {
     /// `shutdown`.
     public func recordings() throws(CoreStatus) -> any CoreAPI { try live() }
 
+    /// The core, for the capture calls (minor 9; docs/FFI.md "Capture"):
+    /// they never wait on a device. Not from inside a callback, except
+    /// `recordAudioEncoded`. `.closed` after `shutdown`.
+    public func capture() throws(CoreStatus) -> any CoreAPI { try live() }
+
     /// `nv_clock_now_ns`.
     public func clockNowNanos() -> UInt64 { core.withLock { $0 }?.clockNowNanos() ?? HostClock.nowNanos() }
 

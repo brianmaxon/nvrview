@@ -53,7 +53,7 @@ public enum NvStatus
     [CName("NV_ERR_UNKNOWN_ID")] UnknownId = -2,
     /// <summary>The core is shutting down.</summary>
     [CName("NV_ERR_CLOSED")] Closed = -3,
-    /// <summary>Too many devices, tiles, layouts, or queued requests.</summary>
+    /// <summary>Too many devices, tiles, layouts, queued requests, or recordings, or too little disk space for a recording.</summary>
     [CName("NV_ERR_LIMIT")] Limit = -4,
     /// <summary>Internal error.</summary>
     [CName("NV_ERR_INTERNAL")] Internal = -5,
@@ -63,7 +63,7 @@ public enum NvStatus
     [CName("NV_ERR_NOT_PERMITTED")] NotPermitted = -7,
     /// <summary>The device's backend cannot do this (minor 5).</summary>
     [CName("NV_ERR_UNSUPPORTED")] Unsupported = -8,
-    /// <summary>Recordings are not configured, or there is no downloads folder (minor 5).</summary>
+    /// <summary>Recordings are not configured, or there is no downloads folder (minor 5); capture is not configured, or a call recording has no encoder (minor 9).</summary>
     [CName("NV_ERR_NOT_CONFIGURED")] NotConfigured = -9,
     /// <summary>Accepted; the answer arrives as an event (nv_thumbnail_get; minor 5).</summary>
     [CName("NV_PENDING")] Pending = 1,
@@ -363,6 +363,24 @@ public unsafe struct NvCallbacks
     public delegate* unmanaged[Cdecl]<void*, ulong, NvAudioBlock*, void> OnAudioTap;
 }
 
+/// <summary>
+/// The app's AAC encoder (minor 9; docs/FFI.md, "Capture"), copied by
+/// nv_capture_set_encoder. Called on the recorders' threads; the functions
+/// and context stay in use until nv_core_free returns.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct NvAudioEncoder
+{
+    /// <summary>Passed back to every function.</summary>
+    public void* Context;
+    /// <summary>NvEncoderOpen: (context, recording, track, sample_rate, channels, bit_rate, asc, asc_cap, asc_len, priming_frames) -> bool.</summary>
+    public delegate* unmanaged[Cdecl]<void*, ulong, uint, uint, uint, uint, byte*, nuint, nuint*, uint*, byte> Open;
+    /// <summary>NvEncoderEncode: (context, recording, track, pcm, frames); 1024 mono float samples.</summary>
+    public delegate* unmanaged[Cdecl]<void*, ulong, uint, float*, nuint, void> Encode;
+    /// <summary>NvEncoderClose: (context, recording, track, flush).</summary>
+    public delegate* unmanaged[Cdecl]<void*, ulong, uint, byte, void> Close;
+}
+
 /// <summary>Grid layout of one tile: its cell, where to draw, and what to sample.</summary>
 [StructLayout(LayoutKind.Sequential)]
 public struct NvTileLayout
@@ -389,7 +407,10 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 8;
+    public const uint AbiMinor = 9;
+
+    /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
+    public const int AscMax = 64;
 
     /// <summary>The library's ABI version.</summary>
     [LibraryImport(Library)]
@@ -745,6 +766,38 @@ public static unsafe partial class NvNative
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_tile_loudness(
         nint core, ulong tile, byte* peak, byte* rms, nuint cap, long* startSeconds, nuint* len);
+
+    // Capture (minor 9; docs/FFI.md, "Capture").
+
+    /// <summary>The live recordings' folder and limits (JSON; minor 9).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_capture_configure(nint core, string json);
+
+    /// <summary>Installs (copied) or removes (null) the app's AAC encoder (minor 9).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_capture_set_encoder(nint core, NvAudioEncoder* encoder);
+
+    /// <summary>One raw AAC access unit answering the encoder (minor 9); any thread, also inside the encoder's functions.</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_record_audio_encoded(nint core, ulong recording, uint track, byte* data, nuint len);
+
+    /// <summary>Starts a live or call recording (JSON; minor 9). NV_ERR_LIMIT answers which limit.</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_record_start(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Stops and finalizes a recording (minor 9).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_record_stop(nint core, ulong recording);
+
+    /// <summary>The running recordings (JSON; minor 9).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_record_status(nint core, byte* output, nuint cap, nuint* len);
 
     // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
 

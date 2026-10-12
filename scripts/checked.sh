@@ -7,6 +7,9 @@
 #   scripts/checked.sh --record mac|windows SECONDS "STEPS"
 #       Writes a stamp for HEAD's tree. Called by scripts/check.sh and
 #       scripts/windows-check.sh, only after a full pass on a clean tree.
+#       The kind windows-reused is written by scripts/merge-branch.sh for a
+#       merge accepted on a branch's earlier Windows result; --windows and
+#       scripts/release.sh never count it. Rules: scripts/stamps-lib.sh.
 #
 # A stamp is the file <git common dir>/nvrview-checks/<tree hash>.mac or
 # .windows (inside the git directory, so never committed). It is keyed by the
@@ -20,7 +23,7 @@ dir="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks"
 
 if [ "${1:-}" = "--record" ]; then
   kind="${2:?usage: $0 --record mac|windows SECONDS STEPS}"
-  case "$kind" in mac | windows) ;; *) echo "unknown stamp kind: $kind" >&2; exit 2 ;; esac
+  case "$kind" in mac | windows | windows-reused) ;; *) echo "unknown stamp kind: $kind" >&2; exit 2 ;; esac
   mkdir -p "$dir"
   {
     printf 'date=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

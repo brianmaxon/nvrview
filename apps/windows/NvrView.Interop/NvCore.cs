@@ -9,11 +9,18 @@ using System.Text;
 namespace NvrView.Interop;
 
 /// <summary>A call into the core returned an error status.</summary>
-public sealed class NvException(NvStatus status, string function)
-    : Exception($"{function} returned {status}")
+public sealed class NvException(NvStatus status, string function, string? detail = null)
+    : Exception($"{function} returned {status}" + (detail is null ? "" : $" ({detail})"))
 {
     /// <summary>The status the core returned.</summary>
     public NvStatus Status { get; } = status;
+
+    /// <summary>
+    /// What the answer said about the error, when it says anything: for
+    /// <see cref="NvStatus.Limit"/> from <c>nv_record_start</c>, which limit
+    /// (<c>live</c>, <c>calls</c>, <c>main_streams</c>, <c>disk_low</c>).
+    /// </summary>
+    public string? Detail { get; } = detail;
 
     /// <summary>The C function that returned it.</summary>
     public string Function { get; } = function;
@@ -107,14 +114,16 @@ internal sealed class NvCoreHandle : SafeHandle
         nint core = handle;
         NvNative.nv_core_free(core);
         Volatile.Write(ref _dispatcher.Raw, 0);
-        // No callback runs after nv_core_free returns, so the context may go.
+        // No callback runs after nv_core_free returns, so the context may go,
+        // and so may the encoders the core was given.
         _context.Free();
+        _dispatcher.FreeEncoders();
         return true;
     }
 }
 
 /// <summary>The object behind every callback's context pointer.</summary>
-internal sealed unsafe class Dispatcher(NvCoreCallbacks callbacks)
+internal sealed unsafe partial class Dispatcher(NvCoreCallbacks callbacks)
 {
     [ThreadStatic] private static int t_depth;
 
@@ -143,7 +152,7 @@ internal sealed unsafe class Dispatcher(NvCoreCallbacks callbacks)
         }
     }
 
-    private void Report(Exception e)
+    internal void Report(Exception e)
     {
         Interlocked.CompareExchange(ref FirstException, e, null);
         Interlocked.Increment(ref ExceptionCount);

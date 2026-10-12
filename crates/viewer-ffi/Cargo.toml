@@ -22,6 +22,8 @@ viewer-core = { path = "../viewer-core" }
 # Recording-store times and answers for the recordings functions' tests.
 bc-protocol = { path = "../bc-protocol" }
 mock-nvr = { path = "../../tools/mock-nvr" }
+# The MP4 box reader of its tests, for the capture functions' files.
+mp4-remux = { path = "../mp4" }
 simtime = { path = "../../tools/simtime" }
 tempfile = "3"
 # Signed update folders for the update functions' tests.
