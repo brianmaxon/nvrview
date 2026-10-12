@@ -61,6 +61,8 @@ final class AppModel {
     @ObservationIgnored private(set) var calls: DoorbellCalls!
     /// Live and call recordings (docs/CAPTURE.md "Live recording").
     @ObservationIgnored private(set) var capture: CaptureController!
+    /// Camera motion: the user's own pan, tilt, lens and preset controls.
+    @ObservationIgnored private(set) var ptz: PTZModel!
     @ObservationIgnored private let taps = TapRouter()
     /// Who wants to hear of every detection (the windows' insets).
     @ObservationIgnored private var detectionListeners: [UUID: (DetectionEvent, CameraRef, Date) -> Void] = [:]
@@ -388,6 +390,7 @@ final class AppModel {
         recordings.app = self
         calls = DoorbellCalls(model: self, services: callServices ?? .system(player: { [weak self] in self?.player }), taps: taps)
         capture = CaptureController(model: self)
+        ptz = PTZModel(model: self)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
             return info.tiers.contains("extern") && !info.isMultiLens
@@ -396,6 +399,7 @@ final class AppModel {
         leases.onTileChange = { [weak self] camera, tile in
             guard let self else { return }
             if let tile { try? bridge.setTileAudio(tile, audible: audible.contains(camera)) }
+            if tile == nil { ptz.cameraClosed(camera) }
             calls.tileChanged(camera)
         }
     }
@@ -592,6 +596,40 @@ final class AppModel {
         }
     }
 
+    /// Lets (or stops letting) an automation move a camera: `auto_correction`
+    /// or a local API client's name. Camera motion control: off for every
+    /// camera until the user allows it here; passed to the core at once and
+    /// after every connection. The user's own controls never need it.
+    func setMotionGrant(_ camera: CameraRef, client: String, _ on: Bool) {
+        let camera = camera.firstLens
+        updateOptions(camera) { o in
+            o.motionGrants.removeAll { $0 == client }
+            if on { o.motionGrants.append(client) }
+        }
+        logEvent("Motion control \(on ? "allowed" : "turned off") for \(client): channel \(camera.channel + 1)")
+        if let id = runtime(camera.device)?.deviceID, (0...255).contains(camera.channel) {
+            try? bridge.motionGrant(device: id, channel: UInt8(camera.channel), client: client, granted: on)
+        }
+    }
+
+    /// Passes the user's automation grants for a device's cameras to the
+    /// core (it keeps them for this run only).
+    private func applyMotionGrants(_ key: String) {
+        guard let id = runtime(key)?.deviceID else { return }
+        for o in cameraSettings where o.camera.device == key && (0...255).contains(o.camera.channel) {
+            for client in o.motionGrants {
+                try? bridge.motionGrant(device: id, channel: UInt8(o.camera.channel), client: client, granted: true)
+            }
+        }
+    }
+
+    /// Whether a camera can be moved at all (either lens), for Settings.
+    func canMove(_ camera: CameraRef) -> Bool {
+        guard let info = channelInfo(camera.firstLens) else { return false }
+        let lenses = max(info.lenses, 1)
+        return (0..<lenses).contains { info.ptz(lens: $0).panTilt || info.ptz(lens: $0).presets }
+    }
+
     /// Passes the user's talk-back permissions for a device's doorbells to
     /// the core (it keeps them for this run only).
     private func applyTalkPermissions(_ key: String) {
@@ -638,6 +676,7 @@ final class AppModel {
                 adoptCoreKey(coreKey, at: i)
             }
             applyTalkPermissions(devices[i].key)
+            applyMotionGrants(devices[i].key)
             leases.reopen(device: devices[i].key)
         } catch {
             devices[i].link = DeviceLink(state: .other("cannot add (status \(error.code))"), since: Self.now)
@@ -1039,6 +1078,8 @@ final class AppModel {
             }
         case .tileTier(let tile, let tier, .failed, _, let reason):
             leases.tierFailed(tile: tile, tier: tier, reason: reason)
+        case .ptz(let e):
+            ptz.handle(e)
         case .talk(let t):
             calls.talkEvent(t)
         case .discoveryStarted, .discovered, .discoveryDone:
@@ -1178,6 +1219,10 @@ struct CameraOptions: Codable, Equatable, Sendable {
     var unmuteOnRing = false
     /// A doorbell: talk-back allowed (camera motion control; off by default).
     var allowTalk = false
+    /// Automations (`auto_correction`, a local API client) the user let move
+    /// this camera (camera motion control; none by default). The user's own
+    /// pan, tilt, lens and preset controls need no grant.
+    var motionGrants: [String] = []
     /// A fisheye camera: how it is mounted (docs/UX.md "Fisheye cameras").
     var fisheyeMount = FisheyeMount.ceiling
     /// Where its calls open: true in their own window, false in the insets,
@@ -1198,7 +1243,9 @@ struct CameraOptions: Codable, Equatable, Sendable {
         self.fisheyeMount = fisheyeMount
     }
 
-    private enum CodingKeys: String, CodingKey { case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount, callWindow }
+    private enum CodingKeys: String, CodingKey {
+        case camera, entrance, unmuteOnRing, allowTalk, fisheyeMount, callWindow, motionGrants
+    }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1206,9 +1253,12 @@ struct CameraOptions: Codable, Equatable, Sendable {
         entrance = try c.decodeIfPresent(Bool.self, forKey: .entrance) ?? false
         unmuteOnRing = try c.decodeIfPresent(Bool.self, forKey: .unmuteOnRing) ?? false
         allowTalk = try c.decodeIfPresent(Bool.self, forKey: .allowTalk) ?? false
+        motionGrants = try c.decodeIfPresent([String].self, forKey: .motionGrants) ?? []
         fisheyeMount = (try? c.decodeIfPresent(FisheyeMount.self, forKey: .fisheyeMount)) ?? .ceiling
         callWindow = try c.decodeIfPresent(Bool.self, forKey: .callWindow)
     }
 
-    var isDefault: Bool { !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling && callWindow == nil }
+    var isDefault: Bool {
+        !entrance && !unmuteOnRing && !allowTalk && fisheyeMount == .ceiling && callWindow == nil && motionGrants.isEmpty
+    }
 }

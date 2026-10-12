@@ -398,14 +398,10 @@ fn edit_lists_and_sound_through_the_c_interface() {
             .to_string()),
             Err(NvStatus::NV_ERR_INVALID_ARGUMENT)
         );
-        // Trimming and the trim kind belong to export.
-        assert_eq!(
-            bad(&json!({"kind": "follow", "download": id, "in_ms": 1}).to_string()),
-            Err(NvStatus::NV_ERR_UNSUPPORTED)
-        );
+        // The trim kind needs its points (ffi_export.rs covers export).
         assert_eq!(
             bad(&json!({"kind": "trim", "download": id}).to_string()),
-            Err(NvStatus::NV_ERR_UNSUPPORTED)
+            Err(NvStatus::NV_ERR_INVALID_ARGUMENT)
         );
         // A NULL length, request, and core.
         assert_eq!(

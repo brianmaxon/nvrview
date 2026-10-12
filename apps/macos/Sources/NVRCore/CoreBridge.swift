@@ -327,6 +327,39 @@ public final class CoreBridge: Sendable {
         try live().talkSetConversation(tile.id, open: open)
     }
 
+    // MARK: Camera motion (minor 11)
+
+    /// `nv_ptz_info` for the tile's camera. It waits for the camera (up to
+    /// 20 s): never on the main thread.
+    public func ptzInfo(_ tile: CoreTile) throws(CoreStatus) -> PTZInfo {
+        let json = try live().ptzInfo(tile: tile.id)
+        guard let info = PTZInfo.parse(json) else { throw .internal }
+        return info
+    }
+
+    /// `nv_ptz_move`: starts a move, or renews it (call again at least
+    /// every 500 ms while the control is held).
+    public func ptzMove(_ tile: CoreTile, _ direction: PTZDirection, speed: Int) throws(CoreStatus) {
+        try live().ptzMove(tile.id, direction: direction, speed: speed)
+    }
+
+    /// `nv_ptz_stop`.
+    public func ptzStop(_ tile: CoreTile) throws(CoreStatus) { try live().ptzStop(tile.id) }
+
+    /// `nv_ptz_lens`: an absolute position, clamped by the core to the range.
+    public func ptzLens(_ tile: CoreTile, _ axis: PTZLensAxis, position: Int) throws(CoreStatus) {
+        try live().ptzLens(tile.id, axis: axis, position: position)
+    }
+
+    /// `nv_ptz_preset`: recalls a preset (recall only).
+    public func ptzPreset(_ tile: CoreTile, id: Int) throws(CoreStatus) { try live().ptzPreset(tile.id, id: id) }
+
+    /// `nv_motion_grant`: lets an automation move one channel (passed again
+    /// after each `addDevice`; the core keeps grants for this run only).
+    public func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus) {
+        try live().motionGrant(device: device, channel: channel, client: client, granted: granted)
+    }
+
     /// The core, for the recordings calls (minor 5; docs/FFI-RECORDINGS.md):
     /// they answer from memory and never wait on a device, so the main
     /// thread may make them. Not from inside a callback. `.closed` after

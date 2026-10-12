@@ -136,7 +136,7 @@ fn abi_version() {
     assert_eq!(nv_abi_version(), NV_ABI_VERSION);
     assert_eq!(NV_ABI_VERSION, 3);
     assert_eq!(nv_abi_minor(), NV_ABI_MINOR);
-    assert_eq!(NV_ABI_MINOR, 9);
+    assert_eq!(NV_ABI_MINOR, 12);
 }
 
 #[test]
@@ -720,6 +720,203 @@ fn talk_back_through_the_c_interface() {
             .iter()
             .any(|j| j.contains("\"sent_ms\":1024") && j.contains("\"tail_ms\":1536"))
     );
+    assert!(!ctx.bad.load(Ordering::SeqCst));
+    // SAFETY: live core, freed once.
+    unsafe { nv_core_free(core) };
+}
+
+#[test]
+fn camera_motion_through_the_c_interface() {
+    use mock_nvr::ptz::PtzCamera;
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/synthetic/h264-basic.h264");
+    let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+    cfg.channels = 3;
+    cfg.ptz.insert(1, PtzCamera::pan_tilt_zoom(2));
+    cfg.ptz.insert(2, PtzCamera::lens_only());
+    let nvr = mock_nvr::spawn(cfg).unwrap();
+    let ctx = leaked_ctx();
+    let mut core: *mut NvCore = ptr::null_mut();
+    // SAFETY: valid callbacks and out pointer; `ctx` outlives the core.
+    assert_eq!(
+        unsafe { nv_core_new(ptr::null(), callbacks(ctx), &mut core) },
+        NvStatus::NV_OK
+    );
+    ctx.core.store(core, Ordering::SeqCst);
+    let host = CString::new("127.0.0.1").unwrap();
+    let user = CString::new("example-user").unwrap();
+    let password = CString::new("example-password").unwrap();
+    let (mut dev, mut pan, mut lens) = (0u64, 0u64, 0u64);
+    let moving = || nvr.ptz_state(1).unwrap().moving.is_some();
+    let ptz_event = |action: &str, state: &str| {
+        let (a, s) = (
+            format!("\"action\":\"{action}\""),
+            format!("\"state\":\"{state}\""),
+        );
+        ctx.json
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|j| j.starts_with("{\"type\":\"ptz\"") && j.contains(&a) && j.contains(&s))
+    };
+    let (left, sideways) = (
+        CString::new("left").unwrap(),
+        CString::new("sideways").unwrap(),
+    );
+    let (zoom, focus) = (
+        CString::new("zoom").unwrap(),
+        CString::new("focus").unwrap(),
+    );
+    // SAFETY: live core, NUL-terminated strings, valid pointers.
+    unsafe {
+        assert_eq!(
+            nv_device_add(
+                core,
+                host.as_ptr(),
+                nvr.addr().port(),
+                user.as_ptr(),
+                password.as_ptr(),
+                &mut dev
+            ),
+            NvStatus::NV_OK
+        );
+        let sub = NvStreamTier::NV_TIER_SUB as u32;
+        assert_eq!(nv_tile_open(core, dev, 1, sub, &mut pan), NvStatus::NV_OK);
+        assert_eq!(nv_tile_open(core, dev, 2, sub, &mut lens), NvStatus::NV_OK);
+
+        // Arguments are checked before anything is sent.
+        assert_eq!(
+            nv_ptz_move(core, pan, sideways.as_ptr(), 20),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        for speed in [0, 65] {
+            assert_eq!(
+                nv_ptz_move(core, pan, left.as_ptr(), speed),
+                NvStatus::NV_ERR_INVALID_ARGUMENT
+            );
+        }
+        assert_eq!(
+            nv_ptz_move(core, pan + 100, left.as_ptr(), 20),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(
+            nv_ptz_move(ptr::null_mut(), pan, left.as_ptr(), 20),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_ptz_move(core, pan, ptr::null(), 20),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(nv_ptz_stop(core, pan + 100), NvStatus::NV_ERR_UNKNOWN_ID);
+        assert_eq!(
+            nv_ptz_lens(core, lens, sideways.as_ptr(), 1),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_ptz_preset(core, pan + 100, 0),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        let empty = CString::new("").unwrap();
+        assert_eq!(
+            nv_motion_grant(core, dev, 1, empty.as_ptr(), true),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            nv_motion_grant(core, dev + 100, 1, c"example-client".as_ptr(), true),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(
+            nv_motion_grant(core, dev, 1, c"example-client".as_ptr(), true),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_motion_grant(core, dev, 1, c"example-client".as_ptr(), false),
+            NvStatus::NV_OK
+        );
+        assert!(!moving());
+
+        // The info: a small buffer says how large, then the answer.
+        let request = CString::new(format!("{{\"tile\":{pan}}}")).unwrap();
+        let mut len = 0usize;
+        assert_eq!(
+            nv_ptz_info(core, request.as_ptr(), ptr::null_mut(), 0, &mut len),
+            NvStatus::NV_ERR_BUFFER_TOO_SMALL
+        );
+        let mut buf = vec![0 as c_char; len + 1];
+        assert_eq!(
+            nv_ptz_info(
+                core,
+                request.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len
+            ),
+            NvStatus::NV_OK
+        );
+        let info: serde_json::Value = serde_json::from_str(&out_text(&buf)).unwrap();
+        assert_eq!(info["pan_tilt"], true);
+        assert_eq!(info["presets"].as_array().unwrap().len(), 2);
+        assert_eq!(info["speeds"], serde_json::json!([1, 64]));
+        let bad = CString::new("{\"tile\":\"x\"}").unwrap();
+        assert_eq!(
+            nv_ptz_info(core, bad.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut len),
+            NvStatus::NV_ERR_INVALID_ARGUMENT
+        );
+
+        // A move, its release, and a preset recall.
+        assert_eq!(nv_ptz_move(core, pan, left.as_ptr(), 20), NvStatus::NV_OK);
+    }
+    wait_until("moving", moving);
+    // SAFETY: live core.
+    unsafe {
+        assert_eq!(nv_ptz_stop(core, pan), NvStatus::NV_OK);
+    }
+    wait_until("stopped", || !moving());
+    wait_until("move and stop events", || {
+        ptz_event("move", "sent") && ptz_event("stop", "sent")
+    });
+    // SAFETY: live core.
+    unsafe {
+        assert_eq!(nv_ptz_preset(core, pan, 1), NvStatus::NV_OK);
+    }
+    wait_until("preset recalled", || {
+        nvr.ptz_state(1).unwrap().last_preset == Some(1)
+    });
+    // Lens positions are clamped to the camera's range (0 to 28).
+    // SAFETY: live core.
+    unsafe {
+        let request = CString::new(format!("{{\"tile\":{lens}}}")).unwrap();
+        let mut len = 0usize;
+        let mut buf = vec![0 as c_char; 512];
+        assert_eq!(
+            nv_ptz_info(
+                core,
+                request.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut len
+            ),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_ptz_lens(core, lens, zoom.as_ptr(), 9_999),
+            NvStatus::NV_OK
+        );
+    }
+    wait_until("zoom clamped", || {
+        nvr.ptz_state(2).unwrap().zoom == Some(28)
+    });
+    // SAFETY: live core.
+    unsafe {
+        assert_eq!(
+            nv_ptz_lens(core, lens, focus.as_ptr(), -50),
+            NvStatus::NV_OK
+        );
+    }
+    wait_until("focus clamped", || {
+        nvr.ptz_state(2).unwrap().focus == Some(0)
+    });
+    assert_eq!(nvr.ptz_config_requests(), 0);
     assert!(!ctx.bad.load(Ordering::SeqCst));
     // SAFETY: live core, freed once.
     unsafe { nv_core_free(core) };

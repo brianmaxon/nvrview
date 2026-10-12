@@ -213,6 +213,8 @@ internal sealed partial class StageView : UserControl
                     "R                            record the selected tile's camera (again to stop)",
                     "Ctrl+Shift+R                 record the selected tile's call, in a call window too",
                     "T                            start or end a conversation on the selected tile",
+                    "Alt+arrows                   move the selected tile's camera while held (a camera that pans and tilts)",
+                    "Alt+= Alt+-, Alt+1 to 9      lens zoom in and out; recall preset 1 to 9",
                     "Menu key, Shift+F10          the selected tile's menu",
                     "Right-click > Quality        Auto, Clear, Fluent, Balanced for the tile",
                     "Right-click > Start Conversation   captions, Talk, and a typed reply",
@@ -271,6 +273,7 @@ internal sealed partial class StageView : UserControl
             _viewer.CallsChanged += _calls.Sync;
         }
         _viewer.Leases.TileChanged += OnTileChanged;
+        InstallPtz();
         _viewer.IndicatorsChanged += SyncOverlays;
         _viewer.Settings.Changed += SyncOverlays;
         // The call cards' corner follows the setting (and the indicators', when it is opposite them).
@@ -2039,6 +2042,10 @@ internal sealed partial class StageView : UserControl
         _calls.Close();
         Renderer.Overlays = [];
         _viewer.Leases.TileChanged -= OnTileChanged;
+        // A held move ends with its window.
+        RemovePtz();
+        ClosePtzFlyout();
+        _viewer.Ptz.StopAll();
         Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnRendering;
     }
 }

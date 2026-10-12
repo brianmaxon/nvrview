@@ -821,6 +821,20 @@ impl Core {
             .ok_or(RecError::Internal)
     }
 
+    /// Each tile of a playback with the picture it shows (see
+    /// [`recordings::export::still::ShownPicture`]); names are the caller's
+    /// to fill in.
+    ///
+    /// # Errors
+    /// [`RecError::UnknownId`], [`RecError::Closed`], [`RecError::Limit`],
+    /// [`RecError::Internal`].
+    pub(crate) fn playback_shown(&self, playback: u64) -> Result<Vec<engine::ShownTile>, RecError> {
+        let cmd = self.pb_cmd(playback)?;
+        let (a, r) = oneshot::channel();
+        cmd.try_send(Cmd::Shown(a)).map_err(|_| RecError::Limit)?;
+        self.pb_wait(r).ok_or(RecError::Internal)
+    }
+
     /// `nv_playback_close`: stops every play, closes every tile of it
     /// (`tile_closed` for each), then `playback_closed` (`closed`).
     ///

@@ -66,6 +66,9 @@ public sealed record DownloadCamera(
     string? Detail,
     string? Output);
 
+/// <summary>The <c>range</c> member of a range download's <c>download</c> event: whole device seconds.</summary>
+public sealed record DownloadRange(long Start, long End);
+
 /// <summary>A download's progress (the <c>download</c> event, and each entry of <c>nv_downloads_get</c>).</summary>
 public sealed record DownloadProgress(
     string Download,
@@ -73,8 +76,12 @@ public sealed record DownloadProgress(
     string? Folder,
     string State,
     bool Paused,
-    IReadOnlyList<DownloadCamera> Cameras)
+    IReadOnlyList<DownloadCamera> Cameras,
+    DownloadRange? Range = null)
 {
+    /// <summary>"07:42:05 to 07:47:05" for a range download (the device's times), else null.</summary>
+    public string? RangeText => Range is { } r ? $"{TransportState.Clock(r.Start * 1000)} to {TransportState.Clock(r.End * 1000)}" : null;
+
     /// <summary>Reads one download object; null when malformed.</summary>
     public static DownloadProgress? From(JsonElement e)
     {
@@ -97,7 +104,9 @@ public sealed record DownloadProgress(
                     Long(c, "bytes_estimate"), Str(c, "reason"), Str(c, "detail"), Str(c, "output")));
             }
         }
-        return new DownloadProgress(id, Str(e, "incident"), Str(e, "folder"), state, Bool(e, "paused"), cameras);
+        DownloadRange? range = e.TryGetProperty("range", out JsonElement r) && r.ValueKind == JsonValueKind.Object
+            && Long(r, "start") is long rs && Long(r, "end") is long re ? new DownloadRange(rs, re) : null;
+        return new DownloadProgress(id, Str(e, "incident"), Str(e, "folder"), state, Bool(e, "paused"), cameras, range);
     }
 
     /// <summary>The <c>downloads</c> list of <c>nv_downloads_get</c>; null when malformed.</summary>

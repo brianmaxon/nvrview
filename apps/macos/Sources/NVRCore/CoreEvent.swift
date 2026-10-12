@@ -180,6 +180,8 @@ public enum CoreEvent: Sendable, Equatable {
     case timing(what: String, tile: UInt64?, nanos: UInt64, tierSwitch: TierSwitchTiming? = nil)
     /// Talk-back progress (docs/FFI.md "Talk-back").
     case talk(TalkEvent)
+    /// What became of a camera motion command (`ptz`, minor 11).
+    case ptz(PTZEvent)
     /// Minor 1: a search was started (docs/FFI.md, "Device discovery").
     case discoveryStarted(search: UInt64)
     /// Minor 1: a device answered, or answered again with more.
@@ -271,6 +273,9 @@ public enum CoreEvent: Sendable, Equatable {
         var revision: Int?
         var sent_ms: Int?
         var dropped_ms: Int?
+        var action: String?
+        var position: Int?
+        var retry_after_ms: Int?
     }
 
     struct ChannelList: Decodable {
@@ -405,6 +410,12 @@ public enum CoreEvent: Sendable, Equatable {
                     tile: tile, device: w.device, channel: w.channel, state: TalkEvent.State(state), reason: w.reason,
                     status: w.status, retryMilliseconds: w.retry_ms, sentMilliseconds: w.sent_ms,
                     droppedMilliseconds: w.dropped_ms))
+        case "ptz":
+            guard let tile = w.tile, let action = w.action, let state = w.state else { return nil }
+            return .ptz(
+                PTZEvent(
+                    tile: tile, action: action, state: PTZEvent.State(state), reason: w.reason, status: w.status,
+                    position: w.position, retryMilliseconds: w.retry_after_ms))
         case "timing":
             guard let what = w.what, let ns = w.ns else { return nil }
             var detail: TierSwitchTiming?

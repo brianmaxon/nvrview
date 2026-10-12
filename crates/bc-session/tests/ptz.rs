@@ -117,7 +117,7 @@ async fn a_move_and_its_release_send_the_observed_commands() {
         ]
     );
     let n = notice(&mut rx).await;
-    assert_eq!((n.channel, n.cause), (PTZ, StopCause::Released));
+    assert_eq!((n.cam.channel, n.cause), (PTZ, StopCause::Released));
     assert_eq!(nvr.ptz_config_requests(), 0);
     s.close().await;
 }

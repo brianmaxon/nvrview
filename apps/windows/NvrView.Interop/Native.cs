@@ -534,6 +534,37 @@ public static unsafe partial class NvNative
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_talk_set_conversation(nint core, ulong tile, [MarshalAs(UnmanagedType.U1)] bool open);
 
+    /// <summary>What a tile's camera can do, as JSON; request is {"tile":N} (minor 11). Waits for the camera.</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_info(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Starts or renews a pan or tilt move ("left", "right", "up", "down"; speed 1 to 64) (minor 11).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_move(nint core, ulong tile, string direction, uint speed);
+
+    /// <summary>Stops the tile's camera at once (minor 11).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_stop(nint core, ulong tile);
+
+    /// <summary>Moves the lens "zoom" or "focus" to an absolute position (minor 11).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_lens(nint core, ulong tile, string what, int position);
+
+    /// <summary>Recalls a preset of the camera's list (minor 11).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_ptz_preset(nint core, ulong tile, uint id);
+
+    /// <summary>Grants or withdraws motion control on a channel for an automation (minor 11).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_motion_grant(
+        nint core, ulong device, byte channel, string client, [MarshalAs(UnmanagedType.U1)] bool granted);
+
     /// <summary>The device's stable key into a buffer.</summary>
     [LibraryImport(Library)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
@@ -734,6 +765,18 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_edit_compute(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    // Export (minor 10; docs/FFI.md, "Export (minor 10)").
+
+    /// <summary>Queues the download of a time range of chosen cameras (JSON; minor 10).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_download_range(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Plans still images from a playback or a finished file (JSON; minor 10).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_still_plan(nint core, string request, byte* output, nuint cap, nuint* len);
 
     /// <summary>Keeps a camera's sub-stream open for sound only (minor 8).</summary>
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

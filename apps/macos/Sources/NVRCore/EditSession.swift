@@ -9,9 +9,9 @@ import VideoKit
 /// uses. Nothing is re-encoded; the screen and an export (M4) draw the same
 /// tiles: the screen through `request` (decoding off the main thread, the
 /// newest request winning) and its display link, an export or the self-test
-/// through `prepare` and `render` (decoding before drawing, frame by frame).
-@MainActor
-public final class EditSession {
+/// through `prepare` and `render` (decoding before drawing, frame by frame,
+/// on any one thread at a time: `EditExporter` draws on its own queue).
+public final class EditSession: @unchecked Sendable {
     public let plan: EditPlan
     /// The open files by source number; a source whose file could not be
     /// opened is missing and draws black.

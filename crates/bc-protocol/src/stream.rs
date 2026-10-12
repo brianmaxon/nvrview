@@ -57,6 +57,15 @@ impl StreamTier {
         .find(|t| t.name() == name)
     }
 
+    /// The lens this tier shows: 0 for the first lens (main, sub), 1 for
+    /// the second lens of a multi-lens camera (mobile, extern).
+    pub const fn lens(self) -> u8 {
+        match self {
+            StreamTier::Main | StreamTier::Sub => 0,
+            StreamTier::Mobile | StreamTier::Extern => 1,
+        }
+    }
+
     /// Handle for a channel on this tier: `(tier << 8) | channel`.
     pub const fn handle(self, channel: u8) -> u32 {
         (self.number() << 8) | channel as u32

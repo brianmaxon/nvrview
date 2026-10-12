@@ -29,7 +29,7 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror -g $asan \
 
 log="$out/mock-nvr.log"
 MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 2 \
-  --recordings 2 --fixture fixtures/synthetic/h264-basic.h264 >"$log" 2>&1 &
+  --recordings 2 --ptz 0 --fixture fixtures/synthetic/h264-basic.h264 >"$log" 2>&1 &
 mock=$!
 trap 'kill "$mock" 2>/dev/null || true' EXIT INT TERM
 

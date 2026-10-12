@@ -54,16 +54,20 @@ public struct FakeDeviceSpec: Sendable {
     /// `FakeCore.Options.fisheyeClip` when one is set.
     public var fisheyeChannels: Set<Int>
     /// Channels whose camera pans, tilts and zooms with presets (`ptz` in
-    /// `channels`). Nothing moves: the fake only reports the capability.
+    /// `channels`); the fake models the commands (`ptzCalls`).
     public var ptzChannels: Set<Int>
+    /// Multi-lens channels whose second lens pans, tilts and zooms with
+    /// presets (`lens_ptz` in `channels`; the first lens does not move).
+    public var ptzLens1Channels: Set<Int>
 
     public init(
         name: String = "NVR", model: String = "EXAMPLE-MODEL", channelCount: Int = 4,
         detectingChannels: Set<Int>? = nil, detects: [String] = ["people", "vehicle", "dog_cat"],
         multiLensChannels: Set<Int> = [], channelsWithoutAudio: Set<Int> = [], talkChannels: Set<Int> = [],
-        fisheyeChannels: Set<Int> = [], ptzChannels: Set<Int> = []
+        fisheyeChannels: Set<Int> = [], ptzChannels: Set<Int> = [], ptzLens1Channels: Set<Int> = []
     ) {
         self.ptzChannels = ptzChannels
+        self.ptzLens1Channels = ptzLens1Channels
         self.fisheyeChannels = fisheyeChannels
         self.talkChannels = talkChannels
         self.multiLensChannels = multiLensChannels
@@ -200,6 +204,9 @@ public final class FakeCore: CoreAPI {
         /// The clock (nanoseconds) a playback's position runs on
         /// (`FakePlayback.swift`): the host clock, or a test's manual one.
         public var playbackClock: @Sendable () -> UInt64 = { HostClock.nowNanos() }
+        /// The clock (seconds) the fake camera's dead-man stop counts on: the
+        /// host clock, or a test's manual one.
+        public var ptzClock: @Sendable () -> Double = { Double(HostClock.nowNanos()) / 1e9 }
         /// Runs inside `free` after it began (calls are refused) and before
         /// the tiles stop: a test sends what a tile thread could still send
         /// there (`flushEvents`), forcing that interleaving.
@@ -354,7 +361,12 @@ public final class FakeCore: CoreAPI {
                 // A talk-back channel is a doorbell here (the made-up one).
                 let talk = spec.talkChannels.contains(c)
                 let moves = spec.ptzChannels.contains(c)
-                let caps = #","talk":\#(talk),"doorbell":\#(talk),"ptz":{"pan_tilt":\#(moves),"presets":\#(moves),"zoom_focus":\#(moves)}"#
+                let lens1 = spec.ptzLens1Channels.contains(c) && spec.multiLensChannels.contains(c)
+                let none = #"{"pan_tilt":false,"presets":false,"zoom_focus":false}"#
+                let all = #"{"pan_tilt":true,"presets":true,"zoom_focus":true}"#
+                let lensCaps = lens1 ? #","lens_ptz":[\#(none),\#(all)]"# : ""
+                let caps =
+                    #","talk":\#(talk),"doorbell":\#(talk),"ptz":{"pan_tilt":\#(moves),"presets":\#(moves),"zoom_focus":\#(moves)}\#(lensCaps)"#
                 return #"{"channel":\#(c),"connected":true,"tiers":["main","sub"],"name":"Channel \#(c + 1)","model":"EXAMPLE-CAM","detects":[\#(detects)]\#(lenses)\#(fisheye)\#(caps)}"#
             }.joined(separator: ",")
             emitEvent(#"{"type":"channels","device":\#(id),"channels":[\#(channels)]}"#)
@@ -650,6 +662,216 @@ public final class FakeCore: CoreAPI {
         guard let talk = talkWorld.withLock({ $0.talks.removeValue(forKey: tile) }) else { return }
         let reason = drain ? "finished" : "stopped"
         emitEvent(talkJSON(t, #""state":"stopped","reason":"\#(reason)","sent_ms":\#(Int(talk.samples16k / 16)),"dropped_ms":0"#))
+    }
+
+    // MARK: Camera motion (minor 11)
+    //
+    // A model of the core's rules for a camera that moves: a move stops by
+    // itself a second after the last call (the dead-man) or after 30 s, a
+    // renewal is not a new command, lens positions are clamped to the
+    // range, only the camera's own presets recall. Every command is
+    // recorded (`ptzCalls`).
+
+    /// One recorded command.
+    public struct PTZCall: Sendable, Equatable {
+        public var tile: UInt64
+        public var channel: Int
+        /// The lens the command addressed (a second-lens tile of a
+        /// multi-lens camera: 1).
+        public var lens: Int
+        /// `move left 20`, `stop`, `preset 1`, `zoom 6000` (a renewal is
+        /// recorded too, as `renew left 20`).
+        public var text: String
+        public var at: Double
+    }
+
+    private struct PTZCamera {
+        var zoom = 1000
+        var focus = 50
+        var moving: (direction: String, started: Double, renewed: Double)?
+    }
+
+    private struct PTZWorld {
+        var calls: [PTZCall] = []
+        /// By "device/channel/lens".
+        var cameras: [String: PTZCamera] = [:]
+        var infoReads = 0
+        /// The tile that started each moving camera (a tile closing stops it).
+        var starters: [String: UInt64] = [:]
+    }
+    private let ptzWorld = Mutex(PTZWorld())
+
+    /// Zoom and focus ranges and the preset count of the fake's cameras.
+    public static let ptzZoomRange = 1000...6000
+    public static let ptzFocusRange = 1...100
+    public static let ptzPresetCount = 3
+
+    /// Every motion command so far, oldest first.
+    public var ptzCalls: [PTZCall] { ptzWorld.withLock { $0.calls } }
+
+    /// `nv_ptz_info` calls so far.
+    public var ptzInfoReads: Int { ptzWorld.withLock { $0.infoReads } }
+
+    private func ptzTarget(_ tile: UInt64) throws(CoreStatus) -> (tile: FakeTile, lens: Int, key: String, caps: Bool) {
+        guard let t = world.withLock({ $0.tiles[tile] }) else { throw .unknownID }
+        let spec = world.withLock { $0.devices[t.device]?.spec }
+        let channel = Int(t.channel)
+        let second = spec?.multiLensChannels.contains(channel) == true && (t.openedTier == .mobile || t.openedTier == .extern)
+        let lens = second ? 1 : 0
+        let caps = lens == 1 ? spec?.ptzLens1Channels.contains(channel) == true : spec?.ptzChannels.contains(channel) == true
+        return (t, lens, "\(t.device)/\(t.channel)/\(lens)", caps)
+    }
+
+    private func ptzJSON(_ t: FakeTile, _ action: String, _ rest: String) -> String {
+        #"{"type":"ptz","tile":\#(t.id),"action":"\#(action)",\#(rest)}"#
+    }
+
+    private func ptzRecord(_ t: FakeTile, _ lens: Int, _ text: String, at now: Double) {
+        ptzWorld.withLock { $0.calls.append(PTZCall(tile: t.id, channel: Int(t.channel), lens: lens, text: text, at: now)) }
+    }
+
+    /// Whether the camera addressed by a tile's channel and lens is moving
+    /// now: started, no stop, a call within the last second, and under 30 s.
+    public func ptzMoving(channel: Int, lens: Int = 0) -> Bool {
+        let now = options.ptzClock()
+        return ptzWorld.withLock { w in
+            w.cameras.contains { key, cam in
+                let parts = key.split(separator: "/")
+                guard parts.count == 3, Int(parts[1]) == channel, Int(parts[2]) == lens, let m = cam.moving else {
+                    return false
+                }
+                return now - m.renewed < 1 && now - m.started < 30
+            }
+        }
+    }
+
+    /// A camera's lens positions (zoom, focus) as the fake holds them.
+    public func ptzLensPositions(channel: Int, lens: Int = 0) -> (zoom: Int, focus: Int)? {
+        ptzWorld.withLock { w in
+            w.cameras.first { key, _ in
+                let parts = key.split(separator: "/")
+                return parts.count == 3 && Int(parts[1]) == channel && Int(parts[2]) == lens
+            }.map { ($0.value.zoom, $0.value.focus) }
+        }
+    }
+
+    public func ptzInfo(tile: UInt64) throws(CoreStatus) -> String {
+        requireOutsideCallback("nv_ptz_info")
+        let (_, _, key, caps) = try ptzTarget(tile)
+        let cam = ptzWorld.withLock { w -> PTZCamera in
+            w.infoReads += 1
+            return w.cameras[key] ?? PTZCamera()
+        }
+        guard caps else {
+            return #"{"pan_tilt":false,"zoom":null,"focus":null,"presets":[],"speeds":[1,64]}"#
+        }
+        let z = Self.ptzZoomRange, f = Self.ptzFocusRange
+        let presets = (0..<Self.ptzPresetCount).map { #"{"id":\#($0),"name":"Preset \#($0 + 1)"}"# }.joined(separator: ",")
+        return
+            #"{"pan_tilt":true,"zoom":{"min":\#(z.lowerBound),"max":\#(z.upperBound),"cur":\#(cam.zoom)},"focus":{"min":\#(f.lowerBound),"max":\#(f.upperBound),"cur":\#(cam.focus)},"presets":[\#(presets)],"speeds":[1,64]}"#
+    }
+
+    public func ptzMove(_ tile: UInt64, direction: PTZDirection, speed: Int) throws(CoreStatus) {
+        requireOutsideCallback("nv_ptz_move")
+        guard (1...64).contains(speed) else { throw .invalidArgument }
+        let (t, lens, key, caps) = try ptzTarget(tile)
+        let now = options.ptzClock()
+        guard caps else {
+            emitEvent(ptzJSON(t, "move", #""state":"refused","reason":"not_supported""#))
+            return
+        }
+        let renewal = ptzWorld.withLock { w -> Bool in
+            var cam = w.cameras[key] ?? PTZCamera()
+            defer { w.cameras[key] = cam }
+            if let m = cam.moving, m.direction == direction.rawValue, now - m.renewed < 1, now - m.started < 30 {
+                cam.moving?.renewed = now
+                return true
+            }
+            cam.moving = (direction.rawValue, now, now)
+            return false
+        }
+        if !renewal { ptzWorld.withLock { $0.starters[key] = t.id } }
+        ptzRecord(t, lens, "\(renewal ? "renew" : "move") \(direction.rawValue) \(speed)", at: now)
+        if !renewal { emitEvent(ptzJSON(t, "move", #""state":"sent""#)) }
+    }
+
+    public func ptzStop(_ tile: UInt64) throws(CoreStatus) {
+        requireOutsideCallback("nv_ptz_stop")
+        let (t, lens, key, caps) = try ptzTarget(tile)
+        let now = options.ptzClock()
+        let was = ptzWorld.withLock { w -> Bool in
+            guard var cam = w.cameras[key] else { return false }
+            let was = cam.moving != nil
+            cam.moving = nil
+            w.cameras[key] = cam
+            w.starters[key] = nil
+            return was
+        }
+        guard caps || was else {
+            emitEvent(ptzJSON(t, "stop", #""state":"refused","reason":"not_supported""#))
+            return
+        }
+        ptzRecord(t, lens, "stop", at: now)
+        emitEvent(ptzJSON(t, "stop", #""state":"sent","reason":"released""#))
+    }
+
+    public func ptzLens(_ tile: UInt64, axis: PTZLensAxis, position: Int) throws(CoreStatus) {
+        requireOutsideCallback("nv_ptz_lens")
+        let (t, lens, key, caps) = try ptzTarget(tile)
+        let now = options.ptzClock()
+        guard caps else {
+            emitEvent(ptzJSON(t, "lens", #""state":"refused","reason":"not_supported""#))
+            return
+        }
+        let range = axis == .zoom ? Self.ptzZoomRange : Self.ptzFocusRange
+        let sent = min(max(position, range.lowerBound), range.upperBound)
+        ptzWorld.withLock { w in
+            var cam = w.cameras[key] ?? PTZCamera()
+            if axis == .zoom { cam.zoom = sent } else { cam.focus = sent }
+            w.cameras[key] = cam
+        }
+        ptzRecord(t, lens, "\(axis.rawValue) \(sent)", at: now)
+        emitEvent(ptzJSON(t, "lens", #""state":"sent","position":\#(sent)"#))
+    }
+
+    public func ptzPreset(_ tile: UInt64, id: Int) throws(CoreStatus) {
+        requireOutsideCallback("nv_ptz_preset")
+        let (t, lens, key, caps) = try ptzTarget(tile)
+        let now = options.ptzClock()
+        guard caps else {
+            emitEvent(ptzJSON(t, "preset", #""state":"refused","reason":"not_supported""#))
+            return
+        }
+        guard (0..<Self.ptzPresetCount).contains(id) else {
+            emitEvent(ptzJSON(t, "preset", #""state":"refused","reason":"unknown_preset""#))
+            return
+        }
+        ptzWorld.withLock { w in
+            var cam = w.cameras[key] ?? PTZCamera()
+            cam.moving = nil
+            w.cameras[key] = cam
+        }
+        ptzRecord(t, lens, "preset \(id)", at: now)
+        emitEvent(ptzJSON(t, "preset", #""state":"sent""#))
+    }
+
+    /// The (device, channel) pairs granted motion control to a client.
+    private let grantsLock = Mutex<Set<String>>([])
+
+    public func motionGrant(device: UInt64, channel: UInt8, client: String, granted: Bool) throws(CoreStatus) {
+        requireOutsideCallback("nv_motion_grant")
+        guard !client.isEmpty, client.utf8.count <= 64, !client.contains(where: { $0.isASCII && $0.asciiValue! < 32 })
+        else { throw .invalidArgument }
+        guard world.withLock({ $0.devices[device] }) != nil else { throw .unknownID }
+        grantsLock.withLock { g in
+            let k = "\(device)/\(channel)/\(client)"
+            if granted { g.insert(k) } else { g.remove(k) }
+        }
+    }
+
+    /// Whether a client was granted motion control of a channel.
+    public func hasMotionGrant(device: UInt64, channel: UInt8, client: String) -> Bool {
+        grantsLock.withLock { $0.contains("\(device)/\(channel)/\(client)") }
     }
 
     public func talkSetConversation(_ tile: UInt64, open: Bool) throws(CoreStatus) {
@@ -959,12 +1181,31 @@ public final class FakeCore: CoreAPI {
         audio.gainBits.store(
             audioTiles.withLock { $0.values.filter(\.audible).map(\.volume).max() ?? 0 }.bitPattern,
             ordering: .relaxed)
-        return world.withLock { w in
+        let tile: FakeTile? = world.withLock { w in
             for (device, var d) in w.devices where d.tiles.contains(id) {
                 d.tiles.removeAll { $0 == id }
                 w.devices[device] = d
             }
             return w.tiles.removeValue(forKey: id)
+        }
+        if let tile { ptzTileClosed(tile) }
+        return tile
+    }
+
+    /// A tile closed: the core stops a move its tile started.
+    private func ptzTileClosed(_ t: FakeTile) {
+        let started = ptzWorld.withLock { w in
+            w.starters.filter { $0.value == t.id }.map(\.key)
+        }
+        guard !started.isEmpty else { return }
+        let now = options.ptzClock()
+        for key in started {
+            ptzWorld.withLock { w in
+                w.starters[key] = nil
+                w.cameras[key]?.moving = nil
+            }
+            let lens = Int(key.split(separator: "/").last ?? "0") ?? 0
+            ptzRecord(t, lens, "stop", at: now)
         }
     }
 

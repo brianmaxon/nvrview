@@ -3,7 +3,8 @@
 // sink writer whose every picture says which camera it is and which frame it
 // is. The top three quarters are one of Palette's colors; the bottom quarter is
 // Bits black or white blocks across the width, the frame number in binary (most
-// significant bit on the left). Made up entirely; nothing comes from a device.
+// significant bit on the left). With Sound, a silent AAC track (48 kHz mono)
+// runs along, for the sound of exports. Made up entirely; nothing comes from a device.
 // The same pictures as the macOS app's SyntheticRecording.
 
 using System.Runtime.CompilerServices;
@@ -11,6 +12,7 @@ using NvrView.Shell;
 using TerraFX.Interop.Windows;
 using static TerraFX.Interop.Windows.Windows;
 using static TerraFX.Interop.Windows.MF;
+using static TerraFX.Interop.Windows.MFAudioFormat;
 using static TerraFX.Interop.Windows.MFVideoFormat;
 
 namespace NvrView.Video;
@@ -34,7 +36,12 @@ public static unsafe class SyntheticRecording
     /// <param name="Height">Picture height (a multiple of 4).</param>
     /// <param name="Fps">Pictures per second.</param>
     /// <param name="KeyframeInterval">Pictures from one keyframe to the next.</param>
-    public readonly record struct Spec(int Frames, int Color, int Width = 640, int Height = 360, int Fps = 10, int KeyframeInterval = 20);
+    /// <param name="Sound">Also a silent AAC track as long as the pictures.</param>
+    public readonly record struct Spec(
+        int Frames, int Color, int Width = 640, int Height = 360, int Fps = 10, int KeyframeInterval = 20, bool Sound = false);
+
+    /// <summary>The sound track's sample rate.</summary>
+    public const int SoundRate = 48_000;
 
     /// <summary>Writes an H.264 MP4 (BT.601 by size, video range) at <paramref name="path"/>; throws <see cref="VideoException"/>.</summary>
     public static void Write(Spec spec, string path)
@@ -110,6 +117,7 @@ public static unsafe class SyntheticRecording
         {
             input->Release();
         }
+        uint sound = spec.Sound ? AddSound(writer) : uint.MaxValue;
         Check(writer->BeginWriting(), "BeginWriting");
         int size = spec.Width * spec.Height * 3 / 2;
         long step = 10_000_000L / spec.Fps;
@@ -140,8 +148,84 @@ public static unsafe class SyntheticRecording
                 }
                 buffer->Release();
             }
+            if (sound != uint.MaxValue)
+            {
+                WriteSilence(writer, sound, frame * step, step);
+            }
         }
         Check(writer->Finalize(), "Finalize");
+    }
+
+    private static IMFMediaType* SoundType(Guid subtype, uint bytesPerSecond, uint blockAlign)
+    {
+        IMFMediaType* type = null;
+        Check(MFCreateMediaType(&type), "MFCreateMediaType");
+        Guid major = MFMediaType_Audio;
+        _ = type->SetGUID(Ref(in MF_MT_MAJOR_TYPE), &major);
+        _ = type->SetGUID(Ref(in MF_MT_SUBTYPE), &subtype);
+        _ = type->SetUINT32(Ref(in MF_MT_AUDIO_BITS_PER_SAMPLE), 16);
+        _ = type->SetUINT32(Ref(in MF_MT_AUDIO_SAMPLES_PER_SECOND), SoundRate);
+        _ = type->SetUINT32(Ref(in MF_MT_AUDIO_NUM_CHANNELS), 1);
+        _ = type->SetUINT32(Ref(in MF_MT_AUDIO_AVG_BYTES_PER_SECOND), bytesPerSecond);
+        _ = type->SetUINT32(Ref(in MF_MT_AUDIO_BLOCK_ALIGNMENT), blockAlign);
+        return type;
+    }
+
+    // An AAC stream fed with 16-bit PCM.
+    private static uint AddSound(IMFSinkWriter* writer)
+    {
+        uint stream;
+        IMFMediaType* output = SoundType(MFAudioFormat_AAC, 12_000, 1);
+        try
+        {
+            _ = output->SetUINT32(Ref(in MF_MT_AAC_PAYLOAD_TYPE), 0);
+            _ = output->SetUINT32(Ref(in MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION), 0x29);
+            Check(writer->AddStream(output, &stream), "AddStream(sound)");
+        }
+        finally
+        {
+            output->Release();
+        }
+        IMFMediaType* input = SoundType(MFAudioFormat_PCM, SoundRate * 2, 2);
+        try
+        {
+            Check(writer->SetInputMediaType(stream, input, null), "SetInputMediaType(PCM)");
+        }
+        finally
+        {
+            input->Release();
+        }
+        return stream;
+    }
+
+    private static void WriteSilence(IMFSinkWriter* writer, uint stream, long time, long duration)
+    {
+        uint bytes = (uint)(SoundRate * duration / 10_000_000L) * 2;
+        IMFMediaBuffer* buffer = null;
+        IMFSample* sample = null;
+        Check(MFCreateMemoryBuffer(bytes, &buffer), "MFCreateMemoryBuffer");
+        try
+        {
+            byte* data;
+            uint max, current;
+            Check(buffer->Lock(&data, &max, &current), "Lock");
+            new Span<byte>(data, (int)bytes).Clear();
+            _ = buffer->Unlock();
+            _ = buffer->SetCurrentLength(bytes);
+            Check(MFCreateSample(&sample), "MFCreateSample");
+            _ = sample->AddBuffer(buffer);
+            _ = sample->SetSampleTime(time);
+            _ = sample->SetSampleDuration(duration);
+            Check(writer->WriteSample(stream, sample), "WriteSample(sound)");
+        }
+        finally
+        {
+            if (sample != null)
+            {
+                sample->Release();
+            }
+            buffer->Release();
+        }
     }
 
     private static IMFMediaType* VideoType(Guid subtype, Spec spec)

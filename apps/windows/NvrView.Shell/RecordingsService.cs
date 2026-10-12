@@ -118,7 +118,7 @@ public sealed class PlainPlaybackHost(IPlayback playback) : IPlaybackHost
 }
 
 /// <summary>The recordings model (see the file comment).</summary>
-public sealed class RecordingsService
+public sealed partial class RecordingsService
 {
     private readonly IRecordings _core;
     private readonly RecordingsEnablementStore? _store;
@@ -565,7 +565,7 @@ public sealed class RecordingsService
         cameras.Count == 0 || _core is not IEditSound sound ? null
             : Query(() => sound.RecordingsLoudness(LoudnessScale.Query(start, end, bucket, cameras)), LoudnessAnswer.Parse);
 
-    /// <summary>An incident's finished download (the newest), whose files a follow cut or a grid is made from.</summary>
+    /// <summary>An incident's finished download (the newest), whose files a follow cut, a grid, or an export is made from.</summary>
     public DownloadProgress? FinishedDownload(string incident) =>
         Downloads.LastOrDefault(d => d.Incident == incident && d.State == "done");
 
@@ -1063,6 +1063,7 @@ public sealed class RecordingsService
     {
         _publishScheduled = false;
         Downloads = _board.Downloads;
+        RunFinishWaiters();
         DownloadsChanged?.Invoke();
     }
 
