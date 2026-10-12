@@ -169,6 +169,74 @@ its own region of interest and weight:
   source is the token's, never the body's. A trigger can at most open
   viewing-tier streams.
 
+#### MQTT input
+
+`crates/mqtt-triggers` is a subscribe-only MQTT 3.1.1 client (written for
+this project on rustls with the same crypto provider as the update client;
+MQTT 5 is not used, and brokers that speak only 5 are not supported). The host
+starts one per MQTT source with `start(config, credentials, sink, options)`
+and stops it with `Handle::stop`. The sink receives
+`{source_id, kind, state, sender_id, at_ms}`; the kind comes from the source's
+settings, never from a payload, and `sender_id` is `mqtt:` plus the source key.
+
+- **Connection.** Plain TCP (port 1883 by convention) or TLS (8883), with the
+  broker's CA pasted as PEM or the built-in public roots. The username and
+  password come from the host's keychain at start and are never part of the
+  stored settings. Keepalive 30 s, clean session, client id `nvrview` unless
+  set. A lost connection reconnects with exponential backoff (1 s to 60 s)
+  and jitter; a login the broker rejects is **not** retried (it would lock
+  the account), and the source shows "login rejected" until restarted.
+- **Local brokers only.** A literal public address is refused when the source
+  is saved; a name is resolved at each connection and refused unless it
+  resolves to a loopback, private, link-local, or shared (carrier-grade NAT range)
+  address. `allow_public` overrides this per source.
+- **Mapping.** One exact topic (wildcards `+` and `#` only when the source
+  allows them; use them for one logical sensor, since state is per source).
+  Level mode treats the payload as a binary sensor: `ON`, `true`, `1` mean on
+  and `OFF`, `false`, `0` mean off (case-insensitive, trimmed; both lists are
+  settings). Off to on is a start and on to off is a stop (each can be turned
+  off); a repeat of the current state is ignored. Pulse mode turns every "on"
+  into one pulse. For JSON payloads a dot path (`state`, `sensor.state`,
+  `items.0.state`) locates the value.
+- **Retained messages** are ignored by default, so a stale "on" held by the
+  broker cannot fire at connect. A source can instead use the retained value
+  to seed its state (without a trigger) or treat it like any message.
+- **Debounce.** A change within N ms (default 500) of the previous trigger is
+  dropped and counted; the state is not updated by it.
+- **Safety.** Payloads over 1 KiB are dropped unread, at most 10 messages a
+  minute (bursts of 20) are examined per source, and a payload is only ever
+  compared with the on and off lists: it is never copied into a trigger,
+  explanation, or log line. If the connection drops while a sensor is on, no
+  stop is invented; episode timeouts end it.
+- **Audit.** Per-source counters: connects, reconnects, failures, messages,
+  triggers, and one counter for each reason a message produced nothing
+  (oversized, rate limited, retained, unrecognized, repeat, transition not
+  counted, debounced, wrong topic). Connection problems are logged at most
+  once every 30 s with a count of the held-back ones.
+
+A home-automation system publishes a sensor's state to the broker in one of
+two generic ways. Either an automation that publishes on each change:
+
+```yaml
+automation:
+  - alias: Publish example sensor state
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.example_motion
+    action:
+      - service: mqtt.publish
+        data:
+          topic: example/sensors/motion
+          payload: "{{ trigger.to_state.state }}"   # "on" or "off"
+```
+
+or the `mqtt_statestream` integration with `base_topic: example`, which
+publishes `example/binary_sensor/example_motion/state` (and attributes under
+sibling topics). In nvrview, add a source with that topic, kind `motion`, and
+the default mapping; map it to the cameras that cover the area like any
+external source. Publish with retain off, or leave the default of ignoring
+retained messages in place.
+
 ### Gate
 
 Cheap, before any picture is fetched, in this order: camera **muted**; the

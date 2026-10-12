@@ -1,0 +1,25 @@
+[package]
+name = "mqtt-triggers"
+version = "0.1.0"
+description = "MQTT input for smart notifications: a small subscribe-only MQTT 3.1.1 client (TCP and TLS, reconnect with backoff) and the mapping from messages to external triggers (docs/NOTIFICATIONS.md)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# TLS on rustls with the same pure-Rust/assembly crypto provider the update
+# client uses (no C compiler needed for the Windows and Linux checks).
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-graviola = "0.4"
+webpki-roots = "1"
+
+[dev-dependencies]
+# Tests make their own certificate authority at run time (no key is ever
+# committed) and serve TLS with rustls.
+graviola = "0.4"
+
+[lints]
+workspace = true
