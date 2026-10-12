@@ -585,10 +585,18 @@ internal sealed class SelfTest(App app, AppOptions options)
             await Until(() => service.Downloads.FirstOrDefault()?.Paused == true, 5);
             fake.CompleteRecordingWork();
             Expect(service.Downloads.FirstOrDefault()?.State != "done", "recordings: a paused download finished");
+            // The panel follows the download's events (the core's shape, with null members): Downloading, then Done.
+            var seen = new List<string>();
+            void Seen() => seen.AddRange(w.DownloadCards().Select(c => c.State));
+            service.DownloadsChanged += Seen;
             service.Pause(queued.Download, false);
             await Until(() => service.Downloads.FirstOrDefault()?.Paused == false, 5);
             fake.CompleteRecordingWork();
             bool done = await Until(() => service.Downloads.FirstOrDefault()?.State == "done", 5);
+            service.DownloadsChanged -= Seen;
+            Say($"recordings: the downloads panel showed {string.Join(", ", seen.Distinct())}");
+            Expect(seen.Contains("Downloading") && seen.LastOrDefault() == "Done" && w.DownloadCards().Any(c => c.State == "Done"),
+                "recordings: the downloads panel did not show the progress and Done");
             DownloadProgress? finished = service.Downloads.FirstOrDefault();
             if (done && finished is not null)
             {

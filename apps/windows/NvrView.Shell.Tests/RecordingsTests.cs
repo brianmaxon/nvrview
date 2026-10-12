@@ -220,6 +220,7 @@ internal static class RecordingsTests
             T.Equal(NvStatus.Limit, StatusOf(() => sound.RecordingsLoudness("""{"start":0,"end":200000,"bucket_s":1}""")));
             sound.SoundLabelsPut($$"""{"camera":{{cam1}},"analyzer":"soundanalysis-v1","start":{{day}},"end":{{day + 600}},"labels":[{"kind":"dog_bark","start":{{day + 100}},"end":{{day + 105}}}]}""");
             // The labels are events from sound, as the core keeps them.
+            // (The download events' sequence is in "recordings: download events as the core sends them".)
             T.Check(rec.RecordingsEvents($$"""{"start":{{day}},"end":{{day + 600}}}""").Contains("\"source\":\"local_audio\"", StringComparison.Ordinal));
             T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.SoundLabelsPut(
                 $$"""{"camera":{{cam1}},"analyzer":"pattern-v1","start":{{day}},"end":{{day + 600}},"labels":[]}""")));

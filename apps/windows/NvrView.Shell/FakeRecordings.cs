@@ -832,6 +832,8 @@ public sealed partial class FakeRecordings(Action<string> sink) : IRecordings, I
                 ["chunks_done"] = done ? 1 : 0,
                 ["chunks_total"] = 1,
                 ["bytes"] = done ? 1 << 20 : 0,
+                // As the core: null until the device gave an estimate (and after the last chunk).
+                ["bytes_estimate"] = null,
                 ["output"] = done ? $"{d.Folder}/Camera {c.Channel + 1}.mp4" : null,
             })]),
         };

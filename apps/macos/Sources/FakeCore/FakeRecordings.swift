@@ -765,6 +765,8 @@ extension FakeCore {
             [
                 "camera": cameraObject(c), "name": "Camera \(c.channel + 1)", "state": d.state, "paused": d.paused,
                 "chunks_done": done ? 1 : 0, "chunks_total": 1, "bytes": done ? 1 << 20 : 0,
+                // As the core: null until the device gave an estimate.
+                "bytes_estimate": NSNull(),
                 "output": done ? "\(d.folder)/Camera \(c.channel + 1).mp4" as Any : NSNull(),
             ]
         }

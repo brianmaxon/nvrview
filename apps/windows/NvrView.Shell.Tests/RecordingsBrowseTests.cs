@@ -186,6 +186,45 @@ internal static class RecordingsBrowseTests
             T.Check(board[keys[0]] is null && board.PendingKeys.Count == 0);
         });
 
+        T.Run("recordings: download events as the core sends them", () =>
+        {
+            // The core's shape (FFI-RECORDINGS.md section 5): null bytes_estimate and output until known. A null
+            // number used to throw out of the parser, so the window never saw a download move.
+            string Event(string state, string camState, int done, string estimate, string output) => $$"""
+                {"type":"download","download":"1791618125-9c1e5a2b7d40f316","incident":"i-1","folder":"/downloads/2026-10-10 07.42 vehicle",
+                 "state":"{{state}}","paused":false,"cameras":[{"camera":{"device":"d-example","channel":3,"lens":0},"name":"Camera 4",
+                 "state":"{{camState}}","paused":false,"chunks_done":{{done}},"chunks_total":2,"bytes":{{done * 1000}},
+                 "bytes_estimate":{{estimate}},"output":{{output}}}]}
+                """;
+            string[] sequence =
+            [
+                Event("queued", "queued", 0, "null", "null"),
+                Event("running", "running", 0, "null", "null"),
+                Event("running", "running", 1, "2000", "null"),
+                Event("finalizing", "finalizing", 2, "null", "null"),
+                Event("done", "done", 2, "null", "\"/downloads/2026-10-10 07.42 vehicle/Camera 4.mp4\""),
+            ];
+            var board = new DownloadBoard();
+            var states = new List<string>();
+            var changes = new List<bool>();
+            foreach (string json in sequence)
+            {
+                RecordingsEvent? e = RecordingsEvent.Parse(System.Text.Encoding.UTF8.GetBytes(json));
+                T.Check(e is RecordingsEvent.Download, json);
+                if (e is RecordingsEvent.Download d)
+                {
+                    changes.Add(board.Apply(d.Progress));
+                    states.Add(board.Downloads[0].StateText());
+                }
+            }
+            T.Equal("Queued,Downloading,Downloading,Finishing,Done", string.Join(",", states));
+            // Every state change publishes at once; progress alone waits for the next redraw.
+            T.Equal("True,True,False,True,True", string.Join(",", changes));
+            T.Equal(1, board.Downloads.Count);
+            T.Check(board.Downloads[0].Outputs().SequenceEqual(["/downloads/2026-10-10 07.42 vehicle/Camera 4.mp4"]));
+            T.Check(board.Downloads[0].Cameras[0].BytesEstimate is null && board.Downloads[0].Cameras[0].ChunksDone == 2);
+        });
+
         T.Run("player: open refusals say why", () =>
         {
             T.Equal("A camera's device is not searched for recordings", PlaybackOpenMessage.Text(NvStatus.InvalidArgument));

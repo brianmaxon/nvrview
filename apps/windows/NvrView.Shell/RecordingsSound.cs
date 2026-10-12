@@ -85,7 +85,7 @@ public sealed record LoudnessAnswer(long Revision, IReadOnlyList<LoudnessLane> L
     });
 
     private static List<int?> Values(JsonElement lane, string name) =>
-        [.. Incident.Items(lane, name).Select(v => v.TryGetInt32(out int n) ? n : (int?)null)];
+        [.. Incident.Items(lane, name).Select(v => v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out int n) ? n : (int?)null)];
 }
 
 /// <summary>The loudness strips' arithmetic.</summary>
