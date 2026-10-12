@@ -1,0 +1,22 @@
+[package]
+name = "ha-output"
+version = "0.1.0"
+description = "Home Assistant output for nvrview smart notifications: pulses helper entities and calls scripts or notify services over the REST API, with a mapping from alert facts to entities, per-entity cooldowns, bounded retries, and structured results (docs/NOTIFICATIONS.md)"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Class, Severity, and CameraId: the shared vocabulary of alerts.
+alerts = { path = "../alerts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+# Blocking HTTP client (MIT OR Apache-2.0) on rustls with graviola's crypto,
+# configured as in crates/updates (no C compiler needed for cross checks).
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+rustls-graviola = "0.4"
+
+[lints]
+workspace = true
