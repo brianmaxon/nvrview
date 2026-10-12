@@ -153,7 +153,16 @@ at the end shows each suite as ran or cached, with its time.
   `-p` arguments. The C header and C smoke tests cover the `viewer-ffi` and
   `mock-nvr` crates; the Swift tests and demo self-tests `apps/macos/`, the C
   header, and the fixtures; the C# and Windows app suites `apps/windows/`, the
-  core crates they load, and the fixtures. Sanitization, self-test parity,
+  core crates they load, and the fixtures. The Windows app self-test is split
+  into areas (startup, viewer, tiles, layouts, header, settings, calls,
+  recordings, capture, ptz), each cached for the debug and the publish build:
+  `scripts/windows-selftest-areas.txt` maps every `// parity:` step to one
+  area (`scripts/check-selftest-areas.py` fails otherwise), the app runs only
+  the areas asked for with `--areas a,b` (starting once), and an area's
+  fingerprint is everything under `apps/windows/` except the files that only
+  another area exercises (`WINDOWS_OWNED` in `scripts/suite-cache.py`), so
+  shared code reruns every area and a change to a recordings file reruns
+  recordings and the always-run startup smoke. A full run covers all areas. Sanitization, self-test parity,
   the secret scan, and `cargo fmt` always run.
 - **Never cached.** A suite with an unstaged or untracked input runs and is
   not recorded. Failures are never recorded. A pass from a Windows run retried
