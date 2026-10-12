@@ -160,6 +160,14 @@ impl PtzRefusal {
                 | PtzRefusal::UnknownPreset
         )
     }
+
+    /// Whether the command certainly never reached the device: a core
+    /// refusal, a failed read it depends on, or a closed session. The
+    /// device refusing, a lost connection, and a timeout are not (the
+    /// command was, or may have been, sent).
+    pub fn sent_nothing(self) -> bool {
+        self.is_refusal() || matches!(self, PtzRefusal::QueryFailed | PtzRefusal::SessionClosed)
+    }
 }
 
 impl fmt::Display for PtzRefusal {
@@ -726,6 +734,9 @@ pub(crate) struct Ptz {
     fetching: HashMap<u32, Fact>,
     /// Reads that failed on this connection.
     failed: HashSet<Fact>,
+    /// Channels where a move was sent and no stop has been confirmed since.
+    /// Only these are owed a stop after a lost connection.
+    sent_moves: HashSet<u8>,
     /// Channels to stop as soon as a connection is logged in.
     pending_stops: HashSet<u8>,
     /// Lens re-reads (294) due, by channel.
@@ -747,6 +758,7 @@ impl Ptz {
             in_flight: HashMap::new(),
             fetching: HashMap::new(),
             failed: HashSet::new(),
+            sent_moves: HashSet::new(),
             pending_stops: HashSet::new(),
             rereads: HashMap::new(),
             log: LineBudget::new(LOG_PER_SECOND, LOG_BURST),
@@ -992,6 +1004,7 @@ impl Ptz {
                         }
                         match session.ptz_move(ch, direction, speed) {
                             Ok((id, bytes)) => {
+                                self.sent_moves.insert(ch);
                                 self.log_sent(ch, direction.name(), r.origin.name(), "", now);
                                 out.push(bytes);
                                 self.in_flight.insert(
@@ -1094,7 +1107,9 @@ impl Ptz {
     pub(crate) fn on_reply(&mut self, message_id: u32, status: u16) {
         let now = Instant::now();
         if let Some(fact) = self.fetching.remove(&message_id) {
-            if status != 200 {
+            // 199 answers 300 with a complete body (observed, protocol.md).
+            let ok = status == 200 || (fact == Fact::Caps && status == 300);
+            if !ok {
                 warn!(?fact, status, "camera motion read refused");
                 self.failed.insert(fact);
             }
@@ -1105,7 +1120,10 @@ impl Ptz {
         };
         let ok = status == 200;
         let result = match (f.op, ok) {
-            (Op::Stop, true) => Ok(PtzOutcome::Stopped),
+            (Op::Stop, true) => {
+                self.sent_moves.remove(&f.channel);
+                Ok(PtzOutcome::Stopped)
+            }
             (Op::Move { .. }, true) => Ok(PtzOutcome::Moving),
             (Op::Preset { .. }, true) => {
                 self.rereads.insert(f.channel, now + self.cfg.lens_reread);
@@ -1159,7 +1177,12 @@ impl Ptz {
             self.pending_stops.insert(ch);
         }
         for (_, f) in self.in_flight.drain() {
-            if matches!(f.op, Op::Stop | Op::Move { .. }) {
+            let owed = match f.op {
+                Op::Move { .. } => true,
+                Op::Stop => self.sent_moves.contains(&f.channel),
+                _ => false,
+            };
+            if owed {
                 self.pending_stops.insert(f.channel);
             }
             if let Some(tx) = f.reply {
