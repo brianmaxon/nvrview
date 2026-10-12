@@ -36,6 +36,13 @@ struct Ctx {
     json: Mutex<Vec<String>>,
 }
 
+/// The callbacks' context, never freed. The core may call back until
+/// `nv_core_free` returns, and a failing assertion unwinds past that call:
+/// a context dropped then would be used after free by the core's threads.
+fn leaked_ctx() -> &'static Ctx {
+    Box::leak(Box::default())
+}
+
 unsafe extern "C" fn on_action(context: *mut c_void, tile: u64, action: *const NvAction) {
     // SAFETY: the context is the test's Ctx, alive until after nv_core_free;
     // the action is valid during the call.
@@ -127,7 +134,7 @@ fn mock(sim: &SimRuntime) -> mock_nvr::MockNvr {
 
 struct Rig {
     sim: SimRuntime,
-    ctx: Box<Ctx>,
+    ctx: &'static Ctx,
     core: *mut NvCore,
 }
 
@@ -141,7 +148,7 @@ impl Rig {
             Duration::from_millis(10),
             || {
                 flush_events(core);
-                cond(&self.ctx)
+                cond(self.ctx)
             },
         );
     }
@@ -194,9 +201,9 @@ fn edit_lists_and_sound_through_the_c_interface() {
     let sim = SimRuntime::new();
     let nvr = mock(&sim);
     let dir = tempfile::tempdir().unwrap();
-    let ctx = Box::new(Ctx::default());
+    let ctx = leaked_ctx();
     let cb = NvCallbacks {
-        context: &*ctx as *const Ctx as *mut c_void,
+        context: ctx as *const Ctx as *mut c_void,
         on_action: Some(on_action),
         on_event: Some(on_event),
         on_audio_tap: None,
