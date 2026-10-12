@@ -428,6 +428,18 @@ public final class CCore: CoreAPI {
         return try Self.string { nv_edit_compute(c, json, $0, $1, $2) }
     }
 
+    // MARK: Export (minor 10)
+
+    public func downloadRange(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.once { nv_download_range(c, json, $0, $1, $2) }
+    }
+
+    public func stillPlan(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_still_plan(c, json, $0, $1, $2) }
+    }
+
     public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) {
         try check(nv_sound_watch(try core(), camera, enabled))
     }

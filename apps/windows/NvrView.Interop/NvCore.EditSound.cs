@@ -29,9 +29,10 @@ public sealed record TileLoudness(long StartSeconds, byte[] Peak, byte[] Rms)
 public interface IEditSound
 {
     /// <summary>
-    /// <c>nv_edit_compute</c>: the edit list (follow cut or grid) of a
-    /// finished download. <c>in_ms</c>, <c>out_ms</c>, and the trim kind
-    /// throw <see cref="NvStatus.Unsupported"/> until export.
+    /// <c>nv_edit_compute</c>: the edit list (follow cut or grid) or the trim
+    /// of a finished download. Minor 10 added the <c>trim</c> kind,
+    /// <c>in_ms</c> and <c>out_ms</c> on follow and grid, and <c>dest</c> and
+    /// <c>share_safe</c> (see <see cref="IExport"/>).
     /// </summary>
     string EditCompute(string json);
 

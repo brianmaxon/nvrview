@@ -25,7 +25,7 @@ use recordings::groups::GroupStore;
 use recordings::incident::{CameraId, Incident};
 use recordings::scheduler::{
     CameraProgress, CameraSource, CameraState, EnqueueError, IncidentDownload, IncidentProgress,
-    Scheduler, SchedulerConfig,
+    Placement, Scheduler, SchedulerConfig,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -61,9 +61,11 @@ impl Downloads {
         dir: PathBuf,
         settings: DownloadSettings,
         sessions: &[(String, Arc<DeviceSession>)],
+        registry: Option<PathBuf>,
         old: Option<Downloads>,
     ) -> Downloads {
         let mut cfg = SchedulerConfig::new(&dir);
+        cfg.registry = registry;
         cfg.chunk_secs = settings.chunk_s;
         cfg.per_device = settings.per_device;
         cfg.max_attempts = settings.max_attempts;
@@ -175,10 +177,15 @@ fn download_value(p: &IncidentProgress) -> (Value, String) {
             v
         })
         .collect();
-    let v = json!({
+    let mut v = json!({
         "download": p.id, "incident": p.key, "folder": p.folder.to_string_lossy(),
         "state": state, "paused": p.paused, "cameras": cameras,
     });
+    if let Some(r) = p.range {
+        // A range download has no incident.
+        v["incident"] = Value::Null;
+        v["range"] = json!({"start": r.start, "end": r.end});
+    }
     (v, states)
 }
 
@@ -317,6 +324,16 @@ pub(super) fn incident_request(
     }
 }
 
+/// How a refused queuing is told to the caller.
+pub(super) fn enqueue_error(e: EnqueueError) -> RecError {
+    match e {
+        EnqueueError::Limit => RecError::Limit,
+        EnqueueError::NoSource => RecError::InvalidArgument,
+        EnqueueError::NotConfigured => RecError::NotConfigured,
+        EnqueueError::Io(e) => io_error(e),
+    }
+}
+
 pub(super) fn io_error(e: std::io::Error) -> RecError {
     warn!(error = %e, "download control failed");
     RecError::Internal
@@ -325,7 +342,8 @@ pub(super) fn io_error(e: std::io::Error) -> RecError {
 impl crate::Core {
     /// `nv_download_incident`: queues an incident's download
     /// (`{"incident": "<key>", "cameras": [{"camera": {...}, "tier":
-    /// "main"}]}`, cameras optional) and returns `{"download": "<id>",
+    /// "main"}], "dest": "<absolute directory>", "share_safe": false}`,
+    /// cameras, `dest`, and `share_safe` optional) and returns `{"download": "<id>",
     /// "folder": "<path>", "existing": bool}`. A download of the same
     /// incident key that is not finished is returned instead, and so is a
     /// finished one of the unchanged incident (section 5, "Download IDs").
@@ -361,11 +379,23 @@ impl crate::Core {
             ),
             Some(_) => return Err(RecError::InvalidArgument),
         };
+        let dest: Option<PathBuf> = match m.get("dest") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(d)) => Some(PathBuf::from(
+                recordings::export::validate_dest(d).map_err(|_| RecError::InvalidArgument)?,
+            )),
+            Some(_) => return Err(RecError::InvalidArgument),
+        };
+        let share_safe = config::flag(&m, "share_safe")?;
+        let place = Placement { dest, share_safe };
         let (sched, req) = {
             let mut st = h.st();
             let sched = h.scheduler(&st)?;
             h.fresh_incidents(&mut st);
-            let inc = query::find(&st, &key).cloned().ok_or(RecError::UnknownId)?;
+            let mut inc = query::find(&st, &key).cloned().ok_or(RecError::UnknownId)?;
+            if share_safe {
+                inc.name = None;
+            }
             let all = inc.cameras();
             let chosen: Vec<(CameraId, recordings::Tier)> = match wanted {
                 None => all
@@ -380,13 +410,27 @@ impl crate::Core {
                 }
             };
             let groups = &st.stores.as_ref().expect("configured").groups;
-            (sched, incident_request(groups, &h.reported(), inc, chosen))
+            let mut req = incident_request(groups, &h.reported(), inc, chosen);
+            if share_safe {
+                // Neutral names, in the order the cameras first saw it.
+                let mut order: Vec<(recordings::Secs, CameraId)> = req
+                    .incident
+                    .download_ranges()
+                    .into_iter()
+                    .map(|(c, r)| (r.0, c))
+                    .collect();
+                order.sort();
+                for (n, (_, c)) in order.iter().enumerate() {
+                    if let Some(s) = req.cameras.iter_mut().find(|s| &s.camera == c) {
+                        s.name = recordings::naming::neutral_camera_name(n);
+                    }
+                }
+            }
+            (sched, req)
         };
-        let r = sched.enqueue_incident(&req).map_err(|e| match e {
-            EnqueueError::Limit => RecError::Limit,
-            EnqueueError::NoSource => RecError::InvalidArgument,
-            EnqueueError::Io(e) => io_error(e),
-        })?;
+        let r = sched
+            .enqueue_incident_to(&req, &place)
+            .map_err(enqueue_error)?;
         Ok(
             json!({"download": r.id, "folder": r.folder.to_string_lossy(),
                   "existing": r.existing})

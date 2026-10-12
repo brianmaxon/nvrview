@@ -51,18 +51,21 @@ public sealed partial class FakeRecordings
         JsonObject o = Object(json, F);
         string kind = o["kind"] is JsonValue k && k.TryGetValue(out string? ks) ? ks : throw Error(NvStatus.InvalidArgument, F);
         string id = o["download"] is JsonValue d && d.TryGetValue(out string? ds) ? ds : throw Error(NvStatus.InvalidArgument, F);
-        switch (kind)
+        if (kind is not ("follow" or "grid" or "trim"))
         {
-            case "follow" or "grid":
-                break;
-            case "trim":
-                throw Error(NvStatus.Unsupported, F);
-            default:
-                throw Error(NvStatus.InvalidArgument, F);
+            throw Error(NvStatus.InvalidArgument, F);
         }
-        if (o.ContainsKey("in_ms") || o.ContainsKey("out_ms"))
+        string? dest = Destination(o["dest"], F);
+        bool shareSafe = Flag(o, "share_safe");
+        long? inMs = Millis(o["in_ms"]);
+        long? outMs = Millis(o["out_ms"]);
+        if (inMs >= outMs)
         {
-            throw Error(NvStatus.Unsupported, F);
+            throw Error(NvStatus.InvalidArgument, F);
+        }
+        if (kind == "trim")
+        {
+            return TrimPlan(o, id, inMs, outMs, dest, shareSafe);
         }
         lock (_gate)
         {
@@ -134,7 +137,7 @@ public sealed partial class FakeRecordings
                     ["present"] = new JsonArray(new JsonArray(start, end)),
                 });
             }
-            return plan.ToJsonString();
+            return Finish(plan, inMs, outMs, dest, shareSafe);
         }
     }
 

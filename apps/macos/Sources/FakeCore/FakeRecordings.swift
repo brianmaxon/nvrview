@@ -48,6 +48,8 @@ final class FakeRecordingsState: @unchecked Sendable {
         var cameras: [RecordingCamera]
         var state: String
         var paused: Bool
+        /// The range (start, end seconds) of a range download, which has no incident.
+        var range: [Int64]? = nil
     }
 
     struct World {
@@ -770,10 +772,15 @@ extension FakeCore {
                 "output": done ? "\(d.folder)/Camera \(c.channel + 1).mp4" as Any : NSNull(),
             ]
         }
-        return [
+        var o: [String: Any] = [
             "download": d.id, "incident": d.incident, "folder": d.folder, "state": d.paused ? "paused" : d.state,
             "paused": d.paused, "cameras": cameras,
         ]
+        if let r = d.range {
+            o["incident"] = NSNull()
+            o["range"] = ["start": r[0], "end": r[1]]
+        }
+        return o
     }
 
     private func downloadQueued(_ d: FakeRecordingsState.Download) {
@@ -786,9 +793,12 @@ extension FakeCore {
     public func downloadIncident(json: String) throws(CoreStatus) -> String {
         let o = try Self.object(json)
         guard let key = o["incident"] as? String else { throw .invalidArgument }
+        let dest = try Self.destination(o["dest"])
         let (answer, queued) = try configuredWorld {
             w throws(CoreStatus) -> ([String: Any], FakeRecordingsState.Download?) in
             guard w.downloadsDir != nil else { throw .notConfigured }
+            // No data directory in the fake: only the downloads directory.
+            if let dest, dest != w.downloadsDir { throw .notConfigured }
             guard let e = Self.allIncidents(w).first(where: { $0.key == key }) else { throw .unknownID }
             if let existing = w.downloads.first(where: { $0.incident == key }) {
                 return (["download": existing.id, "folder": existing.folder, "existing": true], nil)
@@ -938,8 +948,10 @@ extension FakeCore {
             emit(event: Self.json(["type": "thumbnail", "key": key, "state": "ready"]))
         }
         for d in downloads {
-            var running = Self.downloadObject(FakeRecordingsState.Download(
-                id: d.id, incident: d.incident, folder: d.folder, cameras: d.cameras, state: "running", paused: false))
+            var started = d
+            started.state = "running"
+            started.paused = false
+            var running = Self.downloadObject(started)
             running["type"] = "download"
             emit(event: Self.json(running))
             var o = Self.downloadObject(d)
@@ -970,11 +982,18 @@ extension FakeCore {
         let o = try Self.object(json)
         guard let kind = o["kind"] as? String, let id = o["download"] as? String else { throw .invalidArgument }
         switch kind {
-        case "follow", "grid": break
-        case "trim": throw .unsupported
+        case "follow", "grid", "trim": break
         default: throw .invalidArgument
         }
-        if o["in_ms"] != nil || o["out_ms"] != nil { throw .unsupported }
+        let dest = try Self.destination(o["dest"])
+        let shareSafe = o["share_safe"] as? Bool ?? false
+        let inMs = (o["in_ms"] as? NSNumber)?.int64Value
+        let outMs = (o["out_ms"] as? NSNumber)?.int64Value
+        if let inMs, let outMs, inMs >= outMs { throw .invalidArgument }
+        if kind == "trim" {
+            guard let inMs, let outMs else { throw .invalidArgument }
+            return try trimPlan(o, id: id, inMs: inMs, outMs: outMs, dest: dest, shareSafe: shareSafe)
+        }
         let plan = try configuredWorld { w throws(CoreStatus) -> [String: Any] in
             guard w.downloadsDir != nil else { throw .notConfigured }
             guard let d = w.downloads.first(where: { $0.id == id }) else { throw .unknownID }
@@ -1050,7 +1069,254 @@ extension FakeCore {
             }
             return plan
         }
+        return Self.json(Self.finish(plan, window: (inMs, outMs), dest: dest, shareSafe: shareSafe))
+    }
+
+    // MARK: Export (minor 10)
+    //
+    // `downloadRange` queues a range download (an `r-` ID from the cameras,
+    // tiers, and range, so the same request is `existing`) that
+    // `completeRecordingWork` finishes like an incident's; its events carry
+    // `incident` null and `range`. `editCompute` plans a `trim` over the
+    // download's made-up files (a keyframe every 2 s) and clips follow and
+    // grid plans to `in_ms`/`out_ms`; `stillPlan` plans from a playback
+    // (each tile shows the playback's position) or a file. `dest` must be
+    // an absolute directory, and without a data directory only the
+    // downloads directory is accepted. Camera names are `Camera N`, and
+    // `Camera A`, ... with `share_safe`; file names are cruder than the
+    // core's (no formatted time stamp).
+
+    /// The `dest` of a request: nil, or an absolute directory.
+    private static func destination(_ any: Any?) throws(CoreStatus) -> String? {
+        guard let any, !(any is NSNull) else { return nil }
+        guard let s = any as? String, s.hasPrefix("/") || s.dropFirst().hasPrefix(":\\"), s.count <= 1024 else {
+            throw .invalidArgument
+        }
+        return s
+    }
+
+    /// `Camera A`, `Camera B`, ... `Camera Z`, `Camera AA`.
+    static func neutralName(_ n: Int) -> String {
+        var s = ""
+        var i = n
+        repeat {
+            s = String(UnicodeScalar(UInt8(65 + i % 26))) + s
+            i = i / 26 - 1
+        } while i >= 0
+        return "Camera " + s
+    }
+
+    private static func finish(
+        _ plan: [String: Any], window: (Int64?, Int64?), dest: String?, shareSafe: Bool
+    ) -> [String: Any] {
+        var plan = plan
+        if let start = plan["start_ms"] as? Int64, let end = plan["end_ms"] as? Int64 {
+            plan["start_ms"] = max(start, window.0 ?? start)
+            plan["end_ms"] = min(end, window.1 ?? end)
+        }
+        if var segments = plan["segments"] as? [[String: Any]] {
+            segments = segments.compactMap { s in
+                var s = s
+                guard var a = s["start_ms"] as? Int64, var b = s["end_ms"] as? Int64 else { return nil }
+                if let lo = window.0, lo > a {
+                    s["source_in_ms"] = (s["source_in_ms"] as? Int64 ?? 0) + (lo - a)
+                    a = lo
+                }
+                if let hi = window.1 { b = min(b, hi) }
+                guard a < b else { return nil }
+                s["start_ms"] = a
+                s["end_ms"] = b
+                return s
+            }
+            plan["segments"] = segments
+        }
+        if let f = plan["suggested_file"] as? String, let dest {
+            plan["suggested_file"] = dest + "/" + (f.split(separator: "/").last.map(String.init) ?? f)
+        }
+        if shareSafe {
+            plan["share_safe"] = true
+            if let sources = plan["sources"] as? [[String: Any]] {
+                plan["sources"] = sources.enumerated().map { (i, s) -> [String: Any] in
+                    var s = s
+                    s["name"] = neutralName(i)
+                    return s
+                }
+            }
+            if let labels = plan["labels"] as? [[String: Any]] {
+                plan["labels"] = labels.enumerated().map { (i, l) -> [String: Any] in
+                    var l = l
+                    l["name"] = neutralName(i)
+                    return l
+                }
+            }
+        }
+        return plan
+    }
+
+    /// The made-up files of a finished download: camera, first picture's
+    /// time and end, in ms.
+    private static func files(_ d: FakeRecordingsState.Download, _ w: FakeRecordingsState.World)
+        -> [(camera: RecordingCamera, start: Int64, end: Int64)]
+    {
+        if let r = d.range { return d.cameras.map { ($0, r[0] * 1000, r[1] * 1000) } }
+        guard let inc = allIncidents(w).first(where: { $0.key == d.incident }) else { return [] }
+        return d.cameras.filter { inc.cameras.contains($0) }.map { c in
+            let own = inc.events.filter { $0.camera == c }
+            return (c, ((own.map(\.start).min() ?? inc.start) - 5) * 1000, ((own.map(\.end).max() ?? inc.end) + 5) * 1000)
+        }
+    }
+
+    private func trimPlan(
+        _ o: [String: Any], id: String, inMs: Int64, outMs: Int64, dest: String?, shareSafe: Bool
+    ) throws(CoreStatus) -> String {
+        var wanted: [RecordingCamera]?
+        if let list = o["cameras"] as? [Any] {
+            var cameras: [RecordingCamera] = []
+            for item in list { cameras.append(try Self.camera(item)) }
+            guard !cameras.isEmpty else { throw .invalidArgument }
+            wanted = cameras
+        }
+        let exact = (o["cut"] as? String) == "exact"
+        let plan = try configuredWorld { w throws(CoreStatus) -> [String: Any] in
+            guard w.downloadsDir != nil else { throw .notConfigured }
+            guard let d = w.downloads.first(where: { $0.id == id }) else { throw .unknownID }
+            guard d.state == "done" else { throw .invalidArgument }
+            let all = Self.files(d, w)
+            var chosen = all
+            if let wanted { chosen = wanted.compactMap { c in all.first { $0.camera == c } } }
+            var outputs: [[String: Any]] = []
+            var first = Int64.max, last = Int64.min
+            for f in chosen {
+                let lo = max(inMs - f.start, 0)
+                let hi = min(outMs, f.end) - f.start
+                guard lo < hi else { continue }
+                let start = exact ? lo : lo / 2000 * 2000
+                let name = shareSafe ? Self.neutralName(outputs.count) : "Camera \(f.camera.channel + 1)"
+                outputs.append([
+                    "source": outputs.count, "camera": Self.cameraObject(f.camera), "name": name,
+                    "file": "\(d.folder)/Camera \(f.camera.channel + 1).mp4",
+                    "source_in_ms": start, "source_out_ms": hi, "copy_possible": !exact,
+                    "suggested_file": "\(dest ?? d.folder)/\((f.start + start) / 1000) \(name) trim.mp4",
+                ])
+                first = min(first, f.start + start)
+                last = max(last, f.start + hi)
+            }
+            guard !outputs.isEmpty else { throw .invalidArgument }
+            var plan: [String: Any] = [
+                "version": 1, "kind": "trim", "download": id, "start_ms": first, "end_ms": last,
+                "outputs": outputs,
+            ]
+            if shareSafe { plan["share_safe"] = true }
+            return plan
+        }
         return Self.json(plan)
+    }
+
+    public func downloadRange(json: String) throws(CoreStatus) -> String {
+        let o = try Self.object(json)
+        guard let start = (o["start"] as? NSNumber)?.int64Value, let end = (o["end"] as? NSNumber)?.int64Value,
+            start >= 0, end > start, let list = o["cameras"] as? [Any], !list.isEmpty
+        else { throw .invalidArgument }
+        guard end - start <= 86_400, list.count <= 16 else { throw .limit }
+        let dest = try Self.destination(o["dest"])
+        let shareSafe = o["share_safe"] as? Bool ?? false
+        var cameras: [RecordingCamera] = []
+        for item in list {
+            let c = try Self.camera((item as? [String: Any])?["camera"])
+            if !cameras.contains(c) { cameras.append(c) }
+        }
+        let (answer, queued) = try configuredWorld {
+            w throws(CoreStatus) -> ([String: Any], FakeRecordingsState.Download?) in
+            guard w.downloadsDir != nil else { throw .notConfigured }
+            if let dest, dest != w.downloadsDir { throw .notConfigured }
+            for c in cameras where !Self.allowed(w, c) { throw .invalidArgument }
+            var h: UInt64 = 0xcbf2_9ce4_8422_2325
+            let canonical = cameras.map { "\($0.device)/\($0.channel)/\($0.lens)" }.sorted().joined(separator: ",")
+            for b in "\(start)-\(end)-\(canonical)".utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
+            let id = "r-\(start)-\(String(h, radix: 16))"
+            if let existing = w.downloads.first(where: { $0.id == id }) {
+                return (["download": id, "folder": existing.folder, "existing": true], nil)
+            }
+            guard w.downloads.count < 1000 else { throw .limit }
+            let names = cameras.enumerated().map { shareSafe ? Self.neutralName($0.offset) : "Camera \($0.element.channel + 1)" }
+            let name = (o["name"] as? String).flatMap { shareSafe || $0.isEmpty ? nil : $0 } ?? "range"
+            let folder = "\(dest ?? w.downloadsDir ?? "")/\(start)-\(end) \(name) — \(names.joined(separator: ", "))"
+            w.nextDownload += 1
+            let d = FakeRecordingsState.Download(
+                id: id, incident: "", folder: folder, cameras: cameras, state: "queued", paused: false,
+                range: [start, end])
+            w.downloads.append(d)
+            return (["download": id, "folder": folder, "existing": false], d)
+        }
+        if let queued { downloadQueued(queued) }
+        return Self.json(answer)
+    }
+
+    public func stillPlan(json: String) throws(CoreStatus) -> String {
+        let o = try Self.object(json)
+        let dest = try Self.destination(o["dest"])
+        let shareSafe = o["share_safe"] as? Bool ?? false
+        let format = o["format"] as? String ?? "png"
+        guard format == "png" || format == "jpeg" else { throw .invalidArgument }
+        let ext = format == "png" ? "png" : "jpg"
+        switch (o["playback"], o["download"]) {
+        case (let pb?, nil):
+            guard let id = (pb as? NSNumber)?.uint64Value else { throw .invalidArgument }
+            let shown = try playbackWorld.locked { w throws(CoreStatus) -> (Int64, UInt32, [(UInt64, RecordingCamera)]) in
+                guard let p = w.playbacks[id] else { throw .unknownID }
+                return (p.positionMs, p.generation, p.cameras.map { ($0.tile, $0.camera) })
+            }
+            var tiles = shown.2
+            if let list = o["tiles"] as? [Any] {
+                var chosen: [(UInt64, RecordingCamera)] = []
+                for item in list {
+                    guard let t = (item as? NSNumber)?.uint64Value else { throw .invalidArgument }
+                    guard let found = shown.2.first(where: { $0.0 == t }) else { throw .unknownID }
+                    if !chosen.contains(where: { $0.0 == t }) { chosen.append(found) }
+                }
+                tiles = chosen
+            }
+            guard !tiles.isEmpty else { throw .invalidArgument }
+            let base = (try? configuredWorld { w throws(CoreStatus) in w.downloadsDir }) ?? nil
+            let stills = tiles.enumerated().map { (i, t) -> [String: Any] in
+                let name = shareSafe ? Self.neutralName(i) : "Camera \(t.1.channel + 1)"
+                var label: [String: Any] = ["time": String(shown.0)]
+                if !shareSafe { label["name"] = name }
+                return [
+                    "tile": t.0, "camera": Self.cameraObject(t.1), "name": name, "generation": shown.1,
+                    "position_ms": shown.0, "label": label,
+                    "suggested_file": "\(dest ?? base ?? "")/\(shown.0) \(name).\(ext)",
+                ]
+            }
+            return Self.json(["stills": stills])
+        case (nil, let dl?):
+            guard let id = dl as? String, let atMs = (o["at_ms"] as? NSNumber)?.int64Value else {
+                throw .invalidArgument
+            }
+            let c = try Self.camera(o["camera"])
+            let exact = o["exact"] as? Bool ?? true
+            return try configuredWorld { w throws(CoreStatus) -> String in
+                guard w.downloadsDir != nil else { throw .notConfigured }
+                guard let d = w.downloads.first(where: { $0.id == id }) else { throw .unknownID }
+                guard d.state == "done", let f = Self.files(d, w).first(where: { $0.camera == c }) else {
+                    throw .invalidArgument
+                }
+                let pos = atMs - f.start
+                guard pos >= 0, pos < f.end - f.start else { throw .invalidArgument }
+                let sourceIn = exact ? pos : pos / 2000 * 2000
+                let name = shareSafe ? Self.neutralName(0) : "Camera \(c.channel + 1)"
+                var still: [String: Any] = [
+                    "camera": Self.cameraObject(c), "name": name,
+                    "file": "\(d.folder)/Camera \(c.channel + 1).mp4", "source_in_ms": sourceIn,
+                    "position_ms": f.start + sourceIn,
+                    "suggested_file": "\(dest ?? d.folder)/\(f.start + sourceIn) \(name).\(ext)",
+                ]
+                if exact, sourceIn % 2000 != 0 { still["keyframe_in_ms"] = sourceIn / 2000 * 2000 }
+                return Self.json(["stills": [still]])
+            }
+        default:
+            throw .invalidArgument
+        }
     }
 
     public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) {
