@@ -223,7 +223,13 @@ internal sealed class ViewerWindow
             {
                 _sidebarWidth = restore.SidebarWidth;
             }
+            if (restore is { InsetX: { } ix, InsetY: { } iy })
+            {
+                Stage.CallCards.RestoreAnchor(new InsetAnchor(ix, iy));
+            }
         }
+        // Moving the call insets saves the window's record (their position belongs to the window).
+        Stage.CallCards.AnchorChanged += () => Changed?.Invoke();
         ApplySidebar();
         Place(restore);
         Stage.PushSize();
@@ -381,7 +387,8 @@ internal sealed class ViewerWindow
     public SavedWindow ToSaved()
     {
         WindowContent content = State.Content is WindowContent.Scratch ? new WindowContent.Scratch(State.Name, State.Tree) : State.Content;
-        return new SavedWindow(content, _windowedFrame, IsFullScreen, _sidebarCollapsed, _sidebarWidth);
+        InsetAnchor? inset = Stage.CallCards.Anchor;
+        return new SavedWindow(content, _windowedFrame, IsFullScreen, _sidebarCollapsed, _sidebarWidth, inset?.X, inset?.Y);
     }
 
     // ---- content ----

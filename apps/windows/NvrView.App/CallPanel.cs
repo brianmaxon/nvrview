@@ -200,6 +200,8 @@ internal sealed class CallCard : UserControl
 
         // Using the card is using the call (it stays open); the stage underneath is not to see the
         // card's pointer input (selecting, panning, focusing).
+        WireDrag(_header, onHeader: true);
+        WireDrag(_hole, onHeader: false);
         PointerEntered += (_, _) => _viewer.Calls.Use(Camera);
         PointerPressed += (_, e) =>
         {
@@ -211,6 +213,90 @@ internal sealed class CallCard : UserControl
         RightTapped += (_, e) => e.Handled = true;
         PointerWheelChanged += (_, e) => e.Handled = true;
     }
+
+    // ---- moving the column (docs/UX.md "Alert insets", "Moving them") ----
+    // A press on the header, or on the picture, that moves past the slop drags the window's whole
+    // column; the pointer's place is measured in the stack (which does not move), so the card
+    // moving under it does not feed back. The handlers call the same DragPress/DragMove/DragRelease
+    // the self-test calls with synthetic points. A short move on the picture is a click (it does
+    // nothing here: there is no swap on Windows).
+
+    private bool _pressed;
+    private bool _dragged;
+    private bool _onHeader;
+    private Windows.Foundation.Point _pressAt;
+
+    /// <summary>The press has moved far enough to be a drag (self-test).</summary>
+    public bool Dragging => _pressed && _dragged;
+
+    private void WireDrag(UIElement part, bool onHeader)
+    {
+        part.PointerPressed += (_, e) =>
+        {
+            if (_mode == CallCardMode.Inset && Parent is CallStack stack && e.GetCurrentPoint(part).Properties.IsLeftButtonPressed && part.CapturePointer(e.Pointer))
+            {
+                DragPress(e.GetCurrentPoint(stack).Position, onHeader);
+            }
+        };
+        part.PointerMoved += (_, e) =>
+        {
+            if (_pressed && Parent is CallStack stack)
+            {
+                DragMove(e.GetCurrentPoint(stack).Position);
+            }
+        };
+        part.PointerReleased += (_, e) =>
+        {
+            part.ReleasePointerCapture(e.Pointer);
+            DragRelease();
+        };
+        part.PointerCaptureLost += (_, _) => DragRelease();
+    }
+
+    /// <summary>A press at <paramref name="at"/> (stack DIPs) on the header or the picture.</summary>
+    internal void DragPress(Windows.Foundation.Point at, bool onHeader)
+    {
+        _pressAt = at;
+        _onHeader = onHeader;
+        _dragged = false;
+        _pressed = _mode == CallCardMode.Inset && Parent is CallStack stack && stack.BeginDrag();
+    }
+
+    /// <summary>The pointer moved to <paramref name="at"/> with the button down.</summary>
+    internal void DragMove(Windows.Foundation.Point at)
+    {
+        if (!_pressed || Parent is not CallStack stack)
+        {
+            return;
+        }
+        double dx = at.X - _pressAt.X, dy = at.Y - _pressAt.Y;
+        if (!_dragged && !InsetPlacement.IsDrag(dx, dy, _onHeader))
+        {
+            return;
+        }
+        _dragged = true;
+        stack.DragBy(dx, dy);
+        // Moving the column is using its calls (their minute starts again).
+        _viewer.Calls.Use(Camera);
+    }
+
+    /// <summary>The button went up (or the capture was lost): a drag stores the position.</summary>
+    internal void DragRelease()
+    {
+        if (!_pressed)
+        {
+            return;
+        }
+        _pressed = false;
+        if (Parent is CallStack stack)
+        {
+            stack.EndDrag(_dragged);
+        }
+        _dragged = false;
+    }
+
+    /// <summary>The menu's Reset Position: the column returns to the Settings corner.</summary>
+    internal void ResetPosition() => (Parent as CallStack)?.ResetPosition();
 
     /// <summary>The call's camera (its channel's first lens).</summary>
     public CameraRef Camera { get; }
@@ -325,9 +411,17 @@ internal sealed class CallCard : UserControl
         pop.Click += (_, _) => TogglePresentation();
         var end = new MenuFlyoutItem { Text = "End the call" };
         end.Click += (_, _) => _viewer.Calls.End(Camera, "closed");
+        var reset = new MenuFlyoutItem { Text = "Reset Position" };
+        reset.Click += (_, _) => ResetPosition();
         menu.Items.Add(pop);
+        menu.Items.Add(reset);
         menu.Items.Add(end);
-        menu.Opening += (_, _) => pop.Text = PopTip;
+        menu.Opening += (_, _) =>
+        {
+            pop.Text = PopTip;
+            // Only a card in the corner has a column to move.
+            reset.Visibility = _mode == CallCardMode.Inset ? Visibility.Visible : Visibility.Collapsed;
+        };
         return menu;
     }
 
@@ -451,6 +545,73 @@ internal sealed class CallStack : Panel
         _filling = filling;
         Visibility = Visibility.Collapsed;
         _viewer.Leases.TileChanged += OnTileChanged;
+    }
+
+    private InsetAnchor? _anchor;
+    private InsetFrame? _column;
+    private InsetFrame? _dragFrom;
+
+    /// <summary>
+    /// Where the user put the column (a fraction of the free space), null while it sits in the
+    /// Settings corner. Belongs to the window and is saved with it.
+    /// </summary>
+    public InsetAnchor? Anchor => _anchor;
+
+    /// <summary>The user moved the column or reset it (the window saves its record).</summary>
+    public event Action? AnchorChanged;
+
+    /// <summary>The column of cards as last placed (the union of their frames), null with none.</summary>
+    public InsetFrame? Column => _column;
+
+    /// <summary>A position restored with the window (not a change to save).</summary>
+    public void RestoreAnchor(InsetAnchor? anchor)
+    {
+        _anchor = anchor;
+        InvalidateArrange();
+    }
+
+    /// <summary>A drag starts from the column as it is now; false when there is no column.</summary>
+    internal bool BeginDrag()
+    {
+        _dragFrom = _column;
+        return _dragFrom is not null;
+    }
+
+    /// <summary>The column's top left moved by (<paramref name="dx"/>, <paramref name="dy"/>) from where the drag began; each axis snaps near an edge.</summary>
+    internal void DragBy(double dx, double dy)
+    {
+        if (_dragFrom is not { } c || ActualWidth <= 0 || ActualHeight <= 0)
+        {
+            return;
+        }
+        var moved = InsetPlacement.Anchor(c.X + dx, c.Y + dy, c.Width, c.Height, ActualWidth, ActualHeight);
+        if (_anchor != moved)
+        {
+            _anchor = moved;
+            InvalidateArrange();
+        }
+    }
+
+    /// <summary>The drag ended; a real one stores the position.</summary>
+    internal void EndDrag(bool moved)
+    {
+        _dragFrom = null;
+        if (moved)
+        {
+            AnchorChanged?.Invoke();
+        }
+    }
+
+    /// <summary>Back to the Settings corner.</summary>
+    public void ResetPosition()
+    {
+        if (_anchor is null)
+        {
+            return;
+        }
+        _anchor = null;
+        InvalidateArrange();
+        AnchorChanged?.Invoke();
     }
 
     /// <summary>The cards, oldest call first.</summary>
@@ -601,7 +762,7 @@ internal sealed class CallStack : Panel
         double width = CardWidth(w);
         // Newest first: the newest call sits nearest the corner.
         CallCard[] insets = [.. _viewer.Calls.InsetCameras.Reverse().Where(_cards.ContainsKey).Select(c => _cards[c]).Where(c => c.Mode == CallCardMode.Inset)];
-        IReadOnlyList<InsetFrame> frames = InsetGeometry.Frames(insets.Length, width, [.. insets.Select(c => c.DesiredSize.Height)], _viewer.Settings.InsetCorner, w, h);
+        IReadOnlyList<InsetFrame> frames = InsetGeometry.Frames(insets.Length, width, [.. insets.Select(c => c.DesiredSize.Height)], _anchor ?? InsetAnchor.FromCorner(_viewer.Settings.InsetCorner), w, h);
         for (int i = 0; i < insets.Length; i++)
         {
             CallCard card = insets[i];
@@ -612,6 +773,7 @@ internal sealed class CallStack : Panel
             card.Arrange(new Windows.Foundation.Rect(f.X, f.Y, f.Width, f.Height));
         }
         InsetFrame? column = InsetGeometry.Union(frames);
+        _column = column;
         foreach (CallCard card in _cards.Values.Where(c => c.Mode == CallCardMode.Stage))
         {
             InsetFrame f = InsetGeometry.StagePanel(w, h, card.DesiredSize.Height, column);

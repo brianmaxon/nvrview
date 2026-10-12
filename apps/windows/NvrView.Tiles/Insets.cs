@@ -79,6 +79,16 @@ public static class InsetPlacement
     /// <summary>Distance from an edge (inside the margins) within which an axis snaps to that edge.</summary>
     public const double SnapDistance = 24;
 
+    /// <summary>How far a press on an inset's header moves before it is a drag.</summary>
+    public const double HeaderSlop = 2;
+
+    /// <summary>How far a press on an inset's picture moves before it is a drag (a shorter move is a click).</summary>
+    public const double PictureSlop = 6;
+
+    /// <summary>Whether a press that has moved (<paramref name="dx"/>, <paramref name="dy"/>) has become a drag.</summary>
+    public static bool IsDrag(double dx, double dy, bool onHeader) =>
+        Math.Sqrt(dx * dx + dy * dy) >= (onHeader ? HeaderSlop : PictureSlop);
+
     /// <summary>The anchor for a column whose top left corner was dragged to (<paramref name="x"/>, <paramref name="y"/>) in a stage (top-left origin).</summary>
     public static InsetAnchor Anchor(double x, double y, double columnWidth, double columnHeight, double stageWidth, double stageHeight) =>
         new(Fraction(x, columnWidth, stageWidth), Fraction(y, columnHeight, stageHeight));

@@ -87,7 +87,7 @@ less than that. Nothing here was run on a Windows machine.
 | Inset picture drawn by the window's own renderer, last, from the shared tile | yes | yes | Self-test step `alert-inset-in-grid`; Windows also checks it after a device loss (`call-inset-device-loss`). |
 | Inset corner setting (Settings, else opposite the indicators) | yes | yes | macOS: Settings > Alerts; Windows: Settings ("Doorbell call cards"). Windows step `call-inset-corner`. |
 | Entrance option per camera | yes | no | Depends on alert insets for detections. |
-| Movable insets: drag the column, 24 pt edge snap, position per window, Reset Position | yes | no (planned) | UX.md "Alert insets". macOS: `InsetPlacement` (unit tests), saved as `insetAnchor` in windows.json; self-test steps `inset-drag-snap`, `inset-drag-resize`, `inset-drag-restore`, `inset-drag-multi`. |
+| Movable insets: drag the column, 24 pt edge snap, position per window, Reset Position | yes | yes (call cards) | UX.md "Alert insets". `InsetPlacement` (NVRCore, NvrView.Tiles) with the same test vectors; saved as `insetAnchor` in windows.json (`SavedWindow.InsetX/InsetY` on Windows); self-test steps `inset-drag-snap`, `inset-drag-resize`, `inset-drag-restore`, `inset-drag-multi` on both. The Windows steps drive the card's own press/move/release code with synthetic points (pointer events are not injected), and Reset Position through the method its menu item calls; a click on a card's picture does nothing on Windows (no swap). |
 
 ### Calls, talk-back, and captions
 
