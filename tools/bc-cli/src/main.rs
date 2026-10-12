@@ -8,6 +8,7 @@
 //! variable `NVRVIEW_PASSWORD` or, on macOS, from a Keychain item.
 
 use bc_cli::analyze::Analysis;
+use bc_cli::playback_probe;
 use bc_cli::replay_probe::{self, MAX_PLAYS, ProbeConfig};
 use bc_cli::{
     CaptureConfig, CliError, ExtraOutputs, RecordLimits, Restart, capture, info_command,
@@ -40,6 +41,9 @@ usage:
          [--channel N] [--seconds S]
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] talk
          --channel N --allow-talk [--pcm FILE.s16] [--tone HZ] [--seconds S]
+  bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] playback-probe
+         --allow-playback-probe --now YYYY-MM-DDTHH:MM:SS --utc-offset-s N
+         --channels A,B,C,D
   bc-cli --host HOST[:PORT] --user NAME [--keychain SERVICE[:ACCOUNT]] replay-probe
          --channel N --allow-replay-probe --now YYYY-MM-DDTHH:MM:SS
          [--tier main|sub] [--max-plays 1-4 | --plays N[~K],...] [--gap 0-10] [--no-live] [--batched]
@@ -74,6 +78,19 @@ motion control, docs/protocol.md \"Talk-back (motion)\"): only with
 `ffmpeg -i IN -ar 16000 -ac 1 -f s16le OUT`) or a quiet tone (--tone, default
 440 Hz) for --seconds (default 2), pushed in real time like a microphone.
 The talk is closed at the end, on Ctrl-C, and on every error.
+playback-probe runs the playback engine of viewer-core against a real device
+(docs/MILESTONE-P.md, C10): only with --allow-playback-probe. Through the
+core it adds the device, indexes today for 1 to 4 --channels, opens a playback
+of them at a time all recorded (at least 190 s old), and runs a fixed script
+(1x 20 s, exact seek +60 s 15 s, 4x 15 s, 16x 10 s, 1x 10 s, pause, resume)
+with one live tile beside it, then prints per camera the time to the first
+picture, pictures released per second and media speed against the rate, the
+cameras' sync spread, stalls, late/no_recording states, and the engine's
+buffer stops and restarts. --now is the device's local time and
+--utc-offset-s its offset from UTC. Read-only; capped at 150 s; Ctrl-C closes
+the playback, the live tile, and the session. Keep its output in the ignored
+captures/ directory.
+
 replay-probe measures whether one session carries live view and recorded
 plays at once (docs/MILESTONE-P.md, B5): only with --allow-replay-probe. On
 one session it starts live view of --channel, finds a recording of that
@@ -134,6 +151,7 @@ enum Action {
         seconds: u64,
     },
     ReplayProbe(ProbeConfig),
+    PlaybackProbe(playback_probe::ProbeConfig),
 }
 
 enum Parsed {
@@ -182,6 +200,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let (mut allow_talk, mut pcm, mut tone) = (false, None, 440.0f64);
     let (mut allow_probe, mut max_plays, mut now) = (false, None, None);
     let (mut no_live, mut batched) = (false, false);
+    let (mut allow_pb_probe, mut utc_offset, mut pb_channels) = (false, None, None);
     let mut plays = None;
     let mut gap = None;
     let mut it = args;
@@ -253,6 +272,19 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
                         .ok_or("bad --now (YYYY-MM-DDTHH:MM:SS)")?,
                 );
             }
+            "--allow-playback-probe" => allow_pb_probe = true,
+            "--utc-offset-s" => {
+                utc_offset = Some(
+                    playback_probe::parse_utc_offset(&value("--utc-offset-s")?)
+                        .ok_or("bad --utc-offset-s (seconds from UTC, within 18 hours)")?,
+                );
+            }
+            "--channels" => {
+                pb_channels = Some(
+                    playback_probe::parse_channels(&value("--channels")?)
+                        .ok_or("bad --channels (1 to 4 distinct channel numbers, A,B,C,D)")?,
+                );
+            }
             "--no-live" => no_live = true,
             "--batched" => batched = true,
             "--pcm" => pcm = Some(PathBuf::from(value("--pcm")?)),
@@ -265,7 +297,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             "-h" | "--help" => return Err(String::new()),
             "channels" | "record" | "capture" | "analyze" | "query" | "lenses" | "talk"
-            | "replay-probe"
+            | "replay-probe" | "playback-probe"
                 if command.is_none() =>
             {
                 command = Some(a);
@@ -362,6 +394,22 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             cfg.login_limit = LOGIN_LIMIT;
             Action::ReplayProbe(cfg)
         }
+        Some("playback-probe") => {
+            if !allow_pb_probe {
+                return Err(
+                    "playback-probe plays recordings on a real device; pass --allow-playback-probe"
+                        .into(),
+                );
+            }
+            let now = now.ok_or("playback-probe needs --now (the device's local time)")?;
+            let utc_offset = utc_offset
+                .ok_or("playback-probe needs --utc-offset-s (the device's UTC offset)")?;
+            let channels = pb_channels.ok_or("playback-probe needs --channels A,B,C,D")?;
+            // The host is resolved when the run starts.
+            Action::PlaybackProbe(playback_probe::ProbeConfig::new(
+                "", 0, "", now, utc_offset, channels,
+            ))
+        }
         Some("lenses") => Action::Lenses {
             channel,
             window: seconds.map_or(Duration::from_secs(2), Duration::from_secs),
@@ -455,9 +503,18 @@ async fn ctrl_c_or(seconds: Option<u64>) {
     }
 }
 
-async fn run(args: Args) -> Result<(), String> {
+async fn run(
+    args: Args,
+    logs: Option<std::sync::Arc<playback_probe::LogCounts>>,
+) -> Result<(), String> {
     let password = password(args.keychain.as_deref())?;
     let addr = resolve(&args.host).await?;
+    if let Action::PlaybackProbe(mut cfg) = args.action {
+        cfg.host = addr.ip().to_string();
+        cfg.port = addr.port();
+        cfg.user = args.user;
+        return run_playback_probe(cfg, password, logs.unwrap_or_default()).await;
+    }
     let mut cfg = SessionConfig::new(args.user, password);
     if matches!(args.action, Action::ReplayProbe(_)) {
         cfg.max_plays = MAX_PLAYS;
@@ -468,6 +525,32 @@ async fn run(args: Args) -> Result<(), String> {
     // Stops previews and closes the socket before the process exits.
     session.close().await;
     result.map_err(|e| e.to_string())
+}
+
+/// Runs the playback probe on a blocking thread (the core has its own
+/// threads) and turns Ctrl-C into its stop flag.
+async fn run_playback_probe(
+    cfg: playback_probe::ProbeConfig,
+    password: String,
+    logs: std::sync::Arc<playback_probe::LogCounts>,
+) -> Result<(), String> {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = stop.clone();
+    let ctrl_c = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let r = tokio::task::spawn_blocking(move || {
+        let mut out = std::io::stdout();
+        playback_probe::run(&cfg, &password, logs, stop, &mut out)
+    })
+    .await
+    .map_err(|e| format!("the probe thread failed: {e}"))?;
+    ctrl_c.abort();
+    let report = r?;
+    print!("{}", playback_probe::format_summary(&report));
+    Ok(())
 }
 
 async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliError> {
@@ -702,6 +785,7 @@ async fn run_action(session: &DeviceSession, action: Action) -> Result<(), CliEr
             );
             Ok(())
         }
+        Action::PlaybackProbe(_) => unreachable!("handled before the session opens"),
         Action::ReplayProbe(cfg) => {
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
             let ctrl_c = tokio::spawn(async move {
@@ -834,7 +918,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    init_logging();
+    let logs = if matches!(args.action, Action::PlaybackProbe(_)) {
+        Some(playback_probe::init_logging())
+    } else {
+        init_logging();
+        None
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => {
@@ -842,7 +931,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(args)) {
+    match runtime.block_on(run(args, logs)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("bc-cli: {e}");
@@ -1008,5 +1097,47 @@ mod tests {
         assert!(cfg.batched && cfg.plays.len() == 4);
         assert!(with(&["replay-probe", "--allow-replay-probe"]).is_err());
         assert!(with(&["--password", "x", "replay-probe"]).is_err());
+    }
+
+    #[test]
+    fn playback_probe_needs_its_flags() {
+        let with = |extra: &[&str]| {
+            let mut v: Vec<&str> = BASE.to_vec();
+            v.push("playback-probe");
+            v.extend_from_slice(extra);
+            parse(&v)
+        };
+        let all = [
+            "--allow-playback-probe",
+            "--now",
+            "2026-10-08T12:00:00",
+            "--utc-offset-s",
+            "-14400",
+            "--channels",
+            "0,1,2,3",
+        ];
+        let e = with(&all[1..]).err().unwrap();
+        assert!(e.contains("--allow-playback-probe"), "{e}");
+        for flag in ["--now", "--utc-offset-s", "--channels"] {
+            let i = all.iter().position(|a| *a == flag).unwrap();
+            let mut v = all.to_vec();
+            v.drain(i..i + 2);
+            let e = with(&v).err().unwrap();
+            assert!(e.contains(flag), "{flag}: {e}");
+        }
+        let Ok(Parsed::Device(Args {
+            action: Action::PlaybackProbe(cfg),
+            ..
+        })) = with(&all)
+        else {
+            panic!("did not parse");
+        };
+        assert_eq!(cfg.utc_offset_s, -14400);
+        assert_eq!(cfg.channels, vec![0, 1, 2, 3]);
+        let want = replay_probe::parse_time("2026-10-08T12:00:00").unwrap();
+        assert_eq!(cfg.now.to_naive_secs(), want.to_naive_secs());
+        let mut bad = all.to_vec();
+        bad[6] = "0,1,2,3,4";
+        assert!(with(&bad).err().unwrap().contains("--channels"));
     }
 }

@@ -7,6 +7,7 @@
 //! ([`analyze`]).
 
 pub mod analyze;
+pub mod playback_probe;
 pub mod replay_probe;
 
 use bc_protocol::media::{Codec, Record};
