@@ -365,6 +365,8 @@ public final class CoreBridge: Sendable {
     /// thread may make them. Not from inside a callback. `.closed` after
     /// `shutdown`.
     public func recordings() throws(CoreStatus) -> any CoreAPI { try live() }
+    /// The core for the smart-alert calls (minor 12), from outside callbacks.
+    public func smartAlertsAPI() throws(CoreStatus) -> any CoreAPI { try live() }
 
     /// The core, for the capture calls (minor 9; docs/FFI.md "Capture"):
     /// they never wait on a device. Not from inside a callback, except

@@ -642,15 +642,24 @@ extension SmartAlertSettings {
         public var utcOffsetMinutes: Int
         /// The Keychain lookup; nil leaves every secret out.
         public var secret: ((SmartAlertSecret) -> String?)?
+        /// Every camera known now: those without settings of their own are
+        /// sent with the defaults (so explanations carry their names).
+        public var allCameras: [CameraRef]
+        /// The entrance mark the alert insets use (Settings > Cameras), when
+        /// the app keeps it; else the settings' own.
+        public var entrance: ((CameraRef) -> Bool)?
 
         public init(
             deviceID: @escaping (String) -> UInt64?, name: @escaping (CameraRef) -> String? = { _ in nil },
-            utcOffsetMinutes: Int, secret: ((SmartAlertSecret) -> String?)? = nil
+            utcOffsetMinutes: Int, secret: ((SmartAlertSecret) -> String?)? = nil, allCameras: [CameraRef] = [],
+            entrance: ((CameraRef) -> Bool)? = nil
         ) {
             self.deviceID = deviceID
             self.name = name
             self.utcOffsetMinutes = utcOffsetMinutes
             self.secret = secret
+            self.allCameras = allCameras
+            self.entrance = entrance
         }
     }
 
@@ -685,10 +694,12 @@ extension SmartAlertSettings {
             "standby": ["auto_on_battery": standbyOnBattery, "max_wake_per_device": 4],
         ]
         doc["location"] = location.map { ["lat": $0.lat, "lon": $0.lon] } ?? NSNull()
-        doc["cameras"] = cameras.compactMap { c -> [String: Any]? in
+        let listed = Set(cameras.map(\.camera))
+        let all = cameras + ctx.allCameras.filter { !listed.contains($0) }.map(AlertCameraSettings.init(camera:))
+        doc["cameras"] = all.compactMap { c -> [String: Any]? in
             guard let cam = Self.camera(c.camera, ctx) else { return nil }
             var o: [String: Any] = [
-                "camera": cam, "exposure": c.exposure.rawValue, "entrance": c.entrance,
+                "camera": cam, "exposure": c.exposure.rawValue, "entrance": ctx.entrance?(c.camera) ?? c.entrance,
                 "trust_camera_ai": c.trustCameraAI, "classes": c.classes.sorted().map(\.rawValue),
                 "zones": c.zones.filter { $0.points.count >= 3 }.map {
                     ["polygon": Self.polygon($0.points), "include": $0.include] as [String: Any]

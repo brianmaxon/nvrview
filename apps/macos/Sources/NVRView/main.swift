@@ -232,6 +232,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             recordingsFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("recordings-cameras.json")
                     ?? JSONFileStore<RecordingsEnablement>.appSupport("recordings-cameras.json")),
+            // No secret in it: those are Keychain items.
+            smartAlertsFile: SmartAlertSettingsFile(
+                file: options.dataDirectory?.appendingPathComponent("smart-alerts.json")
+                    ?? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json")),
             clock: testClock ?? SystemViewerClock(),
             callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }

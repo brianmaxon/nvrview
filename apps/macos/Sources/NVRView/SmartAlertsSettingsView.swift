@@ -1,0 +1,824 @@
+import AppKit
+import NVRCore
+import SwiftUI
+
+// Settings > Smart Alerts (docs/UX.md "Smart alerts"): turning them on,
+// night, the always-alert rules, each camera's exposure, classes, schedule
+// and zones, the MQTT sensors and the cameras that confirm them, the
+// outputs (desktop, Home Assistant), and where live checks show. Every
+// edit goes through `SmartAlertsController.update` (saved, then sent to
+// the core); passwords and tokens go to the Keychain only.
+
+enum SmartAlertsSection: String, CaseIterable, Identifiable {
+    case general = "General", cameras = "Cameras", sensors = "Sensors", outputs = "Outputs", view = "Live View"
+    var id: String { rawValue }
+}
+
+struct SmartAlertsSettingsView: View {
+    let model: AppModel
+    @State private var section: SmartAlertsSection = .general
+
+    private var alerts: SmartAlertsController { model.smartAlerts }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $section) {
+                ForEach(SmartAlertsSection.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(8)
+            Divider()
+            switch section {
+            case .general: SmartAlertsGeneralView(alerts: alerts)
+            case .cameras: SmartAlertsCamerasView(model: model)
+            case .sensors: SmartAlertsSensorsView(model: model)
+            case .outputs: SmartAlertsOutputsView(model: model)
+            case .view: SmartAlertsLiveViewSettings(alerts: alerts)
+            }
+        }
+        .onAppear { alerts.refreshStatus() }
+    }
+}
+
+/// A binding to one part of the settings.
+@MainActor
+private func setting<T>(_ alerts: SmartAlertsController, _ path: WritableKeyPath<SmartAlertSettings, T>) -> Binding<T> {
+    Binding(get: { alerts.settings[keyPath: path] }, set: { v in alerts.update { $0[keyPath: path] = v } })
+}
+
+private func caption(_ text: String) -> some View {
+    Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+}
+
+/// Minutes after midnight as a time picker's date (today, local).
+private func minuteBinding(_ b: Binding<Int>) -> Binding<Date> {
+    Binding(
+        get: { Calendar.current.startOfDay(for: Date()).addingTimeInterval(TimeInterval(b.wrappedValue * 60)) },
+        set: { d in
+            let c = Calendar.current.dateComponents([.hour, .minute], from: d)
+            b.wrappedValue = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+        })
+}
+
+// MARK: General
+
+struct SmartAlertsGeneralView: View {
+    let alerts: SmartAlertsController
+    @State private var lat = ""
+    @State private var lon = ""
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Smart alerts", isOn: setting(alerts, \.enabled))
+                caption(
+                    "A camera's own AI, a smoke or CO alarm, or a sensor starts a check: this Mac looks at the camera's main stream, confirms what is there, and only then alerts, saying why. Everything runs on this Mac; nothing leaves the local network unless you set up an output that sends it."
+                )
+                if let error = alerts.sendError { Text(error).foregroundStyle(.red) }
+                if let issues = alerts.configured?["issues"]?.array?.compactMap(\.string), !issues.isEmpty {
+                    caption("Adjusted: " + issues.joined(separator: "; "))
+                }
+            }
+            Section("Always alert") {
+                Toggle("Smoke and CO alarms", isOn: setting(alerts, \.alwaysAlert.smokeCO))
+                Toggle("A verified person on an outside camera at night", isOn: setting(alerts, \.alwaysAlert.nightOutsidePerson))
+                Toggle("A doorbell press at night", isOn: setting(alerts, \.alwaysAlert.doorbellNight))
+                caption(
+                    "These alert whatever the schedules, learning and feedback say. Only muting one camera (at most 24 hours) stops them."
+                )
+            }
+            Section("Night") {
+                Toggle(
+                    "Use a location for sunset and sunrise",
+                    isOn: Binding(
+                        get: { alerts.settings.location != nil },
+                        set: { on in alerts.update { $0.location = on ? AlertLocation(lat: 0, lon: 0) : nil } }))
+                if let loc = alerts.settings.location {
+                    HStack {
+                        TextField("Latitude", text: $lat, prompt: Text(String(loc.lat)))
+                            .onSubmit(saveLocation)
+                        TextField("Longitude", text: $lon, prompt: Text(String(loc.lon)))
+                            .onSubmit(saveLocation)
+                        Button("Set", action: saveLocation)
+                    }
+                    caption(
+                        "Rounded to 0.1° (about 11 km) and kept on this Mac, used only for sunset and sunrise. Night is from \(alerts.settings.night.afterSunsetMin) minutes after sunset to \(alerts.settings.night.beforeSunriseMin) minutes before sunrise."
+                    )
+                } else {
+                    DatePicker(
+                        "Night starts", selection: minuteBinding(setting(alerts, \.night.fallbackStartMin)),
+                        displayedComponents: .hourAndMinute)
+                    DatePicker(
+                        "Night ends", selection: minuteBinding(setting(alerts, \.night.fallbackEndMin)),
+                        displayedComponents: .hourAndMinute)
+                }
+                Picker("Mode", selection: setting(alerts, \.mode)) {
+                    ForEach(AlertMode.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                caption("Home: people on inside cameras are expected. Away: everything one step more urgent. Night: treated as night whatever the sun does.")
+            }
+            Section("Alerting") {
+                Picker("Lowest severity that alerts", selection: setting(alerts, \.minAlertSeverity)) {
+                    ForEach([AlertSeverity.low, .normal, .high], id: \.self) { Text($0.title).tag($0) }
+                }
+                caption("Anything lower goes to the event log only.")
+                Toggle("Switch to standby automatically on battery", isOn: setting(alerts, \.standbyOnBattery))
+            }
+            Section("Advanced: checking a camera's own detections") {
+                Stepper(
+                    "Pictures with a hit needed: \(alerts.settings.verification.k)",
+                    value: setting(alerts, \.verification.k), in: 1...4)
+                HStack {
+                    Text("Score floor")
+                    Slider(value: setting(alerts, \.verification.minScore), in: 0.2...0.9, step: 0.05)
+                    Text(String(format: "%.2f", alerts.settings.verification.minScore)).monospacedDigit()
+                }
+                Stepper(
+                    "Look from \(alerts.settings.verification.windowBeforeS) s before",
+                    value: setting(alerts, \.verification.windowBeforeS), in: 0...10)
+                Stepper(
+                    "Look until \(alerts.settings.verification.windowAfterS) s after",
+                    value: setting(alerts, \.verification.windowAfterS), in: 2...30)
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear(perform: loadLocation)
+    }
+
+    private func loadLocation() {
+        lat = alerts.settings.location.map { String($0.lat) } ?? ""
+        lon = alerts.settings.location.map { String($0.lon) } ?? ""
+    }
+
+    private func saveLocation() {
+        guard let la = Double(lat.replacingOccurrences(of: ",", with: ".")),
+            let lo = Double(lon.replacingOccurrences(of: ",", with: "."))
+        else { return loadLocation() }
+        alerts.update { $0.location = AlertLocation(lat: la, lon: lo) }
+        loadLocation()
+    }
+}
+
+// MARK: Cameras
+
+struct SmartAlertsCamerasView: View {
+    let model: AppModel
+    @State private var selection: CameraRef?
+    @State private var editingZone: Int?
+
+    private var alerts: SmartAlertsController { model.smartAlerts }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            List(selection: $selection) {
+                ForEach(model.devices) { d in
+                    Section(d.config.name) {
+                        ForEach(model.listedChannels(d), id: \.channel) { c in
+                            ForEach(model.cameras(device: d.key, channel: c), id: \.self) { cam in
+                                Text(model.name(of: cam)).tag(cam)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .frame(width: 200)
+            Divider()
+            if let camera = selection {
+                cameraForm(camera)
+            } else {
+                Text("Choose a camera").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .sheet(
+            isPresented: Binding(get: { editingZone != nil && selection != nil }, set: { if !$0 { editingZone = nil } })
+        ) {
+            if let camera = selection, let i = editingZone {
+                RegionEditorSheet(
+                    alerts: alerts, camera: camera, title: "Zone on \(model.name(of: camera))",
+                    points: alerts.settings.camera(camera).zones.indices.contains(i) ? alerts.settings.camera(camera).zones[i].points : [],
+                    onSave: { points in
+                        update(camera) { c in
+                            if c.zones.indices.contains(i) { c.zones[i].points = points } else { c.zones.append(AlertZone(points: points)) }
+                            c.zones.removeAll { $0.points.count < 3 }
+                        }
+                        editingZone = nil
+                    }, onCancel: { editingZone = nil })
+            }
+        }
+    }
+
+    private func update(_ camera: CameraRef, _ body: @escaping (inout AlertCameraSettings) -> Void) {
+        alerts.update { s in
+            var c = s.camera(camera)
+            body(&c)
+            s.setCamera(c)
+        }
+    }
+
+    private func binding<T>(_ camera: CameraRef, _ path: WritableKeyPath<AlertCameraSettings, T>) -> Binding<T> {
+        Binding(get: { alerts.settings.camera(camera)[keyPath: path] }, set: { v in update(camera) { $0[keyPath: path] = v } })
+    }
+
+    @ViewBuilder
+    private func cameraForm(_ camera: CameraRef) -> some View {
+        let c = alerts.settings.camera(camera)
+        Form {
+            Section(model.name(of: camera)) {
+                Picker("Exposure", selection: binding(camera, \.exposure)) {
+                    ForEach(AlertExposure.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                caption("Outside and perimeter cameras count as outside for the always-alert rules.")
+                Toggle(
+                    "Entrance", isOn: Binding(get: { model.cameraOptions(camera).entrance }, set: { model.setEntrance(camera, $0) }))
+                Toggle("Trust the camera's AI", isOn: binding(camera, \.trustCameraAI))
+                caption("When this Mac's check sees nothing on an always-alert case, alert anyway, marked unverified.")
+                Toggle("Check motion without a class", isOn: binding(camera, \.verifyMotion))
+            }
+            Section("Schedule") {
+                Picker(
+                    "Alerts",
+                    selection: Binding(
+                        get: { scheduleKind(c.schedule) },
+                        set: { kind in
+                            update(camera) { c in
+                                c.schedule =
+                                    switch kind {
+                                    case 1: .night
+                                    case 2: .windows([AlertDailyWindow(startMin: 22 * 60, endMin: 6 * 60)])
+                                    default: .always
+                                    }
+                            }
+                        })
+                ) {
+                    Text("Always").tag(0)
+                    Text("Only at night").tag(1)
+                    Text("At these times").tag(2)
+                }
+                if case .windows(let windows) = c.schedule {
+                    ForEach(windows.indices, id: \.self) { i in windowRow(camera, windows, i) }
+                    Button("Add Time Window") {
+                        update(camera) { c in
+                            if case .windows(var w) = c.schedule {
+                                w.append(AlertDailyWindow(startMin: 9 * 60, endMin: 17 * 60))
+                                c.schedule = .windows(w)
+                            }
+                        }
+                    }
+                }
+                caption("Always-alert rules ignore the schedule.")
+            }
+            Section("Classes") {
+                ForEach(AlertClass.allCases, id: \.self) { cls in
+                    Toggle(
+                        cls.title,
+                        isOn: Binding(
+                            get: { alerts.settings.camera(camera).classes.contains(cls) },
+                            set: { on in
+                                update(camera) { c in
+                                    c.classes.removeAll { $0 == cls }
+                                    if on { c.classes.append(cls) }
+                                }
+                            }))
+                }
+            }
+            Section("Zones") {
+                ForEach(c.zones.indices, id: \.self) { i in
+                    HStack {
+                        Text("Zone \(i + 1): \(c.zones[i].points.count) corners")
+                        Picker(
+                            "", selection: Binding(get: { c.zones[i].include }, set: { v in update(camera) { $0.zones[i].include = v } })
+                        ) {
+                            Text("Alert only here").tag(true)
+                            Text("Never here (mask)").tag(false)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                        Button("Edit…") { editingZone = i }
+                        Button("Remove") { update(camera) { $0.zones.remove(at: i) } }
+                    }
+                }
+                Button("Draw a Zone…") { editingZone = c.zones.count }
+                caption("Drawn on a still of the camera. A box counts where its feet are.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func scheduleKind(_ s: AlertSchedule) -> Int {
+        switch s {
+        case .always: 0
+        case .night: 1
+        case .windows: 2
+        }
+    }
+
+    private func windowRow(_ camera: CameraRef, _ windows: [AlertDailyWindow], _ i: Int) -> some View {
+        let days = ["M", "T", "W", "T", "F", "S", "S"]
+        func set(_ body: @escaping (inout AlertDailyWindow) -> Void) {
+            update(camera) { c in
+                if case .windows(var w) = c.schedule, w.indices.contains(i) {
+                    body(&w[i])
+                    c.schedule = .windows(w)
+                }
+            }
+        }
+        return HStack(spacing: 4) {
+            ForEach(0..<7, id: \.self) { d in
+                Toggle(
+                    days[d],
+                    isOn: Binding(
+                        get: { windows[i].days & (1 << d) != 0 }, set: { on in set { $0.days = on ? $0.days | (1 << d) : $0.days & ~(1 << d) } })
+                )
+                .toggleStyle(.button)
+            }
+            DatePicker(
+                "", selection: minuteBinding(Binding(get: { windows[i].startMin }, set: { v in set { $0.startMin = v } })),
+                displayedComponents: .hourAndMinute
+            )
+            .labelsHidden()
+            Text("to")
+            DatePicker(
+                "", selection: minuteBinding(Binding(get: { windows[i].endMin }, set: { v in set { $0.endMin = v } })),
+                displayedComponents: .hourAndMinute
+            )
+            .labelsHidden()
+            Button {
+                update(camera) { c in
+                    if case .windows(var w) = c.schedule, w.indices.contains(i) {
+                        w.remove(at: i)
+                        c.schedule = .windows(w)
+                    }
+                }
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove Time Window")
+        }
+    }
+}
+
+// MARK: Sensors
+
+struct SmartAlertsSensorsView: View {
+    let model: AppModel
+    @State private var selection: String?
+    @State private var user = ""
+    @State private var password = ""
+    @State private var regionFor: CameraRef?
+
+    private var alerts: SmartAlertsController { model.smartAlerts }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                List(selection: $selection) {
+                    ForEach(alerts.settings.sensors) { s in
+                        Text(s.name.isEmpty ? s.key : s.name).tag(s.key)
+                    }
+                }
+                .listStyle(.bordered)
+                HStack(spacing: 4) {
+                    Button {
+                        let key = MQTTSensor.newKey(taken: alerts.settings.sensors.map(\.key))
+                        alerts.update { $0.sensors.append(MQTTSensor(key: key, name: "Sensor \($0.sensors.count + 1)")) }
+                        selection = key
+                    } label: {
+                        Image(systemName: "plus").frame(width: 16, height: 16)
+                    }
+                    .accessibilityLabel("Add Sensor")
+                    Button {
+                        if let key = selection { alerts.removeSensor(key) }
+                        selection = nil
+                    } label: {
+                        Image(systemName: "minus").frame(width: 16, height: 16)
+                    }
+                    .disabled(selection == nil)
+                    .accessibilityLabel("Remove Sensor")
+                    Spacer()
+                }
+                .buttonStyle(.borderless)
+                .padding(6)
+            }
+            .frame(width: 180)
+            Divider()
+            if let key = selection, let i = alerts.settings.sensors.firstIndex(where: { $0.key == key }) {
+                sensorForm(i).id(key)
+            } else {
+                VStack(spacing: 8) {
+                    Text("No sensor chosen").foregroundStyle(.secondary)
+                    caption(
+                        "Add a motion, infrared or beam sensor, or a door contact, that your home automation publishes to your own MQTT broker. A sensor never alerts on its own: the cameras that see its area must confirm what is there."
+                    )
+                    .frame(maxWidth: 360)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .sheet(isPresented: Binding(get: { regionFor != nil }, set: { if !$0 { regionFor = nil } })) {
+            if let camera = regionFor, let key = selection, let i = alerts.settings.sensors.firstIndex(where: { $0.key == key }) {
+                RegionEditorSheet(
+                    alerts: alerts, camera: camera, title: "What \(model.name(of: camera)) sees of the sensor's area",
+                    points: alerts.settings.sensors[i].cameras.first { $0.camera == camera }?.roi ?? [],
+                    onSave: { points in
+                        alerts.update { s in
+                            if let j = s.sensors[i].cameras.firstIndex(where: { $0.camera == camera }) {
+                                s.sensors[i].cameras[j].roi = points
+                            }
+                        }
+                        regionFor = nil
+                    }, onCancel: { regionFor = nil })
+            }
+        }
+    }
+
+    private func b<T>(_ i: Int, _ path: WritableKeyPath<MQTTSensor, T>) -> Binding<T> {
+        Binding(
+            get: { alerts.settings.sensors.indices.contains(i) ? alerts.settings.sensors[i][keyPath: path] : MQTTSensor(key: "", name: "")[keyPath: path] },
+            set: { v in alerts.update { if $0.sensors.indices.contains(i) { $0.sensors[i][keyPath: path] = v } } })
+    }
+
+    private func list(_ i: Int, _ path: WritableKeyPath<MQTTSensor, [String]>) -> Binding<String> {
+        Binding(
+            get: { alerts.settings.sensors[i][keyPath: path].joined(separator: ", ") },
+            set: { v in
+                let items = v.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                alerts.update { $0.sensors[i][keyPath: path] = items }
+            })
+    }
+
+    private func intText(_ i: Int, _ path: WritableKeyPath<MQTTSensor, Int>) -> Binding<String> {
+        Binding(get: { String(alerts.settings.sensors[i][keyPath: path]) }, set: { v in if let n = Int(v) { alerts.update { $0.sensors[i][keyPath: path] = n } } })
+    }
+
+    @ViewBuilder
+    private func sensorForm(_ i: Int) -> some View {
+        let s = alerts.settings.sensors[i]
+        Form {
+            Section("Sensor") {
+                TextField("Name", text: b(i, \.name))
+                LabeledContent("Key", value: s.key)
+                TextField("Trigger kind", text: b(i, \.triggerKind), prompt: Text("sensor_motion"))
+                if let status = alerts.sensorStatus(i) { LabeledContent("Status", value: status) }
+            }
+            Section("Broker") {
+                TextField("Address", text: b(i, \.host), prompt: Text("broker.local"))
+                TextField("Port", text: intText(i, \.port))
+                Toggle("TLS", isOn: b(i, \.tls))
+                if s.tls {
+                    VStack(alignment: .leading) {
+                        Text("Broker CA (PEM; empty uses the public roots)").font(.caption)
+                        TextEditor(text: b(i, \.caPEM)).font(.system(.caption, design: .monospaced)).frame(height: 60)
+                    }
+                }
+                TextField(
+                    "User name", text: $user,
+                    prompt: Text(alerts.hasSecret(.mqttUser(s.key)) ? "Saved in the Keychain" : "None"))
+                SecureField(
+                    "Password", text: $password,
+                    prompt: Text(alerts.hasSecret(.mqttPassword(s.key)) ? "Saved in the Keychain" : "None"))
+                HStack {
+                    caption("The user name and password are stored only in the macOS Keychain, never in a file. A login the broker rejects is not retried.")
+                    Spacer()
+                    Button("Save Login") {
+                        alerts.setSecret(user, for: .mqttUser(s.key))
+                        alerts.setSecret(password, for: .mqttPassword(s.key))
+                        user = ""
+                        password = ""
+                    }
+                    .disabled(user.isEmpty && password.isEmpty)
+                }
+                if !AlertEndpoint.hostIsLocal(s.host), !s.host.isEmpty {
+                    Toggle("Allow a broker outside the local network", isOn: b(i, \.allowPublic))
+                }
+            }
+            Section("Message") {
+                TextField("Topic", text: b(i, \.topic), prompt: Text("example/sensors/motion"))
+                Toggle("Allow wildcards (+, #) in the topic", isOn: b(i, \.allowWildcards))
+                Picker("Payload", selection: b(i, \.payload)) {
+                    Text("ON or OFF").tag(MQTTPayloadFormat.plain)
+                    Text("JSON").tag(MQTTPayloadFormat.json)
+                }
+                if s.payload == .json { TextField("Path to the value", text: b(i, \.jsonPath), prompt: Text("state")) }
+                TextField("On values", text: list(i, \.onValues))
+                TextField("Off values", text: list(i, \.offValues))
+                Picker("Each change", selection: b(i, \.pulse)) {
+                    Text("On starts, off stops").tag(false)
+                    Text("Every on is one pulse").tag(true)
+                }
+                Picker("Retained messages", selection: b(i, \.retained)) {
+                    Text("Ignore").tag("ignore")
+                    Text("Seed the state").tag("seed")
+                    Text("Treat like any message").tag("accept")
+                }
+                TextField("Debounce (ms)", text: intText(i, \.debounceMs))
+            }
+            Section("Cameras that see the sensor's area") {
+                ForEach(s.cameras) { sc in
+                    HStack {
+                        Text(model.name(of: sc.camera))
+                        Spacer()
+                        Text(sc.roi.count >= 3 ? "Region: \(sc.roi.count) corners" : "Whole picture").foregroundStyle(.secondary)
+                        Button("Draw Region…") { regionFor = sc.camera }
+                        Stepper(
+                            "Weight \(String(format: "%.1f", sc.weight))",
+                            value: Binding(
+                                get: { sc.weight },
+                                set: { v in
+                                    alerts.update { st in
+                                        if let j = st.sensors[i].cameras.firstIndex(where: { $0.camera == sc.camera }) {
+                                            st.sensors[i].cameras[j].weight = v
+                                        }
+                                    }
+                                }), in: 0.5...2, step: 0.5)
+                        Button {
+                            alerts.update { $0.sensors[i].cameras.removeAll { $0.camera == sc.camera } }
+                        } label: {
+                            Image(systemName: "minus.circle")
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Remove Camera")
+                    }
+                }
+                Menu("Add Camera") {
+                    ForEach(model.allCameras.filter { cam in !s.cameras.contains { $0.camera == cam } }, id: \.self) { cam in
+                        Button(model.name(of: cam)) { alerts.update { $0.sensors[i].cameras.append(SensorCamera(camera: cam)) } }
+                    }
+                }
+                if s.cameras.isEmpty, s.requireVerified {
+                    Text("Choose at least one camera: a sensor alerts only when a camera confirms it.").foregroundStyle(.orange)
+                }
+            }
+            Section("Confirmation") {
+                Stepper("Look from \(s.windowBeforeMs / 1000) s before", value: b(i, \.windowBeforeMs), in: 0...10000, step: 1000)
+                Stepper("Look until \(s.windowAfterMs / 1000) s after", value: b(i, \.windowAfterMs), in: 1000...30000, step: 1000)
+                Stepper(
+                    "Retriggers extend it to at most \(s.windowMaxMs / 1000) s", value: b(i, \.windowMaxMs), in: 5000...120000, step: 5000)
+                ForEach(AlertClass.detector, id: \.self) { cls in
+                    Toggle(
+                        cls.title,
+                        isOn: Binding(
+                            get: { s.classes.contains(cls) },
+                            set: { on in
+                                alerts.update { st in
+                                    st.sensors[i].classes.removeAll { $0 == cls }
+                                    if on { st.sensors[i].classes.append(cls) }
+                                }
+                            }))
+                }
+                Stepper("Pictures needed (weighted): \(String(format: "%.1f", s.k))", value: b(i, \.k), in: 1...6, step: 0.5)
+                Toggle("Alert unverified when no picture could be checked", isOn: b(i, \.alertWhenUnavailable))
+                Toggle("Require a camera to confirm", isOn: b(i, \.requireVerified))
+                if !s.requireVerified {
+                    Text("This sensor alerts on its own, marked unverified.").foregroundStyle(.orange)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: Outputs
+
+struct SmartAlertsOutputsView: View {
+    let model: AppModel
+    @State private var token = ""
+
+    private var alerts: SmartAlertsController { model.smartAlerts }
+
+    var body: some View {
+        let ha = alerts.settings.homeAssistant
+        Form {
+            Section("Desktop notifications") {
+                Toggle("Notify on this Mac", isOn: setting(alerts, \.desktop.enabled))
+                Picker("From severity", selection: setting(alerts, \.desktop.minSeverity)) {
+                    ForEach(AlertSeverity.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Toggle("With a picture", isOn: setting(alerts, \.desktop.pictures))
+            }
+            Section("Home Assistant") {
+                Toggle("Send alerts to Home Assistant", isOn: setting(alerts, \.homeAssistant.enabled))
+                TextField("Address", text: setting(alerts, \.homeAssistant.baseURL), prompt: Text("http://homeassistant.local:8123"))
+                if ha.enabled, let why = AlertEndpoint.checkHomeAssistantURL(ha.baseURL) {
+                    Text(why).foregroundStyle(.orange)
+                }
+                HStack {
+                    SecureField(
+                        "Access token", text: $token,
+                        prompt: Text(alerts.hasSecret(.homeAssistantToken) ? "Saved in the Keychain" : "A long-lived access token"))
+                    Button("Save") {
+                        alerts.setSecret(token, for: .homeAssistantToken)
+                        token = ""
+                    }
+                    .disabled(token.isEmpty)
+                    Button("Test") { alerts.testHomeAssistant() }
+                }
+                if let t = alerts.homeAssistantTest { caption(t) }
+                if let status = alerts.homeAssistantStatus { LabeledContent("Status", value: status) }
+                Picker("From severity", selection: setting(alerts, \.homeAssistant.minSeverity)) {
+                    ForEach(AlertSeverity.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Toggle("With a picture", isOn: setting(alerts, \.homeAssistant.pictures))
+                if ha.pictures, AlertEndpoint.mayLeaveNetwork(ha.baseURL), !ha.baseURL.isEmpty {
+                    Text("This address may be outside your local network: pictures would leave the house.").foregroundStyle(.orange)
+                }
+                Picker("Rules", selection: setting(alerts, \.homeAssistant.allMatches)) {
+                    Text("First match").tag(false)
+                    Text("Every match").tag(true)
+                }
+                Stepper("Pulse gap \(ha.pulseGapMs / 1000) s", value: setting(alerts, \.homeAssistant.pulseGapMs), in: 1000...10000, step: 1000)
+                Stepper("Cooldown \(ha.cooldownMs / 1000) s", value: setting(alerts, \.homeAssistant.cooldownMs), in: 0...600_000, step: 5000)
+                caption(
+                    "The token is stored only in the macOS Keychain. Test asks Home Assistant's API with it and turns nothing on. A pulse turns a helper on and off again (resetting it first if it was left on), for routines that start when it turns on."
+                )
+            }
+            Section("Home Assistant rules") {
+                ForEach(ha.rules.indices, id: \.self) { i in HARuleRow(model: model, index: i) }
+                Button("Add Rule") { alerts.update { $0.homeAssistant.rules.append(HARule()) } }
+            }
+            let problems = alerts.settings.problems()
+            if !problems.isEmpty {
+                Section("To fix") {
+                    ForEach(problems, id: \.self) { Text($0).foregroundStyle(.orange) }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct HARuleRow: View {
+    let model: AppModel
+    let index: Int
+
+    private var alerts: SmartAlertsController { model.smartAlerts }
+
+    private func b<T>(_ path: WritableKeyPath<HARule, T>) -> Binding<T> {
+        Binding(
+            get: { alerts.settings.homeAssistant.rules.indices.contains(index) ? alerts.settings.homeAssistant.rules[index][keyPath: path] : HARule()[keyPath: path] },
+            set: { v in alerts.update { if $0.homeAssistant.rules.indices.contains(index) { $0.homeAssistant.rules[index][keyPath: path] = v } } })
+    }
+
+    var body: some View {
+        let r = alerts.settings.homeAssistant.rules[index]
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Picker("", selection: b(\.action)) {
+                    ForEach(HAActionKind.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                .labelsHidden()
+                .frame(width: 170)
+                TextField(
+                    "", text: b(\.target),
+                    prompt: Text(r.action == .notify ? "notify service" : r.action == .script ? "script.example" : "input_boolean.example_alert"))
+                Button {
+                    alerts.update { $0.homeAssistant.rules.remove(at: index) }
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Remove Rule")
+            }
+            HStack {
+                Menu(r.classes.isEmpty ? "Any class" : r.classes.map(\.title).joined(separator: ", ")) {
+                    ForEach(AlertClass.allCases, id: \.self) { cls in
+                        Toggle(cls.title, isOn: Binding(get: { r.classes.contains(cls) }, set: { on in toggle(\.classes, cls, on) }))
+                    }
+                }
+                Menu(r.cameras.isEmpty ? "Any camera" : "\(r.cameras.count) camera\(r.cameras.count == 1 ? "" : "s")") {
+                    ForEach(model.allCameras, id: \.self) { cam in
+                        Toggle(model.name(of: cam), isOn: Binding(get: { r.cameras.contains(cam) }, set: { on in toggle(\.cameras, cam, on) }))
+                    }
+                }
+                Menu(r.sources.isEmpty ? "Any trigger" : "\(r.sources.count) sensor\(r.sources.count == 1 ? "" : "s")") {
+                    ForEach(alerts.settings.sensors) { s in
+                        Toggle(s.name.isEmpty ? s.key : s.name, isOn: Binding(get: { r.sources.contains(s.key) }, set: { on in toggle(\.sources, s.key, on) }))
+                    }
+                }
+                Picker("From", selection: b(\.minSeverity)) {
+                    Text("Any severity").tag(AlertSeverity?.none)
+                    ForEach(AlertSeverity.allCases, id: \.self) { Text($0.title).tag(AlertSeverity?.some($0)) }
+                }
+                .frame(width: 170)
+            }
+            if let why = HARuleCheck.problem(r), !r.target.isEmpty { Text(why).font(.caption).foregroundStyle(.orange) }
+        }
+    }
+
+    private func toggle<T: Equatable>(_ path: WritableKeyPath<HARule, [T]>, _ value: T, _ on: Bool) {
+        alerts.update { s in
+            guard s.homeAssistant.rules.indices.contains(index) else { return }
+            s.homeAssistant.rules[index][keyPath: path].removeAll { $0 == value }
+            if on { s.homeAssistant.rules[index][keyPath: path].append(value) }
+        }
+    }
+}
+
+// MARK: Live view
+
+struct SmartAlertsLiveViewSettings: View {
+    let alerts: SmartAlertsController
+
+    var body: some View {
+        Form {
+            Section("Live checks") {
+                Picker("Show checks", selection: setting(alerts, \.view.placement)) {
+                    ForEach(VerifyPlacementSetting.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+                Toggle("Also keep checks that end quiet or suppressed", isOn: setting(alerts, \.view.showQuiet))
+                Stepper(
+                    "Stay at least \(alerts.settings.view.minSeconds) s after the decision",
+                    value: setting(alerts, \.view.minSeconds), in: VerifyViewSettings.minimumSeconds...600, step: 30)
+                caption(
+                    "Each check shows the camera's picture with the detector's boxes and every step from the trigger to the decision. It stays longer while the alert is still going, never takes the keyboard, and closes with its × button, Esc, or Dismiss All."
+                )
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: Drawing a region on a still
+
+struct RegionEditorSheet: View {
+    let alerts: SmartAlertsController
+    let camera: CameraRef
+    let title: String
+    let points: [ROIPoint]
+    let onSave: ([ROIPoint]) -> Void
+    let onCancel: () -> Void
+
+    @State private var editor = ROIEditor()
+    @State private var still: CGImage?
+    @State private var loading = true
+    @State private var started = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.headline)
+            caption("Click to add corners (at least three), drag a corner to move it. A box counts where its feet are.")
+            GeometryReader { geo in
+                let size = still.map { CGSize(width: $0.width, height: $0.height) } ?? CGSize(width: 16, height: 9)
+                let fit = ROIGeometry.fitRect(picture: size, in: geo.size)
+                ZStack(alignment: .topLeading) {
+                    Color.black
+                    if let still {
+                        Image(decorative: still, scale: 1).resizable().frame(width: fit.width, height: fit.height)
+                            .offset(x: fit.minX, y: fit.minY)
+                    } else {
+                        Text(loading ? "Getting a picture…" : "No picture from this camera; drawing on a blank frame.")
+                            .foregroundStyle(.white.opacity(0.7))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    Canvas { ctx, _ in
+                        let pts = editor.points.map { ROIGeometry.toView($0, fit: fit) }
+                        if pts.count >= 2 {
+                            var path = Path()
+                            path.addLines(pts)
+                            if pts.count >= 3 { path.closeSubpath() }
+                            ctx.fill(path, with: .color(.yellow.opacity(0.2)))
+                            ctx.stroke(path, with: .color(.yellow), lineWidth: 2)
+                        }
+                        for (i, p) in pts.enumerated() {
+                            let r = CGRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)
+                            ctx.fill(Path(ellipseIn: r), with: .color(i == editor.grabbed ? .orange : .yellow))
+                        }
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { g in
+                            if !started {
+                                started = true
+                                editor.press(at: g.startLocation, fit: fit)
+                            }
+                            editor.drag(to: g.location, fit: fit)
+                        }
+                        .onEnded { _ in
+                            started = false
+                            editor.release()
+                        })
+            }
+            .frame(minWidth: 560, minHeight: 315)
+            HStack {
+                Button("Delete Corner") { editor.deleteCorner() }.disabled(editor.points.isEmpty)
+                Button("Clear") { editor.clear() }
+                Spacer()
+                Text(editor.isClosed ? "\(editor.points.count) corners" : "Whole picture (fewer than three corners)")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Save") { onSave(editor.saved) }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding()
+        .frame(minWidth: 600, minHeight: 440)
+        .task {
+            editor = ROIEditor(points: points)
+            still = await alerts.still(of: camera)
+            loading = false
+        }
+    }
+}

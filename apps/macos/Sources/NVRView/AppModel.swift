@@ -63,6 +63,9 @@ final class AppModel {
     @ObservationIgnored private(set) var capture: CaptureController!
     /// Camera motion: the user's own pan, tilt, lens and preset controls.
     @ObservationIgnored private(set) var ptz: PTZModel!
+    /// Smart alerts: settings, live checks, the event log (docs/UX.md
+    /// "Smart alerts").
+    @ObservationIgnored private(set) var smartAlerts: SmartAlertsController!
     @ObservationIgnored private let taps = TapRouter()
     /// Who wants to hear of every detection (the windows' insets).
     @ObservationIgnored private var detectionListeners: [UUID: (DetectionEvent, CameraRef, Date) -> Void] = [:]
@@ -366,6 +369,7 @@ final class AppModel {
         deviceFile: JSONFileStore<DeviceConfig>, groupFile: JSONFileStore<CameraGroup>,
         cameraFile: JSONFileStore<CameraOptions> = JSONFileStore(file: nil),
         recordingsFile: JSONFileStore<RecordingsEnablement> = JSONFileStore(file: nil),
+        smartAlertsFile: SmartAlertSettingsFile = SmartAlertSettingsFile(file: nil),
         clock: any ViewerClock = SystemViewerClock(), callServices: CallServices? = nil
     ) throws {
         self.clock = clock
@@ -391,6 +395,7 @@ final class AppModel {
         calls = DoorbellCalls(model: self, services: callServices ?? .system(player: { [weak self] in self?.player }), taps: taps)
         capture = CaptureController(model: self)
         ptz = PTZModel(model: self)
+        smartAlerts = SmartAlertsController(model: self, bridge: bridge, credentials: credentials, file: smartAlertsFile)
         leases.hasMiddleTier = { [weak self] camera in
             guard let info = self?.channelInfo(camera) else { return false }
             return info.tiers.contains("extern") && !info.isMultiLens
@@ -440,6 +445,7 @@ final class AppModel {
             MainActor.assumeIsolated {
                 self?.expireDetections()
                 self?.tickCalls()
+                self?.smartAlerts.tick()
             }
         }
         notify()
@@ -529,7 +535,11 @@ final class AppModel {
     }
 
     /// Marks a camera as an entrance: a person on it opens an alert inset.
-    func setEntrance(_ camera: CameraRef, _ on: Bool) { updateOptions(camera) { $0.entrance = on } }
+    func setEntrance(_ camera: CameraRef, _ on: Bool) {
+        updateOptions(camera) { $0.entrance = on }
+        // Smart alerts use the same mark.
+        smartAlerts.apply(force: true)
+    }
 
     /// How a fisheye camera is mounted (its panorama and virtual views follow).
     func setFisheyeMount(_ camera: CameraRef, _ mount: FisheyeMount) {
@@ -644,7 +654,18 @@ final class AppModel {
     /// By camera key or configuration key.
     func runtime(_ key: String) -> DeviceRuntime? { index(key).map { devices[$0] } }
 
-    private func key(forDevice id: UInt64) -> String? { devices.first { $0.deviceID == id }?.key }
+    func key(forDevice id: UInt64) -> String? { devices.first { $0.deviceID == id }?.key }
+
+    /// A smart-alert camera (this run's device ID) as the app names it.
+    func cameraRef(_ c: AlertCamera) -> CameraRef? {
+        key(forDevice: c.device).map { CameraRef(device: $0, channel: Int(c.channel), lens: Int(c.lens)) }
+    }
+
+    /// A camera as the smart-alert calls name it, while its device is added.
+    func alertCamera(_ c: CameraRef) -> AlertCamera? {
+        guard let id = runtime(c.device)?.deviceID, c.channel >= 0, c.lens >= 0 else { return nil }
+        return AlertCamera(device: id, channel: UInt16(clamping: c.channel), lens: UInt8(clamping: c.lens))
+    }
 
     private func index(_ key: String) -> Int? { devices.firstIndex { $0.key == key || $0.config.key == key } }
 
@@ -1026,7 +1047,9 @@ final class AppModel {
             guard let key = key(forDevice: id), let i = index(key) else { return }
             devices[i].link = DeviceLink(state: state, since: Self.now)
             switch state {
-            case .connected: break
+            case .connected:
+                // The settings name cameras by this run's device IDs.
+                smartAlerts.apply()
             case .closed:
                 detections.clear(device: key)
                 alerts.deviceLost(key)
@@ -1099,8 +1122,8 @@ final class AppModel {
             return
         case .recording(let e):
             capture.apply(e)
-        case .smartAlert:
-            // Smart alerts (minor 12): no app side yet (detector, views).
+        case .smartAlert(let e):
+            smartAlerts.handle(e)
             return
         }
         notify()
