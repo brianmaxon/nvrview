@@ -47,7 +47,7 @@ internal sealed partial class StageView
         }
         ClosePtzFlyout();
         var content = new PtzFlyoutContent(camera, mode, _viewer.CameraName(camera), _viewer.Ptz);
-        var flyout = new Flyout { Content = content, Placement = FlyoutPlacementMode.Bottom };
+        var flyout = new Flyout { Content = content.Root, Placement = FlyoutPlacementMode.Bottom };
         flyout.Closed += (_, _) =>
         {
             if (ReferenceEquals(_ptzFlyout, flyout))
@@ -56,14 +56,14 @@ internal sealed partial class StageView
             }
         };
         // Alt keys while the flyout has the keyboard focus (its popup is outside the window's key route).
-        content.KeyDown += (_, e) =>
+        content.Root.KeyDown += (_, e) =>
         {
             if (HandlePtzKey(e.Key, e.KeyStatus.ScanCode, e.KeyStatus.IsMenuKeyDown, repeat: e.KeyStatus.WasKeyDown))
             {
                 e.Handled = true;
             }
         };
-        content.KeyUp += (_, e) => HandlePtzKeyUp(e.Key);
+        content.Root.KeyUp += (_, e) => HandlePtzKeyUp(e.Key);
         _ptzFlyout = flyout;
         PtzContent = content;
         if (from is not null)

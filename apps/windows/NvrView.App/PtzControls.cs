@@ -17,20 +17,22 @@ namespace NvrView.App;
 /// A control that is held: down on pointer down, up on pointer up, when the pointer capture is lost
 /// (the pointer left the window, the flyout closed), and when the control goes away with its flyout.
 /// </summary>
-internal sealed class HoldButton : Button
+internal sealed class HoldButton
 {
     public HoldButton(string glyph, string label)
     {
-        Content = new FontIcon { Glyph = glyph, FontSize = 14 };
-        AutomationProperties.SetName(this, label);
-        ToolTipService.SetToolTip(this, label);
+        Button = new Button { Content = new FontIcon { Glyph = glyph, FontSize = 14 } };
+        AutomationProperties.SetName(Button, label);
+        ToolTipService.SetToolTip(Button, label);
         // The button handles pointer events itself: listen to the handled ones too.
-        AddHandler(PointerPressedEvent, new PointerEventHandler((_, _) => PressDown()), true);
-        AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => PressUp()), true);
-        AddHandler(PointerCanceledEvent, new PointerEventHandler((_, _) => PressUp()), true);
-        AddHandler(PointerCaptureLostEvent, new PointerEventHandler((_, _) => PressUp()), true);
-        Unloaded += (_, _) => PressUp();
+        Button.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => PressDown()), true);
+        Button.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => PressUp()), true);
+        Button.AddHandler(UIElement.PointerCanceledEvent, new PointerEventHandler((_, _) => PressUp()), true);
+        Button.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler((_, _) => PressUp()), true);
+        Button.Unloaded += (_, _) => PressUp();
     }
+
+    public Button Button { get; }
 
     public Action OnDown { get; set; } = () => { };
 
@@ -62,8 +64,10 @@ internal sealed class HoldButton : Button
 }
 
 /// <summary>A lens axis: label, a step down, a slider across the camera's range, and a step up.</summary>
-internal sealed class PtzLensRow : Grid
+internal sealed class PtzLensRow
 {
+    public Grid Root { get; } = new();
+
     private readonly Slider _slider = new() { StepFrequency = 1, SmallChange = 1, LargeChange = 1, MinWidth = 90, HorizontalAlignment = HorizontalAlignment.Stretch };
     private bool _updating;
     private bool _pointerDown;
@@ -72,23 +76,23 @@ internal sealed class PtzLensRow : Grid
     {
         Axis = axis;
         string name = axis == PtzLensAxis.Zoom ? "Zoom" : "Focus";
-        ColumnSpacing = 6;
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Root.ColumnSpacing = 6;
+        Root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(48) });
+        Root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Root.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var label = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
         Minus = StepButton("", axis == PtzLensAxis.Zoom ? "Zoom out" : "Focus nearer", -1);
         Plus = StepButton("", axis == PtzLensAxis.Zoom ? "Zoom in" : "Focus farther", 1);
         AutomationProperties.SetName(_slider, name);
         _slider.VerticalAlignment = VerticalAlignment.Center;
-        SetColumn(Minus, 1);
-        SetColumn(_slider, 2);
-        SetColumn(Plus, 3);
-        Children.Add(label);
-        Children.Add(Minus);
-        Children.Add(_slider);
-        Children.Add(Plus);
+        Grid.SetColumn(Minus, 1);
+        Grid.SetColumn(_slider, 2);
+        Grid.SetColumn(Plus, 3);
+        Root.Children.Add(label);
+        Root.Children.Add(Minus);
+        Root.Children.Add(_slider);
+        Root.Children.Add(Plus);
         _slider.ValueChanged += (_, e) =>
         {
             if (_updating)
@@ -102,10 +106,10 @@ internal sealed class PtzLensRow : Grid
                 OnEnd();
             }
         };
-        _slider.AddHandler(PointerPressedEvent, new PointerEventHandler((_, _) => _pointerDown = true), true);
-        _slider.AddHandler(PointerReleasedEvent, new PointerEventHandler((_, _) => EndPointer()), true);
-        _slider.AddHandler(PointerCanceledEvent, new PointerEventHandler((_, _) => EndPointer()), true);
-        _slider.AddHandler(PointerCaptureLostEvent, new PointerEventHandler((_, _) => EndPointer()), true);
+        _slider.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => _pointerDown = true), true);
+        _slider.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler((_, _) => EndPointer()), true);
+        _slider.AddHandler(UIElement.PointerCanceledEvent, new PointerEventHandler((_, _) => EndPointer()), true);
+        _slider.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler((_, _) => EndPointer()), true);
     }
 
     public PtzLensAxis Axis { get; }
@@ -178,8 +182,11 @@ internal enum PtzMode
 /// The flyout's content: the pad (<see cref="PtzMode.Pad"/>) or the lens sliders (<see cref="PtzMode.Lens"/>) for one
 /// camera, with the camera's name and the latest refusal or failure.
 /// </summary>
-internal sealed class PtzFlyoutContent : StackPanel
+internal sealed class PtzFlyoutContent
 {
+    /// <summary>What the flyout shows.</summary>
+    public StackPanel Root { get; } = new() { Spacing = 8, Width = ContentWidth };
+
     public const double ContentWidth = 240;
 
     private readonly PtzModel _ptz;
@@ -193,8 +200,6 @@ internal sealed class PtzFlyoutContent : StackPanel
         Mode = mode;
         _name = name;
         _ptz = ptz;
-        Width = ContentWidth;
-        Spacing = 8;
         ptz.Changed += OnChanged;
         ptz.ClearProblem(camera);
         Build();
@@ -229,14 +234,14 @@ internal sealed class PtzFlyoutContent : StackPanel
 
     private void Build()
     {
-        Children.Clear();
+        Root.Children.Clear();
         Pad.Clear();
         LensRows.Clear();
         SpeedSlider = null;
-        Children.Add(new TextBlock { Text = _name, FontSize = 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
+        Root.Children.Add(new TextBlock { Text = _name, FontSize = 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis });
         if (_ptz.InfoFor(Camera) is not { } info)
         {
-            Children.Add(new TextBlock { Text = "Reading the camera…", FontSize = 12 });
+            Root.Children.Add(new TextBlock { Text = "Reading the camera…", FontSize = 12 });
             Finish();
             return;
         }
@@ -244,12 +249,12 @@ internal sealed class PtzFlyoutContent : StackPanel
         {
             if (info.PanTilt)
             {
-                Children.Add(BuildPad());
-                Children.Add(BuildSpeed(info));
+                Root.Children.Add(BuildPad());
+                Root.Children.Add(BuildSpeed(info));
             }
             else
             {
-                Children.Add(new TextBlock { Text = "This camera does not pan or tilt", FontSize = 12 });
+                Root.Children.Add(new TextBlock { Text = "This camera does not pan or tilt", FontSize = 12 });
             }
         }
         foreach (PtzLensAxis axis in Enum.GetValues<PtzLensAxis>())
@@ -267,11 +272,11 @@ internal sealed class PtzFlyoutContent : StackPanel
             };
             row.Update(range, _ptz.LensPosition(Camera, a) ?? range.Cur);
             LensRows[a] = row;
-            Children.Add(row);
+            Root.Children.Add(row.Root);
         }
         if (Mode == PtzMode.Lens && LensRows.Count == 0)
         {
-            Children.Add(new TextBlock { Text = "This camera has no zoom or focus", FontSize = 12 });
+            Root.Children.Add(new TextBlock { Text = "This camera has no zoom or focus", FontSize = 12 });
         }
         Finish();
     }
@@ -286,12 +291,14 @@ internal sealed class PtzFlyoutContent : StackPanel
         }
         void Place(PtzDirection d, string glyph, string label, int col, int row)
         {
-            var b = new HoldButton(glyph, label) { HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch };
+            var b = new HoldButton(glyph, label);
+            b.Button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            b.Button.VerticalAlignment = VerticalAlignment.Stretch;
             b.OnDown = () => _ptz.Press(d, Camera);
             b.OnUp = () => _ptz.Release();
-            Grid.SetColumn(b, col);
-            Grid.SetRow(b, row);
-            grid.Children.Add(b);
+            Grid.SetColumn(b.Button, col);
+            Grid.SetRow(b.Button, row);
+            grid.Children.Add(b.Button);
             Pad[d] = b;
         }
         Place(PtzDirection.Up, "", "Tilt up", 1, 0);
@@ -340,7 +347,7 @@ internal sealed class PtzFlyoutContent : StackPanel
         string text = _ptz.ProblemFor(Camera) ?? "";
         _status.Text = text;
         _status.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
-        Children.Add(_status);
+        Root.Children.Add(_status);
     }
 
     /// <summary>The camera's state changed (capabilities read, a position, a refusal).</summary>
@@ -353,7 +360,7 @@ internal sealed class PtzFlyoutContent : StackPanel
             Build();
             return;
         }
-        if (info is null && Children.Count < 2)
+        if (info is null && Root.Children.Count < 2)
         {
             Build();
             return;
