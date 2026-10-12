@@ -421,6 +421,51 @@ public final class CCore: CoreAPI {
         try check(nv_sound_configure(try core(), json))
     }
 
+    // MARK: Edit lists and sound (minor 8)
+
+    public func editCompute(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_edit_compute(c, json, $0, $1, $2) }
+    }
+
+    public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) {
+        try check(nv_sound_watch(try core(), camera, enabled))
+    }
+
+    public func recordingsLoudness(query: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_recordings_loudness(c, query, $0, $1, $2) }
+    }
+
+    public func soundLabelsPut(json: String) throws(CoreStatus) {
+        try check(nv_sound_labels_put(try core(), json))
+    }
+
+    public func soundAnalyzeDay(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_sound_analyze_day(c, json, $0, $1, $2) }
+    }
+
+    public func soundAnalyzeCancel(_ request: UInt64) throws(CoreStatus) {
+        try check(nv_sound_analyze_cancel(try core(), request))
+    }
+
+    public func tileLoudness(_ tile: UInt64, capacity: Int) throws(CoreStatus) -> TileLoudness {
+        let c = try core()
+        let cap = max(0, min(capacity, 3600))
+        var peak = [UInt8](repeating: 0, count: cap)
+        var rms = [UInt8](repeating: 0, count: cap)
+        var start: Int64 = 0
+        var count = 0
+        let status = peak.withUnsafeMutableBufferPointer { p in
+            rms.withUnsafeMutableBufferPointer { r in
+                nv_tile_loudness(c, tile, p.baseAddress, r.baseAddress, cap, &start, &count)
+            }
+        }
+        try check(status)
+        return TileLoudness(startSeconds: start, peak: Array(peak.prefix(count)), rms: Array(rms.prefix(count)))
+    }
+
     // MARK: Recorded playback (minor 6)
 
     public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {

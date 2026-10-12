@@ -69,6 +69,11 @@ final class FakeRecordingsState: @unchecked Sendable {
         var pendingThumbnails: [ThumbnailKey] = []
         var downloads: [Download] = []
         var nextDownload = 1
+        /// Cameras on the sound "always listen" list.
+        var watched: [RecordingCamera] = []
+        /// Sound analysis requests that have not finished: request, camera.
+        var analyses: [(request: UInt64, camera: RecordingCamera, day: Int64)] = []
+        var nextAnalysis: UInt64 = 1
         var stopped = false
     }
 
@@ -895,6 +900,7 @@ extension FakeCore {
     /// their events. Paused downloads wait.
     public func completeRecordingWork() {
         guard !isFreed else { return }
+        completeSoundAnalyses()
         let cover = coverKeyframe
         let (thumbs, downloads) = recordings.locked { w -> ([ThumbnailKey], [FakeRecordingsState.Download]) in
             let thumbs = w.pendingThumbnails
@@ -923,6 +929,225 @@ extension FakeCore {
             var o = Self.downloadObject(d)
             o["type"] = "download"
             emit(event: Self.json(o))
+        }
+    }
+}
+
+// MARK: Edit lists and sound (minor 8)
+//
+// `editCompute` plans a follow cut or a grid over a finished download of the
+// made-up store: every camera of the download is a source of 1920 by 1080
+// h264 that starts at the download range and has a keyframe every 2 s. The
+// follow cut shows each event's camera while it lasts. `soundWatch` keeps a
+// list and sends `sound_watch` events; loudness lanes are `null` except for
+// watched cameras (a steady -40 dBFS peak, -50 RMS); `soundLabelsPut` only
+// validates; `soundAnalyzeDay` queues a request that `completeRecordingWork`
+// finishes with a `sound_analyze` `running` and `done` (no seconds, no
+// labels). `tileLoudness` is in FakeCore.swift.
+
+extension FakeCore {
+    private static func requireKnownCamera(_ w: FakeRecordingsState.World, _ c: RecordingCamera) throws(CoreStatus) {
+        guard allowed(w, c) else { throw .invalidArgument }
+    }
+
+    public func editCompute(json: String) throws(CoreStatus) -> String {
+        let o = try Self.object(json)
+        guard let kind = o["kind"] as? String, let id = o["download"] as? String else { throw .invalidArgument }
+        switch kind {
+        case "follow", "grid": break
+        case "trim": throw .unsupported
+        default: throw .invalidArgument
+        }
+        if o["in_ms"] != nil || o["out_ms"] != nil { throw .unsupported }
+        let plan = try configuredWorld { w throws(CoreStatus) -> [String: Any] in
+            guard w.downloadsDir != nil else { throw .notConfigured }
+            guard let d = w.downloads.first(where: { $0.id == id }) else { throw .unknownID }
+            guard d.state == "done",
+                let inc = Self.allIncidents(w).first(where: { $0.key == d.incident })
+            else { throw .invalidArgument }
+            let cameras = d.cameras.filter { inc.cameras.contains($0) }
+            guard !cameras.isEmpty, !inc.events.isEmpty else { throw .invalidArgument }
+            let range = { (c: RecordingCamera) -> (Int64, Int64) in
+                let own = inc.events.filter { $0.camera == c }
+                return (
+                    (own.map(\.start).min() ?? inc.start) - 5, (own.map(\.end).max() ?? inc.end) + 5
+                )
+            }
+            let sources = cameras.enumerated().map { (i, c) -> [String: Any] in
+                let start = range(c).0 * 1000
+                let ends = range(c).1 * 1000
+                return [
+                    "source": i, "camera": Self.cameraObject(c), "name": "Camera \(c.channel + 1)",
+                    "file": "\(d.folder)/Camera \(c.channel + 1).mp4", "file_start_ms": start, "offset_ms": 0,
+                    "codec": "h264", "width": 1920, "height": 1080, "duration_ms": ends - start,
+                ]
+            }
+            var plan: [String: Any] = [
+                "version": 1, "kind": kind, "download": id, "sources": sources,
+                "suggested_file": "\(d.folder)/\(inc.start) \(kind).mp4",
+            ]
+            if kind == "follow" {
+                var segments: [[String: Any]] = []
+                for e in inc.events.sorted(by: { ($0.start, $0.key) < ($1.start, $1.key) }) {
+                    guard let i = cameras.firstIndex(of: e.camera) else { continue }
+                    let from = max(e.start * 1000, segments.last.map { $0["end_ms"] as! Int64 } ?? 0)
+                    guard from < e.end * 1000 else { continue }
+                    if let last = segments.last, last["source"] as? Int == i {
+                        segments[segments.count - 1]["end_ms"] = e.end * 1000
+                    } else {
+                        segments.append([
+                            "start_ms": from, "end_ms": e.end * 1000, "source": i,
+                            "source_in_ms": from - (range(cameras[i]).0 * 1000),
+                        ])
+                    }
+                }
+                guard let first = segments.first, let last = segments.last else { throw .invalidArgument }
+                plan["start_ms"] = first["start_ms"]
+                plan["end_ms"] = last["end_ms"]
+                plan["segments"] = segments
+                plan["copy_possible"] = (o["cut"] as? String ?? "keyframe") == "keyframe"
+                plan["labels"] = (0..<cameras.count).map { ["source": $0, "name": "Camera \(cameras[$0].channel + 1)", "time": true] }
+            } else {
+                let canvas = o["canvas"] as? [String: Any]
+                let width = canvas?["width"] as? Int ?? 1920
+                let height = canvas?["height"] as? Int ?? 1080
+                guard (1...16_384).contains(width), (1...16_384).contains(height) else { throw .invalidArgument }
+                let layout =
+                    (o["layout"] as? String).flatMap { ["2up", "4up"].contains($0) ? $0 : nil }
+                    ?? (cameras.count == 1 ? "1up" : cameras.count == 2 ? "2up" : "4up")
+                let (cols, rows) = layout == "4up" ? (2, 2) : layout == "1up" ? (1, 1) : (width >= height ? (2, 1) : (1, 2))
+                let lo = cameras.map { range($0).0 }.min()! * 1000
+                let hi = cameras.map { range($0).1 }.max()! * 1000
+                plan["layout"] = layout
+                plan["start_ms"] = lo
+                plan["end_ms"] = hi
+                plan["copy_possible"] = false
+                plan["canvas"] = ["width": width, "height": height]
+                plan["cells"] = cameras.prefix(cols * rows).enumerated().map { (i, c) -> [String: Any] in
+                    let x0 = (i % cols) * width / cols, x1 = (i % cols + 1) * width / cols
+                    let y0 = (i / cols) * height / rows, y1 = (i / cols + 1) * height / rows
+                    return [
+                        "rect": ["x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0], "source": i,
+                        "fit": o["fit"] as? String ?? "fit", "present": [[range(c).0 * 1000, range(c).1 * 1000]],
+                    ]
+                }
+            }
+            return plan
+        }
+        return Self.json(plan)
+    }
+
+    public func soundWatch(camera: String, enabled: Bool) throws(CoreStatus) {
+        let c = try Self.camera(try Self.object(camera))
+        let changed = try configuredWorld { w throws(CoreStatus) -> Bool in
+            if enabled {
+                if w.watched.contains(c) { return false }
+                guard w.watched.count < 64 else { throw .limit }
+                w.watched.append(c)
+                return true
+            }
+            guard let i = w.watched.firstIndex(of: c) else { return false }
+            w.watched.remove(at: i)
+            return true
+        }
+        if changed {
+            emit(event: Self.json([
+                "type": "sound_watch", "camera": Self.cameraObject(c), "state": enabled ? "watching" : "stopped",
+            ]))
+        }
+    }
+
+    public func recordingsLoudness(query: String) throws(CoreStatus) -> String {
+        let o = try Self.object(query)
+        guard let start = (o["start"] as? NSNumber)?.int64Value, let end = (o["end"] as? NSNumber)?.int64Value,
+            end >= start, (0...253_402_300_799).contains(start)
+        else { throw .invalidArgument }
+        let bucket = o["bucket_s"] as? Int ?? 60
+        guard (1...3600).contains(bucket) else { throw .invalidArgument }
+        let count = Int((end - start) / Int64(bucket)) + 1
+        guard count <= 100_000 else { throw .limit }
+        return try configuredWorld { w throws(CoreStatus) -> String in
+            var cameras = w.watched
+            if let list = o["cameras"] as? [Any] {
+                cameras = []
+                for item in list { cameras.append(try Self.camera(item)) }
+            }
+            let lanes = cameras.map { c -> [String: Any] in
+                let heard = w.watched.contains(c) && Self.allowed(w, c)
+                let peak: [Any] = Array(repeating: heard ? -40 : NSNull(), count: count)
+                let rms: [Any] = Array(repeating: heard ? -50 : NSNull(), count: count)
+                return [
+                    "camera": Self.cameraObject(c), "bucket_s": bucket, "start": start,
+                    "peak_db": peak, "rms_db": rms,
+                ]
+            }
+            return Self.json(["revision": w.revision, "lanes": lanes])
+        }
+    }
+
+    public func soundLabelsPut(json: String) throws(CoreStatus) {
+        let o = try Self.object(json)
+        let c = try Self.camera(o["camera"])
+        guard let analyzer = o["analyzer"] as? String, !analyzer.isEmpty, analyzer != "pattern-v1",
+            let start = (o["start"] as? NSNumber)?.int64Value, let end = (o["end"] as? NSNumber)?.int64Value,
+            end >= start, let labels = o["labels"] as? [[String: Any]]
+        else { throw .invalidArgument }
+        guard end - start <= 31 * Self.day, labels.count <= 20_000 else { throw .limit }
+        for l in labels {
+            guard let kind = l["kind"] as? String, !kind.isEmpty,
+                kind.allSatisfy({ $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "_") }),
+                let s = (l["start"] as? NSNumber)?.int64Value, let e = (l["end"] as? NSNumber)?.int64Value, e >= s
+            else { throw .invalidArgument }
+        }
+        try configuredWorld { w throws(CoreStatus) in try Self.requireKnownCamera(w, c) }
+    }
+
+    public func soundAnalyzeDay(json: String) throws(CoreStatus) -> String {
+        let o = try Self.object(json)
+        let c = try Self.camera(o["camera"])
+        guard let day = (o["day"] as? NSNumber)?.int64Value, day >= 0 else { throw .invalidArgument }
+        let request = try configuredWorld { w throws(CoreStatus) -> UInt64 in
+            try Self.requireKnownCamera(w, c)
+            guard w.analyses.count < 32 else { throw .limit }
+            let id = w.nextAnalysis
+            w.nextAnalysis += 1
+            w.analyses.append((id, c, day))
+            return id
+        }
+        emit(event: Self.json(Self.analysisEvent(request, c, day, "queued")))
+        scheduleRecordingWork()
+        return Self.json(["request": request, "state": "queued"])
+    }
+
+    public func soundAnalyzeCancel(_ request: UInt64) throws(CoreStatus) {
+        let gone = try configuredWorld { w throws(CoreStatus) -> (camera: RecordingCamera, day: Int64) in
+            guard let i = w.analyses.firstIndex(where: { $0.request == request }) else { throw .unknownID }
+            let a = w.analyses.remove(at: i)
+            return (a.camera, a.day)
+        }
+        emit(event: Self.json(Self.analysisEvent(request, gone.camera, gone.day, "canceled")))
+    }
+
+    private static func analysisEvent(
+        _ request: UInt64, _ c: RecordingCamera, _ day: Int64, _ state: String
+    ) -> [String: Any] {
+        ["type": "sound_analyze", "request": request, "camera": cameraObject(c), "day": day, "state": state]
+    }
+
+    /// Finishes every queued sound analysis: `running`, then `done` with no
+    /// audio analyzed (the fake has no recordings to listen to).
+    func completeSoundAnalyses() {
+        let pending = recordings.locked { w -> [(request: UInt64, camera: RecordingCamera, day: Int64)] in
+            let p = w.analyses
+            w.analyses.removeAll()
+            return p
+        }
+        for a in pending {
+            emit(event: Self.json(Self.analysisEvent(a.request, a.camera, a.day, "running")))
+            var done = Self.analysisEvent(a.request, a.camera, a.day, "done")
+            done["seconds"] = 0
+            done["labels"] = 0
+            emit(event: Self.json(done))
         }
     }
 }
