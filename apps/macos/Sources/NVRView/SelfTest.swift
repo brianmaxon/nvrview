@@ -1272,13 +1272,18 @@ final class SelfTest {
             problems.append("\(what): the confirmation toast said \(toast ?? "nothing")")
         }
         if !record.dewarped {
-            let (checked, matched) = PictureCheck.compare(
-                image, buffer: record.picture.pixelBuffer, color: record.color, region: record.region, tolerance: tolerance)
+            // A JPEG is compared with the same encoder's JPEG of the decoded
+            // picture: its losses (far off on a sharp color edge, so they
+            // vary with the frame saved) cancel out.
+            let buffer = record.picture.pixelBuffer
+            let (checked, matched) =
+                ext == "jpg"
+                ? PictureCheck.compareEncoded(
+                    image, buffer: buffer, color: record.color, region: record.region, encoding: PictureFormat.jpeg.encoding,
+                    tolerance: tolerance) ?? (0, 0)
+                : PictureCheck.compare(image, buffer: buffer, color: record.color, region: record.region, tolerance: tolerance)
             print("\(what): \(matched) of \(checked) sampled pixels match the decoded picture")
-            // JPEG's chroma subsampling can put a sample on a sharp color
-            // edge of the frame being saved far off; allow a few of those.
-            let share = ext == "jpg" ? 90 : 95
-            if checked < 20 || matched * 100 < checked * share {
+            if checked < 20 || matched * 100 < checked * 95 {
                 problems.append("\(what): only \(matched) of \(checked) pixels match the decoded picture")
             }
         }
@@ -1312,7 +1317,7 @@ final class SelfTest {
                 model.shareSafeNames = true
                 model.pictureFormat = .jpeg
                 saving(stage, { press("p", keyCode: 35) }) { [self] record in
-                    checkSaved(record, "picture (share-safe JPEG)", ext: "jpg", nameEnds: " Camera A", size: size, tolerance: 14)
+                    checkSaved(record, "picture (share-safe JPEG)", ext: "jpg", nameEnds: " Camera A", size: size, tolerance: 8)
                     model.shareSafeNames = false
                     model.pictureFormat = .png
                     zoomedPictureStep(path, camera, folder: folder)
