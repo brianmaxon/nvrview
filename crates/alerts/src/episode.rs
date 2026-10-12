@@ -145,6 +145,12 @@ impl Timeliness {
         }
     }
 
+    /// Makes the next new alert's ID at least `next`, so IDs stay unique
+    /// across runs when the host remembers the highest one it logged.
+    pub fn set_next_alert_id(&mut self, next: u64) {
+        self.next_alert_id = self.next_alert_id.max(next.max(1));
+    }
+
     pub fn get(&self, key: &EpisodeKey) -> Option<&Episode> {
         self.episodes.get(key)
     }

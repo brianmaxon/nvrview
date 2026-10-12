@@ -168,6 +168,17 @@ impl Engine {
         issues
     }
 
+    /// Makes the next new alert's ID at least `next` (alert IDs then stay
+    /// unique across runs of a host that logs them).
+    pub fn set_next_alert_id(&mut self, next: u64) {
+        self.timeliness.set_next_alert_id(next);
+    }
+
+    /// The camera's mute end, if it is muted at `now`.
+    pub fn muted(&self, camera: CameraId, now: Millis) -> Option<Millis> {
+        self.muted_until(camera, now)
+    }
+
     pub fn status(&self) -> EngineStatus {
         EngineStatus {
             open_checks: self.open.len(),
