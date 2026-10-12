@@ -362,7 +362,10 @@ fn incidents_include_every_event_the_index_returns() {
     core.recordings_enable(&key, Some(ENABLE)).unwrap();
     let q = json!({"start": day(8), "end": day(9) + DAY - 1}).to_string();
     // (events the index returns, events in incidents) at every step of the
-    // fill, until both are in or the incidents lag.
+    // fill, until both are in or the incidents lag. The lanes write the
+    // index on their own threads, so an event can land between the two
+    // queries: asked in this order, the incidents may be ahead of the
+    // events but never behind them.
     let mut last = (0, 0);
     fill(&sim, &core, &key, &[day(8), day(9)], false, || {
         let events = parse(core.recordings_events(&q))["events"]
@@ -375,7 +378,7 @@ fn incidents_include_every_event_the_index_returns() {
             .map(|i| i["events"].as_array().unwrap().len())
             .sum();
         last = (events, grouped);
-        events != grouped || events == 2
+        grouped < events || events == 2
     });
     sim.run_free(|| core.shutdown());
     assert_eq!(last, (2, 2), "the incidents lag the index");
