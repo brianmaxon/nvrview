@@ -90,6 +90,9 @@ pub struct ArchiveConfig {
     pub fps: u32,
     /// Seconds between keyframes.
     pub gop_secs: u32,
+    /// Channels whose plays use their own keyframe spacing in seconds
+    /// instead of [`ArchiveConfig::gop_secs`] (cameras of one NVR differ).
+    pub gop_by_channel: Vec<(u8, u32)>,
     /// Audio interleaved in downloads, one ADTS frame every 64 ms, with two
     /// records before the first keyframe as devices send (docs/protocol.md).
     pub audio: Option<Arc<AudioFixture>>,
@@ -216,6 +219,7 @@ impl ArchiveConfig {
             event_page: 50,
             fps: 10,
             gop_secs: 2,
+            gop_by_channel: Vec::new(),
             audio: None,
             download_rate: None,
             play_burst_secs: 3,

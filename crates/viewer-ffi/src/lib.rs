@@ -21,9 +21,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use viewer_core::audio::TapBlock;
 use viewer_core::{
-    Action, AudioEncoder, Callbacks, CaptureError, Codec, ColorMatrix, Core, CoreConfig, CoreError,
-    DecodeFailureKind, EncoderOpened, LogSettings, MAX_CAMERAS, PlaybackState, RecError, SeekMode,
-    StreamTier, ThumbKind, Thumbnail, ThumbnailAnswer, TileStatus, clock,
+    Action, AlertError, AudioEncoder, Callbacks, CaptureError, Codec, ColorMatrix, Core,
+    CoreConfig, CoreError, DecodeFailureKind, EncoderOpened, LogSettings, MAX_CAMERAS,
+    PlaybackState, RecError, SeekMode, StreamTier, ThumbKind, Thumbnail, ThumbnailAnswer,
+    TileStatus, clock,
 };
 
 /// Bumped on any incompatible change; apps compare it with nv_abi_version().
@@ -41,8 +42,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// (section 7a): nv_download_range, nv_still_plan, the trim kind and in_ms and
 /// out_ms of nv_edit_compute, and dest and share_safe on export requests.
 /// Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
-/// nv_ptz_lens, nv_ptz_preset, nv_motion_grant).
-pub const NV_ABI_MINOR: u32 = 11;
+/// nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
+/// (docs/FFI.md, "Smart alerts").
+pub const NV_ABI_MINOR: u32 = 12;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -3345,6 +3347,274 @@ pub unsafe extern "C" fn nv_record_status(
 ) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_answer(core, out, cap, len, |c| Ok(c.record_status())) }
+}
+
+// ---- Smart alerts (minor 12; docs/FFI.md, "Smart alerts") ----
+
+impl From<AlertError> for NvStatus {
+    fn from(e: AlertError) -> NvStatus {
+        match e {
+            AlertError::InvalidArgument => NvStatus::NV_ERR_INVALID_ARGUMENT,
+            AlertError::UnknownId => NvStatus::NV_ERR_UNKNOWN_ID,
+            AlertError::Closed => NvStatus::NV_ERR_CLOSED,
+            AlertError::Limit => NvStatus::NV_ERR_LIMIT,
+            AlertError::BufferTooSmall => NvStatus::NV_ERR_BUFFER_TOO_SMALL,
+            AlertError::NotConfigured => NvStatus::NV_ERR_NOT_CONFIGURED,
+            AlertError::Internal => NvStatus::NV_ERR_INTERNAL,
+        }
+    }
+}
+
+/// Copies `data` into `out` when it fits; `*len` always receives its size.
+///
+/// # Safety
+/// `out` is null or valid for writing `cap` bytes; `len` is valid for one
+/// write.
+unsafe fn copy_bytes(data: &[u8], out: *mut u8, cap: usize, len: *mut usize) -> NvStatus {
+    // SAFETY: per the caller.
+    if !unsafe { put(len, data.len()) } {
+        return NvStatus::NV_ERR_INVALID_ARGUMENT;
+    }
+    if data.is_empty() {
+        return NvStatus::NV_OK;
+    }
+    if out.is_null() || cap < data.len() {
+        return NvStatus::NV_ERR_BUFFER_TOO_SMALL;
+    }
+    // SAFETY: `out` is valid for `cap` >= data.len() bytes per the caller
+    // and does not overlap memory the core owns.
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), out, data.len()) };
+    NvStatus::NV_OK
+}
+
+/// Sets the smart-alert settings (docs/NOTIFICATIONS.md "Settings", plus
+/// "enabled", "utc_offset_min", "acquisition", and "inputs"; docs/FFI.md,
+/// "Smart alerts"). Cameras are named by the device IDs of this run. The
+/// first call starts the engine; until then triggers are ignored. Values
+/// out of range are clamped and reported in the alerts_configured event,
+/// never refused. NV_ERR_INVALID_ARGUMENT for JSON that is not a settings
+/// object. Any thread, never inside a callback. Added in minor 12, as
+/// everything down to nv_alert_mute.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_configure(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alerts_configure(arg(json)?)?)) }
+}
+
+/// The event log, newest first (docs/FFI.md, "Smart alerts"): `query` is
+/// a JSON object of filters (NULL or "{}" for the newest 100); answers
+/// {"entries":[...],"more":bool,"status":{...}} into `out` like
+/// nv_layouts_get.
+///
+/// # Safety
+/// `core` is a live handle; `query` is null or a NUL-terminated string;
+/// `out` is null or valid for writing `cap` bytes; `len` is valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_get(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.alerts_get(opt_arg(query)?.unwrap_or(""))?)
+        })
+    }
+}
+
+/// Queues a trigger from the app (a source of its own, or a self-test)
+/// and writes its trigger ID: {"source":"external","origin":"<key>",
+/// "kind",...} or {"source":"device"|"local_audio"|...,"camera":{...},
+/// "kind",...}. NV_ERR_NOT_CONFIGURED while smart alerts are off,
+/// NV_ERR_LIMIT when the intake queue is full.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string;
+/// `trigger_id` is null or valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_trigger_put(
+    core: *mut NvCore,
+    json: *const c_char,
+    trigger_id: *mut u64,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let id = c.alerts_trigger_put(arg(json)?)?;
+            // SAFETY: null or valid for one write per the caller.
+            put(trigger_id, id);
+            Ok(())
+        })
+    }
+}
+
+/// Copies the frames of a verification request (the `request` of a
+/// verify_request event) into `out`: Annex-B access units from a keyframe
+/// (parameter sets included) to the picture to check, whose sizes the
+/// event lists. `*info` gets the codec (NV_THUMB_H264_KEYFRAME or
+/// NV_THUMB_H265_KEYFRAME), the picture size, and the picture's stream
+/// timestamp. NV_ERR_BUFFER_TOO_SMALL: *info and *len filled.
+/// NV_ERR_UNKNOWN_ID once the request was answered or expired. Never
+/// waits on a device.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `info`
+/// and `len` are valid for one write; `out` is null or valid for writing
+/// `cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_frames_get(
+    core: *mut NvCore,
+    request: *const c_char,
+    info: *mut NvThumbnail,
+    out: *mut u8,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(request)) = (unsafe { core_ref(core) }, unsafe { string(request) })
+        else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if info.is_null() || len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.alert_frames_get(request) {
+            Err(e) => e.into(),
+            Ok(f) => {
+                let d = NvThumbnail {
+                    kind: thumb_kind(if f.codec == Codec::H265 {
+                        ThumbKind::H265Keyframe
+                    } else {
+                        ThumbKind::H264Keyframe
+                    }),
+                    width: f.width,
+                    height: f.height,
+                    pts_us: i64::try_from(f.pts_us).unwrap_or(i64::MAX),
+                };
+                // SAFETY: non-null and valid for one write per the caller.
+                unsafe { put(info, d) };
+                // SAFETY: per the caller.
+                unsafe { copy_bytes(&f.data, out, cap, len) }
+            }
+        }
+    })
+}
+
+/// The detector's boxes for a verification request:
+/// {"detections":[{"class":"person","score":0.8,"box":{"x","y","w","h"}}]}
+/// in normalized coordinates of the whole picture. NV_ERR_UNKNOWN_ID once
+/// the request was answered or expired. A picture that could not be
+/// decoded is simply not answered.
+///
+/// # Safety
+/// `core` is a live handle; `request` and `json` are NUL-terminated
+/// strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_detections_put(
+    core: *mut NvCore,
+    request: *const c_char,
+    json: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            Ok(c.alert_detections_put(arg(request)?, arg(json)?)?)
+        })
+    }
+}
+
+/// Stores the app's picture of an alert (usually a JPEG with its boxes),
+/// replacing an earlier one; outputs that send pictures wait briefly for
+/// it. The bytes are copied. NV_ERR_LIMIT above 1 MiB, NV_ERR_UNKNOWN_ID
+/// for an alert ID never given.
+///
+/// # Safety
+/// `core` is a live handle; `data` is valid for reading `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_snapshot_put(
+    core: *mut NvCore,
+    alert_id: u64,
+    data: *const u8,
+    len: usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            if data.is_null() || len == 0 {
+                return Err(NvStatus::NV_ERR_INVALID_ARGUMENT);
+            }
+            // SAFETY: valid for reading `len` bytes per the caller.
+            let bytes = std::slice::from_raw_parts(data, len);
+            Ok(c.alert_snapshot_put(alert_id, bytes)?)
+        })
+    }
+}
+
+/// Copies an alert's stored picture into `out` (*len gets its size).
+/// NV_ERR_UNKNOWN_ID when there is none; NV_ERR_BUFFER_TOO_SMALL with *len
+/// set.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap`
+/// bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_snapshot_get(
+    core: *mut NvCore,
+    alert_id: u64,
+    out: *mut u8,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.alert_snapshot_get(alert_id) {
+            // SAFETY: per the caller.
+            Ok(data) => unsafe { copy_bytes(&data, out, cap, len) },
+            Err(e) => e.into(),
+        }
+    })
+}
+
+/// Feedback on an alert: {"alert_id":4,"vote":"up"|"down","reason":
+/// "nothing_there"|"wrong_type"|"not_interesting"|"duplicate"} (a reason
+/// only with "down"). NV_ERR_UNKNOWN_ID for an alert ID never given.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_feedback(core: *mut NvCore, json: *const c_char) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alert_feedback(arg(json)?)?)) }
+}
+
+/// Mutes a camera ({"device","channel","lens"}) for `seconds`, at most
+/// 24 h; 0 ends a mute. A mute is the only thing that stops always-alert
+/// rules. NV_ERR_NOT_CONFIGURED before the first nv_alerts_configure.
+///
+/// # Safety
+/// `core` is a live handle; `camera` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_mute(
+    core: *mut NvCore,
+    camera: *const c_char,
+    seconds: u32,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alert_mute(arg(camera)?, seconds)?)) }
 }
 
 #[cfg(test)]

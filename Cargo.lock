@@ -360,6 +360,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ha-output"
+version = "0.1.0"
+dependencies = [
+ "alerts",
+ "rustls-graviola",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +504,18 @@ name = "mp4-remux"
 version = "0.1.0"
 dependencies = [
  "proptest",
+]
+
+[[package]]
+name = "mqtt-triggers"
+version = "0.1.0"
+dependencies = [
+ "graviola",
+ "rustls",
+ "rustls-graviola",
+ "serde",
+ "serde_json",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1137,6 +1161,7 @@ dependencies = [
 name = "viewer-core"
 version = "0.1.0"
 dependencies = [
+ "alerts",
  "audio-pipeline",
  "bc-protocol",
  "bc-session",
@@ -1146,6 +1171,7 @@ dependencies = [
  "libc",
  "mock-nvr",
  "mp4-remux",
+ "proptest",
  "recordings",
  "serde_json",
  "simtime",

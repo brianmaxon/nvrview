@@ -7,6 +7,8 @@
 #                                             runs `NvrView.App.exe --selftest` against a
 #                                             mock-nvr the app starts, in the logged-in
 #                                             user's desktop session
+#                                             (--areas a,b among the options runs only those self-test
+#                                             areas plus startup; see scripts/windows-selftest-areas.txt)
 #   scripts/windows-app.sh startup [SECONDS]  runs `NvrView.App.exe --startup-test`: the plain
 #                                             start (as a double-click) on an empty data
 #                                             directory, idling SECONDS (default 5)

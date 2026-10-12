@@ -1,8 +1,12 @@
 # Smart notifications
 
-Status: **designed; the rules engine (`crates/alerts`) is built**. Nothing
-else here is built yet: no app wiring, no C interface, no delivery, no
-models. Each section says what is built, what is planned, and what is still
+Status: **designed; the rules engine (`crates/alerts`) is built, and so is
+its service in `viewer-core` with the C interface (ABI 3 minor 12;
+[FFI.md](FFI.md), "Smart alerts")**: trigger intake, camera wakes and
+picture acquisition, the verification request and answer, decisions, the
+event log, and the seams for trigger inputs and outputs. Not built yet: the
+apps' side (detector, views, notifications), the input and output modules
+themselves, standby, the coordinator, and models. Each section says what is built, what is planned, and what is still
 to be measured. Protocol facts are marked **observed** or **reported**
 exactly as in [protocol.md](protocol.md); nothing here may depend on a
 reported fact until it is observed.
@@ -169,6 +173,74 @@ its own region of interest and weight:
   source is the token's, never the body's. A trigger can at most open
   viewing-tier streams.
 
+#### MQTT input
+
+`crates/mqtt-triggers` is a subscribe-only MQTT 3.1.1 client (written for
+this project on rustls with the same crypto provider as the update client;
+MQTT 5 is not used, and brokers that speak only 5 are not supported). The host
+starts one per MQTT source with `start(config, credentials, sink, options)`
+and stops it with `Handle::stop`. The sink receives
+`{source_id, kind, state, sender_id, at_ms}`; the kind comes from the source's
+settings, never from a payload, and `sender_id` is `mqtt:` plus the source key.
+
+- **Connection.** Plain TCP (port 1883 by convention) or TLS (8883), with the
+  broker's CA pasted as PEM or the built-in public roots. The username and
+  password come from the host's keychain at start and are never part of the
+  stored settings. Keepalive 30 s, clean session, client id `nvrview` unless
+  set. A lost connection reconnects with exponential backoff (1 s to 60 s)
+  and jitter; a login the broker rejects is **not** retried (it would lock
+  the account), and the source shows "login rejected" until restarted.
+- **Local brokers only.** A literal public address is refused when the source
+  is saved; a name is resolved at each connection and refused unless it
+  resolves to a loopback, private, link-local, or shared (carrier-grade NAT range)
+  address. `allow_public` overrides this per source.
+- **Mapping.** One exact topic (wildcards `+` and `#` only when the source
+  allows them; use them for one logical sensor, since state is per source).
+  Level mode treats the payload as a binary sensor: `ON`, `true`, `1` mean on
+  and `OFF`, `false`, `0` mean off (case-insensitive, trimmed; both lists are
+  settings). Off to on is a start and on to off is a stop (each can be turned
+  off); a repeat of the current state is ignored. Pulse mode turns every "on"
+  into one pulse. For JSON payloads a dot path (`state`, `sensor.state`,
+  `items.0.state`) locates the value.
+- **Retained messages** are ignored by default, so a stale "on" held by the
+  broker cannot fire at connect. A source can instead use the retained value
+  to seed its state (without a trigger) or treat it like any message.
+- **Debounce.** A change within N ms (default 500) of the previous trigger is
+  dropped and counted; the state is not updated by it.
+- **Safety.** Payloads over 1 KiB are dropped unread, at most 10 messages a
+  minute (bursts of 20) are examined per source, and a payload is only ever
+  compared with the on and off lists: it is never copied into a trigger,
+  explanation, or log line. If the connection drops while a sensor is on, no
+  stop is invented; episode timeouts end it.
+- **Audit.** Per-source counters: connects, reconnects, failures, messages,
+  triggers, and one counter for each reason a message produced nothing
+  (oversized, rate limited, retained, unrecognized, repeat, transition not
+  counted, debounced, wrong topic). Connection problems are logged at most
+  once every 30 s with a count of the held-back ones.
+
+A home-automation system publishes a sensor's state to the broker in one of
+two generic ways. Either an automation that publishes on each change:
+
+```yaml
+automation:
+  - alias: Publish example sensor state
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.example_motion
+    action:
+      - service: mqtt.publish
+        data:
+          topic: example/sensors/motion
+          payload: "{{ trigger.to_state.state }}"   # "on" or "off"
+```
+
+or the `mqtt_statestream` integration with `base_topic: example`, which
+publishes `example/binary_sensor/example_motion/state` (and attributes under
+sibling topics). In nvrview, add a source with that topic, kind `motion`, and
+the default mapping; map it to the cameras that cover the area like any
+external source. Publish with retain off, or leave the default of ignoring
+retained messages in place.
+
 ### Gate
 
 Cheap, before any picture is fetched, in this order: camera **muted**; the
@@ -228,6 +300,42 @@ stills of 1280×720 or more, and small distant figures are where models fail.
   **unverified**. When no picture could be checked at all, always-alert cases
   fail open (alert, unverified) and other cases alert one severity lower,
   unverified.
+
+### The detector host contract (as implemented on macOS)
+
+The core never runs a model. It decodes the pictures it needs, chooses crops
+(the whole frame plus the tile plan, plus a region's bounding crop), and asks
+its host to detect; the host returns **raw boxes** and the core applies
+thresholds, tile merging, tracking, and the rest of verification. On macOS the
+host is `DetectorKit`:
+
+- **Input:** a decoded picture (`CVPixelBuffer`; BGRA, or any format Core
+  Image reads) and a list of crops as normalized rectangles (origin top left,
+  0 to 1 across the picture). The standard plan is `CropPlan.wholeFramePlusTiles`:
+  the whole picture plus four tiles of 60 % with 20 % overlap.
+- **Output:** per crop, `{class_id, score, box}`: `class_id` is the model's
+  COCO index (names come with the model), `score` the class probability, `box`
+  in the **original picture's** normalized coordinates, already mapped back
+  through the crop and clamped to the picture. One box per model query (RT-DETR
+  needs no suppression of overlaps), its best class only. The only filter is a
+  noise floor on the score (default 0.05, configurable, 0 returns all 300
+  queries); decision thresholds belong to the core.
+- **Threading:** `DetectorService` runs one job at a time off the main thread,
+  with a bounded wait queue (default 2). A full queue drops the **oldest**
+  waiting job (it throws `dropped`), not the newest. Canceling a waiting job
+  removes it at once; canceling the running one returns at once and discards
+  its result (Core ML cannot be interrupted; the next job starts when the pass
+  ends).
+- **Speed for the processor ranking:** `DetectorBenchmark` runs the same crop
+  plan on synthetic pictures and reports the median time per picture, the
+  worst, preprocessing alone, load time, peak resident size and footprint
+  growth. The self-test step `alerts-detector-benchmark` prints it for the
+  Neural Engine and the CPU. The number to rank on is the median per picture
+  with the Neural Engine (VISION.md: about 50 ms on the Mac measured).
+- **Model location, in order:** the `NVRVIEW_DETECTOR_MODEL` path, the app
+  bundle's `Resources/Models`, the per-user `Application Support/NVRView/Models`
+  folder. No model means the host reports itself unable to detect, and the
+  coordinator must not rank it as a processor.
 
 ### Classification limits
 
@@ -538,6 +646,47 @@ all), `events-log-filter` (filters and opening a trace), `events-log-jump`
   acknowledged, at most 5 times.
 - Delivery results go into the trace (`delivery` steps).
 
+### Home Assistant output
+
+`crates/ha-output` drives Home Assistant's REST API from decisions. It is a
+separate crate; the core hosts it (directly or on its bounded-queue worker)
+and records each result as a `delivery` step such as "Home Assistant:
+`input_boolean.example_alert` pulsed (200)".
+
+- **Helper entity pulse** (for voice-assistant routines that trigger on a
+  helper turning on): read `GET /api/states/<entity_id>`; if the state is
+  already `on`, turn it off first; `POST /api/services/input_boolean/turn_on`;
+  after the pulse gap (default 2 s) `turn_off`. The reset exists because a
+  routine fires on an off-to-on change: a helper left on (a failed earlier
+  turn-off, or someone toggling it) would swallow the next alert. Success is
+  HTTP 200 with a JSON list. If the final turn-off fails, the result says the
+  entity may be left on, and the next pulse resets it.
+- **Other actions:** plain `turn_on` (left on), `script.turn_on` with the facts
+  as script variables, and `notify.<service>` with a message from a template.
+  Templates use only `{camera}`, `{class}`, `{time}`, `{severity}`, and
+  `{explanation}`, filled in one pass from typed alert facts (control
+  characters removed, 200 characters at most), so no trigger payload text is
+  ever sent, spoken, or executed. Entity ids and service names are validated
+  before they reach a request path.
+- **Mapping** (settings): rules match on class, trigger source id, camera,
+  minimum severity, and decision (alerts only by default) and name an action.
+  The mode is first match (default) or all matches (one call per distinct
+  target). Each target has a cooldown (default 30 s, overridable per rule)
+  so one event does not speak twice; a repeat inside it reports "skipped
+  (cooldown)". Updates of an alert (revision above 1) are not sent again.
+- **Reliability:** each request has a timeout (5 s) and, on network errors and
+  5xx, up to 3 tries with doubling backoff from 500 ms (waits go through the
+  injected clock). 4xx is never retried: 401 or 403 reads "token rejected",
+  404 "entity not found". Error lines in the log are limited to 5 a minute with
+  a count of the rest. Delivery runs on a worker with a bounded queue; a full
+  queue drops the alert and the host records a failed delivery.
+- **Address and token:** `https://` anywhere with certificate checks; plain
+  `http://` only for hosts on the local network (the same rule as the
+  picture warning above). Redirects are never followed. The long-lived access
+  token comes from the host's keychain on each start, is sent only as
+  `Authorization: Bearer`, is never stored or logged by the crate, and prints
+  as redacted.
+
 ## Feedback and learning
 
 - **Collection:** useful or not useful on the notification, in the event log,
@@ -640,10 +789,14 @@ device), `learning` (on, promote at 1 in 20, demote at 1 in 2). Validation
 never fails: it clamps every value into range, rounds the location to 0.1°,
 drops unusable sources and duplicate cameras, and lists what it changed.
 
-### C interface (proposed)
+### C interface
 
-Additive, in the next free ABI minor when it lands (the current minor is 8),
-modeled on the thumbnail get-and-put pattern. Not built.
+Built as ABI 3 minor 12; [FFI.md](FFI.md), "Smart alerts", is the
+contract (it adds `nv_alert_snapshot_get` and `nv_alerts_trigger_put` with
+the trigger's ID, and names the settings' `enabled`, `utc_offset_min`,
+`acquisition`, and `inputs`). Standby (`nv_standby_set`) and the
+coordinator's `processor_state` are not built. The design as first
+proposed, modeled on the thumbnail get-and-put pattern:
 
 ```c
 NvStatus nv_alerts_configure(NvCore*, const char *settings_json);
@@ -668,7 +821,7 @@ for always-alert cases).
 
 ## The rules engine (`crates/alerts`)
 
-Built and tested; not yet wired to `viewer-core`.
+Built and tested; wired to `viewer-core` (below).
 
 - `trigger`: normalization (device field lists, unknown kinds, external
   bodies with keys checked and future times clamped).
@@ -685,6 +838,35 @@ Built and tested; not yet wired to `viewer-core`.
 - Bounded: 1024 episodes, 256 open checks, 4096 remembered trigger ids, 64
   trace steps, 8 detections per picture step.
 
+## The service in `viewer-core`
+
+Built (`viewer_core::alerts_owner`; the C contract is FFI.md "Smart
+alerts"):
+
+- **Intake**: a tap on the core's event queue turns `detection`, `motion`,
+  and `alarm` events into triggers; external sources reach it through
+  `ExternalTriggers` (a bounded queue input modules such as MQTT feed,
+  rate-limited per source) and the app through `nv_alerts_trigger_put`.
+- **Acquisition**: one wake per camera, shared by the checks that need it
+  and by any tile showing the same stream; the first keyframe, a picture
+  about 1 s later, and for external checks more every 2 s while the window
+  is open; a cover image (298) of the last 10 s when no picture came in
+  3 s. Caps per device (`standby.max_wake_per_device`) and per process
+  (8), waiting cameras ordered by priority (always-alert candidates
+  first), a re-check hold given up for a new check.
+- **Verification**: `verify_request` events; boxes from the app become the
+  engine's samples; no answer in 5 s counts as not checked.
+- **Timeliness**: still-present re-checks every `recheck_period_s` while an
+  alerted episode lasts, for at most `recheck_limit_s`; the stream stops
+  when the episode settles.
+- **Outputs**: modules implementing `AlertOutput`, built from `outputs[]`
+  by kind (the engine's kinds, `home_assistant` included); each result is
+  a `delivery` step. Delivery is asynchronous (a `DeliveryDone` handle,
+  30 s limit); outputs that send pictures wait up to 2 s for the app's
+  snapshot.
+- **Storage**: the decision log, snapshots, and feedback under
+  `data_dir/alerts/`, each bounded (FFI.md).
+
 ## Testing and evaluation
 
 - **Engine** (built): unit tests for every rule and state transition on
@@ -696,7 +878,13 @@ Built and tested; not yet wired to `viewer-core`.
   confirmation, a reconnect gap with late events); property tests that an
   always-alert outcome is never suppressed and that cooldowns never shrink
   within an episode.
-- **End to end against `mock-nvr`** (planned): scripted 33 pushes, synthetic
+- **End to end against `mock-nvr`** (built for the service:
+  `crates/viewer-core/tests/alerts.rs` on the simulated clock with a
+  scripted detector: external trigger to alert with trace, not confirmed,
+  no answer failing open, smoke and mutes, caps, a shared tile stream, a
+  reconnect mid-check, snapshots and the log, and a property test that
+  woken streams always stop; still planned: the webhook, catch-up, and
+  the coordinator): scripted 33 pushes, synthetic
   streams, and a scripted detector (boxes keyed by camera and time), covering
   wake, request, boxes, alert, settle, stream stop; network loss and catch-up;
   never a second login; the webhook (token, rate limit, region, window,
@@ -721,7 +909,7 @@ Built and tested; not yet wired to `viewer-core`.
 | S3 | Verification maths: crop and tile plan, box merge, per-class thresholds, IoU tracking across pictures and angles, moving vs parked, static memory, repeat suppression | S2 |
 | S4 | `viewer-core` orchestration: wake streams, picture collection, caps, still-present re-checks, catch-up, decision log store, trace events; ABI minor; `mock-nvr` end-to-end | S2, S3 |
 | S5 | Baselines: index backfill, Gamma–Poisson rates, novelty map | S2 |
-| S6 | macOS: Core ML runtime, notifications and actions, settings, verification view, event log, feedback | S4 |
+| S6 | macOS: Core ML runtime (**detector, queue and benchmark done**: `DetectorKit`), notifications and actions, settings, verification view, event log, feedback | S4 |
 | S7 | Windows: Windows ML, the same contract, app notifications, settings, verification view, event log, feedback | S4 |
 | S8 | Standby in both apps ("not watching since", energy and traffic) | S4, S1 |
 | S9 | Coordinator: discovery, pairing between apps, ranked election, lease, handoff, startup check | S4, local API |
@@ -749,3 +937,4 @@ Built and tested; not yet wired to `viewer-core`.
 | Learning | On, bounded, visible, resettable; never touches always-alert rules (proposed default). |
 | Multimodal verifier | Off; when on, only for the borderline band and captions (proposed default). |
 | Retention | Event log 90 days, snapshots 7 days, evaluation pictures until deleted (proposed default). |
+| How the detector model reaches the app (macOS) | **Proposed: a first-use download** of the checksum-pinned, compiled model (37 MB zip) from the user's own update source, shown as part of turning smart alerts on; bundling it (`package-macos.sh --bundle-detector`) stays available for offline installs. Not decided: where the zip is published (`scripts/detector-model.json` has no url yet). |

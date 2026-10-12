@@ -129,7 +129,10 @@ changed crates and the crates above them. `NVRVIEW_FULL_CHECK=1` and the
 release scripts run everything, as does the first run after 72 hours without
 a full pass. A stamp with cached suites serves merges, never a release. Rules
 and inputs: `scripts/suite-cache.py` and the README ("Test result cache");
-tested by `scripts/test-suite-cache.sh`.
+tested by `scripts/test-suite-cache.sh`. The Windows app self-test is cached
+per area (`scripts/windows-selftest-areas.txt` puts every `// parity:` step in
+one area; `--areas a,b` runs some); a new step needs a table entry, and a new
+file that only one area exercises goes in `WINDOWS_OWNED` in the cache script.
 
 **Windows check and merging.** Run the final
 `NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh` on a *clean committed tree*

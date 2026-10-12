@@ -371,6 +371,8 @@ struct Shared {
     /// While set, a preview start is accepted and then never answered or
     /// fed (a stream that is silent).
     silent_previews: AtomicBool,
+    /// Running previews (stream handles) by connection.
+    previews: Mutex<HashMap<u64, Vec<u32>>>,
     /// While set, new in-memory connections are refused.
     refuse_connections: AtomicBool,
     /// Closes every open connection when sent to.
@@ -527,6 +529,7 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         talk_audio_status: AtomicU32::new(200),
         ptz,
         silent_previews: AtomicBool::new(false),
+        previews: Mutex::new(HashMap::new()),
         refuse_connections: AtomicBool::new(false),
         kill: tokio::sync::broadcast::channel(4).0,
         runtime,
@@ -654,6 +657,18 @@ impl MockNvr {
     /// Plays running now, on every connection.
     pub fn active_plays(&self) -> usize {
         self.shared.active_plays.load(Ordering::SeqCst)
+    }
+
+    /// The previews running now across every connection, by channel and
+    /// tier (one entry per running preview).
+    pub fn active_previews(&self) -> Vec<(u8, StreamTier)> {
+        let mut v: Vec<(u8, StreamTier)> = lock(&self.shared.previews)
+            .values()
+            .flatten()
+            .filter_map(|&h| StreamTier::from_handle(h).map(|(t, c)| (c, t)))
+            .collect();
+        v.sort_by_key(|(c, t)| (*c, t.name()));
+        v
     }
 
     /// How many messages with this command number logged-in clients sent.
@@ -952,7 +967,10 @@ impl Conn {
         loop {
             loop {
                 match dec.next_message() {
-                    Ok(Some(m)) => self.handle(&m).await?,
+                    Ok(Some(m)) => {
+                        self.handle(&m).await?;
+                        self.note_previews();
+                    }
                     Ok(None) => break,
                     Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
                 }
@@ -974,7 +992,19 @@ impl Conn {
         }
     }
 
+    /// Publishes this connection's running previews ([`MockNvr::active_previews`]).
+    fn note_previews(&self) {
+        let handles: Vec<u32> = self.streams.keys().copied().collect();
+        let mut p = lock(&self.shared.previews);
+        if handles.is_empty() {
+            p.remove(&self.id);
+        } else {
+            p.insert(self.id, handles);
+        }
+    }
+
     async fn close(&mut self) {
+        lock(&self.shared.previews).remove(&self.id);
         self.shared.alarms.unsubscribe(self.id);
         if !self.open_talks.is_empty() {
             let mut talks = lock(&self.shared.talks);
@@ -2056,6 +2086,10 @@ impl Conn {
             return Ok(());
         }
         let faults = cfg.play_faults.take(ch);
+        let mut cfg = cfg;
+        if let Some((_, g)) = cfg.gop_by_channel.iter().find(|(c, _)| *c == ch) {
+            cfg.gop_secs = *g;
+        }
         let thin = PlayPace {
             speed: speed.filter(|s| [1, 2, 4, 8, 16].contains(s)).unwrap_or(1),
             main: matches!(stream, Some(StreamTier::Main | StreamTier::Extern)),

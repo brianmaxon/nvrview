@@ -1895,6 +1895,15 @@ function's out parameters), `playback_add_camera`, `playback_remove_camera`,
       there is, for scrubbing). Before this, it was shown at once also
       while playing, so one camera showed a moment up to a GOP ahead and
       then froze until the others caught up.
+    - *A play that begins well after the target is asked for again,
+      earlier.* If a camera's first picture of a start (a seek, a rate
+      change, the first start of an opened incident) lies more than 250 ms
+      after the target, its play alone is started once more (a group of
+      one) from the target less the lead less how late that picture was,
+      kept inside the file; so the first play after a paused open and the
+      return to 1x from 16x do not leave a camera on a picture ahead of the
+      others. Only if the second play is also late does the rule above
+      apply. Not done for keyframe seeks (no lead).
     - *A late camera is waited for, then brought back.* The clock waits up
       to 2 s for a playing camera with nothing at the position (item 7).
       When it turns `late` its play alone restarts at the position (a

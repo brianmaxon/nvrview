@@ -45,6 +45,8 @@ Commands (RUN is the path that `plan` prints):
                         a full run counts as the platform's full pass only
                         with --ok and without --partial (steps were skipped)
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
+  areas windows         the Windows app self-test areas (suites app-debug.AREA
+                        and app-publish.AREA; see WINDOWS_OWNED below)
 
 For tests: NVRVIEW_CACHE_NOW (epoch seconds), NVRVIEW_CACHE_METADATA (a
 `cargo metadata` JSON file), NVRVIEW_CACHE_TOOLS (tool versions, one string).
@@ -95,14 +97,82 @@ SUITES = {
                            ["viewer-ffi", "mock-nvr"], ["rust"]),
         # The shell tests are managed code only (no native library).
         "shell-tests": (["apps/windows/", "VERSION"] + FIXTURES, [], ["rust"]),
-        "app-debug": (["apps/windows/", "scripts/windows-app.sh", "VERSION"] + FIXTURES,
-                      ["viewer-ffi", "mock-nvr"], ["rust"]),
-        "app-publish": (["apps/windows/", "scripts/windows-app.sh", "VERSION"] + FIXTURES,
-                        ["viewer-ffi", "mock-nvr"], ["rust"]),
+        # app-debug.AREA and app-publish.AREA are added below (WINDOWS_AREAS).
         "app-update": (["apps/windows/", "scripts/windows-app.sh", "VERSION"] + FIXTURES,
                        ["viewer-ffi", "mock-nvr", "sign-update"], ["rust"]),
     },
 }
+
+# The Windows app self-test runs by area (scripts/windows-selftest-areas.txt;
+# SelfTest.AreaNames in the app). Each area is cached on its own, for the debug
+# build (app-debug.AREA) and for the trimmed publish build (app-publish.AREA).
+# An area's inputs are all of apps/windows/ except the projects that are not
+# part of the app and the files that only some other area exercises
+# (WINDOWS_OWNED), so a file nobody owns and every shared one (App.xaml.cs,
+# CoreHost, StageView, the renderer, SelfTest.cs, the interop, ...) is an
+# input of every area. "startup", the smoke every run includes, takes
+# everything under apps/windows/, owned files too: any change reruns it.
+# Every area also takes the core crates the app loads, the area table, and
+# the fixtures.
+WINDOWS_AREAS = ["startup", "viewer", "tiles", "layouts", "header", "settings",
+                 "calls", "recordings", "capture", "ptz"]
+WINDOWS_NOT_APP = ["apps/windows/NvrView.Demo/", "apps/windows/NvrView.Smoke/",
+                   "apps/windows/NvrView.Shell.Tests/", "apps/windows/NvrView.Tiles.Tests/",
+                   "apps/windows/layout/", "apps/windows/README.md"]
+_A, _S, _T, _I, _V = ("apps/windows/NvrView.App/", "apps/windows/NvrView.Shell/", "apps/windows/NvrView.Tiles/",
+                      "apps/windows/NvrView.Interop/", "apps/windows/NvrView.Video/")
+WINDOWS_OWNED = {
+    "viewer": [_A + "SelfTest.Viewer.cs", _T + "Zoom.cs"],
+    "tiles": [_A + "SelfTest.Tiles.cs", _A + "IndicatorStrip.cs", _A + "QualityMenu.cs",
+              _T + "Alerts.cs", _T + "Detections.cs", _T + "Fisheye.cs", _T + "Indicators.cs", _T + "Quality.cs"],
+    "layouts": [_A + "SelfTest.Layouts.cs", _S + "SidebarReveal.cs"],
+    "header": [_A + "SelfTest.Header.cs", _A + "HeaderBar.cs", _A + "LayoutIcon.cs", _S + "HeaderChrome.cs"],
+    "settings": [_A + "SelfTest.Settings.cs", _A + "SettingsPages.cs", _A + "SettingsWindow.cs",
+                 _A + "UpdateSettingsPanel.cs", _A + "UpdateDefaultsSelfTest.cs", _A + "UpdateNotesSelfTest.cs",
+                 _A + "UpdateNotesView.cs", _A + "Updater.cs", _S + "Discovery.cs", _S + "Updates.cs"],
+    "calls": [_A + "SelfTest.Calls.cs", _A + "CallPanel.cs", _A + "Calls.cs", _A + "CallServices.cs",
+              _A + "CallWindows.cs", _A + "TranscriptStore.cs", _T + "CallWindow.cs", _T + "Calls.cs",
+              _T + "CaptionEcho.cs", _T + "EchoCancellation.cs", _T + "Insets.cs", _T + "TranscriptFiles.cs"],
+    "recordings": [_A + "SelfTest.Recordings.cs", _A + "SelfTest.Export.cs", _A + "EditAudio.cs", _A + "EditStage.cs",
+                   _A + "ExportSynthetic.cs", _A + "ExportWriters.cs", _A + "RecordingsHost.cs",
+                   _A + "RecordingsTimeline.cs", _A + "RecordingsWindow.cs", _A + "RecordingsWindow.Export.cs",
+                   _A + "RecordingsWindow.Inspector.cs", _A + "RecordingsWindow.Player.cs",
+                   _A + "RecordingsWindow.Sidebar.cs",
+                   _S + "EditPlan.cs", _S + "EditPlayer.cs", _S + "ExportController.cs", _S + "ExportPlan.cs",
+                   _S + "FakePlayback.cs", _S + "FakeRecordings.Export.cs", _S + "FakeRecordings.Sound.cs",
+                   _S + "FakeRecordings.cs", _S + "Mp4Index.cs", _S + "Mp4Inspector.cs", _S + "Mp4ShareSafe.cs",
+                   _S + "Playback.cs", _S + "PlayerRules.cs", _S + "Recordings.cs", _S + "RecordingsBrowse.cs",
+                   _S + "RecordingsBrowser.cs", _S + "RecordingsPlayer.cs", _S + "RecordingsService.Export.cs",
+                   _S + "RecordingsService.cs", _S + "RecordingsSound.cs", _S + "SoundAnalysis.cs",
+                   _S + "ThumbnailDecoding.cs", _S + "ToneCheck.cs",
+                   _I + "NvCore.EditSound.cs", _I + "NvCore.Export.cs", _I + "NvCore.Playback.cs",
+                   _I + "NvCore.Recordings.cs",
+                   _V + "AacRoundTrip.cs", _V + "EditFiles.cs", _V + "EditFrameRenderer.cs", _V + "KeyframeImage.cs",
+                   _V + "MfExport.cs", _V + "RecordedFile.cs", _V + "SyntheticRecording.cs"],
+    "capture": [_A + "SelfTest.Capture.cs", _A + "SelfTest.CaptureRecord.cs", _A + "CaptureController.cs",
+                _A + "CaptureSettingsPage.cs", _A + "PictureSaver.cs", _A + "StageView.Capture.cs",
+                _S + "Capture.cs", _S + "CaptureRecordings.cs", _S + "FakeCapture.cs", _T + "Pictures.cs",
+                _I + "NvCore.Capture.cs", _V + "AacCaptureEncoder.cs", _V + "PictureRender.cs", _V + "TilePicture.cs"],
+    "ptz": [_A + "SelfTest.Ptz.cs", _A + "PtzControls.cs", _A + "StageView.Ptz.cs", _A + "Viewer.Ptz.cs",
+            _S + "FakePtz.cs", _S + "Ptz.cs", _S + "PtzModel.cs"],
+}
+WINDOWS_APP_EXTRA = ["scripts/windows-app.sh", "scripts/windows-selftest-areas.txt", "VERSION"] + FIXTURES
+
+
+def windows_area_excludes(area):
+    out = list(WINDOWS_NOT_APP)
+    if area != "startup":
+        for other, paths in WINDOWS_OWNED.items():
+            if other != area:
+                out += paths
+    return out
+
+
+for _prefix in ("app-debug", "app-publish"):
+    for _area in WINDOWS_AREAS:
+        SUITES["windows"]["%s.%s" % (_prefix, _area)] = (
+            ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
+
 RUST_FAMILIES = {"mac": FAMILIES, "windows": ("clippy", "test", "doctest")}
 
 
@@ -236,8 +306,14 @@ class Tree:
             self.tools[kind] = mac_tools(kind)
         return self.tools[kind]
 
-    def key(self, suite, paths, tool_kinds):
-        """(key, dirty input or None)."""
+    def key(self, suite, paths, tool_kinds, excludes=()):
+        """(key, dirty input or None). EXCLUDES are left out (a trailing / is a directory)."""
+        ex_dirs = tuple(e for e in excludes if e.endswith("/"))
+        ex_files = set(e for e in excludes if not e.endswith("/"))
+
+        def skip(path):
+            return path in ex_files or path.startswith(ex_dirs)
+
         prefixes = tuple(sorted(set(p for p in paths if p.endswith("/") or p == "")))
         exact = set(p for p in paths if not (p.endswith("/") or p == ""))
         h = hashlib.sha256()
@@ -245,9 +321,9 @@ class Tree:
         for k in sorted(set(tool_kinds)):
             h.update(("tool %s %s\n" % (k, self.tool(k))).encode())
         for path, mode, blob in self.files:
-            if path in exact or path.startswith(prefixes):
+            if (path in exact or path.startswith(prefixes)) and not skip(path):
                 h.update(("%s %s %s\n" % (mode, blob, path)).encode())
-        dirty = sorted(p for p in self.dirty if p in exact or p.startswith(prefixes))
+        dirty = sorted(p for p in self.dirty if (p in exact or p.startswith(prefixes)) and not skip(p))
         return h.hexdigest(), (dirty[0] if dirty else None)
 
     def crate_inputs(self, roots):
@@ -266,10 +342,10 @@ class Tree:
                     continue
                 k, d = self.key("%s.%s" % (fam, c), paths, ["rust"])
                 out["%s.%s" % (fam, c)] = {"key": k, "dirty": d}
-        for name, (paths, roots, kinds) in SUITES[self.platform].items():
+        for name, (paths, roots, kinds, *rest) in SUITES[self.platform].items():
             roots = [r for r in roots if r == "*" or r in self.crates]
             all_paths = list(paths) + (self.crate_inputs(roots) if roots else [])
-            k, d = self.key(name, all_paths, kinds)
+            k, d = self.key(name, all_paths, kinds, rest[0] if rest else ())
             out[name] = {"key": k, "dirty": d}
         return out
 
@@ -492,13 +568,19 @@ def cmd_full_due(args):
     return 1
 
 
+def cmd_areas(args):
+    """Prints the Windows app self-test areas, space separated."""
+    print(" ".join(WINDOWS_AREAS))
+    return 0
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = sys.argv[1], sys.argv[2:]
     return {"plan": cmd_plan, "want": cmd_want, "crates": cmd_crates, "pass": cmd_pass,
-            "finish": cmd_finish, "full-due": cmd_full_due}[cmd](args) or 0
+            "finish": cmd_finish, "full-due": cmd_full_due, "areas": cmd_areas}[cmd](args) or 0
 
 
 if __name__ == "__main__":

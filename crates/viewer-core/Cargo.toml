@@ -8,6 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Smart alerts: the rules engine (src/alerts_owner).
+alerts = { path = "../alerts" }
 audio-pipeline = { path = "../audio-pipeline" }
 bc-protocol = { path = "../bc-protocol" }
 bc-session = { path = "../bc-session" }
@@ -37,6 +39,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_System_Performance", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 mock-nvr = { path = "../../tools/mock-nvr" }
 # Tests that run the core on a simulated clock (`CoreConfig::test_runtime`).
 simtime = { path = "../../tools/simtime" }

@@ -12,6 +12,8 @@
 //                                     the self-test (SelfTest.cs): the window
 //                                     opens behind the others without taking
 //                                     focus, writes PASS or FAIL to FILE, exits
+//                                     (--areas a,b: only those areas and the
+//                                     startup smoke; default all)
 //   NvrView.App.exe --startup-test SECONDS --log FILE [--data-dir DIR]
 //                                     the plain start (a double-click: devices
 //                                     from Settings, windows restored) on DIR
@@ -84,6 +86,9 @@ internal sealed class AppOptions
     /// <summary>The self-test also opens the microphone for a moment (the audio is measured and dropped).</summary>
     public bool MicrophoneTest { get; private set; }
 
+    /// <summary>The self-test areas to run (null: all); see SelfTest.AreaNames.</summary>
+    public HashSet<string>? Areas { get; private set; }
+
     public bool SelfTest => SelfTestSeconds > 0;
 
     public bool StartupTest => StartupTestSeconds > 0;
@@ -144,6 +149,13 @@ internal sealed class AppOptions
                 case "--software": o.Software = true; break;
                 case "--no-audio": o.NoAudio = true; break;
                 case "--credential-test": o.CredentialTest = true; break;
+                case "--areas":
+                    o.Areas = [.. Value().Split(',', StringSplitOptions.RemoveEmptyEntries)];
+                    if (o.Areas.FirstOrDefault(x => !global::NvrView.App.SelfTest.AreaNames.Contains(x)) is { } unknown)
+                    {
+                        throw new ArgumentException($"unknown self-test area {unknown} (known: {string.Join(", ", global::NvrView.App.SelfTest.AreaNames)})");
+                    }
+                    break;
                 case "--wait-for-pid": o.WaitForPid = Int(1, int.MaxValue); break;
                 case "--mic-test": o.MicrophoneTest = true; break;
                 case "--decoder-samples": DecoderSettings.OutputSamples = Int(0, 32); break;

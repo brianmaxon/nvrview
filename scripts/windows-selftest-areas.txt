@@ -1,0 +1,85 @@
+# The Windows app self-test's areas (apps/windows/NvrView.App/SelfTest*.cs).
+#
+# `NvrView.App.exe --selftest N ... --areas a,b` runs only those areas (plus
+# "startup", which always runs); scripts/suite-cache.py caches each area on
+# its own. Every `// parity: <id>` step belongs to exactly one area, found
+# here by the longest matching pattern: `area  id` (exact) or `area  prefix*`.
+# scripts/check-selftest-areas.py fails when a step matches no pattern, a
+# pattern matches no step, or two patterns of different areas tie.
+#
+# Which code runs for an area is decided in the self-test source (Runs and
+# RunsAny in SelfTest.cs; the area list there is AreaNames). Which files
+# invalidate an area is decided in scripts/suite-cache.py (WINDOWS_OWNED).
+
+# The smoke that every run includes: the grid plays, resize, selection,
+# decode failures, device loss, the "device went away" messages, the contract.
+startup  credential-store
+startup  grid-plays
+startup  third-party-channel
+startup  render-no-alloc
+startup  resize
+startup  key-selection-right
+startup  decode-failures
+startup  device-loss
+startup  tile-retry
+startup  tile-reconnect-text
+startup  core-contract
+
+# Viewer: focus, audio, zoom, fill, pan.
+viewer  focus-main-stream
+viewer  unfocus-sub-stream
+viewer  audio-*
+viewer  zoom-*
+viewer  fill-*
+viewer  pan-*
+viewer  tile-frame-*
+viewer  live-pacing
+
+# Tile features: alerts, indicators, quality, second lens, fisheye, detections.
+tiles  zoom-auto-quality
+tiles  fullscreen-chrome-autohide
+tiles  corner-*
+tiles  indicator-*
+tiles  alert-raise
+tiles  alert-reduce-motion
+tiles  alert-survives-stop
+tiles  alert-dismiss-enter
+tiles  quality-*
+tiles  second-lens*
+tiles  fisheye-*
+tiles  detection-events
+
+# Layouts, second windows, the sidebar.
+layouts  layout-*
+layouts  focus-content-change
+layouts  second-window*
+layouts  sidebar-reveal
+layouts  window-restore
+
+# The header, its menus and keys.
+header  header-*
+header  tile-menu-no-app-wide
+
+# Settings window, device search, updates.
+settings  settings-*
+settings  discovery-*
+settings  wrong-password
+settings  updates-*
+
+# Calls: doorbell, call windows, captions, talk-back, insets.
+calls  call-*
+calls  unmute-on-ring
+calls  alert-inset-in-grid
+calls  inset-drag-*
+
+# Recordings window, playback, edits, export, sound analysis.
+recordings  recordings-*
+recordings  playback-*
+recordings  edit-*
+recordings  export-*
+
+# Pictures and recordings made from tiles (including from call windows).
+capture  capture-*
+
+# Camera motion.
+ptz  ptz-*
