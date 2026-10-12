@@ -498,6 +498,14 @@ internal static class Tests
         Check.Equal(TileAction.None, TileKeyMap.Map(TileKey.M, false, true, false, false), "alt+m is a menu key");
         Check.Equal(TileAction.None, TileKeyMap.Map(TileKey.M, false, false, false, false, editingText: true), "text editing takes the key");
         Check.Equal(TileAction.None, TileKeyMap.Map(TileKey.Other, false, false, false, true), "other keys");
+        Check.Equal(TileAction.SavePicture, TileKeyMap.Map(TileKey.P, false, false, false, false), "p saves the picture");
+        Check.Equal(TileAction.SavePictureAs, TileKeyMap.Map(TileKey.P, false, false, true, false), "shift+p chooses where");
+        Check.Equal(TileAction.SavePicture, TileKeyMap.Map(TileKey.P, true, false, true, false), "ctrl+shift+p saves in a call window");
+        Check.Equal(TileAction.None, TileKeyMap.Map(TileKey.P, true, false, false, false), "ctrl+p is the system's");
+        Check.Equal(TileAction.ToggleRecording, TileKeyMap.Map(TileKey.R, false, false, false, false), "r records");
+        Check.Equal(TileAction.ToggleRecording, TileKeyMap.Map(TileKey.R, true, false, true, false), "ctrl+shift+r records the call");
+        Check.Equal(TileAction.ToggleConversation, TileKeyMap.Map(TileKey.T, false, false, false, false), "t starts or ends a conversation");
+        Check.Equal(TileAction.None, TileKeyMap.Map(TileKey.T, false, false, false, false, editingText: true), "t is typed while editing text");
     }
 
     private static void ManualClock()

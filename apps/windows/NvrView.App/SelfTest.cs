@@ -796,18 +796,18 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // parity: call-tile-menu
         // The tile menu offers the conversation and the permission.
-        var menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
-        stage.AddConversationItems(menu, camera);
-        string[] items = [.. menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Select(i => i.Text)];
-        bool allowChecked = menu.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault()?.IsChecked == true;
+        StageTile menuTile = Tiles.First(t => t.Camera == camera);
+        var menu = stage.BuildTileMenu(menuTile)!;
+        List<string> items = Texts(menu.Items);
+        bool allowChecked = menu.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault(i => i.Text == "Allow talk-back")?.IsChecked == true;
         Say($"calls: tile menu {string.Join(" / ", items)}, allow checked {allowChecked}");
-        Expect(items.SequenceEqual(["Start conversation", "Allow talk-back"]) && !allowChecked, "the tile menu does not offer Start conversation and an unchecked Allow talk-back");
+        Expect(items.Contains("Start Conversation") && items.Contains("Allow talk-back") && !allowChecked, "the tile menu does not offer Start Conversation and an unchecked Allow talk-back");
 
         // parity: call-conversation-start
         // 1. A conversation opens with no press and sends nothing by itself.
         v.Calls.StartConversation(camera);
         Call? call = v.Calls.CallFor(camera);
-        Expect(call is { Origin: CallOrigin.Conversation, Presses: 0 }, "Start conversation did not open a call with no press");
+        Expect(call is { Origin: CallOrigin.Conversation, Presses: 0 }, "Start Conversation did not open a call with no press");
         Expect(v.IsAudible(camera) && call is { Audible: true, ShowsUnmute: false }, "a conversation did not make the camera audible");
         // The call holds a lease, and so does its card in this window (for the picture).
         Expect(v.Leases.LeaseCount(camera) == leasesBefore + 2 && stage.CallCards.LeasesHeld == 1, "the call and its card did not each hold a lease on the camera");
@@ -831,9 +831,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool tapped = engines.Count > 0 && await Until(() => engines[0].SamplesFed > 16_000, 10);
         Say($"calls: camera audio fed to the recognizer: {engines.FirstOrDefault()?.SamplesFed ?? 0} samples");
         Expect(tapped, "the camera's tapped audio did not reach the recognizer");
-        menu = new Microsoft.UI.Xaml.Controls.MenuFlyout();
-        stage.AddConversationItems(menu, camera);
-        Expect(menu.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().First().Text == "End conversation", "the tile menu does not offer End conversation during a call");
+        menu = stage.BuildTileMenu(menuTile)!;
+        Expect(Texts(menu.Items).Contains("End Conversation"), "the tile menu does not offer End Conversation during a call");
 
         // parity: call-talk-permission-prompt
         // 2. Without the permission Talk asks first; Cancel sends nothing, the call stays open, and the setting stays off.
@@ -1095,8 +1094,9 @@ internal sealed class SelfTest(App app, AppOptions options)
                 return;
             }
             bool gone = stages.All(s => s.CallCards.Cards.Count == 0 && s.CallCards.LeasesHeld == 0);
-            bool drawn = await Until(() => cw.Renderer.Overlays.Length == 1 && cw.Renderer.Overlays[0].Tile == cw.Card.Tile && cw.Card.Tile.Shown > 2 && cw.Card.Tile.PictureWidth > 0, 15);
-            bool exact = drawn && cw.Renderer.Layout.Tiles.Length == 0 && cw.Card.Tile.Shared == tile && v.Tiles.Length == v.Leases.Cameras.Count;
+            // The window's picture is a regular tile: the one tile of its own stage (no overlay), drawn from the shared tile.
+            bool drawn = await Until(() => cw.Stage.Tiles.Length == 1 && cw.Renderer.Layout.Tiles.Length == 1 && cw.Renderer.Layout.Tiles[0] == cw.Tile && cw.Tile.Shown > 2 && cw.Tile.PictureWidth > 0, 15);
+            bool exact = drawn && cw.Renderer.Overlays.Length == 0 && cw.Tile.Shared == tile && v.Tiles.Length == v.Leases.Cameras.Count;
             bool undrawn = await Until(() => stages.All(s => s.CallCards.Overlays.Count == 0 && s.Renderer.Overlays.Length == 0), 3);
             var engine = v.Calls.VisitorEngine(camera) as FakeTranscriber;
             long fed = engine?.SamplesFed ?? 0;
@@ -1104,7 +1104,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             bool same = v.Calls.CallFor(camera) == call && call.Presentation == CallPresentation.Window && call.Presses == presses && call.Transcript.Finals.Count == finals;
             int leases = v.Leases.LeaseCount(camera);
             int wantedLeases = leasesBefore - insetsBefore + 1;
-            Say($"calls: pop out: cards {insetsBefore} -> gone {gone} (picture undrawn {undrawn}), window draws the doorbell tile {exact} ({cw.Card.Tile.Shown} pictures), " +
+            Say($"calls: pop out: cards {insetsBefore} -> gone {gone} (picture undrawn {undrawn}), window draws the doorbell tile {exact} ({cw.Tile.Shown} pictures), " +
                 $"same call {same}, tapped {tapped}, leases {leasesBefore} -> {leases}, main stream {cw.AsksForMainStream}");
             Expect(popButtons, "a call's card did not offer Pop Out Call in its header");
             Expect(gone && undrawn, "Pop Out left the call's card (or its picture or lease) in a viewer window");
@@ -1116,19 +1116,20 @@ internal sealed class SelfTest(App app, AppOptions options)
             Expect(cws.LastOpenActivated == true, "an explicit Pop Out did not ask for the focus");
             if (drawn)
             {
-                await CheckCardFrame("call window", cw.Card, cw.Renderer);
+                await CheckPictureFrame("call window", cw.Tile, cw.Renderer);
                 // The window joins the device-loss recovery with the viewer windows: its swap chain and picture come back.
                 int recoveries = cw.Renderer.Recoveries;
-                long shown = cw.Card.Tile.Shown;
+                long shown = cw.Tile.Shown;
                 cw.Renderer.SimulateDeviceLoss();
                 bool recovered = await Until(() => cw.Renderer.Recoveries > recoveries, 10);
-                bool back = recovered && await Until(() => cw.Card.Tile.Shown > shown + 5 && cw.Card.Tile.PictureWidth > 0, 15);
-                Say($"calls: call window after a device loss: recovered {recovered}, pictures {shown} -> {cw.Card.Tile.Shown}");
+                bool back = recovered && await Until(() => cw.Tile.Shown > shown + 5 && cw.Tile.PictureWidth > 0, 15);
+                Say($"calls: call window after a device loss: recovered {recovered}, pictures {shown} -> {cw.Tile.Shown}");
                 Expect(back, "the call window's picture did not come back after a device loss");
                 if (back)
                 {
-                    await CheckCardFrame("call window after device loss", cw.Card, cw.Renderer);
+                    await CheckPictureFrame("call window after device loss", cw.Tile, cw.Renderer);
                 }
+                await CallWindowTile(v, cw, camera, clock);
             }
 
             // parity: call-popout-talk
@@ -1378,6 +1379,167 @@ internal sealed class SelfTest(App app, AppOptions options)
         }
     }
 
+    // The call window's picture is a regular tile (docs/CAPTURE.md "The call window is a regular tile"): a pinch zooms it, the
+    // zoom map shows, the renderer samples the zoomed region, the zoomed tile asks for the main stream, and the header's Reset
+    // Zoom brings it back; its menu is the header model's (Pop In Call, End Conversation, Record Call) with no layout items, and
+    // focus and split do nothing there.
+    private async Task CallWindowTile(Viewer v, CallWindow cw, CameraRef camera, ManualViewerClock clock)
+    {
+        StageView stage = cw.Stage;
+        StageTile tile = cw.Tile;
+        TileChrome? chrome = stage.ChromeFor(tile);
+        if (!stage.FixedTile || chrome is null)
+        {
+            _problems.Add("the call window's picture is not a stage in single fixed tile mode");
+            return;
+        }
+        // parity: call-window-tile-zoom
+        stage.Hover(tile);
+        stage.PinchDigital(tile, tile.X + tile.Width / 2, tile.Y + tile.Height / 2, 2);
+        stage.Tick();
+        bool zoomed = Math.Abs(tile.Zoom - 2) < 0.01;
+        UnitRect seen = tile.DigitalZoom.Visible(tile.ZoomBase);
+        bool cropped = seen.Width < 0.9 || seen.Height < 0.9;
+        bool wantsMain = v.Planner.WantedTier(camera) == StreamTier.Main;
+        // Switching to the main stream takes the picture away for a while (the header then shows only the title and the more button),
+        // so the header is read before the switch happens and the zoom is reset, which sends the tile back to the sub-stream.
+        await Until(() => chrome.ResetShown && chrome.MapShown, 5);
+        bool map = chrome.MapShown;
+        bool resetShown = chrome.ResetShown;
+        wantsMain |= await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
+        chrome.PressReset();
+        bool back = await Until(() => tile.Zoom <= 1.0001 && !chrome.ResetShown && !chrome.MapShown, 5);
+        Say($"call window tile: status \"{stage.StatusText(tile)}\" ({tile.Shared?.Video.Status}); pinch to {tile.Zoom:0.00}x then reset, zoom map {map}, source cropped {cropped} ({seen.Width:0.00}x{seen.Height:0.00}), main stream {wantsMain}, header Reset Zoom shown {resetShown} and back to 1x {back}");
+        Expect(zoomed, "a pinch did not zoom the call window's tile");
+        Expect(map, "the call window's zoomed tile showed no zoom map");
+        Expect(cropped, "the call window's renderer did not sample the zoomed region");
+        Expect(wantsMain, "the zoomed call window tile did not ask for the main stream");
+        Expect(resetShown && back, "the call window's header did not offer Reset Zoom or did not reset");
+
+        // parity: call-window-tile-menu
+        await Until(() => stage.HeaderTileOf(tile) is { Picture: true }, 30);
+        List<string> menu = Texts(stage.BuildTileMenu(tile)!.Items);
+        List<string> want = stage.HeaderTileOf(tile) is { } header ? [.. TileHeaderLayout.Menu(header).Select(e => e.Label)] : [];
+        bool callItems = new[] { "Pop In Call", "End Conversation", "Record Call", "Save Picture" }.All(menu.Contains);
+        string[] layoutItems = [.. new[] { "Focus", "Split Side by Side", "Remove Tile", "Clear Tile", "Show Camera", "Record Main Stream" }.Where(menu.Contains)];
+        stage.ToggleFocus(tile);
+        stage.Split(SplitAxis.Row);
+        bool fixedStill = !stage.IsFocused && stage.State.Tree.LeafCount == 1 && stage.Selected == tile;
+        IReadOnlyList<TileHeaderItem> shownButtons = chrome.ShownButtons;
+        // Ctrl+Shift+R is the call recording, which is not built yet.
+        stage.ApplyAction(TileAction.ToggleRecording, tile);
+        string? toast = stage.ToastText;
+        clock.Advance(StageView.ToastSeconds + 0.1);
+        stage.Tick();
+        Say($"call window tile menu: the model's {want.Count} items {menu.Take(want.Count).SequenceEqual(want)}, call items {callItems}, layout items [{string.Join(", ", layoutItems)}], " +
+            $"focus and split ignored {fixedStill}, header [{string.Join(", ", shownButtons)}], Record Call: {toast ?? "nothing"}");
+        Expect(menu.SequenceEqual(want) && callItems, $"the call window tile's menu is not the header model's call menu: {string.Join(" / ", menu)}");
+        Expect(layoutItems.Length == 0, $"the call window tile's menu offers {string.Join(", ", layoutItems)}");
+        Expect(fixedStill, "focus or split changed the call window's single tile");
+        Expect(shownButtons.Contains(TileHeaderItem.Speaker) && shownButtons.Contains(TileHeaderItem.Quality), "the call window's header lacks the speaker or quality button");
+        Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
+    }
+
+    // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
+    // and right-click menus built from it, and what a not-yet-built action says.
+    private async Task HeaderModel(Viewer v, StageView stage)
+    {
+        StageTile? tile = Tiles.FirstOrDefault(t => stage.HeaderTileOf(t) is { Picture: true } && stage.ChromeFor(t) is not null);
+        if (tile is null || stage.ChromeFor(tile) is not { } chrome || stage.HeaderTileOf(tile) is not { } model)
+        {
+            _problems.Add("no tile with a picture to check the header on");
+            return;
+        }
+        var clock = new ManualViewerClock(new SystemViewerClock().Now);
+        v.UseClock(clock);
+        try
+        {
+            IReadOnlyList<TileHeaderItem> buttons = TileHeaderLayout.Buttons(model);
+            TileHeaderMetrics m = TileHeaderMetrics.Standard;
+            string placedWhy = "", whyNot = "";
+            // Lays the header out at a total width: the buttons shown, and whether they sit inside the tile, apart, and right of the title.
+            (IReadOnlyList<TileHeaderItem> Shown, TileHeaderLayout? Layout, bool Placed) At(double width)
+            {
+                chrome.ForceWidth(width);
+                var frames = chrome.ShownButtons.Select(i => chrome.ButtonFrame(i)).Where(f => f is not null).Select(f => f!.Value).OrderBy(f => f.X).ToList();
+                bool apart = frames.Zip(frames.Skip(1)).All(p => p.First.X + p.First.Width <= p.Second.X + 0.5);
+                bool inside = frames.All(f => f.X >= 0 && f.X + f.Width <= width + 0.5);
+                bool clear = frames.Count == 0 || chrome.TitleFrame.X + chrome.TitleFrame.Width <= frames[0].X + 0.5;
+                placedWhy = $"{width:0}: apart {apart} inside {inside} clear {clear}; title {chrome.TitleFrame.X:0}+{chrome.TitleFrame.Width:0}; buttons {string.Join(" ", frames.Select(f => $"{f.X:0}+{f.Width:0}"))}";
+                if (apart && inside && clear)
+                {
+                    placedWhy = "";
+                }
+                else
+                {
+                    whyNot += placedWhy + " | ";
+                }
+                return (chrome.ShownButtons, chrome.HeaderLayout, apart && inside && clear);
+            }
+            // parity: header-priority-narrow
+            chrome.ForceWidth(m.Narrow + 100);
+            double reserve = chrome.Reserve;
+            var narrow = At(110 + reserve);
+            // One DIP short of every button: some go into "...".
+            double width = reserve + 2 * m.Padding + m.TitleMin + m.Icon * buttons.Count - 1;
+            int fit = (int)((width - reserve - 2 * m.Padding - m.TitleMin - m.Icon) / m.Icon);
+            var middle = At(width);
+            var nudged = At(width + 5);
+            var wide = At(1000);
+            bool narrowOK = narrow.Shown.SequenceEqual([TileHeaderItem.More]) && narrow.Layout?.Visible.SequenceEqual([TileHeaderItem.Title, TileHeaderItem.More]) == true && narrow.Placed;
+            bool middleOK = middle.Shown.SequenceEqual([.. buttons.Take(fit), TileHeaderItem.More]) && middle.Placed
+                && middle.Layout?.Visible.Where(i => i != TileHeaderItem.Title).SequenceEqual(middle.Shown) == true;
+            bool wideOK = wide.Shown.SequenceEqual(buttons) && wide.Layout?.ShowsMore == false && wide.Placed;
+            bool steady = nudged.Shown.SequenceEqual(middle.Shown);
+            // The channels event's capabilities reach the model: a doorbell with talk-back, and a second lens that moves.
+            using var doc = System.Text.Json.JsonDocument.Parse(
+                "{\"channel\":6,\"talk\":true,\"doorbell\":true,\"ptz\":{\"pan_tilt\":false,\"presets\":false,\"zoom_focus\":false},"
+                + "\"lens_talk\":[true,false],\"lens_ptz\":[{\"pan_tilt\":false},{\"pan_tilt\":true,\"presets\":true,\"zoom_focus\":true}]}");
+            ChannelInfo? caps = ChannelInfo.From(doc.RootElement);
+            bool capsOK = caps is { Doorbell: true } && caps.TalkOf(0) && !caps.TalkOf(1) && !caps.PtzOf(0).PanTilt && caps.PtzOf(1) is { PanTilt: true, Presets: true, ZoomFocus: true };
+            Say($"header: placed {narrow.Placed}/{middle.Placed}/{wide.Placed}, narrow layout [{string.Join(",", narrow.Layout?.Visible ?? [])}], reserve {reserve:0}, {whyNot}; 110 DIP {string.Join(",", narrow.Shown)}, {width:0} DIP {string.Join(",", middle.Shown)}, 5 DIP wider unchanged {steady}, 1000 DIP {string.Join(",", wide.Shown)}; capabilities parsed {capsOK}");
+            Expect(narrowOK, "below 120 DIP the header did not show only the title and the more button");
+            Expect(middleOK, $"one DIP short of every button, the header did not show the model's first {fit} buttons and the more button");
+            Expect(wideOK, "a wide header did not show every button without the more button");
+            Expect(steady, "a 5 DIP width change reflowed the header");
+            Expect(capsOK, "the channels event's talk, doorbell and PTZ capabilities were not read");
+
+            // parity: header-overflow-menu
+            At(width);
+            List<string> more = [.. stage.MoreMenuTexts(tile)];
+            List<string> wantMore = chrome.HeaderLayout is { } l ? [.. l.MoreMenu.Select(e => e.Label)] : ["?"];
+            List<string> context = Texts(stage.BuildTileMenu(tile)!.Items);
+            List<string> wantContext = [.. TileHeaderLayout.Menu(model).Select(e => e.Label)];
+            bool menusOK = more.SequenceEqual(wantMore) && context.Take(wantContext.Count).SequenceEqual(wantContext)
+                && context.Contains("Split Side by Side") && more.Contains("Entrance") && !more.Contains("Listen");
+            Say($"header menus: more [{string.Join(" / ", more)}], right-click starts with the model's {wantContext.Count} items {menusOK}");
+            Expect(menusOK, $"the more or right-click menu is not the header model's list ({string.Join(" / ", more)} vs {string.Join(" / ", wantMore)})");
+            // A button whose action is not built yet says so; so do P and R.
+            At(1000);
+            chrome.PressHeader(TileHeaderItem.SavePicture);
+            string? clicked = stage.ToastText;
+            clock.Advance(StageView.ToastSeconds + 0.1);
+            stage.Tick();
+            bool gone = stage.ToastText is null;
+            stage.Select(tile.Path);
+            stage.HandleKey(Windows.System.VirtualKey.P, false, false);
+            string? keyP = stage.ToastText;
+            stage.HandleKey(Windows.System.VirtualKey.R, false, false);
+            string? keyR = stage.ToastText;
+            clock.Advance(StageView.ToastSeconds + 0.1);
+            stage.Tick();
+            Say($"header stubs: click {clicked ?? "nothing"}, gone after {StageView.ToastSeconds} s {gone}, P {keyP ?? "nothing"}, R {keyR ?? "nothing"}");
+            Expect(clicked == "Save Picture is coming soon" && gone, "Save Picture's button did not say it is coming soon");
+            Expect(keyP == "Save Picture is coming soon" && keyR == "Start Recording is coming soon", "P or R did not reach the header's actions");
+        }
+        finally
+        {
+            chrome.ForceWidth(null);
+            v.UseClock(new SystemViewerClock());
+        }
+        await Task.CompletedTask;
+    }
+
     // The call card's picture: one more tile of this window's grid, drawn last from the camera's
     // shared tile (no second decoder), in the card's hole; it comes back after a device loss; the
     // cards stack from the Settings corner, else opposite the indicators.
@@ -1391,7 +1553,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             $"hole {stage.CallCards.Overlays.FirstOrDefault()?.Rect}, core tiles {v.Tiles.Length} for {v.Leases.Cameras.Count} cameras");
         Expect(drawn, "the call card's picture was not drawn");
         Expect(card.Tile.Id != 0 && (grid is null || grid.Id == card.Tile.Id) && v.Tiles.Length == v.Leases.Cameras.Count, "the call card does not draw the camera's shared tile");
-        await CheckCardFrame("call card", card, r);
+        await CheckPictureFrame("call card", card.Tile, r);
 
         // parity: call-inset-device-loss
         long shown = card.Tile.Shown;
@@ -1403,7 +1565,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         Expect(back, "the call card's picture did not come back after a device loss");
         if (back)
         {
-            await CheckCardFrame("call card after device loss", card, r);
+            await CheckPictureFrame("call card after device loss", card.Tile, r);
         }
 
         // parity: call-inset-corner
@@ -1754,12 +1916,12 @@ internal sealed class SelfTest(App app, AppOptions options)
 
         // parity: fill-per-tile
         var menu = stage.BuildTileMenu(boxed);
-        var fillItem = menu?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault(i => i.Text == "Fill tile");
+        var fillItem = menu?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().FirstOrDefault(i => i.Text == "Fill Tile");
         bool offAtFirst = fillItem is { IsChecked: false };
         stage.SetTileFill(boxed, true);
         bool published = await Until(() => boxed.Fill, 5);
         bool single = stage.Fills(boxed) && !stage.Fills(other) && stage.State.Views.Mixed && !other.WantsFill;
-        bool checkedNow = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().Any(i => i.Text == "Fill tile" && i.IsChecked) == true;
+        bool checkedNow = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().Any(i => i.Text == "Fill Tile" && i.IsChecked) == true;
         Say($"fill per tile: menu item {(fillItem is null ? "missing" : "present")}, this tile fills {stage.Fills(boxed)} (drawn {published}), another {stage.Fills(other)}, mixed {stage.State.Views.Mixed}, checked {checkedNow}");
         Expect(offAtFirst, "the tile menu has no unchecked Fill tile on a fitted tile");
         Expect(published && single, "Fill tile on one tile did not fill only it");
@@ -1849,7 +2011,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         stage.SetFill(false);
         bool allFit = !stage.Fills(boxed) && !stage.Fills(other) && !stage.State.Views.Mixed;
         stage.SetTileFill(boxed, true);
-        bool offered = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Any(i => i.Text == "Reset position") == true;
+        bool offered = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Any(i => i.Text == "Reset Position") == true;
         StageView.ResetZoom(boxed);
         bool reset = boxed.DigitalZoom == TileZoom.None && stage.State.Views.Zoom(camera) == TileZoom.None;
         stage.SetTileFill(boxed, false);
@@ -1915,7 +2077,7 @@ internal sealed class SelfTest(App app, AppOptions options)
     }
 
     // A frame read back: the card's picture is the last tile drawn and is not flat.
-    private async Task CheckCardFrame(string what, CallCard card, StageRenderer r)
+    private async Task CheckPictureFrame(string what, StageTile picture, StageRenderer r)
     {
         Task<StageCapture> task = r.CaptureAsync();
         if (await Task.WhenAny(task, Task.Delay(5000)) != task)
@@ -1926,8 +2088,8 @@ internal sealed class SelfTest(App app, AppOptions options)
         StageCapture c = await task;
         (StageTile last, float x, float y, float cw, float ch) = c.Rects.Length > 0 ? c.Rects[^1] : default;
         double spread = Spread(c.Image, x, y, cw, ch);
-        Say($"{what} frame {c.Image.Width}x{c.Image.Height}: drawn last {last == card.Tile}, {cw:0}x{ch:0} px at {x:0},{y:0}, spread {spread:0.0}");
-        Expect(last == card.Tile, $"the {what} picture is not drawn last (on top)");
+        Say($"{what} frame {c.Image.Width}x{c.Image.Height}: drawn last {last == picture}, {cw:0}x{ch:0} px at {x:0},{y:0}, spread {spread:0.0}");
+        Expect(last == picture, $"the {what} picture is not drawn last (on top)");
         Expect(spread >= 8, $"the {what} picture is flat (spread {spread:0.0})");
     }
 
@@ -2148,13 +2310,13 @@ internal sealed class SelfTest(App app, AppOptions options)
         Microsoft.UI.Xaml.Controls.MenuFlyout? tileMenu = stage.BuildTileMenu(tile);
         List<string> tileItems = tileMenu is null ? [] : Texts(tileMenu.Items);
         Say($"tile menu: {string.Join(" / ", tileItems)}");
-        string[] own = ["Focus", "Listen", "Start conversation", "Allow talk-back", "Unmute on ring", "Calls open in", "Quality"];
+        string[] own = ["Focus", "Listen", "Start Conversation", "Allow talk-back", "Quality"];
         Expect(own.All(tileItems.Contains), "the tile menu lost one of the tile's own actions");
         Expect(!tileItems.Any(HeaderActions.IsAppWideTitle), $"the tile menu still holds an app-wide item: {string.Join(", ", tileItems.Where(HeaderActions.IsAppWideTitle))}");
         stage.SetEditing(true);
         List<string> editItems = Texts(stage.BuildTileMenu(tile)!.Items);
         stage.SetEditing(false);
-        Expect(editItems.Contains("Split side by side") && editItems.Contains("Show camera") && !editItems.Any(HeaderActions.IsAppWideTitle),
+        Expect(editItems.Contains("Split Side by Side") && editItems.Contains("Show Camera") && !editItems.Any(HeaderActions.IsAppWideTitle),
             "the tile menu while editing lacks a layout action or holds an app-wide item");
 
         await SettingsWindowSteps(v, w);
@@ -2336,6 +2498,8 @@ internal sealed class SelfTest(App app, AppOptions options)
 
     private async Task TileFeatures(Viewer v, StageView stage)
     {
+        await HeaderModel(v, stage);
+
         // parity: corner-indicators
         // Camera AI detections from the mock reach the corner indicators.
         bool shown = await Until(() => Tiles.Any(t => stage.ChromeFor(t) is { Indicators.Count: > 0 }), 15);

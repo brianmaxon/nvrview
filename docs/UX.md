@@ -126,9 +126,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 
 ## Tile header
 
-> **Built on macOS** (the header, its "…" menu, the right-click menu and
-> the keys); planned on Windows. Save picture is built on macOS (see "Save
-> picture"); recording and PTZ are not built yet: their buttons and menu
+> **Built on both apps** (the header, its "…" menu, the right-click menu and
+> the keys). Save picture is built on macOS (see "Save picture") and planned
+> on Windows; recording and PTZ are not built yet: their buttons and menu
 > items are in place and say so (below).
 
 Every tile's hover header carries its actions as buttons, in an order that
@@ -164,7 +164,8 @@ the edge. Both apps compute it with the same model and test vectors
   only in the header.
 - Corner indicators are unchanged and do not compete for header space.
 
-Details settled while building it (macOS):
+Details settled while building it (macOS; Windows does the same except where
+"Windows" is named):
 
 - The buttons sit together at the header's right end in priority order;
   the title takes what is left from the left edge. Quality, Fisheye View
@@ -193,6 +194,18 @@ Details settled while building it (macOS):
 - Start Conversation and the PTZ buttons follow the `talk`, `doorbell` and
   `ptz` fields of the `channels` event (docs/FFI.md), per lens for a
   multi-lens camera.
+- **Windows:** the header's buttons are real buttons (Tab reaches them while
+  the header shows; a faded header takes no clicks), the Speaker button
+  listens to several cameras with Ctrl-click, and the message over the
+  stage ("Save Picture is coming soon") is a small pill at the bottom,
+  announced to screen readers. Entrance is in its place in the menus but
+  unavailable, because Windows has no entrance insets yet. The Menu key and
+  Shift+F10 open the selected tile's right-click menu at its header. The
+  right-click menu is the model's list followed, after a separator, by the
+  layout's own items with the same wording as on macOS (Focus, Split Side
+  by Side, Split Stacked, Remove Tile, Clear Tile, Show Camera, Layout
+  Preset). The per-camera "Unmute on ring" choice is in Settings > Cameras
+  only, no longer also in the tile menu.
 
 ## Tiles without a picture
 
@@ -239,7 +252,10 @@ overlay (Windows) so they can be discovered.
 
 > **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
 > the others say "… is coming soon" until capture lands, and the Option
-> keys come with PTZ. **Windows:** planned. They act on the selected tile,
+> keys come with PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
+> Ctrl+Shift+R exist (`TileKeyMap`); T works, the others say "… is coming
+> soon"; there is no Camera menu (the window's header has no menu bar) and
+> the Alt keys come with PTZ. They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
 | Key | Action |
@@ -266,8 +282,11 @@ with = or a digit works on every keyboard layout that has those keys.
   is disabled, and the other items say "coming soon". Pan and Tilt… is
   enabled only for a pan-and-tilt camera. ⇧⌘P and ⇧⌘R are hidden items,
   so they also work in a call window.
-- **Windows:** the F1 help overlay lists them, and the keys are mapped in
-  one place (`TileKeyMap`) as the other tile keys are.
+- **Windows:** the F1 help overlay lists them, the keys are mapped in
+  one place (`TileKeyMap`) as the other tile keys are, and the tile's
+  menus show them as key hints. In a call window only the Ctrl+Shift forms
+  (and M, T, 0 while the reply field is not being edited) reach the tile,
+  so P and R can be typed into the reply.
 
 ### Start Conversation (no press)
 
@@ -276,8 +295,7 @@ be at the door without pressing anything, or the user may want to speak to
 someone through a camera's speaker.
 
 - **Where.** A camera tile's context menu has "Start Conversation" (and "End
-  Conversation" while its call is open); on Windows, "Start conversation" and
-  "End conversation", next to "Allow talk-back" (see below). It is offered on every camera tile,
+  Conversation" while its call is open), next to "Allow talk-back" (see below). It is offered on every camera tile,
   not only doorbells: the core learns whether a camera has a speaker only when
   talk-back starts (`not_supported`, docs/FFI.md "Talk-back"), so the call
   says "this camera has no talk-back" when Talk is pressed, and the captions
@@ -436,7 +454,7 @@ does not fit is cropped.
   toggle) sets every tile of the window at once: turning it on or off
   clears the tiles' own choices, so all tiles follow it.
 - **Fill Tile** in a tile's menu (macOS: the right-click menu and the
-  header's "…"; Windows: the right-click menu, "Fill tile") fills or fits
+  header's "…"; Windows: the right-click menu, "Fill Tile") fills or fits
   that camera's tiles in this window only, checked while it fills. While
   some tiles differ from the window's switch, the macOS menu item shows a
   mixed state; the Windows toggle shows the window's own setting.
@@ -455,7 +473,7 @@ does not fit is cropped.
 - **Pointer**: over a picture a drag pans (below the header strip), the
   pointer is an open hand (macOS; a closed hand while dragging) or the hand
   pointer (Windows, which has no closed-hand system pointer).
-- **Reset**: "Reset Position" ("Reset position" on Windows) in the tile's
+- **Reset**: "Reset Position" in the tile's
   menu, shown while a filled crop is moved at 1x, brings it back to the
   middle; 0 and the header's reset control (shown while zoomed) also
   recenter it.
@@ -1047,7 +1065,7 @@ example to keep it beside other work. Both apps follow these rules.
   of the visible area of the screen holding the active viewer window, 12 pt
   in, 480 pt wide by default (the remembered size when there is one, limited
   to the screen), each further window 24 pt left and down.
-- **Layout (built on macOS, planned on Windows; CAPTURE.md "The call
+- **Layout (built on both apps; CAPTURE.md "The call
   window is a regular tile"):**
   the picture becomes the viewer's own tile in a single-tile mode (no
   layout editing, split, swap, focus, Show Camera, Remove or Clear; the
@@ -1074,10 +1092,16 @@ example to keep it beside other work. Both apps follow these rules.
     "coming soon" until capture lands; no recording pill yet.
 
 - **Windows:** the call window is a WinUI window of its own with its own
-  swap chain and renderer (a swap chain is never moved between windows),
-  drawing the doorbell's shared tile in the middle of the call card: header
-  with Pop In and a pin toggle, then the picture, captions, Talk, and the
-  reply field. Pop Out is the button in a card's header and an item in the
+  swap chain and renderer (a swap chain is never moved between windows).
+  The picture is a `StageView` in single fixed tile mode in the middle of
+  the call card, drawing the doorbell's shared tile with the same hover
+  header, "…" and right-click menus (the model's call list, no layout
+  items), digital zoom and zoom map, Quality and fisheye views as any
+  tile, and recovering from a lost GPU device on its own; the window
+  keeps one renderer and one lease. Above it the call bar has Pop In and
+  a pin toggle; below it, the captions, Talk, and the reply field. The
+  Unmute cover is a veil inside the tile. Quality and views chosen in the
+  call window are not kept. Pop Out is the button in a card's header and an item in the
   card's menu (right-click) and the doorbell tile's menu. A ring opens the
   window without activating it (the user keeps typing where they are),
   Pop Out and Start Conversation activate it. The pin is "always on top"

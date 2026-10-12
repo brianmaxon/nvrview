@@ -12,6 +12,9 @@ public enum TileKey
     Space,
     M,
     L,
+    P,
+    R,
+    T,
 }
 
 /// <summary>What a key does to the selected tile.</summary>
@@ -21,13 +24,22 @@ public enum TileAction
     Dismiss,
     ToggleFocus,
     ToggleListening,
+    /// <summary>P, or Ctrl+Shift+P (the call window, where P may be typed into the reply).</summary>
+    SavePicture,
+    /// <summary>Shift+P.</summary>
+    SavePictureAs,
+    /// <summary>R, or Ctrl+Shift+R (the call recording in a call window).</summary>
+    ToggleRecording,
+    /// <summary>T: Start or End Conversation.</summary>
+    ToggleConversation,
 }
 
 public static class TileKeyMap
 {
     /// <summary>
     /// Enter dismisses the selected tile's alert if it has one, and otherwise toggles focus, as
-    /// Space does; M (or Ctrl+L) listens to the tile or mutes it. Other modifiers make a key
+    /// Space does; M (or Ctrl+L) listens to the tile or mutes it; P, Shift+P, R and T are the capture and
+    /// conversation keys (docs/UX.md "Capture and camera keys"). Other modifiers make a key
     /// something else (a menu shortcut), so it is not mapped; text being edited takes every key.
     /// </summary>
     public static TileAction Map(TileKey key, bool ctrl, bool alt, bool shift, bool hasAlert, bool editingText = false)
@@ -42,6 +54,12 @@ public static class TileKeyMap
             TileKey.Space when !ctrl && !shift => TileAction.ToggleFocus,
             TileKey.M when !ctrl => TileAction.ToggleListening,
             TileKey.L when ctrl => TileAction.ToggleListening,
+            TileKey.P when !ctrl && !shift => TileAction.SavePicture,
+            TileKey.P when !ctrl && shift => TileAction.SavePictureAs,
+            TileKey.P when ctrl && shift => TileAction.SavePicture,
+            TileKey.R when !ctrl && !shift => TileAction.ToggleRecording,
+            TileKey.R when ctrl && shift => TileAction.ToggleRecording,
+            TileKey.T when !ctrl && !shift => TileAction.ToggleConversation,
             _ => TileAction.None,
         };
     }
