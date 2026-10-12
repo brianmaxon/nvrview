@@ -194,18 +194,69 @@ internal static class RecordingsTests
             // Edit lists over the finished download, and sound (minor 8).
             IEditSound sound = fake;
             T.Equal(NvStatus.UnknownId, StatusOf(() => sound.EditCompute("""{"kind":"follow","download":"nope"}""")));
-            T.Equal(NvStatus.Unsupported, StatusOf(() => sound.EditCompute($$"""{"kind":"trim","download":"{{id}}"}""")));
-            T.Equal(NvStatus.Unsupported, StatusOf(() => sound.EditCompute($$"""{"kind":"grid","download":"{{id}}","in_ms":1}""")));
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute($$"""{"kind":"trim","download":"{{id}}"}""")));
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute($$"""{"kind":"grid","download":"{{id}}","in_ms":9,"out_ms":3}""")));
             T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute($$"""{"kind":"nonsense","download":"{{id}}"}""")));
             using (JsonDocument follow = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"follow","download":"{{id}}"}""")))
             {
                 T.Equal("follow", follow.RootElement.GetProperty("kind").GetString());
                 T.Equal(1, follow.RootElement.GetProperty("segments").GetArrayLength());
             }
+            long start;
             using (JsonDocument grid = JsonDocument.Parse(sound.EditCompute($$"""{"kind":"grid","download":"{{id}}","layout":"4up"}""")))
             {
                 T.Equal(1, grid.RootElement.GetProperty("cells").GetArrayLength());
+                start = grid.RootElement.GetProperty("start_ms").GetInt64();
             }
+
+            // Export (minor 10): a trim, a trimmed grid, a range download, stills.
+            IExport export = fake;
+            using (JsonDocument trim = JsonDocument.Parse(sound.EditCompute(
+                $$"""{"kind":"trim","download":"{{id}}","in_ms":{{start + 3000}},"out_ms":{{start + 9000}},"share_safe":true}""")))
+            {
+                JsonElement output = trim.RootElement.GetProperty("outputs")[0];
+                T.Equal("trim", trim.RootElement.GetProperty("kind").GetString());
+                T.Equal("Camera A", output.GetProperty("name").GetString());
+                T.Equal(2000L, output.GetProperty("source_in_ms").GetInt64());
+            }
+            using (JsonDocument cut = JsonDocument.Parse(sound.EditCompute(
+                $$"""{"kind":"grid","download":"{{id}}","in_ms":{{start + 3000}},"out_ms":{{start + 9000}}}""")))
+            {
+                T.Equal(start + 3000, cut.RootElement.GetProperty("start_ms").GetInt64());
+                T.Equal(start + 9000, cut.RootElement.GetProperty("end_ms").GetInt64());
+            }
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute(
+                $$"""{"kind":"trim","download":"{{id}}","in_ms":1,"out_ms":2,"dest":"relative"}""")));
+            string rangeRequest = $$"""{"start":{{day + 100}},"end":{{day + 160}},"cameras":[{"camera":{"device":"{{Device}}","channel":0},"tier":"main"}]}""";
+            string rangeId;
+            using (JsonDocument ranged = JsonDocument.Parse(export.DownloadRange(rangeRequest)))
+            {
+                rangeId = ranged.RootElement.GetProperty("download").GetString()!;
+                T.Check(rangeId.StartsWith("r-", StringComparison.Ordinal));
+                T.Check(!ranged.RootElement.GetProperty("existing").GetBoolean());
+            }
+            T.Check(export.DownloadRange(rangeRequest).Contains("\"existing\":true", StringComparison.Ordinal));
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => export.DownloadRange(
+                $$$"""{"start":5,"end":4,"cameras":[{"camera":{"device":"{{{Device}}}","channel":0}}]}""")));
+            T.Equal(NvStatus.Limit, StatusOf(() => export.DownloadRange(
+                $$$"""{"start":0,"end":100000,"cameras":[{"camera":{"device":"{{{Device}}}","channel":0}}]}""")));
+            fake.CompleteRecordingWork();
+            DownloadProgress ranging = events.OfType<RecordingsEvent.Download>().Select(d => d.Progress).Last(p => p.Download == rangeId);
+            T.Equal("done", ranging.State);
+            T.Check(ranging.Incident is null);
+            using (JsonDocument rtrim = JsonDocument.Parse(sound.EditCompute(
+                $$"""{"kind":"trim","download":"{{rangeId}}","in_ms":{{(day + 110) * 1000}},"out_ms":{{(day + 130) * 1000}},"cut":"exact"}""")))
+            {
+                T.Equal(false, rtrim.RootElement.GetProperty("outputs")[0].GetProperty("copy_possible").GetBoolean());
+            }
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => sound.EditCompute($$"""{"kind":"follow","download":"{{rangeId}}"}""")));
+            using (JsonDocument still = JsonDocument.Parse(export.StillPlan(
+                $$"""{"download":"{{rangeId}}","camera":{"device":"{{Device}}","channel":0},"at_ms":{{(day + 121) * 1000}},"format":"jpeg"}""")))
+            {
+                T.Check(still.RootElement.GetProperty("stills")[0].GetProperty("suggested_file").GetString()!.EndsWith(".jpg", StringComparison.Ordinal));
+            }
+            T.Equal(NvStatus.UnknownId, StatusOf(() => export.StillPlan("""{"playback":987654}""")));
+            T.Equal(NvStatus.InvalidArgument, StatusOf(() => export.StillPlan("{}")));
 
             string cam1 = $$"""{"device":"{{Device}}","channel":1,"lens":0}""";
             events.Clear();

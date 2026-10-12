@@ -3,10 +3,11 @@
 > **Sections 1 to 5, 8, 9, and `nv_sound_configure` are implemented**
 > (slice F1: FFI.md, "Recordings (minor 5)", and the header), and so is
 > **section 6, recorded playback, as minor 6** (slice F2: FFI.md, "Recorded
-> playback (minor 6)"; without `nv_playback_step`), and **sections 7 and 2a
-> as minor 8** (slice F3: FFI.md, "Edit lists and sound (minor 8)"; without
-> `in_ms`/`out_ms` and the `trim` kind); the rest is still a
-> proposal (export F4). This
+> playback (minor 6)"; without `nv_playback_step`), **sections 7 and 2a
+> as minor 8** (slice F3: FFI.md, "Edit lists and sound (minor 8)"), and
+> **section 7a, export, as minor 10** (slice F4: FFI.md, "Export (minor
+> 10)"; see "Clarifications from the implementation (F4)"); only
+> `nv_playback_step` is still a proposal. This
 > was the contract for review before the core and the apps were built in
 > parallel, as [FFI-ABI3.md](FFI-ABI3.md) was for M3. Everything in
 > [FFI.md](FFI.md) and [`nvrview.h`](nvrview.h) still holds; the additions
@@ -1320,7 +1321,7 @@ or a counted drop, never growth):
    C11): sections 1 to 5 and the events of section 8 have a Rust API on
    `viewer_core::Core` (JSON in, JSON out, `RecError` for the new
    statuses), with locks (C13), that the C functions of F1 wrap; export
-   (C14) has planners but no C functions yet (F4). mock-nvr serves playback (123/5/7) at 1× with the
+   (C14) has planners and, since F4 (minor 10), C functions. mock-nvr serves playback (123/5/7) at 1× with the
    observed burst-then-pace, across files.
 9. **`NvStreamTier` carries Baichuan tiers** (`MOBILE`, `EXTERN`) in ABI 3.
    This proposal keeps them for live tiles and uses lens + main/sub for
@@ -2007,3 +2008,98 @@ those of the C12 clarifications.
 8. **Events** are the C12 ones; `sound_watch` and `sound_analyze` come
    through `on_event` like the other recordings events, and carry the
    camera as `{"device","channel","lens"}`.
+
+## Clarifications from the implementation (F4, 2026-10-12)
+
+What wrapping section 7a in C functions (MILESTONE-P.md, F4) settled, with the
+core pieces C14 left open. The Rust calls are `Core::download_range`,
+`Core::still_plan`, and `Core::edit_compute` (now with the trim);
+`Scheduler::enqueue_range` and `Scheduler::enqueue_incident_to` run the
+downloads.
+
+1. **Minor 10.** The capture interface took minor 9, so export is minor 10
+   (FFI.md, "Versioning"): `nv_download_range`, `nv_still_plan`, the `trim`
+   kind and `in_ms`/`out_ms` of `nv_edit_compute`, `dest` and `share_safe` on
+   export requests, and `range` in the `download` event. No declaration of an
+   earlier minor changed; a minor 8 core answered `NV_ERR_UNSUPPORTED` to the
+   trim and the window, which bindings treat as "no export".
+2. **Range jobs.** A range download is a scheduler job like an incident's
+   (chunks, retries, resume, pause, retry, trash, events, the 1000-downloads
+   limit), with a stand-in incident in its job file that carries only the
+   download's ID, the user's name, and one `range` event per camera. Its
+   progress `key` is its ID (never an incident key, so it never dedupes with
+   an incident download), and `IncidentProgress::range` and
+   `CameraProgress::start` give the range and each camera's start. Queuing an
+   ID that is known (finished or not) returns it as `existing`; so does one
+   whose folder is still on disk from an earlier run (it is known again). The
+   ` (2)` suffix is chosen against the disk.
+3. **Where downloads go, and the registry.** `dest` (an absolute directory)
+   replaces `downloads_dir` as the directory the download's folder is made
+   in, for range and incident downloads. A folder whose directory is not the
+   downloads directory is listed in `data_dir/recordings/downloads.json`
+   (`{"version":1,"folders":[...]}`), which the scheduler reads when it
+   resumes: listed folders with work left (or a failure to retry) are
+   resumed as if they were under `downloads_dir`; finished, trashed, and
+   vanished entries are dropped; `nv_download_forget(..., true)` drops its
+   entry. Without a data directory such a request is `NV_ERR_NOT_CONFIGURED`
+   (nothing is created). A `dest` equal to `downloads_dir` needs no entry.
+4. **Share-safe downloads.** `share_safe` on an incident download drops the
+   user's incident name from the folder name, names cameras `Camera A`,
+   `Camera B`, ... in the order they first appear in the incident, and writes
+   no `incident.json`; on a range download the planner's rules apply. The
+   job file under `.parts` still holds device keys, as section 7a says.
+5. **The `download` event of a range download** has `incident` null and
+   `range` `{"start","end"}` (seconds); nothing else changes.
+6. **Trim.** `kind` `trim` needs `download`, `in_ms`, and `out_ms`; `cameras`,
+   `cut`, `dest`, and `share_safe` are optional (the planner's rules, section
+   7a (e)). It works on incident and range downloads, because a camera's
+   `file_start_ms` is its download range's start (`CameraProgress::start`
+   times 1000; the B7 seam as for the edit lists). `NV_ERR_INVALID_ARGUMENT`
+   covers `in_ms >= out_ms`, points outside every file, a `dest` that is not
+   an absolute directory, and no finished file.
+7. **`in_ms`/`out_ms` on follow and grid.** Both are optional and each may be
+   given alone; `in_ms >= out_ms` is `NV_ERR_INVALID_ARGUMENT`, as is a window
+   that leaves nothing. A follow cut is computed as before and then cut to the
+   window: shots are clipped (the out point exactly; with `keyframe` cuts the
+   in point of a clipped shot moves back to its source's last keyframe at or
+   before `in_ms`, never before the shot's own start, which is itself a
+   keyframe), sources no shot uses any more are dropped and the rest are
+   renumbered, so `copy_possible` is computed over what remains. A grid's range
+   is intersected with the window (`present` follows). Follow and grid of a
+   range download have no incident: `NV_ERR_INVALID_ARGUMENT`.
+8. **`dest` and `share_safe` on follow and grid.** `suggested_file` is now
+   always a full path: `dest`, else the download's folder, joined with the
+   file name the planner chose (the planner's own name is bare). With
+   `share_safe`, `sources[].name` and `labels[].name` are `Camera A`,
+   `Camera B`, ... in the order of the plan's sources and the plan says
+   `"share_safe": true`; `sources[].file` keeps the files' paths, which the
+   app reads.
+9. **Stills from a playback.** Each tile's feed records the timestamp of the
+   newest picture the app answered with `nv_tile_decoded`; the playback's
+   engine turns it into a recorded time with the camera's buffer (the same
+   anchor playback uses) and reports `ShownPicture` for each tile: the tile's
+   current generation, and no picture (`position_ms` null, so the tile is
+   skipped or, if listed, `NV_ERR_INVALID_ARGUMENT`) while that generation is
+   not yet the one shown, as during a seek. Names are the user's (group name,
+   else the device's reported name); the default directory is `downloads_dir`;
+   an unknown playback or tile is `NV_ERR_UNKNOWN_ID`. A request with both
+   `playback` and `download`, or neither, is `NV_ERR_INVALID_ARGUMENT`.
+10. **Stills from a file** read the download's finished file as an edit list
+    does, with the camera's download range start as the file's start; a
+    position outside the file is `NV_ERR_INVALID_ARGUMENT`.
+11. **MP4 handler names need no change.** The `mp4` crate takes handler names
+    only from a fixed set of generic words (an enum, not text) and
+    `Mp4Finalizer` never records a creation time, so every finalized file
+    already carries what `export::mp4_metadata(true, _)` prescribes. The
+    function stays the one place the rule lives for the day a creation time or
+    a tag is recorded.
+12. **Idempotence.** `nv_download_range` changes state like
+    `nv_download_incident`: the first call queues even when the answer does not
+    fit the buffer. `nv_still_plan` and `nv_edit_compute` change nothing.
+13. **Not done.** The apps' download models do not read `range` yet (M4/W4);
+    the fakes are cruder than the core: no formatted time stamps in file names,
+    only the downloads directory as `dest` (no data directory), the C# fake
+    knows no playbacks (a still from one is unknown), and its incidents have
+    one camera. The C smoke test covers a range download, a trim, and a still
+    from a file; stills from a playback are tested through the Rust C-function
+    tests (`ffi_export.rs`) only.
