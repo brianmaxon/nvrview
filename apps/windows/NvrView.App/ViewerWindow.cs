@@ -228,7 +228,7 @@ internal sealed class ViewerWindow
             {
                 Stage.CallCards.RestoreAnchor(new InsetAnchor(ix, iy));
             }
-            // Fill Tiles, and each camera's zoom, crop and Fill choice (docs/UX.md "Fill Tiles").
+            // Fill Tiles, and each tile's zoom, crop and Fill choice (docs/UX.md "Digital zoom", "Fill Tiles").
             state.Views = restore.PictureViews;
         }
         // Moving the call insets saves the window's record (their position belongs to the window).
@@ -240,6 +240,14 @@ internal sealed class ViewerWindow
         Stage.PushSize();
         Renderer.Start();
         Show(content);
+        if (restore?.Legacy is { Entries.Count: > 0 } legacy && State.Views.Count == 0)
+        {
+            // A file from before views were per tile: each tile showing one of its cameras gets that camera's view,
+            // and the window is saved in the new form.
+            State.Views.Migrate(legacy.Entries, State.ViewsKey, State.Tree);
+            Stage.Reload();
+            Changed?.Invoke();
+        }
         if (restore is { FullScreen: true } && !background)
         {
             AppWindow.SetPresenter(AppWindowPresenterKind.FullScreen);
@@ -462,7 +470,7 @@ internal sealed class ViewerWindow
         }
         else
         {
-            State.Content = new WindowContent.Scratch(State.Name, tree);
+            State.Rename(new WindowContent.Scratch(State.Name, tree));
             Changed?.Invoke();
         }
         UpdateTitle();
@@ -479,7 +487,7 @@ internal sealed class ViewerWindow
         {
             // Changed elsewhere: follow, unless a drag here is still changing
             // it (the drag stores its result when it ends).
-            if (!Stage.IsInteracting && (l.Root != State.Tree || l.Name != State.Name))
+            if (!Stage.IsInteracting && (l.Root.WithTileIds() != State.Tree || l.Name != State.Name))
             {
                 State.Tree = l.Root;
                 State.Name = l.Name;
@@ -491,7 +499,7 @@ internal sealed class ViewerWindow
         else
         {
             // Deleted elsewhere: keep what is on screen, unsaved.
-            State.Content = new WindowContent.Scratch(State.Name, State.Tree);
+            State.Rename(new WindowContent.Scratch(State.Name, State.Tree));
             UpdateTitle();
             Changed?.Invoke();
         }
@@ -614,6 +622,8 @@ internal sealed class ViewerWindow
         {
             return null;
         }
+        // The tiles keep their views in the saved layout.
+        State.Views.Rename(State.ViewsKey, TileViewKey.LayoutKey(id));
         Show(new WindowContent.Layout(id));
         Stage.SetEditing(editing);
         return id;
@@ -633,7 +643,7 @@ internal sealed class ViewerWindow
         }
         else
         {
-            State.Content = new WindowContent.Scratch(name, State.Tree);
+            State.Rename(new WindowContent.Scratch(name, State.Tree));
             Changed?.Invoke();
         }
         UpdateTitle();

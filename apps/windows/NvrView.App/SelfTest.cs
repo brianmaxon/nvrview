@@ -367,6 +367,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await CheckZoomChrome();
         await CheckFillTiles();
         await CheckFillPan();
+        await CheckZoomPerTile();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -1920,9 +1921,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         bool offAtFirst = fillItem is { IsChecked: false };
         stage.SetTileFill(boxed, true);
         bool published = await Until(() => boxed.Fill, 5);
-        bool single = stage.Fills(boxed) && !stage.Fills(other) && stage.State.Views.Mixed && !other.WantsFill;
+        bool single = stage.Fills(boxed) && !stage.Fills(other) && stage.FillMixed && !other.WantsFill;
         bool checkedNow = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.ToggleMenuFlyoutItem>().Any(i => i.Text == "Fill Tile" && i.IsChecked) == true;
-        Say($"fill per tile: menu item {(fillItem is null ? "missing" : "present")}, this tile fills {stage.Fills(boxed)} (drawn {published}), another {stage.Fills(other)}, mixed {stage.State.Views.Mixed}, checked {checkedNow}");
+        Say($"fill per tile: menu item {(fillItem is null ? "missing" : "present")}, this tile fills {stage.Fills(boxed)} (drawn {published}), another {stage.Fills(other)}, mixed {stage.FillMixed}, checked {checkedNow}");
         Expect(offAtFirst, "the tile menu has no unchecked Fill tile on a fitted tile");
         Expect(published && single, "Fill tile on one tile did not fill only it");
         Expect(checkedNow, "Fill tile is not checked on the tile that fills");
@@ -1941,12 +1942,12 @@ internal sealed class SelfTest(App app, AppOptions options)
         UnitRect edge = boxed.DigitalZoom.Visible(b);
         bool stopped = wide ? Math.Abs(edge.X) < 1e-4 : Math.Abs(edge.Y) < 1e-4;
         bool fittedSwaps = stage.DragKind(new Point(other.ViewX + other.ViewWidth / 2, other.ViewY + other.ViewHeight / 2 + 20)) == "swap";
-        bool shared = stage.State.Views.Zoom(camera) == boxed.DigitalZoom;
-        Say($"fill pan drag: kind {kind}, crop followed {followed} ({got.CenterX:0.0000},{got.CenterY:0.0000} for {want.CenterX:0.0000},{want.CenterY:0.0000}), stopped at the edge {stopped}, kept for the camera {shared}, a fitted tile swaps {fittedSwaps}");
+        bool shared = stage.State.ViewKey(boxed.Path) is { } bk && stage.State.Views.Zoom(bk) == boxed.DigitalZoom;
+        Say($"fill pan drag: kind {kind}, crop followed {followed} ({got.CenterX:0.0000},{got.CenterY:0.0000} for {want.CenterX:0.0000},{want.CenterY:0.0000}), stopped at the edge {stopped}, kept for the tile {shared}, a fitted tile swaps {fittedSwaps}");
         Expect(kind == "pan", "a drag on a filled, cropped picture would not pan it");
         Expect(followed, "dragging the filled picture did not move the crop with the drag");
         Expect(stopped, "panning the filled picture did not stop at its edge");
-        Expect(shared, "the crop was not kept for the camera");
+        Expect(shared, "the crop was not kept for the tile");
         Expect(fittedSwaps, "a drag on a fitted tile's picture no longer swaps it");
         // Back from the edge to a position of its own, for the restore check.
         stage.SimulateDrag(middle, wide ? new Point(middle.X - step * 2, middle.Y) : new Point(middle.X, middle.Y - step * 2));
@@ -1983,16 +1984,21 @@ internal sealed class SelfTest(App app, AppOptions options)
         await Until(() => b2.Visible && b2.Fill && o2.Visible, 5);
 
         // parity: fill-pan-restore
+        // The record keeps the crop and the Fill choice under the tile's identity; a window opened from it
+        // shows them in that tile.
         SavedWindow record = WindowStore.FromJson(System.Text.Json.Nodes.JsonNode.Parse(WindowStore.ToJson([window.ToSaved()])))[0];
-        TileViews<CameraRef> saved = record.PictureViews;
-        bool readsBack = saved.Zoom(camera) == crop && saved.Fills(camera) && !saved.Fills(otherCamera);
+        TileViews<TileViewKey> saved = record.PictureViews;
+        TileViewKey? key = stage.State.ViewKey(boxed.Path), otherKey = stage.State.ViewKey(other.Path);
+        bool readsBack = key is { } k1 && otherKey is { } k2 && saved.Zoom(k1) == crop && saved.Fills(k1) && !saved.Fills(k2)
+            && record.Views?.Entries.Any(e => e.Key.Tile == k1.Tile && e.Key.Layout == stage.State.ViewsKey) == true;
         ViewerWindow second = app.OpenWindow(window.State.Content, record);
         bool same = false;
         try
         {
+            NodePath boxedPath = boxed.Path, otherPath = other.Path;
             StageTile? there = null;
-            bool drawn = await Until(() => (there = second.Stage.Tiles.FirstOrDefault(t => t.CameraOrNone == camera)) is { Fill: true, PictureWidth: > 0 }, 10);
-            StageTile? fitted = second.Stage.Tiles.FirstOrDefault(t => t.CameraOrNone == otherCamera);
+            bool drawn = await Until(() => (there = second.Stage.Tiles.FirstOrDefault(t => t.Path == boxedPath && t.CameraOrNone == camera)) is { Fill: true, PictureWidth: > 0 }, 10);
+            StageTile? fitted = second.Stage.Tiles.FirstOrDefault(t => t.Path == otherPath);
             same = drawn && there!.DigitalZoom == crop && second.Stage.Fills(there) && fitted is not null && !second.Stage.Fills(fitted) && !fitted.WantsFill;
         }
         finally
@@ -2000,24 +2006,83 @@ internal sealed class SelfTest(App app, AppOptions options)
             second.Window.Close();
             await Until(() => app.Windows.Count == 1, 5);
         }
-        Say($"fill pan restore: record reads back {readsBack}, a window opened from it has the crop and the single tile's Fill {same}");
-        Expect(readsBack, "the window's saved record lost the crop or the tile's Fill choice");
-        Expect(same, "a window opened from the record did not get the crop and Fill choices back");
+        Say($"fill pan restore: record reads back per tile {readsBack}, a window opened from it has the tile's crop and Fill {same}");
+        Expect(readsBack, "the window's saved record lost the tile's crop or Fill choice");
+        Expect(same, "a window opened from the record did not get the tile's crop and Fill choice back");
 
         // parity: fill-window-switch
-        // The window's switch sets every tile; the crop stays with the camera; Reset position recenters it.
+        // The window's switch sets every tile; the crop stays with the tile; Reset position recenters it.
         stage.SetFill(true);
-        bool allFill = stage.Fills(boxed) && stage.Fills(other) && !stage.State.Views.Mixed;
+        bool allFill = stage.Fills(boxed) && stage.Fills(other) && !stage.FillMixed;
         stage.SetFill(false);
-        bool allFit = !stage.Fills(boxed) && !stage.Fills(other) && !stage.State.Views.Mixed;
+        bool allFit = !stage.Fills(boxed) && !stage.Fills(other) && !stage.FillMixed;
         stage.SetTileFill(boxed, true);
         bool offered = stage.BuildTileMenu(boxed)?.Items.OfType<Microsoft.UI.Xaml.Controls.MenuFlyoutItem>().Any(i => i.Text == "Reset Position") == true;
         StageView.ResetZoom(boxed);
-        bool reset = boxed.DigitalZoom == TileZoom.None && stage.State.Views.Zoom(camera) == TileZoom.None;
+        bool reset = boxed.DigitalZoom == TileZoom.None && key is { } k3 && stage.State.Views.Zoom(k3) == TileZoom.None;
         stage.SetTileFill(boxed, false);
         Say($"fill per tile: Fill Tiles fills every tile {allFill}, then fits every tile {allFit}; Reset position offered {offered}, recenters {reset}");
         Expect(allFill && allFit, "Fill Tiles did not set every tile of the window");
         Expect(offered && reset, "Reset position was not offered or did not recenter the filled crop");
+    }
+
+    // Zoom per tile (docs/UX.md "Digital zoom"): two tiles of one camera are independent views. Show camera
+    // puts the camera in a second tile at the default view; each tile zooms on its own, focus keeps a tile's
+    // zoom, and resetting one leaves the other. Then a swap moves each view with its camera while the tiles
+    // keep their identities, and the layout is put back as it was.
+    private async Task CheckZoomPerTile()
+    {
+        StageView stage = app.Stage!;
+        StageTile? first = Tiles.FirstOrDefault(t => !(t.Fisheye is { } f && f.Mode.Dewarps()));
+        StageTile? next = first is null ? null : Tiles.FirstOrDefault(t => t != first && t.CameraOrNone != first.CameraOrNone && !(t.Fisheye is { } f && f.Mode.Dewarps()));
+        if (first?.CameraOrNone is not { } camera || next?.CameraOrNone is not { } otherCamera)
+        {
+            _problems.Add("no two plain tiles for the zoom per tile checks");
+            return;
+        }
+        NodePath path = first.Path, second = next.Path;
+        StageTile At(NodePath p) => stage.Tiles.First(t => t.Path == p);
+        static bool Scale(StageTile t, double s) => Math.Abs(t.DigitalZoom.Scale - s) < 0.01;
+
+        // parity: zoom-per-tile
+        stage.Assign(camera, second);
+        bool fresh = At(second).CameraOrNone == camera && At(second).DigitalZoom == TileZoom.None;
+        StageView.ZoomAround(At(path), 0.5, 0.5, 2);
+        StageView.ZoomAround(At(second), 0.5, 0.5, 3);
+        bool independent = Scale(At(path), 2) && Scale(At(second), 3) && stage.State.ViewKey(path) is { } ka && stage.State.ViewKey(second) is { } kb
+            && ka != kb && Math.Abs(stage.State.Views.Zoom(ka).Scale - 2) < 0.01 && Math.Abs(stage.State.Views.Zoom(kb).Scale - 3) < 0.01;
+        stage.FocusOn(At(second));
+        bool focusKeeps = stage.IsFocused && Scale(At(second), 3);
+        stage.Unfocus();
+        bool unfocused = await Until(() => app.Renderer!.Focus is null, FocusAnimation.Seconds + 2);
+        bool unfocusKeeps = unfocused && Scale(At(second), 3) && Scale(At(path), 2);
+        StageView.ResetZoom(At(second));
+        bool resetOne = At(second).DigitalZoom == TileZoom.None && Scale(At(path), 2);
+        Say($"zoom per tile: one camera in two tiles at {At(path).DigitalZoom.Scale:0.00}x and 3x, Show camera starts at 1x {fresh}, independent {independent}, focus keeps {focusKeeps}, unfocus keeps {unfocusKeeps}, reset one tile only {resetOne}");
+        Expect(fresh, "Show camera did not start the tile at the default view");
+        Expect(independent, "two tiles of one camera did not zoom independently");
+        Expect(focusKeeps && unfocusKeeps, "focus lost a tile's own zoom");
+        Expect(resetOne, "resetting one tile's zoom changed another tile of the same camera");
+
+        // parity: zoom-follows-swap
+        stage.Assign(otherCamera, second);
+        bool showReset = At(second).CameraOrNone == otherCamera && At(second).DigitalZoom == TileZoom.None;
+        StageView.ZoomAround(At(second), 0.5, 0.5, 3);
+        string? idA = stage.State.Tree[path]?.TileId(), idB = stage.State.Tree[second]?.TileId();
+        stage.Swap(path, second);
+        bool moved = At(second).CameraOrNone == camera && Scale(At(second), 2) && At(path).CameraOrNone == otherCamera && Scale(At(path), 3);
+        bool idsStay = idA is not null && stage.State.Tree[path]?.TileId() == idA && stage.State.Tree[second]?.TileId() == idB;
+        stage.Swap(second, path);
+        bool back = At(path).CameraOrNone == camera && Scale(At(path), 2) && At(second).CameraOrNone == otherCamera && Scale(At(second), 3);
+        StageView.ResetZoom(At(path));
+        StageView.ResetZoom(At(second));
+        bool clean = At(path).DigitalZoom == TileZoom.None && At(second).DigitalZoom == TileZoom.None
+            && stage.State.ViewKey(path) is { } kp && stage.State.Views.Zoom(kp) == TileZoom.None;
+        Say($"zoom follows swap: Show camera resets {showReset}, views moved with the cameras {moved}, tiles kept their identities {idsStay}, swapped back {back}, reset {clean}");
+        Expect(showReset, "Show camera did not reset the tile's view");
+        Expect(moved, "a swap did not move each tile's zoom with its camera");
+        Expect(idsStay, "a swap moved the tiles' identities");
+        Expect(back && clean, "swapping back did not bring the zooms back");
     }
 
     // One of a tile's bars at 1x (DIPs, a unit in from its edges), or null if the picture fills it.

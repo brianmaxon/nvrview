@@ -16,7 +16,7 @@
 //   over the tile's bars until it fills the tile, then crops (TileZoom);
 //   a drag on a filled picture with part hidden moves its crop, and a drag
 //   on a tile's shown header swaps it (docs/UX.md "Fill Tiles"); the zoom,
-//   crop and Fill choice are kept per camera in WindowState.Views and saved
+//   crop and Fill choice are kept per tile in WindowState.Views and saved
 //   with the window;
 // - the tile features: the corner indicators and sound badges, the alert strip
 //   and its Dismiss (Enter), the Quality menu (kept in the layout leaf), M to
@@ -51,25 +51,54 @@ namespace NvrView.App;
 /// <summary>One window's arrangement and what the user is doing with it.</summary>
 internal sealed class WindowState(WindowContent content, string name, LayoutNode tree)
 {
+    private LayoutNode _tree = tree.WithTileIds();
+
     public WindowContent Content { get; set; } = content;
 
     public string Name { get; set; } = name;
 
-    public LayoutNode Tree { get; set; } = tree;
+    /// <summary>
+    /// The arrangement shown. Every leaf has a tile identity (<see cref="TileIdentity.WithTileIds"/>, given on
+    /// every set), and the views of tiles no longer in it are forgotten.
+    /// </summary>
+    public LayoutNode Tree
+    {
+        get => _tree;
+        set
+        {
+            _tree = value.WithTileIds();
+            Views.Prune(ViewsKey, _tree);
+        }
+    }
 
     public NodePath? Selected { get; set; }
 
     public bool Editing { get; set; }
 
     /// <summary>
-    /// The window's Fill Tiles switch, and per camera its digital zoom (at 1x, its filled crop's position) and
-    /// own Fill choice, in picture coordinates (docs/UX.md "Fill Tiles"). Keyed by camera, so tiles of the same
-    /// camera in one window share it. Saved with the window.
+    /// The window's Fill Tiles switch, and per tile its digital zoom (at 1x, its filled crop's position) and own
+    /// Fill choice, in picture coordinates (docs/UX.md "Digital zoom", "Fill Tiles"). Keyed by layout, tile and
+    /// camera (<see cref="TileViewKey"/>), so two tiles of one camera are independent views; a view stays through
+    /// focus, layout switches and the switch to the main stream, moves with its camera in a swap, and starts
+    /// over when its tile is given another camera. Saved with the window.
     /// </summary>
-    public TileViews<CameraRef> Views { get; set; } = new();
+    public TileViews<TileViewKey> Views { get; set; } = new();
 
     /// <summary>Fill Tiles: tiles without a choice of their own crop their pictures to fill instead of fitting.</summary>
     public bool Fill => Views.Fill;
+
+    /// <summary>The name this content's tile views go by.</summary>
+    public string ViewsKey => Content.ViewsKey;
+
+    /// <summary>The view key of the tile at <paramref name="path"/> (null while it shows no camera).</summary>
+    public TileViewKey? ViewKey(NodePath path) => _tree.TileKeyAt(path, ViewsKey);
+
+    /// <summary>The window shows <paramref name="content"/> under another name (an unsaved arrangement saved, a group edited): the views go along.</summary>
+    public void Rename(WindowContent content)
+    {
+        Views.Rename(ViewsKey, content.ViewsKey);
+        Content = content;
+    }
 }
 
 internal sealed partial class StageView : UserControl
@@ -333,11 +362,13 @@ internal sealed partial class StageView : UserControl
                 _viewer.SetQuality(same, quality);
                 same.FisheyeSetting = fisheye;
                 PublishFisheye(same);
+                // Another layout may have put another view on the same place.
+                PublishView(same);
                 continue;
             }
             var t = new StageTile(_viewer, leaf.Path, leaf.Camera, quality) { FisheyeSetting = fisheye };
             t.Shared = leaf.Camera is { } c ? _viewer.Leases.Tile(c) : null;
-            // The zoom, crop and Fill choice follow the camera through layout changes (docs/UX.md "Fill Tiles").
+            // The tile's own zoom, crop and Fill choice (docs/UX.md "Digital zoom", "Fill Tiles").
             PublishView(t);
             t.ZoomChanged = OnTileZoomChanged;
             PublishFisheye(t);
@@ -407,7 +438,7 @@ internal sealed partial class StageView : UserControl
         }
         State.Tree = tree;
         Reload();
-        Edited?.Invoke(tree);
+        Edited?.Invoke(State.Tree);
     }
 
     /// <summary>The selected tile, or the only one.</summary>
@@ -437,6 +468,7 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    /// <summary>Shows <paramref name="camera"/> in the tile at <paramref name="path"/>; a camera new to the tile starts at the default view.</summary>
     public void Assign(CameraRef? camera, NodePath path)
     {
         if (!FixedTile)
@@ -445,14 +477,16 @@ internal sealed partial class StageView : UserControl
         }
     }
 
+    /// <summary>Swaps the cameras of two tiles; each view goes with its camera (the tiles keep their identities, members and places).</summary>
     public void Swap(NodePath from, NodePath to)
     {
-        if (FixedTile)
+        if (FixedTile || from == to || State.Tree.Swapping(from, to) is not { } swapped)
         {
             return;
         }
+        State.Views.SwapViews(State.ViewsKey, State.Tree, from, to);
         State.Selected = to;
-        Edit(t => t.Swapping(from, to));
+        Edit(_ => swapped);
     }
 
     public void ApplyPreset(LayoutPreset preset)
@@ -648,51 +682,46 @@ internal sealed partial class StageView : UserControl
     /// <summary>Back to 1x and, for a filled picture, its crop back to the middle (Reset zoom, Reset position, 0).</summary>
     public static void ResetZoom(StageTile t) => t.DigitalZoom = TileZoom.None;
 
-    /// <summary>Puts the window's zoom, crop and Fill choice for the tile's camera on the tile (what the render thread reads).</summary>
+    /// <summary>Puts the tile's own zoom, crop and Fill choice on it (what the render thread reads).</summary>
     private void PublishView(StageTile t)
     {
-        if (t.CameraOrNone is { } c)
+        if (State.ViewKey(t.Path) is { } k)
         {
-            t.LoadZoom(State.Views.Zoom(c));
-            t.WantsFill = State.Views.Fills(c);
+            t.LoadZoom(State.Views.Zoom(k));
+            t.WantsFill = State.Views.Fills(k);
         }
     }
 
-    // A tile's zoom or crop changed (wheel, pinch, drag, reset): kept for its camera, shared with the
-    // window's other tiles of that camera, and saved.
+    // A tile's zoom or crop changed (wheel, pinch, drag, reset): kept for that tile only, and saved.
     private void OnTileZoomChanged(StageTile t)
     {
-        if (t.CameraOrNone is not { } c)
+        if (State.ViewKey(t.Path) is not { } k)
         {
             return;
         }
         TileZoom z = t.DigitalZoom;
-        if (State.Views.Zoom(c) == z)
+        if (State.Views.Zoom(k) == z)
         {
             return;
         }
-        State.Views.SetZoom(c, z);
-        foreach (StageTile o in _tiles)
-        {
-            if (o != t && o.CameraOrNone == c)
-            {
-                o.LoadZoom(z);
-            }
-        }
+        State.Views.SetZoom(k, z);
         ViewsChanged?.Invoke();
     }
 
-    /// <summary>Whether the tile's camera fills (its own Fill tile choice, else the window's Fill Tiles).</summary>
-    public bool Fills(StageTile t) => t.CameraOrNone is { } c ? State.Views.Fills(c) : State.Fill;
+    /// <summary>Whether the tile fills (its own Fill tile choice, else the window's Fill Tiles).</summary>
+    public bool Fills(StageTile t) => State.ViewKey(t.Path) is { } k ? State.Views.Fills(k) : State.Fill;
 
-    /// <summary>Fill tile (the tile's menu): this camera's tiles in the window fill, or fit.</summary>
+    /// <summary>Whether a tile of the window's content has a Fill choice of its own (the switch is mixed).</summary>
+    public bool FillMixed => State.Views.MixedIn(State.ViewsKey);
+
+    /// <summary>Fill tile (the tile's menu): this tile fills, or fits.</summary>
     public void SetTileFill(StageTile t, bool fill)
     {
-        if (t.CameraOrNone is not { } c || State.Views.Fills(c) == fill)
+        if (State.ViewKey(t.Path) is not { } k || State.Views.Fills(k) == fill)
         {
             return;
         }
-        State.Views.SetFill(c, fill);
+        State.Views.SetFill(k, fill);
         FillChanged();
     }
 
@@ -1506,15 +1535,15 @@ internal sealed partial class StageView : UserControl
         }
     }
 
-    private static TileKey ToTileKey(VirtualKey key) => key switch
+    private static TileViewKey ToTileKey(VirtualKey key) => key switch
     {
         VirtualKey.Enter => TileKey.Enter,
         VirtualKey.Space => TileKey.Space,
         VirtualKey.M => TileKey.M,
         VirtualKey.L => TileKey.L,
-        VirtualKey.P => TileKey.P,
-        VirtualKey.R => TileKey.R,
-        VirtualKey.T => TileKey.T,
+        VirtualKey.P => TileViewKey.P,
+        VirtualKey.R => TileViewKey.R,
+        VirtualKey.T => TileViewKey.T,
         _ => TileKey.Other,
     };
 
@@ -1565,7 +1594,7 @@ internal sealed partial class StageView : UserControl
     /// </summary>
     public void SetFill(bool fill)
     {
-        if (State.Fill == fill && !State.Views.Mixed)
+        if (State.Fill == fill && !FillMixed)
         {
             return;
         }
