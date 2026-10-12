@@ -882,6 +882,74 @@ fn the_clock_waits_for_a_camera_up_to_its_limit_unless_sync_is_free() {
     }
 }
 
+/// The jitter of each released picture against its own timestamp spacing
+/// (ms), for the decodes released after `from`.
+fn release_jitter(decodes: &[(u64, tokio::time::Instant)], from: tokio::time::Instant) -> Vec<i64> {
+    let v: Vec<_> = decodes.iter().filter(|(_, at)| *at >= from).collect();
+    v.windows(2)
+        .map(|w| {
+            let wall = (w[1].1 - w[0].1).as_millis() as i64;
+            let media = pts_ms(w[1].0) - pts_ms(w[0].0);
+            (wall - media).abs()
+        })
+        .collect()
+}
+
+#[test]
+fn pictures_are_released_evenly_when_the_given_utc_offset_is_not_the_devices() {
+    // The app passes the computer's UTC offset; this device's clock runs
+    // three hours east of that. Its keyframes' UTC seconds would put every
+    // picture hours before the seek's target, and the engine would release
+    // each group of pictures as fast as the decoder answers as it arrives
+    // (bunched: a renderer showing the newest picture per refresh skips most
+    // of them). The first keyframe shows the device's own offset; with it,
+    // the target is reached and every picture is released at its own time,
+    // also after the incident is selected again (an exact seek while
+    // playing), and the device's opening burst is short.
+    let rig = Rig::new();
+    let nvr = archive_mock(&rig.sim, 1, |a| {
+        a.utc_offset_s = OFFSET_S + 3 * 3600;
+        a.play_burst_secs = 1;
+    });
+    let (_dev, key) = rig.add(&nvr, &[0]);
+    let p0 = ms(8, 10, 0, 31);
+    let (pb, tiles) = rig.open(json!({
+        "start_ms": ms(8, 10, 0, 0), "end_ms": ms(8, 11, 0, 0), "position_ms": p0,
+        "cameras": cams(&key, &[0], "sub"),
+    }));
+    // Played at once, as the player does when an incident is selected.
+    rig.core.playback_play(pb).unwrap();
+    rig.sim.advance(Duration::from_secs(1));
+    rig.core
+        .playback_seek(pb, p0 + 7_300, SeekMode::Exact)
+        .unwrap();
+    rig.core.playback_play(pb).unwrap();
+    rig.until("the seek", 20, || rig.seek_active(pb, 2));
+    rig.sim.advance(Duration::from_secs(2));
+    let from = rig.sim.now();
+    rig.sim.advance(Duration::from_secs(10));
+    rig.core.flush_events();
+    let (pos, state) = rig.position(pb);
+    assert_eq!(state, PlaybackState::Playing);
+    let released = decodes_of(&rig.rec, tiles[0], 2);
+    // Paced against the clock: nothing released is far ahead of it.
+    let newest = released.iter().map(|(p, _)| pts_ms(*p)).max().unwrap();
+    assert!(
+        newest <= pos + 100,
+        "released up to {newest}, position {pos}"
+    );
+    let jitter = release_jitter(&released, from);
+    assert!(jitter.len() >= 90, "{}", jitter.len());
+    let worst = jitter.iter().copied().max().unwrap_or(0);
+    assert!(
+        worst <= 20,
+        "a picture released {worst} ms off its spacing: {jitter:?}"
+    );
+    assert_eq!(rig.camera_state(pb, tiles[0]).unwrap()["state"], "playing");
+    rig.core.playback_close(pb).unwrap();
+    rig.sim.settle();
+}
+
 #[test]
 fn audio_plays_at_normal_speed_only() {
     let rig = Rig::new();

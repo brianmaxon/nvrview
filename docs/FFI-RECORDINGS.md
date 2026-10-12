@@ -105,6 +105,10 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
 - `utc_offset_s` is the device's offset from UTC, used only to know which
   day is "today" on the device; the app passes the computer's current
   offset (Decision 6). The core has no time-zone database: absent means 0.
+  Playback does not depend on it being right: a play's first keyframe
+  (within seconds of its seek, observed) that lies half a quarter hour or
+  more from the seek shows the device's own offset, which the playback then
+  uses (rounded to a quarter hour) to place its pictures in time.
 - `device_info` gains `"recordings": {"search": true, "playback": true,
   "download": true, "thumbnails": true}` so an app can hide what a backend
   cannot do.
