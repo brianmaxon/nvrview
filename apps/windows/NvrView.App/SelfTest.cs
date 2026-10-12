@@ -368,6 +368,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         await CheckFillTiles();
         await CheckFillPan();
         await CheckZoomPerTile();
+        await CheckPanAndFrames();
 
         // parity: decode-failures
         long failuresBefore = Tiles.Sum(t => (t.Video?.Counters.Failures ?? 0) + (t.Video?.Counters.ConfigureFailures ?? 0));
@@ -1956,7 +1957,7 @@ internal sealed class SelfTest(App app, AppOptions options)
         // parity: fill-pan-header-swap
         NodePath from = boxed.Path, to = other.Path;
         stage.Hover(boxed);
-        var onHeader = new Point(boxed.X + boxed.Width / 2, boxed.Y + 10);
+        var onHeader = new Point(boxed.FrameX + boxed.FrameWidth / 2, boxed.FrameY + 10);
         string? headerKind = stage.DragKind(onHeader);
         stage.SimulateDrag(onHeader, new Point(other.ViewX + other.ViewWidth / 2, other.ViewY + other.ViewHeight / 2));
         bool swapped = stage.State.Tree[from] is LayoutLeaf { Cam: { } a } && a == otherCamera && stage.State.Tree[to] is LayoutLeaf { Cam: { } c2 } && c2 == camera;
@@ -1968,7 +1969,7 @@ internal sealed class SelfTest(App app, AppOptions options)
             StageTile back = stage.Tiles.First(t => t.Path == from);
             await Until(() => back.Visible && back.ViewWidth > 1, 5);
             stage.Hover(moved);
-            stage.SimulateDrag(new Point(moved.X + moved.Width / 2, moved.Y + 10), new Point(back.ViewX + back.ViewWidth / 2, back.ViewY + back.ViewHeight / 2));
+            stage.SimulateDrag(new Point(moved.FrameX + moved.FrameWidth / 2, moved.FrameY + 10), new Point(back.ViewX + back.ViewWidth / 2, back.ViewY + back.ViewHeight / 2));
         }
         bool swappedBack = stage.State.Tree[from] is LayoutLeaf { Cam: { } a2 } && a2 == camera;
         Say($"fill pan header swap: kind {headerKind}, swapped {swapped}, crop kept with the camera {kept}, swapped back {swappedBack}");
@@ -2030,6 +2031,84 @@ internal sealed class SelfTest(App app, AppOptions options)
     // puts the camera in a second tile at the default view; each tile zooms on its own, focus keeps a tile's
     // zoom, and resetting one leaves the other. Then a swap moves each view with its camera while the tiles
     // keep their identities, and the layout is put back as it was.
+    // A press, a long drag and a release on a zoomed picture through the pointer path the handlers take (the
+    // button state each move carries, a mouse drag also starting a manipulation, the hover header appearing
+    // under the pointer and capture going away while the button is down): the picture follows the pointer 1:1
+    // the whole way, and the tile's frame (outline and header) is the tile's area at 1x, zoomed, and focused.
+    // WinUI cannot be fed real pointer events from inside the app without moving the user's pointer, so the
+    // handlers' own entry points stand in for them.
+    private async Task CheckPanAndFrames()
+    {
+        StageView stage = app.Stage!;
+        if (Tiles.FirstOrDefault(x => !(x.Fisheye is { } f && f.Mode.Dewarps()) && ZoomBar(x) is not null) is not { } t
+            || stage.ChromeFor(t) is not { } chrome)
+        {
+            _problems.Add("no letterboxed tile for the pan and frame checks");
+            return;
+        }
+        bool FrameIsTile() => chrome.Placed is var c && Near(c.X, t.ViewX) && Near(c.Y, t.ViewY) && Near(c.Width, t.ViewWidth) && Near(c.Height, t.ViewHeight);
+
+        // parity: tile-frame-zoom
+        bool at1x = await Until(FrameIsTile, 3);
+        var picture = (t.X, t.Y, t.Width, t.Height);
+        bool letterboxed = picture.Width < t.ViewWidth - 2 || picture.Height < t.ViewHeight - 2;
+        StageView.ZoomAround(t, 0.5, 0.5, 4);
+        bool drawnZoomed = await Until(() => t.Zoom > 3.9f, 3);
+        bool zoomedFrame = drawnZoomed && await Until(FrameIsTile, 3);
+        Say($"tile frame zoom: letterboxed {letterboxed}, frame is the tile at 1x {at1x} and at 4x {zoomedFrame} ({chrome.Placed.Width:0}x{chrome.Placed.Height:0} for a tile {t.ViewWidth:0}x{t.ViewHeight:0})");
+        Expect(at1x && zoomedFrame, "the tile's frame is not the tile's area (it stays at the fitted picture)");
+
+        // parity: pan-continuous
+        TileZoom from = t.DigitalZoom;
+        ZoomBase b = t.ZoomBase;
+        var start = new Point(t.ViewX + t.ViewWidth / 2, t.ViewY + t.ViewHeight / 2 + 20);
+        bool began = stage.DragKind(start) == "pan" && stage.PointerDown(start);
+        const int moves = 60;
+        double sx = 0.5, sy = 0.25;
+        for (int i = 1; i <= moves; i++)
+        {
+            stage.PointerMove(new Point(start.X + i * sx, start.Y + i * sy), buttonDown: true);
+            if (i == 8)
+            {
+                // A mouse drag past the system's threshold starts a manipulation too.
+                stage.ManipulationBegan(touch: false);
+            }
+            if (i == 20)
+            {
+                // The hover header appears under the pointer, and capture goes away while the button is down.
+                stage.Hover(t);
+                stage.PointerCaptureLostWith(buttonDown: true);
+            }
+        }
+        var end = new Point(start.X + moves * sx, start.Y + moves * sy);
+        stage.PointerUp(end);
+        TileZoom got = t.DigitalZoom;
+        // The whole picture's length at this zoom (it overflows the tile), so a change of center is a distance
+        // the picture moved (the drawn rectangle itself is clipped to the tile).
+        double lengthX = from.Scale * b.Width * t.ViewWidth, lengthY = from.Scale * b.Height * t.ViewHeight;
+        double movedX = (from.CenterX - got.CenterX) * lengthX, movedY = (from.CenterY - got.CenterY) * lengthY;
+        bool oneToOne = Math.Abs(movedX - moves * sx) < 0.5 && Math.Abs(movedY - moves * sy) < 0.5;
+        // After the release, moves without the button do nothing.
+        stage.PointerMove(new Point(end.X + 40, end.Y + 40), buttonDown: false);
+        bool ended = t.DigitalZoom == got;
+        Say($"pan continuous: began {began}, {moves} moves of {moves * sx:0.0},{moves * sy:0.0} in all moved the picture {movedX:0.00},{movedY:0.00}, ended at release {ended}");
+        Expect(began && oneToOne, "a long drag did not pan the picture 1:1 with the pointer to its end");
+        Expect(ended, "the pan went on after the release");
+
+        // parity: tile-frame-focus
+        stage.FocusOn(t);
+        double w = stage.ActualWidth, h = stage.ActualHeight;
+        bool focusFrame = await Until(() => chrome.Placed is var c && Near(c.X, 0) && Near(c.Y, 0) && Near(c.Width, w) && Near(c.Height, h), FocusAnimation.Seconds + 3);
+        bool pictureSmaller = t.Width < w - 2 || t.Height < h - 2 || t.Zoom > 1.0001f;
+        stage.Unfocus();
+        bool unfocused = await Until(() => app.Renderer!.Focus is null, FocusAnimation.Seconds + 2);
+        bool backFrame = unfocused && await Until(FrameIsTile, 3);
+        StageView.ResetZoom(t);
+        Say($"tile frame focus: frame is the whole stage {focusFrame} ({chrome.Placed.Width:0}x{chrome.Placed.Height:0} of {w:0}x{h:0}, picture {t.Width:0}x{t.Height:0}, zoomed or smaller {pictureSmaller}), back to the tile {backFrame}");
+        Expect(focusFrame, "a focused tile's frame hugs the picture instead of the stage");
+        Expect(backFrame, "the tile's frame did not come back to its cell after focus");
+    }
+
     private async Task CheckZoomPerTile()
     {
         StageView stage = app.Stage!;

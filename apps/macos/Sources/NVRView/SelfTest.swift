@@ -929,6 +929,73 @@ final class SelfTest {
             [camera, otherCamera].allSatisfy { c in
                 model.leases.tile(for: c).map { $0.tierState.shown == model.leases.tiers(for: c).grid } ?? true
             }
+        }, timeout: 5) { [self] in panAndFrameStep(path, camera) }
+    }
+
+    /// A long drag on a zoomed picture pans it 1:1 with the pointer to the
+    /// release (through the mouse handlers, many small moves, the header
+    /// shown); the tile's frame (its chrome: outline and header) is the
+    /// tile's whole area at 1x, zoomed, and focused.
+    private func panAndFrameStep(_ path: NodePath, _ camera: CameraRef) {
+        guard let window else { return headerStep() }
+        let stage = window.stage
+        func frameIsTile(_ rect: CGRect?) -> Bool {
+            guard let rect, let f = stage.chromes[path]?.frame else { return false }
+            return abs(f.minX - rect.minX) < 1 && abs(f.minY - rect.minY) < 1 && abs(f.width - rect.width) < 1
+                && abs(f.height - rect.height) < 1
+        }
+        guard let leaf = stage.frames.leaf(path), let picture = stage.pictureSizes[camera] else {
+            problems.append("no tile for the pan and frame steps")
+            return headerStep()
+        }
+        // parity: tile-frame-zoom
+        stage.relayoutChrome()
+        let at1x = frameIsTile(leaf.rect)
+        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 4, eased: false)
+        stage.relayoutChrome()
+        let zoomed = stage.zoom(atTile: path).scale > 3.9 && frameIsTile(leaf.rect)
+        print("tile frame zoom: frame is the tile at 1x \(at1x) and at 4x \(zoomed)")
+        if !at1x || !zoomed { problems.append("the tile's frame is not the tile's area") }
+
+        // parity: pan-continuous
+        let from = stage.zoom(atTile: path)
+        let fill = stage.fills(atTile: path)
+        // The whole picture's length in points at this zoom (it overflows
+        // the tile), so a change of center is a distance the picture moved.
+        let base = ZoomBase(picture: picture, tile: leaf.rect.size, fill: fill)
+        let length = CGSize(
+            width: from.scale * base.width * leaf.rect.width, height: from.scale * base.height * leaf.rect.height)
+        stage.showHeader(path)
+        let start = CGPoint(x: leaf.rect.midX, y: leaf.rect.midY)
+        let kind = stage.dragKind(at: start)
+        let travel = CGVector(dx: 30, dy: 15)
+        stage.simulateDrag(from: start, to: CGPoint(x: start.x + travel.dx, y: start.y + travel.dy), steps: 60)
+        let to = stage.zoom(atTile: path)
+        let moved = CGVector(
+            dx: (from.center.x - to.center.x) * length.width, dy: (from.center.y - to.center.y) * length.height)
+        let oneToOne = abs(moved.dx - travel.dx) < 0.5 && abs(abs(moved.dy) - travel.dy) < 0.5
+        print(String(format: "pan continuous: kind %@, 60 moves of %.1f,%.1f in all moved the picture %.2f,%.2f",
+            kind ?? "none", travel.dx, travel.dy, moved.dx, moved.dy))
+        if kind != "pan" || !oneToOne { problems.append("a long drag did not pan the picture 1:1 with the pointer") }
+
+        // parity: tile-frame-focus
+        stage.focus(path)
+        advance(StageView.focusDuration)
+        stage.relayoutChrome()
+        let focusFrame = frameIsTile(stage.bounds)
+        stage.unfocus()
+        advance(StageView.focusDuration)
+        stage.relayoutChrome()
+        let back = frameIsTile(stage.frames.leaf(path)?.rect)
+        stage.resetZoom(at: path, eased: false)
+        print("tile frame focus: frame is the whole stage \(focusFrame), back to the tile \(back)")
+        if !focusFrame { problems.append("a focused tile's frame is not the whole stage") }
+        if !back { problems.append("the tile's frame did not come back to its cell after focus") }
+        // The zoom and the focus asked for the main stream: back on the
+        // grid stream before the next steps compare pictures.
+        guard let model = app.model else { return headerStep() }
+        when({
+            model.leases.tile(for: camera).map { $0.tierState.shown == model.leases.tiers(for: camera).grid } ?? true
         }, timeout: 5) { [self] in headerStep() }
     }
 

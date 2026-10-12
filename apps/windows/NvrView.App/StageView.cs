@@ -746,7 +746,7 @@ internal sealed partial class StageView : UserControl
     /// <summary>Whether the point is on the tile's shown hover header, where a drag swaps the tile.</summary>
     private bool OnShownHeader(StageTile t, Point p) =>
         ChromeFor(t) is { HeaderShown: true }
-        && p.X >= t.X && p.X < t.X + t.Width && p.Y >= t.Y && p.Y < t.Y + Math.Min(TileChrome.HeaderHeight, t.Height);
+        && p.X >= t.FrameX && p.X < t.FrameX + t.FrameWidth && p.Y >= t.FrameY && p.Y < t.FrameY + Math.Min(TileChrome.HeaderHeight, t.FrameHeight);
 
     // ---- pointer ----
 
@@ -777,10 +777,25 @@ internal sealed partial class StageView : UserControl
 
     protected override void OnPointerMoved(PointerRoutedEventArgs e)
     {
-        Point p = e.GetCurrentPoint(this).Position;
+        PointerPoint pp = e.GetCurrentPoint(this);
         Interact();
+        PointerMove(pp.Position, pp.Properties.IsLeftButtonPressed);
+        UpdatePointerShape(pp.Position);
+    }
+
+    /// <summary>
+    /// Every pointer move (the handler, and the self-test's pointer path): a gesture goes on while the button
+    /// is down, wherever the move arrives from, and ends at the first move without it (a release this element
+    /// did not see).
+    /// </summary>
+    internal void PointerMove(Point p, bool buttonDown)
+    {
+        if (_gesture != GestureKind.None && !buttonDown)
+        {
+            PointerReleasedAt(p);
+            return;
+        }
         PointerMovedTo(p);
-        UpdatePointerShape(p);
     }
 
     /// <summary>The pointer moved to <paramref name="p"/> (the pointer handler, and the self-test's simulated drags).</summary>
@@ -900,6 +915,12 @@ internal sealed partial class StageView : UserControl
         return _gesture;
     }
 
+    /// <summary>The left button went down at <paramref name="p"/> through the pointer path (self-test); whether a gesture began.</summary>
+    internal bool PointerDown(Point p) => PointerPressedAt(p) != GestureKind.None;
+
+    /// <summary>The left button went up at <paramref name="p"/> through the pointer path (self-test).</summary>
+    internal void PointerUp(Point p) => PointerReleasedAt(p);
+
     /// <summary>What a plain drag starting at <paramref name="p"/> would do (self-test): "pan", "turn", "swap", or null.</summary>
     internal string? DragKind(Point p)
     {
@@ -974,8 +995,21 @@ internal sealed partial class StageView : UserControl
         _dragging = false;
     }
 
-    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e)
+    protected override void OnPointerCaptureLost(PointerRoutedEventArgs e) =>
+        PointerCaptureLostWith(e.GetCurrentPoint(this).Properties.IsLeftButtonPressed);
+
+    /// <summary>
+    /// Capture went away (the handler, and the self-test's pointer path). While the button is still down the
+    /// gesture goes on: the moves still bubble here from the chrome above the picture (a header that appeared
+    /// under the pointer, a system gesture taking capture), so a drag pans 1:1 until the button comes up. A
+    /// drag that lost its button ends.
+    /// </summary>
+    internal void PointerCaptureLostWith(bool buttonDown)
     {
+        if (buttonDown && _gesture != GestureKind.None)
+        {
+            return;
+        }
         if (_gesture == GestureKind.Divider)
         {
             Edited?.Invoke(State.Tree);
@@ -1035,8 +1069,20 @@ internal sealed partial class StageView : UserControl
     }
 
     /// <summary>A two-finger pinch on a touch screen: zooms a Virtual PTZ tile by the step's scale (the tile where the fingers are).</summary>
-    protected override void OnManipulationStarted(ManipulationStartedRoutedEventArgs e)
+    protected override void OnManipulationStarted(ManipulationStartedRoutedEventArgs e) =>
+        ManipulationBegan(e.PointerDeviceType == PointerDeviceType.Touch);
+
+    /// <summary>
+    /// A manipulation began (the handler, and the self-test's pointer path). Only a touch pinch replaces a drag;
+    /// a mouse or pen drag goes on (with the stage's Scale mode a mouse drag also starts a manipulation, which
+    /// used to end the pan after its first few pixels).
+    /// </summary>
+    internal void ManipulationBegan(bool touch)
     {
+        if (!touch)
+        {
+            return;
+        }
         // The first finger began a drag; the pinch replaces it (its view is saved, not left half-turned).
         if (_gesture == GestureKind.Fisheye && _panTile is { } turned)
         {
@@ -1463,7 +1509,7 @@ internal sealed partial class StageView : UserControl
             {
                 if (BuildTileMenu(s) is { } menu)
                 {
-                    menu.ShowAt(this, new Windows.Foundation.Point(s.X + Math.Min(s.Width, 120) / 2, s.Y + TileChrome.HeaderHeight));
+                    menu.ShowAt(this, new Windows.Foundation.Point(s.FrameX + Math.Min(s.FrameWidth, 120) / 2, s.FrameY + TileChrome.HeaderHeight));
                 }
                 return true;
             }

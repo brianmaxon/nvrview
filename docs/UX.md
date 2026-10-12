@@ -245,7 +245,10 @@ in either case.
 | M | Listen to the selected tile, or mute it if it is the one playing (⌘L / Ctrl+L does the same). |
 
 Selection is visible as a thin outline that fades with the other chrome, and
-follows a click on a tile. Shortcuts are listed in the menus (macOS) or a help
+follows a click on a tile. The outline and the header belong to the tile: they
+cover its whole area (not just a fitted picture inside it), whatever the zoom
+or Fill, and the whole stage while the tile is focused or in full screen.
+Shortcuts are listed in the menus (macOS) or a help
 overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
@@ -433,7 +436,10 @@ Details settled while building it (macOS):
 - A plain drag on the picture of a tile zoomed past 1x pans its picture, as
   does one on a filled picture with part hidden (see "Fill Tiles"). On other
   tiles, on a tile's shown hover header, and always while editing the
-  layout, a drag drags the tile to swap.
+  layout, a drag drags the tile to swap. A pan follows the pointer 1:1 from
+  press to release, also when the hover header appears under the pointer
+  (Windows: a lost pointer capture or a mouse drag starting a manipulation no
+  longer ends it; only a touch pinch replaces it).
 - A mouse wheel (line-based scrolling) zooms, each notch 1.25x, eased over
   the next refreshes. Precise scrolling (trackpad, Magic Mouse) pans a zoomed
   tile and does nothing at 1x; with Option held it zooms instead, for devices
