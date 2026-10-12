@@ -154,11 +154,12 @@ internal static class ThumbnailDecodingTests
             byte[] stream = [.. sc, 0x67, 1, .. sc, 0x68, 2, .. sc, 0x65, 3, .. sc, 0x41, 4,
                 .. sc, 0x67, 5, .. sc, 0x68, 6, .. sc, 0x65, 7, .. sc, 0x65, 8, .. sc, 0x41, 9];
             byte[] key = AnnexBKeyframes.Last(stream, h265: false);
-            T.Check(key.SequenceEqual([.. sc, 0x67, 5, .. sc, 0x68, 6, .. sc, 0x65, 7, .. sc, 0x65, 8]));
+            byte[] wanted = [.. sc, 0x67, 5, .. sc, 0x68, 6, .. sc, 0x65, 7, .. sc, 0x65, 8];
+            T.Check(key.AsSpan().SequenceEqual(wanted));
             T.Equal(0, AnnexBKeyframes.Last([.. sc, 0x41, 4], h265: false).Length);
             // H.265: VPS (32), SPS (33), IDR_W_RADL (19), TRAIL_R (1).
             byte[] h265 = [.. sc, 0x40, 1, 1, .. sc, 0x42, 1, 2, .. sc, 0x26, 1, 3, .. sc, 0x02, 1, 4];
-            T.Check(AnnexBKeyframes.Last(h265, h265: true).SequenceEqual(h265[..^7]));
+            T.Check(AnnexBKeyframes.Last(h265, h265: true).AsSpan().SequenceEqual(h265.AsSpan(0, h265.Length - 7)));
         });
 
         T.Run("thumbnails: the worker thread decodes off the caller's thread", () =>

@@ -83,7 +83,9 @@ using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
+using NvThumbKind = NvrView.Interop.NvThumbKind;
 using Point = Windows.Foundation.Point;
+using RecordedThumbnail = NvrView.Interop.RecordedThumbnail;
 
 namespace NvrView.App;
 
@@ -821,6 +823,9 @@ internal sealed class SelfTest(App app, AppOptions options)
         foreach ((string codec, bool h265, NvThumbKind kind) in new[] { ("h264", false, NvThumbKind.H264Keyframe), ("h265", true, NvThumbKind.H265Keyframe) })
         {
             byte[] colors = ReadKeyframe($"{codec}-colors.{codec}", h265);
+            Nv12Picture? raw = KeyframeImage.Decode(h265 ? NvrView.Interop.NvCodec.H265 : NvrView.Interop.NvCodec.H264, colors, 192, 96, out _);
+            (YuvMatrix? vuiMatrix, bool? vuiFull) = h265 ? HevcColor.Read(colors) : (null, null);
+            Say($"recordings: {codec} decoder {raw?.Decoder}, matrix {raw?.Matrix}, full range {raw?.FullRange}; stream says {vuiMatrix?.ToString() ?? "nothing"}, {vuiFull?.ToString() ?? "nothing"}");
             RecordedThumbnail? small = KeyframeImage.Thumbnail(new RecordedThumbnail(kind, 192, 96, 0, colors), out string? why);
             if (small is null)
             {

@@ -17,6 +17,7 @@ using static TerraFX.Interop.Windows.Windows;
 using static TerraFX.Interop.Windows.MF;
 using static TerraFX.Interop.Windows.MFT;
 using static TerraFX.Interop.Windows.MFVideoFormat;
+using static TerraFX.Interop.Windows.S;
 
 namespace NvrView.Video;
 
@@ -81,6 +82,19 @@ public static unsafe class KeyframeImage
     /// </summary>
     public static Nv12Picture? Decode(NvCodec codec, ReadOnlySpan<byte> annexB, uint width, uint height, out string? error)
     {
+        Nv12Picture? picture = DecodeOnce(codec, annexB, width, height, width, height, out error);
+        // The decoders are given the coded size: a visible size that is not a multiple of 16 (270 lines) may be refused.
+        uint codedWidth = (width + 15) & ~15u, codedHeight = (height + 15) & ~15u;
+        if (picture is null && width > 0 && (codedWidth != width || codedHeight != height))
+        {
+            picture = DecodeOnce(codec, annexB, codedWidth, codedHeight, width, height, out error);
+        }
+        return picture;
+    }
+
+    private static Nv12Picture? DecodeOnce(NvCodec codec, ReadOnlySpan<byte> annexB, uint inWidth, uint inHeight,
+        uint width, uint height, out string? error)
+    {
         error = null;
         if (annexB.IsEmpty)
         {
@@ -109,10 +123,12 @@ public static unsafe class KeyframeImage
                 _ = attributes->SetUINT32(Ref(in MF_LOW_LATENCY), 1);
                 attributes->Release();
             }
-            if (!SetInput(mft, codec, width, height, out error) || !SetOutput(mft, out Output output, out error))
+            if (!SetInput(mft, codec, inWidth, inHeight, out error) || !SetOutput(mft, out Output output, out error))
             {
                 return null;
             }
+            // The HEVC decoder reports a default, not the stream's colour description (measured): the parameter set's wins.
+            (YuvMatrix? streamMatrix, bool? streamFull) = codec == NvCodec.H265 ? HevcColor.Read(annexB.ToArray()) : (null, null);
             _ = mft->ProcessMessage(MFT_MESSAGE_TYPE.MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
             _ = mft->ProcessMessage(MFT_MESSAGE_TYPE.MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
@@ -192,6 +208,8 @@ public static unsafe class KeyframeImage
                 IMFSample* sample = buffer.pSample;
                 try
                 {
+                    output.Matrix = streamMatrix ?? output.Matrix;
+                    output.FullRange = streamFull ?? output.FullRange;
                     return Copy(sample, output, width, height, name, out error);
                 }
                 finally

@@ -258,6 +258,222 @@ public sealed class ThumbnailDecodeQueue : IDisposable
     }
 }
 
+/// <summary>
+/// The colour description in an H.265 stream's sequence parameter set (its VUI), for decoders that do not report
+/// it. Reads only what is needed; anything unusual (scaling lists) gives no answer.
+/// </summary>
+public static class HevcColor
+{
+    /// <summary>The matrix and range the stream says, each null when it says nothing.</summary>
+    public static (YuvMatrix? Matrix, bool? FullRange) Read(byte[] annexB)
+    {
+        for (int i = 0; i + 4 < annexB.Length; i++)
+        {
+            if (annexB[i] == 0 && annexB[i + 1] == 0 && annexB[i + 2] == 1 && ((annexB[i + 3] >> 1) & 0x3F) == 33)
+            {
+                int end = i + 3;
+                while (end + 2 < annexB.Length && !(annexB[end] == 0 && annexB[end + 1] == 0 && annexB[end + 2] <= 1))
+                {
+                    end++;
+                }
+                try
+                {
+                    return Parse(annexB.AsSpan(i + 5, Math.Min(end, annexB.Length) - (i + 5)));
+                }
+                catch (InvalidOperationException)
+                {
+                    return (null, null);
+                }
+            }
+        }
+        return (null, null);
+    }
+
+    private sealed class Bits(byte[] data)
+    {
+        private int _pos;
+
+        public uint U(int n)
+        {
+            uint v = 0;
+            for (int k = 0; k < n; k++, _pos++)
+            {
+                if (_pos >> 3 >= data.Length)
+                {
+                    throw new InvalidOperationException("short");
+                }
+                v = (v << 1) | (uint)((data[_pos >> 3] >> (7 - (_pos & 7))) & 1);
+            }
+            return v;
+        }
+
+        public bool Flag() => U(1) == 1;
+
+        public uint Ue()
+        {
+            int zeros = 0;
+            while (U(1) == 0)
+            {
+                if (++zeros > 31)
+                {
+                    throw new InvalidOperationException("bad code");
+                }
+            }
+            return zeros == 0 ? 0 : (1u << zeros) - 1 + U(zeros);
+        }
+
+        public void Skip(int n)
+        {
+            for (; n > 0; n--)
+            {
+                _ = U(1);
+            }
+        }
+    }
+
+    private static (YuvMatrix?, bool?) Parse(ReadOnlySpan<byte> payload)
+    {
+        // Drop the emulation prevention bytes (00 00 03).
+        var rbsp = new List<byte>(payload.Length);
+        for (int i = 0; i < payload.Length; i++)
+        {
+            if (i >= 2 && payload[i] == 3 && payload[i - 1] == 0 && payload[i - 2] == 0)
+            {
+                continue;
+            }
+            rbsp.Add(payload[i]);
+        }
+        var b = new Bits([.. rbsp]);
+        b.Skip(4);
+        int maxSubLayersMinus1 = (int)b.U(3);
+        b.Skip(1);
+        b.Skip(96);
+        bool[] profile = new bool[8], level = new bool[8];
+        for (int i = 0; i < maxSubLayersMinus1; i++)
+        {
+            profile[i] = b.Flag();
+            level[i] = b.Flag();
+        }
+        if (maxSubLayersMinus1 > 0)
+        {
+            b.Skip(2 * (8 - maxSubLayersMinus1));
+        }
+        for (int i = 0; i < maxSubLayersMinus1; i++)
+        {
+            b.Skip((profile[i] ? 88 : 0) + (level[i] ? 8 : 0));
+        }
+        _ = b.Ue();
+        if (b.Ue() == 3)
+        {
+            b.Skip(1);
+        }
+        _ = b.Ue();
+        _ = b.Ue();
+        if (b.Flag())
+        {
+            for (int k = 0; k < 4; k++)
+            {
+                _ = b.Ue();
+            }
+        }
+        _ = b.Ue();
+        _ = b.Ue();
+        uint log2PocLsb = b.Ue() + 4;
+        bool orderingInfo = b.Flag();
+        for (int i = orderingInfo ? 0 : maxSubLayersMinus1; i <= maxSubLayersMinus1; i++)
+        {
+            _ = b.Ue();
+            _ = b.Ue();
+            _ = b.Ue();
+        }
+        for (int k = 0; k < 6; k++)
+        {
+            _ = b.Ue();
+        }
+        if (b.Flag())
+        {
+            // Scaling lists: not parsed.
+            return (null, null);
+        }
+        b.Skip(2);
+        if (b.Flag())
+        {
+            b.Skip(8);
+            _ = b.Ue();
+            _ = b.Ue();
+            b.Skip(1);
+        }
+        uint sets = b.Ue();
+        var deltaPocs = new int[Math.Max(1, (int)sets)];
+        for (int idx = 0; idx < sets; idx++)
+        {
+            bool inter = idx != 0 && b.Flag();
+            if (inter)
+            {
+                // Only the slice-header form (delta index) is not possible in an SPS: the reference is the previous set.
+                b.Skip(1);
+                _ = b.Ue();
+                int count = deltaPocs[idx - 1];
+                int used = 0;
+                for (int j = 0; j <= count; j++)
+                {
+                    if (b.Flag() || b.Flag())
+                    {
+                        used++;
+                    }
+                }
+                deltaPocs[idx] = used;
+            }
+            else
+            {
+                uint negative = b.Ue();
+                uint positive = b.Ue();
+                for (uint j = 0; j < negative + positive; j++)
+                {
+                    _ = b.Ue();
+                    b.Skip(1);
+                }
+                deltaPocs[idx] = (int)(negative + positive);
+            }
+        }
+        if (b.Flag())
+        {
+            uint longTerm = b.Ue();
+            for (uint j = 0; j < longTerm; j++)
+            {
+                b.Skip((int)log2PocLsb + 1);
+            }
+        }
+        b.Skip(2);
+        if (!b.Flag())
+        {
+            return (null, null);
+        }
+        if (b.Flag() && b.U(8) == 255)
+        {
+            b.Skip(32);
+        }
+        if (b.Flag())
+        {
+            b.Skip(1);
+        }
+        if (!b.Flag())
+        {
+            return (null, null);
+        }
+        b.Skip(3);
+        bool? full = b.Flag();
+        YuvMatrix? matrix = null;
+        if (b.Flag())
+        {
+            b.Skip(16);
+            uint coeffs = b.U(8);
+            matrix = coeffs switch { 1 or 9 or 10 => YuvMatrix.Bt709, 5 or 6 => YuvMatrix.Bt601, _ => null };
+        }
+        return (matrix, full);
+    }
+}
+
 /// <summary>Finds a keyframe in an Annex-B stream (the self-test cuts cover keyframes out of the synthetic fixtures).</summary>
 public static class AnnexBKeyframes
 {
