@@ -33,8 +33,13 @@ struct Queue {
     delivering: bool,
 }
 
+/// Sees every event before it is queued (the alert service's trigger
+/// intake). Must not block.
+pub(crate) type Tap = Arc<dyn Fn(&str) + Send + Sync>;
+
 struct Inner {
     queue: Mutex<Queue>,
+    tap: std::sync::OnceLock<Tap>,
     ready: Condvar,
     /// Signaled when the queue empties after a delivery ([`EventSink::flush`]).
     idle: Condvar,
@@ -55,6 +60,9 @@ impl EventSink {
     /// Queues one JSON object for `on_event`. Returns false when it was
     /// dropped (queue full of diagnostics, or the core is shutting down).
     pub(crate) fn send(&self, json: String, priority: Priority) -> bool {
+        if let Some(tap) = self.0.tap.get() {
+            tap(&json);
+        }
         let mut q = self.0.lock();
         if q.closed {
             return false;
@@ -75,6 +83,11 @@ impl EventSink {
         drop(q);
         self.0.ready.notify_one();
         true
+    }
+
+    /// Installs the tap (once; later calls are ignored).
+    pub(crate) fn set_tap(&self, tap: Tap) {
+        let _ = self.0.tap.set(tap);
     }
 
     /// Events dropped so far because the app was not keeping up.
@@ -103,6 +116,7 @@ impl EventThread {
     pub(crate) fn spawn(callbacks: Arc<dyn Callbacks>) -> std::io::Result<EventThread> {
         let sink = EventSink(Arc::new(Inner {
             queue: Mutex::new(Queue::default()),
+            tap: std::sync::OnceLock::new(),
             ready: Condvar::new(),
             idle: Condvar::new(),
             dropped: AtomicU64::new(0),

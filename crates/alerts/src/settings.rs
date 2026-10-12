@@ -423,6 +423,9 @@ pub enum OutputKind {
     Mqtt,
     /// A generic outgoing webhook.
     Webhook,
+    /// A Home Assistant instance on the local network (an output module
+    /// the host registers; see docs/NOTIFICATIONS.md, "Delivery").
+    HomeAssistant,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
