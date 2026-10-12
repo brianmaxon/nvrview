@@ -98,6 +98,7 @@ internal static class Program
         RecordingsBrowseTests.Run();
         RecordingsModelTests.Run();
         RecordingsSoundTests.Run();
+        EditPlanTests.Run();
         return T.Summary();
     }
 }

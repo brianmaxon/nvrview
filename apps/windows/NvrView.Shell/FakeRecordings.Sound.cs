@@ -44,6 +44,20 @@ public sealed partial class FakeRecordings
         }
     }
 
+    // The event of camera c that happens along with the incident's event e (the same kind, overlapping it): e itself for its
+    // own camera. The made-up store has one event per incident, so an incident with several cameras (an edit would make
+    // one) is the events of the same kind that overlap.
+    private FakeEvent? ConcurrentEvent(FakeEvent e, RecordingCamera c)
+    {
+        if (c == e.Camera)
+        {
+            return e;
+        }
+        return Allowed(c)
+            ? EventsOf(c, DeviceTime.DayStart(e.Start)).FirstOrDefault(x => x.Kind == e.Kind && x.Start <= e.End && e.Start <= x.End)
+            : null;
+    }
+
     /// <inheritdoc/>
     public string EditCompute(string json)
     {
@@ -78,41 +92,98 @@ public sealed partial class FakeRecordings
             {
                 throw Error(NvStatus.InvalidArgument, F);
             }
-            long start = (e.Start - 5) * 1000;
-            long end = (e.End + 5) * 1000;
+            // Every camera of the download is a source of 640 by 360 h264 at 10 frames a second from 5 s before its
+            // event to 5 s after (the synthetic files the self-test writes are such files); the fake writes none itself.
+            var members = new List<(RecordingCamera Camera, FakeEvent Event)>();
+            foreach (RecordingCamera c in download.Cameras)
+            {
+                if (ConcurrentEvent(e, c) is { } concurrent)
+                {
+                    members.Add((c, concurrent));
+                }
+            }
+            if (members.Count == 0)
+            {
+                throw Error(NvStatus.InvalidArgument, F);
+            }
+            (long Start, long End) Range(int i) => ((members[i].Event.Start - 5) * 1000, (members[i].Event.End + 5) * 1000);
             var plan = new JsonObject
             {
                 ["version"] = 1,
                 ["kind"] = kind,
                 ["download"] = id,
-                ["start_ms"] = start,
-                ["end_ms"] = end,
                 ["suggested_file"] = $"{download.Folder}/{e.Start} {kind}.mp4",
-                ["sources"] = new JsonArray(new JsonObject
+                ["sources"] = new JsonArray([.. members.Select((m, i) => (JsonNode)new JsonObject
                 {
-                    ["source"] = 0,
-                    ["camera"] = CameraNode(e.Camera),
-                    ["name"] = $"Camera {e.Camera.Channel + 1}",
-                    ["file"] = $"{download.Folder}/Camera {e.Camera.Channel + 1}.mp4",
-                    ["file_start_ms"] = start,
+                    ["source"] = i,
+                    ["camera"] = CameraNode(m.Camera),
+                    ["name"] = $"Camera {m.Camera.Channel + 1}",
+                    ["file"] = $"{download.Folder}/Camera {m.Camera.Channel + 1}.mp4",
+                    ["file_start_ms"] = Range(i).Start,
                     ["offset_ms"] = 0,
                     ["codec"] = "h264",
-                    ["width"] = 1920,
-                    ["height"] = 1080,
-                    ["duration_ms"] = end - start,
-                }),
+                    ["width"] = 640,
+                    ["height"] = 360,
+                    ["duration_ms"] = Range(i).End - Range(i).Start,
+                })]),
             };
             if (kind == "follow")
             {
-                plan["copy_possible"] = (o["cut"] as JsonValue)?.TryGetValue(out string? cut) != true || cut == "keyframe";
-                plan["segments"] = new JsonArray(new JsonObject
+                // At each moment the camera whose event started last (section 7's overlap rule, without priorities, holds, or
+                // pre-roll); where no event runs, the previous shot continues while its file has video.
+                long[] bounds = [.. members.SelectMany(m => new[] { m.Event.Start * 1000, m.Event.End * 1000 }).Distinct().Order()];
+                var segments = new List<(long Start, long End, int Source)>();
+                for (int bi = 0; bi + 1 < bounds.Length; bi++)
                 {
-                    ["start_ms"] = e.Start * 1000,
-                    ["end_ms"] = e.End * 1000,
-                    ["source"] = 0,
-                    ["source_in_ms"] = (e.Start * 1000) - start,
-                });
-                plan["labels"] = new JsonArray(new JsonObject { ["source"] = 0, ["name"] = $"Camera {e.Camera.Channel + 1}", ["time"] = true });
+                    long a0 = bounds[bi], b0 = bounds[bi + 1];
+                    int pick = -1;
+                    long newest = long.MinValue;
+                    for (int i = 0; i < members.Count; i++)
+                    {
+                        FakeEvent ev = members[i].Event;
+                        if (ev.Start * 1000 <= a0 && a0 < ev.End * 1000 && ev.Start >= newest)
+                        {
+                            newest = ev.Start;
+                            pick = i;
+                        }
+                    }
+                    if (pick < 0 && segments.Count > 0 && segments[^1].End == a0 && Range(segments[^1].Source).End >= b0)
+                    {
+                        pick = segments[^1].Source;
+                    }
+                    if (pick < 0)
+                    {
+                        continue;
+                    }
+                    if (segments.Count > 0 && segments[^1].Source == pick && segments[^1].End == a0)
+                    {
+                        segments[^1] = (segments[^1].Start, b0, pick);
+                    }
+                    else
+                    {
+                        segments.Add((a0, b0, pick));
+                    }
+                }
+                if (segments.Count == 0)
+                {
+                    throw Error(NvStatus.InvalidArgument, F);
+                }
+                plan["start_ms"] = segments[0].Start;
+                plan["end_ms"] = segments[^1].End;
+                plan["copy_possible"] = (o["cut"] as JsonValue)?.TryGetValue(out string? cut) != true || cut == "keyframe";
+                plan["segments"] = new JsonArray([.. segments.Select(g => (JsonNode)new JsonObject
+                {
+                    ["start_ms"] = g.Start,
+                    ["end_ms"] = g.End,
+                    ["source"] = g.Source,
+                    ["source_in_ms"] = g.Start - Range(g.Source).Start,
+                })]);
+                plan["labels"] = new JsonArray([.. members.Select((m, i) => (JsonNode)new JsonObject
+                {
+                    ["source"] = i,
+                    ["name"] = $"Camera {m.Camera.Channel + 1}",
+                    ["time"] = true,
+                })]);
             }
             else
             {
@@ -123,16 +194,27 @@ public sealed partial class FakeRecordings
                 {
                     throw Error(NvStatus.InvalidArgument, F);
                 }
-                plan["layout"] = "1up";
+                string layout = o["layout"] is JsonValue l && l.TryGetValue(out string? ls) && ls is "2up" or "4up"
+                    ? ls! : members.Count == 1 ? "1up" : members.Count == 2 ? "2up" : "4up";
+                (int cols, int rows) = layout == "4up" ? (2, 2) : layout == "1up" ? (1, 1) : width >= height ? (2, 1) : (1, 2);
+                plan["layout"] = layout;
+                plan["start_ms"] = Enumerable.Range(0, members.Count).Min(i => Range(i).Start);
+                plan["end_ms"] = Enumerable.Range(0, members.Count).Max(i => Range(i).End);
                 plan["copy_possible"] = false;
                 plan["canvas"] = new JsonObject { ["width"] = width, ["height"] = height };
-                plan["cells"] = new JsonArray(new JsonObject
+                string fit = o["fit"] is JsonValue f && f.TryGetValue(out string? fs) ? fs : "fit";
+                plan["cells"] = new JsonArray([.. members.Take(cols * rows).Select((m, i) =>
                 {
-                    ["rect"] = new JsonObject { ["x"] = 0, ["y"] = 0, ["width"] = width, ["height"] = height },
-                    ["source"] = 0,
-                    ["fit"] = o["fit"] is JsonValue f && f.TryGetValue(out string? fit) ? fit : "fit",
-                    ["present"] = new JsonArray(new JsonArray(start, end)),
-                });
+                    int x0 = i % cols * width / cols, x1 = (i % cols + 1) * width / cols;
+                    int y0 = i / cols * height / rows, y1 = (i / cols + 1) * height / rows;
+                    return (JsonNode)new JsonObject
+                    {
+                        ["rect"] = new JsonObject { ["x"] = x0, ["y"] = y0, ["width"] = x1 - x0, ["height"] = y1 - y0 },
+                        ["source"] = i,
+                        ["fit"] = fit,
+                        ["present"] = new JsonArray(new JsonArray(Range(i).Start, Range(i).End)),
+                    };
+                })]);
             }
             return plan.ToJsonString();
         }
