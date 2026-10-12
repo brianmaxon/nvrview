@@ -50,9 +50,30 @@ skip() { skipped="$skipped, $1"; }
 tree_clean_at_start=0
 if [ -z "$(git status --porcelain)" ]; then tree_clean_at_start=1; fi
 
+# Docs-only fast path. The changes being checked are the staged, unstaged,
+# and untracked changes, plus the commits not yet on the branch's upstream
+# (when it has one). A clean tree with no upstream has no changes to judge
+# and gets the full check. When there are changes and every one is a *.md
+# file, only sanitization, self-test parity, and the secret scan run. The fast
+# path never writes a check stamp. NVRVIEW_FULL_CHECK=1 forces the full run.
+fast=0
+if [ "${NVRVIEW_FULL_CHECK:-0}" != "1" ]; then
+  changed=$( {
+    git diff --name-only HEAD
+    git ls-files --others --exclude-standard
+    if upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null); then
+      git diff --name-only "$upstream"...HEAD
+    fi
+  } | sort -u)
+  if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qv '\.md$'; then
+    fast=1
+    echo "docs-only change ($(printf '%s\n' "$changed" | wc -l | tr -d ' ') markdown files): taking the fast path (sanitization, parity, secret scan; NVRVIEW_FULL_CHECK=1 runs everything)"
+  fi
+fi
+
 # Per-test time limits come from .config/nextest.toml. Install cargo-nextest
 # when it is missing, as the check cannot run its tests without it.
-if ! cargo nextest --version >/dev/null 2>&1; then
+if [ "$fast" = 0 ] && ! cargo nextest --version >/dev/null 2>&1; then
   echo "installing cargo-nextest (cargo install cargo-nextest --locked)"
   cargo install cargo-nextest --locked
 fi
@@ -97,6 +118,13 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
 else
   step "secret scan skipped (no gitleaks or Docker)"
   skip "secret scan"
+fi
+
+if [ "$fast" = 1 ]; then
+  now=$(date +%s)
+  printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
+  printf '\nDocs-only fast path passed in %ss (sanitization, parity, secret scan). No check stamp: run a full check before a release.\n' "$((now - check_start))"
+  exit 0
 fi
 
 step "rustfmt"
@@ -167,7 +195,7 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   # An overall limit (the whole run takes a few minutes); on a hang the
   # test that last started is named.
   (cd apps/macos &&
-    python3 -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-900}" "swift test" swift test)
+    python3 -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
 
   # Opens a window for a few seconds, behind all other windows and without
   # taking focus, so it needs a desktop session. NVRVIEW_GUI_TESTS=0 skips it.

@@ -79,6 +79,14 @@ failure. Run it before every commit.
 | Windows portability (from macOS) | `cargo check --workspace --all-targets --target x86_64-pc-windows-msvc` |
 | macOS app | `cd apps/macos && swift test` |
 
+Docs-only fast path: when every change being checked is a `*.md` file (staged,
+unstaged, and untracked changes, plus commits not yet on the upstream if the
+branch has one), `scripts/check.sh` runs only the sanitization check, the
+self-test parity check, and the secret scan, and says so. Any other change, or
+`NVRVIEW_FULL_CHECK=1`, runs everything. The fast path never writes a check
+stamp (stamps come only from full runs on a clean tree; `scripts/release.sh`
+needs them).
+
 When chaining checks in a shell, make failures stop the chain (`set -e`, and
 `set -o pipefail` when piping output); a filtered pipeline can otherwise hide
 a failing step.
