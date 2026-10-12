@@ -1943,7 +1943,10 @@ those of the C12 clarifications.
    the status, as section 2a declares it.
 6. **`nv_sound_analyze_day`** changes state like the downloads' calls, but
    asking again for the same camera-day returns the existing request, so a
-   binding that lost an answer to a too-small buffer may call again. With no
+   binding that lost an answer to a too-small buffer may call again (its
+   `state` is then `queued` or `running`, whichever it is by then, so a size
+   probe with a NULL buffer is best avoided: pass room for the short answer
+   at once, as for the other calls that change state). With no
    audio source for recorded days (C10 and the downloads provide it later)
    every request ends `failed` with `no_source`; the events and the cancel
    work as C12 describes.

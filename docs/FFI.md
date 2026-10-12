@@ -967,7 +967,8 @@ NvStatus nv_sound_configure(NvCore *core, const char *json);
   between two calls (the index fills meanwhile), so bindings loop until the
   answer fits.
 - **Calls that change state answer once.** `nv_incident_edit`,
-  `nv_incident_lock`, `nv_download_incident`, and `nv_download_trash` make
+  `nv_incident_lock`, `nv_download_incident`, `nv_download_trash`, and (minor
+  8) `nv_sound_analyze_day` make
   their change even when the answer does not fit: `NV_ERR_BUFFER_TOO_SMALL`
   (with `*len` set) then only says the answer was not written, and calling
   again would apply the change again (or report `NV_ERR_UNKNOWN_ID` for a

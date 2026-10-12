@@ -671,10 +671,37 @@ fn edit_lists_and_sound_through_the_c_interface() {
 
         // ---- Sound: analyzing a recorded day ----------------------------
         let analyze = c(&json!({"camera": cam(0), "day": day8 + 5}).to_string());
-        let queued = rig
-            .answer(|o, n, l| nv_sound_analyze_day(core, analyze.as_ptr(), o, n, l))
-            .unwrap();
+        // A call that changes state is made once with room for the answer
+        // (a size probe would queue the request and the second call would
+        // find it, perhaps already running).
+        let mut room = vec![0 as c_char; 4096];
+        assert_eq!(
+            nv_sound_analyze_day(
+                core,
+                analyze.as_ptr(),
+                room.as_mut_ptr(),
+                room.len(),
+                &mut len
+            ),
+            NvStatus::NV_OK
+        );
+        let queued: Value =
+            serde_json::from_str(CStr::from_ptr(room.as_ptr()).to_str().unwrap()).unwrap();
         assert_eq!(queued["state"], "queued");
+        // Asking again while it waits or runs returns the same request.
+        assert_eq!(
+            nv_sound_analyze_day(
+                core,
+                analyze.as_ptr(),
+                room.as_mut_ptr(),
+                room.len(),
+                &mut len
+            ),
+            NvStatus::NV_OK
+        );
+        let again: Value =
+            serde_json::from_str(CStr::from_ptr(room.as_ptr()).to_str().unwrap()).unwrap();
+        assert_eq!(again["request"], queued["request"]);
         let request = queued["request"].as_u64().unwrap();
         // With no audio source (none exists until downloads or playback
         // provide one) the request fails; events say so.

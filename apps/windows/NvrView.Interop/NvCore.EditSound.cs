@@ -77,7 +77,7 @@ public sealed unsafe partial class NvCore : IEditSound
 
     /// <inheritdoc/>
     public string SoundAnalyzeDay(string json) =>
-        Answer((c, b, n, l) => NvNative.nv_sound_analyze_day(c, json, b, n, l), nameof(NvNative.nv_sound_analyze_day));
+        Once((c, b, n, l) => NvNative.nv_sound_analyze_day(c, json, b, n, l), nameof(NvNative.nv_sound_analyze_day));
 
     /// <inheritdoc/>
     public void SoundAnalyzeCancel(ulong request) =>

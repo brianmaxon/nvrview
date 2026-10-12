@@ -443,7 +443,7 @@ public final class CCore: CoreAPI {
 
     public func soundAnalyzeDay(json: String) throws(CoreStatus) -> String {
         let c = try core()
-        return try Self.string { nv_sound_analyze_day(c, json, $0, $1, $2) }
+        return try Self.once { nv_sound_analyze_day(c, json, $0, $1, $2) }
     }
 
     public func soundAnalyzeCancel(_ request: UInt64) throws(CoreStatus) {
