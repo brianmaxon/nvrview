@@ -964,6 +964,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             return;
         }
         Say($"edits: follow cut {string.Join(", ", plan.Segments.Select(g => $"{g.Source}@{g.StartMs - s}"))}, cuts {string.Join(", ", ep.Cuts.Select(c => c - s))}, frames drawn {w.EditShown?.Frames}");
+        // The device playback's pause arrives as a core event, and the edit
+        // can draw its first frame before it.
+        await Until(() => !p.Transport.IsPlaying, 5);
         Expect(b.PlayerView == PlayerView.Follow && !p.Transport.IsPlaying, "edits: the device playback still plays under the follow cut");
         Expect(live.Failures.Count == 0, $"edits: files not opened: {string.Join("; ", live.Failures.Select(f => $"{f.Key}: {f.Value}"))}");
         Expect(ep.Cuts.SequenceEqual([s + 1000, s + 2000]) && plan.Segments.Select(g => g.Source).SequenceEqual([0, 1, 2]),
