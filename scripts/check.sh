@@ -140,6 +140,9 @@ cargo nextest run --workspace
 step "doctests"
 cargo test --workspace --doc
 
+step "check-stamp and merge scripts (throwaway repositories, fake checks)"
+sh scripts/test-stamps.sh
+
 step "C header up to date"
 if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
   scripts/gen-header.sh --check

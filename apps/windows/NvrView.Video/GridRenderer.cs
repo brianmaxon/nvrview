@@ -418,6 +418,23 @@ public sealed unsafe class GridRenderer : IDisposable
         Frames++;
     }
 
+    /// <summary>
+    /// Draws one tile into the offscreen target and reads it back (Save Picture): the draw's destination is the whole
+    /// target, its source the part of the picture to save. Waits for the GPU; allocates. Null when the tile has no
+    /// picture.
+    /// </summary>
+    public RenderedImage? RenderOne(in TileDraw draw)
+    {
+        if (_targetView == null)
+        {
+            throw new InvalidOperationException("this renderer has no offscreen target");
+        }
+        Span<ulong> sequence = stackalloc ulong[1];
+        using DeviceLock held = _gpu.Lock();
+        Draw(_targetView, Width, Height, new ReadOnlySpan<TileDraw>(in draw), sequence);
+        return sequence[0] == 0 ? null : ReadBack();
+    }
+
     /// <summary>Reads back the last frame (waits for the GPU). For tests; allocates.</summary>
     public RenderedImage ReadBack()
     {

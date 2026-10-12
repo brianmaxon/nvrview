@@ -63,6 +63,15 @@ internal sealed class ViewSettingsFile
 
     /// <summary>Call transcripts go into the log and, one text file per call, the Transcripts folder (off by default).</summary>
     public bool SaveCallTranscripts { get; set; }
+
+    /// <summary>Where Save Picture writes (docs/UX.md "Save picture"); absent: Pictures\NvrView.</summary>
+    public string? PicturesFolder { get; set; }
+
+    /// <summary>The picture format: absent for png (the default), or jpeg.</summary>
+    public string? PictureFormat { get; set; }
+
+    /// <summary>Saved pictures name the camera "Camera A" (off by default).</summary>
+    public bool ShareSafePictureNames { get; set; }
 }
 
 [JsonSerializable(typeof(ViewSettingsFile))]
@@ -75,6 +84,9 @@ internal sealed class ViewSettings(string? file)
     private ChromeCorner? _insetCorner;
     private bool _hideOffline = true;
     private bool _saveTranscripts;
+    private string? _picturesFolder;
+    private PictureFormat _pictureFormat = PictureFormat.Png;
+    private bool _shareSafeNames;
     private bool _loaded;
     private Dictionary<string, string> _mounts = [];
     private HashSet<string> _talkAllowed = [];
@@ -403,7 +415,75 @@ internal sealed class ViewSettings(string? file)
         }
     }
 
-    /// <summary>Raised on the UI thread after a setting changes.</summary>
+    /// <summary>Pictures\NvrView in the user's Pictures folder: where Save Picture writes unless told otherwise.</summary>
+    public static string DefaultPicturesFolder =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "NvrView");
+
+    /// <summary>Where Save Picture writes (Settings > Capture); the default folder unless chosen.</summary>
+    public string PicturesFolder
+    {
+        get
+        {
+            Load();
+            return _picturesFolder ?? DefaultPicturesFolder;
+        }
+        set
+        {
+            Load();
+            string? chosen = string.IsNullOrWhiteSpace(value) || value == DefaultPicturesFolder ? null : value;
+            if (_picturesFolder == chosen)
+            {
+                return;
+            }
+            _picturesFolder = chosen;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The format Save Picture writes (PNG unless changed).</summary>
+    public PictureFormat PictureFormat
+    {
+        get
+        {
+            Load();
+            return _pictureFormat;
+        }
+        set
+        {
+            Load();
+            if (_pictureFormat == value)
+            {
+                return;
+            }
+            _pictureFormat = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>Saved pictures name the camera "Camera A" instead of its own name.</summary>
+    public bool ShareSafePictureNames
+    {
+        get
+        {
+            Load();
+            return _shareSafeNames;
+        }
+        set
+        {
+            Load();
+            if (_shareSafeNames == value)
+            {
+                return;
+            }
+            _shareSafeNames = value;
+            Save();
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>Raised on the UI thread after a setting changes.
     public event Action? Changed;
 
     public ChromeCorner IndicatorCorner
@@ -474,6 +554,9 @@ internal sealed class ViewSettings(string? file)
             _motionGrants = read?.MotionGrants is { } mg ? mg.Where(kv => kv.Value.Length > 0).ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value)) : [];
             _ptzSpeed = read?.PtzSpeed is { } ps ? Math.Clamp(ps, 1, 64) : 0;
             _saveTranscripts = read?.SaveCallTranscripts ?? false;
+            _picturesFolder = string.IsNullOrWhiteSpace(read?.PicturesFolder) ? null : read.PicturesFolder;
+            _pictureFormat = PictureFormats.FromKey(read?.PictureFormat);
+            _shareSafeNames = read?.ShareSafePictureNames ?? false;
             _callsInWindow = read?.CallsOpenInWindow ?? false;
             _callPresentations = read?.CallPresentation is { } cp ? new Dictionary<string, string>(cp) : [];
             _placement = read?.CallWindowPlacement == "activeScreen" ? CallWindowPlacement.Mode.ActiveScreen : CallWindowPlacement.Mode.Remembered;
@@ -510,6 +593,9 @@ internal sealed class ViewSettings(string? file)
                     PtzSpeed = _ptzSpeed > 0 && _ptzSpeed != 20 ? _ptzSpeed : null,
                     UnmuteOnRing = _unmuteOnRing.Count > 0 ? [.. _unmuteOnRing.Order(StringComparer.Ordinal)] : null,
                     SaveCallTranscripts = _saveTranscripts,
+                    PicturesFolder = _picturesFolder,
+                    PictureFormat = _pictureFormat == PictureFormat.Png ? null : _pictureFormat.Key(),
+                    ShareSafePictureNames = _shareSafeNames,
                     CallsOpenInWindow = _callsInWindow,
                     CallPresentation = _callPresentations.Count > 0 ? new Dictionary<string, string>(_callPresentations) : null,
                     CallWindowPlacement = _placement == CallWindowPlacement.Mode.ActiveScreen ? "activeScreen" : null,

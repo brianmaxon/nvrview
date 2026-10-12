@@ -1090,8 +1090,9 @@ NvStatus nv_tile_loudness(NvCore *core, uint64_t tile, uint8_t *peak, uint8_t *r
   dBFS, `null` where no audio was analyzed), `nv_sound_labels_put` (answers
   nothing; the reserved analyzer `pattern-v1` is refused),
   `nv_sound_analyze_day` and `nv_sound_analyze_cancel` (`sound_analyze`
-  events; without a source for the day's audio a request fails with
-  `no_source`), and `nv_tile_loudness` (a live tile's newest seconds, one
+  events; the day's audio is read from the camera's finished downloads: a
+  request fails with `no_audio` when none covers the day, `no_source` when
+  no downloads folder is configured), and `nv_tile_loudness` (a live tile's newest seconds, one
   byte per value: 0 no audio, 1 to 128 is -127 to 0 dBFS).
 
 Events (FFI-RECORDINGS.md, sections 2a and 8; ignore unknown types and fields):

@@ -622,9 +622,10 @@ impl crate::Core {
     /// same camera-day. At most one analysis runs per device at a time (one
     /// stream per device); `sound_analyze` events report `running`, `done`
     /// (`seconds`, `labels`), `failed` (`reason`), or `canceled`. The audio
-    /// comes from the source set with [`crate::Core::set_sound_day_source`]
-    /// (downloaded or played-back recordings, slices C10 and downloads);
-    /// without one the request fails with `no_source`. The result is the
+    /// comes from the source set with [`crate::Core::set_sound_day_source`] or,
+    /// when none is set, from the camera's finished downloads covering the
+    /// day (`no_audio` when none does, `no_source` when no downloads folder
+    /// is configured). The result is the
     /// day's loudness in the envelope store and the core's alarm labels
     /// (`pattern-v1`) for the audio analyzed; labels from the app's
     /// classifier come with [`crate::Core::sound_labels_put`]. At most 32
@@ -659,8 +660,8 @@ impl crate::Core {
     }
 
     /// Sets (or clears) where recorded days' audio comes from for
-    /// [`crate::Core::sound_analyze_day`]. This is the seam for downloaded
-    /// files and playback: see [`DayAudioSource`].
+    /// [`crate::Core::sound_analyze_day`], replacing the default (finished
+    /// downloads). This is the seam for other sources: see [`DayAudioSource`].
     ///
     /// # Errors
     /// [`RecError::Closed`].

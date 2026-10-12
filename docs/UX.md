@@ -127,9 +127,9 @@ suggestion; [ARCHITECTURE.md](ARCHITECTURE.md) has the goals and
 ## Tile header
 
 > **Built on both apps** (the header, its "…" menu, the right-click menu and
-> the keys). Save picture is built on macOS (see "Save picture") and planned
-> on Windows; recording is not built yet: its buttons and menu items are in
-> place and say so (below). PTZ is built on both apps ("Pan, tilt, and zoom").
+> the keys). Save picture is built on both apps (see "Save picture");
+> recording is not built yet: its buttons and menu items are in place and
+> say so (below). PTZ is built on both apps ("Pan, tilt, and zoom").
 
 Every tile's hover header carries its actions as buttons, in an order that
 survives narrow tiles: what does not fit moves into a "…" menu, never off
@@ -197,8 +197,8 @@ Details settled while building it (macOS; Windows does the same except where
 - **Windows:** the header's buttons are real buttons (Tab reaches them while
   the header shows; a faded header takes no clicks), the Speaker button
   listens to several cameras with Ctrl-click, and the message over the
-  stage ("Save Picture is coming soon") is a small pill at the bottom,
-  announced to screen readers. Entrance is in its place in the menus but
+  stage ("Picture saved" with Show in folder, "Start Recording is coming soon")
+  is a small pill at the bottom, announced to screen readers. Entrance is in its place in the menus but
   unavailable, because Windows has no entrance insets yet. The Menu key and
   Shift+F10 open the selected tile's right-click menu at its header. The
   right-click menu is the model's list followed, after a separator, by the
@@ -253,11 +253,11 @@ overlay (Windows) so they can be discovered.
 
 ### Capture and camera keys
 
-> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; T works,
-> the others say "… is coming soon" until capture lands; the Option keys
-> are PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
-> Ctrl+Shift+R exist (`TileKeyMap`); T works, the others say "… is coming
-> soon"; there is no Camera menu (the window's header has no menu bar); the
+> **macOS:** P, Shift+P, R, T, ⇧⌘P, ⇧⌘R and the Camera menu exist; P, Shift+P,
+> ⇧⌘P and T work, R says "… is coming soon" until recording lands, and the
+> Option keys are PTZ. **Windows:** P, Shift+P, R, T, Ctrl+Shift+P and
+> Ctrl+Shift+R exist (`TileKeyMap`); P, Shift+P, Ctrl+Shift+P and T work, R and
+> Ctrl+Shift+R say "… is coming soon"; there is no Camera menu (the window's header has no menu bar); the
 > Alt keys are PTZ ("Pan, tilt, and zoom"). They act on the selected tile,
 > never while text is edited, and toggles ignore key repeat.
 
@@ -603,8 +603,8 @@ stream on many tiles costs the device and this computer much more.
 
 ## Save picture
 
-> **Built on macOS** (CAPTURE.md, "Save picture"); planned on Windows
-> (CAP-P2). Playback tiles come later.
+> **Built on both apps** (CAPTURE.md, "Save picture"). Playback tiles come
+> later.
 
 - **Where:** the header's camera button, the right-click menu, P (and
   Shift+P for Save Picture As…), the call window's tile, and later playback
@@ -619,12 +619,15 @@ stream on many tiles costs the device and this computer much more.
   `2026-10-11 17.02.03.250 Camera 1.png`; with "Share-safe names" the
   camera is `Camera A`. No metadata; an optional time and name label burned
   in, off by default.
-- **Settings (macOS):** Settings > Capture has "Save pictures to" (Choose…
+- **Settings:** Settings > Capture (both apps) has "Save pictures to" (Choose…
   and Reset), Format (PNG or JPEG) and "Share-safe names". Save Picture As…
   (Shift+P) opens a save panel in that folder with a Format menu; Open
-  Pictures Folder is in the Camera menu.
-- **Feedback:** a brief shutter flash on the tile (not under Reduce Motion)
-  and a "Picture saved"
+  Pictures Folder is in the Camera menu. On Windows, Save Picture As… opens
+  the system save dialog (it starts in the Pictures library, as the dialog
+  cannot be pointed at another folder) with PNG and JPEG choices, and Open
+  pictures folder is a button on the Capture page.
+- **Feedback:** on macOS a brief shutter flash on the tile (not under Reduce
+  Motion; not on Windows) and a "Picture saved"
   toast with Show in Finder or Show in Explorer. A failure names the file,
   not the folder path.
 

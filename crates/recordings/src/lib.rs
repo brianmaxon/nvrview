@@ -43,6 +43,7 @@
 //! Everything here is read-only toward the devices and free of platform
 //! APIs; it builds and tests on Linux, macOS, and Windows.
 
+pub mod audio_track;
 pub mod chunk;
 pub mod edits;
 pub mod edl;

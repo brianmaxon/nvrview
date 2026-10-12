@@ -309,7 +309,7 @@ Other options: `--gpu auto|hardware|warp`, `--software` (CPU decoding),
 Using it: hover a tile for its header (its buttons, laid out by
 `TileHeaderLayout`: what does not fit goes into the "…" menu; the name; it
 fades 3 s after the pointer stops); click the speaker to listen (Ctrl+click
-to listen to several); P, Shift+P and R say "coming soon", T starts or ends
+to listen to several); P and Shift+P save a picture (see "Save picture" below), R says "coming soon", T starts or ends
 a conversation; double-click, Space, or Enter focuses the selected tile and back;
 arrow keys move the selection by position (in focus they switch the
 focused camera); F is full screen, Esc leaves focus and then full screen;
@@ -463,7 +463,9 @@ that is refused once, then streams):
     on the real computer: the system voice renders a sentence, the desktop
     recognizer hears it ("moment" must be in the text where Windows has a
     recognizer), and with `--mic-test` the microphone opens for 0.7 s (the
-    audio is measured and dropped);
+    audio is measured and dropped). `scripts/windows-check.sh` passes
+    `--mic-test` only with `NVRVIEW_MIC_TEST=1`: an unattended test computer
+    usually has no microphone that hears anything;
 17. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
 
@@ -545,6 +547,24 @@ build of the Windows app would ship Microsoft's redistributables under
 those terms, and its release would need an end-user notice that carries
 them. The package's `NOTICE.txt` lists the open-source components inside
 it. `TerraFX.Interop.Windows` and `System.Speech` (both MIT) are the only other packages.
+
+### Save picture
+
+P (or the header's button, the tile's menu, Ctrl+Shift+P) saves the tile's
+current decoded picture at its full size. Nothing is decoded again: a
+`GridRenderer` of its own, on the shared device and under the device lock,
+draws the tile's shown picture (the same shaders and color matrix as the
+screen) into a texture of the saved size (`NvrView.Video` `PictureRender`),
+which is read back, encoded with WIC (PNG, or JPEG at quality 0.9, no
+metadata) off the UI thread, and written to the pictures folder under the
+shared name rule (`PictureNaming`, tested on `fixtures/synthetic/capture-names.json`)
+without replacing a file. Save Zoomed Area draws the region the zoom rule shows
+(`PictureRegion`); a dewarped fisheye tile saves its view at the source's size,
+and Save Original Fisheye Picture the circle. Settings > Capture (folder,
+format, share-safe names) lives in view-settings.json. Self-test steps
+`capture-picture-tile`, `capture-picture-zoomed`, `capture-picture-fisheye`
+(`SelfTest.Capture.cs`) read the files back and compare pixels with a CPU
+conversion of the decoded picture (and the synthetic scene's colors for a fisheye view).
 
 ### Calls
 
@@ -714,6 +734,7 @@ Windows-only (macOS keeps its menu bar; docs/PARITY.md), described in
 | `ViewerCalls`, `CallStack`, `CallServices` | the calls in progress (doorbell press or Start conversation), their cards over the stage, and the microphone, system voice and recognizer behind interfaces (see "Calls") |
 | `CallWindows`, `CallWindow` | the call windows: one per call shown in its own window, with its own swap chain, renderer and fixed-tile `StageView` (see "Calls") |
 | `StageView.Header.cs` | what each `TileHeaderItem` does for a tile (buttons, "…" and right-click menus built from `TileHeaderLayout.Menu`, the P/R/T keys, the "coming soon" message) |
+| `StageView.Capture.cs`, `PictureSaver.cs` | Save Picture: the plan (whole picture, zoomed region, or dewarped view), the offscreen render (`NvrView.Video` `PictureRender`), WIC encoding, naming and writing, the save picker, the toast |
 | `Viewer.Ptz` (`PtzModel`), `PtzControls.cs`, `StageView.Ptz.cs` | camera motion ([docs/UX.md](../../docs/UX.md) "Pan, tilt, and zoom"): the model (in `NvrView.Shell`, with `Ptz.cs` and a `FakePtzCore` for tests) reads each camera's abilities off the UI thread, holds and renews a move every 250 ms (also from a backup timer), stops it on release, tile close, window close and deactivation, recalls presets and sends lens positions (a drag at most five a second, then the last); the flyouts (pad with speed, lens sliders), the presets menu and the Alt keys (read by scan code; an Alt key that drove a camera is swallowed so Alt does not open the system menu) are thin shells over it; per-camera automation grants are in Settings > Cameras and passed again after each connection |
 | `WindowsCredentials`, `DeviceStore` | passwords in Credential Manager, the device list in `settings.json` |
 | `SelfTest`, `MockNvr`, `StartupTest` | the self-test and the mock it starts; the plain start test |
