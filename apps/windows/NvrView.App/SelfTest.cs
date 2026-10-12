@@ -83,6 +83,7 @@ using NvrView.Shell;
 using NvrView.Tiles;
 using NvrView.Video;
 using Windows.Graphics;
+using Point = Windows.Foundation.Point;
 
 namespace NvrView.App;
 
