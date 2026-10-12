@@ -1015,7 +1015,9 @@ impl Session {
         let Some((cmd, channel)) = self.ptz.reads.remove(&message_id) else {
             return;
         };
-        if status != 200 {
+        // 199 answers 300 with a complete body on some firmware (observed,
+        // protocol.md); every other read here answers 200.
+        if status != 200 && !(cmd == Command::Support && status == 300) {
             return;
         }
         match (cmd, channel) {

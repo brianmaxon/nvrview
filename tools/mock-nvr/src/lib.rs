@@ -349,6 +349,7 @@ struct Shared {
     talks: Mutex<Vec<talk::TalkLog>>,
     /// Status for talk opens (201); 200 accepts.
     talk_open_status: AtomicU32,
+    support_status: AtomicU32,
     /// Status for talk audio replies (202); 200 accepts.
     talk_audio_status: AtomicU32,
     /// Every camera's motion state and the PTZ request log.
@@ -496,6 +497,7 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         third_party_starts: Mutex::new(HashMap::new()),
         talks: Mutex::new(Vec::new()),
         talk_open_status: AtomicU32::new(200),
+        support_status: AtomicU32::new(200),
         talk_audio_status: AtomicU32::new(200),
         ptz,
         silent_previews: AtomicBool::new(false),
@@ -658,6 +660,15 @@ impl MockNvr {
 
     /// Sets the status later talk opens (201) are answered with (200, the
     /// default, accepts; anything else refuses).
+    /// Answers the capabilities read (199) with this status. Newer
+    /// firmware answers 300 with a complete body (observed); 200 is the
+    /// default.
+    pub fn set_support_status(&self, status: u16) {
+        self.shared
+            .support_status
+            .store(u32::from(status), Ordering::SeqCst);
+    }
+
     pub fn set_talk_open_status(&self, status: u16) {
         self.shared
             .talk_open_status
@@ -1123,7 +1134,10 @@ impl Conn {
                 )
                 .await
             }
-            199 => self.reply_xml(199, id, 200, &self.support()).await,
+            199 => {
+                let status = self.shared.support_status.load(Ordering::SeqCst) as u16;
+                self.reply_xml(199, id, status, &self.support()).await
+            }
             // Alarm report: an empty reply, then state pushes (33).
             192 => {
                 self.reply_xml(192, id, 200, "").await?;

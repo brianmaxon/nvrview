@@ -421,6 +421,50 @@ async fn closing_or_dropping_the_session_stops_every_moving_camera() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_capabilities_reply_with_status_300_is_a_success() {
+    // Newer firmware answers 199 with status 300 and a complete body.
+    let nvr = spawn_mock();
+    nvr.set_support_status(300);
+    let s = session(&nvr);
+    assert_eq!(
+        s.ptz_move(PTZ, Direction::Left, 40, MANUAL).await,
+        Ok(PtzOutcome::Moving)
+    );
+    assert!(moving(&nvr, PTZ));
+    assert_eq!(s.ptz_stop(PTZ, MANUAL).await, Ok(PtzOutcome::Stopped));
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_move_refused_before_sending_owes_no_stop_after_a_reconnect() {
+    let nvr = spawn_mock();
+    nvr.set_support_status(500);
+    let s = session(&nvr);
+    let mut state = s.watch_state();
+    assert_eq!(
+        s.ptz_move(PTZ, Direction::Left, 40, MANUAL).await,
+        Err(PtzRefusal::QueryFailed)
+    );
+    assert!(PtzRefusal::QueryFailed.sent_nothing());
+    // A stop in flight when the connection drops is not owed again: no
+    // camera ever moved.
+    s.ptz_stop_now(PTZ, MANUAL);
+    nvr.drop_connections();
+    state
+        .wait_for(|s| *s != ConnState::Connected)
+        .await
+        .unwrap();
+    state
+        .wait_for(|s| *s == ConnState::Connected)
+        .await
+        .unwrap();
+    s.close().await;
+    let c = controls(&nvr, PTZ);
+    assert!(c.iter().filter(|c| *c == "stop").count() <= 1, "{c:?}");
+    assert!(!c.iter().any(|c| c == "left"));
+}
+
+#[tokio::test(start_paused = true)]
 async fn info_reads_capabilities_lens_and_presets() {
     let nvr = spawn_mock();
     let s = session(&nvr);
