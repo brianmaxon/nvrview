@@ -12,6 +12,9 @@ publish = false
 bc-protocol = { path = "../../crates/bc-protocol" }
 bc-session = { path = "../../crates/bc-session" }
 discovery = { path = "../../crates/discovery" }
+viewer-core = { path = "../../crates/viewer-core" }
+serde_json = "1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "env-filter"] }
 
