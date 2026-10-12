@@ -24,8 +24,9 @@ extern "C" {
  * NV_ABI_VERSION. Minor 1: device discovery. Minor 2: updates. Minor 3:
  * nv_tile_retry. Minor 4: nv_talk_set_conversation. Minor 5: recordings,
  * part 1. Minor 6: recorded playback. Minor 7: "months" in
- * nv_recordings_want. Minor 8: edit lists and the rest of sound. */
-#define NV_ABI_MINOR 8
+ * nv_recordings_want. Minor 8: edit lists and the rest of sound. Minor 9:
+ * camera motion (PTZ). */
+#define NV_ABI_MINOR 9
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -332,6 +333,35 @@ NvStatus nv_talk_stop(NvCore *core, uint64_t tile, bool drain);
  * closes, the permission is withdrawn, or the core is freed. Added in
  * minor 4. */
 NvStatus nv_talk_set_conversation(NvCore *core, uint64_t tile, bool open);
+
+/* Camera motion (minor 9; docs/FFI.md, "Camera motion (PTZ)"; event ptz).
+ * The app's calls are the user's own manual control and need no enable. */
+
+/* What a tile's camera can do and where its lens is, as JSON: request
+ * {"tile":N}; answer {"pan_tilt","zoom":{"min","max","cur"}|null,"focus":...,
+ * "presets":[{"id","name"}],"speeds":[1,64]}. Blocks for at most 20 s. */
+NvStatus nv_ptz_info(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+
+/* Starts or renews a move ("left", "right", "up", "down"; speed 1 to 64).
+ * Call again at least every 500 ms while the control is held: the camera is
+ * stopped 1 s after the last call, after 30 s, and on every exit path. */
+NvStatus nv_ptz_move(NvCore *core, uint64_t tile, const char *direction, uint32_t speed);
+
+/* Stops the tile's camera at once; never limited. */
+NvStatus nv_ptz_stop(NvCore *core, uint64_t tile);
+
+/* Moves the lens "zoom" or "focus" to an absolute position, clamped to the
+ * range nv_ptz_info reported. */
+NvStatus nv_ptz_lens(NvCore *core, uint64_t tile, const char *what, int32_t position);
+
+/* Recalls a preset from nv_ptz_info's list (recall only). */
+NvStatus nv_ptz_preset(NvCore *core, uint64_t tile, uint32_t id);
+
+/* Grants or withdraws motion control on one channel for an automation (a
+ * local API client by name, or "auto_correction") for this run of the core;
+ * the app passes the user's grants after each nv_device_add. */
+NvStatus nv_motion_grant(NvCore *core, uint64_t device, uint8_t channel, const char *client,
+                         bool granted);
 
 /* Layouts and device keys (docs/FFI.md, "Layouts"). Strings come back
  * UTF-8 and NUL-terminated in `out`; *len receives the length without the

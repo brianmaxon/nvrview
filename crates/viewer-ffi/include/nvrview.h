@@ -26,9 +26,11 @@
  * part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
  * playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
  * calendar alone) and the recordings_month_failed event. Minor 8: edit
- * lists (section 7) and the rest of sound (section 2a).
+ * lists (section 7) and the rest of sound (section 2a). Minor 9: camera
+ * motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop, nv_ptz_lens,
+ * nv_ptz_preset, nv_motion_grant).
  */
-#define NV_ABI_MINOR 8
+#define NV_ABI_MINOR 9
 
 /**
  * Return codes. Every function that can fail returns one.
@@ -655,6 +657,89 @@ enum NvStatus nv_talk_stop(struct NvCore *core, uint64_t tile, bool drain);
  * `core` is a live handle.
  */
 enum NvStatus nv_talk_set_conversation(struct NvCore *core, uint64_t tile, bool open);
+
+/**
+ * Reads what a tile's camera can do and where its lens is (viewing tier
+ * only) as JSON into `out` (NUL-terminated; `*len` bytes without the NUL):
+ * `request` is `{"tile":N}`; the answer is `{"pan_tilt":bool,"zoom":
+ * {"min","max","cur"}|null,"focus":...,"presets":[{"id","name"}],
+ * "speeds":[1,64]}` (docs/FFI.md, "Camera motion (PTZ)"). Blocks for at
+ * most 20 s. NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap` <=
+ * `*len`; NV_ERR_INTERNAL when the device did not answer. Added in minor 9.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_ptz_info(struct NvCore *core,
+                          const char *request,
+                          char *out,
+                          size_t cap,
+                          size_t *len);
+
+/**
+ * Starts or renews a pan or tilt move of a tile's camera: `direction` is
+ * "left", "right", "up" or "down", `speed` 1 to 64. The app calls it again
+ * at least every 500 ms while the control is held; the camera stops 1 s
+ * after the last call, after 30 s of holding, on nv_ptz_stop, when the
+ * tile closes, and on every other exit path. Returns at once; the outcome
+ * arrives as a `ptz` event. These calls are the user's own manual control
+ * and need no enable. NV_ERR_INVALID_ARGUMENT for another direction or
+ * a speed outside 1 to 64. Added in minor 9.
+ *
+ * # Safety
+ * `core` is a live handle; `direction` is a NUL-terminated string.
+ */
+enum NvStatus nv_ptz_move(struct NvCore *core,
+                          uint64_t tile,
+                          const char *direction,
+                          uint32_t speed);
+
+/**
+ * Stops a tile's camera at once. Never rate-limited. NV_ERR_UNKNOWN_ID for
+ * an unknown tile. Added in minor 9.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_ptz_stop(struct NvCore *core, uint64_t tile);
+
+/**
+ * Moves a tile's lens `what` ("zoom" or "focus") to the absolute
+ * `position`, clamped to the range nv_ptz_info reports. The outcome
+ * arrives as a `ptz` event carrying the position sent. Added in minor 9.
+ *
+ * # Safety
+ * `core` is a live handle; `what` is a NUL-terminated string.
+ */
+enum NvStatus nv_ptz_lens(struct NvCore *core, uint64_t tile, const char *what, int32_t position);
+
+/**
+ * Recalls preset `id` (from nv_ptz_info) on a tile's camera. Saving or
+ * deleting presets is not possible. Added in minor 9.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_ptz_preset(struct NvCore *core, uint64_t tile, uint32_t id);
+
+/**
+ * Grants or withdraws camera motion control on one channel of a device for
+ * an automation: `client` is a local API client's name or
+ * "auto_correction" (1 to 64 bytes, no control characters). None is
+ * granted until granted, for this run of the core; the app passes the
+ * user's grants after each nv_device_add. Withdrawing stops that
+ * automation's move. The app's own controls need no grant. Added in
+ * minor 9.
+ *
+ * # Safety
+ * `core` is a live handle; `client` is a NUL-terminated string.
+ */
+enum NvStatus nv_motion_grant(struct NvCore *core,
+                              uint64_t device,
+                              uint8_t channel,
+                              const char *client,
+                              bool granted);
 
 /**
  * The device's stable key (docs/FFI.md, "Layouts"): UTF-8 into `out`,

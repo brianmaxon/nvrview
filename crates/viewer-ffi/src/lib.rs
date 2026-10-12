@@ -36,8 +36,10 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// part 1 (docs/FFI-RECORDINGS.md, sections 1 to 5). Minor 6: recorded
 /// playback (section 6). Minor 7: "months" in nv_recordings_want (a month's
 /// calendar alone) and the recordings_month_failed event. Minor 8: edit
-/// lists (section 7) and the rest of sound (section 2a).
-pub const NV_ABI_MINOR: u32 = 8;
+/// lists (section 7) and the rest of sound (section 2a). Minor 9: camera
+/// motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop, nv_ptz_lens,
+/// nv_ptz_preset, nv_motion_grant).
+pub const NV_ABI_MINOR: u32 = 9;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -1233,6 +1235,160 @@ pub unsafe extern "C" fn nv_talk_set_conversation(
             Some(c) => status(c.set_talk_conversation(tile, open)),
             None => NvStatus::NV_ERR_INVALID_ARGUMENT,
         }
+    })
+}
+
+/// Reads what a tile's camera can do and where its lens is (viewing tier
+/// only) as JSON into `out` (NUL-terminated; `*len` bytes without the NUL):
+/// `request` is `{"tile":N}`; the answer is `{"pan_tilt":bool,"zoom":
+/// {"min","max","cur"}|null,"focus":...,"presets":[{"id","name"}],
+/// "speeds":[1,64]}` (docs/FFI.md, "Camera motion (PTZ)"). Blocks for at
+/// most 20 s. NV_ERR_BUFFER_TOO_SMALL (with `*len` set) when `cap` <=
+/// `*len`; NV_ERR_INTERNAL when the device did not answer. Added in minor 9.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_ptz_info(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(request)) = (unsafe { core_ref(core) }, unsafe { string(request) })
+        else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let Some(tile) = serde_json::from_str::<serde_json::Value>(request)
+            .ok()
+            .and_then(|v| v.get("tile").and_then(serde_json::Value::as_u64))
+        else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        match c.ptz_info(tile) {
+            // SAFETY: per the caller.
+            Ok(json) => unsafe { copy_out(&json, out, cap, len) },
+            Err(e) => error_status(e),
+        }
+    })
+}
+
+/// Starts or renews a pan or tilt move of a tile's camera: `direction` is
+/// "left", "right", "up" or "down", `speed` 1 to 64. The app calls it again
+/// at least every 500 ms while the control is held; the camera stops 1 s
+/// after the last call, after 30 s of holding, on nv_ptz_stop, when the
+/// tile closes, and on every other exit path. Returns at once; the outcome
+/// arrives as a `ptz` event. These calls are the user's own manual control
+/// and need no enable. NV_ERR_INVALID_ARGUMENT for another direction or
+/// a speed outside 1 to 64. Added in minor 9.
+///
+/// # Safety
+/// `core` is a live handle; `direction` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_ptz_move(
+    core: *mut NvCore,
+    tile: u64,
+    direction: *const c_char,
+    speed: u32,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(direction)) = (unsafe { core_ref(core) }, unsafe { string(direction) })
+        else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let Some(direction) = viewer_core::PtzDirection::from_name(direction) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.ptz_move(tile, direction, speed, viewer_core::MotionOrigin::Manual))
+    })
+}
+
+/// Stops a tile's camera at once. Never rate-limited. NV_ERR_UNKNOWN_ID for
+/// an unknown tile. Added in minor 9.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_ptz_stop(core: *mut NvCore, tile: u64) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.ptz_stop(tile, viewer_core::MotionOrigin::Manual)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Moves a tile's lens `what` ("zoom" or "focus") to the absolute
+/// `position`, clamped to the range nv_ptz_info reports. The outcome
+/// arrives as a `ptz` event carrying the position sent. Added in minor 9.
+///
+/// # Safety
+/// `core` is a live handle; `what` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_ptz_lens(
+    core: *mut NvCore,
+    tile: u64,
+    what: *const c_char,
+    position: i32,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(what)) = (unsafe { core_ref(core) }, unsafe { string(what) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        let Some(axis) = viewer_core::LensAxis::from_name(what) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.ptz_lens(tile, axis, position, viewer_core::MotionOrigin::Manual))
+    })
+}
+
+/// Recalls preset `id` (from nv_ptz_info) on a tile's camera. Saving or
+/// deleting presets is not possible. Added in minor 9.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_ptz_preset(core: *mut NvCore, tile: u64, id: u32) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        match unsafe { core_ref(core) } {
+            Some(c) => status(c.ptz_preset(tile, id, viewer_core::MotionOrigin::Manual)),
+            None => NvStatus::NV_ERR_INVALID_ARGUMENT,
+        }
+    })
+}
+
+/// Grants or withdraws camera motion control on one channel of a device for
+/// an automation: `client` is a local API client's name or
+/// "auto_correction" (1 to 64 bytes, no control characters). None is
+/// granted until granted, for this run of the core; the app passes the
+/// user's grants after each nv_device_add. Withdrawing stops that
+/// automation's move. The app's own controls need no grant. Added in
+/// minor 9.
+///
+/// # Safety
+/// `core` is a live handle; `client` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_motion_grant(
+    core: *mut NvCore,
+    device: u64,
+    channel: u8,
+    client: *const c_char,
+    granted: bool,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let (Some(c), Some(client)) = (unsafe { core_ref(core) }, unsafe { string(client) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        status(c.set_motion_grant(device, channel, client, granted))
     })
 }
 
