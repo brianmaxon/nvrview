@@ -7,7 +7,7 @@
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> [NVRVIEW_WINDOWS_WORKER=<name>] \
 #     scripts/windows-check.sh
 #
-# A finished worker's folder (about 5 GB of build output) is deleted with
+# A finished worker's folder, its target\ build output included, is deleted with
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
 #
@@ -69,6 +69,8 @@ if [ -n "$free" ] && [ "$free" -lt 10 ]; then
   echo "         Delete finished workers with: $0 --clean <name>" >&2
 fi
 
+tree_sent=$(git rev-parse 'HEAD^{tree}')
+if [ -n "$(git status --porcelain)" ]; then tree_sent="dirty"; fi
 echo "sending the working tree to $host (worker $worker)"
 # cmd.exe on the far side: recreate src, keep target (a directory junction
 # inside src points at it; the junction alone is removed first, with a plain
@@ -105,4 +107,13 @@ done
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\""
 now=$(date +%s)
+# A full pass (app self-tests included) on a clean tree, i.e. exactly the
+# tree of HEAD, leaves a stamp that scripts/checked.sh --windows and
+# scripts/release.sh look for.
+if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] &&
+  [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests; worker $worker"
+else
+  echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
+fi
 printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"

@@ -41,6 +41,22 @@ step() {
   printf '\n== %s\n' "$*"
 }
 
+# Check stamps (scripts/checked.sh): a full pass on a clean tree is recorded
+# for HEAD's tree. "skipped" collects steps that run by default but were
+# skipped (no stamp then); "ran_optional" lists the opt-in steps that ran.
+skipped=""
+ran_optional=""
+skip() { skipped="$skipped, $1"; }
+tree_clean_at_start=0
+if [ -z "$(git status --porcelain)" ]; then tree_clean_at_start=1; fi
+
+# Per-test time limits come from .config/nextest.toml. Install cargo-nextest
+# when it is missing, as the check cannot run its tests without it.
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "installing cargo-nextest (cargo install cargo-nextest --locked)"
+  cargo install cargo-nextest --locked
+fi
+
 step "sanitization"
 python3 -I scripts/check-sanitized.py --all
 
@@ -52,6 +68,7 @@ python3 -I scripts/check-parity.py
 # .gitleaksignore (synthetic examples only).
 if [ "${NVRVIEW_SECRET_SCAN:-1}" = "0" ]; then
   step "secret scan skipped (NVRVIEW_SECRET_SCAN=0)"
+  skip "secret scan"
 elif command -v gitleaks >/dev/null 2>&1; then
   step "secret scan (full history)"
   gitleaks detect --source=. --redact --no-banner
@@ -79,6 +96,7 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   rm -f "$scan_log"
 else
   step "secret scan skipped (no gitleaks or Docker)"
+  skip "secret scan"
 fi
 
 step "rustfmt"
@@ -87,8 +105,12 @@ cargo fmt --all --check
 step "clippy"
 cargo clippy --workspace --all-targets -- -D warnings
 
-step "tests"
-cargo test --workspace
+# nextest fails a test that runs past its limit (.config/nextest.toml) and
+# names it; it does not run doctests, so those run separately.
+step "tests (per-test time limit)"
+cargo nextest run --workspace
+step "doctests"
+cargo test --workspace --doc
 
 step "C header up to date"
 if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
@@ -121,6 +143,7 @@ if [ "${NVRVIEW_LINUX_TESTS:-0}" != "1" ]; then
   step "Linux tests skipped (NVRVIEW_LINUX_TESTS=1 runs them)"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   step "Linux tests (Docker)"
+  ran_optional="$ran_optional, Linux tests"
   scripts/linux-check.sh
 else
   step "Linux tests skipped (Docker is not running)"
@@ -130,21 +153,27 @@ fi
 # Docker daemon is running. NVRVIEW_CSHARP_TESTS=0 skips them.
 if [ "${NVRVIEW_CSHARP_TESTS:-1}" = "0" ]; then
   step "C# smoke test skipped (NVRVIEW_CSHARP_TESTS=0)"
+  skip "C# tests"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   step "C# smoke test (Docker)"
   scripts/csharp-check.sh
 else
   step "C# smoke test skipped (Docker is not running)"
+  skip "C# tests"
 fi
 
 if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   step "macOS app tests"
-  (cd apps/macos && swift test)
+  # An overall limit (the whole run takes a few minutes); on a hang the
+  # test that last started is named.
+  (cd apps/macos &&
+    python3 -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-900}" "swift test" swift test)
 
   # Opens a window for a few seconds, behind all other windows and without
   # taking focus, so it needs a desktop session. NVRVIEW_GUI_TESTS=0 skips it.
   if [ "${NVRVIEW_GUI_TESTS:-1}" = "0" ]; then
     step "macOS demo self-tests skipped (NVRVIEW_GUI_TESTS=0)"
+    skip "GUI self-tests"
   elif [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
     step "macOS demo self-test, Metal renderer"
     (cd apps/macos && swift build --product NVRViewDemo &&
@@ -154,6 +183,7 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
       .build/debug/NVRViewDemo --renderer layer --tiles 6 --selftest 3 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
   else
     step "macOS demo self-tests skipped (no desktop session)"
+    skip "GUI self-tests"
   fi
 fi
 
@@ -162,6 +192,7 @@ fi
 # browsers and takes a few minutes. NVRVIEW_BROWSER_TESTS=1 runs it.
 if [ "${NVRVIEW_BROWSER_TESTS:-0}" = "1" ]; then
   step "browser playback check"
+  ran_optional="$ran_optional, browser tests"
   scripts/browser-check.sh
 else
   step "browser playback check skipped (NVRVIEW_BROWSER_TESTS=1 runs it)"
@@ -170,3 +201,13 @@ fi
 now=$(date +%s)
 printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
 printf '\nAll checks passed in %ss.\n' "$((now - check_start))"
+
+if [ "$(uname)" != "Darwin" ]; then
+  echo "no check stamp written (the stamp is for the Mac checks)"
+elif [ -n "$skipped" ]; then
+  echo "no check stamp written; skipped:${skipped#,}"
+elif [ "$tree_clean_at_start" != 1 ] || [ -n "$(git status --porcelain)" ]; then
+  echo "no check stamp written (the working tree is not clean)"
+else
+  scripts/checked.sh --record mac "$((now - check_start))" "all default steps${ran_optional:+; optional:${ran_optional#,}}"
+fi
