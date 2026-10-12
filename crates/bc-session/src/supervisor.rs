@@ -3,7 +3,7 @@
 use crate::Shared;
 use crate::archive::{TransferItem, TransferKind, TransferSink};
 use crate::config::{Jitter, SessionConfig};
-use crate::ptz::{Ptz, PtzControl, PtzReq};
+use crate::ptz::{Ptz, PtzControl};
 use crate::queue::{FrameQueue, Item, Subscription};
 use crate::talk::{TalkControl, TalkLimits, TalkReq, Talks};
 use crate::transport::Connector;
@@ -189,7 +189,6 @@ pub(crate) enum Request {
     Query(QueryReq),
     Transfer(TransferReq),
     Talk(TalkReq),
-    Ptz(PtzReq),
 }
 
 pub(crate) struct NewSub {
@@ -902,7 +901,6 @@ impl Ctx {
             Request::Query(q) => self.queries.add(q),
             Request::Transfer(t) => self.transfers.add(t),
             Request::Talk(t) => self.talks.add(t),
-            Request::Ptz(r) => self.ptz.add(r),
         }
     }
 

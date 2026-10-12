@@ -52,6 +52,34 @@ impl Object {
         self
     }
 
+    /// Adds a signed integer member.
+    pub(crate) fn i64(mut self, key: &str, value: i64) -> Object {
+        self.key(key);
+        let _ = write!(self.buf, "{value}");
+        self
+    }
+
+    /// Adds a null member.
+    pub(crate) fn null(mut self, key: &str) -> Object {
+        self.key(key);
+        self.buf.push_str("null");
+        self
+    }
+
+    /// Adds an array of unsigned integers.
+    pub(crate) fn u64s(mut self, key: &str, values: impl IntoIterator<Item = u64>) -> Object {
+        self.key(key);
+        self.buf.push('[');
+        for (i, v) in values.into_iter().enumerate() {
+            if i > 0 {
+                self.buf.push(',');
+            }
+            let _ = write!(self.buf, "{v}");
+        }
+        self.buf.push(']');
+        self
+    }
+
     /// Adds a number member; a value that is not finite is written as null.
     pub(crate) fn f64(mut self, key: &str, value: f64) -> Object {
         self.key(key);

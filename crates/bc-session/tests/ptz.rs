@@ -443,3 +443,25 @@ async fn info_reads_capabilities_lens_and_presets() {
     );
     s.close().await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn commands_handed_over_without_waiting_keep_their_order() {
+    use bc_session::PtzCommand;
+    let nvr = spawn_mock();
+    let s = session(&nvr);
+    let mv = s.ptz_send(
+        PTZ,
+        PtzCommand::Move {
+            direction: Direction::Left,
+            speed: 20,
+        },
+        MANUAL,
+    );
+    // The release is handed over at once and its result never awaited:
+    // it still goes out, after the move.
+    drop(s.ptz_send(PTZ, PtzCommand::Stop, MANUAL));
+    assert_eq!(mv.outcome().await, Ok(PtzOutcome::Moving));
+    wait_for(&nvr, "stop", |n| controls(n, PTZ) == ["left", "stop"]).await;
+    assert!(!moving(&nvr, PTZ));
+    s.close().await;
+}

@@ -260,11 +260,13 @@ impl PtzBoard {
     }
 
     /// A camera's state now, if the channel has one.
+    /// The position is brought up to now on a copy, so a caller on
+    /// another clock (a test thread outside a simulated runtime) cannot
+    /// disturb the camera's own.
     pub fn state(&self, channel: u8) -> Option<PtzState> {
-        let mut g = self.lock();
-        let s = g.state.get_mut(&channel)?;
+        let mut s = self.lock().state.get(&channel)?.clone();
         s.settle(Instant::now());
-        Some(s.clone())
+        Some(s)
     }
 
     /// Every PTZ request so far (the latest [`LOG_MAX`]), oldest first.

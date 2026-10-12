@@ -35,7 +35,7 @@
 //!   log.
 
 use crate::config::{PtzConfig, RateLimit};
-use crate::supervisor::{DeviceSession, QueryError, Request};
+use crate::supervisor::{DeviceSession, QueryError};
 use crate::talk::Outgoing;
 use bc_protocol::ptz::{Direction, LensAxis, LensRange, Preset};
 use bc_protocol::session::{Command, PtzCaps, Session, SessionError};
@@ -561,12 +561,21 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Automation grants and the stop notices.
+/// Automation grants, the requests waiting for the supervisor, and the
+/// stop notices.
 pub(crate) struct PtzControl {
     /// Per channel, the automation names granted motion control.
     grants: Mutex<HashMap<u8, HashSet<String>>>,
+    /// Requests in the order they were made (the supervisor takes them).
+    inbox: Mutex<VecDeque<PtzReq>>,
     notices: broadcast::Sender<PtzNotice>,
 }
+
+/// Requests other than stops waiting for the supervisor at most; more are
+/// refused ([`PtzRefusal::RateLimited`]). Stops are always taken, up to
+/// [`INBOX_HARD_MAX`].
+const INBOX_MAX: usize = 256;
+const INBOX_HARD_MAX: usize = 1024;
 
 /// Stop notices kept for slow receivers.
 const NOTICES_QUEUED: usize = 64;
@@ -575,6 +584,7 @@ impl PtzControl {
     pub(crate) fn new() -> PtzControl {
         PtzControl {
             grants: Mutex::new(HashMap::new()),
+            inbox: Mutex::new(VecDeque::new()),
             notices: broadcast::channel(NOTICES_QUEUED).0,
         }
     }
@@ -610,6 +620,25 @@ impl PtzControl {
         v
     }
 
+    /// Queues a request; gives it back when the inbox is full.
+    fn submit(&self, r: PtzReq) -> Result<(), PtzReq> {
+        let mut q = lock(&self.inbox);
+        let max = if r.op == Op::Stop {
+            INBOX_HARD_MAX
+        } else {
+            INBOX_MAX
+        };
+        if q.len() >= max {
+            return Err(r);
+        }
+        q.push_back(r);
+        Ok(())
+    }
+
+    fn take_inbox(&self) -> VecDeque<PtzReq> {
+        std::mem::take(&mut *lock(&self.inbox))
+    }
+
     fn notify(&self, n: PtzNotice) {
         // No receiver is fine.
         let _ = self.notices.send(n);
@@ -619,17 +648,38 @@ impl PtzControl {
 // ---------------------------------------------------------------------------
 // The supervisor's side.
 
-/// What a request asks.
+/// A camera motion command ([`DeviceSession::ptz_send`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Op {
-    Move { direction: Direction, speed: u8 },
+pub enum PtzCommand {
+    /// Start or renew a pan or tilt move (speed 1 to 64).
+    Move {
+        /// The direction.
+        direction: Direction,
+        /// The speed, limited to 1–64.
+        speed: u8,
+    },
+    /// Stop at once.
     Stop,
-    Preset { id: u32 },
-    Lens { axis: LensAxis, position: i32 },
+    /// Recall a preset by its id.
+    Preset {
+        /// The preset's id (190).
+        id: u32,
+    },
+    /// Move the lens zoom or focus to a position (clamped to the camera's
+    /// range).
+    Lens {
+        /// Which motor.
+        axis: LensAxis,
+        /// The position, in the camera's steps.
+        position: i32,
+    },
 }
 
-impl Op {
-    fn action(self) -> &'static str {
+type Op = PtzCommand;
+
+impl PtzCommand {
+    /// A short name for logs and events: `move`, `stop`, `preset`, `lens`.
+    pub fn action(self) -> &'static str {
         match self {
             Op::Move { .. } => "move",
             Op::Stop => "stop",
@@ -701,10 +751,6 @@ impl Ptz {
             rereads: HashMap::new(),
             log: LineBudget::new(LOG_PER_SECOND, LOG_BURST),
         }
-    }
-
-    pub(crate) fn add(&mut self, r: PtzReq) {
-        self.queue.push_back(r);
     }
 
     fn log_sent(&mut self, channel: u8, action: &str, origin: &str, reason: &str, now: Instant) {
@@ -832,6 +878,8 @@ impl Ptz {
     pub(crate) fn poll(&mut self, session: &mut Session) -> Outgoing {
         let now = Instant::now();
         let mut out = Vec::new();
+        let inbox = self.control.take_inbox();
+        self.queue.extend(inbox);
         if !session.is_logged_in() {
             return out;
         }
@@ -1142,6 +1190,8 @@ impl Ptz {
     /// owed stop, and every queued stop.
     pub(crate) fn close_all(&mut self, session: &mut Session) -> Outgoing {
         let mut out = Vec::new();
+        let inbox = self.control.take_inbox();
+        self.queue.extend(inbox);
         let mut stops: Vec<(u8, Option<MotionOrigin>)> = self
             .policy
             .take_all()
@@ -1177,6 +1227,8 @@ impl Ptz {
 
     /// The session has ended: everything still waiting fails.
     pub(crate) fn finish(&mut self) {
+        let inbox = self.control.take_inbox();
+        self.queue.extend(inbox);
         for r in self.queue.drain(..) {
             if let Some(tx) = r.reply {
                 let _ = tx.send(Err(PtzRefusal::SessionClosed));
@@ -1222,32 +1274,87 @@ fn query_refusal(e: QueryError) -> PtzRefusal {
     }
 }
 
+/// A motion command handed to the session ([`DeviceSession::ptz_send`]):
+/// await [`PtzPending::outcome`] for what happened. Dropping it does not
+/// cancel a stop (a stop always goes out); a move, recall or lens move
+/// whose pending result was dropped before the supervisor took it is not
+/// sent.
+#[derive(Debug)]
+pub struct PtzPending {
+    rx: Option<oneshot::Receiver<Result<PtzOutcome, PtzRefusal>>>,
+    refused: Option<PtzRefusal>,
+    wait: Duration,
+}
+
+impl PtzPending {
+    /// What the command did: the device's answer, or why nothing was
+    /// sent. Gives up after the session's query timeout
+    /// ([`PtzRefusal::TimedOut`]; a stop still goes out).
+    pub async fn outcome(self) -> Result<PtzOutcome, PtzRefusal> {
+        if let Some(r) = self.refused {
+            return Err(r);
+        }
+        let Some(rx) = self.rx else {
+            return Err(PtzRefusal::SessionClosed);
+        };
+        match timeout(self.wait, rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err(PtzRefusal::SessionClosed),
+            Err(_) => Err(PtzRefusal::TimedOut),
+        }
+    }
+}
+
 impl DeviceSession {
+    /// Hands a motion command to the session without waiting: commands
+    /// reach the device in the order of these calls (a release is never
+    /// overtaken by its move). See [`DeviceSession::ptz_move`] and its
+    /// siblings for what each does.
+    pub fn ptz_send(&self, channel: u8, command: PtzCommand, origin: MotionOrigin) -> PtzPending {
+        let wait = self.query_timeout;
+        let refused = |r| PtzPending {
+            rx: None,
+            refused: Some(r),
+            wait,
+        };
+        if self.shared.is_closing() {
+            return refused(PtzRefusal::SessionClosed);
+        }
+        let command = match command {
+            Op::Move { direction, speed } => Op::Move {
+                direction,
+                speed: speed.clamp(bc_protocol::ptz::MIN_SPEED, bc_protocol::ptz::MAX_SPEED),
+            },
+            c => c,
+        };
+        let (tx, rx) = oneshot::channel();
+        let req = PtzReq {
+            channel,
+            op: command,
+            origin,
+            reply: Some(tx),
+        };
+        if let Err(r) = self.ptz_control.submit(req) {
+            warn!(channel, action = r.op.action(), "camera motion inbox full");
+            return refused(PtzRefusal::RateLimited {
+                retry_after: Duration::from_millis(100),
+            });
+        }
+        self.shared.wake.notify_one();
+        PtzPending {
+            rx: Some(rx),
+            refused: None,
+            wait,
+        }
+    }
+
     async fn ptz_request(
         &self,
         channel: u8,
         op: Op,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        if self.shared.is_closing() {
-            return Err(PtzRefusal::SessionClosed);
-        }
-        let (tx, rx) = oneshot::channel();
-        let req = PtzReq {
-            channel,
-            op,
-            origin,
-            reply: Some(tx),
-        };
-        if self.cmd_tx.send(Request::Ptz(req)).await.is_err() {
-            return Err(PtzRefusal::SessionClosed);
-        }
-        self.shared.wake.notify_one();
-        match timeout(self.query_timeout, rx).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(_)) => Err(PtzRefusal::SessionClosed),
-            Err(_) => Err(PtzRefusal::TimedOut),
-        }
+        self.ptz_send(channel, op, origin).outcome().await
     }
 
     /// Starts or renews a pan or tilt move on `channel` at `speed` (1 to
@@ -1268,7 +1375,6 @@ impl DeviceSession {
         speed: u8,
         origin: MotionOrigin,
     ) -> Result<PtzOutcome, PtzRefusal> {
-        let speed = speed.clamp(bc_protocol::ptz::MIN_SPEED, bc_protocol::ptz::MAX_SPEED);
         self.ptz_request(channel, Op::Move { direction, speed }, origin)
             .await
     }
@@ -1292,16 +1398,7 @@ impl DeviceSession {
     /// close paths that cannot wait). It goes out as soon as the
     /// supervisor runs, or after the next login.
     pub fn ptz_stop_now(&self, channel: u8, origin: MotionOrigin) {
-        let req = PtzReq {
-            channel,
-            op: Op::Stop,
-            origin,
-            reply: None,
-        };
-        if self.cmd_tx.try_send(Request::Ptz(req)).is_err() {
-            warn!(channel, "camera stop could not be queued");
-        }
-        self.shared.wake.notify_one();
+        drop(self.ptz_send(channel, Op::Stop, origin));
     }
 
     /// Recalls preset `id` (19 `toPos`) on `channel`. A move in progress
