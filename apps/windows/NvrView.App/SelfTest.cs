@@ -1394,9 +1394,6 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             return;
         }
         // parity: call-window-tile-zoom
-        // The call window is narrow, and which buttons fit there depends on how many the camera's capabilities add (priority order,
-        // checked in HeaderModel), so the header is laid out wide here: this step is about what the buttons do.
-        chrome.ForceWidth(1000);
         stage.Hover(tile);
         stage.PinchDigital(tile, tile.X + tile.Width / 2, tile.Y + tile.Height / 2, 2);
         stage.Tick();
@@ -1406,11 +1403,20 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         bool wantsMain = v.Planner.WantedTier(camera) == StreamTier.Main;
         // Switching to the main stream takes the picture away for a while (the header then shows only the title and the more button),
         // so the header is read before the switch happens and the zoom is reset, which sends the tile back to the sub-stream.
-        await Until(() => chrome.ResetShown && chrome.MapShown, 5);
+        // At the window's real size the header may keep Reset Zoom in its "..." menu: it must be offered either way.
+        await Until(() => chrome.MapShown && (chrome.ResetShown || chrome.HeaderLayout?.MoreMenu.Any(e => e.Item == TileHeaderItem.ResetZoom) == true), 5);
         bool map = chrome.MapShown;
-        bool resetShown = chrome.ResetShown;
+        bool resetButton = chrome.ResetShown;
+        bool resetShown = resetButton || chrome.HeaderLayout?.MoreMenu.Any(e => e.Item == TileHeaderItem.ResetZoom) == true;
         wantsMain |= await Until(() => v.Planner.WantedTier(camera) == StreamTier.Main, 8);
-        chrome.PressReset();
+        if (resetButton)
+        {
+            chrome.PressReset();
+        }
+        else
+        {
+            stage.PerformHeaderItem(tile, TileHeaderItem.ResetZoom, null);
+        }
         bool back = await Until(() => tile.Zoom <= 1.0001 && !chrome.ResetShown && !chrome.MapShown, 5);
         Say($"call window tile: status \"{stage.StatusText(tile)}\" ({tile.Shared?.Video.Status}); pinch to {tile.Zoom:0.00}x then reset, zoom map {map}, source cropped {cropped} ({seen.Width:0.00}x{seen.Height:0.00}), main stream {wantsMain}, header Reset Zoom shown {resetShown} and back to 1x {back}");
         Expect(zoomed, "a pinch did not zoom the call window's tile");
@@ -1439,9 +1445,12 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         Expect(menu.SequenceEqual(want) && callItems, $"the call window tile's menu is not the header model's call menu: {string.Join(" / ", menu)}");
         Expect(layoutItems.Length == 0, $"the call window tile's menu offers {string.Join(", ", layoutItems)}");
         Expect(fixedStill, "focus or split changed the call window's single tile");
-        Expect(shownButtons.Contains(TileHeaderItem.Speaker) && shownButtons.Contains(TileHeaderItem.Quality), "the call window's header lacks the speaker or quality button");
+        // The shared model decides (the speaker never hides before Save Picture; Quality may sit in "..."), and both stay reachable.
+        IReadOnlyList<TileHeaderMenuEntry> overflow = chrome.HeaderLayout?.MoreMenu ?? [];
+        bool Reachable(TileHeaderItem i) => shownButtons.Contains(i) || overflow.Any(e => e.Item == i);
+        Expect(Reachable(TileHeaderItem.Speaker) && Reachable(TileHeaderItem.Quality), "the call window's header has no speaker or quality control, in the header or its \"...\" menu");
+        Expect(!shownButtons.Contains(TileHeaderItem.SavePicture) || shownButtons.Contains(TileHeaderItem.Speaker), "the call window's header hides the speaker while Save Picture shows");
         Expect(toast == "Record Call is coming soon" && stage.ToastText is null, $"Record Call in the call window said \"{toast}\"");
-        chrome.ForceWidth(null);
     }
 
     // The tile header (docs/UX.md "Tile header"): laid out by the shared model on the real chrome at several widths, the "..."
