@@ -133,7 +133,7 @@ internal static class PacingTests
             // Every picture is overdue: each second of media is released as its download arrives, decoded back to back.
             long[] released = [.. Enumerable.Range(0, N).Select(k => k / 10 * 1_000_000L)];
             List<string> problems = Verdict(Decode(released), pts);
-            T.Check(Has(problems, "max") && Has(problems, "late") && Has(problems, "shown") && Has(problems, "skipped"), string.Join("; ", problems));
+            T.Check(Has(problems, "p95") && Has(problems, "late") && Has(problems, "shown") && Has(problems, "skipped"), string.Join("; ", problems));
         });
 
         T.Run("pacing verdict: one picture a few refreshes late passes (the display's grid, not a regression)", () =>
@@ -150,12 +150,27 @@ internal static class PacingTests
             T.Check(problems.Count == 0, string.Join("; ", problems));
         });
 
+        T.Run("pacing verdict: a single stall passes; two late pictures fail", () =>
+        {
+            long[] pts = Pts();
+            // A 110 ms stall: the picture comes so late that the next replaces it (one never shown).
+            long[] stalled = [.. pts.Select(p => p + 105_000)];
+            stalled[30] += 110_000;
+            T.Check(Verdict(Decode(stalled), pts).Count == 0, string.Join("; ", Verdict(Decode(stalled), pts)));
+            // Two pictures 50 ms late are two too many pairs off their spacing.
+            long[] two = [.. pts.Select(p => p + 105_000)];
+            two[20] += 50_000;
+            two[40] += 50_000;
+            List<string> problems = Verdict(Decode(two), pts);
+            T.Check(Has(problems, "late") && !Has(problems, "shown") && !Has(problems, "skipped"), string.Join("; ", problems));
+        });
+
         T.Run("pacing verdict: half the pictures shown, or too few pairs, fails", () =>
         {
             long[] pts = [.. Enumerable.Range(0, N / 2).Select(k => k * 200_000L)];
             long[] at = [.. pts.Select(p => p + 105_000)];
             List<string> half = PacingVerdict.Problems(at, pts, N, 0, 16.667, 20);
-            T.Check(Has(half, "shown") && !Has(half, "max"), string.Join("; ", half));
+            T.Check(Has(half, "shown") && !Has(half, "late"), string.Join("; ", half));
             List<string> few = PacingVerdict.Problems(at[..5], pts[..5], 5, 0, 16.667, 20);
             T.Check(Has(few, "pairs"), string.Join("; ", few));
         });

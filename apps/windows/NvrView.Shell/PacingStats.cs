@@ -219,18 +219,17 @@ public static class PacingRefresh
 /// The bounds the self-tests' pacing steps apply to the shown pictures
 /// (docs/RENDERING.md, "Playback pacing"). A display draws pictures on its
 /// refresh grid, so a pair's jitter of one refresh is the grid alone. The
-/// bounds leave room for that and for a rare late picture, and still fail
-/// clearly on the regressions that matter: pictures decoded in bunches
+/// bounds leave room for that and for a rare late picture (a decoder or
+/// machine stall of any length counts once, as at most two late pairs), and still
+/// fail clearly on the regressions that matter: pictures decoded in bunches
 /// (about half of them never shown, or shown in consecutive refreshes far
-/// from their spacing).
+/// from their spacing, which makes many late pairs and a high p95). There is
+/// no bound on the single largest jitter: one stall says nothing about pacing.
 /// </summary>
 public static class PacingVerdict
 {
     /// <summary>Jitter (ms) the shown pairs may have at the 95th percentile: one 60 Hz refresh plus a few ms.</summary>
     public const double JitterP95Ms = 20;
-
-    /// <summary>Largest jitter allowed for any shown pair, in refresh periods (plus <see cref="NoiseRefreshes"/>).</summary>
-    public const double MaxRefreshes = 3;
 
     /// <summary>A pair whose jitter is over this many refresh periods (plus <see cref="NoiseRefreshes"/>) is late.</summary>
     public const double LateRefreshes = 2;
@@ -241,8 +240,8 @@ public static class PacingVerdict
     /// </summary>
     public const double NoiseRefreshes = 0.5;
 
-    /// <summary>Late pairs allowed (one late picture makes two: the interval before it and the one after).</summary>
-    public const int LateAllowed = 4;
+    /// <summary>Late pairs allowed: one late picture makes two (the interval before it and the one after).</summary>
+    public const int LateAllowed = 2;
 
     /// <summary>Share of the released pictures that must be shown.</summary>
     public const double ShownRatio = 0.9;
@@ -252,7 +251,7 @@ public static class PacingVerdict
 
     /// <summary>
     /// What is wrong with the shown pictures (empty when they pass). Each
-    /// problem starts with its key: "pairs", "p95", "max", "late", "shown",
+    /// problem starts with its key: "pairs", "p95", "late", "shown",
     /// or "skipped".
     /// </summary>
     /// <param name="shownAtUs">When each picture was first shown (µs, ascending).</param>
@@ -265,7 +264,7 @@ public static class PacingVerdict
     {
         var problems = new List<string>();
         PacingSummary s = PacingStats.Of(shownAtUs, shownPtsUs);
-        double max = (MaxRefreshes + NoiseRefreshes) * refreshMs, lateMs = (LateRefreshes + NoiseRefreshes) * refreshMs;
+        double lateMs = (LateRefreshes + NoiseRefreshes) * refreshMs;
         int late = PacingStats.Over(shownAtUs, shownPtsUs, lateMs);
         double ratio = released > 0 ? (double)s.Pictures / released : 0;
         if (s.Pairs < minPairs)
@@ -276,13 +275,9 @@ public static class PacingVerdict
         {
             problems.Add(FormattableString.Invariant($"p95: jitter p95 {s.JitterP95:0.0} ms (at most {JitterP95Ms:0} ms)"));
         }
-        if (s.JitterMax > max)
-        {
-            problems.Add(FormattableString.Invariant($"max: jitter max {s.JitterMax:0.0} ms (at most {MaxRefreshes:0} refreshes, {max:0.0} ms)"));
-        }
         if (late > LateAllowed)
         {
-            problems.Add(FormattableString.Invariant($"late: {late} pairs more than {LateRefreshes:0} refreshes ({lateMs:0.0} ms) off their spacing (at most {LateAllowed})"));
+            problems.Add(FormattableString.Invariant($"late: {late} pairs more than {LateRefreshes:0} refreshes ({lateMs:0.0} ms) off their spacing (at most {LateAllowed}; largest {s.JitterMax:0.0} ms)"));
         }
         if (ratio < ShownRatio)
         {

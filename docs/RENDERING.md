@@ -224,10 +224,11 @@ self-tests therefore judge the decode times the trace recorded as an ideal
 picture is drawn, as both renderers do), and check the real display only as
 wiring (at least 80% of the released pictures drawn). The bounds
 (`PacingVerdict`, the same constants and test vectors in `PacingStats.cs` and
-`PacingStats.swift`): shown pairs' jitter p95 at most 20 ms; no pair over
-three refreshes plus half a refresh of noise; at most four pairs over two
-and a half refreshes (one late picture makes two); at least 90% of the
-released pictures shown; at most two decoded pictures never shown. The
+`PacingStats.swift`): shown pairs' jitter p95 at most 20 ms; at most two
+pairs over two and a half refreshes (one late picture, or one stall of any
+length, makes two; there is no bound on the single largest jitter); at least
+90% of the released pictures shown; at most two decoded pictures never
+shown. The
 playback step measures 40 shown pairs (about four seconds at the mock's
 10 fps) and the live step 30 pictures per tile, each waiting for those
 counts, not for a fixed time.
@@ -241,7 +242,8 @@ the display stage and the bounds in the shell and NVRCore tests, which also
 inject the old bugs: pictures a device sends in pairs decoded on arrival
 (without the live pacer) show 30 of 60 pictures with 30 never shown, and a
 recording released in one-second bursts (the wrong UTC offset) shows 12 of
-60 with a 483 ms jitter, both failing; one picture 50 ms late passes. The
+60 with a 483 ms jitter, both failing; one picture 50 ms late, or one
+110 ms stall, passes, and two late pictures fail. The
 apps' steps keep the end to end path: the real core against the mock, the
 real decoder, the real renderer.
 
