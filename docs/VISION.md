@@ -397,8 +397,10 @@ DetectorKit`). Windows is planned (Windows ML) and not started.
 - **Delivery.** `scripts/detector-model.sh build` makes the compiled, zipped
   model and prints its size and SHA-256; `fetch` installs a published copy
   after checking both against `scripts/detector-model.json`;
-  `package-macos.sh --bundle-detector` puts it in the app bundle. Where the
-  published zip lives is an owner decision (see NOTIFICATIONS.md, Decisions).
+  `package-macos.sh --bundle-detector` puts it in the app bundle. The
+  published zip lives in a `models` folder next to the update manifest
+  (NOTIFICATIONS.md, Decisions); the app derives its address from the update
+  source.
 
 Measured on the synthetic benchmark (release build, one process that also
 runs the viewer, eight 1280 x 720 pictures, the whole picture plus four tiles =

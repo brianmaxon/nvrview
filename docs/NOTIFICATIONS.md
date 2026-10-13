@@ -933,10 +933,11 @@ FFI.md "Smart alerts" has their settings entries.
   `scripts/package-macos.sh`) are checked before the archive is unpacked
   into Application Support/NVRView/Models; a mismatch installs nothing. The
   status is a plain sentence ("No detector model: set an update source...")
-  in `SmartAlertsController.modelStatus`. The manifest pins no published
-  archive yet, so until `scripts/detector-model.sh build` output is
-  published and recorded there, the host reports that and stays unable to
-  detect.
+  in `SmartAlertsController.modelStatus`. Publishing a model: run
+  `scripts/detector-model.sh build`, record the printed size and SHA-256 in
+  `scripts/detector-model.json` (its `url` stays empty: the address comes
+  from the update source), and copy the zip into a `models` folder next to
+  `updates.json` before the release that pins it.
 - **Windows** has the settings builder (`AlertSettingsDocument`, the same
   rules and tests as macOS) and the Credential Manager store
   (`WindowsAlertSecrets`); its host (decode, detector, notifications) is
@@ -1018,4 +1019,4 @@ FFI.md "Smart alerts" has their settings entries.
 | Learning | On, bounded, visible, resettable; never touches always-alert rules (proposed default). |
 | Multimodal verifier | Off; when on, only for the borderline band and captions (proposed default). |
 | Retention | Event log 90 days, snapshots 7 days, evaluation pictures until deleted (proposed default). |
-| How the detector model reaches the app (macOS) | **Proposed: a first-use download** of the checksum-pinned, compiled model (37 MB zip) from the user's own update source, shown as part of turning smart alerts on; bundling it (`package-macos.sh --bundle-detector`) stays available for offline installs. Not decided: where the zip is published (`scripts/detector-model.json` has no url yet). |
+| How the detector model reaches the app (macOS) | **Decided: a first-use download** of the checksum-pinned, compiled model (37 MB zip) from the user's own update source, at `<update source>/models/rtdetr_r18vd.mlmodelc.zip`, shown as part of turning smart alerts on; bundling it (`package-macos.sh --bundle-detector`) stays available for offline installs. |
