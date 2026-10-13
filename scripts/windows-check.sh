@@ -5,7 +5,14 @@
 # for preparing that computer (toolchain, key-only SSH).
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> [NVRVIEW_WINDOWS_WORKER=<name>] \
-#     scripts/windows-check.sh
+#     scripts/windows-check.sh [--lock-held]
+#
+# The script takes the Windows lock itself (scripts/windows-lock.sh; waiting
+# in this one command, agents behind any waiting merge) and gives it back on
+# every exit, so do not take it by hand. NVRVIEW_WINDOWS_HOSTS="host-a host-b"
+# names a pool: the first free host runs the check. --lock-held (or
+# NVRVIEW_WINDOWS_LOCK_HELD=1) says the caller already holds it, with
+# NVRVIEW_WINDOWS_HOST set to the host it got (merge scripts do this).
 #
 # A finished worker's folder, its target\ build output included, is deleted with
 #
@@ -27,9 +34,17 @@
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 
-host="${NVRVIEW_WINDOWS_HOST:?set NVRVIEW_WINDOWS_HOST to the SSH host alias of the Windows computer}"
+. scripts/stamps-lib.sh
+[ -n "$(windows_hosts)" ] || { echo "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer" >&2; exit 2; }
 clean=0
 package_to=""
+if [ "${1:-}" = "--lock-held" ]; then
+  # The caller holds the Windows lock (scripts/windows-lock.sh) and has set
+  # NVRVIEW_WINDOWS_HOST to the host it got.
+  NVRVIEW_WINDOWS_LOCK_HELD=1
+  export NVRVIEW_WINDOWS_LOCK_HELD
+  shift
+fi
 defaults_args=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
@@ -79,6 +94,17 @@ worker="${NVRVIEW_WINDOWS_WORKER:-main}"
 case "$worker" in
   *[!A-Za-z0-9_-]* | '') echo "NVRVIEW_WINDOWS_WORKER: letters, digits, - and _ only" >&2; exit 2 ;;
 esac
+# The lock (scripts/windows-lock.sh): taken here unless the caller holds it,
+# at priority $NVRVIEW_WINDOWS_PRIORITY (agent by default; merges and releases
+# use merge). It picks the first free host of NVRVIEW_WINDOWS_HOSTS. --clean
+# touches only a worker's folder and needs no lock.
+if [ "$clean" = 1 ]; then
+  host="${NVRVIEW_WINDOWS_HOST:-$(windows_hosts | head -n 1)}"
+else
+  trap windows_unlock EXIT
+  windows_lock
+  host="${NVRVIEW_WINDOWS_HOST:-$(windows_hosts | head -n 1)}"
+fi
 ssh_opts="-o BatchMode=yes -o ConnectTimeout=10"
 gitbash='"C:\Program Files\Git\bin\bash.exe"'
 
@@ -165,7 +191,7 @@ run_file=""
 finish_cache() {
   if [ -n "$run_file" ]; then sc finish "$run_file" "$@" || true; run_file=""; fi
 }
-trap 'finish_cache --failed "Windows worker"; rm -rf "$logs"' EXIT
+trap 'finish_cache --failed "Windows worker"; rm -rf "$logs"; windows_unlock' EXIT
 # The worker's tool versions are part of every Windows fingerprint.
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
