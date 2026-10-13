@@ -51,8 +51,8 @@ struct SmartAlertSettingsFile {
 @MainActor
 @Observable
 final class SmartAlertsModel {
-    @ObservationIgnored private unowned let model: AppModel
-    @ObservationIgnored private let bridge: CoreBridge
+    @ObservationIgnored unowned let model: AppModel
+    @ObservationIgnored let bridge: CoreBridge
     @ObservationIgnored private let credentials: any CredentialStore
     @ObservationIgnored private let file: SmartAlertSettingsFile
 
@@ -71,6 +71,11 @@ final class SmartAlertsModel {
     private(set) var lastDelivery: [Int: (ok: Bool, at: Date)] = [:]
     /// The last Home Assistant connection test, in words.
     var homeAssistantTest: String?
+    /// The last "Send test alert" result, in words, and as the event gave it.
+    var homeAssistantSend: String?
+    private(set) var lastOutputTest: OutputTestResult?
+    /// The last "Simulate trigger", in words.
+    var simulateNote: String?
     /// Requests seen, by key (until done), for the detector and the boxes.
     @ObservationIgnored private var requests: [String: VerifyRequest] = [:]
     /// The latest checked picture per check and angle (window mode).
@@ -234,6 +239,11 @@ final class SmartAlertsModel {
             configured = JSONValue.parse(json)
         case .triggerRejected:
             break
+        case .outputTest(let json):
+            if let r = OutputTestResult(json: json) {
+                lastOutputTest = r
+                homeAssistantSend = r.line()
+            }
         }
         for body in eventListeners.values { body(event) }
         updatePanel()
@@ -405,14 +415,10 @@ final class SmartAlertsModel {
     /// The settings screen's line for a sensor (its input's result and, when
     /// the core reports it, the connection's state).
     func sensorStatus(_ index: Int) -> String? {
-        if let live = (status?["inputs"]?.array)?.first(where: { $0["index"]?.int64 == Int64(index) }) {
-            if let state = live["state"]?.string {
-                switch state {
-                case "connected": return "Connected"
-                case "login_rejected": return "Login rejected (not retried; save again to restart)"
-                case let s: return s.replacingOccurrences(of: "_", with: " ").capitalized
-                }
-            }
+        if settings.sensors.indices.contains(index),
+            let live = SensorConnection.find(id: settings.sensors[index].key, in: status)
+        {
+            return live.line()
         }
         guard let entry = (configured?["inputs"]?.array)?.first(where: { $0["index"]?.int64 == Int64(index) }) else {
             return settings.enabled ? nil : "Smart alerts are off"
@@ -505,7 +511,7 @@ final class SmartAlertsModel {
 
     func unsubscribeEvents(_ token: UUID) { eventListeners[token] = nil }
 
-    private func changed() {
+    func changed() {
         for body in listeners.values { body() }
     }
 }

@@ -311,6 +311,22 @@ public protocol CoreAPI: Sendable {
     func alertFeedback(json: String) throws(CoreStatus)
     /// `nv_alert_mute`: mutes a camera for `seconds` (0 unmutes).
     func alertMute(cameraJSON: String, seconds: UInt32) throws(CoreStatus)
+    /// `nv_alerts_messages` (minor 14): a sensor's message log, a page as
+    /// `SensorMessagePage.parse` reads it (`SensorMessagePage.request` in).
+    func alertsMessages(request: String) throws(CoreStatus) -> String
+    /// `nv_alerts_output_test` (minor 14): one test alert through a
+    /// configured output; the result arrives as an `alerts_output_test` event.
+    func alertsOutputTest(request: String) throws(CoreStatus)
+    /// `nv_alert_evidence_put` (minor 14): a kept frame (JPEG, or none) and
+    /// the methods' boxes for a check (`EvidenceDocument.request`).
+    func alertEvidencePut(json: String, data: Data?) throws(CoreStatus)
+    /// `nv_alert_evidence_get` (minor 14): one set (`{"trigger_id":N}`) or the
+    /// list (`EvidenceList.parse`).
+    func alertEvidenceGet(query: String?) throws(CoreStatus) -> String
+    /// `nv_alert_evidence_frame_get` (minor 14): one kept frame (JPEG).
+    func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data
+    /// `nv_alert_evidence_pin` (minor 14): "Keep".
+    func alertEvidencePin(triggerID: UInt64) throws(CoreStatus)
 
     // MARK: Recorded playback (minor 6; docs/FFI.md "Recorded playback (minor 6)")
     //

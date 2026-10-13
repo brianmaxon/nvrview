@@ -53,6 +53,25 @@ final class FakeAlertsState: @unchecked Sendable {
         var feedback: [UInt64: [String: Any]] = [:]
         var mutes: [AlertCamera: Date] = [:]
         var events: [String] = []
+        /// Minor 14: simulated triggers (trigger ID to "also send to Home
+        /// Assistant"), the sensor key of each trigger, the sensors' message
+        /// logs and connection states, the next test-alert result, and the
+        /// kept evidence.
+        var tests: [UInt64: Bool] = [:]
+        var sensors: [UInt64: String] = [:]
+        var sensorMessages: [String: [[String: Any]]] = [:]
+        var sensorSeq: [String: Int64] = [:]
+        var sensorStates: [String: [String: Any]] = [:]
+        var outputTestResult: (ok: Bool, status: Int?, summary: String) = (true, 200, "Home Assistant: helper pulsed (200)")
+        var evidence: [UInt64: FakeEvidence] = [:]
+    }
+
+    /// One kept set of evidence.
+    struct FakeEvidence {
+        var created = Int(Date().timeIntervalSince1970 * 1000)
+        var doc: [String: Any] = [:]
+        var frames: [Int: (at: Int, data: Data)] = [:]
+        var pinned = false
     }
 
     private let lock = NSLock()
@@ -149,10 +168,15 @@ extension FakeCore {
             case "co_alarm": "co"
             default: external ? "sensor" : "other"
             }
+        let test = o["test"] as? Bool ?? false
+        let sendToHA = test && (o["send_to_home_assistant"] as? Bool ?? false)
+        if o["only_camera"] != nil, !test { throw .invalidArgument }
         let id = try alertsWorld.locked { w throws(CoreStatus) -> UInt64 in
             guard w.configured, w.enabled else { throw .notConfigured }
             let id = w.nextTrigger
             w.nextTrigger += 1
+            if test { w.tests[id] = sendToHA }
+            if external, let origin = o["origin"] as? String { w.sensors[id] = origin }
             let now = Self.nowMs()
             var received: [String: Any] = [
                 "at_ms": now, "step": "trigger_received", "source": source, "kind": kind, "class": className,
@@ -281,7 +305,23 @@ extension FakeCore {
         step(&w, &check, id: id, outcome)
         d["trace"] = ["version": 1, "trigger_id": id, "steps": check.steps]
         var entry: [String: Any] = ["logged_ms": now, "source": check.source, "decision": d, "deliveries": [Any]()]
-        w.events.append(alertJSON(["type": "alert", "state": state, "source": check.source, "decision": d]))
+        var event: [String: Any] = ["type": "alert", "state": state, "source": check.source, "decision": d]
+        if w.tests[id] != nil {
+            entry["test"] = true
+            event["test"] = true
+        }
+        if let sensor = w.sensors[id] {
+            entry["sensor"] = sensor
+            event["sensor"] = sensor
+        }
+        if w.evidence[id] != nil {
+            var summary = d
+            summary.removeValue(forKey: "trace")
+            w.evidence[id]?.doc["decision"] = summary
+            w.evidence[id]?.doc["trigger"] = ["source": check.source, "class": cls]
+            if w.tests[id] != nil { w.evidence[id]?.doc["test"] = true }
+        }
+        w.events.append(alertJSON(event))
         if decision == "alert" {
             // The desktop output (the app's own): one delivery step.
             let delivery: [String: Any] = ["at_ms": now, "step": "delivery", "output": 0, "kind": "desktop", "ok": true]
@@ -424,6 +464,8 @@ extension FakeCore {
         let classes = q["class"] as? [String]
         let camera = Self.parseCamera(q["camera"])
         let text = (q["text"] as? String)?.lowercased()
+        let sensorKey = q["sensor"] as? String
+        let testOnly = q["test"] as? Bool
         let since = q["since_ms"] as? Int, until = q["until_ms"] as? Int, before = q["before_ms"] as? Int
         let ranks = ["low": 0, "normal": 1, "high": 2, "critical": 3]
         let minRank = (q["min_severity"] as? String).flatMap { ranks[$0] }
@@ -442,6 +484,8 @@ extension FakeCore {
                     if c?.device != camera.device || c?.channel != camera.channel { continue }
                 }
                 if let text, !((d["explanation"] as? String) ?? "").lowercased().contains(text) { continue }
+                if let sensorKey, e["sensor"] as? String != sensorKey { continue }
+                if let testOnly, (e["test"] as? Bool ?? false) != testOnly { continue }
                 if let since, decided < since { continue }
                 if let until, decided >= until { continue }
                 if let before, decided >= before { continue }
@@ -467,6 +511,13 @@ extension FakeCore {
                 "status": [
                     "configured": w.configured, "enabled": w.enabled, "open_checks": w.checks.count,
                     "muted": muted, "requests": w.requests.count,
+                    "input_status": Self.configuredInputs(w.lastConfiguration).enumerated().map { i, id in
+                        [
+                            "index": i, "id": id, "kind": "mqtt",
+                            "status": w.sensorStates[id] ?? ["status": "connected", "messages": w.sensorSeq[id] ?? 0],
+                        ] as [String: Any]
+                    },
+                    "evidence": ["sets": w.evidence.count],
                 ],
             ])
         }

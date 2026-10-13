@@ -71,6 +71,24 @@ pub(crate) fn clamp_retention_min(m: i64) -> u32 {
         .unwrap_or(DEFAULT_RETENTION_MIN)
 }
 
+/// Merges `patch` into `into`: objects member by member (so a method's
+/// boxes for another frame add to the earlier ones), anything else replaced.
+fn merge(into: &mut Value, patch: &Value) {
+    match (into.as_object_mut(), patch.as_object()) {
+        (Some(a), Some(b)) => {
+            for (k, v) in b {
+                match a.get_mut(k) {
+                    Some(existing) => merge(existing, v),
+                    None => {
+                        a.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        _ => *into = patch.clone(),
+    }
+}
+
 impl EvidenceStore {
     /// Opens (and prunes) the store under `dir/evidence` and
     /// `dir/evidence/pinned`; `None` keeps everything in memory.
@@ -233,7 +251,7 @@ impl EvidenceStore {
             ) {
                 continue;
             }
-            set.doc[k] = v.clone();
+            merge(&mut set.doc[k], v);
         }
         self.write_doc(id);
         true
@@ -509,6 +527,20 @@ mod tests {
         assert!(again.get(5, later).is_some());
         assert!(again.get(5, T0 + MIN + PIN_RETENTION_MS + 1).is_none());
         assert!(!dir.path().join("evidence/pinned/5").exists());
+    }
+
+    #[test]
+    fn documents_merge_deeply_so_each_frame_adds_its_boxes() {
+        let mut s = EvidenceStore::open(None, T0);
+        let first = json!({"methods": {"detector": {"frames": {"0": {"boxes": [1]}}}}});
+        let second = json!({"methods": {"detector": {"frames": {"1": {"boxes": [2]}}},
+                                         "camera_ai": {"claimed": "person"}}});
+        s.merge_doc(1, &first, T0);
+        s.merge_doc(1, &second, T0);
+        let v = s.get(1, T0).unwrap();
+        assert_eq!(v["methods"]["detector"]["frames"]["0"]["boxes"][0], 1);
+        assert_eq!(v["methods"]["detector"]["frames"]["1"]["boxes"][0], 2);
+        assert_eq!(v["methods"]["camera_ai"]["claimed"], "person");
     }
 
     #[test]

@@ -121,6 +121,7 @@ public final class SmartAlertsController {
                 stored: stored, deviceID: { environment.deviceID($0) },
                 utcOffsetMinutes: environment.utcOffsetMinutes(), secrets: environment.secrets)
             desktop = DesktopOutput(document: built.json)
+            verifier.evidence.setInside(Self.insideCameras(in: built.json))
             guard built.enabled || state != .off else {
                 state = .off
                 return
@@ -154,12 +155,30 @@ public final class SmartAlertsController {
         case .configured(let json):
             lastConfigured = json
             if case .running = self.state, let issues = Self.issues(in: json) { self.state = .running(issues: issues) }
-        case .verifyRequestDone, .verifyStep, .triggerRejected:
+        case .verifyRequestDone, .verifyStep, .triggerRejected, .outputTest:
             break
         }
     }
 
     private func finished() { inFlight -= 1 }
+
+    /// The cameras the settings mark as inside a building: their checks leave
+    /// no evidence.
+    static func insideCameras(in json: String) -> Set<AlertCamera> {
+        guard let data = json.data(using: .utf8),
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let cameras = object["cameras"] as? [[String: Any]]
+        else { return [] }
+        var out: Set<AlertCamera> = []
+        for entry in cameras where (entry["exposure"] as? String) == "inside" {
+            if let c = entry["camera"] as? [String: Any], let device = (c["device"] as? NSNumber)?.uint64Value,
+                let channel = (c["channel"] as? NSNumber)?.uint16Value
+            {
+                out.insert(AlertCamera(device: device, channel: channel, lens: (c["lens"] as? NSNumber)?.uint8Value ?? 0))
+            }
+        }
+        return out
+    }
 
     private static func issues(in json: String) -> [String]? {
         guard let data = json.data(using: .utf8),
