@@ -57,6 +57,24 @@ final class RecordingsPlayer {
     var volume: Float = 1 { didSet { if volume != oldValue { updateAudio() } } }
     /// Why the player shows nothing (a refused open), if it does not.
     private(set) var message: String?
+    /// Each camera's digital zoom, Fill choice and fisheye view (docs/UX.md
+    /// "Recordings"). It belongs to the player's tile: play, pause, seeks,
+    /// speed changes, another incident of the same cameras and the grid,
+    /// large and single views keep it; a camera that leaves the player
+    /// forgets it. Nothing downloaded, exported or edited reads it.
+    var tileViews = PlayerTileViews()
+    /// The view that draws the cells (it takes the pointer's zoom and pan).
+    @ObservationIgnored weak var stage: PlayerStageView?
+    /// The cell under the pointer, if any (the keys act on it).
+    var hovered: Int?
+    /// A short message over the player (a saved picture), with what it offers.
+    var toast: PlayerToast?
+    /// Pictures saved and the last one (self-test).
+    @ObservationIgnored var pictureSaves = 0
+    @ObservationIgnored var lastPictureSave: PictureSaveRecord?
+    /// Counts saves, so a cell can flash (the shutter).
+    var flashCount = 0
+    var flashCamera: RecordingCamera?
     /// How many playbacks this player opened and seeks it sent (self-test).
     @ObservationIgnored private(set) var opens = 0
     @ObservationIgnored private(set) var seeks = 0
@@ -64,6 +82,8 @@ final class RecordingsPlayer {
     init(model: RecordingsModel) {
         self.model = model
     }
+
+    var app: AppModel? { model.app }
 
     var transport: TransportState {
         TransportState(startMs: startMs, endMs: endMs, positionMs: positionMs, state: state, rate: rate)
@@ -129,6 +149,7 @@ final class RecordingsPlayer {
             opens += 1
             playback = opened.id
             cells = zip(cameras, opened.tiles).map { Cell(camera: $0, tile: $1) }
+            tileViews.retain(cameras)
             self.day = day
             startMs = start
             endMs = end
@@ -206,6 +227,7 @@ final class RecordingsPlayer {
         guard let p = playback, let i = cells.firstIndex(where: { $0.camera == camera }) else { return }
         let tile = cells[i].tile
         cells.remove(at: i)
+        tileViews.retain(cameras)
         mode = PlayerGrid.normalized(mode, count: cells.count)
         model.removePlaybackCamera(p, tile: tile)
         if cells.isEmpty { close() } else { updateAudio() }

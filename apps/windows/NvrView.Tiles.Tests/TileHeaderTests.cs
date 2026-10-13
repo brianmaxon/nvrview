@@ -22,7 +22,7 @@ internal static class TileHeaderTests
     private static readonly string[] TileKeys =
     [
         "audio", "talk", "doorbell", "panTilt", "presets", "lens", "fisheye", "picture", "recording", "zoomed",
-        "alert", "listening", "conversation", "call", "panned",
+        "alert", "listening", "conversation", "call", "panned", "playback",
     ];
 
     private static TileHeaderTile Tile(JsonElement json)
@@ -49,6 +49,7 @@ internal static class TileHeaderTests
             Alert = Flag("alert"),
             Listening = Flag("listening"),
             Conversation = Flag("conversation"),
+            Playback = Flag("playback"),
             Call = call switch
             {
                 "none" => TileHeaderCall.None,

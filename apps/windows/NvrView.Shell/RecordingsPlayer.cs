@@ -78,6 +78,13 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
     /// <summary>Clears the refusal message (the user dismissed it).</summary>
     public void Dismiss() => Message = null;
 
+    /// <summary>
+    /// Each camera's digital zoom, Fill choice and fisheye view (docs/UX.md "Recordings"). It belongs to the player's tile:
+    /// play, pause, seeks, speed changes, another incident of the same cameras and the grid, large and single views keep it;
+    /// a camera that leaves the player forgets it. Nothing downloaded, exported or edited reads it.
+    /// </summary>
+    public PlayerTileViews Views { get; } = new();
+
     /// <summary>How many playbacks this player opened (self-test).</summary>
     public int Opens { get; private set; }
 
@@ -205,6 +212,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
             Opens++;
             Playback = opened.Playback;
             Cells = [.. cameras.Zip(opened.Tiles, (c, t) => new PlayerCell(c, t))];
+            Views.Retain(cameras);
             Day = day;
             StartMs = start;
             EndMs = end;
@@ -323,6 +331,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         }
         PlayerCell cell = Cells[i];
         Cells.RemoveAt(i);
+        Views.Retain(Cameras);
         _mode = PlayerGrid.Normalized(_mode, Cells.Count);
         model.RemovePlaybackCamera(p, cell.Tile);
         if (Cells.Count == 0)

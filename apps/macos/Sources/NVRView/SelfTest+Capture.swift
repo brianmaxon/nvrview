@@ -176,7 +176,8 @@ extension SelfTest {
     /// CPU conversion of the buffer it was made from. Returns the image.
     @discardableResult
     func checkSaved(
-        _ record: PictureSaveRecord?, _ what: String, ext: String, nameEnds: String, size: CGSize?, tolerance: Int
+        _ record: PictureSaveRecord?, _ what: String, ext: String, nameEnds: String, size: CGSize?, tolerance: Int,
+        confirmation: (text: String?, action: String?)? = nil
     ) -> RenderedImage? {
         guard let record else {
             problems.append("\(what): no picture was saved")
@@ -195,12 +196,14 @@ extension SelfTest {
         }
         let sized = size.map { abs(CGFloat(image.width) - $0.width) <= 1 && abs(CGFloat(image.height) - $0.height) <= 1 } ?? true
         let named = name.wholeMatch(of: shape) != nil && name.hasSuffix(nameEnds + "." + ext)
-        let toast = window?.stage.toastText
+        // The confirmation: the live stage's, or the one given (a player's).
+        let toast = confirmation.map(\.text) ?? window?.stage.toastText
+        let toastAction = confirmation.map(\.action) ?? window?.stage.toast.actionTitle
         print("\(what): \(name), \(image.width)x\(image.height), \(data.count) bytes, toast \(toast ?? "none")")
         if !named { problems.append("\(what): the file name \(name) does not follow the rule") }
         if fileSize != data.count || data.count < 100 { problems.append("\(what): the file has \(fileSize ?? -1) bytes") }
         if !sized { problems.append("\(what): \(image.width)x\(image.height), expected \(size.map { "\($0)" } ?? "?")") }
-        if toast != "Picture saved" || window?.stage.toast.actionTitle != "Show in Finder" {
+        if toast != "Picture saved" || toastAction != "Show in Finder" {
             problems.append("\(what): the confirmation toast said \(toast ?? "nothing")")
         }
         if !record.dewarped {

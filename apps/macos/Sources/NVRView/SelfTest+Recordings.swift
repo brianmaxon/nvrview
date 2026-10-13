@@ -384,7 +384,7 @@ extension SelfTest {
         }
         whenPlayback(fake, { p.state == .playing && p.positionMs >= target * 1000 }, timeout: 2) { [self] in
             print("recordings: a lane click seeked to \(TransportState.clock(p.positionMs)) and plays")
-            playbackEdits(b, fake, rec)
+            playbackZoom(b, fake, rec)
         }
     }
 

@@ -1134,7 +1134,10 @@ internal sealed partial class StageView : UserControl
     /// One pinch step on a touch screen zooms the tile's digital zoom around the point between the fingers
     /// (<paramref name="x"/>, <paramref name="y"/> in the stage's units), as the wheel does around the pointer.
     /// </summary>
-    public void PinchDigital(StageTile t, double x, double y, double scale)
+    public void PinchDigital(StageTile t, double x, double y, double scale) => PinchAround(t, x, y, scale);
+
+    /// <summary>One pinch step on any tile drawn by a <see cref="StageRenderer"/> (a live tile's or a recording player's): see <see cref="PinchDigital"/>.</summary>
+    public static void PinchAround(StageTile t, double x, double y, double scale)
     {
         if (t.ViewWidth <= 0 || t.ViewHeight <= 0 || t.PictureWidth <= 0)
         {

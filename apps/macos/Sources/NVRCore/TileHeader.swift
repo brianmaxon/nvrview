@@ -88,12 +88,18 @@ public struct TileHeaderTile: Equatable, Sendable {
     /// The camera's call is open (End Conversation).
     public var conversation = false
     public var call = TileHeaderCall.noCall
+    /// A recording player's tile (docs/UX.md "Recordings"): only what applies
+    /// to a picture is offered (Save Picture, Reset Zoom, Fisheye View, Fill
+    /// Tile, Reset Position, the Save items); no Record, Speaker, Quality,
+    /// talk-back, PTZ or call items.
+    public var playback = false
 
     public init(
         audio: Bool = false, talk: Bool = false, doorbell: Bool = false, panTilt: Bool = false,
         presets: Bool = false, lens: Bool = false, fisheye: Bool = false, picture: Bool = true,
         recording: Bool = false, zoomed: Bool = false, panned: Bool = false, alert: Bool = false,
-        listening: Bool = false, conversation: Bool = false, call: TileHeaderCall = .noCall
+        listening: Bool = false, conversation: Bool = false, call: TileHeaderCall = .noCall,
+        playback: Bool = false
     ) {
         self.audio = audio
         self.talk = talk
@@ -110,6 +116,7 @@ public struct TileHeaderTile: Equatable, Sendable {
         self.listening = listening
         self.conversation = conversation
         self.call = call
+        self.playback = playback
     }
 }
 
@@ -200,8 +207,19 @@ public struct TileHeaderLayout: Equatable, Sendable {
         return TileHeaderLayout(width: width, titleWidth: titleWidth, tile: tile, metrics: metrics, placed: fresh)
     }
 
+    /// What a recording player's tile offers: the picture's own actions.
+    public static let playbackItems: Set<TileHeaderItem> = [
+        .savePicture, .resetZoom, .resetPosition, .fisheye, .fillTile, .savePictureAs, .saveZoomedArea,
+        .saveOriginalFisheye,
+    ]
+
     /// The full menu for a tile, in header order, then the long tail.
     public static func menu(for tile: TileHeaderTile) -> [TileHeaderMenuEntry] {
+        let all = fullMenu(for: tile)
+        return tile.playback ? all.filter { playbackItems.contains($0.item) } : all
+    }
+
+    private static func fullMenu(for tile: TileHeaderTile) -> [TileHeaderMenuEntry] {
         let inWindow = tile.call == .window
         var m: [TileHeaderMenuEntry] = []
         if tile.alert { m.append(.init(.dismissAlert, "Dismiss Alert", mac: "↩", windows: "Enter")) }
@@ -253,6 +271,11 @@ public struct TileHeaderLayout: Equatable, Sendable {
     /// The header buttons that apply to a tile, by priority (the pill,
     /// the title and Dismiss excluded).
     public static func buttons(for tile: TileHeaderTile) -> [TileHeaderItem] {
+        let all = fullButtons(for: tile)
+        return tile.playback ? all.filter { playbackItems.contains($0) } : all
+    }
+
+    private static func fullButtons(for tile: TileHeaderTile) -> [TileHeaderItem] {
         var b: [TileHeaderItem] = []
         if tile.audio { b.append(.speaker) }
         b.append(.record)

@@ -22,7 +22,7 @@ namespace NvrView.App;
 internal sealed partial class RecordingsWindow
 {
     private readonly Grid _playerColumn = new();
-    private readonly Grid _playerArea = new() { Background = new SolidColorBrush(Colors.Black) };
+    private readonly PlayerAreaGrid _playerArea = new() { Background = new SolidColorBrush(Colors.Black) };
     private readonly SwapChainPanel _panel = new();
     private readonly Canvas _labels = new() { IsHitTestVisible = false };
     private readonly TextBlock _emptyText = new() { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, Foreground = new SolidColorBrush(Muted), TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, IsHitTestVisible = false, MaxWidth = 360 };
@@ -72,6 +72,14 @@ internal sealed partial class RecordingsWindow
             {
                 Browser.Driver.TogglePlay();
                 e.Handled = true;
+                return;
+            }
+            // 0 resets the tile's view, P saves its picture, Shift+P asks where (docs/UX.md "Keyboard").
+            static bool Down(Windows.System.VirtualKey k) =>
+                Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(k).HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+            if (HandlePlayerKey(e.Key, Down(Windows.System.VirtualKey.Control), Down(Windows.System.VirtualKey.Menu), Down(Windows.System.VirtualKey.Shift)))
+            {
+                e.Handled = true;
             }
         };
         _playerArea.Tapped += OnPlayerTapped;
@@ -95,7 +103,9 @@ internal sealed partial class RecordingsWindow
             }
             SwapChainAttach.To(_panel, chain);
         }));
+        _renderer.Circles = _viewer.Circles;
         _renderer.Start();
+        BuildPlayerPictures();
         Grid.SetRow(_playerArea, 0);
         _playerColumn.Children.Add(_playerArea);
 
@@ -267,6 +277,7 @@ internal sealed partial class RecordingsWindow
     /// <summary>Stops the render thread and lets go of the swap chain (the window is closing).</summary>
     private void ClosePlayerView()
     {
+        ClosePlayerPictures();
         if (_renderer is { } r)
         {
             _renderer = null;
@@ -414,6 +425,7 @@ internal sealed partial class RecordingsWindow
             AddLabel(cells[i], r);
         }
         renderer.Layout = new StageLayout([.. tiles], [.. rects], w, h);
+        SyncPlayerChromes(tiles);
     }
 
     // The follow cut or grid: the renderer draws the edit's pictures; over them the labels of docs/UX.md "Follow and Grid".
@@ -425,6 +437,7 @@ internal sealed partial class RecordingsWindow
             _editStage = new EditStage(files, edit.FramePosition, () => edit.KeyframesOnly);
         }
         renderer.Layout = StageLayout.Empty;
+        SyncPlayerChromes([]);
         renderer.Edit = _editStage;
         _cellRects = [];
         _labels.Children.Clear();
@@ -542,6 +555,11 @@ internal sealed partial class RecordingsWindow
     private void OnPlayerTapped(object sender, TappedRoutedEventArgs e)
     {
         _ = _keys.Focus(FocusState.Pointer);
+        if (_suppressTap)
+        {
+            _suppressTap = false;
+            return;
+        }
         if (Browser.PlayerView != PlayerView.Cameras)
         {
             // A grid's click picks the cell whose sound plays.
@@ -604,6 +622,19 @@ internal sealed partial class RecordingsWindow
             remove.Click += (_, _) => Browser.Remove(camera, incident.Key);
             menu.Items.Add(remove);
         }
+        if (TileAt(point) is { } tile)
+        {
+            SelectPlayerTile(tile);
+            var entries = TileHeaderLayout.Menu(PlayerHeaderTile(tile));
+            if (entries.Count > 0)
+            {
+                menu.Items.Add(new MenuFlyoutSeparator());
+                foreach (TileHeaderMenuEntry entry in entries)
+                {
+                    menu.Items.Add(PlayerMenuItem(entry, tile));
+                }
+            }
+        }
         menu.ShowAt(_playerArea, point);
         e.Handled = true;
     }
@@ -653,4 +684,11 @@ internal sealed partial class RecordingsWindow
 
     /// <summary>The messages drawn over the picture (not the camera labels): "No recording at this time", and so on.</summary>
     public List<string> MessageTexts() => [.. _labels.Children.OfType<TextBlock>().Select(t => t.Text)];
+}
+
+/// <summary>The player's picture area: a grid whose pointer shape the window sets (a hand over a picture a drag moves).</summary>
+internal sealed class PlayerAreaGrid : Grid
+{
+    /// <summary>Sets the pointer shape over the area; null for the default.</summary>
+    public void SetCursor(Microsoft.UI.Input.InputCursor? cursor) => ProtectedCursor = cursor;
 }

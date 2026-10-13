@@ -30,14 +30,19 @@ struct PictureSaveRecord {
     var dewarped: Bool
 }
 
-extension StageView {
-    /// What to draw for `kind` from the tile at `path` now: its newest
-    /// decoded picture, the color matrix, and the region or the dewarp.
-    /// Nil without a picture.
-    func pictureRender(at path: NodePath, kind: PictureKind) -> PictureRender? {
-        guard let camera = state.tree[path]?.camera, let tile = model.leases.tile(for: camera),
-            let picture = tile.latestPicture()
-        else { return nil }
+/// What a save draws from a tile (shared by the live tiles and the recording
+/// player's, so a saved picture is made one way): the tile's newest decoded
+/// picture, its color matrix, and the region or the dewarp.
+enum PictureRenderBuilder {
+    /// Nil without a picture. `tileSize` is the tile in points (for the
+    /// zoomed area); `dewarp` gives the fisheye view for the picture at its
+    /// layout size, or nil to draw the picture as is.
+    @MainActor
+    static func make(
+        tile: CoreTile, kind: PictureKind, tileSize: CGSize?, fill: Bool, zoom: TileZoom,
+        dewarp: (DecodedPicture, CGSize) -> FisheyeDewarp?
+    ) -> PictureRender? {
+        guard let picture = tile.latestPicture() else { return nil }
         let snapshot = tile.snapshot
         let mapping = PictureMapping(
             snapshot: snapshot, pictureSize: PixelSize(width: UInt32(picture.width), height: UInt32(picture.height)))
@@ -48,21 +53,32 @@ extension StageView {
             ?? YCbCrToRGB(r: [1, 0, 0, 0], g: [0, 1, 0, 0], b: [0, 0, 1, 0])
         let whole = PictureRegion.whole(layoutSize: layout, offset: offset)
         // A dewarped fisheye view is drawn at the source's resolution.
-        if kind != .originalFisheye,
-            let dewarp = fisheyeDewarp(camera: camera, path: path, picture: picture, tileSize: layout)
-        {
+        if kind != .originalFisheye, let dewarp = dewarp(picture, layout) {
             return PictureRender(
                 picture: picture, color: color, source: whole.rect, dewarp: dewarp.constants, width: whole.width,
                 height: whole.height)
         }
         var region = whole
-        if kind == .zoomedArea, let leaf = frames.leaves.first(where: { $0.path == path }) {
-            region = PictureRegion.visible(
-                layoutSize: layout, offset: offset, tile: leaf.rect.size, fill: fills(atTile: path),
-                zoom: zoom(atTile: path)) ?? whole
+        if kind == .zoomedArea, let tileSize {
+            region = PictureRegion.visible(layoutSize: layout, offset: offset, tile: tileSize, fill: fill, zoom: zoom)
+                ?? whole
         }
         return PictureRender(
             picture: picture, color: color, source: region.rect, width: region.width, height: region.height)
+    }
+}
+
+extension StageView {
+    /// What to draw for `kind` from the tile at `path` now. Nil without a
+    /// picture.
+    func pictureRender(at path: NodePath, kind: PictureKind) -> PictureRender? {
+        guard let camera = state.tree[path]?.camera, let tile = model.leases.tile(for: camera) else { return nil }
+        return PictureRenderBuilder.make(
+            tile: tile, kind: kind, tileSize: frames.leaves.first(where: { $0.path == path })?.rect.size,
+            fill: fills(atTile: path), zoom: zoom(atTile: path)
+        ) { picture, layout in
+            self.fisheyeDewarp(camera: camera, path: path, picture: picture, tileSize: layout)
+        }
     }
 
     /// Saves the picture of the tile at `path`: to the pictures folder, or
@@ -119,8 +135,49 @@ extension StageView {
         }
     }
 
-    /// The next free name in `folder`, for the save panel to start from.
     private static func suggestedName(
+        camera: String, date: Date, folder: URL, format: PictureFormat, shareSafe: Bool
+    ) -> String {
+        SavePicturePanel.suggestedName(camera: camera, date: date, folder: folder, format: format, shareSafe: shareSafe)
+    }
+
+    private func askWhere(suggested: String, folder: URL, format: PictureFormat, done: @escaping (URL?) -> Void) {
+        SavePicturePanel.ask(suggested: suggested, folder: folder, format: format, window: window, done: done)
+    }
+
+    /// A brief white flash over the tile, as a shutter (not under Reduce
+    /// Motion; the confirmation still shows).
+    private func flash(_ path: NodePath) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let chrome = chromes[path] else { return }
+        let view = NSView(frame: chrome.frame)
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.55).cgColor
+        view.setAccessibilityElement(false)
+        addSubview(view, positioned: .above, relativeTo: nil)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            view.animator().alphaValue = 0
+        } completionHandler: {
+            view.removeFromSuperview()
+        }
+        // The toast stays on top of the flash.
+        if !toast.isHidden { addSubview(toast, positioned: .above, relativeTo: nil) }
+    }
+
+    /// Opens the pictures folder in the Finder (made first if missing).
+    func openPicturesFolder() {
+        let folder = model.picturesFolder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(folder)
+    }
+}
+
+/// The Save Picture As… panel and the default file name (shared by the live
+/// tiles and the recording player).
+@MainActor
+enum SavePicturePanel {
+    /// The next free name in `folder`, for the save panel to start from.
+    static func suggestedName(
         camera: String, date: Date, folder: URL, format: PictureFormat, shareSafe: Bool
     ) -> String {
         PictureNaming.fileName(
@@ -131,7 +188,9 @@ extension StageView {
 
     /// Save Picture As…: a save panel in the pictures folder with a format
     /// choice; `done` gets the chosen file, nil if canceled.
-    private func askWhere(suggested: String, folder: URL, format: PictureFormat, done: @escaping (URL?) -> Void) {
+    static func ask(
+        suggested: String, folder: URL, format: PictureFormat, window: NSWindow?, done: @escaping (URL?) -> Void
+    ) {
         let panel = NSSavePanel()
         panel.title = "Save Picture As"
         panel.canCreateDirectories = true
@@ -159,32 +218,6 @@ extension StageView {
         } else {
             panel.begin(completionHandler: finish)
         }
-    }
-
-    /// A brief white flash over the tile, as a shutter (not under Reduce
-    /// Motion; the confirmation still shows).
-    private func flash(_ path: NodePath) {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let chrome = chromes[path] else { return }
-        let view = NSView(frame: chrome.frame)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.55).cgColor
-        view.setAccessibilityElement(false)
-        addSubview(view, positioned: .above, relativeTo: nil)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            view.animator().alphaValue = 0
-        } completionHandler: {
-            view.removeFromSuperview()
-        }
-        // The toast stays on top of the flash.
-        if !toast.isHidden { addSubview(toast, positioned: .above, relativeTo: nil) }
-    }
-
-    /// Opens the pictures folder in the Finder (made first if missing).
-    func openPicturesFolder() {
-        let folder = model.picturesFolder
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(folder)
     }
 }
 

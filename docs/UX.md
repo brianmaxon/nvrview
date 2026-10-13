@@ -407,6 +407,8 @@ look at a detail.
   the same region is shown, now with the main stream's detail (the region
   is kept in picture coordinates, independent of resolution). It is saved
   with the window (see "Fill Tiles").
+- The recording player's camera tiles zoom, pan and fill the same way (see
+  "Recordings", "The player's pictures").
 - Double-click keeps its meaning (focus); 0 or a small reset control in the
   hover header returns to 1x (and a filled picture's crop to the middle);
   zoom never changes what is recorded or streamed.
@@ -604,12 +606,12 @@ stream on many tiles costs the device and this computer much more.
 
 ## Save picture
 
-> **Built on both apps** (CAPTURE.md, "Save picture"). Playback tiles come
-> later.
+> **Built on both apps** (CAPTURE.md, "Save picture"), also for the
+> recording player's camera tiles (see "Recordings").
 
 - **Where:** the header's camera button, the right-click menu, P (and
-  Shift+P for Save Picture As…), the call window's tile, and later playback
-  tiles.
+  Shift+P for Save Picture As…), the call window's tile, and the recording
+  player's tiles.
 - **What:** the full frame of the stream the tile shows, at its own size
   (the menu says the pixel size), whatever the zoom. While zoomed, "Save
   Zoomed Area" saves only the visible region, at the source's resolution,
@@ -1279,6 +1281,54 @@ grids on both (M3 and W3); exports on both (M4 and W4).
   Show Alone, Make Large, Show All Cameras, and Remove from Incident. Live
   view keeps running. The playback closes when another day is shown, the
   window closes, or the app quits.
+- **The player's pictures:** every camera tile of the player (the Cameras
+  view; not the follow cut or the grids, which are one composed picture of
+  downloaded files) has the picture features a live tile has, by the same
+  rules and the same code (`TileZoom`, `TileViews`, `FisheyeAim`,
+  `TileHeaderLayout`, the save path):
+  - **Digital zoom and pan** as in "Digital zoom": the mouse wheel (each
+    notch 1.25x on macOS, eased) or a trackpad pinch zooms around the
+    pointer, a plain drag on a zoomed tile (or a filled picture with part
+    hidden) moves the picture, a trackpad two-finger scroll pans (Option
+    zooms), a touch pinch zooms (Windows), the point under the pointer
+    stays put, **0** or the header's reset control returns to 1x, and the
+    zoom map shows in the picture's bottom left corner while zoomed.
+  - **Fill Tile** and **Reset Position** in the tile's menu, as in "Fill
+    Tiles", per tile (the player has no window-wide Fill Tiles switch).
+  - **Fisheye cameras** get the Fisheye View menu (Original, Panorama,
+    Double Panorama, Quad, Virtual PTZ) with the camera's mount (the
+    camera's Settings choice), and a dewarped view is turned by a drag and
+    zoomed (Virtual PTZ) by the wheel or a pinch, exactly as on a live tile
+    ("Fisheye cameras"). Each lens of a multi-lens camera is a camera of its
+    own here too, with its own view.
+  - **Save Picture** (P), **Save Picture As…** (Shift+P), **Save Zoomed
+    Area** and **Save Original Fisheye Picture**, in the header, the
+    right-click menu and the keys, with the file names, formats, folder and
+    share-safe rule of "Save picture" (a recording's picture is named after
+    its camera and the moment it is saved, not the recording's time).
+  - **Header and menus:** a hover header on each cell with the camera name
+    and the picture buttons the header model gives a playback tile
+    (`TileHeaderTile.Playback`: Save Picture, Reset Zoom, Fisheye View, then
+    "…" for what does not fit); the right-click menu holds the same items
+    after Show Alone, Make Large and Show All Cameras. Record, Speaker,
+    Quality, talk-back, PTZ and calls are live-only and are not offered.
+    The keys 0, P and Shift+P act on the cell under the pointer, else the
+    large (or first) one.
+  - **Kept per tile:** the zoom, the crop, the Fill choice and the fisheye
+    view belong to the camera's tile in the player, not to the playback:
+    play, pause, seeks, speed changes, another incident of the same cameras
+    and the grid, large and single views all keep them; a camera that
+    leaves the player (another set of cameras, Remove from Incident) forgets
+    its view and starts at 1x, Original, following itself. They are not
+    saved with the window (a new playback starts at 1x). Zoom changes only
+    the rectangles the renderer draws and samples: it never changes what is
+    played, downloaded or exported (exports and stills are full frame; the
+    export has no zoomed area, and the Save items above are the way to keep
+    a region), and it adds no decoding, so playback pacing is unchanged.
+  - **Not here:** the zoom-driven switch to the main stream
+    ("Stream quality per tile"): a playback's streams are fixed for the
+    play, so zooming shows the picture's own detail enlarged. The follow cut
+    and the grids are one composed picture and do not zoom.
 - **Transport:** back and forward 10 s, play and pause, the device time at
   the playhead, the speed (0.25×, 0.5×, 1×, 2×, 4×, 8×, 16×; from 2× up
   "Keyframes only, no sound", below 1× "No sound below 1×"), Split Here,
