@@ -1,7 +1,6 @@
 //! The fake recording store, driven by the real `bc-protocol` client session.
 
-mod common;
-
+use crate::common::{Link, TestNvr};
 use bc_protocol::archive::{
     self, CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
 };
@@ -9,7 +8,6 @@ use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Demuxer, Record};
 use bc_protocol::session::{Event, Session};
 use bc_protocol::stream::StreamTier;
-use common::{Link, TestNvr};
 use mock_nvr::Config;
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;

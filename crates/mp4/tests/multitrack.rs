@@ -3,9 +3,7 @@
 //! recovery of a cut file. Structural checks always run; ffprobe/ffmpeg
 //! checks run only where they are installed.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mp4_remux::{
     AacConfig, AudioHandler, AudioTrackSpec, Error, FileOptions, FragmentOptions, FragmentedFile,
     Fragmenter, MAX_AUDIO_TRACKS, Mp4Writer, Options, VideoCodec, VideoFrame, finalize_to_mp4,

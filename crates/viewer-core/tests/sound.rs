@@ -6,9 +6,7 @@
 //! loudness for each tile. On a simulated clock (`simtime`): the fixtures'
 //! seconds of audio take simulated time, not real time.
 
-mod common;
-
-use common::{PASSWORD, Recorder, USER, on_sim, sim_spawn, sim_until, start};
+use crate::common::{PASSWORD, Recorder, USER, on_sim, sim_spawn, sim_until, start};
 use serde_json::Value;
 use simtime::SimRuntime;
 use std::path::PathBuf;
@@ -151,7 +149,7 @@ fn smoke_alarm_is_detected_once_per_channel_and_stops_with_the_tiles() {
         .timeline()
         .into_iter()
         .filter_map(|t| match t {
-            common::Entry::Event(e)
+            crate::common::Entry::Event(e)
                 if (e["type"] == "detection" && e["channel"] == 0 && e["state"] == "stop")
                     || (e["type"] == "tile_closed" && e["tile"] == sub0) =>
             {

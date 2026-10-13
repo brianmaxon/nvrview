@@ -1,13 +1,11 @@
 //! Talk-back against the in-process mock NVR's doorbell model: permission,
 //! capability checks, rate limit, pacing, and the close on every exit path.
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::talk::{AdpcmEncoder, RECORD_DURATION_US, SAMPLES_PER_RECORD, decode_record};
 use bc_session::{
     DeviceSession, Refusal, SessionConfig, StopReason, Talk, TalkObserver, TalkState,
 };
-use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::talk::{TalkEnd, TalkLog};
 use std::path::PathBuf;

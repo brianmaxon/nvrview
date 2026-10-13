@@ -1,9 +1,7 @@
 //! File logging through viewer-log. Its own test binary: the subscriber is
 //! global to the process.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::time::Duration;
 use viewer_core::{CoreConfig, LogSettings, StreamTier};
 

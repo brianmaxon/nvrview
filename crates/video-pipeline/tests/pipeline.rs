@@ -1,8 +1,6 @@
 //! TilePipeline against the synthetic fixtures and a fake decoder.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use video_pipeline::{
     AccessUnit, Codec, DecodeFailureKind, ParameterSets, PipelineConfig, Rect, Size, TileStatus,
     VideoFormat,

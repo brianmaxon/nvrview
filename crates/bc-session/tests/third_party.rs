@@ -2,12 +2,10 @@
 //! previews answered with 400, then the stream on the message ID of a later
 //! start (docs/protocol.md, "Records as the official client reads them").
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, Item, SessionConfig, Subscription};
-use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
 use std::time::Duration;

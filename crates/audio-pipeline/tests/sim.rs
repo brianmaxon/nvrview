@@ -38,11 +38,9 @@
 //! cargo nextest run -p audio-pipeline --test sim --run-ignored only --no-capture
 //! ```
 
-mod common;
-
+use crate::common::*;
 use audio_pipeline::presentation::PresentationEstimator;
 use audio_pipeline::timestamp::Timestamper;
-use common::*;
 
 /// Required: every click within this of the intended latency.
 const BOUND_US: f64 = 40_000.0;

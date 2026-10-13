@@ -1,10 +1,8 @@
 //! Taps, other codecs, and malformed records through a whole tile.
 
-mod common;
-
+use crate::common::*;
 use audio_pipeline::adts::split_frames;
 use audio_pipeline::{AudioRecord, OutputConfig, OutputFormat, TileAudio, TileConfig, output, tap};
-use common::*;
 use std::cell::RefCell;
 use std::path::PathBuf;
 

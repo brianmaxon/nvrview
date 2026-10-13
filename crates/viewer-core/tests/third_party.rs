@@ -4,9 +4,7 @@
 //! third-party mode, on a simulated clock: retry intervals and wait limits
 //! take simulated time.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::time::Duration;

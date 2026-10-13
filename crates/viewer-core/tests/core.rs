@@ -3,9 +3,7 @@
 //! (answers from other threads, a slow `on_action`, calls from callbacks)
 //! keep the core's own runtime and tile threads, in real time.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::sync::atomic::Ordering;
 use std::time::Duration;

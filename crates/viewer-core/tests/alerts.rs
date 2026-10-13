@@ -4,13 +4,12 @@
 //! engine decides with a trace; woken streams stop when checks end and
 //! episodes settle. Nothing here waits on real time.
 
-mod common;
 mod mock_ha;
 #[allow(unused_imports)]
 #[path = "../../mqtt-triggers/tests/common/mod.rs"]
 mod mqtt_broker;
 
-use common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, start, wait_until};
+use crate::common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, start, wait_until};
 use serde_json::{Value, json};
 use simtime::SimRuntime;
 use std::collections::{HashMap, HashSet};

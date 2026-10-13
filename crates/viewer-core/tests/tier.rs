@@ -3,9 +3,7 @@
 //! clock: switch timeouts and the alignment cap are measured in simulated
 //! time.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::time::Duration;
 use viewer_core::{CoreConfig, CoreError, StreamTier};

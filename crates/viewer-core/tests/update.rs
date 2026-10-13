@@ -3,9 +3,7 @@
 //! an operation running. Sources are local folders and a loopback socket;
 //! the signing key is made by the test.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
