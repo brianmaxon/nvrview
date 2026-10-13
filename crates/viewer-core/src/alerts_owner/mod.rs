@@ -1212,7 +1212,19 @@ impl Inner {
             _ => "logged",
         };
         let test_flag = st.tests.get(&d.trigger_id).copied();
+        // The configured sensor that triggered it, by its key.
+        let sensor_key = st.engine.as_ref().map(Engine::settings).and_then(|s| {
+            d.trace.steps.iter().find_map(|step| match &step.kind {
+                StepKind::TriggerReceived {
+                    sensor: Some(i), ..
+                } => s.sources.get(*i as usize).map(|m| m.key.clone()),
+                _ => None,
+            })
+        });
         let mut line = json!({"logged_ms": now.ms, "source": source_name, "decision": decision});
+        if let Some(k) = &sensor_key {
+            line["sensor"] = json!(k);
+        }
         if test_flag.is_some() {
             line["test"] = json!(true);
         }
@@ -1258,6 +1270,9 @@ impl Inner {
                             "decision": event_decision});
         if test_flag.is_some() {
             ev["test"] = json!(true);
+        }
+        if let Some(k) = &sensor_key {
+            ev["sensor"] = json!(k);
         }
         if let Some(k) = &device_key {
             ev["device_key"] = json!(k);

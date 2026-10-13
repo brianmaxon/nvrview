@@ -776,6 +776,8 @@ impl crate::Core {
             Some(s) => Some(severity_of(s.as_str().ok_or(bad)?).ok_or(bad)?),
         };
         let text = q["text"].as_str().map(str::to_lowercase);
+        let sensor = q["sensor"].as_str().map(str::to_owned);
+        let test_only = q["test"].as_bool();
 
         let inner = &self.alerts.inner;
         let (reader, status) = {
@@ -825,6 +827,10 @@ impl crate::Core {
                 && classes
                     .as_ref()
                     .is_none_or(|l| l.iter().any(|x| d["class"].as_str() == Some(x)))
+                && sensor
+                    .as_ref()
+                    .is_none_or(|k| v["sensor"].as_str() == Some(k))
+                && test_only.is_none_or(|t| v["test"].as_bool().unwrap_or(false) == t)
                 && min_severity.is_none_or(|m| {
                     d["severity"]
                         .as_str()

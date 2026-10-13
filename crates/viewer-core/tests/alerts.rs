@@ -1034,6 +1034,17 @@ fn a_simulated_trigger_is_a_test_and_skips_home_assistant_unless_ticked() {
     assert_eq!(ev["decision"]["decision"], "alert", "{ev}");
     let log: Value = serde_json::from_str(&h.core.alerts_get("{}").unwrap()).unwrap();
     assert_eq!(log["entries"][0]["test"], true);
+    assert_eq!(log["entries"][0]["sensor"], "sensor-1");
+    let by_sensor: Value = serde_json::from_str(
+        &h.core
+            .alerts_get(r#"{"sensor":"sensor-1","test":true}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(by_sensor["entries"].as_array().unwrap().len(), 1);
+    let real_only: Value =
+        serde_json::from_str(&h.core.alerts_get(r#"{"test":false}"#).unwrap()).unwrap();
+    assert_eq!(real_only["entries"].as_array().unwrap().len(), 0);
     // The desktop output (the app) sees the alert; Home Assistant does not.
     h.core.flush_events();
     assert!(
