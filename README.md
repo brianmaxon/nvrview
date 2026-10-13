@@ -123,10 +123,27 @@ PowerShell on that computer, exclude its build folders from Microsoft
 Defender real-time scanning, which slows builds:
 
 ```powershell
-Add-MpPreference -ExclusionPath "$env:USERPROFILE\nvrview", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:USERPROFILE\.nuget\packages"
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\nvrview", "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:USERPROFILE\.nuget\packages", "$env:LOCALAPPDATA\Mozilla\sccache"
 ```
 
-That is your decision: it trades some protection for those folders for speed.
+| folder | holds |
+| --- | --- |
+| `nvrview` | the check workers (source and `target`, several GB each) and the clone; most build traffic |
+| `.cargo`, `.rustup` | the Rust toolchain, crate sources, and installed tools |
+| `.nuget\packages` | the .NET packages |
+| `Mozilla\sccache` | the shared compile cache (sccache's default folder, which the workers use) |
+
+If Defender still scans heavily during builds, the build programs can be
+excluded too, so the files they open are not scanned. This is broader: what
+those programs touch anywhere goes unscanned.
+
+```powershell
+Add-MpPreference -ExclusionProcess "cargo.exe", "rustc.exe", "link.exe", "sccache.exe", "dotnet.exe", "MSBuild.exe"
+```
+
+`Get-MpPreference | Select-Object -ExpandProperty ExclusionPath` lists the
+folder exclusions. That is your decision: it trades some protection for those
+folders (and programs) for speed.
 
 ## Checks
 

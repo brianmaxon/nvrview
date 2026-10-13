@@ -20,6 +20,8 @@
     .\setup-windows.ps1 [-RepoDir <folder>] [-SkipTests] [-Optional]
                         [-EnableSsh [-SshSource winget|feature]
                          -AuthorizedKey "ssh-ed25519 AAAA... name"]
+  Only the SSH server and a key (nothing else installed):
+    .\setup-windows.ps1 -SshOnly -AuthorizedKey "ssh-ed25519 AAAA... name"
 
 .PARAMETER RepoDir
   Where to clone the repository (default: $HOME\nvrview\repo).
@@ -31,6 +33,9 @@
 .PARAMETER EnableSsh
   Install and start the OpenSSH server, key-only, reachable from the local
   subnet only.
+.PARAMETER SshOnly
+  Only turn on the OpenSSH server and add -AuthorizedKey, as -EnableSsh does:
+  no toolchain, no repository, no tests. For adding or replacing a key.
 .PARAMETER SshSource
   Where the OpenSSH server comes from when none is installed: 'winget' (the
   default: Microsoft's Win32-OpenSSH package, Microsoft.OpenSSH.Preview) or
@@ -47,6 +52,7 @@ param(
   [switch]$SkipTests,
   [switch]$Optional,
   [switch]$EnableSsh,
+  [switch]$SshOnly,
   [ValidateSet('winget', 'feature')]
   [string]$SshSource = 'winget',
   [string]$AuthorizedKey = ''
@@ -54,6 +60,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($SshOnly) {
+  $EnableSsh = $true
+  $SkipTests = $true
+}
 
 $RepoUrl = 'https://github.com/brianmaxon/nvrview.git'
 
@@ -80,10 +91,17 @@ function Install-WingetPackage([string]$Id, [string[]]$ExtraArgs = @()) {
     return
   }
   Write-Host "installing $Id"
-  $wingetArgs = @('install', '--id', $Id, '--exact', '--silent',
+  # Every package here is in the community 'winget' source. Naming it keeps a
+  # broken msstore source (an outdated App Installer fails its certificate
+  # check) from stopping the install.
+  $wingetArgs = @('install', '--id', $Id, '--exact', '--silent', '--source', 'winget',
     '--accept-package-agreements', '--accept-source-agreements') + $ExtraArgs
   & winget @wingetArgs
-  # winget returns non-zero for "already installed" on some versions; check again.
+  # Trust winget's own success: 'winget list' does not always show portable
+  # (zip) packages such as ffmpeg right after they install. Already installed
+  # (0x8A150061) and no applicable upgrade (0x8A15002B) count as success too.
+  if ($LASTEXITCODE -in 0, -1978335135, -1978335189) { return }
+  # Some winget versions use other codes for "already installed"; check again.
   $listed = winget list --id $Id --exact 2>$null | Out-String
   if ($listed -notmatch [regex]::Escape($Id)) { throw "winget could not install $Id" }
 }
@@ -95,74 +113,76 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
   throw 'winget is missing: install "App Installer" from the Microsoft Store first.'
 }
 
-Step 'Git'
-Install-WingetPackage 'Git.Git'
+if (-not $SshOnly) {
+  Step 'Git'
+  Install-WingetPackage 'Git.Git'
 
-Step 'Visual Studio C++ build tools (MSVC linker and Windows SDK, needed by Rust)'
-Install-WingetPackage 'Microsoft.VisualStudio.2022.BuildTools' @(
-  '--override',
-  '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
+  Step 'Visual Studio C++ build tools (MSVC linker and Windows SDK, needed by Rust)'
+  Install-WingetPackage 'Microsoft.VisualStudio.2022.BuildTools' @(
+    '--override',
+    '--wait --passive --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
 
-Step 'Rust (rustup, stable, MSVC)'
-Install-WingetPackage 'Rustlang.Rustup'
-Sync-SessionPath
-rustup default stable-x86_64-pc-windows-msvc
-rustup component add rustfmt clippy
-rustc --version
-
-Step '.NET SDK 10 (C# bindings and smoke test in apps\windows)'
-Install-WingetPackage 'Microsoft.DotNet.SDK.10'
-
-Step 'LLVM (clang builds the C layout check against the MSVC ABI, as CI does)'
-Install-WingetPackage 'LLVM.LLVM'
-
-Step 'Python (scripts\check-sanitized.py)'
-Install-WingetPackage 'Python.Python.3.12'
-
-if ($Optional) {
-  Step 'Optional: ffmpeg and gitleaks'
-  Install-WingetPackage 'Gyan.FFmpeg'
-  Install-WingetPackage 'Gitleaks.Gitleaks'
-}
-
-Sync-SessionPath
-
-Step 'cbindgen (checks the generated C header)'
-if (Get-Command cbindgen -ErrorAction SilentlyContinue) {
-  Write-Host 'cbindgen already installed'
-} else {
-  cargo install cbindgen --locked
-}
-
-Step 'sccache (shared compile cache for the check workers)'
-if (Get-Command sccache -ErrorAction SilentlyContinue) {
-  Write-Host 'sccache already installed'
-} else {
-  try { Install-WingetPackage 'Mozilla.sccache' } catch { Write-Host "winget could not install sccache: $_" }
+  Step 'Rust (rustup, stable, MSVC)'
+  Install-WingetPackage 'Rustlang.Rustup'
   Sync-SessionPath
-  if (-not (Get-Command sccache -ErrorAction SilentlyContinue)) {
-    cargo install sccache --locked
+  rustup default stable-x86_64-pc-windows-msvc
+  rustup component add rustfmt clippy
+  rustc --version
+
+  Step '.NET SDK 10 (C# bindings and smoke test in apps\windows)'
+  Install-WingetPackage 'Microsoft.DotNet.SDK.10'
+
+  Step 'LLVM (clang builds the C layout check against the MSVC ABI, as CI does)'
+  Install-WingetPackage 'LLVM.LLVM'
+
+  Step 'Python (scripts\check-sanitized.py)'
+  Install-WingetPackage 'Python.Python.3.12'
+
+  if ($Optional) {
+    Step 'Optional: ffmpeg and gitleaks'
+    Install-WingetPackage 'Gyan.FFmpeg'
+    Install-WingetPackage 'Gitleaks.Gitleaks'
   }
-}
 
-Step 'cargo-nextest (per-test time limits, .config\nextest.toml)'
-if (Get-Command cargo-nextest -ErrorAction SilentlyContinue) {
-  Write-Host 'cargo-nextest already installed'
-} else {
-  cargo install cargo-nextest --locked
-}
+  Sync-SessionPath
 
-Step "Repository in $RepoDir"
-if (Test-Path (Join-Path $RepoDir '.git')) {
-  Write-Host 'already cloned; fetching'
-  git -C $RepoDir fetch --quiet origin
-} else {
-  New-Item -ItemType Directory -Force -Path (Split-Path $RepoDir) | Out-Null
-  git clone $RepoUrl $RepoDir
+  Step 'cbindgen (checks the generated C header)'
+  if (Get-Command cbindgen -ErrorAction SilentlyContinue) {
+    Write-Host 'cbindgen already installed'
+  } else {
+    cargo install cbindgen --locked
+  }
+
+  Step 'sccache (shared compile cache for the check workers)'
+  if (Get-Command sccache -ErrorAction SilentlyContinue) {
+    Write-Host 'sccache already installed'
+  } else {
+    try { Install-WingetPackage 'Mozilla.sccache' } catch { Write-Host "winget could not install sccache: $_" }
+    Sync-SessionPath
+    if (-not (Get-Command sccache -ErrorAction SilentlyContinue)) {
+      cargo install sccache --locked
+    }
+  }
+
+  Step 'cargo-nextest (per-test time limits, .config\nextest.toml)'
+  if (Get-Command cargo-nextest -ErrorAction SilentlyContinue) {
+    Write-Host 'cargo-nextest already installed'
+  } else {
+    cargo install cargo-nextest --locked
+  }
+
+  Step "Repository in $RepoDir"
+  if (Test-Path (Join-Path $RepoDir '.git')) {
+    Write-Host 'already cloned; fetching'
+    git -C $RepoDir fetch --quiet origin
+  } else {
+    New-Item -ItemType Directory -Force -Path (Split-Path $RepoDir) | Out-Null
+    git clone $RepoUrl $RepoDir
+  }
+  # Fixtures are binary and compared byte for byte; keep files exactly as committed.
+  git -C $RepoDir config core.autocrlf false
+  git -C $RepoDir config core.longpaths true
 }
-# Fixtures are binary and compared byte for byte; keep files exactly as committed.
-git -C $RepoDir config core.autocrlf false
-git -C $RepoDir config core.longpaths true
 
 if ($EnableSsh) {
   Step 'OpenSSH server (key-only, local subnet only)'
@@ -243,7 +263,7 @@ if (-not $SkipTests) {
 }
 
 Step 'Done'
-Write-Host "Repository: $RepoDir"
+if (-not $SshOnly) { Write-Host "Repository: $RepoDir" }
 Write-Host 'Open a new terminal so PATH changes take effect everywhere.'
 if ($EnableSsh) {
   $ips = Get-NetIPAddress -AddressFamily IPv4 |
