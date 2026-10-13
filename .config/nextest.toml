@@ -1,8 +1,9 @@
 # Per-test time limits for `cargo nextest run` (scripts/check.sh and the
 # Windows worker). The slowest tests legitimately take about 25 seconds on a
-# busy development machine (the long simulated-time audio runs and one
-# playback test), so a test is reported as slow after 30 seconds and killed,
-# and failed by name, after 120 seconds: about five times the slowest. A hang
-# fails fast instead of holding up the whole check.
+# busy development machine (a playback test; the audio sync simulations run
+# minutes of simulated time, a few seconds each, and their 3-hour run is an
+# ignored test run by hand), so a test is reported as slow after 30 seconds
+# and killed, and failed by name, after 120 seconds: about five times the
+# slowest. A hang fails fast instead of holding up the whole check.
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }

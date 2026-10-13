@@ -93,6 +93,8 @@ pub struct TimestampStats {
 pub struct Timestamper {
     rate: u32,
     epoch: u32,
+    /// Number of the first sample of every epoch (0 except in tests).
+    base: u64,
     count: u64,
     pending_reset: bool,
     pts_origin: Option<f64>,
@@ -108,6 +110,14 @@ pub struct Timestamper {
 impl Timestamper {
     /// A timestamper for a source with nominal `rate` samples per second.
     pub fn new(rate: u32) -> Timestamper {
+        Timestamper::with_base(rate, 0)
+    }
+
+    /// Like [`Timestamper::new`], numbering the samples of every epoch from
+    /// `base` instead of 0. For tests that start with counters as they are
+    /// after a long run.
+    #[doc(hidden)]
+    pub fn with_base(rate: u32, base: u64) -> Timestamper {
         let rate = rate.max(1);
         let r = f64::from(rate);
         // Prior strength: the x co-moment of PRIOR_S seconds of records
@@ -117,7 +127,8 @@ impl Timestamper {
         Timestamper {
             rate,
             epoch: 0,
-            count: 0,
+            base,
+            count: base,
             pending_reset: true,
             pts_origin: None,
             fit: LineFit::new(WINDOW_S * r, 1e6 / r, prior),
@@ -135,6 +146,12 @@ impl Timestamper {
         self.rate
     }
 
+    /// Number of the first sample of every epoch (0 unless made with
+    /// [`Timestamper::with_base`]).
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
     /// Counters.
     pub fn stats(&self) -> TimestampStats {
         self.stats
@@ -149,7 +166,7 @@ impl Timestamper {
     /// Like [`Timestamper::reset`], for a source with a new nominal rate.
     pub fn reset_with_rate(&mut self, rate: u32) {
         let (epoch, stats) = (self.epoch.wrapping_add(1), self.stats);
-        *self = Timestamper::new(rate);
+        *self = Timestamper::with_base(rate, self.base);
         self.epoch = epoch;
         self.stats = stats;
         self.stats.resets += 1;

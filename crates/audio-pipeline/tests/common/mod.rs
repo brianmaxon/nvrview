@@ -31,10 +31,9 @@
 
 #![allow(dead_code)]
 
+use audio_pipeline::output::output_at_frame;
 use audio_pipeline::presentation::DELAY_PERCENTILE;
-use audio_pipeline::{
-    AudioOutput, OutputConfig, OutputFormat, PcmFormat, TileAudio, TileConfig, output,
-};
+use audio_pipeline::{AudioOutput, OutputConfig, OutputFormat, PcmFormat, TileAudio, TileConfig};
 
 /// Delivery-delay deviation per message.
 #[derive(Clone, Copy, Debug)]
@@ -82,6 +81,7 @@ pub enum HostClock {
     Sleep { period_us: f64, overshoot_us: f64 },
 }
 
+#[derive(Clone)]
 pub struct SimConfig {
     pub audio_rate: f64,
     pub nominal_rate: u32,
@@ -103,6 +103,39 @@ pub struct SimConfig {
     pub stalls: Vec<(f64, f64)>,
     pub seed: u64,
     pub host_clock: HostClock,
+    /// Host time (µs) at camera second 0.
+    pub host0_us: f64,
+    /// Camera video timestamp (µs) at camera second 0.
+    pub pts0_us: f64,
+    /// Number of the tile's first audio sample
+    /// ([`TileAudio::set_sample_base`]).
+    pub sample_base: u64,
+    /// Where the output ring's frame counters start
+    /// ([`audio_pipeline::output::output_at_frame`]).
+    pub frame_base: u64,
+}
+
+impl SimConfig {
+    /// Starts every clock and counter as if it had already run for
+    /// `elapsed_s` seconds (the host clock that much past its default, the
+    /// camera timestamps, the audio sample count, and the output ring), to
+    /// check long-running numerics in a short run.
+    pub fn started_after(mut self, elapsed_s: f64) -> SimConfig {
+        self.host0_us = HOST0_US + elapsed_s * 1e6;
+        self.pts0_us = PTS0_US + elapsed_s * 1e6;
+        self.sample_base = (elapsed_s * self.audio_rate) as u64;
+        self.frame_base = (elapsed_s * f64::from(self.out_rate)) as u64;
+        self
+    }
+
+    /// The correction ([`audio_pipeline::PlayoutStats::correction`]) that
+    /// keeps the audio in step: the camera's audio rate over the nominal
+    /// rate, through the camera-to-host clock ratio. The device's skew does
+    /// not appear: playout measures the device's frame rate on the host
+    /// clock and reports the correction relative to it.
+    pub fn true_correction(&self) -> f64 {
+        self.audio_rate / f64::from(self.nominal_rate) / self.camera_skew - 1.0
+    }
 }
 
 impl Default for SimConfig {
@@ -128,6 +161,10 @@ impl Default for SimConfig {
             stalls: Vec::new(),
             seed: 0x1234_5678_9ABC_DEF1,
             host_clock: HostClock::Exact,
+            host0_us: HOST0_US,
+            pts0_us: PTS0_US,
+            sample_base: 0,
+            frame_base: 0,
         }
     }
 }
@@ -250,17 +287,19 @@ pub fn run_with(
     setup: impl FnOnce(&mut TileAudio),
     mut observe: impl FnMut(f64, &TileAudio),
 ) -> SimResult {
-    let (out, mut renderer) = output(
+    let (out, mut renderer) = output_at_frame(
         OutputFormat {
             sample_rate: cfg.out_rate,
             channels: cfg.out_channels,
         },
         OutputConfig::default(),
+        cfg.frame_base,
     );
     let tile_cfg = TileConfig {
         playout_delay_us: cfg.playout_delay_us,
     };
     let mut tile = TileAudio::new(tile_cfg);
+    tile.set_sample_base(cfg.sample_base);
     tile.set_output(Some(out.clone()));
     tile.set_audible(true);
     setup(&mut tile);
@@ -271,7 +310,8 @@ pub fn run_with(
         slow: 0.0,
         last_t: 0.0,
     };
-    let host_of_cam = |cam_s: f64| HOST0_US + cam_s * 1e6 * cfg.camera_skew;
+    let host0 = cfg.host0_us;
+    let host_of_cam = |cam_s: f64| host0 + cam_s * 1e6 * cfg.camera_skew;
     let fmt = PcmFormat {
         sample_rate: cfg.nominal_rate,
         channels: 1,
@@ -293,7 +333,7 @@ pub fn run_with(
     let mut devs = Vec::new();
     let mut delays = Vec::new();
 
-    let cb_start = HOST0_US + 50_000.0;
+    let cb_start = host0 + 50_000.0;
     let mut clock_rng = Rng(cfg.seed ^ 0x5DEE_CE66);
     let mut sleep_cb = cb_start;
     let (mut silent_calls, mut silent_run, mut longest_silence_s) = (0u64, 0.0f64, 0.0f64);
@@ -357,7 +397,7 @@ pub fn run_with(
         }
 
         if is_video {
-            last_pts = Some((PTS0_US + t_video * 1e6).round() as u64);
+            last_pts = Some((cfg.pts0_us + t_video * 1e6).round() as u64);
             next_video += 1;
         } else {
             let k = next_audio;
@@ -401,9 +441,9 @@ pub fn run_with(
     let heard = heard
         .into_iter()
         .map(|host_us| {
-            let rough_s = (host_us - HOST0_US) / 1e6 / cfg.camera_skew;
+            let rough_s = (host_us - host0) / 1e6 / cfg.camera_skew;
             let expected = reference + delay_at(rough_s);
-            let cam_s = (host_us - expected - HOST0_US) / 1e6 / cfg.camera_skew;
+            let cam_s = (host_us - expected - host0) / 1e6 / cfg.camera_skew;
             let k = (cam_s * cfg.audio_rate / cfg.click_every as f64)
                 .round()
                 .max(1.0);
