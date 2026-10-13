@@ -39,7 +39,7 @@ fi
 # run passed in the last NVRVIEW_FULL_MAX_AGE_H hours (default 72), and on
 # every NVRVIEW_FULL_EVERY-th run when that is set. A table at the end shows
 # what ran and what was cached.
-sc() { python3 -I scripts/suite-cache.py "$@"; }
+. scripts/suite-cache-lib.sh
 run_file=""
 
 # Each step prints how long the previous one took, and the end prints the
@@ -54,7 +54,7 @@ end_step() {
   now=$(date +%s)
   if [ -n "$step_name" ]; then
     printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))" | tee -a "$timing_file"
-    if [ -n "$run_file" ] && [ "$step_row" != "-" ]; then sc pass "$run_file" "$((now - step_start))" "$step_row"; fi
+    if [ -n "$run_file" ] && [ "$step_row" != "-" ]; then cache_pass "$((now - step_start))" "$step_row"; fi
   fi
   step_name=""
 }
@@ -68,14 +68,14 @@ step() { # ROW LABEL ("-" for no row)
 # Runs the step for SUITE unless it is cached (then it prints why and fails).
 want() { # SUITE LABEL
   end_step
-  if [ -n "$run_file" ] && ! sc want "$run_file" "$1"; then return 1; fi
+  if [ -n "$run_file" ] && ! cache_want "$1"; then return 1; fi
   step "$1" "$2"
 }
 # Sets args to the cargo arguments for the crates of a Rust family that must
 # run (empty: all cached); the cached ones are printed.
 crates() { # FAMILY
   end_step
-  if [ -n "$run_file" ]; then args=$(sc crates "$run_file" "$1"); else args=--workspace; fi
+  if [ -n "$run_file" ]; then args=$(cache_crates "$1" args); else args=--workspace; fi
 }
 on_exit() {
   rc=$?
@@ -127,17 +127,17 @@ if [ "$fast" = 0 ] && ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 if [ "$fast" = 0 ]; then
-  run_file=$(sc plan mac)
+  cache_start mac
 fi
 
 step sanitization "sanitization"
-python3 -I scripts/check-sanitized.py --all
+"$py" -I scripts/check-sanitized.py --all
 
 step parity "self-test parity"
-python3 -I scripts/check-parity.py
+"$py" -I scripts/check-parity.py
 
 step selftest-areas "Windows self-test areas"
-python3 -I scripts/check-selftest-areas.py
+"$py" -I scripts/check-selftest-areas.py
 
 # The secret scan (scripts/secret-scan.sh): gitleaks over the commits added
 # since the last clean scan plus the working tree changes; the full history
@@ -190,9 +190,7 @@ if [ -n "$args" ]; then
 fi
 
 if want script-tests "check-stamp, merge, merge-train, lock, and cache scripts (throwaway repositories, fake checks)"; then
-  sh scripts/test-stamps.sh
-  sh scripts/test-suite-cache.sh
-  sh scripts/test-merge-train.sh
+  scripts/run-script-tests.sh
 fi
 
 if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
@@ -261,7 +259,7 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
     # An overall limit (the whole run takes a few minutes); on a hang the
     # test that last started is named.
     (cd apps/macos &&
-      python3 -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
+      "$py" -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
   fi
 
   # Opens a window for a few seconds, behind all other windows and without
@@ -304,8 +302,8 @@ run_file=""
 cached=$(sed -n 's/.*; cached suites: //p' "$summary")
 rm -f "$summary"
 printf '\nAll checks passed in %ss.\n' "$((now - check_start))"
-python3 -I scripts/timing.py table "$timing_file"
-python3 -I scripts/timing.py log mac "$((now - check_start))" --tree "$(git rev-parse 'HEAD^{tree}')" "$timing_file" || true
+"$py" -I scripts/timing.py table "$timing_file"
+"$py" -I scripts/timing.py log mac "$((now - check_start))" --tree "$(git rev-parse 'HEAD^{tree}')" "$timing_file" || true
 
 if [ "$(uname)" != "Darwin" ]; then
   echo "no check stamp written (the stamp is for the Mac checks)"

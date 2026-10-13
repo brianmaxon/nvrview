@@ -31,23 +31,34 @@ runs/<id>.json for a run in progress. Entries older than 14 days are pruned,
 and at most 20000 are kept. Failures are never recorded.
 
 Commands (RUN is the path that `plan` prints):
-  plan PLATFORM [--full] [--retried] [--tools-file F]   start a run; prints RUN
-  want RUN SUITE        exit 0: run it; exit 1: cached (prints the cached line)
-  crates RUN FAMILY [--list]
-                        Rust family (clippy, test, doctest, wincheck,
-                        linuxcheck): prints cargo arguments for the crates to
-                        run (--workspace, -p a -p b, or nothing); with --list
-                        all, none, or a,b
-  pass RUN SECS NAME... record passes (a suite, a family, or a plain step name
-                        that is only shown in the table)
+  plan PLATFORM [--full] [--retried] [--tools-file F]
+                        start a run and decide every suite once; prints RUN.
+                        Writes RUN.json (the decisions and fingerprints),
+                        RUN.plan (the same decisions as tab-separated lines for
+                        the shell: full, areas, want, crates, cmsg) and an
+                        empty RUN.log
   finish RUN [--ok [--partial]] [--failed LABEL]
-                        records the passes, prints the table, ends the run;
-                        a full run counts as the platform's full pass only
-                        with --ok and without --partial (steps were skipped)
+                        folds RUN.log into the store, prints the table, ends
+                        the run (removes the three files); a full run counts
+                        as the platform's full pass only with --ok and without
+                        --partial (steps were skipped)
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
   areas windows         the Windows app self-test areas (suites app-debug.AREA
                         and app-publish.AREA; see WINDOWS_OWNED below)
   check-projects        fails when DOTNET_REFS differs from the C# project files
+
+The scripts call Python twice per run (plan, finish), not once per suite. The
+shell reads its answers from RUN.plan and appends one tab-separated line per
+event to RUN.log (plain printf, no Python):
+  want SUITE            SUITE was reported as cached or deferred (a row)
+  crates FAMILY         the crates of a Rust family were selected
+  pass SECS NAME...     a suite, a family, or a plain step name (shown only in
+                        the table) passed
+finish replays the log in order, so a run that was interrupted still records
+the suites that had completed. In RUN.plan, `want SUITE run` means run it,
+`want SUITE cached|deferred LINE` carries the line to print, and `crates FAMILY
+ARGS LIST` the cargo arguments and the --list form (`cmsg` lines are the
+cached-crate messages for stderr). A suite not in the plan runs.
 
 The trimmed publish build and what runs on it (app-publish.AREA) are deferred
 in ordinary runs ("deferred ...", counted like cached suites: a stamp with them
@@ -81,7 +92,7 @@ FIXTURES = ["fixtures/synthetic/"]
 
 # The C# projects under apps/windows and the projects each references (kept in
 # step with the project files: `suite-cache.py check-projects`, run by
-# scripts/test-suite-cache.sh).
+# scripts/test_suite_cache.py).
 W = "apps/windows/"
 DOTNET_REFS = {
     "Interop": [], "Tiles": [], "Shell": ["Tiles", "Interop"],
@@ -462,14 +473,76 @@ def prune(base):
 
 
 # --- commands ----------------------------------------------------------------
+#
+# `plan` decides every suite once, from the tree, the platform, the tools and
+# the store as they are at the start of the run, and writes the decisions to
+# RUN.json and a tab-separated RUN.plan that the shell reads (no Python per
+# suite). The shell appends what happened to RUN.log; `finish` replays the log
+# in order, so the table is the same as when each step called Python itself.
 
-def cmd_plan(args):
-    platform = args[0]
-    full = "--full" in args
-    retried = "--retried" in args
+def want_decision(base, run, suite):
+    """Whether SUITE runs: {"status": run|cached|deferred, "line": text printed when it does not}."""
+    if is_trimmed(suite) and run["platform"] == "windows" and not run["full"]:
+        if run.get("trimmed"):
+            return {"status": "run", "line": ""}  # the daily trimmed-build run is due
+        if suite != "app-update":
+            last = read_json(os.path.join(base, "state-windows.json"), {}).get("last_trimmed", now())
+            return {"status": "deferred", "line": "deferred %s (trimmed build; last passed %s ago, runs daily and for releases)"
+                    % (suite, age(now() - last))}
+    e = cached_entry(base, run, suite)
+    if e is None:
+        return {"status": "run", "line": ""}
+    return {"status": "cached", "line": "cached pass %s (%s, key %s)" % (
+        suite, age(now() - e["time"]), run["suites"][suite]["key"][:10])}
+
+
+def crates_decision(base, run, fam):
+    """The crates of FAM to run: cargo arguments, the --list form, messages, and the table label."""
+    names = sorted(s.split(".", 1)[1] for s in run["suites"] if s.startswith(fam + "."))
+    todo, cached = [], []
+    for c in names:
+        e = cached_entry(base, run, "%s.%s" % (fam, c))
+        (todo if e is None else cached).append((c, e))
+    if len(cached) <= 3:
+        msgs = ["cached pass %s.%s (%s, key %s)" % (fam, c, age(now() - e["time"]),
+                                                    run["suites"]["%s.%s" % (fam, c)]["key"][:10]) for c, e in cached]
+    else:
+        ages = sorted(now() - e["time"] for _, e in cached)
+        msgs = ["cached pass %s for %d crates: %s (%s to %s old)" % (
+            fam, len(cached), ", ".join(c for c, _ in cached), age(ages[0]), age(ages[-1]))]
+    # Doctest suites exist for library crates only, which is what
+    # `cargo test --doc --workspace` covers.
+    all_crates = len(todo) == len(names)
+    return {
+        "todo": [c for c, _ in todo], "msgs": msgs,
+        "label": "cached %d of %d crates" % (len(cached), len(names)),
+        "cached_label": "%s (%d of %d crates)" % (fam, len(cached), len(names)) if cached else "",
+        "args": ("--workspace" if all_crates else " ".join("-p %s" % c for c, _ in todo)) if todo else "",
+        "list": "all" if todo and all_crates else ",".join(c for c, _ in todo) or "none",
+    }
+
+
+def plan_text(run):
+    """The decisions as tab-separated lines for the shell."""
+    lines = ["full\t%s" % run["reason"], "areas\t%s" % " ".join(WINDOWS_AREAS)]
+    for suite, d in sorted(run["wants"].items()):
+        lines.append("want\t%s\t%s\t%s" % (suite, d["status"], d["line"]))
+    for fam, d in run["crate_plans"].items():
+        for m in d["msgs"]:
+            lines.append("cmsg\t%s\t%s" % (fam, m))
+        lines.append("crates\t%s\t%s\t%s" % (fam, d["args"], d["list"]))
+    return "\n".join(lines) + "\n"
+
+
+def run_stem(path):
+    return path[:-len(".json")]
+
+
+def plan(platform, full=False, retried=False, tools_file=None):
+    """Starts a run. Returns (RUN path, the one-line message for stderr)."""
     tools = {}
-    if "--tools-file" in args:
-        with open(args[args.index("--tools-file") + 1]) as f:
+    if tools_file:
+        with open(tools_file) as f:
             text = f.read()
         tools = {"rust": text, "cbindgen": text, "cc": text, "swift": text}
     if os.environ.get("NVRVIEW_CACHE_TOOLS") is not None:
@@ -480,23 +553,27 @@ def cmd_plan(args):
     tree = Tree(platform, tools)
     run = {
         "platform": platform, "full": bool(reason), "reason": reason or "", "retried": retried,
-        "started": now(), "tools": tree.tools, "suites": tree.suite_keys(), "selected": {},
-        "passed": {}, "rows": [], "cached": [], "crates": {c: v["lib"] for c, v in tree.crates.items()},
+        "started": now(), "tools": tree.tools, "suites": tree.suite_keys(),
         "trimmed": trimmed_reason(base, platform, bool(reason)) or "",
     }
     run["tools"] = tree.tools  # filled while computing the keys
+    run["wants"] = {s: want_decision(base, run, s) for s in run["suites"]}
+    run["crate_plans"] = {f: crates_decision(base, run, f) for f in FAMILIES}
     state_file = os.path.join(base, "state-%s.json" % platform)
     state = read_json(state_file, {})
     if reason:
-        print("full run: %s" % reason, file=sys.stderr)
+        message = "full run: %s" % reason
     else:
         state["runs_since_full"] = state.get("runs_since_full", 0) + 1
         write_json(state_file, state)
-        print("cached run: suites with a clean pass in the last %gh are skipped (last full pass %s ago; NVRVIEW_FULL_CHECK=1 runs everything)"
-              % (hours("NVRVIEW_CACHE_MAX_AGE_H", 72), age(now() - state.get("last_full", now()))), file=sys.stderr)
+        message = ("cached run: suites with a clean pass in the last %gh are skipped (last full pass %s ago; NVRVIEW_FULL_CHECK=1 runs everything)"
+                   % (hours("NVRVIEW_CACHE_MAX_AGE_H", 72), age(now() - state.get("last_full", now()))))
     path = os.path.join(base, "runs", "%s-%d-%d.json" % (platform, now(), os.getpid()))
     write_json(path, run)
-    print(path)
+    with open(run_stem(path) + ".plan", "w") as f:
+        f.write(plan_text(run))
+    open(run_stem(path) + ".log", "w").close()
+    return path, message
 
 
 def cached_entry(base, run, suite):
@@ -512,67 +589,35 @@ def cached_entry(base, run, suite):
     return e
 
 
-def cmd_want(args):
-    path, suite = args
-    run = read_json(path)
-    base = store()
-    if is_trimmed(suite) and run["platform"] == "windows" and not run["full"]:
-        if run.get("trimmed"):
-            return 0  # the daily trimmed-build run is due: these run whatever the cache says
-        if suite != "app-update":
-            last = read_json(os.path.join(base, "state-windows.json"), {}).get("last_trimmed", now())
-            print("deferred %s (trimmed build; last passed %s ago, runs daily and for releases)" % (suite, age(now() - last)))
-            run["rows"].append([suite, "deferred", 0])
-            run["cached"].append(suite + " (deferred)")
-            write_json(path, run)
-            return 1
-    e = cached_entry(base, run, suite)
-    if e is None:
-        return 0
-    print("cached pass %s (%s, key %s)" % (suite, age(now() - e["time"]), run["suites"][suite]["key"][:10]))
-    run["rows"].append([suite, "cached", 0])
-    run["cached"].append(suite)
-    write_json(path, run)
-    return 1
+def replay(run, log_path):
+    """Folds the shell's event log into the run: rows, cached suites, passed suites."""
+    run["rows"], run["cached"], run["passed"], run["selected"] = [], [], {}, {}
+    try:
+        with open(log_path) as f:
+            events = [line.rstrip("\n").split("\t") for line in f if line.strip()]
+    except OSError:
+        events = []
+    for ev in events:
+        if ev[0] == "want" and len(ev) == 2:
+            d = run["wants"].get(ev[1])
+            if d and d["status"] == "cached":
+                run["rows"].append([ev[1], "cached", 0])
+                run["cached"].append(ev[1])
+            elif d and d["status"] == "deferred":
+                run["rows"].append([ev[1], "deferred", 0])
+                run["cached"].append(ev[1] + " (deferred)")
+        elif ev[0] == "crates" and len(ev) == 2:
+            d = run["crate_plans"].get(ev[1])
+            if d:
+                run["selected"][ev[1]] = d["todo"]
+                run["rows"].append([ev[1], d["label"], 0])
+                if d["cached_label"]:
+                    run["cached"].append(d["cached_label"])
+        elif ev[0] == "pass" and len(ev) >= 3 and ev[1].isdigit():
+            pass_event(run, int(ev[1]), ev[2:])
 
 
-def cmd_crates(args):
-    path, fam = args[0], args[1]
-    as_list = "--list" in args
-    run = read_json(path)
-    base = store()
-    names = sorted(s.split(".", 1)[1] for s in run["suites"] if s.startswith(fam + "."))
-    todo, cached = [], []
-    for c in names:
-        e = cached_entry(base, run, "%s.%s" % (fam, c))
-        (todo if e is None else cached).append((c, e))
-    if len(cached) <= 3:
-        for c, e in cached:
-            print("cached pass %s.%s (%s, key %s)" % (fam, c, age(now() - e["time"]),
-                                                     run["suites"]["%s.%s" % (fam, c)]["key"][:10]), file=sys.stderr)
-    else:
-        ages = sorted(now() - e["time"] for _, e in cached)
-        print("cached pass %s for %d crates: %s (%s to %s old)" % (
-            fam, len(cached), ", ".join(c for c, _ in cached), age(ages[0]), age(ages[-1])), file=sys.stderr)
-    run["selected"][fam] = [c for c, _ in todo]
-    run["rows"].append([fam, "cached %d of %d crates" % (len(cached), len(names)), 0])
-    write_json(path, run)
-    if cached:
-        run["cached"].append("%s (%d of %d crates)" % (fam, len(cached), len(names)))
-        write_json(path, run)
-    # Doctest suites exist for library crates only, which is what
-    # `cargo test --doc --workspace` covers.
-    all_crates = len(todo) == len(names)
-    if as_list:
-        print("all" if todo and all_crates else ",".join(c for c, _ in todo) or "none")
-    elif todo:
-        print("--workspace" if all_crates else " ".join("-p %s" % c for c, _ in todo))
-    return 0
-
-
-def cmd_pass(args):
-    path, secs, names = args[0], int(args[1]), args[2:]
-    run = read_json(path)
+def pass_event(run, secs, names):
     for name in names:
         if name in run["selected"]:
             sel = run["selected"][name]
@@ -590,22 +635,20 @@ def cmd_pass(args):
             if name in run["suites"]:
                 run["passed"][name] = True
             run["rows"].append([name, "ran", secs])
-    write_json(path, run)
-    return 0
 
 
-def cmd_finish(args):
-    path = args[0]
-    ok = "--ok" in args
-    failed = args[args.index("--failed") + 1] if "--failed" in args else ""
+def finish(path, ok=False, partial=False, failed=""):
+    """Records the passes, ends the run, and returns the table text."""
     run = read_json(path)
     if run is None:
-        return 0
+        return ""
+    stem = run_stem(path)
+    replay(run, stem + ".log")
     base = store()
     # Record only suites whose inputs are what they were at the start.
     tree = Tree(run["platform"], run["tools"])
     keys = tree.suite_keys() if run["passed"] else {}
-    recorded = changed = 0
+    changed = 0
     for suite in run["passed"]:
         s = run["suites"].get(suite)
         k = keys.get(suite)
@@ -615,9 +658,8 @@ def cmd_finish(args):
         write_json(entry_path(base, run["platform"], suite, s["key"], run["retried"]),
                    {"time": now(), "run": os.path.basename(path), "retried": run["retried"],
                     "duration": dict((r[0], r[2]) for r in run["rows"]).get(suite.split(".")[0], 0)})
-        recorded += 1
     state_file = os.path.join(base, "state-%s.json" % run["platform"])
-    if ok and run["full"] and not run["retried"] and "--partial" not in args:
+    if ok and run["full"] and not run["retried"] and not partial:
         state = read_json(state_file, {})
         state.update(last_full=now(), runs_since_full=0)
         write_json(state_file, state)
@@ -627,22 +669,37 @@ def cmd_finish(args):
         state["last_trimmed"] = now()
         write_json(state_file, state)
     prune(base)
-    try:
-        os.remove(path)
-    except OSError:
-        pass
+    for ext in (".json", ".plan", ".log"):
+        try:
+            os.remove(stem + ext)
+        except OSError:
+            pass
     # The table.
     rows = run["rows"]
     if failed:
         rows.append([failed, "FAILED", 0])
     width = max([len(r[0]) for r in rows] + [5])
-    print("\n%-*s  %-34s %s" % (width, "suite", "result", "time"))
+    out = ["", "%-*s  %-34s %s" % (width, "suite", "result", "time")]
     for name, status, secs in rows:
-        print("%-*s  %-34s %s" % (width, name, status, "-" if status.startswith("cached") else "%ss" % secs))
-    print("%s run on %s; cached suites: %s" % ("full" if run["full"] else "cached", run["platform"],
-                                                ", ".join(run["cached"]) or "none"))
+        out.append("%-*s  %-34s %s" % (width, name, status, "-" if status.startswith("cached") else "%ss" % secs))
+    out.append("%s run on %s; cached suites: %s" % ("full" if run["full"] else "cached", run["platform"],
+                                                    ", ".join(run["cached"]) or "none"))
     if changed:
-        print("%d passed suite(s) not recorded: their inputs changed during the run" % changed)
+        out.append("%d passed suite(s) not recorded: their inputs changed during the run" % changed)
+    return "\n".join(out) + "\n"
+
+
+def cmd_plan(args):
+    tools_file = args[args.index("--tools-file") + 1] if "--tools-file" in args else None
+    path, message = plan(args[0], "--full" in args, "--retried" in args, tools_file)
+    print(message, file=sys.stderr)
+    print(path)
+    return 0
+
+
+def cmd_finish(args):
+    failed = args[args.index("--failed") + 1] if "--failed" in args else ""
+    sys.stdout.write(finish(args[0], "--ok" in args, "--partial" in args, failed))
     return 0
 
 
@@ -683,8 +740,7 @@ def main():
         print(__doc__, file=sys.stderr)
         return 2
     cmd, args = sys.argv[1], sys.argv[2:]
-    return {"plan": cmd_plan, "want": cmd_want, "crates": cmd_crates, "pass": cmd_pass,
-            "finish": cmd_finish, "full-due": cmd_full_due, "areas": cmd_areas,
+    return {"plan": cmd_plan, "finish": cmd_finish, "full-due": cmd_full_due, "areas": cmd_areas,
             "check-projects": cmd_check_projects}[cmd](args) or 0
 
 
