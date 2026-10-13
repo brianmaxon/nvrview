@@ -508,6 +508,35 @@ extension FakeCore {
         }
     }
 
+    /// A stand-in for the core's answer, not the sun's arithmetic: the
+    /// sun rises at 06:00 and sets at 18:00 UTC of the request's UTC date.
+    /// Validates like the core (a location in range, `at_ms`).
+    public func alertsSunTimes(json: String) throws(CoreStatus) -> String {
+        checkOutsideCallback("nv_alerts_sun_times")
+        if isFreed { throw .closed }
+        guard let o = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+            let lat = (o["lat"] as? NSNumber)?.doubleValue, let lon = (o["lon"] as? NSNumber)?.doubleValue,
+            let at = (o["at_ms"] as? NSNumber)?.int64Value, abs(lat) <= 90, abs(lon) <= 180
+        else { throw .invalidArgument }
+        let offset = (o["utc_offset_min"] as? NSNumber)?.int64Value ?? 0
+        let after = (o["after_sunset_min"] as? NSNumber)?.int64Value ?? 0
+        let before = (o["before_sunrise_min"] as? NSNumber)?.int64Value ?? 0
+        let day: Int64 = 86_400_000
+        let local = at + offset * 60_000
+        let midnight = (local / day) * day - (local < 0 && local % day != 0 ? day : 0)
+        let rise = midnight + 6 * 3_600_000, set = midnight + 18 * 3_600_000
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        let date = f.string(from: Date(timeIntervalSince1970: Double(midnight) / 1000))
+        let answer: [String: Any] = [
+            "date": date, "kind": "normal", "sunrise_ms": rise, "sunset_ms": set,
+            "night_start_ms": set + after * 60_000, "night_end_ms": rise + day - before * 60_000,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
     public func alertMute(cameraJSON: String, seconds: UInt32) throws(CoreStatus) {
         checkOutsideCallback("nv_alert_mute")
         if isFreed { throw .closed }

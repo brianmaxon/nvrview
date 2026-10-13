@@ -43,8 +43,8 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// out_ms of nv_edit_compute, and dest and share_safe on export requests.
 /// Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
 /// nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
-/// (docs/FFI.md, "Smart alerts").
-pub const NV_ABI_MINOR: u32 = 12;
+/// (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times.
+pub const NV_ABI_MINOR: u32 = 13;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -3425,6 +3425,33 @@ pub unsafe extern "C" fn nv_alerts_get(
     unsafe {
         rec_answer(core, out, cap, len, |c| {
             Ok(c.alerts_get(opt_arg(query)?.unwrap_or(""))?)
+        })
+    }
+}
+
+/// Today's sunrise and sunset and the night that starts this evening at a
+/// location (docs/FFI.md, "Smart alerts"): `request` is {"lat","lon",
+/// "at_ms","utc_offset_min","after_sunset_min","before_sunrise_min"};
+/// answers {"date","kind","sunrise_ms","sunset_ms","night_start_ms",
+/// "night_end_ms"} into `out` like nv_layouts_get. NV_ERR_INVALID_ARGUMENT
+/// for JSON that is not that or a location out of range. Answers from
+/// memory, on any thread, never inside a callback. Added in minor 13.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_sun_times(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.alerts_sun_times(arg(request)?)?)
         })
     }
 }

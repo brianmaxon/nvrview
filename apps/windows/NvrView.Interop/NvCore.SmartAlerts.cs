@@ -58,6 +58,9 @@ public interface ISmartAlerts
     /// <summary><c>nv_alerts_get</c>: the event log, newest first, filtered by <paramref name="query"/> (JSON, or null).</summary>
     string AlertsGet(string? query);
 
+    /// <summary><c>nv_alerts_sun_times</c> (minor 13): today's sunrise, sunset, and night window at a location (JSON in, JSON out). No screen uses it on Windows yet.</summary>
+    string AlertsSunTimes(string request);
+
     /// <summary><c>nv_alerts_trigger_put</c>: a trigger from the app; its ID.</summary>
     ulong AlertsTriggerPut(string json);
 
@@ -85,6 +88,10 @@ public sealed unsafe partial class NvCore : ISmartAlerts
     /// <inheritdoc/>
     public void AlertsConfigure(string json) =>
         Call(c => NvNative.nv_alerts_configure(c, json), nameof(NvNative.nv_alerts_configure));
+
+    /// <inheritdoc/>
+    public string AlertsSunTimes(string request) =>
+        Answer((c, b, n, l) => NvNative.nv_alerts_sun_times(c, request, b, n, l), nameof(NvNative.nv_alerts_sun_times));
 
     /// <inheritdoc/>
     public string AlertsGet(string? query) =>

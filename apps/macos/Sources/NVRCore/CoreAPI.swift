@@ -291,6 +291,10 @@ public protocol CoreAPI: Sendable {
     func alertsConfigure(json: String) throws(CoreStatus)
     /// `nv_alerts_get`: the event log, newest first, filtered by `query`.
     func alertsGet(query: String?) throws(CoreStatus) -> String
+    /// `nv_alerts_sun_times` (minor 13): today's sunrise, sunset, and night
+    /// window at a location (`AlertSunTimes.request` in, `AlertSunTimes.parse`
+    /// out). Needs no `alertsConfigure` first.
+    func alertsSunTimes(json: String) throws(CoreStatus) -> String
     /// `nv_alerts_trigger_put`: a trigger from the app; its ID.
     func alertsTriggerPut(json: String) throws(CoreStatus) -> UInt64
     /// `nv_alert_frames_get`: a verification request's access units.

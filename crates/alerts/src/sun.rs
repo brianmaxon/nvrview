@@ -108,6 +108,50 @@ pub fn sun_day(date: Date, lat: f64, lon: f64) -> SunDay {
     }
 }
 
+/// The sun and the night around one calendar date, for showing to a person.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SunTimes {
+    /// What the sun does on the date.
+    pub day: SunDay,
+    /// When that evening's night starts (sunset plus the after-sunset
+    /// margin), or `None` when there is none (polar day, or a polar night
+    /// that has no sunset to count from).
+    pub night_start_ms: Option<Millis>,
+    /// When that night ends (the next sunrise less the before-sunrise
+    /// margin), or `None` when the next day has no sunrise.
+    pub night_end_ms: Option<Millis>,
+}
+
+/// Today's sunrise and sunset and the night that starts this evening, with
+/// the same margins [`is_night`] uses. A night the margins swallow (a short
+/// summer night) has both ends `None`.
+pub fn sun_times(
+    date: Date,
+    lat: f64,
+    lon: f64,
+    after_sunset_min: u16,
+    before_sunrise_min: u16,
+) -> SunTimes {
+    let day = sun_day(date, lat, lon);
+    let (mut start, mut end) = (None, None);
+    if let SunDay::Normal { set_ms, .. } = day {
+        start = Some(set_ms + Millis::from(after_sunset_min) * MINUTE_MS);
+        if let SunDay::Normal { rise_ms, .. } = sun_day(date.add_days(1), lat, lon) {
+            end = Some(rise_ms - Millis::from(before_sunrise_min) * MINUTE_MS);
+        }
+        if let (Some(s), Some(e)) = (start, end)
+            && s >= e
+        {
+            (start, end) = (None, None);
+        }
+    }
+    SunTimes {
+        day,
+        night_start_ms: start,
+        night_end_ms: end,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Edge {
     Rise,
@@ -331,5 +375,41 @@ mod tests {
         assert!(in_daily_window(100, 0, 0));
         assert!(in_daily_window(9 * 60, 8 * 60, 17 * 60));
         assert!(!in_daily_window(17 * 60, 8 * 60, 17 * 60));
+    }
+
+    #[test]
+    fn sun_times_are_sunset_and_next_sunrise_less_margins() {
+        // Greenwich, 2024-12-21: sunrise 08:03:48, sunset 15:52:49 UTC; the
+        // next morning's sunrise is about 08:04.
+        let d = Date::new(2024, 12, 21);
+        let t = sun_times(d, 51.5, 0.0, 30, 20);
+        let SunDay::Normal { rise_ms, set_ms } = t.day else {
+            panic!("expected a normal day");
+        };
+        assert!((rise_ms - at(d, 8, 3, 48)).abs() <= 2 * MINUTE_MS);
+        assert!((set_ms - at(d, 15, 52, 49)).abs() <= 2 * MINUTE_MS);
+        assert_eq!(t.night_start_ms, Some(set_ms + 30 * MINUTE_MS));
+        let end = t.night_end_ms.unwrap();
+        assert!((end - (at(d.add_days(1), 8, 4, 0) - 20 * MINUTE_MS)).abs() <= 2 * MINUTE_MS);
+    }
+
+    #[test]
+    fn sun_times_polar_and_vanishing_nights() {
+        let polar_day = sun_times(Date::new(2024, 6, 21), 69.6, 19.0, 30, 30);
+        assert_eq!(polar_day.day, SunDay::PolarDay);
+        assert_eq!(
+            (polar_day.night_start_ms, polar_day.night_end_ms),
+            (None, None)
+        );
+        let polar_night = sun_times(Date::new(2024, 12, 21), 69.6, 19.0, 30, 30);
+        assert_eq!(polar_night.day, SunDay::PolarNight);
+        assert_eq!(
+            (polar_night.night_start_ms, polar_night.night_end_ms),
+            (None, None)
+        );
+        // A short midsummer night under 90-minute margins is gone.
+        let short = sun_times(Date::new(2024, 6, 21), 64.1, -21.9, 90, 90);
+        assert!(matches!(short.day, SunDay::Normal { .. }));
+        assert_eq!((short.night_start_ms, short.night_end_ms), (None, None));
     }
 }

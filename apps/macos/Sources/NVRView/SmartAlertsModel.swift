@@ -101,6 +101,22 @@ final class SmartAlertsModel {
         board.settings = settings.view
     }
 
+    // MARK: Night
+
+    /// The Night location's fields (kept here so they outlive the view).
+    @ObservationIgnored lazy var locationEditor = NightLocationEditor(alerts: self)
+
+    /// Today's predicted sunrise, sunset, and night window at the stored
+    /// location (the core's arithmetic, `nv_alerts_sun_times`); nil without
+    /// a location or when the core cannot say.
+    func sunTimes(now: Date = Date(), zone: TimeZone = .current) -> AlertSunTimes? {
+        guard let location = settings.location else { return nil }
+        let request = AlertSunTimes.request(
+            location: location, now: now, utcOffsetMinutes: zone.secondsFromGMT(for: now) / 60, night: settings.night)
+        guard let answer = try? bridge.smartAlertsAPI().alertsSunTimes(json: request) else { return nil }
+        return AlertSunTimes.parse(answer)
+    }
+
     // MARK: Settings
 
     /// Changes the settings: saved, then sent to the core.

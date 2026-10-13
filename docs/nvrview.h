@@ -27,8 +27,8 @@ extern "C" {
  * nv_recordings_want. Minor 8: edit lists and the rest of sound. Minor 9:
  * capture (live and call recordings). Minor 10: export (nv_download_range,
  * nv_still_plan, the trim kind). Minor 11: camera motion (PTZ). Minor 12:
- * smart alerts. */
-#define NV_ABI_MINOR 12
+ * smart alerts. Minor 13: nv_alerts_sun_times. */
+#define NV_ABI_MINOR 13
 
 /* Return codes. Every function that can fail returns one. */
 typedef enum NvStatus {
@@ -768,6 +768,14 @@ NvStatus nv_alert_snapshot_get(NvCore *core, uint64_t alert_id, uint8_t *out, si
 NvStatus nv_alert_feedback(NvCore *core, const char *json);
 /* {"device","channel","lens"} muted for seconds (at most 24 h; 0 unmutes). */
 NvStatus nv_alert_mute(NvCore *core, const char *camera, uint32_t seconds);
+/* Today's sunrise and sunset and the night that starts this evening at a
+ * location. request: {"lat","lon","at_ms","utc_offset_min"?,
+ * "after_sunset_min"?,"before_sunrise_min"?}; answers {"date","kind":
+ * "normal"|"polar_day"|"polar_night","sunrise_ms","sunset_ms",
+ * "night_start_ms","night_end_ms"} (UTC ms; null where there is none) like
+ * nv_alerts_get. Needs no nv_alerts_configure. */
+NvStatus nv_alerts_sun_times(NvCore *core, const char *request, char *out, size_t cap,
+                             size_t *len);
 
 #ifdef __cplusplus
 }

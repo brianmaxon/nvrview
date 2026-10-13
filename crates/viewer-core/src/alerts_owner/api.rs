@@ -637,6 +637,58 @@ impl crate::Core {
         Ok(())
     }
 
+    /// Today's sunrise and sunset and the night that starts this evening,
+    /// for the settings screen. `request` is `{"lat":..,"lon":..,"at_ms":..,
+    /// "utc_offset_min":..,"after_sunset_min":..,"before_sunrise_min":..}`
+    /// (the offsets and margins optional, 0); the date is the local date of
+    /// `at_ms` at the offset. Answers `{"date":"YYYY-MM-DD","kind":
+    /// "normal"|"polar_day"|"polar_night","sunrise_ms":..,"sunset_ms":..,
+    /// "night_start_ms":..,"night_end_ms":..}`; members that do not exist
+    /// that day are null. Needs no state; never waits.
+    ///
+    /// # Errors
+    /// [`AlertError::InvalidArgument`] for malformed JSON, a missing or
+    /// non-numeric `lat`, `lon`, or `at_ms`, or a location out of range,
+    /// [`AlertError::Closed`].
+    pub fn alerts_sun_times(&self, request: &str) -> Result<String, AlertError> {
+        self.check_api().map_err(core_err)?;
+        let q = parse_object(request)?;
+        let bad = AlertError::InvalidArgument;
+        let lat = q.get("lat").and_then(Value::as_f64).ok_or(bad)?;
+        let lon = q.get("lon").and_then(Value::as_f64).ok_or(bad)?;
+        let at_ms = q.get("at_ms").and_then(Value::as_i64).ok_or(bad)?;
+        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+            return Err(bad);
+        }
+        let int = |k: &str, max: i64| -> Result<i64, AlertError> {
+            match q.get(k) {
+                None | Some(Value::Null) => Ok(0),
+                Some(x) => x.as_i64().map(|n| n.clamp(-max, max)).ok_or(bad),
+            }
+        };
+        let offset = i32::try_from(int("utc_offset_min", 14 * 60)?).unwrap_or(0);
+        let after = u16::try_from(int("after_sunset_min", 1440)?.max(0)).unwrap_or(0);
+        let before = u16::try_from(int("before_sunrise_min", 1440)?.max(0)).unwrap_or(0);
+        let date = alerts::time::local(at_ms, offset).date;
+        let t = alerts::sun::sun_times(date, lat, lon, after, before);
+        let (kind, rise, set) = match t.day {
+            alerts::sun::SunDay::Normal { rise_ms, set_ms } => {
+                ("normal", Some(rise_ms), Some(set_ms))
+            }
+            alerts::sun::SunDay::PolarDay => ("polar_day", None, None),
+            alerts::sun::SunDay::PolarNight => ("polar_night", None, None),
+        };
+        Ok(json!({
+            "date": format!("{:04}-{:02}-{:02}", date.year, date.month, date.day),
+            "kind": kind,
+            "sunrise_ms": rise,
+            "sunset_ms": set,
+            "night_start_ms": t.night_start_ms,
+            "night_end_ms": t.night_end_ms,
+        })
+        .to_string())
+    }
+
     /// The event log, newest first, for the Events view: `query` is
     /// `{"limit":100,"before_ms":..,"since_ms":..,"until_ms":..,
     /// "camera":{...},"device":n,"decision":["alert","quiet","suppress"],

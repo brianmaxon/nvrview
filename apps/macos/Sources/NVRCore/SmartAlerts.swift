@@ -210,6 +210,7 @@ public enum SmartAlertEvent: Sendable, Equatable {
 extension CoreAPI {
     public func alertsConfigure(json: String) throws(CoreStatus) { throw .unsupported }
     public func alertsGet(query: String?) throws(CoreStatus) -> String { throw .unsupported }
+    public func alertsSunTimes(json: String) throws(CoreStatus) -> String { throw .unsupported }
     public func alertsTriggerPut(json: String) throws(CoreStatus) -> UInt64 { throw .unsupported }
     public func alertFramesGet(request: String) throws(CoreStatus) -> AlertFrames { throw .unsupported }
     public func alertDetectionsPut(request: String, json: String) throws(CoreStatus) { throw .unsupported }

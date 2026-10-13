@@ -1189,6 +1189,19 @@ static void alerts(NvCore *core, uint64_t device) {
         nv_alert_frames_get(core, "v0", NULL, NULL, 0, NULL) != NV_ERR_INVALID_ARGUMENT) {
         problem("alert feedback, mute, and refusals");
     }
+    {
+        char sun[512];
+        size_t sun_len = 0;
+        if (nv_alerts_sun_times(core,
+                                "{\"lat\":12.3,\"lon\":-45.6,\"at_ms\":1718971200000,"
+                                "\"utc_offset_min\":-180}",
+                                sun, sizeof sun, &sun_len) != NV_OK ||
+            strstr(sun, "\"kind\":\"normal\"") == NULL ||
+            nv_alerts_sun_times(core, "{\"lat\":91,\"lon\":0,\"at_ms\":0}", sun, sizeof sun,
+                                &sun_len) != NV_ERR_INVALID_ARGUMENT) {
+            problem("nv_alerts_sun_times");
+        }
+    }
     /* Off: nothing stays woken. */
     if (nv_alerts_configure(core, "{\"enabled\":false}") != NV_OK) {
         problem("turning smart alerts off");

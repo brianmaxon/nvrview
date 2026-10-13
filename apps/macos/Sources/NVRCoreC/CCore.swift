@@ -605,6 +605,11 @@ public final class CCore: CoreAPI {
         }
     }
 
+    public func alertsSunTimes(json: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_alerts_sun_times(c, json, $0, $1, $2) }
+    }
+
     public func alertsTriggerPut(json: String) throws(CoreStatus) -> UInt64 {
         var id: UInt64 = 0
         try check(nv_alerts_trigger_put(try core(), json, &id))
