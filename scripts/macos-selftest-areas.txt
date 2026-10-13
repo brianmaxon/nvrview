@@ -1,0 +1,76 @@
+# The macOS app self-test's areas (apps/macos/Sources/NVRView/SelfTest.swift).
+#
+# `NVRView --fake ... --selftest N --areas a,b` runs only those areas (plus
+# "startup", which always runs); scripts/suite-cache.py caches each area on
+# its own (mac-app.AREA). Every `// parity: <id>` step belongs to exactly one
+# area, found here by the longest matching pattern: `area  id` (exact) or
+# `area  prefix*`. scripts/check-selftest-areas.py fails when a step matches
+# no pattern, a pattern matches no step, or two patterns of different areas
+# tie. The names follow the Windows areas (scripts/windows-selftest-areas.txt)
+# where the steps correspond; a step sits where the Mac self-test's chain runs
+# it, which is not always the Windows area.
+#
+# Which code runs for an area is decided in the self-test source (runs(...) in
+# SelfTest.swift; the area list there is areaNames). Which files invalidate an
+# area is decided in scripts/suite-cache.py (MAC_OWNED).
+
+# The smoke that every run includes: the launch, the grid plays, resize, the
+# Retry delay, the core contract, AppKit's warnings.
+startup  sidebar-system-peek
+startup  grid-plays
+startup  resize
+startup  tile-retry
+startup  core-contract
+startup  appkit-warnings
+
+# Viewer: focus, audio, keys, zoom, the full-screen chrome, fill, pan.
+viewer  live-pacing
+viewer  focus-*
+viewer  unfocus-sub-stream
+viewer  audio-*
+viewer  key-*
+viewer  zoom-*
+viewer  fullscreen-chrome-autohide
+viewer  fill-*
+viewer  pan-*
+viewer  tile-frame-*
+
+# Tile features: quality, the second lens, fisheye.
+tiles  quality-*
+tiles  second-lens
+tiles  fisheye-*
+tiles  capture-picture-fisheye
+
+# The sidebar.
+layouts  sidebar-rows-update
+layouts  sidebar-reveal
+
+# The tile header's buttons and menus.
+header  header-*
+
+# Settings: device search, updates.
+settings  discovery-*
+settings  updates-*
+
+# Calls: doorbell insets and call windows, their recording, alert insets.
+calls  call-*
+calls  alert-inset-*
+calls  inset-drag-*
+calls  capture-call-record-button
+
+# Recordings window, playback, edits, export, sound analysis (fake and real core).
+recordings  recordings-*
+recordings  playback-*
+recordings  edit-*
+recordings  export-*
+
+# Pictures and recordings made from tiles (and the real core's recordings).
+capture  capture-*
+
+# Camera motion.
+ptz  ptz-*
+
+# Smart alerts: settings, live checks, the events log, the detector, end to end.
+alerts  alerts-*
+alerts  verify-view-*
+alerts  events-log-*

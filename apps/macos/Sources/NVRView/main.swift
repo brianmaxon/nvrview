@@ -75,7 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             NSApplication.shared.activate()
             if model.devices.isEmpty { showSettings(nil) }
         }
-        if let seconds = options.selfTestSeconds { SelfTest(app: self).start(seconds: seconds) }
+        if let seconds = options.selfTestSeconds { SelfTest(app: self, areas: options.areas).start(seconds: seconds) }
     }
 
     // MARK: Call windows

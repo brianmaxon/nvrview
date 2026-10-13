@@ -446,6 +446,55 @@ same("C# suites: the shared build settings rerun every suite", csuites(),
 commit_file("crates/viewer-ffi/src/lib.rs", "// ffi 2")
 same("C# suites: the core library reruns the ones that load it", csuites(), "csharp-smoke,video-selftest,app-update")
 
+# The Mac app self-test (fake core) is cached by area the same way
+# (mac-app.AREA): the area files and the screens only one area exercises
+# rerun that area and startup; shared code, the main self-test file, and the
+# area table rerun every area; the demo and the unit tests rerun none.
+for f in ("apps/macos/Sources/NVRView/SelfTest.swift", "apps/macos/Sources/NVRView/SelfTest+Recordings.swift",
+          "apps/macos/Sources/NVRView/SelfTest+PTZ.swift", "apps/macos/Sources/NVRView/RecordingsWindow.swift",
+          "apps/macos/Sources/NVRView/StageView.swift", "apps/macos/Sources/NVRCore/PTZ.swift",
+          "apps/macos/Sources/AlertHost/AlertNotifier.swift", "apps/macos/Sources/NVRViewDemo/main.swift",
+          "apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "scripts/macos-selftest-areas.txt"):
+    write(f, "// %s\n" % f)
+sh("git", "add", "-A")
+sh("git", "commit", "-q", "-m", "mac app files")
+MAC_AREAS = sc.MAC_AREAS
+all_mac = ",".join(MAC_AREAS)
+
+
+def mcheck():
+    """The Mac app self-test areas to run; all pass."""
+    tick(60)
+    mrun, _ = plan("mac")
+    todo = [a for a in MAC_AREAS if want(mrun, "mac-app." + a)]
+    for a in todo:
+        passed(mrun, 1, "mac-app." + a)
+    sc.finish(mrun, ok=True)
+    return ",".join(todo) or "-"
+
+
+same("mac areas: the first run runs every area", mcheck(), all_mac)
+same("mac areas: unchanged, all cached", mcheck(), "-")
+commit_file("apps/macos/Sources/NVRView/SelfTest+Recordings.swift", "// recordings steps 2")
+same("mac areas: the recordings steps rerun recordings and startup", mcheck(), "startup,recordings")
+commit_file("apps/macos/Sources/NVRView/RecordingsWindow.swift", "// recordings window 2")
+same("mac areas: so does the recordings window", mcheck(), "startup,recordings")
+commit_file("apps/macos/Sources/NVRCore/PTZ.swift", "// ptz 2")
+same("mac areas: a PTZ file reruns ptz and startup", mcheck(), "startup,ptz")
+commit_file("apps/macos/Sources/AlertHost/AlertNotifier.swift", "// alert host 2")
+same("mac areas: a file of an owned directory reruns its area", mcheck(), "startup,alerts")
+commit_file("apps/macos/Sources/NVRViewDemo/main.swift", "// demo 2")
+commit_file("apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "// tests 2")
+same("mac areas: the demo and the unit tests rerun no area", mcheck(), "-")
+commit_file("apps/macos/Sources/NVRView/StageView.swift", "// shared stage 2")
+same("mac areas: a shared app file reruns every area", mcheck(), all_mac)
+commit_file("apps/macos/Sources/NVRView/SelfTest.swift", "// shared self-test 2")
+same("mac areas: the main self-test file reruns every area", mcheck(), all_mac)
+commit_file("scripts/macos-selftest-areas.txt", "# table 2")
+same("mac areas: the area table reruns every area", mcheck(), all_mac)
+check("mac areas: the plan lists them for the shell",
+      "macareas\t%s" % " ".join(MAC_AREAS) in sc.plan_text({"reason": "", "wants": {}, "crate_plans": {}}))
+
 # DOTNET_REFS against the real C# project files.
 here_cwd = os.getcwd()
 os.chdir(os.path.join(HERE, ".."))

@@ -2,7 +2,7 @@
 # Runs the macOS app's self-test on the real core (the Rust library through
 # NVRViewCore.xcframework) against a local tools/mock-nvr with three
 # channels, three days of recordings and AAC audio, so the recordings
-# window's and the capture's real-core steps run too (SelfTest.swift,
+# window's and the capture's real-core steps run too (SelfTest*.swift,
 # `recordings-real-core`, `capture-record-real-core`,
 # `capture-call-record-real-core`). Never a real NVR:
 # the device is the mock on 127.0.0.1, with made-up credentials, and the
@@ -10,8 +10,10 @@
 #
 #   scripts/macos-real-selftest.sh            # builds what is missing first
 #
-# Not part of scripts/check.sh (it builds the release core); run it after
-# changing the recordings screens or the C interface they use.
+# scripts/check.sh runs it in full runs (NVRVIEW_FULL_CHECK=1, the release
+# checks, and the periodic full run); it builds the release core, so ordinary
+# checks leave it out. Run it by hand after changing the recordings screens or
+# the C interface they use.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$(pwd)

@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""Checks the Windows app self-test's area table (scripts/windows-selftest-areas.txt).
+"""Checks the app self-tests' area tables, for Windows and for the Mac.
 
-Every `// parity: <id>` step in apps/windows/NvrView.App/SelfTest*.cs must
-belong to exactly one area: the table's longest matching pattern decides, and
-two patterns of different areas with the same length that match one step is
-an error. Also checked:
+Windows: scripts/windows-selftest-areas.txt against the `// parity: <id>`
+steps in apps/windows/NvrView.App/SelfTest*.cs. Mac:
+scripts/macos-selftest-areas.txt against the steps in
+apps/macos/Sources/NVRView/SelfTest*.swift.
+
+Every step must belong to exactly one area: the table's longest matching
+pattern decides, and two patterns of different areas with the same length
+that match one step is an error. Also checked, per platform:
 
 - every pattern matches a step (no stale entries);
-- the area list is the same in the table, SelfTest.AreaNames (the app's
-  --areas), and WINDOWS_AREAS in scripts/suite-cache.py;
-- every area name used in a Runs(...) or RunsAny(...) call is a known area;
-- the files that scripts/suite-cache.py lists as owned by an area exist and
-  are owned by one area only.
+- the area list is the same in the table, the app's own list (Windows
+  SelfTest.AreaNames, Mac SelfTest.areaNames: what --areas accepts), and
+  WINDOWS_AREAS or MAC_AREAS in scripts/suite-cache.py;
+- every area name used in a Runs(...)/RunsAny(...) call (Windows) or a
+  runs(...) call (Mac) is a known area;
+- the files that scripts/suite-cache.py lists as owned by an area
+  (WINDOWS_OWNED, MAC_OWNED) exist and are owned by one area only.
 
 Run with `python3 -I scripts/check-selftest-areas.py`; `--list` prints the
 steps of each area.
@@ -25,9 +31,30 @@ sys.dont_write_bytecode = True
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "apps/windows/NvrView.App"
-TABLE = ROOT / "scripts/windows-selftest-areas.txt"
 MARKER = re.compile(r"^\s*//+\s*parity:\s*(\S+)\s*$")
+
+PLATFORMS = {
+    "windows": {
+        "sources": lambda: sorted((ROOT / "apps/windows/NvrView.App").glob("SelfTest*.cs")),
+        "table": ROOT / "scripts/windows-selftest-areas.txt",
+        "names_file": ROOT / "apps/windows/NvrView.App/SelfTest.cs",
+        "names": re.compile(r"AreaNames\s*=\s*\[([^\]]*)\]"),
+        "names_label": "SelfTest.AreaNames",
+        "calls": re.compile(r"\bRuns(?:Any)?\(([^)]*)\)"),
+        "areas": "WINDOWS_AREAS",
+        "owned": "WINDOWS_OWNED",
+    },
+    "mac": {
+        "sources": lambda: sorted((ROOT / "apps/macos/Sources/NVRView").glob("SelfTest*.swift")),
+        "table": ROOT / "scripts/macos-selftest-areas.txt",
+        "names_file": ROOT / "apps/macos/Sources/NVRView/SelfTest.swift",
+        "names": re.compile(r"static let areaNames\s*=\s*\[([^\]]*)\]"),
+        "names_label": "SelfTest.areaNames",
+        "calls": re.compile(r"\bruns\(([^)]*)\)"),
+        "areas": "MAC_AREAS",
+        "owned": "MAC_OWNED",
+    },
+}
 
 
 def load_cache():
@@ -37,10 +64,13 @@ def load_cache():
     return mod
 
 
-def main():
-    errors = []
+def check(platform, cfg, cache, errors):
+    """Checks one platform; returns (areas in order, step -> area, step count)."""
+    def err(text):
+        errors.append(f"{platform}: {text}")
+
     ids = {}
-    sources = sorted(APP.glob("SelfTest*.cs"))
+    sources = cfg["sources"]()
     for path in sources:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             m = MARKER.match(line)
@@ -48,14 +78,14 @@ def main():
                 ids[m.group(1)] = f"{path.name}:{number}"
 
     table = []  # (area, pattern, line number)
-    table_rel = TABLE.relative_to(ROOT)
-    for number, raw in enumerate(TABLE.read_text(encoding="utf-8").splitlines(), 1):
+    table_rel = cfg["table"].relative_to(ROOT)
+    for number, raw in enumerate(cfg["table"].read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split()
         if len(parts) != 2:
-            errors.append(f"{table_rel}:{number}: want `area  id` or `area  prefix*`")
+            err(f"{table_rel}:{number}: want `area  id` or `area  prefix*`")
             continue
         table.append((parts[0], parts[1], number))
 
@@ -63,67 +93,72 @@ def main():
         return step.startswith(pattern[:-1]) if pattern.endswith("*") else step == pattern
 
     areas = {}  # step -> area
-    used = set()
     for step, where in sorted(ids.items()):
         best = []
         for area, pattern, number in table:
             if matches(pattern, step):
                 best.append((len(pattern.rstrip("*")) + (0 if pattern.endswith("*") else 1), area, pattern, number))
         if not best:
-            errors.append(f"{where}: step `{step}` belongs to no area (add it to {table_rel})")
+            err(f"{where}: step `{step}` belongs to no area (add it to {table_rel})")
             continue
         top = max(b[0] for b in best)
         winners = [b for b in best if b[0] == top]
         if len({b[1] for b in winners}) > 1:
-            errors.append(f"{where}: step `{step}` matches patterns of several areas equally: "
-                          + ", ".join(f"{b[1]} {b[2]}" for b in winners))
+            err(f"{where}: step `{step}` matches patterns of several areas equally: "
+                + ", ".join(f"{b[1]} {b[2]}" for b in winners))
             continue
         areas[step] = winners[0][1]
-        used.update((b[3]) for b in winners)
     for area, pattern, number in table:
         if not any(matches(pattern, step) for step in ids):
-            errors.append(f"{table_rel}:{number}: `{pattern}` matches no step")
+            err(f"{table_rel}:{number}: `{pattern}` matches no step")
 
     table_areas = {a for a, _, _ in table}
-    cache = load_cache()
-    cache_areas = list(cache.WINDOWS_AREAS)
-    cs = (APP / "SelfTest.cs").read_text(encoding="utf-8")
-    m = re.search(r"AreaNames\s*=\s*\[([^\]]*)\]", cs)
+    cache_areas = list(getattr(cache, cfg["areas"]))
+    text = cfg["names_file"].read_text(encoding="utf-8")
+    m = cfg["names"].search(text)
     app_areas = re.findall(r'"([a-z]+)"', m.group(1)) if m else []
     if not m:
-        errors.append("SelfTest.cs: AreaNames not found")
+        err(f"{cfg['names_file'].name}: {cfg['names_label']} not found")
     if set(app_areas) != set(cache_areas) or len(app_areas) != len(cache_areas):
-        errors.append(f"area lists differ: SelfTest.AreaNames {app_areas}, suite-cache.py {cache_areas}")
+        err(f"area lists differ: {cfg['names_label']} {app_areas}, suite-cache.py {cache_areas}")
     if table_areas != set(cache_areas):
-        errors.append(f"{table_rel}: areas {sorted(table_areas)} differ from suite-cache.py {sorted(cache_areas)}")
+        err(f"{table_rel}: areas {sorted(table_areas)} differ from suite-cache.py {sorted(cache_areas)}")
 
     for path in sources:
-        for call in re.finditer(r"\bRuns(?:Any)?\(([^)]*)\)", path.read_text(encoding="utf-8")):
+        for call in cfg["calls"].finditer(path.read_text(encoding="utf-8")):
             for name in re.findall(r'"([^"]*)"', call.group(1)):
                 if name not in cache_areas:
-                    errors.append(f"{path.name}: unknown area `{name}` in {call.group(0)}")
+                    err(f"{path.name}: unknown area `{name}` in {call.group(0)}")
 
     seen = {}
-    for area, paths in cache.WINDOWS_OWNED.items():
+    for area, paths in getattr(cache, cfg["owned"]).items():
         if area not in cache_areas or area == "startup":
-            errors.append(f"suite-cache.py WINDOWS_OWNED: `{area}` is not an owning area")
+            err(f"suite-cache.py {cfg['owned']}: `{area}` is not an owning area")
         for p in paths:
-            if not (ROOT / p).is_file():
-                errors.append(f"suite-cache.py WINDOWS_OWNED: {p} does not exist")
+            if not (ROOT / p).exists():
+                err(f"suite-cache.py {cfg['owned']}: {p} does not exist")
             if p in seen:
-                errors.append(f"suite-cache.py WINDOWS_OWNED: {p} is owned by {seen[p]} and {area}")
+                err(f"suite-cache.py {cfg['owned']}: {p} is owned by {seen[p]} and {area}")
             seen[p] = area
+    return cache_areas, areas, len(ids)
 
+
+def main():
+    errors = []
+    cache = load_cache()
+    results = {p: check(p, cfg, cache, errors) for p, cfg in PLATFORMS.items()}
     if errors:
         print("self-test area check failed:", file=sys.stderr)
         for e in errors:
             print("  " + e, file=sys.stderr)
         return 1
-    if "--list" in sys.argv:
-        for area in cache_areas:
-            print(f"{area}: " + " ".join(sorted(s for s, a in areas.items() if a == area)))
-    else:
-        print(f"self-test areas ok: {len(ids)} steps in {len(cache_areas)} areas")
+    for platform, (area_list, areas, count) in results.items():
+        if "--list" in sys.argv:
+            print(f"== {platform}")
+            for area in area_list:
+                print(f"{area}: " + " ".join(sorted(s for s, a in areas.items() if a == area)))
+        else:
+            print(f"self-test areas ok ({platform}): {count} steps in {len(area_list)} areas")
     return 0
 
 
