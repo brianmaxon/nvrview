@@ -1372,7 +1372,10 @@ port as `N`). Nothing else was sent.
   media had `encryptLen` 0 when the official client's did not; the playback
   commands 381 and 383 (unused by the client so far) and why it sends 382 at
   quit; how a 143 error (bad stream name, no disk) is reported. A play across a
-  file boundary is observed to continue with no wire event, and rates
+  file boundary is observed to continue with no wire event; a play across a
+  gap with no recording at all (whether the device skips it instantly, waits
+  it out, or ends the play) was not observed, and the mock skips it
+  instantly; and rates
   2×–16× are served by stop/seek/play with `playSpeed` 2, 4, 8, 16 (keyframes
   only, no audio; settled, see "Rates, keyframes, and how a play ends").
   Four plays at once are observed for the official client (see "Four plays

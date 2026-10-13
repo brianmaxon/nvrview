@@ -517,7 +517,10 @@ fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
     assert!(pts_ms(g1[0].0) >= ms(8, 10, 1, 20));
     check_protocol(&rig.rec.seen_of(tiles[1], 1));
     // At 10:01:30 it has nothing again: cleared, then back at 10:01:40, in
-    // the same play (the device's play goes on across the gap).
+    // the same play (the mock skips the gap and the play goes on). The
+    // empty time of the gap does not count toward the buffer limit; if it
+    // did, the next file's opening seconds would fill the 20 s buffer and
+    // a third play would start at 10:01:40.
     rig.until("the second gap", 15, || {
         rig.camera_state(pb, tiles[1]).unwrap()["state"] == "no_recording"
     });
@@ -529,6 +532,8 @@ fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
     });
     let (pos, _) = rig.position(pb);
     assert!(pos >= ms(8, 10, 1, 40) && pos <= ms(8, 10, 1, 42), "{pos}");
+    let log = nvr.play_log();
+    assert_eq!(log.len(), 2, "{log:?}");
     // Channel 0 played on throughout, in its first generation.
     let g0 = decodes_of(&rig.rec, tiles[0], 1);
     let gaps = g0
