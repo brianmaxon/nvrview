@@ -28,6 +28,14 @@
 # Neither is ever committed; without them nothing changes and the app trusts
 # nothing until the user adds a key.
 #
+# The bundle is reused, not rebuilt, when it is the one the real-core self-test
+# ran against for this exact tree (scripts/macos-real-selftest.sh --bundle
+# leaves build/NVRView.app.tested with the tree hash; both markers need a clean
+# tree). Only the bundled files are then replaced (update-defaults.json,
+# release-notes.json; the binary is untouched, so what ships is what was
+# tested), and the bundle is signed again and zipped. --rebuild forces a build
+# from scratch. A tree with uncommitted changes always builds.
+#
 # This signing is for local use. Distributing the app needs a Developer ID
 # signature and notarization, which this script does not do.
 set -eu
@@ -37,15 +45,17 @@ if [ -d /opt/homebrew/opt/rustup/bin ]; then
 fi
 
 real=1
+rebuild=0
 key_files=""
 update_source=""
-usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE] [--release-notes FILE [--notes-history DIR]] [--bundle-detector]"
+usage="usage: $0 [--fake-only] [--rebuild] [--trusted-key-file FILE]... [--update-source SOURCE] [--release-notes FILE [--notes-history DIR]] [--bundle-detector]"
 bundle_detector=0
 release_notes=""
 notes_history=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --fake-only) real=0; shift ;;
+    --rebuild) rebuild=1; shift ;;
     --bundle-detector) bundle_detector=1; shift ;;
     --trusted-key-file)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
@@ -82,18 +92,32 @@ pack=apps/macos/Packaging
 version=$(tr -d "[:space:]" <VERSION)
 app=build/NVRView.app
 work=build/package-work
+# Its own build folder, so a check's other Swift builds never wait for this one.
+scratch=""
+if [ "$real" = 1 ]; then scratch="--scratch-path .build-real-core"; fi
 
+# Reuse the bundle the self-test ran against (see the header).
+tree=""
+if [ -z "$(git status --porcelain)" ]; then tree=$(git rev-parse 'HEAD^{tree}'); fi
+reuse=0
+if [ "$rebuild" = 0 ] && [ "$real" = 1 ] && [ "$bundle_detector" = 0 ] && [ -n "$tree" ] && [ -x "$app/Contents/MacOS/NVRView" ] &&
+  [ "$(sed -n 's/^tree=//p' build/NVRView.app.tested 2>/dev/null)" = "$tree" ] &&
+  [ "$(cat build/NVRView.app.tree 2>/dev/null)" = "$tree" ]; then
+  reuse=1
+  echo "reusing the app bundle that passed the real-core self-test for tree $tree (only the bundled files and the signature are redone)"
+  rm -f "$app/Contents/Resources/update-defaults.json" "$app/Contents/Resources/release-notes.json"
+fi
+if [ "$reuse" = 0 ]; then
+rm -f build/NVRView.app.tree build/NVRView.app.tested
 if [ "$real" = 1 ]; then
-  xcf=$(scripts/build-xcframework.sh)
-  rm -rf apps/macos/NVRViewCore.xcframework
-  cp -R "$xcf" apps/macos/NVRViewCore.xcframework
+  scripts/build-xcframework.sh --install >/dev/null
   NVRVIEW_REAL_CORE=1; export NVRVIEW_REAL_CORE
 else
   unset NVRVIEW_REAL_CORE || true
 fi
 
-(cd apps/macos && swift build -c release --arch arm64 --product NVRView)
-bin=$(cd apps/macos && swift build -c release --arch arm64 --show-bin-path)/NVRView
+(cd apps/macos && swift build $scratch -c release --arch arm64 --product NVRView)
+bin=$(cd apps/macos && swift build $scratch -c release --arch arm64 --show-bin-path)/NVRView
 
 rm -rf "$app" "$work"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$work/AppIcon.iconset"
@@ -115,6 +139,9 @@ set_icon 256 256x256;  set_icon 512 "256x256${at}2x"
 set_icon 512 512x512;  set_icon 1024 "512x512${at}2x"
 iconutil -c icns "$work/AppIcon.iconset" -o "$app/Contents/Resources/AppIcon.icns"
 rm -rf "$work"
+# The skeleton is for this tree; the self-test marks it tested.
+if [ "$real" = 1 ] && [ -n "$tree" ]; then echo "$tree" >build/NVRView.app.tree; fi
+fi
 
 # The bundled update public key(s) and source, inside the bundle before it is
 # signed (docs/UPDATES.md, "Bundled defaults").
