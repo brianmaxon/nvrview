@@ -790,9 +790,11 @@ struct SmartAlertsLiveViewSettings: View {
                     ForEach(VerifyPlacementSetting.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
                 Toggle("Also keep checks that end quiet or suppressed", isOn: setting(alerts, \.view.showQuiet))
-                Stepper(
-                    "Stay at least \(alerts.settings.view.minSeconds) s after the decision",
-                    value: setting(alerts, \.view.minSeconds), in: VerifyViewSettings.minimumSeconds...600, step: 30)
+                Picker("Stay after the decision", selection: setting(alerts, \.view.minSeconds)) {
+                    ForEach(VerifyViewSettings.stayChoices(including: alerts.settings.view.minSeconds), id: \.self) {
+                        Text(VerifyViewSettings.stayTitle($0)).tag($0)
+                    }
+                }
                 caption(
                     "Each check shows the camera's picture with the detector's boxes and every step from the trigger to the decision. It stays longer while the alert is still going, never takes the keyboard, and closes with its × button, Esc, or Dismiss All."
                 )

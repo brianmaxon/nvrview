@@ -339,12 +339,25 @@ public struct VerifyViewSettings: Codable, Equatable, Sendable {
     /// Also keep checks that end quiet or suppressed on screen (default:
     /// alerts and always-alert candidates only).
     public var showQuiet = false
-    /// Seconds a check stays after its decision (at least 60).
+    /// Seconds a check stays after its decision (at least 5; default 60).
     public var minSeconds = 60
 
     public init() {}
 
-    public static let minimumSeconds = 60
+    public static let minimumSeconds = 5
+    /// The "Stay after the decision" choices (seconds), with a stored value
+    /// that is not one of them kept as its own choice.
+    public static func stayChoices(including current: Int) -> [Int] {
+        let base = [5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300, 600]
+        return current >= minimumSeconds && !base.contains(current) ? (base + [current]).sorted() : base
+    }
+
+    /// "5 s", "1 min", "1 min 30 s".
+    public static func stayTitle(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds) s" }
+        let m = seconds / 60, r = seconds % 60
+        return r == 0 ? "\(m) min" : "\(m) min \(r) s"
+    }
 }
 
 public struct AlertLocation: Codable, Equatable, Sendable {

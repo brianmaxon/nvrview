@@ -304,3 +304,19 @@ import Testing
         #expect(ViewerKeys.insetKey(keyCode: ViewerKeys.space, modifiers: [], isRepeat: false, context: .stage) == nil)
     }
 }
+
+@Suite struct VerificationStayTests {
+    @Test func theStayChoicesStartAtFiveSeconds() {
+        #expect(VerifyViewSettings.minimumSeconds == 5)
+        #expect(VerifyViewSettings.stayChoices(including: 60).first == 5)
+        #expect(VerifyViewSettings.stayChoices(including: 65).contains(65))
+        #expect(VerifyViewSettings.stayTitle(5) == "5 s")
+        #expect(VerifyViewSettings.stayTitle(90) == "1 min 30 s")
+    }
+
+    @Test func aCheckWithAFiveSecondStayClosesFiveSecondsAfterItsDecision() {
+        var settings = VerifyViewSettings()
+        settings.minSeconds = 5
+        #expect(Double(max(settings.minSeconds, VerifyViewSettings.minimumSeconds)) == 5)
+    }
+}

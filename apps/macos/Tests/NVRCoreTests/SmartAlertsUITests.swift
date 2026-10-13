@@ -350,14 +350,16 @@ private func decision(_ trigger: UInt64, _ kind: String, alertID: UInt64? = nil,
         #expect(b.check(1) != nil)
         b.hover(1, false, now: 10_000)
         #expect(b.tick(now: 10_060) == [1])
-        // A longer minimum from the settings; never below 60 s.
+        // A longer minimum from the settings; never below 5 s.
         b.settings.minSeconds = 90
         b.step(triggerID: 2, step(#"{"at_ms":0,"step":"gate","result":"pass"}"#), now: 0)
         b.alertEvent(decision(2, "alert", alertID: 10), now: 0)
         b.alertEvent(step(#"{"type":"alert","state":"settled","alert_id":10}"#), now: 5)
         #expect(b.closesAt(b.check(2)!) == 95)
         b.settings.minSeconds = 10
-        #expect(b.closesAt(b.check(2)!) == 65)
+        #expect(b.closesAt(b.check(2)!) == 15)
+        b.settings.minSeconds = 1
+        #expect(b.closesAt(b.check(2)!) == 10)
     }
 
     @Test func quietChecksShowOnlyWhenAsked() {

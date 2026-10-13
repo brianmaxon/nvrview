@@ -583,7 +583,9 @@ Every check can be watched while it happens and read back later.
     always-alert); rarity and novelty inputs when they exist; timeliness
     (episode, incident, cooldown, update); the decision with its explanation;
     and delivery results per output.
-- **Timing.** It stays at least **60 s after the decision**, longer while the
+- **Timing.** It stays a set time **after the decision** (Settings, "Stay
+  after the decision": 5 s to 10 min, default 60 s; owner decision
+  2026-10-13), longer while the
   episode is active; a close button on each, Esc when focused, and "Dismiss
   all". It **never steals focus**.
 - **Settings:** where to show (tile, inset, window), whether to show checks
@@ -1069,7 +1071,7 @@ FFI.md "Smart alerts" has their settings entries.
 | Phone push | **Self-hosted ntfy**; **MQTT and webhooks** as well. |
 | Pictures in pushes | **On**, per output, with a warning when the endpoint may be outside the local network. |
 | Standby in the apps | **A toggle**, plus **automatic on battery** as an option. |
-| Live verification view | **Shown** in the tile, an inset, or a non-activating window; live pictures with boxes and a step log; at least 60 s after the decision; never steals focus; every check in a browsable event log. |
+| Live verification view | **Shown** in the tile, an inset, or a non-activating window; live pictures with boxes and a step log; a set time after the decision (5 s to 10 min, default 60 s); never steals focus; every check in a browsable event log. |
 | Learning | On, bounded, visible, resettable; never touches always-alert rules (proposed default). |
 | Multimodal verifier | Off; when on, only for the borderline band and captions (proposed default). |
 | Retention | Event log 90 days, snapshots 7 days, evaluation pictures until deleted (proposed default). |
