@@ -167,39 +167,38 @@ public enum PacingRefresh {
 public enum PacingVerdict {
     /// Jitter (ms) the shown pairs may have at the 95th percentile: one 60 Hz refresh plus a few ms.
     public static let jitterP95Ms = 20.0
-    /// Largest jitter allowed for any shown pair, in refresh periods (plus `noiseRefreshes`).
-    public static let maxRefreshes = 3.0
     /// A pair whose jitter is over this many refresh periods (plus `noiseRefreshes`) is late.
+    /// There is no bound on the largest jitter: a single stall of any length
+    /// says nothing about pacing.
     public static let lateRefreshes = 2.0
     /// Room for timing noise on top of whole refreshes: a jitter of exactly
     /// two refreshes measures a little over or under it.
     public static let noiseRefreshes = 0.5
-    /// Late pairs allowed (one late picture makes two: the interval before it and the one after).
-    public static let lateAllowed = 4
+    /// Late pairs allowed: one late picture makes two (the interval before it and the one after).
+    public static let lateAllowed = 2
     /// Share of the released pictures that must be shown.
     public static let shownRatio = 0.9
     /// Pictures that may be decoded and never shown.
     public static let skippedAllowed = 2
 
     /// What is wrong with the shown pictures (empty when they pass). Each
-    /// problem starts with its key: "pairs", "p95", "max", "late", "shown",
-    /// or "skipped".
+    /// problem starts with its key: "pairs", "p95", "late", "shown", or
+    /// "skipped".
     public static func problems(
         shownAtUs: [Int64], shownPtsUs: [Int64], released: Int, skipped: Int, refreshMs: Double, minPairs: Int
     ) -> [String] {
         var problems: [String] = []
         let s = PacingStats.of(atUs: shownAtUs, ptsUs: shownPtsUs)
-        let max = (maxRefreshes + noiseRefreshes) * refreshMs, lateMs = (lateRefreshes + noiseRefreshes) * refreshMs
+        let lateMs = (lateRefreshes + noiseRefreshes) * refreshMs
         let late = PacingStats.over(atUs: shownAtUs, ptsUs: shownPtsUs, thresholdMs: lateMs)
         let ratio = released > 0 ? Double(s.pictures) / Double(released) : 0
         func f(_ v: Double) -> String { String(format: "%.1f", v) }
         if s.pairs < minPairs { problems.append("pairs: only \(s.pairs) picture pairs were shown (at least \(minPairs))") }
         if s.jitterP95 > jitterP95Ms { problems.append("p95: jitter p95 \(f(s.jitterP95)) ms (at most \(Int(jitterP95Ms)) ms)") }
-        if s.jitterMax > max {
-            problems.append("max: jitter max \(f(s.jitterMax)) ms (at most \(Int(maxRefreshes)) refreshes, \(f(max)) ms)")
-        }
         if late > lateAllowed {
-            problems.append("late: \(late) pairs more than \(Int(lateRefreshes)) refreshes (\(f(lateMs)) ms) off their spacing (at most \(lateAllowed))")
+            problems.append(
+                "late: \(late) pairs more than \(Int(lateRefreshes)) refreshes (\(f(lateMs)) ms) off their spacing "
+                    + "(at most \(lateAllowed); largest \(f(s.jitterMax)) ms)")
         }
         if ratio < shownRatio {
             problems.append("shown: \(s.pictures) of \(released) released pictures were shown (at least \(Int(shownRatio * 100))%)")

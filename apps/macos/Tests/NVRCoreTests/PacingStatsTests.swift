@@ -109,7 +109,7 @@ import Testing
         let released = (0..<Self.n).map { Int64($0 / 10) * 1_000_000 }
         let problems = Self.verdict(Self.decode(released), Self.pts)
         #expect(
-            Self.has(problems, "max") && Self.has(problems, "late") && Self.has(problems, "shown") && Self.has(problems, "skipped"),
+            Self.has(problems, "p95") && Self.has(problems, "late") && Self.has(problems, "shown") && Self.has(problems, "skipped"),
             "\(problems)")
     }
 
@@ -128,11 +128,25 @@ import Testing
         #expect(problems.isEmpty, "\(problems)")
     }
 
+    @Test func aSingleStallPassesTwoLatePicturesFail() {
+        // A 110 ms stall: the picture comes so late that the next replaces it (one never shown).
+        var stalled = Self.pts.map { $0 + 105_000 }
+        stalled[30] += 110_000
+        let one = Self.verdict(Self.decode(stalled), Self.pts)
+        #expect(one.isEmpty, "\(one)")
+        // Two pictures 50 ms late are two too many pairs off their spacing.
+        var two = Self.pts.map { $0 + 105_000 }
+        two[20] += 50_000
+        two[40] += 50_000
+        let problems = Self.verdict(Self.decode(two), Self.pts)
+        #expect(Self.has(problems, "late") && !Self.has(problems, "shown") && !Self.has(problems, "skipped"), "\(problems)")
+    }
+
     @Test func halfThePicturesShownOrTooFewPairsFails() {
         let pts = (0..<(Self.n / 2)).map { Int64($0) * 200_000 }
         let at = pts.map { $0 + 105_000 }
         let half = PacingVerdict.problems(shownAtUs: at, shownPtsUs: pts, released: Self.n, skipped: 0, refreshMs: 16.667, minPairs: 20)
-        #expect(Self.has(half, "shown") && !Self.has(half, "max"), "\(half)")
+        #expect(Self.has(half, "shown") && !Self.has(half, "late"), "\(half)")
         let few = PacingVerdict.problems(
             shownAtUs: Array(at.prefix(5)), shownPtsUs: Array(pts.prefix(5)), released: 5, skipped: 0, refreshMs: 16.667, minPairs: 20)
         #expect(Self.has(few, "pairs"), "\(few)")
