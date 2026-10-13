@@ -14,6 +14,15 @@
 # NVRVIEW_WINDOWS_LOCK_HELD=1) says the caller already holds it, with
 # NVRVIEW_WINDOWS_HOST set to the host it got (merge scripts do this).
 #
+# With NVRVIEW_WINDOWS_HOSTS naming several computers, a check that has work
+# in both halves (Rust: clippy and tests; everything else) and finds a second
+# computer free runs the halves at the same time, one per computer
+# (scripts/windows-split.py decides and balances; NVRVIEW_WINDOWS_SPLIT=0 turns
+# it off; NVRVIEW_WINDOWS_SPEEDS="host=2 other=1" weights the computers). The
+# second computer's lock is a try, never a wait, and is given back as soon as
+# its half is done. Results, the test result cache and the stamp are the same
+# as for a one-computer run.
+#
 # A finished worker's folder, its target\ build output included, is deleted with
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/windows-check.sh --clean <name>
@@ -126,9 +135,9 @@ gitbash='"C:\Program Files\Git\bin\bash.exe"'
 ssh $ssh_opts "$host" "echo connected" >/dev/null
 
 # Free space on the drive holding %USERPROFILE%, in whole GB.
-free_gb() {
+free_gb() { # [HOST]
   # shellcheck disable=SC2086
-  ssh $ssh_opts "$host" 'powershell -NoProfile -Command "[math]::Floor((Get-PSDrive ($env:USERPROFILE.Substring(0,1))).Free / 1GB)"' |
+  ssh $ssh_opts "${1:-$host}" 'powershell -NoProfile -Command "[math]::Floor((Get-PSDrive ($env:USERPROFILE.Substring(0,1))).Free / 1GB)"' |
     tr -d '\r' | grep -E '^[0-9]+$' | tail -n 1
 }
 
@@ -152,21 +161,25 @@ fi
 
 tree_sent=$(git rev-parse 'HEAD^{tree}')
 if [ -n "$(git status --porcelain)" ]; then tree_sent="dirty"; fi
-echo "sending the working tree to $host (worker $worker)"
+# Unpacks this working tree into the worker's folder on a host.
 # cmd.exe on the far side: recreate src, keep target (a directory junction
 # inside src points at it; the junction alone is removed first, with a plain
 # rmdir, so deleting src never reaches into target), unpack from stdin with
 # Windows' own tar.
 # $worker is meant to expand here, on this side.
-# shellcheck disable=SC2086,SC2029
 # COPYFILE_DISABLE and --no-mac-metadata keep macOS from adding ._* files
 # (MSBuild took one for a second project file).
 # Untracked files go too (work not yet committed), but never build output or
 # other checkouts nested in this one.
+sync_tree() { # HOST
+echo "sending the working tree to $1 (worker $worker)"
+# shellcheck disable=SC2086,SC2029
 git ls-files -z --cached --others --exclude-standard -- . \
   ':(exclude,glob)**/target/**' ':(exclude).claude/worktrees' ':(exclude).worktrees' |
   COPYFILE_DISABLE=1 tar --no-mac-metadata --null -T - -cf - |
-  ssh $ssh_opts "$host" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
+  ssh $ssh_opts "$1" "cd /d %USERPROFILE% && (if not exist nvrview\\worker\\$worker mkdir nvrview\\worker\\$worker) && cd nvrview\\worker\\$worker && (if not exist target mkdir target) && (if exist src\target rmdir src\target) && (if exist src rmdir /s /q src) && mkdir src && C:\Windows\System32\tar.exe -xf - -C src && mklink /J src\\target target >nul"
+}
+sync_tree "$host"
 
 sent=$(date +%s)
 printf '   (sync: %ss)\n' "$((sent - check_start))"
@@ -243,36 +256,173 @@ NVRVIEW_SUITES=${NVRVIEW_SUITES:-none}
 echo "running the Windows checks on $host"
 # cmd.exe does not treat single quotes as quoting: double-quote bash's script.
 # The worker's options travel as variables set in that script.
-vars=""
-for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY NVRVIEW_MIC_TEST \
-  NVRVIEW_SUITES NVRVIEW_CLIPPY_CRATES NVRVIEW_TEST_CRATES NVRVIEW_DOCTEST_CRATES; do
-  eval "val=\${$v:-}"
-  case "$val" in
-    *[!A-Za-z0-9_.,-]*) echo "$v: letters, digits, '.', ',', '-' and '_' only" >&2; exit 2 ;;
-  esac
-  if [ -n "$val" ]; then
-    vars="$vars $v=$val"
+# worker_vars PART sets $vars for one run of the worker: all (the whole check),
+# or one half of a split run (scripts/windows-split.py): rust (clippy, tests
+# and doctests only) or rest (every other suite).
+worker_vars() { # PART
+  vars=""
+  for v in NVRVIEW_APP_SELFTEST NVRVIEW_APP_SELFTEST_SECONDS NVRVIEW_WINDOWS_ONLY NVRVIEW_MIC_TEST \
+    NVRVIEW_SUITES NVRVIEW_CLIPPY_CRATES NVRVIEW_TEST_CRATES NVRVIEW_DOCTEST_CRATES; do
+    eval "val=\${$v:-}"
+    case "$1:$v" in
+      rust:NVRVIEW_SUITES) val=none ;;
+      rest:NVRVIEW_CLIPPY_CRATES | rest:NVRVIEW_TEST_CRATES | rest:NVRVIEW_DOCTEST_CRATES) val=none ;;
+    esac
+    case "$val" in
+      *[!A-Za-z0-9_.,-]*) echo "$v: letters, digits, '.', ',', '-' and '_' only" >&2; exit 2 ;;
+    esac
+    if [ -n "$val" ]; then
+      vars="$vars $v=$val"
+    fi
+  done
+  if [ "$1" != all ]; then vars="$vars NVRVIEW_WINDOWS_PART=$1"; fi
+  vars="$vars NVRVIEW_TREE=$tree_sent"
+}
+worker_vars all
+vars_all=$vars
+worker_vars rust
+vars_rust=$vars
+worker_vars rest
+vars_rest=$vars
+
+# One run of the worker on HOST: its output goes to a log (and to the terminal
+# when STREAM is 1), its exit status to a file. $gitbash and $3 are meant to
+# expand here, on this side.
+# shellcheck disable=SC2086,SC2029
+run_part() { # HOST PART VARS STREAM
+  {
+    if ssh $ssh_opts "$1" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$3 scripts/windows-worker.sh\"" 2>&1; then
+      echo 0 >"$logs/rc.$2"
+    else
+      echo "$?" >"$logs/rc.$2"
+    fi
+  } | if [ "$4" = 1 ]; then tee "$logs/worker.$2.log"; else cat >"$logs/worker.$2.log"; fi
+}
+
+# Splitting the check over two computers (docs: apps/windows/README.md, "Host
+# pool"): when the check has work in both halves, a second computer is free
+# right now (a try, never a wait, with the lock's usual priority rules), it has
+# the same toolchain, and scripts/windows-split.py expects it to be faster, the
+# halves run at the same time, each on its own computer. A host is held only
+# while it is used: the second one is given back as soon as its half is done.
+lock_owner="${NVRVIEW_WINDOWS_LOCK_OWNER:-$$}"
+second=""
+release_second() {
+  if [ -n "$second" ]; then
+    scripts/windows-lock.sh release --host "$second" --owner-pid "$lock_owner" || true
+    second=""
+  fi
+}
+trap 'finish_cache --failed "Windows worker"; release_second; rm -rf "$logs"; windows_unlock' EXIT
+split_plan() { # HOST SECOND
+  "$py" -I scripts/windows-split.py plan --hosts "$1" "$2" --rust "$rust_halves" --suites "$NVRVIEW_SUITES"
+}
+rust_halves=""
+for kv in clippy:NVRVIEW_CLIPPY_CRATES test:NVRVIEW_TEST_CRATES doctest:NVRVIEW_DOCTEST_CRATES; do
+  eval "val=\${${kv#*:}:-none}"
+  if [ "$val" != none ]; then rust_halves="$rust_halves${rust_halves:+,}${kv%%:*}"; fi
+done
+rust_halves=${rust_halves:-none}
+parts="all"
+host_rust=""
+host_rest=""
+if [ -z "$only" ] && [ "${NVRVIEW_WINDOWS_SPLIT:-1}" != 0 ] && [ "$rust_halves" != none ] && [ "$NVRVIEW_SUITES" != none ]; then
+  candidate=$(windows_hosts | grep -vx "$host" | head -n 1 || true)
+  if [ -n "$candidate" ]; then
+    plan=$(split_plan "$host" "$candidate" || true)
+    case "$plan" in
+      split*)
+        second=$(scripts/windows-lock.sh acquire --try --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid "$lock_owner" --exclude "$host" 2>/dev/null) || second=""
+        ;;
+      *) echo "not splitting: ${plan#single }" ;;
+    esac
+  fi
+  if [ -n "$second" ]; then
+    # The same toolchain on both computers, or the results would not be the
+    # same as a one-computer run's.
+    # shellcheck disable=SC2086,SC2029
+    ssh $ssh_opts "$second" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
+      </dev/null 2>/dev/null | tr -d '\r' >"$logs/tools2" || true
+    plan=$(split_plan "$host" "$second" || true)
+    if ! cmp -s "$logs/tools" "$logs/tools2"; then
+      echo "not splitting: $second has other tool versions than $host"
+      release_second
+    else
+      case "$plan" in
+        split*)
+          if sync_tree "$second"; then
+            parts="rust rest"
+            host_rust=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rust$/\1/p')
+            host_rest=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rest$/\1/p')
+          else
+            echo "not splitting: sending the tree to $second failed"
+            release_second
+          fi
+          ;;
+        *) echo "not splitting: ${plan#single }"; release_second ;;
+      esac
+    fi
+  fi
+fi
+
+if [ "$parts" = all ]; then
+  logfiles="$logs/worker.all.log"
+  run_part "$host" all "$vars_all" 1
+else
+  echo "splitting the check: Rust half (clippy, tests, doctests) on $host_rust, everything else on $host_rest"
+  logfiles="$logs/worker.rust.log $logs/worker.rest.log"
+  # The half on the second computer gives its lock back when it is done.
+  (
+    run_part "$host_rust" rust "$vars_rust" 0
+    if [ "$host_rust" = "$second" ]; then release_second; fi
+  ) &
+  rust_pid=$!
+  (
+    run_part "$host_rest" rest "$vars_rest" 0
+    if [ "$host_rest" = "$second" ]; then release_second; fi
+  ) &
+  rest_pid=$!
+  wait "$rust_pid" || true
+  wait "$rest_pid" || true
+  second=""
+fi
+rc=0
+failed_parts=""
+for pt in $parts; do
+  prc=$(cat "$logs/rc.$pt" 2>/dev/null || echo 1)
+  if [ "$prc" != 0 ]; then
+    rc=$prc
+    failed_parts="$failed_parts $pt"
   fi
 done
-vars="$vars NVRVIEW_TREE=$tree_sent"
-# $gitbash and $vars are meant to expand here, on this side. The output goes
-# to the terminal and to a log, from which the suite results are read.
-# shellcheck disable=SC2086,SC2029
-{
-  if ssh $ssh_opts "$host" "$gitbash -lc \"cd ~/nvrview/worker/$worker/src &&$vars scripts/windows-worker.sh\"" 2>&1; then
-    echo 0 >"$logs/rc"
-  else
-    echo "$?" >"$logs/rc"
-  fi
-} | tee "$logs/worker.log"
-rc=$(cat "$logs/rc")
-tr -d '\r' <"$logs/worker.log" | sed -n 's/^suite-result \([A-Za-z0-9_.-]*\) \([0-9]*\)$/\1 \2/p' >"$logs/results"
+if [ "$parts" != all ]; then
+  # Each half's output in turn, a passing one first, so that the output ends
+  # with the failing step the way a one-computer run's does.
+  for pt in $parts; do
+    case " $failed_parts " in *" $pt "*) continue ;; esac
+    printf '\n---- %s half, on %s: passed ----\n' "$pt" "$([ "$pt" = rust ] && echo "$host_rust" || echo "$host_rest")"
+    cat "$logs/worker.$pt.log"
+  done
+  for pt in $failed_parts; do
+    printf '\n---- %s half, on %s: FAILED ----\n' "$pt" "$([ "$pt" = rust ] && echo "$host_rust" || echo "$host_rest")"
+    cat "$logs/worker.$pt.log"
+  done
+fi
+: >"$logs/results"
+for pt in $parts; do
+  tr -d '\r' <"$logs/worker.$pt.log" | sed -n 's/^suite-result \([A-Za-z0-9_.-]*\) \([0-9]*\)$/\1 \2/p' >>"$logs/results"
+done
 while read -r name secs; do
   cache_pass "$secs" "$name"
 done <"$logs/results"
 if [ "$rc" != 0 ]; then
-  # Name the failure: the suite or area that was running and the failing step.
-  tr -d '\r' <"$logs/worker.log" | "$py" -I scripts/flakes.py explain /dev/stdin | sed 's/^/Windows check: /' >&2
+  # Name the failure: the half, the suite or area that was running, and the failing step.
+  for pt in $failed_parts; do
+    if [ "$parts" != all ]; then
+      echo "Windows check: the $pt half failed on $([ "$pt" = rust ] && echo "$host_rust" || echo "$host_rest")" >&2
+    fi
+    tr -d '\r' <"$logs/worker.$pt.log" | "$py" -I scripts/flakes.py explain /dev/stdin | sed 's/^/Windows check: /' >&2
+  done
   exit "$rc"
 fi
 partial=""
@@ -289,8 +439,12 @@ if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] && 
 else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi
-printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"
+if [ "$parts" = all ]; then
+  printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"
+else
+  printf '\nWindows checks (Rust half on %s, the rest on %s) took %ss in all (disk check and sync %ss).\n' "$host_rust" "$host_rest" "$((now - check_start))" "$((sent - check_start))"
+fi
 # Step times: the sync here, the worker's steps and background builds.
 printf '   (sync: %ss)\n' "$((sent - check_start))" >"$logs/steps"
-"$py" -I scripts/timing.py table "$logs/steps" "$logs/worker.log"
-"$py" -I scripts/timing.py log windows "$((now - check_start))" --tree "$tree_sent" "$logs/steps" "$logs/worker.log" || true
+"$py" -I scripts/timing.py table "$logs/steps" $logfiles
+"$py" -I scripts/timing.py log windows "$((now - check_start))" --tree "$tree_sent" "$logs/steps" $logfiles || true

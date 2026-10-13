@@ -147,7 +147,10 @@ windows_lock() {
     export NVRVIEW_WINDOWS_HOST
   fi
   NVRVIEW_WINDOWS_LOCK_HELD=1
-  export NVRVIEW_WINDOWS_LOCK_HELD
+  # The owner of the lock, so that a nested scripts/windows-check.sh can add a
+  # second host to it for a split run (and give that one back) as the same owner.
+  NVRVIEW_WINDOWS_LOCK_OWNER=$$
+  export NVRVIEW_WINDOWS_LOCK_HELD NVRVIEW_WINDOWS_LOCK_OWNER
   windows_locked=1
 }
 

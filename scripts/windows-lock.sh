@@ -5,9 +5,14 @@
 #       Waits (in this one command) until a host is free, takes its lock, and
 #       prints the host alias on standard output. Messages go to standard
 #       error. The default priority is $NVRVIEW_WINDOWS_PRIORITY, else agent.
-#   scripts/windows-lock.sh release [--owner-pid PID]
-#       Gives back the lock(s) recorded for that owner. It never touches a lock
-#       another owner holds.
+#   scripts/windows-lock.sh acquire --try [--exclude HOST]... [--owner-pid PID]
+#       One pass, no waiting: takes a free host (not an excluded one, with the
+#       same priority rules) and prints it, or exits 1 when none is free. A
+#       check that already holds one host uses it to add a second one for the
+#       other half of a split run (scripts/windows-check.sh).
+#   scripts/windows-lock.sh release [--host HOST] [--owner-pid PID]
+#       Gives back the lock(s) recorded for that owner (only HOST's with
+#       --host). It never touches a lock another owner holds.
 #   scripts/windows-lock.sh status
 #       Prints each host's lock owner and the waiting queue.
 #
@@ -46,7 +51,10 @@ log() { echo "windows-lock: $*" >&2; }
 
 # One "lock path|host" line per lock (a single empty host when none is set).
 lock_list() {
-  for h in $hosts; do echo "$base-$h|$h"; done
+  for h in $hosts; do
+    case " $exclude " in *" $h "*) continue ;; esac
+    echo "$base-$h|$h"
+  done
   [ -n "$hosts" ] || echo "$base|"
 }
 
@@ -140,6 +148,9 @@ blocked() { # HOST
   done | grep -q yes
 }
 
+exclude=""
+only_host=""
+try_once=0
 owner_pid="$PPID"
 priority="${NVRVIEW_WINDOWS_PRIORITY:-agent}"
 cmd="${1:-}"
@@ -148,6 +159,9 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --priority) priority="${2:?--priority needs merge or agent}"; shift 2 ;;
     --owner-pid) owner_pid="${2:?--owner-pid needs a pid}"; shift 2 ;;
+    --try) try_once=1; shift ;;
+    --exclude) exclude="$exclude ${2:?--exclude needs a host}"; shift 2 ;;
+    --host) only_host="${2:?--host needs a host}"; shift 2 ;;
     *) echo "usage: $0 acquire|release|status [--priority merge|agent] [--owner-pid PID]" >&2; exit 2 ;;
   esac
 done
@@ -156,6 +170,20 @@ case "$priority" in merge | agent) ;; *) echo "priority: merge or agent" >&2; ex
 case "$cmd" in
   acquire)
     mkdir -p "$waiters"
+    if [ "$try_once" = 1 ]; then
+      # No waiter entry: every live waiter of our priority counts as ahead of
+      # us, so a try never takes a host that someone is queued for.
+      wname="try-$$"
+      prune_waiters
+      for entry in $(lock_list); do
+        if blocked "${entry#*|}"; then continue; fi
+        if try_take "${entry%%|*}" "${entry#*|}" "$priority" "$owner_pid"; then
+          printf '%s\n' "${entry#*|}"
+          exit 0
+        fi
+      done
+      exit 1
+    fi
     wname="$priority-$(date +%s)-$$"
     # shellcheck disable=SC2086 # the host list, one line
     printf 'pid=%s\nmachine=%s\nhosts=%s\n' "$owner_pid" "$me" "$(echo $hosts)" >"$waiters/$wname"
@@ -181,6 +209,7 @@ case "$cmd" in
   release)
     for entry in $(lock_list); do
       l="${entry%%|*}"
+      if [ -n "$only_host" ] && [ "${entry#*|}" != "$only_host" ]; then continue; fi
       if [ -f "$l/owner" ] && [ "$(field "$l/owner" pid)" = "$owner_pid" ] && [ "$(field "$l/owner" machine)" = "$me" ]; then
         rm -rf "$l"
       fi

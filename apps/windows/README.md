@@ -1034,6 +1034,38 @@ host before any waiting agent. Check stamps and the test result cache are keyed
 by tree and platform, not host, so a pass on any host counts. Each host keeps
 its own worker folders (about 5 GB each).
 
+**One check on two computers.** A check that has work in both of its halves
+runs them at the same time when a second computer is free:
+
+- the Rust half is clippy, the tests, and the doctests; the other half is
+  everything else (the C# builds and tests, the video self-test, the app
+  self-test, the trimmed publish and its smoke run, and the update test);
+- the check takes its first host as before (waiting, by priority), then makes
+  one try, without waiting, for a second one with the same priority rules
+  (`scripts/windows-lock.sh acquire --try`). A computer someone is queued for
+  is not taken. With no second computer free, the check runs whole on the
+  first, exactly as with one host;
+- it splits only when `scripts/windows-split.py` expects a gain: the smaller
+  half is at least 30 s (`NVRVIEW_SPLIT_MIN_SECONDS`) and the longer half's
+  time is under 90 % of the whole check on the first host. The times come from
+  the step times in `check-timings.jsonl`; the slower computer takes the shorter
+  half. Name the computers' relative speeds for that,
+  `export NVRVIEW_WINDOWS_SPEEDS="win-test-1=2 win-test-2=1"` (default 1
+  each);
+- both computers must report the same compiler, nextest, clippy, and .NET
+  versions, or the check runs whole (the cache's fingerprint includes them);
+- a computer is held only while its half runs: the second one is given back
+  the moment its half is done, and every exit path gives back all locks;
+- the output ends with the halves one after the other (a failing one last),
+  each headed with its computer. A failure names the half, the suite or
+  area, and the step. Suite passes, the test result cache, the stamp, and the
+  step-time log are the same as a one-host run's: keyed by tree and inputs, not
+  host. (`scripts/windows-check.sh --package` reuses a tested publish output
+  only on the host that has it; otherwise it builds afresh.)
+
+`NVRVIEW_WINDOWS_SPLIT=0` turns the split off. The tests are
+`scripts/test-windows-split.sh` (fake ssh, no real computer).
+
 ## Running the tests
 
 ### On macOS or Linux, in Docker (no .NET needed)
