@@ -90,6 +90,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The merge happens on a temporary branch: the checks need a clean committed
+# tree, and the current branch moves only when both pass. The branch is made
+# before merging, because switching branches mid-merge drops MERGE_HEAD and
+# the commit would lose its second parent.
+git checkout -q -b "$tmpb" || die "could not create the temporary branch $tmpb"
 if ! git merge --no-commit --no-ff "$branch" >"$logs/merge.log" 2>&1; then
   cat "$logs/merge.log" >&2
   die "the merge has conflicts; resolve them in the branch (merge main into it) and retry"
@@ -124,11 +129,9 @@ if [ "$skip" = 0 ]; then
   [ -n "$(windows_hosts)" ] || die "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer"
 fi
 
-# Commit the merge on a temporary branch: the checks need a clean committed
-# tree, and the current branch moves only when both pass.
-git checkout -q -b "$tmpb" || die "could not create the temporary branch $tmpb"
 git commit -q -m "$message" || die "the commit failed (hook?); the merge was dropped"
 [ "$(git rev-parse 'HEAD^{tree}')" = "$merged" ] || die "the committed tree differs from the merged tree"
+[ "$(git rev-parse -q --verify 'HEAD^2')" = "$tip" ] || die "the merge commit does not have $branch as its second parent"
 tree=$merged
 
 if [ "$skip" = 1 ]; then

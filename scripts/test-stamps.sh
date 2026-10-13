@@ -156,6 +156,7 @@ stamp windows b1
 git checkout -q main
 run_merge b1 "merge b1" >"$work/out1" 2>&1 || { cat "$work/out1"; fail "merge b1"; }
 [ "$(grep -c windows "$log")" = 0 ] && pass "rule A merge ran no Windows check" || fail "rule A merge ran no Windows check"
+expect "the merge commit has the branch as its second parent" test "$(git rev-parse -q --verify HEAD^2)" = "$(git rev-parse b1)"
 [ "$(grep -c mac "$log")" = 1 ] && pass "the Mac check ran once" || fail "the Mac check ran once"
 expect "the merge left a Mac stamp" test -f "$(stamp_dir)/$(tree HEAD).mac"
 expect "the merge left a reused-Windows stamp" test -f "$(stamp_dir)/$(tree HEAD).windows-reused"
