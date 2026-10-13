@@ -5013,6 +5013,8 @@ final class SelfTest {
         problems += UpdateNotesSelfTest.run()
         // parity: updates-bundled-defaults
         if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
+        // parity: updates-whats-new
+        if let model = app.model { problems += WhatsNewSelfTest.run(bridge: model.bridge) }
         // parity: appkit-warnings
         if let watch = app.logWatch {
             for p in watch.patterns {

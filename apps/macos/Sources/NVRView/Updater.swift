@@ -53,7 +53,7 @@ final class Updater {
     init(
         bridge: CoreBridge, store: JSONFileStore<UpdateSettings>, automaticAllowed: Bool,
         bundleURL: URL = Bundle.main.bundleURL, current: String? = nil, now: @escaping () -> Date = Date.init,
-        bundled: BundledUpdateDefaults? = nil
+        bundled: BundledUpdateDefaults? = nil, releaseNotes: BundledReleaseNotes? = nil
     ) {
         self.bridge = bridge
         self.store = store
@@ -62,11 +62,28 @@ final class Updater {
         self.current = current ?? (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
         self.now = now
         launchedAt = now()
+        self.releaseNotes =
+            releaseNotes ?? BundledReleaseNotes.load(from: bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true))
         settings = store.load().first ?? UpdateSettings()
         // What the build bundles (docs/UPDATES.md, "Bundled defaults"): read
         // from the app's Resources on every start, never from the user's file.
         settings.bundled =
             bundled ?? BundledUpdateDefaults.load(from: bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true))
+    }
+
+    /// The notes of the versions in this build (docs/UPDATES.md, "Bundled
+    /// release notes"), newest first; empty in a development build.
+    let releaseNotes: BundledReleaseNotes
+
+    /// The notes to show once on the first launch of a new version, or nil;
+    /// records this version as the one that ran.
+    func takeWhatsNew() -> ReleaseNote? {
+        let decision = WhatsNew.decide(current: current, lastRun: settings.lastRunVersion, bundled: releaseNotes)
+        if let remember = decision.remember {
+            settings.lastRunVersion = remember
+            save()
+        }
+        return decision.show
     }
 
     /// Cleans staging leftovers, reports what the last install did, and

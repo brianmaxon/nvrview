@@ -25,7 +25,7 @@ internal sealed class Updater
     private string? _pending;
     private bool _dialogOpen;
 
-    public Updater(Viewer viewer, DispatcherQueue ui, string? settingsFile, bool automaticAllowed, BundledUpdateDefaults? bundled = null, string? appDir = null)
+    public Updater(Viewer viewer, DispatcherQueue ui, string? settingsFile, bool automaticAllowed, BundledUpdateDefaults? bundled = null, string? appDir = null, BundledReleaseNotes? releaseNotes = null, string? current = null)
     {
         _viewer = viewer;
         _file = settingsFile;
@@ -34,7 +34,8 @@ internal sealed class Updater
         // What the build bundles (docs/UPDATES.md, "Bundled defaults"): read
         // from the app folder on every start, never from the user's file.
         Settings.Bundled = bundled ?? BundledUpdateDefaults.Load(AppDir);
-        Current = typeof(Updater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        ReleaseNotes = releaseNotes ?? BundledReleaseNotes.Load(AppDir);
+        Current = current ?? typeof(Updater).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
         viewer.UpdateReceived += Handle;
         // Only where an earlier download made the folder: with updates off,
         // nothing is created next to the app folder.
@@ -59,6 +60,31 @@ internal sealed class Updater
     public UpdateStatus Status { get; private set; } = UpdateStatus.Idle;
 
     public string Current { get; }
+
+    /// <summary>The notes of the versions in this build (docs/UPDATES.md, "Bundled release notes"), newest first; empty in a development build.</summary>
+    public BundledReleaseNotes ReleaseNotes { get; }
+
+    /// <summary>The notes to show once on the first launch of a new version, or null; records this version as the one that ran.</summary>
+    public ReleaseNote? TakeWhatsNew()
+    {
+        WhatsNew.Decision decision = WhatsNew.Decide(Current, Settings.LastRunVersion, ReleaseNotes);
+        if (decision.Remember is { } remember)
+        {
+            Settings.LastRunVersion = remember;
+            Save();
+        }
+        return decision.Show;
+    }
+
+    /// <summary>The window of notes after an update (docs/UX.md, "Release notes"), or Help's list of every version.</summary>
+    public Task ShowWhatsNew(ReleaseNote note) =>
+        Show($"What's new in NvrView {note.Version}", "", null, "Close", UpdateNotesView.Notes(ReleaseNotesText.Format(note.Notes)));
+
+    /// <summary>The About page's Release notes: every version in this build, newest first.</summary>
+    public Task ShowReleaseNotes() =>
+        ReleaseNotes.IsEmpty
+            ? Show("Release notes", "No release notes in this build.", null, "Close")
+            : Show("Release notes", "", null, "Close", UpdateNotesView.Notes(ReleaseNotes.DisplayText, UpdateNotesView.ListMaxHeight));
 
     /// <summary>The folder this copy of the app runs from.</summary>
     public string AppDir { get; }

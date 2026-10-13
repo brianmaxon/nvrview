@@ -11,6 +11,12 @@
 #   --update-source SOURCE    the update source the app uses until the user sets
 #                             one (an absolute folder path or an http(s) URL)
 #
+#   --release-notes FILE      this version's release notes (plain text); written
+#                             with --notes-history DIR (a folder of <version>.txt
+#                             files) as Contents/Resources/release-notes.json
+#                             before code signing (docs/UPDATES.md, "Bundled
+#                             release notes"). Never committed.
+#
 #   --bundle-detector         also install the on-device detector's model (about
 #                             37 MB) into Contents/Resources/Models, checked
 #                             against scripts/detector-model.json (see
@@ -33,8 +39,10 @@ fi
 real=1
 key_files=""
 update_source=""
-usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE] [--bundle-detector]"
+usage="usage: $0 [--fake-only] [--trusted-key-file FILE]... [--update-source SOURCE] [--release-notes FILE [--notes-history DIR]] [--bundle-detector]"
 bundle_detector=0
+release_notes=""
+notes_history=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --fake-only) real=0; shift ;;
@@ -48,6 +56,12 @@ $2"
     --update-source)
       [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
       update_source="$2"; shift 2 ;;
+    --release-notes)
+      [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+      release_notes="$2"; shift 2 ;;
+    --notes-history)
+      [ $# -ge 2 ] || { echo "$usage" >&2; exit 2; }
+      notes_history="$2"; shift 2 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
@@ -112,6 +126,13 @@ if [ -n "$key_files" ] || [ -n "$update_source" ]; then
   IFS=$oldifs
   if [ -n "$update_source" ]; then set -- "$@" --update-source "$update_source"; fi
   python3 -I scripts/update-defaults.py "$@"
+fi
+
+# The release notes of this and earlier versions, inside the bundle before it
+# is signed (docs/UPDATES.md, "Bundled release notes").
+if [ -n "$release_notes" ]; then
+  python3 -I scripts/release-notes-bundle.py --version "$version" --notes "$release_notes" \
+    ${notes_history:+--history "$notes_history"} --out "$app/Contents/Resources/release-notes.json"
 fi
 
 # The pinned size and checksum of the detector model, so the app can fetch it

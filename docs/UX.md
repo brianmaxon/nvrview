@@ -1743,7 +1743,7 @@ section is left. A pane lists the sections, each in a scrolling page:
   ("Save picture"), and below them where recordings go, "Record from" and
   when a recording stops by itself ("Recording").
 - **Updates.** The update source, trusted keys, automatic checks, Check now.
-- **About.** The version and license.
+- **About.** The version and license; on Windows also the Release notes button.
 
 ### Update prompt
 
@@ -1754,6 +1754,25 @@ mouse wheel and, once focused, the arrow, Page, Home, and End keys. Short notes
 get a short area. The title, the line, and the buttons (Download / Not Now)
 never scroll away. macOS: an alert sheet with the notes as its accessory
 view; Windows: a dialog with the same area.
+
+### Release notes
+
+The notes of the versions in the build (plain text, bundled at packaging time;
+docs/UPDATES.md, "Bundled release notes"). Nothing here is fetched.
+
+- **What's New.** On the first launch of a version newer than the last one
+  that ran, a small window titled "What's new in NVRView X" shows that
+  version's notes in the same bounded, selectable, scrolling text area as the
+  update prompt, with a Close button. It shows once. No window on a first
+  run, the same version, a downgrade, a version without notes, or a
+  development build. macOS: an alert sheet on the front window; Windows: a
+  dialog about two seconds after start (never in a background start).
+- **Release notes list.** macOS: Help > Release Notes. Windows: Settings,
+  About, Release notes. Every version in the build, newest first, each under
+  "Version X", in a taller bounded area (about 360 points). A build without
+  the file says "No release notes in this build."
+- Lines show as written; a line starting with "- " or "* " shows with a bullet
+  character; runs of blank lines shrink to one.
 
 ## Windows notes
 
