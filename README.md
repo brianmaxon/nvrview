@@ -44,6 +44,7 @@ scripts/setup-dev.sh        # commit hook, identity check
 scripts/check.sh            # everything CI runs, plus the macOS app tests
 scripts/package-macos.sh    # builds build/NVRView.app with the Rust core
 open build/NVRView.app
+scripts/restart-macos-app.sh [--build]   # quit it cleanly and reopen it (optionally rebuilt)
 ```
 
 Add your NVR or camera in **Settings**: the new-device form lists what answers
