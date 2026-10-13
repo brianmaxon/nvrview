@@ -502,17 +502,25 @@ impl SparseFile {
     }
     pub fn read_at(&self, at: u64, n: usize) -> Vec<u8> {
         let mut out = vec![0u8; n];
-        let mut off = 0;
-        while off < n {
-            let p = at + off as u64;
-            let in_page = (p % 4096) as usize;
-            let m = (4096 - in_page).min(n - off);
-            if let Some(pg) = self.pages.get(&(p / 4096)) {
-                out[off..off + m].copy_from_slice(&pg[in_page..in_page + m]);
-            }
-            off += m;
-        }
+        self.fill(at, &mut out);
         out
+    }
+
+    /// Copies the stored pages over `out` (zeroed), which starts at `at`.
+    /// Visits only the pages that exist, so reading gigabytes of zeros
+    /// costs a memset.
+    fn fill(&self, at: u64, out: &mut [u8]) {
+        if out.is_empty() {
+            return;
+        }
+        let end = at + out.len() as u64;
+        for (&idx, pg) in self.pages.range(at / 4096..end.div_ceil(4096)) {
+            let page_at = idx * 4096;
+            let from = at.max(page_at);
+            let to = end.min(page_at + 4096);
+            out[(from - at) as usize..(to - at) as usize]
+                .copy_from_slice(&pg[(from - page_at) as usize..(to - page_at) as usize]);
+        }
     }
 }
 
@@ -527,7 +535,8 @@ impl std::io::Write for SparseFile {
             let idx = p / 4096;
             if let Some(pg) = self.pages.get_mut(&idx) {
                 pg[in_page..in_page + n].copy_from_slice(src);
-            } else if src.iter().any(|&b| b != 0) {
+            } else if src.iter().fold(0, |acc, &b| acc | b) != 0 {
+                // (A fold without an early exit runs vectorized.)
                 let mut pg = Box::new([0u8; 4096]);
                 pg[in_page..in_page + n].copy_from_slice(src);
                 self.pages.insert(idx, pg);
@@ -546,8 +555,8 @@ impl std::io::Write for SparseFile {
 impl std::io::Read for SparseFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = (self.len.saturating_sub(self.pos)).min(buf.len() as u64) as usize;
-        let v = self.read_at(self.pos, n);
-        buf[..n].copy_from_slice(&v);
+        buf[..n].fill(0);
+        self.fill(self.pos, &mut buf[..n]);
         self.pos += n as u64;
         Ok(n)
     }

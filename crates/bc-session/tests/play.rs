@@ -90,7 +90,7 @@ async fn read(p: &mut Play, secs: u64, from_start: bool) -> (Option<u32>, u64, u
 
 #[tokio::test(start_paused = true)]
 async fn a_play_seeks_bursts_paces_and_crosses_files() {
-    let nvr = spawn_mock(|a| a.file_minutes = 1);
+    let nvr = spawn_mock(|a| a.file_secs = 60);
     let s = session(&nvr, |_| {});
     // 20 s before a file boundary; the GOP is 2 s, so the play starts at
     // the keyframe at or before the seek.

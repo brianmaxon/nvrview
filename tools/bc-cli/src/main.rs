@@ -171,6 +171,8 @@ enum Action {
     PtzProbe(ptz_probe::ProbeConfig),
 }
 
+// Made once per run; boxing would only complicate the tests' patterns.
+#[allow(clippy::large_enum_variant)]
 enum Parsed {
     Device(Args),
     Analyze(PathBuf),

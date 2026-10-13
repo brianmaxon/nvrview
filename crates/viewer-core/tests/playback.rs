@@ -53,6 +53,15 @@ fn archive_mock(
     sim_spawn(sim, cfg)
 }
 
+/// Ten-second recording files from `from` to `to` (hour, minute) of the
+/// day only, so a test reaches a file boundary or a gap in a few simulated
+/// seconds (devices write files of minutes; the engine only sees file
+/// times) and the index holds a few dozen files instead of a day's worth.
+fn ten_second_files(a: &mut ArchiveConfig, from: (u32, u32), to: (u32, u32)) {
+    a.file_secs = 10;
+    a.day_window = (from.0 * 3600 + from.1 * 60, to.0 * 3600 + to.1 * 60);
+}
+
 struct Rig {
     sim: SimRuntime,
     core: Arc<Core>,
@@ -469,21 +478,22 @@ fn rates_send_play_speed_and_pace_the_clock() {
 #[test]
 fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
     let rig = Rig::new();
-    // One-minute files; channel 1 has no file at 10:01 or 10:03.
+    // Ten-second files; channel 1 has no file at 10:01:10 or 10:01:30.
     let nvr = archive_mock(&rig.sim, 2, |a| {
-        a.file_minutes = 1;
-        a.missing = vec![(1, d(8, 10, 1, 0)), (1, d(8, 10, 3, 0))];
+        ten_second_files(a, (10, 0), (10, 10));
+        a.missing = vec![(1, d(8, 10, 1, 10)), (1, d(8, 10, 1, 30))];
     });
     let (_dev, key) = rig.add(&nvr, &[0, 1]);
+    // Opened in channel 1's first gap, 5 s before its recording resumes.
     let (pb, tiles) = rig.open(json!({
-        "start_ms": ms(8, 10, 0, 0), "end_ms": ms(8, 10, 10, 0), "position_ms": ms(8, 10, 1, 30),
+        "start_ms": ms(8, 10, 0, 0), "end_ms": ms(8, 10, 10, 0), "position_ms": ms(8, 10, 1, 15),
         "cameras": cams(&key, &[0, 1], "sub"),
     }));
     rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
     // Only the camera with a recording at the time was started.
     let log = nvr.play_log();
     assert_eq!(log.len(), 1, "{log:?}");
-    assert_eq!((log[0].channel, log[0].at), (0, d(8, 10, 1, 28)));
+    assert_eq!((log[0].channel, log[0].at), (0, d(8, 10, 1, 13)));
     assert_eq!(
         rig.camera_state(pb, tiles[1]).unwrap()["state"],
         "no_recording"
@@ -491,34 +501,34 @@ fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
     // Its tile shows generation 1, cleared.
     assert_eq!(rig.rec.seen_of(tiles[1], 0), vec![Seen::Reset]);
     assert_eq!(rig.rec.seen_of(tiles[1], 1), vec![Seen::Clear]);
-    // Where its recording resumes (10:02), it starts by itself: a seek and
-    // play of that one camera while the other goes on.
+    // Where its recording resumes (10:01:20), it starts by itself: a seek
+    // and play of that one camera while the other goes on.
     rig.core.playback_play(pb).unwrap();
-    rig.until("channel 1 resumes", 60, || {
+    rig.until("channel 1 resumes", 15, || {
         rig.camera_state(pb, tiles[1]).unwrap()["state"] == "playing"
     });
     let log = nvr.play_log();
     assert_eq!(log.len(), 2, "{log:?}");
-    assert_eq!((log[1].channel, log[1].at), (1, d(8, 10, 2, 0)));
+    assert_eq!((log[1].channel, log[1].at), (1, d(8, 10, 1, 20)));
     assert!(log[1].served);
     let (pos, _) = rig.position(pb);
-    assert!(pos >= ms(8, 10, 1, 58) && pos <= ms(8, 10, 2, 2), "{pos}");
+    assert!(pos >= ms(8, 10, 1, 18) && pos <= ms(8, 10, 1, 22), "{pos}");
     let g1 = decodes_of(&rig.rec, tiles[1], 1);
-    assert!(pts_ms(g1[0].0) >= ms(8, 10, 2, 0));
+    assert!(pts_ms(g1[0].0) >= ms(8, 10, 1, 20));
     check_protocol(&rig.rec.seen_of(tiles[1], 1));
-    // At 10:03 it has nothing again: cleared, then back at 10:04, in the
-    // same play (the device's play goes on across the gap).
-    rig.until("the second gap", 120, || {
+    // At 10:01:30 it has nothing again: cleared, then back at 10:01:40, in
+    // the same play (the device's play goes on across the gap).
+    rig.until("the second gap", 15, || {
         rig.camera_state(pb, tiles[1]).unwrap()["state"] == "no_recording"
     });
     let (pos, _) = rig.position(pb);
-    assert!(pos >= ms(8, 10, 3, 0) && pos <= ms(8, 10, 3, 2), "{pos}");
+    assert!(pos >= ms(8, 10, 1, 30) && pos <= ms(8, 10, 1, 32), "{pos}");
     assert_eq!(rig.rec.seen_of(tiles[1], 1).last(), Some(&Seen::Clear));
-    rig.until("back after the gap", 120, || {
+    rig.until("back after the gap", 15, || {
         rig.camera_state(pb, tiles[1]).unwrap()["state"] == "playing"
     });
     let (pos, _) = rig.position(pb);
-    assert!(pos >= ms(8, 10, 4, 0) && pos <= ms(8, 10, 4, 2), "{pos}");
+    assert!(pos >= ms(8, 10, 1, 40) && pos <= ms(8, 10, 1, 42), "{pos}");
     // Channel 0 played on throughout, in its first generation.
     let g0 = decodes_of(&rig.rec, tiles[0], 1);
     let gaps = g0
@@ -534,28 +544,28 @@ fn a_camera_without_recording_is_not_started_and_resumes_with_its_recording() {
 #[test]
 fn a_play_crosses_file_boundaries_and_the_playback_ends_with_the_recordings() {
     let rig = Rig::new();
-    let nvr = archive_mock(&rig.sim, 2, |a| a.file_minutes = 1);
+    // Ten-second files, opened 5 s before the last boundary of the day.
+    let nvr = archive_mock(&rig.sim, 2, |a| ten_second_files(a, (23, 59), (24, 0)));
     let (_dev, key) = rig.add(&nvr, &[0, 1]);
     // The range runs past the last recording (the end of the 8th).
     let (pb, tiles) = rig.open(json!({
-        "start_ms": ms(8, 23, 58, 0), "end_ms": ms(9, 0, 5, 0), "position_ms": ms(8, 23, 58, 50),
+        "start_ms": ms(8, 23, 59, 30), "end_ms": ms(9, 0, 5, 0), "position_ms": ms(8, 23, 59, 45),
         "cameras": cams(&key, &[0, 1], "sub"),
     }));
     rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
     rig.core.playback_play(pb).unwrap();
-    rig.until("the end", 120, || {
-        rig.position(pb).1 == PlaybackState::Ended
-    });
+    rig.until("the end", 30, || rig.position(pb).1 == PlaybackState::Ended);
     let (pos, _) = rig.position(pb);
     assert_eq!(pos, ms(9, 0, 0, 0));
-    // One play per camera ran across the boundaries at 23:59 and midnight
-    // came with no message: the engine ended at the end of the index.
+    // One play per camera ran across the boundaries at 23:59:50 and
+    // midnight came with no message: the engine ended at the end of the
+    // index.
     assert_eq!(nvr.play_log().len(), 2);
     for &tile in &tiles {
         let g = decodes_of(&rig.rec, tile, 1);
         let across = g
             .windows(2)
-            .any(|w| pts_ms(w[0].0) < ms(8, 23, 59, 0) && pts_ms(w[1].0) >= ms(8, 23, 59, 0));
+            .any(|w| pts_ms(w[0].0) < ms(8, 23, 59, 50) && pts_ms(w[1].0) >= ms(8, 23, 59, 50));
         assert!(across);
         assert!(g.windows(2).all(|w| pts_ms(w[1].0) - pts_ms(w[0].0) <= 200));
         assert!(pts_ms(g.last().unwrap().0) >= ms(8, 23, 59, 58));
@@ -574,7 +584,7 @@ fn a_play_crosses_file_boundaries_and_the_playback_ends_with_the_recordings() {
     rig.until("the restart", 20, || {
         rig.seek_active(pb, 2) && rig.position(pb).1 == PlaybackState::Playing
     });
-    assert!(rig.position(pb).0 < ms(8, 23, 58, 5));
+    assert!(rig.position(pb).0 < ms(8, 23, 59, 35));
     rig.core.playback_close(pb).unwrap();
     rig.sim.settle();
     assert_eq!(nvr.active_plays(), 0);

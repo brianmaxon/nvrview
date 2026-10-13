@@ -273,12 +273,24 @@ async fn forgetting_with_partial_files_drops_the_registry_entry() {
     sched.shutdown().await;
 }
 
+#[test]
+fn the_downloads_limit_is_a_thousand_by_default() {
+    assert_eq!(MAX_DOWNLOADS, 1000);
+    assert_eq!(SchedulerConfig::new("x").max_downloads, MAX_DOWNLOADS);
+}
+
+/// With a limit of three (the default is a thousand, checked above), the
+/// fourth range is refused and a known one is still answered.
 #[tokio::test(start_paused = true)]
-async fn the_thousand_downloads_limit_applies_to_ranges() {
+async fn the_downloads_limit_applies_to_ranges() {
+    const LIMIT: usize = 3;
     let root = tempfile::tempdir().unwrap();
-    let sched = scheduler(root.path(), None);
+    let mut cfg = config(root.path(), None);
+    cfg.max_downloads = LIMIT;
+    let f: Arc<dyn Finalizer> = Arc::new(Mp4Finalizer::default());
+    let sched = Scheduler::new(cfg, Some(f));
     let base = secs(d(10, 0, 0, 0));
-    for n in 0..MAX_DOWNLOADS as i64 {
+    for n in 0..LIMIT as i64 {
         let mut req = request(0, 10);
         req.start = base + n * 2;
         req.end = req.start + 1;
