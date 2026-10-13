@@ -96,9 +96,22 @@ else
   if [ "$new" = 0 ]; then
     echo "secret scan (incremental): no commits since the last clean scan"
   else
-    echo "secret scan (incremental): $new new commits"
+    # A merge shows no changes in plain `git log -p`, so gitleaks would see
+    # "0 commits" for a range of merges alone. Commits with their own changes
+    # are scanned as they are; merges with -m, against each parent, so what a
+    # conflict resolution added is scanned too.
     # shellcheck disable=SC2086
-    scan_commits "$new" "HEAD --not $tips" || exit 1
+    plain=$(git rev-list --count --no-merges HEAD --not $tips)
+    merges=$((new - plain))
+    echo "secret scan (incremental): $new new commits ($plain with changes, $merges merges)"
+    if [ "$plain" -gt 0 ]; then
+      # shellcheck disable=SC2086
+      scan_commits "$plain" "--no-merges HEAD --not $tips" || exit 1
+    fi
+    if [ "$merges" -gt 0 ]; then
+      # shellcheck disable=SC2086
+      scan_commits "$merges" "--merges -m HEAD --not $tips" || exit 1
+    fi
   fi
   # Staged, then unstaged, changes. Only when there are some.
   if ! git diff --quiet --cached; then
