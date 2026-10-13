@@ -35,7 +35,7 @@ Commands (RUN is the path that `plan` prints):
                         start a run and decide every suite once; prints RUN.
                         Writes RUN.json (the decisions and fingerprints),
                         RUN.plan (the same decisions as tab-separated lines for
-                        the shell: full, areas, want, crates, cmsg) and an
+                        the shell: full, areas, macareas, want, crates, cmsg) and an
                         empty RUN.log
   finish RUN [--ok [--partial]] [--failed LABEL]
                         folds RUN.log into the store, prints the table, ends
@@ -43,8 +43,9 @@ Commands (RUN is the path that `plan` prints):
                         as the platform's full pass only with --ok and without
                         --partial (steps were skipped)
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
-  areas windows         the Windows app self-test areas (suites app-debug.AREA;
-                        see WINDOWS_OWNED below)
+  areas windows|mac     the app self-test areas: Windows (suites app-debug.AREA;
+                        see WINDOWS_OWNED below) or the Mac (suites
+                        mac-app.AREA; see MAC_OWNED)
   check-projects        fails when DOTNET_REFS differs from the C# project files
 
 The scripts call Python twice per run (plan, finish), not once per suite. The
@@ -231,6 +232,57 @@ for _area in WINDOWS_AREAS:
         ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
 SUITES["windows"]["app-publish"] = (
     ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes("startup"))
+
+# The macOS app self-test (fake core) runs by area the same way
+# (scripts/macos-selftest-areas.txt; SelfTest.areaNames in the app), cached as
+# mac-app.AREA. An area's inputs are the Swift package (apps/macos/) except
+# what is not part of the app and the files only another area exercises
+# (MAC_OWNED: mostly the SelfTest+Area.swift files and the screens behind
+# them), plus the C header copy, the area table, and the fixtures. "startup"
+# takes everything, owned files too. The real-core self-test
+# (scripts/macos-real-selftest.sh) is not cached: it runs in full runs only.
+MAC_AREAS = ["startup", "viewer", "tiles", "layouts", "header", "settings",
+             "calls", "recordings", "capture", "ptz", "alerts"]
+MAC_NOT_APP = ["apps/macos/Sources/NVRViewDemo/", "apps/macos/Tests/", "apps/macos/Packaging/"]
+_N, _C, _F = "apps/macos/Sources/NVRView/", "apps/macos/Sources/NVRCore/", "apps/macos/Sources/FakeCore/"
+MAC_OWNED = {
+    "tiles": [_N + "SelfTest+Fisheye.swift", _C + "Fisheye.swift"],
+    "settings": [_N + "SelfTest+Settings.swift", _N + "UpdateDefaultsSelfTest.swift", _N + "UpdateNotesSelfTest.swift",
+                 _N + "UpdateNotesView.swift", _C + "Discovery.swift", _F + "FakeDiscovery.swift"],
+    "calls": [_N + "SelfTest+Calls.swift", _N + "CallServices.swift", _N + "CallWindow.swift", _N + "DoorbellCalls.swift",
+              _N + "TranscriptStore.swift", _C + "CaptionEcho.swift", _C + "CallTranscriptFile.swift",
+              _C + "EchoCancellation.swift", _C + "TalkAudioConverter.swift"],
+    "recordings": [_N + "SelfTest+Recordings.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
+                   _N + "PlayerStage.swift", _N + "RecordingsBrowser.swift", _N + "RecordingsExport.swift",
+                   _N + "RecordingsModel.swift", _N + "RecordingsPlayer.swift", _N + "RecordingsPlayerView.swift",
+                   _N + "RecordingsWindow.swift", _C + "EditExporter.swift", _C + "EditPlan.swift",
+                   _C + "EditSession.swift", _C + "ExportPlan.swift", _C + "ExportSupport.swift", _C + "MP4ShareSafe.swift",
+                   _C + "Playback.swift", _C + "PlayerRules.swift", _C + "Recordings.swift", _C + "RecordingsBrowse.swift",
+                   _C + "RecordingsSound.swift", _C + "SoundAnalysis.swift", _C + "TrimExporter.swift",
+                   _F + "FakePlayback.swift", _F + "FakeRecordings.swift", _F + "SyntheticRecording.swift"],
+    "capture": [_N + "SelfTest+Capture.swift"],
+    "ptz": [_N + "SelfTest+PTZ.swift", _N + "PTZControls.swift", _N + "PTZModel.swift", _N + "StageView+PTZ.swift",
+            _C + "PTZ.swift"],
+    "alerts": [_N + "SelfTest+Alerts.swift", _N + "AlertsSelfTest.swift", _N + "DetectorSelfTest.swift",
+               _N + "MockHomeAssistant.swift", _N + "SmartAlertEventsWindow.swift", _N + "SmartAlertsModel.swift",
+               _N + "SmartAlertsSettingsView.swift", _N + "StageView+Verify.swift", _N + "VerificationViews.swift",
+               _C + "SmartAlerts.swift", _C + "SmartAlertSettings.swift", _C + "VerificationBoard.swift",
+               _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/"],
+}
+MAC_APP_EXTRA = ["docs/nvrview.h", "crates/viewer-ffi/include/", "scripts/macos-selftest-areas.txt", "VERSION"] + FIXTURES
+
+
+def mac_area_excludes(area):
+    out = list(MAC_NOT_APP)
+    if area != "startup":
+        for other, paths in MAC_OWNED.items():
+            if other != area:
+                out += paths
+    return out
+
+
+for _area in MAC_AREAS:
+    SUITES["mac"]["mac-app.%s" % _area] = (["apps/macos/"] + MAC_APP_EXTRA, [], ["swift"], mac_area_excludes(_area))
 
 RUST_FAMILIES = {"mac": FAMILIES, "windows": ("clippy", "test", "doctest")}
 
@@ -528,7 +580,8 @@ def crates_decision(base, run, fam):
 
 def plan_text(run):
     """The decisions as tab-separated lines for the shell."""
-    lines = ["full\t%s" % run["reason"], "areas\t%s" % " ".join(WINDOWS_AREAS)]
+    lines = ["full\t%s" % run["reason"], "areas\t%s" % " ".join(WINDOWS_AREAS),
+             "macareas\t%s" % " ".join(MAC_AREAS)]
     for suite, d in sorted(run["wants"].items()):
         lines.append("want\t%s\t%s\t%s" % (suite, d["status"], d["line"]))
     for fam, d in run["crate_plans"].items():
@@ -734,8 +787,8 @@ def cmd_check_projects(args):
 
 
 def cmd_areas(args):
-    """Prints the Windows app self-test areas, space separated."""
-    print(" ".join(WINDOWS_AREAS))
+    """Prints the Windows (or, with `mac`, the Mac) app self-test areas, space separated."""
+    print(" ".join(MAC_AREAS if args and args[0] == "mac" else WINDOWS_AREAS))
     return 0
 
 

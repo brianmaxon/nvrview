@@ -75,8 +75,12 @@ runs the app against a built-in fake core with no network at all.
 cd apps/macos
 swift test                                  # app and bridge tests (fake core)
 swift run NVRView --fake ../../fixtures/synthetic/h264-basic.h264
+# the app's self-test on the fake core (about 20 s; --areas a,b runs some, see scripts/macos-selftest-areas.txt)
+swift run NVRView --fake --data-dir "$(mktemp -d)" --selftest 60 ../../fixtures/synthetic/h264-basic.h264 \
+  ../../fixtures/synthetic/h265-basic.h265 ../../fixtures/synthetic/fisheye/h264-fisheye.h264
 scripts/build-xcframework.sh                # from the repository root: the real core
 NVRVIEW_REAL_CORE=1 swift test              # against the real core (after copying the XCFramework, see Package.swift)
+scripts/macos-real-selftest.sh              # from the repository root: the self-test on the real core against mock-nvr
 ```
 
 ## Building on Windows
@@ -151,7 +155,11 @@ folders (and programs) for speed.
 sanitization and a full-history secret scan, `cargo fmt`, `clippy`, the Rust
 tests, the C header check, the C smoke test (plain and with AddressSanitizer),
 Windows and Linux compile checks, the C# smoke test in Docker, the macOS app
-tests, and the macOS GUI self-tests (their windows open behind other windows).
+tests, and the macOS GUI self-tests: the app's self-test on the fake core,
+by area, and the two renderer demos (their windows open behind other windows;
+with no desktop session they are skipped and the run writes no stamp). Full
+runs (`NVRVIEW_FULL_CHECK=1`, the release checks) add the app's self-test on
+the real core against `tools/mock-nvr` (`scripts/macos-real-selftest.sh`).
 Environment variables skip the slow or optional steps:
 `NVRVIEW_CSHARP_TESTS=0`, `NVRVIEW_GUI_TESTS=0`, `NVRVIEW_SECRET_SCAN=0`.
 `NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
@@ -185,6 +193,13 @@ at the end shows each suite as ran or cached, with its time.
   another area exercises (`WINDOWS_OWNED` in `scripts/suite-cache.py`), so
   shared code reruns every area and a change to a recordings file reruns
   recordings and the always-run startup smoke. A full run covers all areas.
+  The macOS app self-test (fake core) is cached by area the same way
+  (`mac-app.AREA`: startup, viewer, tiles, layouts, header, settings, calls,
+  recordings, capture, ptz, alerts): `scripts/macos-selftest-areas.txt` maps
+  its steps, `NVRView --selftest N --areas a,b` runs some, the larger areas'
+  steps live in `SelfTest+Area.swift` files, and `MAC_OWNED` in
+  `scripts/suite-cache.py` lists the files only one area exercises. Its
+  real-core run is not cached; it runs in full runs only.
   The other Windows suites cover only the C# projects they build (and what
   those reference): the video self-test the video demo project, the smoke test
   the smoke project, the tile tests and the shell tests their own projects,
