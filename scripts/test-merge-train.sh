@@ -114,7 +114,7 @@ unset NVRVIEW_WINDOWS_HOSTS
 export NVRVIEW_WINDOWS_LOCK="$work/l4/windows.lock"
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-train.sh" "$here/branch-ready.sh" "$here/windows-lock.sh" "$here/suite-cache.py" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-train.sh" "$here/branch-ready.sh" "$here/windows-lock.sh" "$here/suite-cache.py" "$here/timing.py" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .
@@ -264,6 +264,36 @@ NVRVIEW_MERGE_MAC_CMD="echo stray >stray.dat" sh scripts/merge-train.sh x1 >"$wo
 check "...and says it changed files" grep -q "it changed files" "$work/out5"
 [ "$(git rev-parse HEAD)" = "$head5" ] && pass "...and main is untouched" || fail "...and main is untouched"
 rm -f stray.dat
+
+
+# The Mac and Windows checks of a train run at the same time: each fake check
+# waits for the other to start, which only works when they overlap.
+r="$work/train6"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+: >"$log"
+full_state "$(date +%s)"
+rendezvous() { # ME OTHER
+  echo "touch $work/tr-$1; n=0; until [ -f $work/tr-$2 ]; do n=\$((n + 1)); [ \$n -lt 400 ] || exit 1; sleep 0.05; done"
+}
+rm -f "$work"/tr-mac "$work"/tr-win
+branch_with y1 f1.txt one
+branch_with y2 f2.txt two
+NVRVIEW_MERGE_MAC_CMD="$(rendezvous mac win); echo mac >>$log; echo '   (fake mac step: 6s)'" \
+  NVRVIEW_MERGE_WINDOWS_CMD="$(rendezvous win mac); echo windows >>$log; scripts/checked.sh --record windows 1 fake" \
+  sh scripts/merge-train.sh y1 y2 >"$work/out6" 2>&1 && pass "a train runs its Mac and Windows checks at the same time" || { cat "$work/out6"; fail "a train runs its Mac and Windows checks at the same time"; }
+check "the train prints both summaries" sh -c "grep -q 'Mac check: PASS' $work/out6 && grep -q 'Windows check: PASS' $work/out6"
+check "the train prints the total and the slowest steps" sh -c "grep -q 'slowest: fake mac step 6s' $work/out6"
+check "the train is in the timing log" sh -c "grep -q '\"kind\":\"train\"' '$(git rev-parse --git-common-dir)/check-timings.jsonl'"
+# One side failing fails the train (here the Windows side, while Mac passes).
+branch_with y3 f3.txt WINFAIL
+head6=$(git rev-parse HEAD)
+NVRVIEW_MERGE_MAC_CMD="echo mac >>$log" \
+  NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log; ! grep -rqs WINFAIL --include='*.txt' ." \
+  sh scripts/merge-train.sh y3 >"$work/out6b" 2>&1 && fail "a Windows failure fails a parallel train" || pass "a Windows failure fails a parallel train"
+check "...naming the Windows check" grep -Eq '^y3 +failed \(Windows check\)' "$work/out6b"
+[ "$(git rev-parse HEAD)" = "$head6" ] && pass "...and main stays where it was" || fail "...and main stays where it was"
 
 echo
 if [ "$failures" -ne 0 ]; then

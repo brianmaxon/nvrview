@@ -27,7 +27,7 @@ expect_not() { # NAME CMD...  (the command must fail)
 # A fresh repository with the scripts under test, main holding a few files.
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$here/windows-lock.sh" "$here/branch-ready.sh" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$here/windows-lock.sh" "$here/branch-ready.sh" "$here/timing.py" "$here/secret-scan.sh" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .
@@ -219,6 +219,144 @@ if run_merge b7 "merge b7" >"$work/out7" 2>&1; then fail "a real Windows failure
 export NVRVIEW_MERGE_MAC_CMD="exit 1"
 if run_merge b7 "merge b7" >"$work/out8" 2>&1; then fail "a Mac failure fails the merge"; else pass "a Mac failure fails the merge"; fi
 [ "$(git rev-parse HEAD)" = "$head_before" ] && [ -z "$(git status --porcelain)" ] && pass "...and leaves a clean tree" || fail "...and leaves a clean tree"
+
+# --- parallel checks in merge-branch.sh ---------------------------------------
+# The Mac and the Windows fake check each wait for the other to start, so they
+# can only pass when they really run at the same time (a condition, not a delay).
+r="$work/par"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+log="$work/par.log"
+: >"$log"
+export NVRVIEW_WINDOWS_HOST=fake
+unset NVRVIEW_FULL_WINDOWS_EVERY
+full_state "$(date +%s)"
+rendezvous() { # ME OTHER
+  echo "touch $work/par-$1; n=0; until [ -f $work/par-$2 ]; do n=\$((n + 1)); [ \$n -lt 400 ] || exit 1; sleep 0.05; done"
+}
+rm -f "$work"/par-mac "$work"/par-win
+export NVRVIEW_MERGE_MAC_CMD="$(rendezvous mac win); echo mac >>$log; echo '   (fake mac step: 7s)'"
+export NVRVIEW_MERGE_WINDOWS_CMD="$(rendezvous win mac); echo windows >>$log; echo '   (fake windows step: 5s)'; scripts/checked.sh --record windows 1 fake"
+git checkout -q -b pb1
+commit_file a.txt par1
+git checkout -q main
+run_merge pb1 "merge pb1" >"$work/outp1" 2>&1 && pass "the Mac and Windows checks run at the same time" || { cat "$work/outp1"; fail "the Mac and Windows checks run at the same time"; }
+expect "both summaries are printed" sh -c "grep -q 'Mac check: PASS' $work/outp1 && grep -q 'Windows check: PASS' $work/outp1"
+expect "the slowest steps are printed" grep -q 'slowest: fake mac step 7s; fake windows step 5s' "$work/outp1"
+expect "the total is printed" grep -Eq '^total [0-9]+ s;' "$work/outp1"
+expect "main moved to the merge" test "$(git log -1 --format=%s)" = "merge pb1"
+expect "no temporary branch is left" test -z "$(git branch --list 'merge-branch-*')"
+expect "the merge left Mac and Windows stamps" sh -c "test -f '$(stamp_dir)/$(tree HEAD).mac' && test -f '$(stamp_dir)/$(tree HEAD).windows'"
+timing_log="$(git rev-parse --git-common-dir)/check-timings.jsonl"
+expect "the run is in the timing log" sh -c "grep -q '\"kind\":\"merge\"' $timing_log && grep -q 'fake mac step' $timing_log"
+# A failure of either side drops the merge, whatever the other side did.
+head_par=$(git rev-parse HEAD)
+git checkout -q -b pb2
+commit_file b.txt par2
+git checkout -q main
+export NVRVIEW_MERGE_MAC_CMD="echo 'mac broke'; exit 1"
+export NVRVIEW_MERGE_WINDOWS_CMD="echo windows >>$log; scripts/checked.sh --record windows 1 fake"
+run_merge pb2 "merge pb2" >"$work/outp2" 2>&1 && fail "a Mac failure fails the merge although Windows passed" || pass "a Mac failure fails the merge although Windows passed"
+[ "$(git rev-parse HEAD)" = "$head_par" ] && [ "$(git symbolic-ref --short HEAD)" = main ] && [ -z "$(git status --porcelain)" ] && [ -z "$(git branch --list 'merge-branch-*')" ] &&
+  pass "...main is untouched and the temporary branch is gone" || fail "...main is untouched and the temporary branch is gone"
+grep -q "Windows check: PASS" "$work/outp2" && pass "...and the Windows summary is still printed" || fail "...and the Windows summary is still printed"
+export NVRVIEW_MERGE_MAC_CMD="echo mac >>$log"
+export NVRVIEW_MERGE_WINDOWS_CMD="echo 'windows broke'; exit 1"
+git checkout -q -b pb3 main
+commit_file c.txt par3
+git checkout -q main
+run_merge pb3 "merge pb3" >"$work/outp3" 2>&1 && fail "a Windows failure fails the merge although Mac passed" || pass "a Windows failure fails the merge although Mac passed"
+[ "$(git rev-parse HEAD)" = "$head_par" ] && [ -z "$(git branch --list 'merge-branch-*')" ] && pass "...and main is untouched" || fail "...and main is untouched"
+grep -q "Mac check: PASS" "$work/outp3" && pass "...and the Mac summary is still printed" || fail "...and the Mac summary is still printed"
+
+# --- timing log -----------------------------------------------------------------
+export NVRVIEW_TIMING_LOG="$work/timings.jsonl" NVRVIEW_TIMING_KEEP=5
+printf 'x\n   (first step: 2s)\n   (second step: 9s)\n   (third step: 4s)\n   (fourth step: 1s)\n' >"$work/steps.log"
+for i in 1 2 3 4 5 6 7 8; do
+  NVRVIEW_TIMING_NOW=$((1000 + i)) python3 -I scripts/timing.py log mac "$i" --tree "t$i" "$work/steps.log"
+done
+[ "$(wc -l <"$work/timings.jsonl" | tr -d ' ')" = 5 ] && pass "the timing log keeps only its last lines" || fail "the timing log keeps only its last lines"
+[ "$(head -n 1 "$work/timings.jsonl" | sed 's/.*"total":\([0-9]*\).*/\1/')" = 4 ] && [ "$(tail -n 1 "$work/timings.jsonl" | sed 's/.*"total":\([0-9]*\).*/\1/')" = 8 ] &&
+  pass "...the oldest ones go" || fail "...the oldest ones go"
+grep -q '"steps":\[\["first step",2\],\["second step",9\]' "$work/timings.jsonl" && pass "a line holds the step times" || fail "a line holds the step times"
+[ "$(python3 -I scripts/timing.py slowest "$work/steps.log")" = "4 steps, 16s of step time; slowest: second step 9s; third step 4s; first step 2s" ] &&
+  pass "the slowest three steps are named" || fail "the slowest three steps are named"
+python3 -I scripts/timing.py table "$work/steps.log" | grep -q "second step *9s" && pass "the table lists each step" || fail "the table lists each step"
+grep -q '^KEEP = 500$' scripts/timing.py && pass "the default limit is 500 lines" || fail "the default limit is 500 lines"
+unset NVRVIEW_TIMING_LOG NVRVIEW_TIMING_KEEP
+
+# --- the incremental secret scan ----------------------------------------------
+r="$work/scan"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+calls="$work/gl.calls"
+: >"$calls"
+cat >"$work/fakegl.sh" <<EOF
+echo "\$*" >>"$calls"
+case "\$1" in detect) echo "7 commits scanned." ;; esac
+[ ! -f "$work/leak" ]
+EOF
+export NVRVIEW_GITLEAKS_CMD="sh $work/fakegl.sh \"\$@\"" NVRVIEW_SCAN_NOW=1000000
+unset NVRVIEW_FULL_CHECK
+rm -f "$work/leak"
+scan() { sh scripts/secret-scan.sh 2>&1; }
+detects() { grep -c '^detect' "$calls" || true; }
+scan >"$work/scan1" && pass "the first scan passes" || fail "the first scan passes"
+grep -q "full history: no earlier scan on record" "$work/scan1" && [ "$(detects)" = 1 ] && ! grep -q 'log-opts' "$calls" &&
+  pass "the first scan is a full-history scan" || fail "the first scan is a full-history scan"
+state="$(stamp_dir)/secret-scan.state"
+grep -q "^clean=$(git rev-parse HEAD)$" "$state" && pass "the clean commit is recorded in the common git directory" || fail "the clean commit is recorded in the common git directory"
+first=$(git rev-parse HEAD)
+NVRVIEW_SCAN_NOW=1000100 scan >"$work/scan2"
+grep -q "no commits since the last clean scan" "$work/scan2" && [ "$(detects)" = 1 ] && pass "nothing new: nothing is scanned" || fail "nothing new: nothing is scanned"
+commit_file a.txt one
+NVRVIEW_SCAN_NOW=1000200 scan >"$work/scan3"
+grep -q "incremental): 1 new commits" "$work/scan3" && grep -q "log-opts=HEAD --not $first" "$calls" && pass "a new commit: only the range since the clean scan" || fail "a new commit: only the range since the clean scan"
+second=$(git rev-parse HEAD)
+echo staged >s.txt
+git add s.txt
+echo edit >>a.txt
+NVRVIEW_SCAN_NOW=1000300 scan >"$work/scan4"
+grep -q '^protect --staged' "$calls" && grep -q '^protect --redact' "$calls" && pass "staged and unstaged changes are scanned too" || fail "staged and unstaged changes are scanned too"
+git reset -q --hard
+git clean -qfd
+touch "$work/leak"
+commit_file a.txt leak
+leaky=$(git rev-parse HEAD)
+before_state=$(cat "$state")
+NVRVIEW_SCAN_NOW=1000400 scan >"$work/scan5" && fail "a finding fails the scan" || pass "a finding fails the scan"
+[ "$(cat "$state")" = "$before_state" ] && pass "a failed scan is never recorded as clean" || fail "a failed scan is never recorded as clean"
+rm -f "$work/leak"
+: >"$calls"
+NVRVIEW_SCAN_NOW=1000500 scan >"$work/scan6"
+grep -q "log-opts=HEAD --not $second" "$calls" && pass "the next scan covers the same range again" || fail "the next scan covers the same range again"
+grep -q "^clean=$leaky$" "$state" && pass "...and records it once it passes" || fail "...and records it once it passes"
+: >"$calls"
+NVRVIEW_SCAN_NOW=$((1000000 + 25 * 3600)) scan >"$work/scan7"
+grep -q "full history: the last full scan was 25 h ago" "$work/scan7" && pass "a full scan runs when the last one is 24 hours old" || fail "a full scan runs when the last one is 24 hours old"
+NVRVIEW_SCAN_NOW=$((1000000 + 26 * 3600)) scan >"$work/scan8"
+grep -q "no commits since" "$work/scan8" && pass "...and the full scan restarts the 24 hours" || fail "...and the full scan restarts the 24 hours"
+NVRVIEW_SECRET_FULL_MAX_AGE_H=48 NVRVIEW_SCAN_NOW=$((1000000 + 60 * 3600)) scan >"$work/scan9"
+grep -q "no commits since" "$work/scan9" && pass "the age limit can be changed" || fail "the age limit can be changed"
+unset NVRVIEW_SECRET_FULL_MAX_AGE_H # (variables set in front of a function call stay set)
+NVRVIEW_FULL_CHECK=1 scan >"$work/scan10"
+grep -q "full history: NVRVIEW_FULL_CHECK=1" "$work/scan10" && pass "NVRVIEW_FULL_CHECK=1 (releases) scans everything" || fail "NVRVIEW_FULL_CHECK=1 (releases) scans everything"
+unset NVRVIEW_FULL_CHECK
+echo "0000000000000000000000000000000000000000:a.txt:generic:1" >.gitleaksignore
+git add .gitleaksignore
+git commit -q -m "ignore list"
+NVRVIEW_SCAN_NOW=$((1000000 + 60 * 3600)) scan >"$work/scan11"
+grep -q "full history: the gitleaks rules or ignore list changed" "$work/scan11" && pass "a changed ignore list forces a full scan" || fail "a changed ignore list forces a full scan"
+touch "$work/leak"
+before_state=$(cat "$state")
+NVRVIEW_FULL_CHECK=1 scan >"$work/scan12" && fail "a failing full scan fails" || pass "a failing full scan fails"
+[ "$(cat "$state")" = "$before_state" ] && pass "...and is not recorded either" || fail "...and is not recorded either"
+rm -f "$work/leak"
+unset NVRVIEW_GITLEAKS_CMD NVRVIEW_SCAN_NOW
+expect "release-check.sh forces full scans through NVRVIEW_FULL_CHECK=1" grep -q 'export NVRVIEW_FULL_CHECK=1' "$here/release-check.sh"
+
 
 echo
 if [ "$failures" -ne 0 ]; then

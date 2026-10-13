@@ -21,13 +21,15 @@ export NVRVIEW_TEST_PASSWORD="${NVRVIEW_TEST_PASSWORD:-example-password}"
 # compile shared dependencies twice.
 # shellcheck disable=SC2086 # a list of cargo arguments
 cargo build --release ${NVRVIEW_RELEASE_PACKAGES:--p mock-nvr}
-# Relative paths (build/ is git-ignored) keep Windows drive-letter paths out
-# of bash.
-out=build/csharp
-dotnet build apps/windows/NvrView.Demo -c Release --artifacts-path "$out/artifacts"
+# Relative paths keep Windows drive-letter paths out of bash. Everything under
+# target/ survives between worker runs, and all C# projects build into the
+# one artifacts folder, so a shared project (Shell, Tiles, Interop) is built
+# once and a run with no change rebuilds nothing.
+art="${NVRVIEW_DOTNET_ARTIFACTS:-target/dotnet}"
+dotnet build apps/windows/NvrView.Demo -c Release --artifacts-path "$art" -v quiet -clp:ErrorsOnly -nologo
 # NVRVIEW_BUILD_ONLY=1 stops here (scripts/windows-worker.sh builds ahead).
 if [ -n "${NVRVIEW_BUILD_ONLY:-}" ]; then exit 0; fi
-demo=(dotnet "$out/artifacts/bin/NvrView.Demo/release/NvrView.Demo.dll"
+demo=(dotnet "$art/bin/NvrView.Demo/release/NvrView.Demo.dll"
   --mock-nvr target/release/mock-nvr.exe --lib target/release/nvrview.dll)
 f=fixtures/synthetic
 

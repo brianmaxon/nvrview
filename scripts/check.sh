@@ -49,10 +49,11 @@ check_start=$(date +%s)
 step_start=$check_start
 step_name=""
 step_row=""
+timing_file=$(mktemp)
 end_step() {
   now=$(date +%s)
   if [ -n "$step_name" ]; then
-    printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))"
+    printf '   (%s: %ss)\n' "$step_name" "$((now - step_start))" | tee -a "$timing_file"
     if [ -n "$run_file" ] && [ "$step_row" != "-" ]; then sc pass "$run_file" "$((now - step_start))" "$step_row"; fi
   fi
   step_name=""
@@ -81,6 +82,7 @@ on_exit() {
   if [ -n "$run_file" ]; then
     sc finish "$run_file" --failed "$step_name" || true
   fi
+  rm -f "$timing_file"
   exit "$rc"
 }
 trap on_exit EXIT
@@ -137,40 +139,23 @@ python3 -I scripts/check-parity.py
 step selftest-areas "Windows self-test areas"
 python3 -I scripts/check-selftest-areas.py
 
-# The same full-history secret scan as CI, when Docker or gitleaks is
-# available. NVRVIEW_SECRET_SCAN=0 skips it. False positives go in
-# .gitleaksignore (synthetic examples only).
+# The secret scan (scripts/secret-scan.sh): gitleaks over the commits added
+# since the last clean scan plus the working tree changes; the full history
+# once a day and always with NVRVIEW_FULL_CHECK=1 (the release scripts).
+# NVRVIEW_SECRET_SCAN=0 skips it. False positives go in .gitleaksignore
+# (synthetic examples only).
 if [ "${NVRVIEW_SECRET_SCAN:-1}" = "0" ]; then
   step - "secret scan skipped (NVRVIEW_SECRET_SCAN=0)"
   skip "secret scan"
-elif command -v gitleaks >/dev/null 2>&1; then
-  step secret-scan "secret scan (full history)"
-  gitleaks detect --source=. --redact --no-banner
-elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  step secret-scan "secret scan (full history, Docker)"
-  # Mounted at the same paths as on the host, with the repository's common
-  # git directory too: in a git worktree .git is a file pointing there, and
-  # without it git fails and gitleaks scans nothing yet exits 0. A scan that
-  # reports no commits is therefore a failure.
-  common="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
-  scan_log="$(mktemp)"
-  if docker run --rm -v "$PWD:$PWD" -v "$common:$common" -w "$PWD" \
-    zricethezav/gitleaks:v8.18.4 detect --source="$PWD" --redact --no-banner \
-    >"$scan_log" 2>&1; then scan_rc=0; else scan_rc=$?; fi
-  cat "$scan_log"
-  if [ "$scan_rc" -ne 0 ]; then
-    rm -f "$scan_log"
+else
+  step secret-scan "secret scan"
+  scan_rc=0
+  scripts/secret-scan.sh || scan_rc=$?
+  if [ "$scan_rc" = 3 ]; then
+    skip "secret scan"
+  elif [ "$scan_rc" != 0 ]; then
     exit "$scan_rc"
   fi
-  if ! grep -Eq '[1-9][0-9]* commits scanned' "$scan_log"; then
-    rm -f "$scan_log"
-    echo "secret scan: no commits were scanned" >&2
-    exit 1
-  fi
-  rm -f "$scan_log"
-else
-  step - "secret scan skipped (no gitleaks or Docker)"
-  skip "secret scan"
 fi
 
 if [ "$fast" = 1 ]; then
@@ -319,6 +304,8 @@ run_file=""
 cached=$(sed -n 's/.*; cached suites: //p' "$summary")
 rm -f "$summary"
 printf '\nAll checks passed in %ss.\n' "$((now - check_start))"
+python3 -I scripts/timing.py table "$timing_file"
+python3 -I scripts/timing.py log mac "$((now - check_start))" --tree "$(git rev-parse 'HEAD^{tree}')" "$timing_file" || true
 
 if [ "$(uname)" != "Darwin" ]; then
   echo "no check stamp written (the stamp is for the Mac checks)"

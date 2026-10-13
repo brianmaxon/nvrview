@@ -207,7 +207,7 @@ if [ -z "$only" ]; then
 fi
 NVRVIEW_SUITES=""
 wanted="shell-tests"
-if [ "$only" != app ]; then wanted="csharp-smoke video-selftest $wanted"; fi
+if [ "$only" != app ]; then wanted="csharp-smoke tiles-tests video-selftest $wanted"; fi
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then
   # The app self-test is cached by area (scripts/windows-selftest-areas.txt), for the debug and the publish build.
   # NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no stamp, not a full pass).
@@ -269,3 +269,7 @@ else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi
 printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"
+# Step times: the sync here, the worker's steps and background builds.
+printf '   (sync: %ss)\n' "$((sent - check_start))" >"$logs/steps"
+python3 -I scripts/timing.py table "$logs/steps" "$logs/worker.log"
+python3 -I scripts/timing.py log windows "$((now - check_start))" --tree "$tree_sent" "$logs/steps" "$logs/worker.log" || true
