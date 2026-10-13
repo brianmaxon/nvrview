@@ -56,6 +56,9 @@ public final class SmartAlertsController {
     public private(set) var alertsSeen = 0
     /// The `alerts_configured` event's JSON, as the core sent it.
     public private(set) var lastConfigured: String?
+    /// How many times the core took the settings (for tests that wait for
+    /// a change to be applied).
+    public private(set) var configureCount = 0
 
     private let environment: Environment
     private let installer: ModelInstaller
@@ -127,6 +130,7 @@ public final class SmartAlertsController {
                 return
             }
             try environment.core().alertsConfigure(json: built.json)
+            configureCount += 1
             state = built.enabled ? .running(issues: []) : .off
         } catch let error as AlertSettingsError {
             state = .failed(error == .notAnObject ? "alerts.json is not a settings object." : "alerts.json is unusable.")

@@ -264,7 +264,8 @@ final class AlertsSelfTest {
         print("\(id): saved settings configured the core, Events lists \"\(shown.explanation)\", \(steps) live steps, pulsed")
         await reviewSteps(
             alerts: alerts, core: core, ha: ha, events: events, stub: stub, controller: controller, shown: shown,
-            sensor: "sensor-ui", camera: camera)
+            sensor: "sensor-ui", camera: camera,
+            other: device.channels.map(\.channel).sorted().dropFirst().first.map { CameraRef(device: device.key, channel: $0) })
     }
 
     /// Evidence for an outdoor person check is kept with its decision and
@@ -313,7 +314,8 @@ final class AlertsSelfTest {
     /// the Events window's overlay.
     private func reviewSteps(
         alerts: SmartAlertsModel, core: any CoreAPI, ha: MockHomeAssistant, events: SmartAlertEventsModel,
-        stub: StubDetector, controller: SmartAlertsController, shown: SmartAlertLogEntry, sensor: String, camera: CameraRef
+        stub: StubDetector, controller: SmartAlertsController, shown: SmartAlertLogEntry, sensor: String, camera: CameraRef,
+        other: CameraRef?
     ) async {
         // alerts-sensor-diagnostics: the first sensor's broker port is closed.
         var diag = "alerts-sensor-diagnostics"
@@ -382,16 +384,19 @@ final class AlertsSelfTest {
             print("\(test): \"\(alerts.homeAssistantSend ?? "")\"")
         }
 
-        // alerts-simulate-trigger: a vehicle then an animal (their own
-        // cooldowns; the person alert above holds the person's).
+        // alerts-simulate-trigger: a vehicle on the sensor's camera (the person
+        // alert above holds that camera's person cooldown), then a person
+        // on another camera that raised no alert, ticked for Home Assistant.
         let sim = "alerts-simulate-trigger"
         let beforeSim = ha.turnOns(Self.helper)
         stub.classID = 2  // car
         guard let first = alerts.simulate(sensor: sensor, sendToHomeAssistant: false) else { return fail(sim, "the trigger was refused") }
         var entry: SmartAlertLogEntry?
-        let decided = await wait(60) {
-            events.reload()
-            entry = events.entries.first { $0.triggerID == first }
+        let decided = await wait(40) {
+            guard let text = try? core.alertsGet(query: #"{"trigger_id":\#(first)}"#),
+                let page = SmartAlertLogPage.parse(text)
+            else { return false }
+            entry = page.entries.first
             return entry != nil
         }
         guard decided, let entry else { return fail(sim, "no test decision was logged") }
@@ -403,12 +408,22 @@ final class AlertsSelfTest {
         // fixed wait proves that none comes.
         try? await Task.sleep(for: .milliseconds(400))
         if ha.turnOns(Self.helper) != beforeSim { fail(sim, "a simulated trigger reached Home Assistant unticked") }
-        stub.classID = 16  // dog
-        guard let second = alerts.simulate(sensor: sensor, sendToHomeAssistant: true) else { return fail(sim, "the ticked trigger was refused") }
-        guard await wait(60, { ha.turnOns(Self.helper) == beforeSim + 1 }) else {
-            return fail(sim, "the ticked simulated trigger did not reach Home Assistant: \(ha.log.suffix(4))")
+        guard let other else { return print("\(sim): the ticked half is skipped (the device has fewer than three channels)") }
+        let applied = controller.configureCount
+        alerts.update { s in
+            s.setCamera(AlertCameraSettings(camera: other))
+            if let i = s.sensors.firstIndex(where: { $0.key == "sensor-msg" }) { s.sensors[i].cameras = [SensorCamera(camera: other)] }
         }
-        _ = second
+        guard await wait(30, { controller.configureCount > applied }) else { return fail(sim, "the core did not take the new mapping") }
+        stub.classID = 0  // person
+        guard let second = alerts.simulate(sensor: "sensor-msg", sendToHomeAssistant: true) else { return fail(sim, "the ticked trigger was refused") }
+        guard await wait(60, { ha.turnOns(Self.helper) == beforeSim + 1 }) else {
+            let why = (try? core.alertsGet(query: #"{"trigger_id":\#(second)}"#)).flatMap(SmartAlertLogPage.parse)?.entries.first
+            return fail(
+                sim,
+                "the ticked simulated trigger did not reach Home Assistant: decision \(why?.decision ?? "none") \(why?.reason ?? "") test \(why?.isTest ?? false); \(ha.log.suffix(3))"
+            )
+        }
         print("\(sim): a test decision with no Home Assistant delivery, then one with it when ticked")
 
         // alerts-events-overlay: the Events window's detail pane for the
