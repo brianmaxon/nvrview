@@ -6,11 +6,14 @@ its service in `viewer-core` with the C interface (ABI 3 minor 12;
 picture acquisition, the verification request and answer, decisions, the
 event log, the seams for trigger inputs and outputs, and the two modules
 the core ships: the MQTT input and the Home Assistant output, wired end to
-end with credentials passed in memory. **On macOS the glue is built**
-(`AlertHost`: the verification host with the detector, snapshots, the model
-fetched on first use, desktop notifications, the Keychain). Not built yet:
-the views (live verification, event log, settings screens), Windows'
-host, standby, the coordinator, the local API, and the other outputs. Each section says what is built, what is planned, and what is still
+end with credentials passed in memory. **On macOS the glue and the views are
+built**: `AlertHost` (the verification host with the detector, snapshots,
+the model fetched on first use, desktop notifications, the Keychain) and
+Settings > Smart Alerts, the live verification view, and the Events window
+([UX.md](UX.md) "Smart alerts"). Settings > Smart Alerts saves the
+document's stored form (`alerts.json`) and the host configures the core from
+it. Not built yet: Windows' host and screens, standby, the coordinator, the
+local API, and the other outputs. Each section says what is built, what is planned, and what is still
 to be measured. Protocol facts are marked **observed** or **reported**
 exactly as in [protocol.md](protocol.md); nothing here may depend on a
 reported fact until it is observed.
@@ -903,11 +906,16 @@ FFI.md "Smart alerts" has their settings entries.
 - **Events.** Only alerts carry the full trace in `alert` events; quiet and
   suppressed decisions carry a short `summary`. The full trace stays in the
   alert log and `nv_alerts_get`.
-- **macOS host (`AlertHost`).** Smart alerts are **off unless `alerts.json`**
-  (Application Support, or `--data-dir`) exists and says `"enabled": true`.
-  The settings screens are not built; the file is the interface. Cameras may
-  be named by `device_key` (the stable device key) and are given this run's
-  device IDs when sent. It answers `verify_request` off the event thread
+- **macOS host (`AlertHost`).** Smart alerts are **off unless the settings
+  say `"enabled": true`**. The host configures the core from what Settings >
+  Smart Alerts saved (its stored form, also written to `alerts.json` in
+  Application Support or `--data-dir`); until the user saves there, a
+  hand-written `alerts.json` is used. Credentials come from the Keychain
+  (account `alerts.<id>`) each time the settings are sent. Cameras may be
+  named by `device_key` (the stable device key) and are given this run's
+  device IDs when sent. Every smart-alert event goes to the views (live
+  checks, the Events window) and then to the host. With the fake core there
+  is no host and the settings screen sends the document itself. It answers `verify_request` off the event thread
   (`alert_frames_get`, VideoToolbox decode, `DetectorKit` on the crops,
   `alert_detections_put`), keeps the last decoded picture per camera and
   uses it for the snapshot JPEG of an alert (`alert_snapshot_put`), and raises

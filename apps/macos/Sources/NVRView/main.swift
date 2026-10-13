@@ -17,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Calls shown in their own windows (not viewer windows).
     private(set) var callWindows: CallWindows?
     private var settings: SettingsWindowController?
+    /// Smart alerts: the event log's window and the live checks' window.
+    private(set) var eventsWindow: SmartAlertEventsWindowController?
+    private(set) var verificationPanel: VerificationPanelController?
     /// Open recordings windows (docs/UX.md "Recordings").
     private(set) var recordingsWindows: [RecordingsWindowController] = []
     /// With `--selftest`: AppKit's warnings on standard error, counted.
@@ -57,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         startCallWindows(model)
         startCapture(model)
         startSmartAlerts(model)
+        startAlertHost(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
@@ -99,6 +103,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     static let selfTestDefaults = "nvrview-selftest"
 
+    // MARK: Smart alerts
+
+    /// The live checks' window and whether a camera is on any viewer window
+    /// (docs/UX.md "Smart alerts").
+    private func startSmartAlerts(_ model: AppModel) {
+        let alerts = model.alertsModel!
+        alerts.isOnScreen = { [weak self] camera in self?.windows.contains { $0.stage.showsCamera(camera) } ?? false }
+        alerts.showPanel = { [weak self, weak model] show in
+            guard let self, let model else { return }
+            if show {
+                if verificationPanel == nil { verificationPanel = VerificationPanelController(model: model) }
+                // Never takes focus; in a self-test it stays behind.
+                if options.selfTestSeconds != nil {
+                    verificationPanel?.window?.orderBack(nil)
+                } else {
+                    verificationPanel?.present()
+                }
+            } else {
+                verificationPanel?.hide()
+            }
+        }
+    }
+
+    /// Window > Smart Alert Events.
+    @objc func showSmartAlertEvents(_ sender: Any?) {
+        let c = openSmartAlertEvents()
+        c?.showWindow(nil)
+        c?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The events window, opened if need be (behind the others, never key,
+    /// in a self-test).
+    @discardableResult
+    func openSmartAlertEvents() -> SmartAlertEventsWindowController? {
+        guard let model else { return nil }
+        if let open = eventsWindow { return open }
+        let c = SmartAlertEventsWindowController(app: model)
+        c.onClose = { [weak self] _ in self?.eventsWindow = nil }
+        c.events.jump = { [weak self] camera, ms in self?.openRecording(camera, atMs: ms) }
+        eventsWindow = c
+        if options.selfTestSeconds != nil { c.window?.orderBack(nil) }
+        return c
+    }
+
+    /// The recordings window at a camera, a few seconds before a time.
+    private func openRecording(_ camera: CameraRef, atMs ms: Int64) {
+        guard let model, let c = recordingsWindows.first ?? openRecordingsWindow() else { return }
+        c.showWindow(nil)
+        let seconds = ms / 1000 + Int64(model.recordings.utcOffset) - 5
+        c.browser.show(day: DeviceTime.dayStart(seconds))
+        c.browser.laneClick(RecordingCamera(device: camera.device, channel: camera.channel, lens: camera.lens), at: seconds)
+    }
+
     // MARK: Recordings (capture)
 
     /// Recordings' messages go to the viewer windows showing the camera
@@ -135,22 +192,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// are read from the Keychain at startup and passed to the core in
     /// memory with the settings. Not with `--fake` (the fake core has no
     /// outputs); a self-test builds its own.
-    private func startSmartAlerts(_ model: AppModel) {
+    ///
+    /// The settings are what Settings > Smart Alerts saved (its stored form,
+    /// also written to `alerts.json`); until the user saved there, a
+    /// hand-written `alerts.json`. Credentials are read from the Keychain
+    /// each time the settings are sent, so a password saved in Settings
+    /// counts at once.
+    private func startAlertHost(_ model: AppModel) {
         guard !options.fake else { return }
         let file =
             options.dataDirectory?.appendingPathComponent("alerts.json")
             ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("alerts.json") : nil)
         let bridge = model.bridge
-        let secrets = KeychainAlertSecrets(service: options.keychainService)
+        let secrets = ModelAlertSecrets(model: model)
         let environment = SmartAlertsController.Environment(
             core: { try bridge.smartAlerts() },
-            storedSettings: { file.flatMap { try? Data(contentsOf: $0) } },
+            storedSettings: { [weak model] in
+                model?.alertsModel.storedData ?? file.flatMap { try? Data(contentsOf: $0) }
+            },
             deviceID: { [weak model] key in model?.runtime(key)?.deviceID },
             updateSource: { [weak model] in model?.updater?.settings.effectiveSource },
             secrets: secrets)
         model.smartAlerts = SmartAlertsController(
             environment: environment, installer: ModelInstaller(manifest: ModelManifest.bundled()),
             notifier: SystemNotifier())
+        model.alertsModel.apply(force: true)
     }
 
     // MARK: Updates
@@ -260,6 +326,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             recordingsFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("recordings-cameras.json")
                     ?? JSONFileStore<RecordingsEnablement>.appSupport("recordings-cameras.json")),
+            // No secret in either: those are Keychain items.
+            // A self-test without a --data-dir keeps them in memory.
+            smartAlertsFile: SmartAlertSettingsFile(
+                file: options.dataDirectory?.appendingPathComponent("smart-alerts.json")
+                    ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json") : nil),
+                stored: options.dataDirectory?.appendingPathComponent("alerts.json")
+                    ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("alerts.json") : nil)),
             clock: testClock ?? SystemViewerClock(),
             callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }
@@ -591,6 +664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         window.addItem(.separator())
         window.addItem(item("Recordings", #selector(showRecordings(_:)), "r", [.command, .option]))
+        window.addItem(item("Smart Alert Events", #selector(showSmartAlertEvents(_:)), "e", [.command, .option]))
         let windowItem = NSMenuItem()
         windowItem.submenu = window
         main.addItem(windowItem)

@@ -2910,9 +2910,295 @@ final class SelfTest {
             recordingsChecked = true
             return app.model?.fake != nil ? recordingsStep() : recordingsRealStep()
         }
+        if !smartAlertsChecked, app.model?.fake != nil {
+            smartAlertsChecked = true
+            return smartAlertsSettingsStep()
+        }
         guard !discoveryChecked, app.model?.fake != nil else { return checkLogNow() }
         discoveryChecked = true
         discoveryStep()
+    }
+
+    // MARK: Smart alerts (docs/UX.md "Smart alerts")
+
+    private var smartAlertsChecked = false
+    /// The camera of the first scripted check (the event log step filters by it).
+    private var smartTileCamera: CameraRef?
+
+    private static let personBoxes = [
+        AlertDetection(label: "person", score: 0.82, x: 0.4, y: 0.3, w: 0.12, h: 0.45),
+        AlertDetection(label: "person", score: 0.31, x: 0.1, y: 0.4, w: 0.08, h: 0.3),
+    ]
+
+    /// A trigger from the app's side (the fake core checks it like its own).
+    private func smartTrigger(_ camera: CameraRef, kind: String, source: String = "device") -> UInt64? {
+        guard let model = app.model, let fake = model.fake, let c = model.alertCamera(camera) else { return nil }
+        let id = try? fake.alertsTriggerPut(json: #"{"source":"\#(source)","camera":\#(c.json),"kind":"\#(kind)","state":"start"}"#)
+        fake.completeAlertWork()
+        return id
+    }
+
+    /// Plays the detector: the boxes go to the live view and to the core for
+    /// each of the check's open requests.
+    private func answerCheck(_ trigger: UInt64, _ boxes: [AlertDetection]) {
+        guard let model = app.model, let fake = model.fake else { return }
+        for r in model.alertsModel.requests(trigger: trigger) {
+            model.alertsModel.recordDetections(request: r.request, detections: boxes)
+            try? fake.alertDetectionsPut(request: r.request, json: AlertDetection.json(boxes))
+        }
+        fake.completeAlertWork()
+    }
+
+    /// A camera check from trigger to decision: waits for its two pictures,
+    /// answers them, and waits for the decision.
+    private func scriptedCheck(_ camera: CameraRef, then next: @escaping @MainActor (UInt64?) -> Void) {
+        guard let alerts = app.model?.alertsModel, let t = smartTrigger(camera, kind: "people") else { return next(nil) }
+        when({ alerts.requests(trigger: t).count == 2 }, timeout: 3) { [self] in
+            answerCheck(t, Self.personBoxes)
+            when({ alerts.board.check(t)?.decision != nil }, timeout: 3) { next(t) }
+        }
+    }
+
+    private func smartAlertsSettingsStep() {
+        guard let model = app.model, let fake = model.fake, let key = model.runtime("fake-1")?.key else { return checkLog() }
+        let alerts = model.alertsModel!
+        // parity: alerts-settings-roundtrip
+        // Settings > Smart Alerts: an edit is saved and sent to the core, the
+        // cameras named by this run's device IDs; the sensor's password goes
+        // to the credential store and into the document for the core only,
+        // never into the saved settings.
+        var sensor = MQTTSensor(key: "sensor-1", name: "Sensor 1")
+        sensor.host = "broker.local"
+        sensor.topic = "example/sensors/motion"
+        sensor.cameras = [
+            SensorCamera(
+                camera: CameraRef(device: key, channel: 1),
+                roi: [ROIPoint(x: 0, y: 0.5), ROIPoint(x: 1, y: 0.5), ROIPoint(x: 1, y: 1)])
+        ]
+        alerts.update { s in
+            s.enabled = true
+            s.mode = .away
+            s.location = AlertLocation(lat: 12.34, lon: 56.78)
+            s.sensors = [sensor]
+        }
+        alerts.setSecret("example-password", for: .mqttPassword("sensor-1"))
+        fake.completeAlertWork()
+        when({ alerts.configured != nil }, timeout: 3) { [self] in
+            let file = String(decoding: alerts.settings.fileData(), as: UTF8.self)
+            let sent = fake.lastAlertsConfiguration ?? ""
+            let doc = (try? JSONSerialization.jsonObject(with: Data(sent.utf8))) as? [String: Any] ?? [:]
+            let device = model.runtime("fake-1")?.deviceID ?? 0
+            let source = (doc["sources"] as? [[String: Any]])?.first
+            let camera = (source?["cameras"] as? [[String: Any]])?.first?["camera"] as? [String: Any]
+            let secrets = doc["secrets"] as? [String: String]
+            print(
+                "smart alerts settings: sent \(sent.count) bytes, mode \(doc["mode"] ?? "-"), "
+                    + "location \(doc["location"] ?? "-"), sensor camera \(camera ?? [:]), file \(file.count) bytes")
+            if SmartAlertSettings.fromFile(alerts.settings.fileData()) != alerts.settings {
+                problems.append("the smart-alert settings did not survive their file")
+            }
+            if file.contains("example-password") { problems.append("the settings file holds the sensor's password") }
+            if doc["enabled"] as? Bool != true || doc["mode"] as? String != "away"
+                || (doc["location"] as? [String: Double]) != ["lat": 12.3, "lon": 56.8]
+            {
+                problems.append("the core did not get the edited settings: \(sent.prefix(200))")
+            }
+            if (camera?["device"] as? Int).map(UInt64.init) != device || camera?["channel"] as? Int != 1 {
+                problems.append("the sensor's camera was not named by this run's device ID")
+            }
+            if secrets?["sensor-1"] != "example-password" || !alerts.hasSecret(.mqttPassword("sensor-1")) {
+                problems.append("the sensor's password did not go from the credential store to the core")
+            }
+            verifyTileStep()
+        }
+    }
+
+    private func verifyTileStep() {
+        guard let model = app.model, let window else { return checkLog() }
+        let alerts = model.alertsModel!
+        let stage = window.stage
+        guard let camera = stage.frames.leaves.first?.camera else { return checkLog() }
+        // parity: verify-view-tile
+        // A scripted check of a camera on screen: its band shows in the
+        // tile with the detector's boxes (a hit, and one below the floor,
+        // labeled) and its steps through the decision; no inset opens.
+        scriptedCheck(camera) { [self] t in
+            let check = t.flatMap { alerts.board.check($0) }
+            let content = stage.verificationBand(for: camera)?.content
+            print(
+                "verify view tile: \(check?.decision ?? "no decision"), band \(content != nil), boxes "
+                    + "\(content?.boxes.map(\.caption) ?? []), last step \(content?.lines.last ?? "-")")
+            if check?.decision != "alert" { problems.append("the scripted check did not alert") }
+            if content == nil { problems.append("the check's band did not show in the camera's tile") }
+            if content?.boxes.map(\.verdict) != [.hit, .belowFloor] {
+                problems.append("the band's boxes are \(content?.boxes.map(\.caption) ?? [])")
+            }
+            if content?.lines.contains(where: { $0.hasPrefix("Decision: alert") }) != true {
+                problems.append("the band's steps lack the decision: \(content?.lines ?? [])")
+            }
+            if stage.insetBoard.items.contains(where: { $0.kind == .verification }) {
+                problems.append("a check of a camera on screen opened an inset")
+            }
+            smartTileCamera = camera
+            verifyDismissStep(t ?? 0, camera, alertID: check?.alertID)
+        }
+    }
+
+    private func verifyDismissStep(_ t: UInt64, _ camera: CameraRef, alertID: UInt64?) {
+        guard let model = app.model, let fake = model.fake, let window, let alertID else { return checkLog() }
+        let alerts = model.alertsModel!
+        let stage = window.stage
+        // parity: verify-view-dismiss
+        // On the viewer clock: an alert's check stays while its episode
+        // lasts and at least 60 s after it settles; then the close button
+        // and Dismiss All.
+        advance(300)
+        alerts.tick()
+        let whileActive = stage.verificationBand(for: camera) != nil
+        fake.settleAlert(alertID)
+        fake.completeAlertWork()
+        when({ alerts.board.check(t)?.settledAt != nil }, timeout: 3) { [self] in
+            advance(59)
+            alerts.tick()
+            let at59 = stage.verificationBand(for: camera) != nil
+            advance(2)
+            alerts.tick()
+            let at61 = alerts.board.check(t) == nil && stage.verificationBand(for: camera) == nil
+            print("verify view dismiss: shown while active \(whileActive), at 59 s \(at59), gone at 61 s \(at61)")
+            if !whileActive || !at59 || !at61 { problems.append("a check's time on screen is wrong") }
+            guard let other = stage.frames.leaves.dropFirst().first?.camera,
+                let a = smartTrigger(camera, kind: "smoke_alarm", source: "local_audio"),
+                let b = smartTrigger(other, kind: "smoke_alarm", source: "local_audio")
+            else { return checkLog() }
+            when({ alerts.board.check(a)?.decision != nil && alerts.board.check(b)?.decision != nil }, timeout: 3) { [self] in
+                stage.verificationBand(for: camera)?.clickCloseForTest()
+                let closed = alerts.board.check(a) == nil && alerts.board.check(b) != nil
+                alerts.dismissAll()
+                let all = alerts.board.shown.isEmpty && stage.verificationBand(for: other) == nil
+                print("verify view dismiss: close button \(closed), dismiss all \(all)")
+                if !closed { problems.append("the band's close button did not close its check alone") }
+                if !all { problems.append("Dismiss All left checks on screen") }
+                verifyInsetStep()
+            }
+        }
+    }
+
+    private func verifyInsetStep() {
+        guard let model = app.model, let window else { return checkLog() }
+        let alerts = model.alertsModel!
+        let stage = window.stage
+        let leaves = stage.frames.leaves
+        guard leaves.count >= 3, let a = leaves[1].camera, let b = leaves[2].camera else { return checkLog() }
+        // parity: verify-view-inset
+        // With another tile focused, checks of cameras the window does not
+        // show open verification insets (the alert insets' column), newest
+        // on top, without taking the keyboard; Esc closes the top one and
+        // its check.
+        stage.focus(leaves[0].path)
+        advance(StageView.focusDuration)
+        let key = NSApp.keyWindow
+        let responder = window.window?.firstResponder
+        scriptedCheck(a) { [self] t1 in
+            scriptedCheck(b) { [self] t2 in
+                let insets = stage.insetBoard.shown.filter { $0.kind == .verification }.map(\.camera)
+                let overlay = stage.verificationInsetOverlay(for: b)?.content
+                let focusKept = NSApp.keyWindow === key && window.window?.firstResponder === responder
+                print(
+                    "verify view inset: insets \(insets), overlay boxes \(overlay?.boxes.count ?? 0), "
+                        + "focus kept \(focusKept)")
+                if insets != [b, a] { problems.append("the checks' insets are \(insets), not the newest on top") }
+                if overlay?.boxes.count != 2 { problems.append("the inset did not show the check's boxes") }
+                if !focusKept { problems.append("a check's inset took the keyboard") }
+                _ = stage.handleInsetKey(.dismiss)
+                if let t2, alerts.board.check(t2) != nil || stage.insetBoard.item(for: b) != nil {
+                    problems.append("Esc did not close the top check and its inset")
+                }
+                // The window setting: off-screen checks go to the small
+                // window, which never becomes key.
+                alerts.update { $0.view.placement = .tileThenWindow }
+                let panelShown = app.verificationPanel?.window?.isVisible == true
+                let panelKey = app.verificationPanel?.window?.isKeyWindow == true
+                let insetGone = stage.insetBoard.item(for: a) == nil
+                print("verify view window: shown \(panelShown), key \(panelKey), inset gone \(insetGone)")
+                if !panelShown || panelKey || !insetGone {
+                    problems.append("the window setting did not move the check to a window that never takes focus")
+                }
+                alerts.dismissAll()
+                alerts.update { $0.view.placement = .tileThenInset }
+                if app.verificationPanel?.window?.isVisible == true { problems.append("the empty checks window stayed") }
+                _ = t1
+                stage.unfocus()
+                advance(StageView.focusDuration)
+                eventsLogStep()
+            }
+        }
+    }
+
+    private func eventsLogStep() {
+        guard let model = app.model, let window, let events = app.openSmartAlertEvents()?.events else { return checkLog() }
+        let alerts = model.alertsModel!
+        _ = window
+        guard let first = smartTileCamera, let firstAlert = model.alertCamera(first) else { return checkLog() }
+        // parity: events-log-filter
+        // The Events window lists every decision; the filters narrow it and
+        // an entry opens its whole trace.
+        events.range = .all
+        let all = events.entries.count
+        events.filter.sources = [.sound]
+        let sound = events.entries.map(\.className)
+        events.filter.sources = []
+        events.filter.camera = firstAlert
+        let onFirst = events.entries.allSatisfy { $0.camera == firstAlert } && !events.entries.isEmpty
+        if !onFirst { print("events on \(firstAlert): \(events.entries.map { "\($0.camera.map { "\($0.device)/\($0.channel)" } ?? "-") \($0.decision)" })") }
+        events.filter.decisions = ["alert"]
+        events.filter.text = "person"
+        let person = events.entries.first
+        events.select(person?.id)
+        let lines = events.selected.map { e in e.allSteps.map { TraceText.line($0, cameraName: events.cameraName) } } ?? []
+        print(
+            "events log: \(all) entries, sound \(sound), on the first camera \(onFirst), "
+                + "trace of \(lines.count) steps ending \(lines.last ?? "-")")
+        if all < 5 { problems.append("the event log has \(all) entries") }
+        if sound.isEmpty || sound.contains(where: { $0 != "smoke" }) { problems.append("the sound filter showed \(sound)") }
+        if !onFirst { problems.append("the camera filter let other cameras through") }
+        if !lines.contains(where: { $0.hasPrefix("Gate: passed") }) || !lines.contains(where: { $0.hasPrefix("Delivered") }) {
+            problems.append("the opened entry's trace is incomplete: \(lines)")
+        }
+        // parity: events-log-feedback
+        // Feedback on an entry is kept and shown; a mute suppresses the
+        // camera's next trigger until it is lifted.
+        guard let entry = person else { return finishEvents() }
+        events.feedback(entry, useful: false, reason: .nothingThere)
+        let down = events.selected.map { ($0.vote, $0.voteReason) }
+        events.feedback(entry, useful: true)
+        let up = events.selected?.vote
+        events.mute(entry, .minutes15)
+        let muted = alerts.status.map { SmartAlertLogPage(status: $0).muted.map(\.camera) } ?? []
+        let t = smartTrigger(first, kind: "smoke_alarm", source: "local_audio")
+        when({ t.flatMap { alerts.board.check($0)?.decision } != nil || events.entries.contains { $0.triggerID == t } }, timeout: 3) {
+            [self] in
+            events.filter = SmartAlertLogFilter()
+            let suppressed = events.entries.first { $0.triggerID == t }
+            print(
+                "events feedback: down \(String(describing: down)), up \(up ?? "-"), muted \(muted), "
+                    + "next trigger \(suppressed?.decision ?? "-") (\(suppressed?.reason ?? "-"))")
+            if down?.0 != "down" || down?.1 != "nothing_there" || up != "up" {
+                problems.append("feedback was not kept: \(String(describing: down)) then \(up ?? "-")")
+            }
+            if muted != [firstAlert] { problems.append("the mute did not show in the status: \(muted)") }
+            if suppressed?.decision != "suppress" || suppressed?.reason != "muted" {
+                problems.append("a muted camera's trigger was not suppressed")
+            }
+            alerts.mute(firstAlert, seconds: 0)
+            finishEvents()
+        }
+    }
+
+    private func finishEvents() {
+        app.eventsWindow?.close()
+        app.model?.alertsModel.dismissAll()
+        app.model?.alertsModel.update { $0.enabled = false }
+        checkLog()
     }
 
     /// The add-device screen's "Find Devices on This Network" list against the
@@ -4598,8 +4884,9 @@ final class SelfTest {
         }
         // parity: alerts-e2e-verified
         // parity: alerts-e2e-not-confirmed
+        // parity: alerts-ui-real-core
         Task { @MainActor [self] in
-            problems += await AlertsSelfTest(model: model).run()
+            problems += await AlertsSelfTest(model: model, openEvents: { [weak app] in app?.openSmartAlertEvents() }).run()
             checkLogRest()
         }
     }

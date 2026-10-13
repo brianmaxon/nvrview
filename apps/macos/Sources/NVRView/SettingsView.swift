@@ -11,6 +11,7 @@ struct SettingsView: View {
             DeviceSettingsView(model: model).tabItem { Label("Devices", systemImage: "server.rack") }
             CameraSettingsView(model: model).tabItem { Label("Cameras", systemImage: "video") }
             AlertSettingsView(model: model).tabItem { Label("Alerts", systemImage: "bell") }
+            SmartAlertsSettingsView(model: model).tabItem { Label("Smart Alerts", systemImage: "checkmark.shield") }
             CaptureSettingsView(model: model).tabItem { Label("Capture", systemImage: "camera") }
             if let updater = model.updater {
                 UpdateSettingsView(updater: updater).tabItem { Label("Updates", systemImage: "arrow.down.circle") }

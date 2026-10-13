@@ -14,8 +14,13 @@ import NVRCore
 // case failing open). Smoke and CO alert at once (critical); a mute
 // suppresses everything on its camera. Events are queued by the calls and
 // sent shortly after (or only on `completeAlertWork()` with
-// `Options.recordingWorkIsManual`). Not modeled: the engine's rules beyond
-// these, episodes and cooldowns, settling, outputs.
+// `Options.recordingWorkIsManual`). Each check also sends its trace steps
+// as `verify_step` events (trigger, gate, sampling, each picture, progress,
+// the check, rules, timeliness, decision, and a desktop delivery for an
+// alert) and logs them with the decision; `settleAlert` ends an alert's
+// episode. `nv_alerts_get` filters like the core (camera, source, decision,
+// class, severity, time, text). Not modeled: the engine's rules beyond
+// these, episodes and cooldowns, outputs other than the desktop.
 
 /// What the fake core keeps for smart alerts, under one lock.
 final class FakeAlertsState: @unchecked Sendable {
@@ -23,17 +28,24 @@ final class FakeAlertsState: @unchecked Sendable {
         var camera: AlertCamera?
         var className: String
         var external: Bool
+        var source = "device"
         var answers: [Bool] = []
         var outstanding: Set<String> = []
+        var steps: [[String: Any]] = []
+        var always = false
     }
 
     struct World {
         var configured = false
         var enabled = false
+        /// The last settings document the app sent.
+        var lastConfiguration: String?
         var alwaysAlertCameras: Set<AlertCamera> = []
         var nextTrigger: UInt64 = 1
         var nextRequest: UInt64 = 1
         var nextAlert: UInt64 = 1
+        /// Alerts not settled yet: alert ID to trigger ID, camera and class.
+        var openAlerts: [UInt64: (trigger: UInt64, camera: AlertCamera?, className: String)] = [:]
         var checks: [UInt64: Check] = [:]
         var requests: [String: UInt64] = [:]
         var log: [[String: Any]] = []
@@ -72,11 +84,17 @@ extension FakeCore {
     }
 
     private static func parseCamera(_ any: Any?) -> AlertCamera? {
-        guard let o = any as? [String: Any], let d = o["device"] as? Int, let ch = o["channel"] as? Int,
+        // Numbers as JSON gives them, or as this file stored them (UInt64, UInt16, UInt8).
+        func int(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue ?? (v as? UInt64).map(Int.init) ?? (v as? UInt16).map(Int.init) ?? (v as? UInt8).map(Int.init) }
+        guard let o = any as? [String: Any], let d = int(o["device"]), let ch = int(o["channel"]),
             d >= 0, (0...Int(UInt16.max)).contains(ch)
         else { return nil }
-        return AlertCamera(device: UInt64(d), channel: UInt16(ch), lens: UInt8((o["lens"] as? Int) ?? 0))
+        return AlertCamera(device: UInt64(d), channel: UInt16(ch), lens: UInt8(clamping: int(o["lens"]) ?? 0))
     }
+
+    /// The last settings document `nv_alerts_configure` took (the self-test
+    /// reads what the app sent).
+    public var lastAlertsConfiguration: String? { alertsWorld.locked { $0.lastConfiguration } }
 
     /// Cameras whose person checks are always-alert cases (they fail open
     /// when no picture could be checked).
@@ -95,6 +113,7 @@ extension FakeCore {
         alertsWorld.locked { w in
             w.configured = true
             w.enabled = enabled
+            w.lastConfiguration = json
             if !enabled {
                 w.checks.removeAll()
                 w.requests.removeAll()
@@ -134,23 +153,67 @@ extension FakeCore {
             guard w.configured, w.enabled else { throw .notConfigured }
             let id = w.nextTrigger
             w.nextTrigger += 1
+            let now = Self.nowMs()
+            var received: [String: Any] = [
+                "at_ms": now, "step": "trigger_received", "source": source, "kind": kind, "class": className,
+                "event_ms": now, "late": false, "age_ms": 0,
+            ]
+            if let camera { received["camera"] = Self.cameraObject(camera) }
+            var check = FakeAlertsState.Check(camera: camera, className: className, external: external)
+            check.source = source
+            Self.step(&w, &check, id: id, received)
             if let c = camera, let until = w.mutes[c], until > Date() {
-                Self.decide(&w, id: id, camera: c, className: className, decision: "suppress", reason: "muted")
+                let untilMs = Int(until.timeIntervalSince1970 * 1000)
+                Self.step(&w, &check, id: id, ["at_ms": now, "step": "gate", "result": "muted", "until_ms": untilMs])
+                Self.decide(&w, check, id: id, decision: "suppress", reason: "muted")
                 return id
             }
             switch className {
             case "smoke", "co":
-                Self.decide(&w, id: id, camera: camera, className: className, decision: "alert", severity: "critical")
+                check.always = true
+                Self.step(&w, &check, id: id, ["at_ms": now, "step": "gate", "result": "pass_always", "rule": "smoke_co"])
+                Self.decide(&w, check, id: id, decision: "alert", severity: "critical")
             case "person", "vehicle", "animal", "sensor":
-                w.checks[id] = FakeAlertsState.Check(camera: camera, className: className, external: external)
+                if let c = camera, className == "person", w.alwaysAlertCameras.contains(c) {
+                    check.always = true
+                    Self.step(
+                        &w, &check, id: id,
+                        ["at_ms": now, "step": "gate", "result": "pass_always", "rule": "night_outside_person"])
+                } else {
+                    Self.step(&w, &check, id: id, ["at_ms": now, "step": "gate", "result": "pass"])
+                }
+                Self.step(
+                    &w, &check, id: id,
+                    [
+                        "at_ms": now, "step": "sampling", "cameras": camera.map { [Self.cameraObject($0)] } ?? [],
+                        "from_ms": now - 2000, "until_ms": now + 8000,
+                        "classes": external ? ["person", "vehicle", "animal"] : [className], "k": 2.0,
+                    ])
+                if let camera {
+                    Self.step(
+                        &w, &check, id: id,
+                        ["at_ms": now, "step": "camera_woken", "camera": Self.cameraObject(camera), "first_picture_ms": 215])
+                }
+                w.checks[id] = check
                 for _ in 0..<2 { Self.request(&w, check: id) }
             default:
-                Self.decide(&w, id: id, camera: camera, className: className, decision: "quiet", reason: "unknown_kind")
+                Self.step(&w, &check, id: id, ["at_ms": now, "step": "gate", "result": "unknown_kind"])
+                Self.decide(&w, check, id: id, decision: "quiet", reason: "unknown_kind")
             }
             return id
         }
         scheduleAlertWork()
         return id
+    }
+
+    private static func nowMs() -> Int { Int(Date().timeIntervalSince1970 * 1000) }
+
+    /// Records a trace step and sends it as a `verify_step` event.
+    private static func step(
+        _ w: inout FakeAlertsState.World, _ check: inout FakeAlertsState.Check, id: UInt64, _ step: [String: Any]
+    ) {
+        check.steps.append(step)
+        w.events.append(alertJSON(["type": "verify_step", "trigger_id": id, "step": step]))
     }
 
     private static func request(_ w: inout FakeAlertsState.World, check: UInt64) {
@@ -174,50 +237,96 @@ extension FakeCore {
     }
 
     private static func decide(
-        _ w: inout FakeAlertsState.World, id: UInt64, camera: AlertCamera?, className: String, decision: String,
-        severity: String? = nil, reason: String? = nil, unverified: Bool = false
+        _ w: inout FakeAlertsState.World, _ check: FakeAlertsState.Check, id: UInt64, className: String? = nil,
+        decision: String, severity: String? = nil, reason: String? = nil, unverified: Bool = false
     ) {
+        var check = check
+        let now = nowMs()
+        let cls = className ?? check.className
+        let name = check.camera.map { "Camera \($0.channel + 1)" } ?? "Sensor 1"
+        let label = cls == "co" ? "CO" : cls.capitalized
         var d: [String: Any] = [
-            "trigger_id": id, "class": className, "decision": decision,
-            "decided_ms": Int(Date().timeIntervalSince1970 * 1000),
-            "explanation": decision == "alert" ? "Alerted (fake core)." : "Not alerted (fake core).",
-            "trace": ["version": 1, "trigger_id": id, "steps": [[String: Any]]()],
+            "trigger_id": id, "class": cls, "decision": decision, "decided_ms": now,
+            "explanation": decision == "alert"
+                ? "\(label) on \(name) (fake core). Alerted." : "\(label) on \(name) (fake core). Not alerted: \(reason ?? "").",
         ]
-        if let camera { d["camera"] = cameraObject(camera) }
+        if let camera = check.camera { d["camera"] = cameraObject(camera) }
         var state = "logged"
+        var outcome: [String: Any] = ["at_ms": now, "step": "decision", "decision": decision]
         if decision == "alert" {
-            d["alert_id"] = w.nextAlert
+            let alertID = w.nextAlert
+            w.nextAlert += 1
+            let sev = severity ?? "normal"
+            d["alert_id"] = alertID
             d["rev"] = 1
-            d["severity"] = severity ?? "normal"
+            d["severity"] = sev
             d["late"] = false
             d["unverified"] = unverified
-            w.nextAlert += 1
+            if check.always { d["always"] = cls == "smoke" || cls == "co" ? "smoke_co" : "night_outside_person" }
+            step(
+                &w, &check, id: id,
+                [
+                    "at_ms": now, "step": "rules", "class": cls, "night": check.always, "basis": "fixed",
+                    "exposure": "outside", "entrance": false, "mode": "home",
+                    "support": unverified ? "unverified" : "verified", "severity": sev, "unverified": unverified,
+                ])
+            step(&w, &check, id: id, ["at_ms": now, "step": "timeliness", "admission": "new", "alert_id": alertID])
+            outcome.merge(["severity": sev, "alert_id": alertID, "rev": 1, "late": false, "unverified": unverified]) { $1 }
+            w.openAlerts[alertID] = (id, check.camera, cls)
             state = "new"
         } else {
             d["reason"] = reason ?? ""
+            outcome["reason"] = reason ?? ""
         }
-        w.log.append(d)
+        step(&w, &check, id: id, outcome)
+        d["trace"] = ["version": 1, "trigger_id": id, "steps": check.steps]
+        var entry: [String: Any] = ["logged_ms": now, "source": check.source, "decision": d, "deliveries": [Any]()]
+        w.events.append(alertJSON(["type": "alert", "state": state, "source": check.source, "decision": d]))
+        if decision == "alert" {
+            // The desktop output (the app's own): one delivery step.
+            let delivery: [String: Any] = ["at_ms": now, "step": "delivery", "output": 0, "kind": "desktop", "ok": true]
+            entry["deliveries"] = [delivery]
+            w.events.append(alertJSON(["type": "verify_step", "trigger_id": id, "step": delivery]))
+        }
+        w.log.append(entry)
         if w.log.count > 1000 { w.log.removeFirst() }
-        w.events.append(alertJSON(["type": "alert", "state": state, "source": "device", "decision": d]))
+    }
+
+    /// Ends an alert's episode: the `settled` event the core sends when an
+    /// episode settles.
+    public func settleAlert(_ alertID: UInt64) {
+        alertsWorld.locked { w in
+            guard let open = w.openAlerts.removeValue(forKey: alertID) else { return }
+            var e: [String: Any] = [
+                "type": "alert", "state": "settled", "alert_id": alertID, "rev": 1, "trigger_id": open.trigger,
+                "class": open.className, "at_ms": Self.nowMs(),
+            ]
+            if let c = open.camera { e["camera"] = Self.cameraObject(c) }
+            w.events.append(Self.alertJSON(e))
+        }
+        scheduleAlertWork()
     }
 
     private static func finish(_ w: inout FakeAlertsState.World, check id: UInt64, timedOut: Bool) {
-        guard let c = w.checks.removeValue(forKey: id) else { return }
+        guard var c = w.checks.removeValue(forKey: id) else { return }
         for k in c.outstanding { w.requests.removeValue(forKey: k) }
         let hits = c.answers.filter { $0 }.count
+        let cls = c.external ? "person" : c.className
+        let check: [String: Any] =
+            c.answers.isEmpty
+            ? ["status": "unavailable"]
+            : hits >= 2
+                ? ["status": "verified", "class": cls, "hits": hits, "n": c.answers.count, "angles": 1, "score": 0.8]
+                : ["status": "not_seen", "n": c.answers.count, "outside_region": false]
+        step(&w, &c, id: id, ["at_ms": nowMs(), "step": "checked", "check": check])
         if hits >= 2 {
-            Self.decide(
-                &w, id: id, camera: c.camera, className: c.external ? "person" : c.className, decision: "alert")
+            decide(&w, c, id: id, className: cls, decision: "alert", severity: c.always ? "critical" : "normal")
         } else if c.answers.isEmpty, timedOut, let cam = c.camera, w.alwaysAlertCameras.contains(cam) {
-            Self.decide(
-                &w, id: id, camera: c.camera, className: c.className, decision: "alert", severity: "critical",
-                unverified: true)
+            decide(&w, c, id: id, decision: "alert", severity: "critical", unverified: true)
         } else if c.answers.isEmpty {
-            Self.decide(&w, id: id, camera: c.camera, className: c.className, decision: "quiet", reason: "could_not_look")
+            decide(&w, c, id: id, decision: "quiet", reason: "could_not_look")
         } else {
-            Self.decide(
-                &w, id: id, camera: c.camera, className: c.external ? "sensor" : c.className, decision: "quiet",
-                reason: c.external ? "nothing_seen" : "not_confirmed")
+            decide(&w, c, id: id, decision: "quiet", reason: c.external ? "nothing_seen" : "not_confirmed")
         }
     }
 
@@ -251,6 +360,35 @@ extension FakeCore {
             }
             c.answers.append(hit)
             c.outstanding.remove(request)
+            let now = Self.nowMs()
+            let judged: [[String: Any]] = list.prefix(8).map { d in
+                let label = ((d["class"] ?? d["label"]) as? String)?.lowercased() ?? ""
+                let cls =
+                    switch label {
+                    case "car", "truck", "bus", "motorcycle": "vehicle"
+                    case "dog", "cat": "animal"
+                    default: label
+                    }
+                let score = (d["score"] as? Double) ?? 0
+                return [
+                    "class": cls, "score": score, "above": score >= 0.5, "in_region": true,
+                    "hit": allowed.contains(cls) && score >= 0.5,
+                ]
+            }
+            Self.step(
+                &w, &c, id: id,
+                [
+                    "at_ms": now, "step": "frame_sampled",
+                    "camera": Self.cameraObject(c.camera ?? AlertCamera(device: 0, channel: 0)), "frame_ms": now,
+                    "detections": judged, "more": max(list.count - 8, 0),
+                ])
+            let hits = c.answers.filter { $0 }.count
+            Self.step(
+                &w, &c, id: id,
+                [
+                    "at_ms": now, "step": "progress", "class": c.external ? "person" : c.className,
+                    "weighted": Double(hits), "needed": 2.0, "hits": hits, "n": c.answers.count, "angles": 1,
+                ])
             w.checks[id] = c
             w.events.append(Self.alertJSON(["type": "verify_request_done", "request": request, "result": "answered"]))
             if c.outstanding.isEmpty { Self.finish(&w, check: id, timedOut: false) }
@@ -282,24 +420,50 @@ extension FakeCore {
             q = o
         }
         let decisions = q["decision"] as? [String]
+        let sources = q["source"] as? [String]
+        let classes = q["class"] as? [String]
+        let camera = Self.parseCamera(q["camera"])
+        let text = (q["text"] as? String)?.lowercased()
+        let since = q["since_ms"] as? Int, until = q["until_ms"] as? Int, before = q["before_ms"] as? Int
+        let ranks = ["low": 0, "normal": 1, "high": 2, "critical": 3]
+        let minRank = (q["min_severity"] as? String).flatMap { ranks[$0] }
         let limit = min(q["limit"] as? Int ?? 100, 1000)
         return alertsWorld.locked { w in
             var entries: [[String: Any]] = []
-            for d in w.log.reversed() {
+            var more = false
+            for e in w.log.reversed() {
+                guard let d = e["decision"] as? [String: Any] else { continue }
+                let decided = d["decided_ms"] as? Int ?? 0
                 if let decisions, !decisions.contains(d["decision"] as? String ?? "") { continue }
-                if entries.count >= limit { break }
-                var e: [String: Any] = ["decision": d, "source": "device", "deliveries": [Any]()]
-                if let a = d["alert_id"] as? UInt64 {
-                    e["snapshot"] = w.snapshots[a] != nil
-                    if let f = w.feedback[a] { e["feedback"] = f }
-                } else {
-                    e["snapshot"] = false
+                if let sources, !sources.contains(e["source"] as? String ?? "") { continue }
+                if let classes, !classes.contains(d["class"] as? String ?? "") { continue }
+                if let camera {
+                    let c = Self.parseCamera(d["camera"])
+                    if c?.device != camera.device || c?.channel != camera.channel { continue }
                 }
-                entries.append(e)
+                if let text, !((d["explanation"] as? String) ?? "").lowercased().contains(text) { continue }
+                if let since, decided < since { continue }
+                if let until, decided >= until { continue }
+                if let before, decided >= before { continue }
+                if let minRank, (ranks[d["severity"] as? String ?? ""] ?? -1) < minRank { continue }
+                if entries.count >= limit {
+                    more = true
+                    break
+                }
+                var entry = e
+                if let a = d["alert_id"] as? UInt64 {
+                    entry["snapshot"] = w.snapshots[a] != nil
+                    if let f = w.feedback[a] { entry["feedback"] = f }
+                } else {
+                    entry["snapshot"] = false
+                }
+                entries.append(entry)
             }
-            let muted = w.mutes.filter { $0.value > Date() }.map { Self.cameraObject($0.key) }
+            let muted = w.mutes.filter { $0.value > Date() }.map {
+                ["camera": Self.cameraObject($0.key), "until_ms": Int($0.value.timeIntervalSince1970 * 1000)] as [String: Any]
+            }
             return Self.alertJSON([
-                "entries": entries, "more": false,
+                "entries": entries, "more": more,
                 "status": [
                     "configured": w.configured, "enabled": w.enabled, "open_checks": w.checks.count,
                     "muted": muted, "requests": w.requests.count,

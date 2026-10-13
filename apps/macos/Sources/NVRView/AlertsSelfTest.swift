@@ -3,8 +3,8 @@ import DetectorKit
 import Foundation
 import NVRCore
 
-/// Self-test steps `alerts-e2e-verified` and `alerts-e2e-not-confirmed`
-/// (docs/NOTIFICATIONS.md): smart alerts end to end on the real core against
+/// Self-test steps `alerts-e2e-verified`, `alerts-e2e-not-confirmed` and
+/// `alerts-ui-real-core` (docs/NOTIFICATIONS.md): smart alerts end to end on the real core against
 /// the mock NVR, with the app's own host in the middle. A trigger (the path
 /// an MQTT message takes after the input module) wakes a mapped camera; the
 /// core announces pictures; the host decodes them with VideoToolbox and the
@@ -16,8 +16,11 @@ import NVRCore
 /// The verified step uses a stub detector that reports a person (the mock's
 /// pictures are synthetic); the not-confirmed step uses the real model when
 /// it is present, which finds nothing in a synthetic picture, else a stub
-/// that finds nothing. Runs only on the real core, against a device on this
-/// computer.
+/// that finds nothing. The third step goes through the app's own path:
+/// settings saved in Settings > Smart Alerts (the token through its
+/// credential store), read back by the host from their stored form, and the
+/// verified alert reaching the Events window. Runs only on the real core,
+/// against a device on this computer.
 @MainActor
 final class AlertsSelfTest {
     private let model: AppModel
@@ -25,7 +28,13 @@ final class AlertsSelfTest {
     private static let helper = "input_boolean.example_alert"
     private static let token = "example-token-0123456789"
 
-    init(model: AppModel) { self.model = model }
+    /// Opens the Smart Alert Events window (the app delegate's).
+    private let openEvents: () -> SmartAlertEventsWindowController?
+
+    init(model: AppModel, openEvents: @escaping () -> SmartAlertEventsWindowController? = { nil }) {
+        self.model = model
+        self.openEvents = openEvents
+    }
 
     /// Reports why the steps cannot run here, else nil.
     static func unavailable(_ model: AppModel) -> String? {
@@ -55,6 +64,9 @@ final class AlertsSelfTest {
         await scenario(
             "alerts-e2e-not-confirmed", device: device, channel: channels[1], ha: ha, personVisible: false,
             expectAlert: false)
+        // Step alerts-ui-real-core, on a camera without an open episode (an
+        // alert on the first one would be an update of the first step's).
+        await uiScenario(device: device, channel: channels.count > 2 ? channels[2] : channels[1], ha: ha)
         return problems
     }
 
@@ -162,6 +174,87 @@ final class AlertsSelfTest {
         let configured = controller.lastConfigured ?? ""
         if configured.contains(Self.token) { fail(id, "the token appeared in an event") }
         if let text = try? core.alertsGet(query: "{}"), text.contains(Self.token) { fail(id, "the token appeared in the alert log") }
+    }
+
+    /// Settings > Smart Alerts to the Events window, with the app's host in
+    /// between (the stub detector reports a person).
+    private func uiScenario(device: AppModel.DeviceRuntime, channel: Int, ha: MockHomeAssistant) async {
+        let id = "alerts-ui-real-core"
+        let alerts = model.alertsModel!
+        let before = ha.turnOns(Self.helper)
+        let notifier = RecordingNotifier()
+        let bridge = model.bridge
+        let stub = StubDetector(person: true)
+        let handle = DetectorHandle(service: DetectorService(detector: stub), labels: DetectorProvider.cocoLabels)
+        let environment = SmartAlertsController.Environment(
+            core: { try bridge.smartAlerts() },
+            storedSettings: { [weak model] in model?.alertsModel.storedData },
+            deviceID: { [weak model] key in model?.runtime(key)?.deviceID },
+            secrets: ModelAlertSecrets(model: model))
+        let controller = SmartAlertsController(
+            environment: environment, installer: ModelInstaller(manifest: nil, locate: { nil }), notifier: notifier,
+            detector: { handle })
+        model.smartAlerts = controller
+        var steps = 0
+        let token = alerts.subscribeEvents { e in if case .verifyStep = e { steps += 1 } }
+        let camera = CameraRef(device: device.key, channel: channel)
+        defer {
+            alerts.unsubscribeEvents(token)
+            alerts.setSecret("", for: .homeAssistantToken)
+            alerts.update { $0 = SmartAlertSettings() }
+        }
+        // What the user does in Settings: a camera, a sensor that it confirms
+        // (its broker is a closed local port: the trigger is put directly),
+        // Home Assistant with a rule and its token.
+        alerts.setSecret(Self.token, for: .homeAssistantToken)
+        alerts.update { s in
+            s.enabled = true
+            s.setCamera(AlertCameraSettings(camera: camera))
+            var sensor = MQTTSensor(key: "sensor-ui", name: "Sensor UI")
+            sensor.host = "127.0.0.1"
+            sensor.port = 9
+            sensor.topic = "example/sensors/ui"
+            sensor.cameras = [SensorCamera(camera: camera)]
+            s.sensors = [sensor]
+            s.homeAssistant.enabled = true
+            s.homeAssistant.baseURL = ha.url
+            s.homeAssistant.minSeverity = .low
+            s.homeAssistant.pulseGapMs = 0
+            s.homeAssistant.cooldownMs = 0
+            s.homeAssistant.rules = [HARule(id: "r1", target: Self.helper)]
+        }
+        // The host read the stored form: cameras by device key, no secret.
+        let stored = alerts.storedData.map { String(decoding: $0, as: UTF8.self) } ?? ""
+        if !stored.contains("\"device_key\"") || stored.contains(Self.token) {
+            fail(id, "the stored settings are \(stored.isEmpty ? "missing" : "malformed or hold the token")")
+        }
+        guard await wait(30, { if case .running = controller.state { true } else { false } }) else {
+            return fail(id, "the host did not configure the core from the saved settings (\(controller.state))")
+        }
+        guard let core = try? bridge.smartAlerts(),
+            let trigger = try? core.alertsTriggerPut(
+                json: #"{"source":"external","origin":"sensor-ui","kind":"sensor_motion","state":"pulse"}"#)
+        else { return fail(id, "the trigger was refused") }
+        guard let events = openEvents()?.events else { return fail(id, "the Events window did not open") }
+        var shown: SmartAlertLogEntry?
+        let listed = await wait(60) {
+            shown = events.entries.first { $0.triggerID == trigger && $0.decision == "alert" }
+            return shown != nil
+        }
+        guard listed, let shown else {
+            let got = events.entries.first { $0.triggerID == trigger }
+            return fail(id, "the Events window did not list an alert for the trigger (\(got?.decision ?? "no entry"))")
+        }
+        if steps == 0 { fail(id, "the live checks got no verification step") }
+        guard await wait(30, { ha.turnOns(Self.helper) == before + 1 }) else {
+            let configured = controller.lastConfigured ?? "none"
+            let deliveries = (try? core.alertsGet(query: #"{"trigger_id":\#(trigger)}"#)).map { String($0.prefix(600)) } ?? "-"
+            return fail(
+                id,
+                "Home Assistant was not pulsed with the token saved in Settings: \(ha.log); token saved \(alerts.hasSecret(.homeAssistantToken)); configured \(configured); log \(deliveries)")
+        }
+        if (try? core.alertsGet(query: "{}"))?.contains(Self.token) == true { fail(id, "the token appeared in the alert log") }
+        print("\(id): saved settings configured the core, Events lists \"\(shown.explanation)\", \(steps) live steps, pulsed")
     }
 
     /// Polls `condition` (about every 20 ms) until it holds or `seconds` pass.

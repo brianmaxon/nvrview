@@ -141,20 +141,21 @@ Planned in [NOTIFICATIONS.md](NOTIFICATIONS.md); the rules engine
 (`crates/alerts`), its service, the MQTT input, and the Home Assistant output
 are built in the core and shared. macOS has the verification host, snapshot,
 model download, and desktop notification (`AlertHost`, settings in
-`alerts.json`, credentials in the Keychain); Windows has the settings builder
-and the Credential Manager store only.
+`alerts.json`, credentials in the Keychain) and the settings, live checks
+and event log (UX.md "Smart alerts"); Windows has the settings builder and
+the Credential Manager store only.
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | built (no actions yet; off unless `alerts.json` enables it) | no (planned; settings builder and Credential Manager store built) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. macOS: IDs `alerts-e2e-verified`, `alerts-e2e-not-confirmed` (real core against the mock; a mock Home Assistant is pulsed for the alert only). The model is fetched on first use from the update source's `models` folder. |
-| Live verification view in the tile (pictures with boxes, step log) | no (planned) | no (planned) | IDs `verify-view-tile`, `verify-view-dismiss`. |
-| Verification inset and non-activating verification window, stacked, never taking focus | no (planned) | no (planned) | Same mechanism as the doorbell call insets and call window. ID `verify-view-inset`. |
-| Events log (every decision with its trace, filters, jump to recording or incident) | no (planned) | no (planned) | IDs `events-log-filter`, `events-log-jump`. |
-| Smart-alert settings (cameras, zones, schedules, always-alert rules, location, sources, outputs) | no (planned) | no (planned) | One settings document (`alerts.json`) on both. |
-| External trigger mapping (sources to camera angles with regions) | no (planned) | no (planned) | Needs the local API's trigger grant. |
+| Verified notifications (camera AI, sound, and sensor triggers checked on the main stream; explained decisions) | built (no actions yet; off until Settings > Smart Alerts or `alerts.json` enables it) | no (planned; settings builder and Credential Manager store built) | Desktop notifications with snapshot and actions; Windows needs an app identity for app notifications. macOS: IDs `alerts-e2e-verified`, `alerts-e2e-not-confirmed` (real core against the mock; a mock Home Assistant is pulsed for the alert only), and `alerts-ui-real-core` (settings saved in the UI, read back by the host, the verified alert listed in the Events window). The model is fetched on first use from the update source's `models` folder. |
+| Live verification view in the tile (pictures with boxes, step log) | yes | no (planned) | UX.md "Live checks". Pure parts in `VerificationBoard` (NVRCore, unit tests); self-test IDs `verify-view-tile`, `verify-view-dismiss` on the fake core's scripted checks. |
+| Verification inset and non-activating verification window, stacked, never taking focus | yes | no (planned) | macOS: the alert insets' column (`InsetKind.verification`) and a non-activating panel. ID `verify-view-inset` (also checks the window setting). |
+| Events log (every decision with its trace, filters, jump to recording or incident) | yes (jump to the recording, not the incident) | no (planned) | macOS: Window > Smart Alert Events (⌥⌘E). ID `events-log-filter`; `events-log-jump` is not in the self-test yet. |
+| Smart-alert settings (cameras, zones, schedules, always-alert rules, location, sources, outputs) | yes | no (planned; settings builder built) | macOS: Settings > Smart Alerts, saved as `smart-alerts.json` plus the stored document `alerts.json` (no secret: MQTT passwords and the Home Assistant token are Keychain items `alerts.<id>`); the host configures the core from the stored document. IDs `alerts-settings-roundtrip` (fake core), `alerts-ui-real-core`. |
+| External trigger mapping (sources to camera angles with regions) | yes (MQTT sensors) | no (planned) | macOS: Settings > Smart Alerts > Sensors, regions drawn on a still. The webhook needs the local API's trigger grant. |
 | Standby toggle and automatic standby on battery; "Not watching since" | no (planned) | no (planned) | Menu bar on macOS, tray on Windows. |
 | Smart-alert processor election among running apps, handoff, startup check | no (planned) | no (planned) | Same protocol on both; a headless service may join later. |
-| Feedback on notifications and log entries (useful, not useful with reasons) | no (planned) | no (planned) | |
+| Feedback on notifications and log entries (useful, not useful with reasons) | yes (log entries) | no (planned) | ID `events-log-feedback` (also a mute suppressing the camera's next trigger). |
 
 ### Recordings (milestone P)
 
