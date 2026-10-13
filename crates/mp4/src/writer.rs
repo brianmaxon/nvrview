@@ -501,6 +501,26 @@ impl<W: Read + Write + Seek> Mp4Writer<W> {
         Ok(true)
     }
 
+    /// Test seam: ends the current chunks and moves on to file offset
+    /// `offset` (at or past the end so far), leaving media data that no
+    /// sample uses, without writing it (a sparse sink stores nothing). The
+    /// next sample starts a chunk there. Lets a test put chunks at chosen
+    /// offsets past 4 GiB, where they need 64 bits, without pushing
+    /// gigabytes through the muxer.
+    #[doc(hidden)]
+    pub fn skip_media_to_for_test(&mut self, offset: u64) -> Result<()> {
+        if let Some(v) = &mut self.video {
+            flush(&mut self.out, &mut self.pos, &mut v.pending, &mut v.chunks)?;
+        }
+        for a in &mut self.audio {
+            flush(&mut self.out, &mut self.pos, &mut a.pending, &mut a.chunks)?;
+        }
+        assert!(offset >= self.pos, "{offset} is before {}", self.pos);
+        self.pos = offset;
+        self.out.seek(SeekFrom::Start(offset))?;
+        Ok(())
+    }
+
     /// Writes the index, finalizes the file, and returns the sink.
     pub fn finish(mut self) -> Result<(W, Summary)> {
         let mut video = self.video.take().ok_or(Error::NoVideo)?;

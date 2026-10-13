@@ -211,8 +211,20 @@ fn concatenated_file_decodes_cleanly() {
 
 // ---- 64-bit offsets --------------------------------------------------------
 
-fn big_file(faststart: bool) {
-    let aus = h264();
+/// Where the first sample of a file starts: after `ftyp` and the 64-bit
+/// `mdat` header.
+const FIRST_SAMPLE_AT: u64 = 28 + 16;
+
+/// Writes a keyframe at the start of the media data, then a run of frames
+/// in a chunk at each of `chunk_at` (file offsets as if the file had no
+/// index in front), the space between left unwritten in a sparse sink.
+/// Returns the sink, the summary, and the video track's tables, after
+/// checking every sample against its frame.
+fn chunks_at(
+    aus: &[Au],
+    faststart: bool,
+    chunk_at: &[u64],
+) -> (SparseFile, mp4_remux::Summary, TrackTables) {
     let mut w = Mp4Writer::new(
         SparseFile::new(),
         VideoCodec::H264,
@@ -222,78 +234,95 @@ fn big_file(faststart: bool) {
         },
     )
     .unwrap();
+    let mut written = vec![0usize];
     w.write_video(VideoFrame::new(&aus[0].data, true, 0))
         .unwrap();
-    // ~4.4 GiB of padding in 16 MiB zero-filled slices (the NAL ends in a
-    // non-zero byte so trailing-zero trimming keeps its size).
-    let mut big = vec![0, 0, 0, 1, 0x41, 0x9a];
-    big.resize(16 << 20, 0);
-    *big.last_mut().unwrap() = 0x80;
-    for i in 1..=280 {
-        w.write_video(VideoFrame::new(&big, false, i * STEP))
-            .unwrap();
+    for (c, &at) in chunk_at.iter().enumerate() {
+        w.skip_media_to_for_test(at).unwrap();
+        for k in 0..3 {
+            let i = 1 + c * 3 + k;
+            w.write_video(VideoFrame::new(&aus[i].data, aus[i].key, i as i64 * STEP))
+                .unwrap();
+            written.push(i);
+        }
     }
-    w.write_video(VideoFrame::new(&aus[1].data, false, 281 * STEP))
-        .unwrap();
     let (sink, s) = w.finish().unwrap();
-    assert!(s.uses_co64);
-    assert!(s.file_size > u64::from(u32::MAX));
     assert_eq!(sink.len(), s.file_size);
     // Locate moov using only the box headers and parse it on its own.
     let ftyp = u32::from_be_bytes(sink.read_at(0, 4).try_into().unwrap()) as u64;
-    let (moov_at, mdat_at) = if faststart {
-        (ftyp, 0)
+    let moov_at = if faststart {
+        ftyp
     } else {
         let hdr = sink.read_at(ftyp, 16);
         assert_eq!(&hdr[4..8], b"mdat");
         assert_eq!(u32::from_be_bytes(hdr[..4].try_into().unwrap()), 1);
-        (
-            ftyp + u64::from_be_bytes(hdr[8..16].try_into().unwrap()),
-            ftyp,
-        )
+        // The mdat's 64-bit size runs to the moov.
+        ftyp + u64::from_be_bytes(hdr[8..16].try_into().unwrap())
     };
     let size = u32::from_be_bytes(sink.read_at(moov_at, 4).try_into().unwrap()) as usize;
+    assert_eq!(size as u64, s.moov_size);
     let moov = sink.read_at(moov_at, size);
-    let t = &tracks(&moov)[0];
-    assert!(t.co64);
-    assert_eq!(t.stsz.len(), 282);
+    let t = tracks(&moov).remove(0);
+    assert_eq!(t.co64, s.uses_co64);
+    // The chunks are where they were put, after the moov when it comes
+    // first.
+    let shift = if faststart { s.moov_size } else { 0 };
+    let mut want = vec![FIRST_SAMPLE_AT + shift];
+    want.extend(chunk_at.iter().map(|at| at + shift));
+    assert_eq!(t.chunk_offsets, want);
+    // Every sample holds its frame: length-prefixed NALs that fill it
+    // exactly, the last one the frame's last NAL byte for byte.
     let locs = t.sample_locations();
-    assert!(
-        locs.last().unwrap().0 > u64::from(u32::MAX),
-        "last sample is beyond 4 GiB"
-    );
-    // Every sample starts with its own length prefix and NAL header.
-    for (i, &(off, sz)) in locs.iter().enumerate().skip(1).step_by(37) {
-        let head = sink.read_at(off, 6);
-        assert_eq!(
-            u32::from_be_bytes(head[..4].try_into().unwrap()),
-            sz - 4,
-            "sample {i}"
-        );
+    assert_eq!(locs.len(), written.len());
+    for (&(off, sz), &i) in locs.iter().zip(&written) {
+        let sample = sink.read_at(off, sz as usize);
+        let mut p = 0;
+        let mut last = &sample[..0];
+        while p < sample.len() {
+            let n = u32::from_be_bytes(sample[p..p + 4].try_into().unwrap()) as usize;
+            last = &sample[p + 4..p + 4 + n];
+            p += 4 + n;
+        }
+        assert_eq!(p, sample.len(), "frame {i}");
+        let (ns, ne) = *nals(&aus[i].data).last().unwrap();
+        assert_eq!(last, &aus[i].data[ns..ne], "frame {i}");
     }
-    let (off, sz) = *locs.last().unwrap();
-    assert_eq!(
-        sink.read_at(off + u64::from(sz) - 1, 1)[0],
-        aus[1].data.last().copied().unwrap()
-    );
-    // Sizes of the mdat match the file.
-    if !faststart {
-        let hdr = sink.read_at(mdat_at, 16);
-        assert_eq!(
-            u64::from_be_bytes(hdr[8..16].try_into().unwrap()),
-            moov_at - mdat_at
-        );
-    }
+    (sink, s, t)
+}
+
+/// Chunks just under and well past 4 GiB: 64-bit offsets, the mdat's
+/// 64-bit size, and every sample where the index says.
+fn past_4_gib(faststart: bool) {
+    let aus = h264();
+    let max = u64::from(u32::MAX);
+    let (_, s, _) = chunks_at(&aus, faststart, &[max - 1000, max + (1 << 20) + 3]);
+    assert!(s.uses_co64);
+    assert!(s.file_size > max);
 }
 
 #[test]
 fn co64_when_file_exceeds_4_gib() {
-    big_file(false);
+    past_4_gib(false);
 }
 
 #[test]
 fn co64_with_faststart_shifts_offsets_past_the_moov() {
-    big_file(true);
+    past_4_gib(true);
+}
+
+/// The last chunk starts just under 4 GiB: it fits 32 bits where it was
+/// written, but not once a front moov pushes it along.
+#[test]
+fn co64_when_only_the_faststart_shift_crosses_4_gib() {
+    let aus = h264();
+    let at = u64::from(u32::MAX) - 100;
+    let (_, s, t) = chunks_at(&aus, false, &[at]);
+    assert!(!s.uses_co64, "the chunk fits 32 bits where it was written");
+    assert!(s.moov_size > 100);
+    assert_eq!(*t.chunk_offsets.last().unwrap(), at);
+    let (_, s, t) = chunks_at(&aus, true, &[at]);
+    assert!(s.uses_co64);
+    assert!(*t.chunk_offsets.last().unwrap() > u64::from(u32::MAX));
 }
 
 #[test]

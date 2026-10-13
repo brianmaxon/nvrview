@@ -33,14 +33,14 @@ const DAY: i64 = 86_400;
 /// (today is the 10th): a person on channel 0 on the 8th, a vehicle on
 /// channel 1 on the 9th, and motion on channel 1 that runs from just before
 /// noon on the 10th (when the clock starts) for a minute.
-fn archive_mock(sim: &SimRuntime, file_minutes: u32) -> mock_nvr::MockNvr {
-    archive_mock_with(sim, file_minutes, None)
+fn archive_mock(sim: &SimRuntime, file_secs: u32) -> mock_nvr::MockNvr {
+    archive_mock_with(sim, file_secs, None)
 }
 
 /// [`archive_mock`] whose file searches each take `search_delay`.
 fn archive_mock_with(
     sim: &SimRuntime,
-    file_minutes: u32,
+    file_secs: u32,
     search_delay: Option<std::time::Duration>,
 ) -> mock_nvr::MockNvr {
     let path =
@@ -49,7 +49,7 @@ fn archive_mock_with(
     cfg.channels = 2;
     let mut a = ArchiveConfig::new(vec![d(8, 0, 0, 0), d(9, 0, 0, 0), d(10, 0, 0, 0)]);
     a.events_per_day = 0;
-    a.file_minutes = file_minutes;
+    a.file_secs = file_secs;
     a.search_delay = search_delay;
     let ev = |channel: u8, kind: &str, start: DateTime, end: DateTime| MockEvent {
         channel,
@@ -146,7 +146,7 @@ fn day_files(data_dir: &Path) -> Vec<String> {
 #[test]
 fn locking_queues_the_download_and_a_growing_incident_waits_until_it_settles() {
     let sim = SimRuntime::new();
-    let nvr = archive_mock(&sim, 60);
+    let nvr = archive_mock(&sim, 3600);
     let (core, rec) = start(config(&sim, None, 0));
     let out = tempfile::tempdir().unwrap();
     assert_eq!(
@@ -204,13 +204,22 @@ fn locking_queues_the_download_and_a_growing_incident_waits_until_it_settles() {
             .any(|e| e["incident"] == k && e["state"].is_string())
     };
     assert!(!queued_for(&k10));
-    // It ends at 12:01:00; with a 10 s gap it settles at 12:01:10.
-    sim_until(&sim, &core, "settled", 90, || {
-        let growing = by_start(&core, t(10, 11, 59, 50)).unwrap()["growing"] == true;
-        assert!(!growing || !queued_for(&k10), "queued while growing");
-        !growing
-    });
-    sim_until(&sim, &core, "queued once settled", 20, || queued_for(&k10));
+    // It ends at 12:01:00; with a 10 s gap it settles at 12:01:10 (the
+    // clock started at 12:00:00), and only then is it queued: the queue is
+    // watched every step, and when the download shows up the incident is
+    // no longer growing. (Reading the incidents every step instead cost
+    // most of this test's time.)
+    sim_until(&sim, &core, "queued once settled", 110, || queued_for(&k10));
+    assert!(
+        sim.elapsed() >= std::time::Duration::from_secs(70),
+        "queued at {:?}, before it settled",
+        sim.elapsed()
+    );
+    assert_eq!(
+        by_start(&core, t(10, 11, 59, 50)).unwrap()["growing"],
+        false,
+        "queued while growing"
+    );
     assert_eq!(
         by_start(&core, t(10, 11, 59, 50)).unwrap()["downloads"]
             .as_array()
@@ -238,7 +247,7 @@ fn locking_queues_the_download_and_a_growing_incident_waits_until_it_settles() {
 #[test]
 fn a_lock_survives_group_changes_and_restarts_and_keeps_its_edits_and_days_past_the_age_limit() {
     let sim = SimRuntime::new();
-    let nvr = archive_mock(&sim, 60);
+    let nvr = archive_mock(&sim, 3600);
     let dir = tempfile::tempdir().unwrap();
     let (core, _rec) = start(config(&sim, Some(dir.path()), 0));
     core.recordings_configure("{}").unwrap();
@@ -316,7 +325,7 @@ fn a_lock_survives_group_changes_and_restarts_and_keeps_its_edits_and_days_past_
 fn a_locked_day_is_evicted_last_when_the_index_is_over_its_size() {
     let sim = SimRuntime::new();
     // One-minute files make each camera-day's file list a few hundred KB.
-    let nvr = archive_mock(&sim, 1);
+    let nvr = archive_mock(&sim, 60);
     let dir = tempfile::tempdir().unwrap();
     let (core, _rec) = start(config(&sim, Some(dir.path()), 0));
     core.recordings_configure(r#"{"index": {"max_bytes": 1048576}}"#)
@@ -355,7 +364,7 @@ fn incidents_include_every_event_the_index_returns() {
     let sim = SimRuntime::new();
     // Searches 200 ms apart: each camera-day is indexed well within a
     // second of the one before.
-    let nvr = archive_mock_with(&sim, 60, Some(std::time::Duration::from_millis(200)));
+    let nvr = archive_mock_with(&sim, 3600, Some(std::time::Duration::from_millis(200)));
     let (core, _rec) = start(config(&sim, None, 0));
     core.recordings_configure("{}").unwrap();
     let key = add(&core, &nvr);

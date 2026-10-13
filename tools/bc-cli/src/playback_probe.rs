@@ -52,7 +52,7 @@ const MIN_WINDOW_SECS: i64 = 120;
 const INDEX_WAIT: Duration = Duration::from_secs(30);
 /// How long after the request the index is trusted to be idle even if no
 /// camera shows a recording (a camera may have none).
-const INDEX_GRACE: Duration = Duration::from_secs(8);
+pub const INDEX_GRACE: Duration = Duration::from_secs(8);
 /// How long the opening seek may take.
 const OPEN_WAIT: Duration = Duration::from_secs(20);
 /// How often the sync spread is sampled.
@@ -79,6 +79,10 @@ pub struct ProbeConfig {
     pub scale: f64,
     /// The whole run (at most [`RUN_LIMIT`] in a real run).
     pub run_limit: Duration,
+    /// How long after the request the index is trusted to be idle although
+    /// a camera shows no recording ([`INDEX_GRACE`] in a real run; tests
+    /// shorten it).
+    pub index_grace: Duration,
     /// Tests only: the core's data directory parent (`None`: the temp dir).
     pub scratch_parent: Option<PathBuf>,
 }
@@ -102,6 +106,7 @@ impl ProbeConfig {
             channels,
             scale: 1.0,
             run_limit: RUN_LIMIT,
+            index_grace: INDEX_GRACE,
             scratch_parent: None,
         }
     }
@@ -874,7 +879,7 @@ fn run_inner(
                 })
             });
         spans = read_spans(&core, &key, &cfg.channels, day0 - 86_400, day0 + 86_400)?;
-        if idle && (spans.iter().all(|s| !s.is_empty()) || asked.elapsed() >= INDEX_GRACE) {
+        if idle && (spans.iter().all(|s| !s.is_empty()) || asked.elapsed() >= cfg.index_grace) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));

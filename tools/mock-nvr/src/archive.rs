@@ -3,11 +3,12 @@
 //! serving them (day records 142, file search 14–16, event search 272–274,
 //! cover images 298, download by time range 143 with its stop 144).
 //!
-//! Every configured day is recorded continuously on every channel, in files
-//! of [`ArchiveConfig::file_minutes`]. Events come from a deterministic
-//! generator plus any explicit [`MockEvent`]s. A download is a synthetic
-//! BCMEDIA stream cut at the keyframe at or before the requested start, the
-//! way devices cut (a keyframe every [`ArchiveConfig::gop_secs`]).
+//! Every configured day is recorded continuously on every channel (within
+//! [`ArchiveConfig::day_window`]), in files of [`ArchiveConfig::file_secs`].
+//! Events come from a deterministic generator plus any explicit
+//! [`MockEvent`]s. A download is a synthetic BCMEDIA stream cut at the
+//! keyframe at or before the requested start, the way devices cut (a
+//! keyframe every [`ArchiveConfig::gop_secs`]).
 //!
 //! Faults can be injected into downloads ([`DownloadFault`]): stall (stop
 //! sending, keep the connection) or disconnect, after a number of bytes.
@@ -69,13 +70,23 @@ pub struct DownloadLog {
     pub stream: Option<StreamTier>,
 }
 
+/// Seconds in a day.
+const DAY_SECS: i64 = 86_400;
+
 /// Settings of the fake recording store.
 #[derive(Clone, Debug)]
 pub struct ArchiveConfig {
     /// Days that have recordings (any time of day; only the date counts).
     pub days: Vec<DateTime>,
-    /// Length of each recording file in minutes (files tile every day).
-    pub file_minutes: u32,
+    /// Length of each recording file in seconds (files tile every day from
+    /// midnight). Devices write files of minutes; tests that cross files or
+    /// gaps use shorter ones so they get there in a few simulated seconds.
+    pub file_secs: u32,
+    /// The part of each recorded day that has recordings, as seconds of the
+    /// day `[from, to)` (default: all of it). Files outside it are not
+    /// listed, played, or downloaded. Keeps a day of short files to a few
+    /// files (bounds on file boundaries).
+    pub day_window: (u32, u32),
     /// Generated events per channel and day (deterministic).
     pub events_per_day: u32,
     /// Types the generator cycles through.
@@ -211,7 +222,8 @@ impl ArchiveConfig {
     pub fn new(days: Vec<DateTime>) -> ArchiveConfig {
         ArchiveConfig {
             days,
-            file_minutes: 60,
+            file_secs: 3600,
+            day_window: (0, DAY_SECS as u32),
             events_per_day: 6,
             event_types: vec!["md".into(), "people".into(), "vehicle".into()],
             events: Vec::new(),
@@ -235,7 +247,21 @@ impl ArchiveConfig {
 
     /// One past the last recorded second (naive seconds).
     pub(crate) fn recorded_end(&self) -> i64 {
-        self.sorted_days().last().map_or(0, |d| ts(*d) + 86_400)
+        let (_, to) = self.window();
+        self.sorted_days().last().map_or(0, |d| ts(*d) + to)
+    }
+
+    /// [`ArchiveConfig::day_window`] as offsets into a day, clamped to it.
+    fn window(&self) -> (i64, i64) {
+        let to = i64::from(self.day_window.1).clamp(0, DAY_SECS);
+        (i64::from(self.day_window.0).clamp(0, to), to)
+    }
+
+    /// Whether naive second `t` falls in a recorded day's window.
+    pub(crate) fn recorded_at(&self, t: i64) -> bool {
+        let (from, to) = self.window();
+        let in_day = t.rem_euclid(DAY_SECS);
+        self.has_day(dt(t)) && from <= in_day && in_day < to
     }
 
     /// Whether `channel` has no recording at naive second `t` (a file
@@ -244,8 +270,8 @@ impl ArchiveConfig {
         if self.missing.is_empty() {
             return false;
         }
-        let len = i64::from(self.file_minutes.max(1)) * 60;
-        let day = t.div_euclid(86_400) * 86_400;
+        let len = i64::from(self.file_secs.max(1));
+        let day = t.div_euclid(DAY_SECS) * DAY_SECS;
         let start = day + (t - day).div_euclid(len) * len;
         self.missing
             .iter()
@@ -275,10 +301,10 @@ pub(crate) fn file_holds(cfg: &ArchiveConfig, channel: u8, file_id: &str, at: Da
     else {
         return false;
     };
-    let len = i64::from(cfg.file_minutes.max(1)) * 60;
-    let day_end = start.div_euclid(86_400) * 86_400 + 86_400;
+    let len = i64::from(cfg.file_secs.max(1));
+    let day_end = start.div_euclid(DAY_SECS) * DAY_SECS + cfg.window().1;
     let t = ts(at);
-    cfg.has_day(dt(start))
+    cfg.recorded_at(start)
         && !cfg.missing_at(channel, start)
         && start <= t
         && t < (start + len).min(day_end)
@@ -320,13 +346,15 @@ pub(crate) fn files(
     start: DateTime,
     end: DateTime,
 ) -> Vec<FileEntry> {
-    let len = i64::from(cfg.file_minutes.max(1)) * 60;
+    let len = i64::from(cfg.file_secs.max(1));
     let mut out = Vec::new();
+    let (from, to) = cfg.window();
     for day in cfg.sorted_days() {
         let d0 = ts(day);
-        let mut s = d0;
-        while s < d0 + 86_400 {
-            let e = (s + len).min(d0 + 86_400) - 1;
+        // The first file that starts in the window.
+        let mut s = d0 + (from + len - 1).div_euclid(len) * len;
+        while s < d0 + to {
+            let e = (s + len).min(d0 + to) - 1;
             if e >= ts(start) && s <= ts(end) && !cfg.missing_at(channel, s) {
                 out.push(FileEntry {
                     channel,
@@ -594,7 +622,7 @@ pub(crate) fn media(
     let mut have_pictures = false;
     while t_us < span_us {
         let secs = first + (t_us / 1_000_000) as i64;
-        if cfg.has_day(dt(secs)) {
+        if cfg.recorded_at(secs) {
             let abs_us = (secs as u64).wrapping_mul(1_000_000) + t_us % 1_000_000;
             let keyframe = t_us % (gop as u64 * 1_000_000) < frame_us;
             let data = if keyframe {

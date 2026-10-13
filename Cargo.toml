@@ -31,7 +31,8 @@ opt-level = 2
 [profile.dev.package.symphonia-core]
 opt-level = 2
 
-# The large-file test pushes a few GiB through the muxer.
+# The 64-bit offset tests move a few GiB of (sparse) media through the
+# faststart copy.
 [profile.dev.package.mp4-remux]
 opt-level = 2
 

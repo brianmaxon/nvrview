@@ -273,10 +273,17 @@ impl Recorder {
         self.events.lock().unwrap().clone()
     }
 
+    /// The events of one type. Copies only those: tests poll this every
+    /// simulated step, and copying every event (stats and states pile up
+    /// over a long run) made the polling cost grow with the square of the
+    /// run's length.
     pub fn events_of(&self, kind: &str) -> Vec<serde_json::Value> {
-        self.events()
-            .into_iter()
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|e| e["type"] == kind)
+            .cloned()
             .collect()
     }
 

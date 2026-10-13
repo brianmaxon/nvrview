@@ -47,6 +47,17 @@ fn probe_cfg(nvr: &mock_nvr::MockNvr) -> ProbeConfig {
     c
 }
 
+/// Polls `cond` every 20 ms; panics after 30 s.
+fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+    for _ in 0..1500 {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("no {what}");
+}
+
 fn wait_idle(nvr: &mock_nvr::MockNvr) {
     for _ in 0..200 {
         if nvr.active_logins() == 0 && nvr.active_plays() == 0 {
@@ -109,13 +120,14 @@ fn runs_the_script_and_leaves_nothing_running() {
 
 #[test]
 fn an_interrupt_stops_every_play_and_closes_the_session() {
-    let nvr = mock(true);
+    let nvr = Arc::new(mock(true));
     let mut cfg = probe_cfg(&nvr);
     cfg.scale = 1.0;
     let stop = Arc::new(AtomicBool::new(false));
-    let flag = stop.clone();
+    // Interrupted as soon as the script has plays running on the device.
+    let (flag, watched) = (stop.clone(), Arc::clone(&nvr));
     let t = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(6));
+        wait_for("a running play", || watched.active_plays() > 0);
         flag.store(true, Ordering::SeqCst);
     });
     let mut out = Vec::new();
@@ -131,7 +143,7 @@ fn the_run_cap_ends_the_run_cleanly() {
     let nvr = mock(true);
     let mut cfg = probe_cfg(&nvr);
     cfg.scale = 1.0;
-    cfg.run_limit = Duration::from_secs(5);
+    cfg.run_limit = Duration::from_secs(1);
     let mut out = Vec::new();
     // The cap may fall in the index wait (an interrupted report) or in the
     // script; either way nothing is left running.
@@ -144,7 +156,11 @@ fn the_run_cap_ends_the_run_cleanly() {
 #[test]
 fn a_device_without_recordings_is_reported_and_closed() {
     let nvr = mock(false);
-    let cfg = probe_cfg(&nvr);
+    let mut cfg = probe_cfg(&nvr);
+    // The index goes idle with nothing found; the probe trusts that after
+    // the grace (8 s in a real run).
+    assert_eq!(cfg.index_grace, playback_probe::INDEX_GRACE);
+    cfg.index_grace = Duration::from_millis(500);
     let mut out = Vec::new();
     let r = run(&cfg, Arc::new(AtomicBool::new(false)), &mut out);
     assert!(r.is_err(), "{r:?}");

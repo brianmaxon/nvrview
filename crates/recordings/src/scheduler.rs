@@ -102,6 +102,9 @@ pub struct SchedulerConfig {
     /// elsewhere than under `root` is refused
     /// ([`EnqueueError::NotConfigured`]).
     pub registry: Option<PathBuf>,
+    /// Most downloads known at once (default [`MAX_DOWNLOADS`]; tests use
+    /// a small limit).
+    pub max_downloads: usize,
 }
 
 impl SchedulerConfig {
@@ -117,6 +120,7 @@ impl SchedulerConfig {
             cancel_timeout: Duration::from_secs(2),
             pattern: NamePattern::default(),
             registry: None,
+            max_downloads: MAX_DOWNLOADS,
         }
     }
 }
@@ -398,7 +402,7 @@ pub struct Enqueued {
 /// Why [`Scheduler::enqueue_incident`] queued nothing.
 #[derive(Debug)]
 pub enum EnqueueError {
-    /// [`MAX_DOWNLOADS`] downloads are known already.
+    /// [`SchedulerConfig::max_downloads`] downloads are known already.
     Limit,
     /// No camera of the incident has a source.
     NoSource,
@@ -849,7 +853,7 @@ impl Scheduler {
                     existing: true,
                 });
             }
-            if st.jobs.len() >= MAX_DOWNLOADS {
+            if st.jobs.len() >= self.inner.cfg.max_downloads {
                 return Err(EnqueueError::Limit);
             }
         }
@@ -962,7 +966,7 @@ impl Scheduler {
     /// range, for `incident.json` (none is written for a share-safe job).
     ///
     /// # Errors
-    /// [`EnqueueError::Limit`] at [`MAX_DOWNLOADS`] known downloads;
+    /// [`EnqueueError::Limit`] at [`SchedulerConfig::max_downloads`] known downloads;
     /// [`EnqueueError::NotConfigured`] for a folder outside the root when
     /// the scheduler has no registry; [`EnqueueError::NoSource`] without
     /// cameras; [`EnqueueError::Io`].
@@ -983,7 +987,7 @@ impl Scheduler {
                     existing: true,
                 });
             }
-            if st.jobs.len() >= MAX_DOWNLOADS {
+            if st.jobs.len() >= self.inner.cfg.max_downloads {
                 return Err(EnqueueError::Limit);
             }
         }
@@ -1212,7 +1216,7 @@ impl Scheduler {
                 if st.jobs.contains_key(&j.incident.id) {
                     continue;
                 }
-                if st.jobs.len() >= MAX_DOWNLOADS {
+                if st.jobs.len() >= self.inner.cfg.max_downloads {
                     warn!("too many unfinished downloads; the oldest are resumed first");
                     break;
                 }
