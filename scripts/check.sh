@@ -360,7 +360,7 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
     if [ -n "$(cache_full)" ]; then
       run_real=1
     else
-      step - "macOS real-core self-test deferred (full runs and releases run it)"
+      step - "macOS shipped-app self-test (real core, release bundle) deferred (full runs and releases run it)"
     fi
     if lwant macos-demo-metal; then run_demo_metal=1; fi
     if lwant macos-demo-layer; then run_demo_layer=1; fi
@@ -393,7 +393,7 @@ mac_selftest() {
 mac_real_selftest() {
   real_log=$(mktemp)
   real_rc=0
-  scripts/macos-real-selftest.sh >"$real_log" 2>&1 || real_rc=$?
+  scripts/macos-real-selftest.sh --bundle >"$real_log" 2>&1 || real_rc=$?
   if [ "$real_rc" != 0 ]; then
     grep -E '^  |error:' "$real_log" | tail -n 20 || true
     tail -n 30 "$real_log"
@@ -420,7 +420,7 @@ lane_swift() {
     for a in $(echo "$mac_areas" | tr "," " "); do rows="$rows,mac-app.$a"; done
     lstep "${rows#,}" "macOS app self-test, fake core, areas: $([ "$mac_all" = 1 ] && echo all || echo "$mac_areas")" mac_selftest
   fi
-  if [ "$run_real" = 1 ]; then lstep macos-real-selftest "macOS app self-test, real core against mock-nvr" mac_real_selftest; fi
+  if [ "$run_real" = 1 ]; then lstep macos-real-selftest "macOS app self-test, shipped release bundle on the real core against mock-nvr" mac_real_selftest; fi
   if [ "$run_demo_metal" = 1 ]; then lstep macos-demo-metal "macOS demo self-test, Metal renderer" demo_selftest; fi
   if [ "$run_demo_layer" = 1 ]; then lstep macos-demo-layer "macOS demo self-test, display-layer renderer" demo_selftest --renderer layer; fi
 }

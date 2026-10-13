@@ -56,6 +56,7 @@ if [ -z "${RUSTC_WRAPPER:-}" ] && command -v sccache >/dev/null 2>&1; then
 fi
 export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
+script_start=$(date +%s)
 die() { echo "release: $*" >&2; exit 1; }
 
 notes=""
@@ -96,6 +97,34 @@ if [ "$skip_windows" != 1 ]; then
   NVRVIEW_WINDOWS_PRIORITY=merge
   export NVRVIEW_WINDOWS_PRIORITY
 fi
+# The public key, derived from the secret one (only the public line is kept in
+# a temporary file); it is bundled into both packages and used to verify them.
+cargo build -q -p sign-update
+sign=target/debug/sign-update
+pubfile=$(mktemp)
+wlog=$(mktemp)
+trap 'rm -f "$pubfile" "$wlog"' EXIT
+"$sign" pubkey --secret "$key" | sed -n 1p >"$pubfile"
+[ -s "$pubfile" ] || die "could not derive the public key from $key"
+if [ -n "$update_source" ]; then
+  # Validated here, before the long builds (the packaging scripts check again).
+  python3 -I scripts/update-defaults.py --update-source "$update_source" --out /dev/null >/dev/null ||
+    die "--update-source is not usable"
+fi
+# The bundled release notes (docs/UPDATES.md, "Bundled release notes"),
+# validated here before the long builds and given to both packagers.
+set -- --release-notes "$notes"
+if [ -n "$notes_history" ]; then set -- "$@" --notes-history "$notes_history"; fi
+python3 -I scripts/release-notes-bundle.py --version "$version" --notes "$notes" ${notes_history:+--history "$notes_history"} \
+  --out /dev/null >/dev/null || die "the release notes cannot be bundled"
+# The Mac check tests the shipped app bundle with the same bundled files the
+# package gets (scripts/macos-real-selftest.sh --bundle), so what is zipped is
+# what was tested.
+NVRVIEW_BUNDLE_KEY_FILE="$pubfile"
+NVRVIEW_BUNDLE_NOTES="$notes"
+export NVRVIEW_BUNDLE_KEY_FILE NVRVIEW_BUNDLE_NOTES
+if [ -n "$update_source" ]; then NVRVIEW_BUNDLE_UPDATE_SOURCE="$update_source"; export NVRVIEW_BUNDLE_UPDATE_SOURCE; fi
+if [ -n "$notes_history" ]; then NVRVIEW_BUNDLE_NOTES_HISTORY="$notes_history"; export NVRVIEW_BUNDLE_NOTES_HISTORY; fi
 if [ "$full_check" = 1 ]; then
   echo "== fresh checks (--full-check)"
   # Full runs: nothing is taken from the test result cache.
@@ -105,6 +134,7 @@ if [ "$full_check" = 1 ]; then
     scripts/release-check.sh || die "the checks failed"
   fi
 fi
+checks_done=$(date +%s)
 # Each requested stamp must exist for HEAD's tree or, by the version-only
 # rule, for a tree that differs from it in VERSION alone.
 head_tree=$(git rev-parse 'HEAD^{tree}')
@@ -122,29 +152,24 @@ for kind in $kinds; do
 done
 
 start=$(date +%s)
-# The public key, derived from the secret one (only the public line is kept in
-# a temporary file); it is bundled into both packages and used to verify them.
-cargo build -q -p sign-update
-sign=target/debug/sign-update
-pubfile=$(mktemp)
-trap 'rm -f "$pubfile"' EXIT
-"$sign" pubkey --secret "$key" | sed -n 1p >"$pubfile"
-[ -s "$pubfile" ] || die "could not derive the public key from $key"
-if [ -n "$update_source" ]; then
-  # Validated here, before the long builds (the packaging scripts check again).
-  python3 -I scripts/update-defaults.py --update-source "$update_source" --out /dev/null >/dev/null ||
-    die "--update-source is not usable"
-fi
-# The bundled release notes (docs/UPDATES.md, "Bundled release notes"),
-# validated here before the long builds and given to both packagers.
-set -- --release-notes "$notes"
-if [ -n "$notes_history" ]; then set -- "$@" --notes-history "$notes_history"; fi
-python3 -I scripts/release-notes-bundle.py --version "$version" --notes "$notes" ${notes_history:+--history "$notes_history"} \
-  --out /dev/null >/dev/null || die "the release notes cannot be bundled"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 mac_zip="NVRView-$version-macos-arm64.zip"
 win_zip="NvrView-$version-win-x64.zip"
+
+win_pid=""
+if [ "$skip_windows" != 1 ]; then
+  # On the Windows computer that tested the publish output, at the same time as
+  # the macOS package is zipped here.
+  (
+    if [ -n "$update_source" ]; then
+      scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source" "$@"
+    else
+      scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" "$@"
+    fi
+  ) >"$wlog" 2>&1 &
+  win_pid=$!
+fi
 
 echo "== macOS package"
 if [ -n "$update_source" ]; then
@@ -158,12 +183,11 @@ packages="$out/$mac_zip"
 if [ "$skip_windows" = 1 ]; then
   echo "== Windows package skipped (--skip-windows): this is a macOS-only result"
 else
-  echo "== Windows package (built on the Windows computer)"
-  if [ -n "$update_source" ]; then
-    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source" "$@"
-  else
-    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" "$@"
-  fi
+  echo "== Windows package (on the Windows computer that tested it)"
+  win_rc=0
+  wait "$win_pid" || win_rc=$?
+  cat "$wlog"
+  [ "$win_rc" = 0 ] || die "the Windows package failed (exit $win_rc)"
   [ -s "$out/$win_zip" ] || die "the Windows package $win_zip was not fetched"
   chmod 644 "$out/$win_zip"
   packages="$packages $out/$win_zip"
@@ -196,6 +220,7 @@ if [ "$skip_windows" = 1 ]; then
 else
   echo "Release $version built, signed, and verified in $((now - start)) s."
 fi
+echo "release.sh took $((now - script_start)) s in all (checks, if run: $((checks_done - script_start)) s; stamps and packages: $((now - checks_done)) s)."
 echo "Files in $out:"
 ls -l "$out"
 echo

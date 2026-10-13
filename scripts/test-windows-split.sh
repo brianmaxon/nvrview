@@ -49,6 +49,7 @@ new_repo() { # DIR
     cp "$here/$f" "$1/scripts/"
   done
   cp "$work/fake-ssh" "$1.bin/ssh"
+  cp "$work/fake-scp" "$1.bin/scp"
   # One crate, so the Rust half has work.
   cat >"$1.metadata.json" <<META
 {"workspace_root": "$1", "packages": [{"name": "a", "manifest_path": "$1/crates/a/Cargo.toml", "targets": [{"kind": ["lib"]}], "dependencies": []}]}
@@ -132,6 +133,15 @@ case "$cmd" in
 esac
 EOF
 chmod +x "$work/fake-ssh"
+# The fake scp copies nothing; it makes the destination file and logs the source.
+cat >"$work/fake-scp" <<'EOF2'
+#!/bin/sh
+for last; do :; done
+for first; do case "$first" in -*|BatchMode=*|ConnectTimeout=*) ;; *) break ;; esac; done
+echo "$first" >>"$FS_DIR/scp.log"
+echo zip >"$last"
+EOF2
+chmod +x "$work/fake-scp"
 
 run_check() { # DIR LOGFILE  (env decides the rest)
   (
@@ -157,7 +167,7 @@ hosts_free() { # DIR: both locks are gone
 }
 stamp_of() { # DIR: the Windows stamp without its times
   f=$(ls "$1"/.git/nvrview-checks/*.windows)
-  sed -E 's/^(.*)=[0-9]+$/\1/; s/[0-9]+s//g' "$f" | grep -Ev "^(time|commit=|date=)" | sort
+  sed -E 's/^(.*)=[0-9]+$/\1/; s/[0-9]+s//g; s/; host .*$//' "$f" | grep -Ev "^(time|commit=|date=)" | sort
 }
 entries_of() { # DIR
   (cd "$1/.git/nvrview-checks/suite-cache/entries/windows" && find . -type f | sed -E 's/[0-9]{6,}/N/g' | LC_ALL=C sort)
@@ -166,6 +176,10 @@ entries_of() { # DIR
 # Two hosts free: the halves run at the same time on different hosts.
 fresh two
 export NVRVIEW_WINDOWS_HOSTS="win-a win-b"
+# History in which the app half is the long one, and win-b the faster computer:
+# win-b takes the app half although win-a is the first free host.
+echo '{"time":1,"kind":"windows","total":400,"tree":"t","steps":[["clippy (--workspace)",100],["build: C# app",300]]}' >"$NVRVIEW_TIMING_LOG"
+export NVRVIEW_WINDOWS_SPEEDS="win-a=1 win-b=2"
 if run_check "$r" "$work/two.out"; then pass "a check on two free hosts passes"; else cat "$work/two.out"; fail "a check on two free hosts passes"; fi
 [ "$(sort -u "$FS_DIR/worker.log" | wc -l | tr -d ' ')" = 2 ] && grep -q '^rust ' "$FS_DIR/worker.log" && grep -q '^rest ' "$FS_DIR/worker.log" && pass "...in two halves" || { cat "$FS_DIR/worker.log"; fail "...in two halves"; }
 [ "$(awk '{print $2}' "$FS_DIR/worker.log" | sort -u | wc -l | tr -d ' ')" = 2 ] && pass "...on two different hosts" || fail "...on two different hosts"
@@ -173,9 +187,22 @@ if run_check "$r" "$work/two.out"; then pass "a check on two free hosts passes";
 hosts_free "$r" && pass "...and both locks given back" || fail "...and both locks given back"
 ls "$FS_DIR"/sync.* | wc -l | grep -q 2 && pass "...each host got the tree" || fail "...each host got the tree"
 grep -q 'splitting the check' "$work/two.out" && pass "...and the output says so" || fail "...and the output says so"
+grep -q '^split decision: split (split .*plan inputs: Rust half about' "$work/two.out" && pass "...and logs the split decision with the plan's numbers" || fail "...and logs the split decision with the plan's numbers"
 two_stamp=$(stamp_of "$r")
 two_entries=$(entries_of "$r")
 check "...and leaves a Windows stamp" ls "$r"/.git/nvrview-checks/*.windows
+# The stamp names the host that ran the app half, and a package is built on
+# that host (it holds the tested publish output), whichever host is free first.
+app_host=$(sed -n 's/^steps=.*; host \([A-Za-z0-9_.-]*\)$/\1/p' "$r"/.git/nvrview-checks/*.windows)
+rest_host=$(grep '^rest ' "$FS_DIR/worker.log" | awk '{print $2}')
+[ "$app_host" = win-b ] && [ "$app_host" = "$rest_host" ] && pass "the stamp records the host that ran the app half" || fail "the stamp records the host that ran the app half ($app_host, $rest_host)"
+: >"$FS_DIR/ssh.log"
+rm -f "$FS_DIR/scp.log"
+( cd "$r" && PATH="$r.bin:$PATH" scripts/windows-check.sh --package "$work/two-pkg" ) >"$work/two-pkg.out" 2>&1 || { cat "$work/two-pkg.out"; fail "packaging after a split run works"; }
+grep -q "^packaging on $app_host, where the checks" "$work/two-pkg.out" && pass "a package is built on the stamp's host" || fail "a package is built on the stamp's host"
+[ -s "$FS_DIR/ssh.log" ] && grep -q "^$app_host " "$FS_DIR/ssh.log" && ! grep -v "^$app_host " "$FS_DIR/ssh.log" | grep -q . && pass "...and nothing is sent to or run on the other host" || { cat "$FS_DIR/ssh.log"; fail "...and nothing is sent to or run on the other host"; }
+hosts_free "$r" && pass "...and its lock given back" || fail "...and its lock given back"
+unset NVRVIEW_WINDOWS_SPEEDS
 # The second run takes everything from the cache.
 if run_check "$r" "$work/two2.out"; then :; fi
 
@@ -186,6 +213,7 @@ if run_check "$r" "$work/one.out"; then pass "a check on one host passes"; else 
 [ "$(wc -l <"$FS_DIR/worker.log" | tr -d ' ')" = 1 ] && grep -q '^all win-a$' "$FS_DIR/worker.log" && pass "...in one whole run on that host" || fail "...in one whole run on that host"
 hosts_free "$r" && pass "...and its lock given back" || fail "...and its lock given back"
 ! grep -q 'splitting the check' "$work/one.out" && pass "...without a split" || fail "...without a split"
+grep -q '^split decision: whole on win-a (only one Windows host is configured)' "$work/one.out" && pass "...and logs why it did not split" || fail "...and logs why it did not split"
 [ "$(stamp_of "$r")" = "$two_stamp" ] && pass "the stamp is the same as the split run's" || { fail "the stamp is the same as the split run's"; echo "$two_stamp"; stamp_of "$r"; }
 [ "$(entries_of "$r")" = "$two_entries" ] && pass "the test result cache entries are the same as the split run's" || { fail "the test result cache entries are the same as the split run's"; echo "$two_entries"; entries_of "$r"; }
 
@@ -197,13 +225,14 @@ printf 'pid=%s\nmachine=%s\nstart=1\npriority=agent\nhost=win-b\n' "$$" "$(hostn
 if run_check "$r" "$work/busy.out"; then pass "a check with the second host busy passes"; else cat "$work/busy.out"; fail "a check with the second host busy passes"; fi
 grep -q '^all win-a$' "$FS_DIR/worker.log" && [ "$(wc -l <"$FS_DIR/worker.log" | tr -d ' ')" = 1 ] && pass "...whole, on the free host" || fail "...whole, on the free host"
 check "...and the busy host's lock is not touched" test -f "$r.lock-win-b/owner"
+grep -q '^split decision: whole on win-a (win-b is not free right now' "$work/busy.out" && pass "...and logs that the second host was busy" || fail "...and logs that the second host was busy"
 rm -rf "$r.lock-win-b"
 
 # Different tool versions on the second host: no split.
 fresh odd
 export NVRVIEW_WINDOWS_HOSTS="win-a win-b" FS_ODD_HOST=win-b
 if run_check "$r" "$work/odd.out"; then pass "a check with differing toolchains passes"; else cat "$work/odd.out"; fail "a check with differing toolchains passes"; fi
-grep -q '^all win-a$' "$FS_DIR/worker.log" && grep -q 'not splitting: win-b has other tool versions' "$work/odd.out" && pass "...whole on one host, and says why" || fail "...whole on one host, and says why"
+grep -q '^all win-a$' "$FS_DIR/worker.log" && grep -q 'split decision: whole on win-a (win-b has other tool versions' "$work/odd.out" && pass "...whole on one host, and says why" || fail "...whole on one host, and says why"
 hosts_free "$r" && pass "...with the second lock given back" || fail "...with the second lock given back"
 unset FS_ODD_HOST
 
@@ -212,6 +241,7 @@ fresh off
 export NVRVIEW_WINDOWS_HOSTS="win-a win-b" NVRVIEW_WINDOWS_SPLIT=0
 run_check "$r" "$work/off.out" || true
 grep -q '^all win-a$' "$FS_DIR/worker.log" && pass "NVRVIEW_WINDOWS_SPLIT=0 runs the check whole" || fail "NVRVIEW_WINDOWS_SPLIT=0 runs the check whole"
+grep -q '^split decision: whole on win-a (NVRVIEW_WINDOWS_SPLIT=0)' "$work/off.out" && pass "...and logs that it was turned off" || fail "...and logs that it was turned off"
 unset NVRVIEW_WINDOWS_SPLIT
 
 # A failure in either half fails the check, names the half, the suite and the

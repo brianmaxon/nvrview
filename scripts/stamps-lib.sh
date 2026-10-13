@@ -134,6 +134,24 @@ windows_hosts() {
   for h in ${NVRVIEW_WINDOWS_HOSTS:-${NVRVIEW_WINDOWS_HOST:-}}; do echo "$h"; done
 }
 
+# Whether a merge starts a full check of the new main in the background
+# (scripts/full-check-bg.sh). FLAG is the script's option: 1 (--full-check-after),
+# 0 (--no-full-check-after) or empty. Empty falls back to
+# NVRVIEW_BACKGROUND_FULL_CHECK=1|0, and then to "on when two or more Windows
+# computers are configured" (one computer would be kept busy after every merge).
+background_full_check_wanted() { # FLAG
+  case "${1:-${NVRVIEW_BACKGROUND_FULL_CHECK:-}}" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  [ "$(windows_hosts | wc -l | tr -d ' ')" -ge 2 ]
+}
+
+# Starts it for HEAD (a failure to start is only reported: the merge is done).
+start_background_full_check() {
+  scripts/full-check-bg.sh start HEAD || echo "the background full check could not be started; a release will run its own checks" >&2
+}
+
 # Exclusive use of a Windows computer (scripts/windows-lock.sh): waits for a
 # free host at priority $NVRVIEW_WINDOWS_PRIORITY (merge or agent, default
 # agent), exports the chosen host as NVRVIEW_WINDOWS_HOST, and marks the lock
