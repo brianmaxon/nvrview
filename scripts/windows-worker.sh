@@ -16,6 +16,11 @@
 #                            under apps/windows only)
 #   NVRVIEW_WINDOWS_ONLY=app only the library and the app (also skips the
 #                            C# smoke test and the video self-test)
+#   NVRVIEW_WINDOWS_PART=rust  only the Rust half (clippy, tests, doctests: the
+#                            crate lists say which), with no background builds;
+#                            scripts/windows-check.sh runs it on one computer
+#                            while another runs the rest (NVRVIEW_SUITES and
+#                            the crate lists set to none), see windows-split.py
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,6 +42,7 @@ rustc --version
 dotnet --version
 
 only="${NVRVIEW_WINDOWS_ONLY:-}"
+part="${NVRVIEW_WINDOWS_PART:-all}"
 
 # Which suites to run, decided on the Mac by the test result cache
 # (scripts/suite-cache.py; the cache lives there): NVRVIEW_SUITES is a comma
@@ -98,6 +104,7 @@ if { [ "$only" != app ] && { want csharp-smoke || want video-selftest; }; } ||
   [ "$app_tests" = 0 ]; then
   need_lib=1
 fi
+if [ "$part" = rust ]; then need_lib=0; fi
 
 # Compile cache shared by every worker on this computer (each worker has its
 # own target folder; sccache keys on each crate's exact inputs, so a second
@@ -154,6 +161,7 @@ prebuild() {
     # shellcheck disable=SC2086 # a list of cargo arguments
     timed "build: release library and mock" cargo build --release $NVRVIEW_RELEASE_PACKAGES
   fi
+  if [ "$part" = rust ]; then return 0; fi
   if [ "$only" != app ]; then
     if want csharp-smoke; then NVRVIEW_SMOKE_PARTS=smoke NVRVIEW_BUILD_ONLY=1 timed "build: C# smoke" scripts/csharp-smoke.sh; fi
     if want tiles-tests; then NVRVIEW_SMOKE_PARTS=tiles NVRVIEW_BUILD_ONLY=1 timed "build: C# tile tests" scripts/csharp-smoke.sh; fi

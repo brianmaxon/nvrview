@@ -146,6 +146,26 @@ NVRVIEW_WINDOWS_HOSTS=win-test-1 sh "$lock" release --owner-pid "$mergepid"
 NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2" sh "$lock" release --owner-pid "$other"
 unset NVRVIEW_WINDOWS_HOSTS
 
+# Adding a second host to a held one for a split run: a try never waits, skips
+# the excluded host, gives way to waiters, and one host can be released alone.
+export NVRVIEW_WINDOWS_LOCK="$work/l5/windows.lock" NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"
+a=$(sh "$lock" acquire --owner-pid "$holder" 2>/dev/null)
+b=$(sh "$lock" acquire --try --exclude "$a" --owner-pid "$holder" 2>/dev/null)
+[ "$a" = win-test-1 ] && [ "$b" = win-test-2 ] && pass "a try adds the other free host to the owner" || fail "a try adds the other free host to the owner ($a, $b)"
+check "...and a third try finds nothing free" test "$(sh "$lock" acquire --try --exclude "$a" --owner-pid "$holder" 2>/dev/null || echo none)" = none
+sh "$lock" release --host win-test-2 --owner-pid "$holder"
+check "release --host gives back that host only" test ! -d "$NVRVIEW_WINDOWS_LOCK-win-test-2" -a -d "$NVRVIEW_WINDOWS_LOCK-win-test-1"
+sh "$lock" acquire --try --exclude win-test-1 --owner-pid "$other" >/dev/null 2>&1
+check "a try by another owner takes the free host" grep -q "^pid=$other$" "$NVRVIEW_WINDOWS_LOCK-win-test-2/owner"
+sh "$lock" release --owner-pid "$other"
+# A try gives way to a waiting merge that wants the host (a waiter written by hand, so that nothing races).
+mkdir -p "$NVRVIEW_WINDOWS_LOCK.waiters"
+printf 'pid=%s\nmachine=%s\nhosts=win-test-2\n' "$mergepid" "$(hostname)" >"$NVRVIEW_WINDOWS_LOCK.waiters/merge-1-1"
+check "an agent's try does not take a host a waiting merge wants" test "$(sh "$lock" acquire --try --exclude win-test-1 --owner-pid "$other" 2>/dev/null || echo none)" = none
+rm -f "$NVRVIEW_WINDOWS_LOCK.waiters/merge-1-1"
+sh "$lock" release --owner-pid "$holder"
+unset NVRVIEW_WINDOWS_HOSTS
+
 # --- merge trains -------------------------------------------------------------
 export NVRVIEW_WINDOWS_LOCK="$work/l4/windows.lock"
 new_repo() { # DIR

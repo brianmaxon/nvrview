@@ -191,7 +191,10 @@ the one lock for the Windows computer. Merges and releases wait at priority
 records its owner; one whose process has been gone for 2 minutes is broken
 with a log line. `NVRVIEW_WINDOWS_HOSTS="host-a host-b"` makes a pool with one
 lock per host (setup: apps/windows/README.md); stamps and the cache are keyed
-by tree and platform, so any host's result counts.
+by tree and platform, so any host's result counts. With a pool, one check
+splits over two free computers (Rust half on one, the rest on the other) when
+that pays off: the second host is a try, never a wait, held only while its
+half runs (`NVRVIEW_WINDOWS_SPLIT=0` turns it off; apps/windows/README.md).
 
 **Branches arrive with a Windows result.** Before reporting a branch finished,
 run `scripts/branch-ready.sh <branch>`. If the Windows stamp is missing
