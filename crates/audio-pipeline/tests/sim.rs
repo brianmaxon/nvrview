@@ -364,44 +364,60 @@ fn timestamper_lands_on_exact_drift() {
 /// its 30-minute window fills, so this feeds it two hours of arrivals (just
 /// the estimator: under a second), after which the prior's pull is under
 /// 0.5% of the skew.
-#[test]
-fn presentation_estimator_lands_on_exact_clock_ratio() {
-    for (skew_ppm, start_s) in [(8.0, 0.0), (-150.0, 7.0 * DAY_S)] {
-        let skew = 1.0 + skew_ppm * 1e-6;
-        let mut e = PresentationEstimator::new();
-        let host0 = HOST0_US + start_s * 1e6;
-        let pts0 = PTS0_US + start_s * 1e6;
-        // About 16 records per second, as the audio delivers them.
-        let step_us = 1024.0 / 16_000.0 * 1e6;
-        let n = (2.0 * 3600.0 * 1e6 / step_us) as u64;
-        for k in 0..n {
-            let c = k as f64 * step_us;
-            e.observe(pts0 + c, host0 + c * skew + 200_000.0);
-        }
-        let m = e.map().unwrap();
-        let got_ppm = (m.host_per_camera - 1.0) * 1e6;
-        let c = n as f64 * step_us;
-        let err = m.host_at(pts0 + c) - (host0 + c * skew + 200_000.0);
-        println!(
-            "skew {skew_ppm} ppm, start {start_s} s: estimate {got_ppm:.3} ppm, offset {err:.1} µs"
-        );
-        assert!(
-            (got_ppm - skew_ppm).abs() < 0.005 * skew_ppm.abs() + 0.05,
-            "skew {skew_ppm} ppm: estimate {got_ppm} ppm"
-        );
-        assert!(err.abs() < 100.0, "offset {err} µs");
+fn presentation_estimator_lands_on(skew_ppm: f64, start_s: f64) {
+    let skew = 1.0 + skew_ppm * 1e-6;
+    let mut e = PresentationEstimator::new();
+    let host0 = HOST0_US + start_s * 1e6;
+    let pts0 = PTS0_US + start_s * 1e6;
+    // About 16 records per second, as the audio delivers them.
+    let step_us = 1024.0 / 16_000.0 * 1e6;
+    let n = (2.0 * 3600.0 * 1e6 / step_us) as u64;
+    for k in 0..n {
+        let c = k as f64 * step_us;
+        e.observe(pts0 + c, host0 + c * skew + 200_000.0);
     }
+    let m = e.map().unwrap();
+    let got_ppm = (m.host_per_camera - 1.0) * 1e6;
+    let c = n as f64 * step_us;
+    let err = m.host_at(pts0 + c) - (host0 + c * skew + 200_000.0);
+    println!(
+        "skew {skew_ppm} ppm, start {start_s} s: estimate {got_ppm:.3} ppm, offset {err:.1} µs"
+    );
+    assert!(
+        (got_ppm - skew_ppm).abs() < 0.005 * skew_ppm.abs() + 0.05,
+        "skew {skew_ppm} ppm: estimate {got_ppm} ppm"
+    );
+    assert!(err.abs() < 100.0, "offset {err} µs");
 }
 
 #[test]
-fn measured_conditions_settle_and_hold() {
+fn presentation_estimator_lands_on_exact_clock_ratio() {
+    presentation_estimator_lands_on(8.0, 0.0);
+}
+
+/// A large skew, with clocks a week in.
+#[test]
+fn presentation_estimator_lands_on_a_large_clock_ratio() {
+    presentation_estimator_lands_on(-150.0, 7.0 * DAY_S);
+}
+
+#[test]
+fn measured_clocks_settle_and_stay_stationary() {
     exact_drift_is_stationary("measured, exact", measured());
+}
+
+#[test]
+fn measured_conditions_hold_sync_under_jitter() {
     jitter_holds("measured", measured());
 }
 
 #[test]
-fn worst_case_skew_settles_and_holds() {
+fn worst_case_skew_settles_and_stays_stationary() {
     exact_drift_is_stationary("16,013 Hz, exact", worst_case());
+}
+
+#[test]
+fn worst_case_skew_holds_sync_under_jitter() {
     jitter_holds("16,013 Hz", worst_case());
 }
 
@@ -421,11 +437,15 @@ fn numerics_hold_a_week_in() {
         "16,013 Hz, 7 days in",
         worst_case().started_after(7.0 * DAY_S),
     );
+}
+
+#[test]
+fn numerics_hold_a_week_in_under_jitter() {
     jitter_holds("measured, 7 days in", measured().started_after(7.0 * DAY_S));
 }
 
-/// Stalls (start, length in camera seconds): nothing arrives, then everything sent during it in a
-/// burst. After recovery the latency (host time heard minus host time
+/// Stalls (start, length in camera seconds): nothing arrives, then
+/// everything sent during it in a burst. After recovery the latency (host time heard minus host time
 /// captured) equals that of the same run without the stalls (same seed),
 /// within `tol_us`: the stall left nothing behind, in the ring or in the
 /// presentation reference. The playout delay is fixed here; that a rare
@@ -501,22 +521,27 @@ fn a_stall_does_not_raise_latency() {
 /// frames keeps the schedule), without jitter and with jitter like the
 /// measurement (where the run without stalls wanders a few ms differently
 /// after each resync, so the tolerance is wider; a ratchet adds hundreds).
+const STALLS: [(f64, f64); 3] = [(150.0, 1.5), (200.0, 0.5), (250.0, 1.5)];
+
 #[test]
 fn repeated_stalls_do_not_ratchet_latency() {
-    let stalls = [(150.0, 1.5), (200.0, 0.5), (250.0, 1.5)];
     stalls_keep_latency(
         "three stalls",
         exact(SimConfig::default()),
-        &stalls,
+        &STALLS,
         EXACT_STALL_TOL_US,
     );
+}
+
+#[test]
+fn repeated_stalls_do_not_ratchet_latency_under_jitter() {
     stalls_keep_latency(
         "three stalls, jitter",
         SimConfig {
             seed: 4,
             ..SimConfig::default()
         },
-        &stalls,
+        &STALLS,
         STALL_TOL_US,
     );
 }
@@ -571,7 +596,16 @@ fn resyncs_after_a_long_stall() {
 /// in use equals its target and is stationary, every click stays on its
 /// (moving) target, and nothing jumps after the warm-up.
 #[test]
-fn playout_delay_adapts_to_the_jitter() {
+fn playout_delay_adapts_to_low_jitter() {
+    playout_delay_adapts_to("low jitter");
+}
+
+#[test]
+fn playout_delay_adapts_to_high_jitter() {
+    playout_delay_adapts_to("high jitter");
+}
+
+fn playout_delay_adapts_to(which: &str) {
     use audio_pipeline::delay::{INITIAL_DELAY_US, MIN_DELAY_US};
     let run_s = 300.0;
     // Settled: the warm-up allowance has faded (120 s) and the delay has had
@@ -594,7 +628,10 @@ fn playout_delay_adapts_to_the_jitter() {
         seed: 32,
         ..SimConfig::default()
     };
-    for (name, cfg) in [("low jitter", &low), ("high jitter", &high)] {
+    for (name, cfg) in [("low jitter", &low), ("high jitter", &high)]
+        .into_iter()
+        .filter(|(n, _)| *n == which)
+    {
         let (r, trace) = run_traced(cfg);
         report(name, &r);
         let s = r.tile.stats();
