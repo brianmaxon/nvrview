@@ -105,12 +105,31 @@ elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
-if [ -n "$package_to" ] && [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then
-  # Package from the worker whose full check stamped HEAD's tree, so its
-  # tested publish output can be reused (the stamp's steps end "worker <name>").
+if [ -n "$package_to" ]; then
+  # Package from the worker and the host whose full check stamped HEAD's tree,
+  # so its tested publish output can be reused: the stamp's steps end
+  # "worker <name>; host <host>" (the host that ran the app half, which may be
+  # either one after a split run). Without a usable stamp the app is built on
+  # whichever host is free.
   stamp="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks/$(git rev-parse 'HEAD^{tree}').windows"
   if [ -f "$stamp" ]; then
-    NVRVIEW_WINDOWS_WORKER=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)$/\1/p' "$stamp")
+    stamp_worker=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)\(; host .*\)\{0,1\}$/\1/p' "$stamp")
+    stamp_host=$(sed -n 's/^steps=.*; host \([A-Za-z0-9_.-]*\)$/\1/p' "$stamp")
+    if [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then NVRVIEW_WINDOWS_WORKER=$stamp_worker; fi
+    if [ "$NVRVIEW_WINDOWS_WORKER" = "$stamp_worker" ] && [ -n "$stamp_host" ]; then
+      if [ "${NVRVIEW_WINDOWS_LOCK_HELD:-0}" = 1 ]; then
+        echo "the lock is already held (host ${NVRVIEW_WINDOWS_HOST:-?}); the stamp names $stamp_host"
+      elif windows_hosts | grep -qx "$stamp_host"; then
+        echo "packaging on $stamp_host, where the checks built and tested the publish output (worker $stamp_worker)"
+        NVRVIEW_WINDOWS_HOSTS=$stamp_host
+        export NVRVIEW_WINDOWS_HOSTS
+        unset NVRVIEW_WINDOWS_HOST
+      else
+        echo "the checks tested the publish output on $stamp_host, which is not in the configured hosts; it will be built again"
+      fi
+    fi
+  else
+    echo "no Windows check stamp for this tree; the app will be built again"
   fi
 fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
@@ -453,7 +472,7 @@ now=$(date +%s)
 # cached suites it serves merges, and scripts/release.sh needs a full one.
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] && [ -z "${NVRVIEW_APP_AREAS:-}" ] &&
   [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
-  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker" "${cached:-none}"
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker; host ${host_rest:-$host}" "${cached:-none}"
 else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi
