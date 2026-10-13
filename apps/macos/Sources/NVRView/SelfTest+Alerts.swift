@@ -341,7 +341,11 @@ extension SelfTest {
                 problems.append("a muted camera's trigger was not suppressed")
             }
             alerts.mute(firstAlert, seconds: 0)
-            finishEvents()
+            guard let kept = events.entries.first(where: { $0.triggerID == person?.triggerID }) ?? person else { return finishEvents() }
+            Task { @MainActor [self] in
+                await eventsImageStep(events, entry: kept)
+                finishEvents()
+            }
         }
     }
 

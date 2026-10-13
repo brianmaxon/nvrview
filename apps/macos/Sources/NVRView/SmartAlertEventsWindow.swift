@@ -36,8 +36,23 @@ final class SmartAlertEventsModel {
     var visibleMethods: Set<String> = []
     /// Camera AI against our detector over the kept pictures.
     private(set) var comparison = EvidenceComparison([])
+    /// Every kept set by trigger (the list's picture icon and its filter).
+    private(set) var evidenceSets: [UInt64: AlertEvidence] = [:]
+    /// The evidence filter "with pictures": only entries whose pictures are
+    /// still kept.
+    var withPictures = false {
+        didSet { if withPictures != oldValue { reload() } }
+    }
     /// What the last action did, in words.
     var note: String?
+    /// The clock (a self-test moves it past an expiry).
+    @ObservationIgnored var now: () -> Date = { Date() }
+    /// Where Open in Preview and drags put temporary files.
+    @ObservationIgnored var tempFolder = SmartAlertEventsModel.defaultTempFolder
+    /// Opens a temporary picture (Preview; the self-test replaces it).
+    @ObservationIgnored var opener: (URL) -> Void = { SmartAlertEventsModel.openInPreviewApp($0) }
+    /// The large viewer, while it is open.
+    @ObservationIgnored var viewer: EvidenceViewerWindowController?
     /// Opens the recordings window at a camera and time (set by the app
     /// delegate).
     @ObservationIgnored var jump: (CameraRef, Int64) -> Void = { _, _ in }
@@ -59,6 +74,7 @@ final class SmartAlertEventsModel {
     }
 
     func close() {
+        viewer?.close()
         if let token { app.alertsModel.unsubscribeEvents(token) }
         token = nil
     }
@@ -93,17 +109,46 @@ final class SmartAlertEventsModel {
             return
         }
         unavailable = false
-        entries = page.entries.filter(filter.matches)
+        let kept = app.alertsModel.evidenceList()?.sets ?? []
+        evidenceSets = Dictionary(kept.map { ($0.triggerID, $0) }, uniquingKeysWith: { first, _ in first })
+        entries = page.entries.filter(filter.matches).filter(passesPictures)
         more = page.more
         if let s = selection, !entries.contains(where: { $0.id == s }) { selection = nil }
         loadSnapshot()
-        comparison = EvidenceComparison(app.alertsModel.evidenceList()?.sets ?? [])
+        comparison = EvidenceComparison(kept)
+    }
+
+    /// The row's picture icon: nil when no frames are kept (or they expired).
+    func badge(_ e: SmartAlertLogEntry) -> EvidenceBadge.Info? {
+        evidenceSets[e.triggerID].flatMap { EvidenceBadge.info($0, nowMs: Int64(now().timeIntervalSince1970 * 1000)) }
+    }
+
+    private func passesPictures(_ e: SmartAlertLogEntry) -> Bool { !withPictures || badge(e) != nil }
+
+    /// Steps the shown frame (the large viewer's arrow keys).
+    func stepFrame(by delta: Int) {
+        guard let evidence else { return }
+        frame = EvidenceFrameStep.step(from: frame, by: delta, in: evidence.frames.map(\.index))
+    }
+
+    /// Opens the large viewer on the shown frame.
+    func openViewer() {
+        guard subject != nil else { return }
+        if let viewer {
+            viewer.showWindow(nil)
+            viewer.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        let c = EvidenceViewerWindowController(events: self)
+        c.onClose = { [weak self] in self?.viewer = nil }
+        viewer = c
+        c.showWindow(nil)
     }
 
     /// The next page (older entries).
     func loadMore() {
         guard more, let last = entries.last, let page = app.alertsModel.log(filter, beforeMs: last.decidedMs) else { return }
-        entries += page.entries.filter(filter.matches).filter { e in !entries.contains { $0.id == e.id } }
+        entries += page.entries.filter(filter.matches).filter(passesPictures).filter { e in !entries.contains { $0.id == e.id } }
         more = page.more
     }
 
@@ -146,7 +191,8 @@ final class SmartAlertEventsModel {
     func keepEvidence() {
         guard let e = selected else { return }
         note = app.alertsModel.pinEvidence(trigger: e.triggerID) ? "Kept for 7 days." : "The pictures are gone."
-        loadEvidence()
+        // The list's icon follows (kept, not expiring).
+        reload()
     }
 
     /// Opens the sensor's message log (the messages around the decision).
@@ -224,15 +270,18 @@ struct SmartAlertEventsView: View {
     @Bindable var events: SmartAlertEventsModel
 
     var body: some View {
-        HSplitView {
+        // The divider positions are remembered (UserDefaults).
+        PersistentSplit(
+            vertical: false, key: "eventsListFraction", defaultFraction: 0.58, minFirst: 440, minSecond: 280
+        ) {
             VStack(spacing: 0) {
                 filters.padding(8)
                 Divider()
                 list
                 comparisonSummary
             }
-            .frame(minWidth: 440)
-            detail.frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
+        } second: {
+            detail.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -268,6 +317,9 @@ struct SmartAlertEventsView: View {
                 ForEach(SmartAlertLogFilter.decisionKinds, id: \.self) { d in
                     Toggle(Self.decisionTitle(d), isOn: member(\.decisions, d)).toggleStyle(.button)
                 }
+                Divider().frame(height: 16)
+                Toggle("With pictures", isOn: $events.withPictures).toggleStyle(.button)
+                    .help("Only decisions whose kept pictures are still there.")
                 Divider().frame(height: 16)
                 Menu(events.filter.classes.isEmpty ? "Any class" : events.filter.classes.sorted().joined(separator: ", ")) {
                     ForEach(AlertClass.allCases.map(\.rawValue) + ["sensor"], id: \.self) { c in
@@ -345,6 +397,13 @@ struct SmartAlertEventsView: View {
             Text(e.className ?? "—").frame(width: 60, alignment: .leading)
             Text(Self.decisionLabel(e)).foregroundStyle(e.decision == "alert" ? .primary : .secondary).frame(width: 120, alignment: .leading)
             Text(e.firstSentence).lineLimit(1).foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if let badge = events.badge(e) {
+                Image(systemName: badge.pinned ? "photo.badge.checkmark" : "photo")
+                    .foregroundStyle(.secondary)
+                    .help(badge.tooltip)
+                    .accessibilityLabel(badge.tooltip)
+            }
         }
         .font(.callout)
     }
@@ -370,6 +429,27 @@ struct SmartAlertEventsView: View {
     @ViewBuilder
     private var detail: some View {
         if let e = events.selected {
+            if let ev = events.evidence {
+                // The picture above, the text (scores and steps) below; the
+                // divider is remembered.
+                PersistentSplit(
+                    vertical: true, key: "eventsDetailFraction", defaultFraction: 0.5, minFirst: 180, minSecond: 140
+                ) {
+                    EvidenceView(events: events, evidence: ev).padding(8)
+                } second: {
+                    detailText(e)
+                }
+            } else {
+                detailText(e)
+            }
+        } else {
+            Text("Choose a decision to see its steps.").foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func detailText(_ e: SmartAlertLogEntry) -> some View {
+        Group {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("\(Self.decisionLabel(e)) · \(events.place(e)) · \(Self.time(e.decidedMs))").font(.headline)
@@ -421,7 +501,15 @@ struct SmartAlertEventsView: View {
                     }
                     if let ev = events.evidence {
                         Divider()
-                        EvidenceView(events: events, evidence: ev)
+                        Text("Scores").font(.subheadline.bold())
+                        ForEach(Array(ev.methods.enumerated()), id: \.element.name) { i, m in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Image(systemName: EvidenceView.symbols[i % EvidenceView.symbols.count])
+                                    .foregroundStyle(EvidenceView.colors[i % EvidenceView.colors.count])
+                                Text(m.title).font(.callout.bold())
+                                Text(EvidenceView.summary(m, evidence: ev)).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     Divider()
                     Text("Steps").font(.subheadline.bold())
@@ -430,9 +518,6 @@ struct SmartAlertEventsView: View {
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-        } else {
-            Text("Choose a decision to see its steps.").foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }
@@ -464,8 +549,17 @@ struct EvidenceView: View {
                 }
             }
             if let image = events.evidenceImages[events.frame] {
+                // Scales to the space, aspect kept; click to enlarge, drag
+                // out for a file, right-click for the rest.
                 EvidenceOverlayView(image: image, evidence: evidence, frame: events.frame, visible: events.visibleMethods)
-                    .frame(maxWidth: .infinity).frame(height: 240)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .onTapGesture { events.openViewer() }
+                    .onDrag { events.dragProvider() ?? NSItemProvider() }
+                    .contextMenu { EvidencePictureMenu(events: events) }
+                    .help("Click to enlarge. Drag to Finder or another app for a file.")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Opens the picture in a large viewer")
             } else {
                 Text("This picture is gone.").foregroundStyle(.secondary)
             }
@@ -475,19 +569,7 @@ struct EvidenceView: View {
                 }
                 .pickerStyle(.segmented).labelsHidden()
             }
-            ForEach(Array(evidence.methods.enumerated()), id: \.element.name) { i, m in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Toggle(isOn: Binding(get: { events.visibleMethods.contains(m.name) }, set: { _ in events.toggleMethod(m.name) })) {
-                        HStack(spacing: 4) {
-                            Image(systemName: Self.symbols[i % Self.symbols.count])
-                                .foregroundStyle(Self.colors[i % Self.colors.count])
-                            Text(m.title)
-                        }
-                    }
-                    .toggleStyle(.checkbox)
-                    Text(Self.summary(m, evidence: evidence)).font(.caption).foregroundStyle(.secondary)
-                }
-            }
+            MethodToggles(events: events, evidence: evidence)
         }
     }
 
