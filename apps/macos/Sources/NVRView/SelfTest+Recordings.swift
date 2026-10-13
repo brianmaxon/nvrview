@@ -1349,7 +1349,12 @@ extension SelfTest {
         _ b: RecordingsBrowser, _ rec: RecordingsModel, then next: @escaping @MainActor () -> Void
     ) {
         // parity: playback-pacing
-        func oneCamera() -> Incident? { b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 }) }
+        // Another incident than the one the player holds (paused by the step
+        // before): selecting the selected incident again changes nothing.
+        func oneCamera() -> Incident? {
+            let finished = b.dayIncidents.filter { !$0.growing && $0.cameras.count == 1 }
+            return finished.first { $0.key != b.player.incidentKey } ?? finished.first
+        }
         if let incident = oneCamera() { return recordingsRealPacing(b, incident, then: next) }
         // The mock records days by UTC date: early in the day (or late, west
         // of UTC) today's incidents still grow, and yesterday has finished ones.
@@ -1372,7 +1377,11 @@ extension SelfTest {
                     + "(\(app.recordingsWindows.first?.stage == nil ? "none" : "present"))")
             return next()
         }
-        b.click(incident.key, extend: false)
+        if b.player.incidentKey == incident.key {
+            p.play()
+        } else {
+            b.click(incident.key, extend: false)
+        }
         var recorder: PacingRecorder?
         renderer.onNewPicture = { tile, pts, at in
             if tile == 0 { recorder?.shown(pts, at: at) }
