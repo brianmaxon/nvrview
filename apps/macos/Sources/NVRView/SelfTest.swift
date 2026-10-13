@@ -4711,12 +4711,10 @@ final class SelfTest {
             } else if p.positionMs <= (first ?? 0) + 500 {
                 problems.append("recordings: the real core's playback clock did not move")
             }
-            recordingsRealPacing(b) { [self] in
-                p.pause()
-                when({ p.state == .paused }, timeout: 10) { [self] in
-                    if p.state != .paused { problems.append("recordings: the real core's playback did not pause") }
-                    recordingsRealDownload(b, rec, calls)
-                }
+            p.pause()
+            when({ p.state == .paused }, timeout: 10) { [self] in
+                if p.state != .paused { problems.append("recordings: the real core's playback did not pause") }
+                recordingsRealPacing(b, rec) { [self] in recordingsRealDownload(b, rec, calls) }
             }
         }
     }
@@ -4745,11 +4743,27 @@ final class SelfTest {
     /// What this cannot show on its own is proven on simulated time: the
     /// release pacing in the core's tests (tests/playback.rs, a wrong UTC
     /// offset), the bounds and the old bugs injected in PacingStatsTests.
-    private func recordingsRealPacing(_ b: RecordingsBrowser, then next: @escaping @MainActor () -> Void) {
+    private func recordingsRealPacing(
+        _ b: RecordingsBrowser, _ rec: RecordingsModel, then next: @escaping @MainActor () -> Void
+    ) {
         // parity: playback-pacing
+        func oneCamera() -> Incident? { b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 }) }
+        if let incident = oneCamera() { return recordingsRealPacing(b, incident, then: next) }
+        // The mock records days by UTC date: early in the day (or late, west
+        // of UTC) today's incidents still grow, and yesterday has finished ones.
+        b.previousDay()
+        when({ oneCamera() != nil && !rec.searching.busy }, timeout: 30) { [self] in
+            recordingsRealPacing(b, oneCamera()) { [self] in
+                // Back on the day the other real-core steps work on, listed again.
+                b.nextDay()
+                when({ !b.dayIncidents.isEmpty && !rec.searching.busy }, timeout: 30) { next() }
+            }
+        }
+    }
+
+    private func recordingsRealPacing(_ b: RecordingsBrowser, _ found: Incident?, then next: @escaping @MainActor () -> Void) {
         let p = b.player
-        let oneCamera = b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 })
-        guard let incident = oneCamera, let renderer = app.recordingsWindows.first?.stage?.grid?.renderer else {
+        guard let incident = found, let renderer = app.recordingsWindows.first?.stage?.grid?.renderer else {
             let counts = b.dayIncidents.map { "\($0.cameras.count)\($0.growing ? "+" : "")" }.joined(separator: ",")
             problems.append(
                 "playback pacing: no one-camera incident (cameras per incident: \(counts)) or player stage "
