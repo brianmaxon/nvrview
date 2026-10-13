@@ -923,9 +923,29 @@ no such file and trusts nothing. See "Bundled defaults" in docs/UPDATES.md.
 SSH. Several computers form a pool; a check takes the first free one, so
 parallel checks and merges finish sooner. To add one:
 
-1. On the new machine, run `scripts/setup-windows.ps1` (toolchain and
-   key-only SSH), as for the first one.
-2. On the Mac, add an alias with a key to `~/.ssh/config`:
+1. On the Mac, copy the public key the checks log in with to the clipboard
+   (make one with `ssh-keygen -t ed25519 -f ~/.ssh/<key>` if needed):
+
+   ```sh
+   pbcopy < ~/.ssh/<key>.pub
+   ```
+
+   On the new machine, in an elevated PowerShell (Run as administrator), run
+   `scripts/setup-windows.ps1` with SSH turned on, pasting the key line
+   between the quotes:
+
+   ```powershell
+   Set-ExecutionPolicy -Scope Process Bypass
+   .\setup-windows.ps1 -Optional -EnableSsh -AuthorizedKey "ssh-ed25519 AAAA... name"
+   ```
+
+   It installs the toolchain and the OpenSSH server (key only, local subnet
+   only) and adds the key to
+   `C:\ProgramData\ssh\administrators_authorized_keys`, the one file Windows
+   reads for an administrator's keys (so `ssh-copy-id` does not work here).
+   If the toolchain is already installed, the same command with `-SkipTests`
+   just adds SSH and the key; installed packages are skipped.
+2. On the Mac, add an alias with that key to `~/.ssh/config`:
 
    ```
    Host win-test-2
@@ -933,6 +953,9 @@ parallel checks and merges finish sooner. To add one:
        User <its user>
        IdentityFile ~/.ssh/<key>
    ```
+
+   `ssh win-test-2 ver` should print the Windows version without asking for
+   a password.
 
 3. Name every alias in `NVRVIEW_WINDOWS_HOSTS`, for example in the shell
    profile: `export NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"`.
