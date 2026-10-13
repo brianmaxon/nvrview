@@ -511,6 +511,12 @@ public final class FakeCore: CoreAPI {
 
     public func tileSetTier(_ tile: UInt64, tier: StreamTier) throws(CoreStatus) {
         requireOutsideCallback("nv_tile_set_tier")
+        // A playback tile restarts its camera's play in the new tier at the
+        // playback's position (no `tile_tier` event; the status reports it).
+        if world.withLock({ $0.playbackTiles.contains(tile) }) {
+            try setPlaybackTier(tile: tile, tier: tier)
+            return
+        }
         guard let t = world.withLock({ $0.tiles[tile] }) else { throw .unknownID }
         for json in t.setTier(tier) { emitEvent(json) }
     }

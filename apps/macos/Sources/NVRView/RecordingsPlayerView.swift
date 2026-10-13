@@ -177,6 +177,9 @@ struct PlayerCellOverlay: View {
                     if let mode = Self.viewName(player, camera) {
                         Text(mode).font(.caption2).foregroundStyle(.white.opacity(0.8))
                     }
+                    if hovering || player.streams.quality(camera) != .auto {
+                        Text(player.streams.label(camera)).font(.caption2).foregroundStyle(.white.opacity(0.8))
+                    }
                     if let state = Self.stateText(cell) {
                         Text(state).font(.caption2).foregroundStyle(.white.opacity(0.8))
                     }
@@ -1152,6 +1155,16 @@ struct PlayerHeaderButton: View {
 
     var body: some View {
         switch item {
+        case .quality:
+            Menu {
+                PlayerQualityMenu(player: player, index: index)
+            } label: {
+                Image(systemName: Self.symbol(.quality))
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .frame(width: 26, height: 22)
+            .help("Quality")
+            .accessibilityLabel("Quality")
         case .fisheye:
             Menu {
                 PlayerFisheyeMenu(player: player, index: index)
@@ -1188,7 +1201,28 @@ struct PlayerHeaderButton: View {
         switch item {
         case .savePicture: "camera"
         case .resetZoom: "1.magnifyingglass"
+        case .quality: "slider.horizontal.3"
         default: "questionmark"
+        }
+    }
+}
+
+/// The Quality menu of a player cell: Auto, High (main stream), Low
+/// (sub-stream), as the live tiles' Quality menu.
+struct PlayerQualityMenu: View {
+    let player: RecordingsPlayer
+    let index: Int
+
+    var body: some View {
+        if player.cells.indices.contains(index) {
+            let camera = player.cells[index].camera
+            let current = player.streams.quality(camera)
+            ForEach(PlayerQuality.allCases, id: \.rawValue) { q in
+                Toggle(q.title, isOn: Binding(get: { q == current }, set: { _ in player.setQuality(q, for: camera) }))
+                    .help(q.detail)
+            }
+            Divider()
+            Text("Playing the " + player.streams.label(camera))
         }
     }
 }
@@ -1225,6 +1259,8 @@ struct PlayerTileMenu: View {
     var body: some View {
         ForEach(entries, id: \.item.rawValue) { entry in
             switch entry.item {
+            case .quality:
+                Menu(entry.label) { PlayerQualityMenu(player: player, index: index) }
             case .fisheye:
                 Menu(entry.label) { PlayerFisheyeMenu(player: player, index: index) }
             case .fillTile:

@@ -89,9 +89,9 @@ public struct TileHeaderTile: Equatable, Sendable {
     public var conversation = false
     public var call = TileHeaderCall.noCall
     /// A recording player's tile (docs/UX.md "Recordings"): only what applies
-    /// to a picture is offered (Save Picture, Reset Zoom, Fisheye View, Fill
-    /// Tile, Reset Position, the Save items); no Record, Speaker, Quality,
-    /// talk-back, PTZ or call items.
+    /// to a picture or its stream is offered (Save Picture, Reset Zoom,
+    /// Quality (Auto, High, Low), Fisheye View, Fill Tile, Reset Position,
+    /// the Save items); no Record, Speaker, talk-back, PTZ or call items.
     public var playback = false
 
     public init(
@@ -209,7 +209,7 @@ public struct TileHeaderLayout: Equatable, Sendable {
 
     /// What a recording player's tile offers: the picture's own actions.
     public static let playbackItems: Set<TileHeaderItem> = [
-        .savePicture, .resetZoom, .resetPosition, .fisheye, .fillTile, .savePictureAs, .saveZoomedArea,
+        .savePicture, .resetZoom, .resetPosition, .quality, .fisheye, .fillTile, .savePictureAs, .saveZoomedArea,
         .saveOriginalFisheye,
     ]
 

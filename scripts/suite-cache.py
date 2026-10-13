@@ -262,7 +262,7 @@ MAC_OWNED = {
     "calls": [_N + "SelfTest+Calls.swift", _N + "CallServices.swift", _N + "CallWindow.swift", _N + "DoorbellCalls.swift",
               _N + "TranscriptStore.swift", _C + "CaptionEcho.swift", _C + "CallTranscriptFile.swift",
               _C + "EchoCancellation.swift", _C + "TalkAudioConverter.swift"],
-    "recordings": [_N + "SelfTest+Recordings.swift", _N + "SelfTest+PlayerZoom.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
+    "recordings": [_N + "SelfTest+Recordings.swift", _N + "SelfTest+PlayerZoom.swift", _N + "SelfTest+PlayerQuality.swift", _C + "PlayerQuality.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
                    _N + "PlayerStage.swift", _N + "RecordingsBrowser.swift", _N + "RecordingsExport.swift",
                    _N + "RecordingsModel.swift", _N + "RecordingsPlayer.swift", _N + "RecordingsPlayer+Pictures.swift",
                    _N + "RecordingsPlayerView.swift", _C + "PlayerTileViews.swift",

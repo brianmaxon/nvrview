@@ -186,6 +186,13 @@ public final class CoreBridge: Sendable {
         }
     }
 
+    /// `nv_tile_set_tier` on a playback tile (FFI-RECORDINGS.md section 6): the
+    /// camera's play restarts at the playback's position in the new tier, as a
+    /// new generation; there is no `tile_tier` event to follow.
+    public func setPlaybackTileTier(_ tile: CoreTile, _ tier: StreamTier) throws(CoreStatus) {
+        try live().tileSetTier(tile.id, tier: tier)
+    }
+
     /// Minor 3 `nv_tile_retry`: the Retry button. The core restarts the
     /// tile's stream now, or connects now when its device is waiting to; it
     /// ignores a second ask within 2 s and does nothing for a refused login.
