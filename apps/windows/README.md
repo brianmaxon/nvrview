@@ -1042,15 +1042,24 @@ its own worker folders (about 5 GB each).
 scripts/csharp-check.sh
 ```
 
-Builds `libnvrview.so`, mock-nvr, and the layout helper in the Rust image
-(sharing the `nvrview-linux-*` volumes of `scripts/linux-check.sh`), then
-builds and runs the smoke test in `mcr.microsoft.com/dotnet/sdk` (sources
-mounted read-only; output in the `nvrview-csharp-*` volumes). About 10 s when
-warm. `scripts/check.sh` runs it when Docker is up (`NVRVIEW_CSHARP_TESTS=0`
-skips it); `scripts/clean-docker.sh` removes the volumes.
+`scripts/csharp-check.sh [smoke] [shell] [tiles]` (default: all three).
+For the smoke test it builds `libnvrview.so`, mock-nvr, and the layout helper in
+the Rust image (sharing the `nvrview-linux-*` volumes of
+`scripts/linux-check.sh`). One container of `mcr.microsoft.com/dotnet/sdk`
+(sources mounted read-only; packages in the `nvrview-csharp-nuget` volume) then
+restores and builds the wanted projects once and runs their test programs at
+the same time. The smoke test is the bindings against the Linux library (structure
+layout and calling details); `shell` is `NvrView.Shell.Tests`; `tiles` is
+`NvrView.Tiles.Tests` (simulated time: a manual clock, nothing sleeps).
 
-The tile features' tests (`apps/windows/NvrView.Tiles.Tests`, simulated time:
-a manual clock, nothing sleeps) run in the same container.
+`scripts/check.sh` runs it when Docker is up (`NVRVIEW_CSHARP_TESTS=0` skips
+it), as three cached suites (`csharp-docker-smoke`, `-shell`, `-tiles`): a Rust
+or bindings change reruns the smoke test only, a shell or tile change reruns
+those tests only. At most `NVRVIEW_DOCKER_SLOTS` (default 2) heavy Docker steps
+run at a time across all worktrees (`scripts/docker-slot.sh`), each container
+has a memory cap (`NVRVIEW_DOCKER_MEMORY`, default 3g), and Docker's "no space
+left on device" prints a message to restart Docker Desktop.
+`scripts/clean-docker.sh` removes the volumes.
 
 ### On Windows
 

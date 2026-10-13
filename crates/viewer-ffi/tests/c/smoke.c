@@ -52,6 +52,18 @@ static void sleep_ms(long ms) {
     nanosleep(&ts, NULL);
 }
 
+/* NVRVIEW_SMOKE_TIMING=1 prints the time each part took (stderr). */
+static void phase(const char *name) {
+    static struct timespec last;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (getenv("NVRVIEW_SMOKE_TIMING") != NULL && last.tv_sec != 0) {
+        fprintf(stderr, "smoke-timing: %-12s %6ld ms\n", name,
+                (long)((now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000));
+    }
+    last = now;
+}
+
 static void problem(const char *what) {
     fprintf(stderr, "smoke: %s\n", what);
     atomic_fetch_add(&g_problems, 1);
@@ -1240,9 +1252,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    phase("start");
     for (int i = 0; i < 1000 && atomic_load(&g_answered) < 50; i++) {
         sleep_ms(10);
     }
+    phase("first-frames");
     unsigned long decoded = atomic_load(&g_answered);
 
     /* Focus: the main stream starts as generation 1; generation 0 ends with
@@ -1253,6 +1267,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 1000 && atomic_load(&g_gen_answered[1]) < 20; i++) {
         sleep_ms(10);
     }
+    phase("tier-switch");
     if (nv_tile_retry(core, tile + 100) != NV_ERR_UNKNOWN_ID) {
         problem("nv_tile_retry accepted an unknown tile");
     }
@@ -1338,14 +1353,19 @@ int main(int argc, char **argv) {
             problem("nv_layout_delete");
         }
         recordings(core, key, work);
+        phase("recordings");
         playback(core, key);
+        phase("playback");
         capture(core, tile, work);
+        phase("capture");
         alerts(core, device);
+        phase("alerts");
     }
 
     if (nv_tile_close(core, tile) != NV_OK) {
         problem("nv_tile_close failed");
     }
+    phase("ptz-etc");
     unsigned long actions_at_close = atomic_load(&g_decodes) + atomic_load(&g_configures);
     sleep_ms(200);
     if (atomic_load(&g_decodes) + atomic_load(&g_configures) != actions_at_close) {
@@ -1403,6 +1423,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    phase("close-etc");
     nv_core_free(core);
     unsigned long after_free = atomic_load(&g_callbacks);
     sleep_ms(200);
@@ -1410,6 +1431,7 @@ int main(int argc, char **argv) {
         problem("callback after nv_core_free returned");
     }
     nv_core_free(NULL);
+    phase("free");
 
     printf("smoke: configures=%lu decodes=%lu answered=%lu events=%lu tile_closed=%lu "
            "renders=%lu audible_renders=%lu tap_blocks=%lu recordings_changed=%lu "

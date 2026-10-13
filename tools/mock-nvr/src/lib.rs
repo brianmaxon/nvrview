@@ -139,6 +139,11 @@ pub struct Config {
     /// devices were seen to bunch pictures on the network (the mock's
     /// model of that; for tests of live pacing).
     pub video_burst: u32,
+    /// Live video and audio go out this many times faster than real time,
+    /// with their picture times unchanged (1.0: real time). A test that waits
+    /// on media time (a recording's length, a count of pictures) finishes
+    /// sooner; the stream is a fast-forwarded one, not a different one.
+    pub live_speed: f64,
     /// Width advertised in the info record and stream info.
     pub width: u32,
     /// Height advertised in the info record and stream info.
@@ -299,6 +304,7 @@ impl Config {
             max_failed_logins: 3,
             fps: 25,
             video_burst: 1,
+            live_speed: 1.0,
             width: 320,
             height: 240,
             fixture: Arc::new(fixture),
@@ -1705,8 +1711,14 @@ async fn stream_media(
             }
             _ => send_us,
         };
-        let at =
-            start + Duration::from_micros(send_us as u64) + Duration::from_micros(jitter.next_us());
+        let speed = if cfg.live_speed.is_finite() && cfg.live_speed > 0.0 {
+            cfg.live_speed
+        } else {
+            1.0
+        };
+        let at = start
+            + Duration::from_micros((send_us / speed) as u64)
+            + Duration::from_micros(jitter.next_us());
         due = due.max(at);
         sleep_until(due).await;
     }

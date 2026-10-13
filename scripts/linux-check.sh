@@ -11,6 +11,9 @@
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 . scripts/docker-rust-image.sh
+. scripts/docker-slot.sh
+trap docker_slot_release EXIT INT TERM
+docker_slot_acquire
 
 if [ "${NVRVIEW_LINUX_CACHE:-1}" = "0" ]; then
   cargo_vol=/usr/local/cargo/registry
@@ -21,7 +24,7 @@ else
 fi
 
 # shellcheck disable=SC2086 # $rust_env is a list of -e options
-docker run --rm \
+docker_run --rm --memory "${NVRVIEW_DOCKER_MEMORY:-6g}" --memory-swap "${NVRVIEW_DOCKER_MEMORY:-6g}" \
   -v "$PWD":/src \
   -v /src/target \
   -v "$cargo_vol" \
