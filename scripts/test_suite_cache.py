@@ -216,6 +216,42 @@ check("a retried pass is recorded as retried", os.path.exists(os.path.join(ent, 
       and not os.path.exists(os.path.join(ent, rk + ".json")))
 same("...and does not skip the suite", fake_check(), "cached test=none swift=run")
 
+# A retry (NVRVIEW_RETRY_SINCE = start of the first try) takes the passes of
+# the earlier tries of its own sequence, also those recorded as retried, also
+# in a full run, and nothing recorded before that.
+commit_file("apps/macos/App.swift", "// app 6")
+tick(60)
+since = int(os.environ["NVRVIEW_CACHE_NOW"])
+tick(5)
+p1, _ = plan("mac")
+passed(p1, 1, "swift-test")
+sc.finish(p1, ok=False, failed="other")
+tick(5)
+os.environ["NVRVIEW_RETRY_SINCE"] = str(since)
+p2, _ = plan("mac", retried=True)
+check("a retry skips a suite the first try passed", not want(p2, "swift-test"))
+sc.finish(p2, ok=True)
+commit_file("apps/macos/App.swift", "// app 7")
+tick(60)
+since = int(os.environ["NVRVIEW_CACHE_NOW"])
+os.environ["NVRVIEW_RETRY_SINCE"] = str(since)
+tick(5)
+p3, _ = plan("mac", full=True, retried=True)
+check("a retried full run runs a suite with no pass in its sequence", want(p3, "swift-test"))
+passed(p3, 1, "swift-test")
+sc.finish(p3, ok=False, failed="other")
+tick(5)
+p4, _ = plan("mac", full=True, retried=True)
+check("...and skips it once a try of the sequence passed it (retried entry)", not want(p4, "swift-test"))
+sc.finish(p4, ok=True)
+os.environ["NVRVIEW_RETRY_SINCE"] = str(int(os.environ["NVRVIEW_CACHE_NOW"]) + 1)
+tick(5)
+p5, _ = plan("mac", retried=True)
+check("a pass from before the sequence started is not taken", want(p5, "swift-test"))
+sc.finish(p5, ok=True)
+del os.environ["NVRVIEW_RETRY_SINCE"]
+fake_check()  # a clean run records the plain pass again
+
 # Uncommitted changes to a suite's inputs: it runs and is never recorded;
 # staged changes count as content.
 with open("crates/d/src/lib.rs", "a") as f:

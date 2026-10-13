@@ -579,13 +579,23 @@ def plan(platform, full=False, retried=False, tools_file=None):
 
 def cached_entry(base, run, suite):
     """The cached clean pass that lets SUITE be skipped, or None."""
-    if run["full"]:
+    # A retry after a known flake (NVRVIEW_RETRY_SINCE = when the first try
+    # started) takes the passes of the earlier tries of that same sequence,
+    # also in a full run and also those recorded as retried, and nothing older.
+    since = int(os.environ.get("NVRVIEW_RETRY_SINCE") or 0) if run["retried"] else 0
+    if run["full"] and not since:
         return None
     s = run["suites"].get(suite)
     if not s or s["dirty"]:
         return None
     e = read_json(entry_path(base, run["platform"], suite, s["key"]))
-    if not e or e.get("retried") or now() - e["time"] > hours("NVRVIEW_CACHE_MAX_AGE_H", 72) * 3600:
+    if since:
+        r = read_json(entry_path(base, run["platform"], suite, s["key"], True))
+        if r and r["time"] >= since and (not e or r["time"] > e["time"]):
+            e = r
+        if e and e["time"] < since and run["full"]:
+            return None
+    if not e or (e.get("retried") and not since) or now() - e["time"] > hours("NVRVIEW_CACHE_MAX_AGE_H", 72) * 3600:
         return None
     return e
 

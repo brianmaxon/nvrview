@@ -109,13 +109,22 @@ windows_reuse_decision() {
 
 # Whether the output of a failed Windows check looks like a known
 # environmental flake: the video self-test falling back to a software H.264
-# decoder, or the real-microphone step. Reads the log file.
+# decoder, the real-microphone step, or the playback pacing step's jitter
+# bound. Reads the log file.
 windows_flake() { # LOGFILE
   last=$(grep '^== ' "$1" | tail -n 1)
   case "$last" in *"video self-test"*) return 0 ;; esac
   grep -qiE 'microphone|mic-test|mic test' "$1" && return 0
+  grep -q 'playback pacing: shown pictures are uneven' "$1" && return 0
   grep -qiE 'software' "$1" && grep -qiE 'h\.?264' "$1" && return 0
   return 1
+}
+
+# Names a failed check: the suite or area that was running (the last "== "
+# step header) and the failing step's lines, one "NAME check: ..." line each.
+#   failure_note NAME LOG
+failure_note() {
+  python3 -I scripts/flakes.py explain "$2" | sed "s/^/$1 check: /"
 }
 
 # The Windows test computers: NVRVIEW_WINDOWS_HOSTS (space-separated ssh
@@ -163,7 +172,11 @@ windows_unlock_any() {
 # The commands run through `sh -c` in the current directory, which must be a
 # clean committed tree. The Windows half takes the Windows lock for its run
 # and retries up to 3 times after a known environmental flake (a retry runs
-# with NVRVIEW_RETRIED=1). Leaves LOGDIR/mac.log, windows.log, windows.msgs
+# with NVRVIEW_RETRIED=1, and NVRVIEW_RETRY_SINCE=<start of the first try> so
+# that the suites the earlier tries passed come from the test result cache and
+# only the rest runs again). Every failure is named in the .msgs file (which
+# suite or area, which step), and each flake is appended to flakes.jsonl
+# (scripts/flakes.py). Leaves LOGDIR/mac.log, windows.log, mac.msgs, windows.msgs
 # and sets mac_rc, win_rc (0 when skipped), mac_secs, win_secs. The caller
 # decides what a failure means; a lock that cannot be taken counts as one.
 parallel_checks() {
@@ -172,10 +185,12 @@ parallel_checks() {
   : >"$pc_logs/mac.log"
   : >"$pc_logs/windows.log"
   : >"$pc_logs/windows.msgs"
+  : >"$pc_logs/mac.msgs"
   (
     t0=$(date +%s)
     rc=0
     sh -c "$pc_mac" >"$pc_logs/mac.log" 2>&1 || rc=$?
+    if [ "$rc" != 0 ]; then failure_note "Mac" "$pc_logs/mac.log" >"$pc_logs/mac.msgs"; fi
     echo "$rc $(($(date +%s) - t0))" >"$pc_logs/mac.rc"
   ) &
   pc_mac_pid=$!
@@ -186,14 +201,19 @@ parallel_checks() {
       rc=0
       if windows_lock 2>>"$pc_logs/windows.msgs"; then
         try=1
+        since=$(date +%s)
         while :; do
           retried=""
           if [ "$try" -gt 1 ]; then retried=1; fi
           echo "== Windows check (try $try of 3)" >>"$pc_logs/windows.msgs"
           rc=0
-          NVRVIEW_RETRIED=$retried sh -c "$pc_win" >"$pc_logs/windows.log" 2>&1 || rc=$?
+          NVRVIEW_RETRIED=$retried NVRVIEW_RETRY_SINCE=$since sh -c "$pc_win" >"$pc_logs/windows.log" 2>&1 || rc=$?
+          if [ "$rc" != 0 ]; then
+            failure_note "Windows" "$pc_logs/windows.log" >>"$pc_logs/windows.msgs"
+          fi
           if [ "$rc" != 0 ] && [ "$try" -lt 3 ] && windows_flake "$pc_logs/windows.log"; then
-            echo "looks like a known environmental flake; trying again" >>"$pc_logs/windows.msgs"
+            python3 -I scripts/flakes.py record --platform windows --tree "$(git rev-parse 'HEAD^{tree}')" "$pc_logs/windows.log" || true
+            echo "looks like a known environmental flake; trying again (only the suites and areas that did not pass run again; the others come from the test result cache)" >>"$pc_logs/windows.msgs"
             try=$((try + 1))
             continue
           fi
