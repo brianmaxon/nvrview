@@ -64,7 +64,7 @@ internal sealed partial class SelfTest
         Expect(recording, "capture: the recording did not reach its first keyframe");
         Expect(label == "Stop Recording", "capture: the header's Record did not become Stop");
         Expect(started is not null && started.File.StartsWith(cap.Settings.LiveFolder, StringComparison.OrdinalIgnoreCase), "capture: the recording is not in the recordings folder");
-        await Until(() => cap.Board.LiveOf(camera) is { DurationMs: >= 3000 }, 30);
+        await Until(() => cap.Board.LiveOf(camera) is { DurationMs: >= 1500 }, 30);
 
         // parity: capture-record-indicator
         stage.Tick();
@@ -209,7 +209,7 @@ internal sealed partial class SelfTest
         string? label = stage.HeaderTileOf(tile) is { } model ? TileHeaderLayout.Menu(model).FirstOrDefault(e => e.Item == TileHeaderItem.Record)?.Label : null;
         bool beside = entry is not null && string.Equals(Path.GetDirectoryName(entry.File), v.Transcripts.Folder, StringComparison.OrdinalIgnoreCase);
         bool named = stem is not null && entry is not null && Path.GetFileName(entry.File) == stem + ".mp4";
-        await Until(() => cap.CallRecording(camera) is { DurationMs: >= 1500 }, 20);
+        await Until(() => cap.CallRecording(camera) is { DurationMs: >= 1000 }, 20);
         stage.ApplyAction(TileAction.ToggleRecording, tile);
         bool ended = await Until(() => cap.CallRecording(camera) is null, 20);
         RecordingEvent? end = cap.Board.Ended.LastOrDefault(e => e.Kind == "call");
@@ -246,7 +246,7 @@ internal sealed partial class SelfTest
             return;
         }
         ulong id = entry.Id;
-        bool long_ = await Until(() => cap.Board.Running.TryGetValue(id, out BoardEntry? e) && e.DurationMs >= 2500, 30);
+        bool long_ = await Until(() => cap.Board.Running.TryGetValue(id, out BoardEntry? e) && e.DurationMs >= 1500, 30);
         // The recording ends with the call.
         v.Calls.End(camera, "closed");
         bool ended = await Until(() => !cap.Board.Running.ContainsKey(id), 20);

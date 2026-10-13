@@ -43,6 +43,17 @@
     <DebuggerSupport>false</DebuggerSupport>
     <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2104</WarningsNotAsErrors>
   </PropertyGroup>
+  <!-- The app's own assemblies are roots: every type and member in them is kept, whatever
+       the trim mode, so nothing the app reaches by reflection (the XAML type info, the JSON
+       contexts, COM and WinRT callbacks) can be trimmed away. The trim analyzer runs on
+       every build (Directory.Build.props). -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="NvrView.App" />
+    <TrimmerRootAssembly Include="NvrView.Interop" />
+    <TrimmerRootAssembly Include="NvrView.Video" />
+    <TrimmerRootAssembly Include="NvrView.Tiles" />
+    <TrimmerRootAssembly Include="NvrView.Shell" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../NvrView.Interop/NvrView.Interop.csproj" />
     <ProjectReference Include="../NvrView.Video/NvrView.Video.csproj" />

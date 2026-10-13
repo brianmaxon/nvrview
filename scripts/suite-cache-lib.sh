@@ -44,3 +44,9 @@ cache_pass() { printf 'pass\t%s\t%s\n' "$1" "$2" >>"$log_file"; }
 
 # cache_areas: the Windows app self-test areas, space separated.
 cache_areas() { awk -F '\t' '$1 == "areas" { print $2 }' "$plan_file"; }
+
+# cache_mac_areas: the Mac app self-test areas, space separated.
+cache_mac_areas() { awk -F '\t' '$1 == "macareas" { print $2 }' "$plan_file"; }
+
+# cache_full: prints why the run is full (nothing when it is not).
+cache_full() { awk -F '\t' '$1 == "full" { print $2 }' "$plan_file"; }

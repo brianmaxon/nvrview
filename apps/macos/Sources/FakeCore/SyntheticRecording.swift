@@ -243,21 +243,23 @@ public enum SyntheticRecording {
         else { return nil }
         let yStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
         let cStride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+        // Every row of a part is the same: one row of each is made, then copied
+        // (per-pixel loops in a debug build took seconds per file).
+        let stripRow = (0..<w).map { bit($0) ? UInt8(235) : 16 }
+        let topChroma = (0..<w).map { $0 % 2 == 0 ? color.cb : color.cr }
+        let bottomChroma = [UInt8](repeating: 128, count: w)
         for y in 0..<h {
             let row = yBase + y * yStride
             if y < strip {
                 memset(row, Int32(color.y), w)
             } else {
-                for x in 0..<w { row[x] = bit(x) ? 235 : 16 }
+                stripRow.withUnsafeBufferPointer { row.update(from: $0.baseAddress!, count: w) }
             }
         }
         for y in 0..<(h / 2) {
             let row = cBase + y * cStride
-            let top = y * 2 < strip
-            for x in 0..<(w / 2) {
-                row[x * 2] = top ? color.cb : 128
-                row[x * 2 + 1] = top ? color.cr : 128
-            }
+            let source = y * 2 < strip ? topChroma : bottomChroma
+            source.withUnsafeBufferPointer { row.update(from: $0.baseAddress!, count: w / 2 * 2) }
         }
         return buffer
     }

@@ -136,7 +136,7 @@ step sanitization "sanitization"
 step parity "self-test parity"
 "$py" -I scripts/check-parity.py
 
-step selftest-areas "Windows self-test areas"
+step selftest-areas "self-test areas (Windows and macOS)"
 "$py" -I scripts/check-selftest-areas.py
 
 # The secret scan (scripts/secret-scan.sh): gitleaks over the commits added
@@ -265,9 +265,63 @@ if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
   # Opens a window for a few seconds, behind all other windows and without
   # taking focus, so it needs a desktop session. NVRVIEW_GUI_TESTS=0 skips it.
   if [ "${NVRVIEW_GUI_TESTS:-1}" = "0" ]; then
-    step - "macOS demo self-tests skipped (NVRVIEW_GUI_TESTS=0)"
+    step - "macOS GUI self-tests skipped (NVRVIEW_GUI_TESTS=0)"
     skip "GUI self-tests"
   elif [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
+    # The app's self-test on the fake core, by area (scripts/macos-selftest-areas.txt):
+    # the areas with a cached pass are skipped, the rest run in one start of the app
+    # (startup always runs). Its lines go to a log; a failure prints its problems.
+    mac_areas=""
+    mac_all=1
+    mac_list=$(cache_mac_areas)
+    [ -n "$mac_list" ] || mac_list=$(awk '!/^#/ && NF && !seen[$1]++ { print $1 }' scripts/macos-selftest-areas.txt)
+    for a in $mac_list; do
+      if cache_want "mac-app.$a"; then mac_areas="$mac_areas,$a"; else mac_all=0; fi
+    done
+    mac_areas=${mac_areas#,}
+    if [ -n "$mac_areas" ]; then
+      end_step
+      step - "macOS app self-test, fake core, areas: $([ "$mac_all" = 1 ] && echo all || echo "$mac_areas")"
+      mac_log=$(mktemp)
+      mac_data=$(mktemp -d)
+      mac_rc=0
+      mac_start=$(date +%s)
+      (cd apps/macos && swift build --product NVRView &&
+        .build/debug/NVRView --fake --data-dir "$mac_data" --selftest 60 $([ "$mac_all" = 1 ] || echo "--areas $mac_areas") \
+          ../../fixtures/synthetic/h264-basic.h264 ../../fixtures/synthetic/h265-basic.h265 \
+          ../../fixtures/synthetic/fisheye/h264-fisheye.h264) >"$mac_log" 2>&1 || mac_rc=$?
+      rm -rf "$mac_data"
+      if [ "$mac_rc" != 0 ]; then
+        grep -E '^  |error:' "$mac_log" | tail -n 20 || true
+        tail -n 30 "$mac_log"
+        rm -f "$mac_log"
+        exit "$mac_rc"
+      fi
+      grep -E 'selftest took|^selftest: ' "$mac_log" || true
+      rm -f "$mac_log"
+      for a in $(echo "$mac_areas" | tr "," " "); do
+        cache_pass "$(($(date +%s) - mac_start))" "mac-app.$a"
+      done
+    fi
+    # The real-core self-test (the Rust library against tools/mock-nvr) builds the
+    # release core, so it runs in full runs only (NVRVIEW_FULL_CHECK=1, the release
+    # checks, and the periodic full run).
+    if [ -n "$(cache_full)" ]; then
+      step macos-real-selftest "macOS app self-test, real core against mock-nvr"
+      real_log=$(mktemp)
+      real_rc=0
+      scripts/macos-real-selftest.sh >"$real_log" 2>&1 || real_rc=$?
+      if [ "$real_rc" != 0 ]; then
+        grep -E '^  |error:' "$real_log" | tail -n 20 || true
+        tail -n 30 "$real_log"
+        rm -f "$real_log"
+        exit "$real_rc"
+      fi
+      grep -E 'selftest took|^selftest: ' "$real_log" || true
+      rm -f "$real_log"
+    else
+      step - "macOS real-core self-test deferred (full runs and releases run it)"
+    fi
     if want macos-demo-metal "macOS demo self-test, Metal renderer"; then
       (cd apps/macos && swift build --product NVRViewDemo &&
         .build/debug/NVRViewDemo --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)

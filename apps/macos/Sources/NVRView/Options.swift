@@ -8,7 +8,8 @@ import NVRCore
 ///     NVRView [--keychain-service nvrview]
 ///     NVRView --host H [--port 9000] --user U        (adds one device for this run)
 ///     NVRView --fake file.h264|file.h265 ...         (two made-up NVRs playing the files)
-///     any form: [--selftest SECONDS]   (window opens behind all others, no focus)
+///     any form: [--selftest SECONDS [--areas a,b]]   (window opens behind all others, no focus;
+///                                                    --areas runs only those self-test areas and startup)
 struct Options {
     var host: String?
     var port: UInt16 = 9000
@@ -17,12 +18,15 @@ struct Options {
     var fake = false
     var files: [URL] = []
     var selfTestSeconds: Double?
+    /// The self-test areas to run (scripts/macos-selftest-areas.txt; startup
+    /// always runs); nil runs them all.
+    var areas: Set<String>?
     /// Where devices, groups and the core's store live (default: the app's
     /// Application Support folder); for development and self-tests.
     var dataDirectory: URL?
 
     static let usage = """
-        usage: NVRView [--keychain-service NAME] [--data-dir DIR] [--selftest SECONDS]
+        usage: NVRView [--keychain-service NAME] [--data-dir DIR] [--selftest SECONDS [--areas A,B]]
                NVRView --host HOST [--port N] --user USER [--data-dir DIR] [--selftest SECONDS]
                NVRView --fake [--selftest SECONDS] file.h264|file.h265 ...
         Devices are configured in Settings; passwords are kept in the macOS Keychain. With --host, the
@@ -43,6 +47,9 @@ struct Options {
             case "--data-dir": guard let v = it.next(), !v.isEmpty else { return nil }; o.dataDirectory = URL(fileURLWithPath: v)
             case "--fake": o.fake = true
             case "--selftest": guard let v = it.next().flatMap(Double.init), v > 0 else { return nil }; o.selfTestSeconds = v
+            case "--areas":
+                guard let v = it.next(), !v.isEmpty else { return nil }
+                o.areas = Set(v.split(separator: ",").map(String.init))
             default:
                 if a.hasPrefix("--") { return nil }
                 o.files.append(URL(fileURLWithPath: a))

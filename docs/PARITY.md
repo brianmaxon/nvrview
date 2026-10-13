@@ -161,7 +161,7 @@ the Credential Manager store only.
 
 | Feature | macOS | Windows | Notes |
 | --- | --- | --- | --- |
-| Recordings window (Window > Recordings, ⌥⌘R; Windows: Ctrl+Alt+R or Recordings in the header's "…" menu) | yes | yes | UX.md "Recordings"; Windows is W1/W2 (MILESTONE-P.md). The macOS self-test runs it on the fake core and, with `scripts/macos-real-selftest.sh`, on the real core against the mock (`recordings-real-core`); the Windows self-test runs the same window class on the Windows fakes (`FakeRecordings`, `FakePlayback`), the model and rules also in the shell unit tests with the macOS vectors. Not on Windows yet: the real-core steps, cover thumbnails (below), and the edits and groups steps (the fake does not model them).
+| Recordings window (Window > Recordings, ⌥⌘R; Windows: Ctrl+Alt+R or Recordings in the header's "…" menu) | yes | yes | UX.md "Recordings"; Windows is W1/W2 (MILESTONE-P.md). The macOS self-test runs it on the fake core and, with `scripts/macos-real-selftest.sh` (part of full and release checks), on the real core against the mock (`recordings-real-core`); the Windows self-test runs the same window class on the Windows fakes (`FakeRecordings`, `FakePlayback`), the model and rules also in the shell unit tests with the macOS vectors. Not on Windows yet: the real-core steps, cover thumbnails (below), and the edits and groups steps (the fake does not model them).
 | Cameras to search, per device and per camera, kept between launches | yes | yes | ID `recordings-enable`. |
 | Days asked for as shown; today held per window while shown, released on another day or close | yes | yes | IDs `recordings-hold-today`, `recordings-navigate-day`, `recordings-window-close`. |
 | Calendar of days with recordings; refresh; a failed day marked | yes | yes | ID `recordings-calendar-lanes`. The failed-day mark is not in the self-test. |
@@ -205,7 +205,7 @@ the Credential Manager store only.
 | Hardware decoding, GPU rendering | yes | yes | VideoToolbox and Metal; Media Foundation and D3D11. |
 | Message when the OS lacks an HEVC decoder | n/a (built in) | yes | Windows needs the HEVC Video Extension. |
 | Recorded-video playback in the Recordings window (up to four cameras on one clock, grid with large and single views, transport with skip, speeds 0.25× to 16×, mute and volume, scrubber with the incident's events) | yes | yes | Milestone P, M2 (macOS) and W2; [PLAYBACK.md](PLAYBACK.md) is the design, docs/UX.md "Recordings" the screen. IDs `playback-open`, `playback-transport`, `playback-grid`, `playback-scrub`, `playback-close`, and `playback-real-core` (real core against the mock). Stepping and per-camera offsets are not built. Windows draws the playback with the window's own D3D11 renderer; its pictures are not yet checked in the self-test (the fake makes none; `playback-real-core` is a gap). |
-| Pacing: live and recorded pictures drawn at their own timestamps (the core paces both; each app shows the newest decoded picture per refresh) | yes | yes | RENDERING.md "Pacing". IDs `live-pacing` (every live tile of the first window, the mock sending pictures in pairs; at least 90% of the delivered pictures drawn) and `playback-pacing` (a one-camera incident at 1x on the real core; at least 90% drawn, shown jitter p95 at most 20 ms, max 34 ms). Both measure real time on purpose. A trace for any run: `NVRVIEW_PACING_TRACE=1` (Windows logs per playback tile, macOS per window of live tiles, every 10 s). |
+| Pacing: live and recorded pictures drawn at their own timestamps (the core paces both; each app shows the newest decoded picture per refresh) | yes | yes | RENDERING.md "Pacing". IDs `live-pacing` (every live tile of the first window, the mock sending pictures in pairs, until each tile has been delivered a count of pictures; at least 90% of the delivered pictures drawn) and `playback-pacing` (a one-camera incident at 1x on the real core, measured by picture counts; the verdict, `PacingVerdict`, is given on a simulated 60 Hz display fed with the real decode times, `PacingRefresh`, so missed refreshes of the real display do not count: shown jitter p95 at most 20 ms, at most one late picture, at least 90% shown, at most 2 never shown; the real display must still draw most released pictures). The bounds, the display model, and the old bugs injected (decode on arrival without the pacer, bursts from a wrong UTC offset) are unit tests with the same vectors on both apps (`PacingStatsTests`, `PacingTests`); the release pacing itself is proven on a simulated clock in the core's tests. A trace for any run: `NVRVIEW_PACING_TRACE=1` (Windows logs per playback tile, macOS per window of live tiles, every 10 s). |
 | Remove from Incident and Split Here at the playhead | yes | yes (built, not in the self-test) | IDs `playback-remove-camera`, `playback-split-here`. |
 | Follow cut and 2-up/4-up grids of a downloaded incident in the player (view menu; files decoded and drawn by the platform renderer, no re-encode; same transport; sound follows the shown camera) | yes | yes | Milestone P, M3 and W3; docs/UX.md "Recordings", "Follow and Grid". IDs `edit-download`, `edit-follow-cut`, `edit-grid`, `edit-back-to-cameras` on both (fake store, synthetic files; Metal and VideoToolbox on macOS, D3D11 and Media Foundation on Windows). Windows differences: sound through `MediaPlayer`, Space needs a click on the player first. |
 
@@ -221,8 +221,11 @@ What the table shows that is not just a platform difference:
 ## The self-test comparison
 
 Both apps have a `--selftest` built from numbered steps
-(`apps/macos/Sources/NVRView/SelfTest.swift`,
-`apps/windows/NvrView.App/SelfTest.cs` and `SelfTest.Capture.cs`). Each step carries a stable ID in a
+(`apps/macos/Sources/NVRView/SelfTest*.swift`,
+`apps/windows/NvrView.App/SelfTest*.cs`), split into areas that the test result
+cache reruns on their own (`scripts/macos-selftest-areas.txt`,
+`scripts/windows-selftest-areas.txt`; `scripts/check-selftest-areas.py` checks
+both). Each step carries a stable ID in a
 comment directly above its code:
 
 ```text

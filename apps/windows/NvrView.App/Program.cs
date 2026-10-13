@@ -13,7 +13,9 @@
 //                                     opens behind the others without taking
 //                                     focus, writes PASS or FAIL to FILE, exits
 //                                     (--areas a,b: only those areas and the
-//                                     startup smoke; default all)
+//                                     startup smoke; default all; --smoke:
+//                                     startup and one wiring check per area,
+//                                     for the trimmed build, SelfTest.Smoke.cs)
 //   NvrView.App.exe --startup-test SECONDS --log FILE [--data-dir DIR]
 //                                     the plain start (a double-click: devices
 //                                     from Settings, windows restored) on DIR
@@ -89,6 +91,9 @@ internal sealed class AppOptions
     /// <summary>The self-test areas to run (null: all); see SelfTest.AreaNames.</summary>
     public HashSet<string>? Areas { get; private set; }
 
+    /// <summary>The self-test runs the startup area and one wiring check per other area (SelfTest.Smoke.cs).</summary>
+    public bool Smoke { get; private set; }
+
     public bool SelfTest => SelfTestSeconds > 0;
 
     public bool StartupTest => StartupTestSeconds > 0;
@@ -149,6 +154,7 @@ internal sealed class AppOptions
                 case "--software": o.Software = true; break;
                 case "--no-audio": o.NoAudio = true; break;
                 case "--credential-test": o.CredentialTest = true; break;
+                case "--smoke": o.Smoke = true; o.Areas = []; break;
                 case "--areas":
                     o.Areas = [.. Value().Split(',', StringSplitOptions.RemoveEmptyEntries)];
                     if (o.Areas.FirstOrDefault(x => !global::NvrView.App.SelfTest.AreaNames.Contains(x)) is { } unknown)

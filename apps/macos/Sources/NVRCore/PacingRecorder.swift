@@ -18,9 +18,23 @@ public final class PacingRecorder: Sendable {
         public var decoded = 0
         /// Pictures decoded but never drawn (replaced before a frame took them).
         public var skipped = 0
+        /// The decoded pictures on a simulated 60 Hz display (`PacingRefresh`):
+        /// what the verdict is given, free of the real display's missed refreshes.
+        public var simulated = RefreshShown()
+
+        /// The simulated display's pacing.
+        public var simulatedShown: PacingSummary { PacingStats.of(atUs: simulated.atUs, ptsUs: simulated.ptsUs) }
+
+        /// `PacingVerdict` on the simulated display (empty when it passes).
+        public func verdict(minPairs: Int) -> [String] {
+            PacingVerdict.problems(
+                shownAtUs: simulated.atUs, shownPtsUs: simulated.ptsUs, released: released.pictures,
+                skipped: simulated.skipped, refreshMs: Double(PacingRefresh.refresh60HzUs) / 1000, minPairs: minPairs)
+        }
 
         public var description: String {
-            "released: \(released); shown: \(shown); decode p50 \(String(format: "%.1f", decodeP50Ms)) max "
+            "released: \(released); shown: \(shown); simulated 60 Hz: \(simulatedShown), skipped \(simulated.skipped); "
+                + "decode p50 \(String(format: "%.1f", decodeP50Ms)) max "
                 + "\(String(format: "%.1f", decodeMaxMs)) ms; decoded \(decoded), skipped \(skipped)"
         }
     }
@@ -75,6 +89,7 @@ public final class PacingRecorder: Sendable {
         r.decodeMaxMs = decode.last ?? 0
         r.decoded = s.decoded.count
         r.skipped = PacingStats.skipped(decodedPts: s.decoded.map(\.pts), shownPts: s.shown.map(\.pts))
+        r.simulated = PacingRefresh.show(decodedAtUs: s.decoded.map(\.at), ptsUs: s.decoded.map(\.pts))
         return r
     }
 }

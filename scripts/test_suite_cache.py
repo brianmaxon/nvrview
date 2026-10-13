@@ -308,7 +308,7 @@ same("...and the main checkout then reuses the worktree's passes", fake_check(),
 # The Windows app self-test is cached by area: the areas whose inputs changed
 # rerun (with the startup smoke, which takes every change under apps/windows),
 # and a change to shared code reruns them all. The C# suites cover the
-# projects they build; the trimmed build (app-publish.AREA) is deferred except
+# projects they build; the trimmed build's smoke (app-publish) is deferred except
 # for the daily run and full runs.
 for f in ("apps/windows/NvrView.App/SelfTest.cs", "apps/windows/NvrView.App/SelfTest.Recordings.cs",
           "apps/windows/NvrView.App/SelfTest.Ptz.cs", "apps/windows/NvrView.App/RecordingsWindow.cs",
@@ -329,18 +329,22 @@ last_wtable = ""
 
 
 def wcheck(fail_trimmed=False):
-    """The areas to run, "<debug> | <publish> | <update or ->"; all pass."""
+    """The areas to run, "<debug> | <publish or -> | <update or ->"; all pass."""
     global last_wtable
     tick(60)
     wrun, _ = plan("windows")
     out = []
-    for prefix in ("app-debug", "app-publish"):
-        todo = []
-        for a in AREAS:
-            if want(wrun, "%s.%s" % (prefix, a)):
-                todo.append(a)
-                passed(wrun, 1, "%s.%s" % (prefix, a))
-        out.append(",".join(todo) or "-")
+    todo = []
+    for a in AREAS:
+        if want(wrun, "app-debug.%s" % a):
+            todo.append(a)
+            passed(wrun, 1, "app-debug.%s" % a)
+    out.append(",".join(todo) or "-")
+    if want(wrun, "app-publish"):
+        out.append("publish")
+        passed(wrun, 1, "app-publish")
+    else:
+        out.append("-")
     upd = "-"
     if want(wrun, "app-update"):
         upd = "update"
@@ -351,8 +355,8 @@ def wcheck(fail_trimmed=False):
 
 same("the area list is what `areas` prints", AREAS, ["startup", "viewer", "tiles", "layouts", "header", "settings",
                                                        "calls", "recordings", "capture", "ptz"])
-same("app areas: the first run runs every area, debug and publish, and the update test", wcheck(),
-     "%s | %s | update" % (all_areas, all_areas))
+same("app areas: the first run runs every debug area, the trimmed smoke, and the update test", wcheck(),
+     "%s | publish | update" % all_areas)
 same("app areas: unchanged, all cached", wcheck(), "- | - | -")
 with open("apps/windows/NvrView.App/RecordingsWindow.cs", "a") as f:
     f.write("// recordings window 2\n")
@@ -360,10 +364,10 @@ sh("git", "add", "-A")
 sh("git", "commit", "-q", "-m", "recordings window")
 same("app areas: a recordings view file reruns recordings and startup in the debug build only", wcheck(),
      "startup,recordings | - | -")
-check("the table shows the deferred trimmed suites",
-      any(l.startswith("app-publish.recordings") and "deferred" in l for l in last_wtable.splitlines()))
-check("...and counts them like cached ones (the stamp is not a full one)",
-      "cached suites:" in last_wtable and "app-publish.ptz (deferred)" in last_wtable)
+check("the table shows the deferred trimmed suite",
+      any(l.startswith("app-publish") and "deferred" in l for l in last_wtable.splitlines()))
+check("...and counts it like cached ones (the stamp is not a full one)",
+      "cached suites:" in last_wtable and "app-publish (deferred)" in last_wtable)
 commit_file("apps/windows/NvrView.Shell/Recordings.cs", "// shell recordings 2")
 same("app areas: so does a recordings shell file", wcheck(), "startup,recordings | - | -")
 commit_file("apps/windows/NvrView.App/SelfTest.Recordings.cs", "// self-test recordings 2")
@@ -404,23 +408,23 @@ sc.finish(wrun, ok=True)
 same("app areas: a failed area is run again, a passed one is not", again, "ptz")
 
 # The trimmed build runs once a day: 24 hours after the last passing trimmed
-# run the next check runs every publish area (and the update test), whatever
+# run the next check runs its smoke (and the update test), whatever
 # the cache holds; a failed trimmed run does not count; a release (full run)
 # always runs them.
 tick(23 * 3600)
-same("trimmed: 23 hours after the first run the publish areas are still deferred", wcheck(), "ptz | - | -")
+same("trimmed: 23 hours after the first run the trimmed smoke is still deferred", wcheck(), "ptz | - | -")
 tick(2 * 3600)
-same("trimmed: after 24 hours every publish area and the update test are due", wcheck(fail_trimmed=True),
-     "- | %s | update" % all_areas)
+same("trimmed: after 24 hours the trimmed smoke and the update test are due", wcheck(fail_trimmed=True),
+     "- | publish | update")
 check("trimmed: ...the failing update test shows in the table",
       any(l.startswith("app-update") and "FAILED" in l for l in last_wtable.splitlines()))
-same("trimmed: a failed trimmed run does not count: they are due again", wcheck(), "- | %s | update" % all_areas)
+same("trimmed: a failed trimmed run does not count: they are due again", wcheck(), "- | publish | update")
 same("trimmed: after a passing trimmed run they are deferred again", wcheck(), "- | - | -")
 check("trimmed: a passing trimmed run is no full run", sc.full_reason(sc.store(), "windows") is None)
 wrun, _ = plan("windows", full=True)
-n = sum(1 for a in AREAS if want(wrun, "app-publish." + a)) + (1 if want(wrun, "app-update") else 0)
+n = (1 if want(wrun, "app-publish") else 0) + (1 if want(wrun, "app-update") else 0)
 sc.finish(wrun, failed="x")
-same("trimmed: a full run (a release) runs every publish area and the update test", n, 11)
+same("trimmed: a full run (a release) runs the trimmed smoke and the update test", n, 2)
 os.environ["NVRVIEW_TRIMMED_MAX_AGE_H"] = "1000"
 tick(30 * 3600)
 same("trimmed: NVRVIEW_TRIMMED_MAX_AGE_H moves the limit", wcheck(), "- | - | -")
@@ -481,6 +485,55 @@ same("C# suites: the shared build settings rerun every suite", csuites(),
      "csharp-smoke,tiles-tests,video-selftest,shell-tests,app-update")
 commit_file("crates/viewer-ffi/src/lib.rs", "// ffi 2")
 same("C# suites: the core library reruns the ones that load it", csuites(), "csharp-smoke,video-selftest,app-update")
+
+# The Mac app self-test (fake core) is cached by area the same way
+# (mac-app.AREA): the area files and the screens only one area exercises
+# rerun that area and startup; shared code, the main self-test file, and the
+# area table rerun every area; the demo and the unit tests rerun none.
+for f in ("apps/macos/Sources/NVRView/SelfTest.swift", "apps/macos/Sources/NVRView/SelfTest+Recordings.swift",
+          "apps/macos/Sources/NVRView/SelfTest+PTZ.swift", "apps/macos/Sources/NVRView/RecordingsWindow.swift",
+          "apps/macos/Sources/NVRView/StageView.swift", "apps/macos/Sources/NVRCore/PTZ.swift",
+          "apps/macos/Sources/AlertHost/AlertNotifier.swift", "apps/macos/Sources/NVRViewDemo/main.swift",
+          "apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "scripts/macos-selftest-areas.txt"):
+    write(f, "// %s\n" % f)
+sh("git", "add", "-A")
+sh("git", "commit", "-q", "-m", "mac app files")
+MAC_AREAS = sc.MAC_AREAS
+all_mac = ",".join(MAC_AREAS)
+
+
+def mcheck():
+    """The Mac app self-test areas to run; all pass."""
+    tick(60)
+    mrun, _ = plan("mac")
+    todo = [a for a in MAC_AREAS if want(mrun, "mac-app." + a)]
+    for a in todo:
+        passed(mrun, 1, "mac-app." + a)
+    sc.finish(mrun, ok=True)
+    return ",".join(todo) or "-"
+
+
+same("mac areas: the first run runs every area", mcheck(), all_mac)
+same("mac areas: unchanged, all cached", mcheck(), "-")
+commit_file("apps/macos/Sources/NVRView/SelfTest+Recordings.swift", "// recordings steps 2")
+same("mac areas: the recordings steps rerun recordings and startup", mcheck(), "startup,recordings")
+commit_file("apps/macos/Sources/NVRView/RecordingsWindow.swift", "// recordings window 2")
+same("mac areas: so does the recordings window", mcheck(), "startup,recordings")
+commit_file("apps/macos/Sources/NVRCore/PTZ.swift", "// ptz 2")
+same("mac areas: a PTZ file reruns ptz and startup", mcheck(), "startup,ptz")
+commit_file("apps/macos/Sources/AlertHost/AlertNotifier.swift", "// alert host 2")
+same("mac areas: a file of an owned directory reruns its area", mcheck(), "startup,alerts")
+commit_file("apps/macos/Sources/NVRViewDemo/main.swift", "// demo 2")
+commit_file("apps/macos/Tests/NVRCoreTests/PacingStatsTests.swift", "// tests 2")
+same("mac areas: the demo and the unit tests rerun no area", mcheck(), "-")
+commit_file("apps/macos/Sources/NVRView/StageView.swift", "// shared stage 2")
+same("mac areas: a shared app file reruns every area", mcheck(), all_mac)
+commit_file("apps/macos/Sources/NVRView/SelfTest.swift", "// shared self-test 2")
+same("mac areas: the main self-test file reruns every area", mcheck(), all_mac)
+commit_file("scripts/macos-selftest-areas.txt", "# table 2")
+same("mac areas: the area table reruns every area", mcheck(), all_mac)
+check("mac areas: the plan lists them for the shell",
+      "macareas\t%s" % " ".join(MAC_AREAS) in sc.plan_text({"reason": "", "wants": {}, "crate_plans": {}}))
 
 # DOTNET_REFS against the real C# project files.
 here_cwd = os.getcwd()

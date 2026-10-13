@@ -271,9 +271,18 @@ projection, and TerraFX shrink; the app's own assemblies are kept whole), with
 no `.pdb` files and no debugger or crash-dump helpers (`mscordaccore*.dll`,
 `mscordbi.dll`, `createdump.exe`, `Microsoft.DiaSymReader.Native`). That is
 about 34 MB zipped and 85 MB in 318 files, against 101 MB and 266 MB in 613
-files before. The check script's app steps (`NVRVIEW_APP_SELFTEST=1`) run
-the plain start, the self-test, and the update test against this published
-build as well as the debug build, because trimming breaks things silently.
+files before. Trimming breaks things silently, so it is checked twice:
+statically, by the trim analyzer on every build (`EnableTrimAnalyzer` in
+`Directory.Build.props`, warnings are errors), by the app's own assemblies
+being trimmer roots (`TrimmerRootAssembly`: every type and member kept, so
+nothing they reflect on is gone), and by `publish`, which fails when one of
+them lost more than 10% of its compiled size; and at run time, where the
+check script's app steps (`NVRVIEW_APP_SELFTEST=1`, in full runs, releases,
+and the daily trimmed run) run the plain start, a short self-test
+(`--smoke`: the startup area and one wiring check per other area, each going
+through a window, menu, settings file, picture file, or core request of its
+kind; `SelfTest.Smoke.cs`), and the update test on this published build. The
+whole self-test runs on the debug build.
 The largest files left are WinUI itself (`Microsoft.ui.xaml.dll`, 15 MB),
 `nvrview.dll` (10.6 MB), `Microsoft.UI.Xaml.Controls.dll`, and `coreclr.dll`.
 ReadyToRun is off: it makes the files larger, and startup is not slow enough
@@ -468,6 +477,21 @@ that is refused once, then streams):
     usually has no microphone that hears anything;
 17. with `--credential-test`, a throwaway credential is written, read back,
     and deleted in Credential Manager.
+
+No step waits a fixed time: timed behavior (the Retry delay, the chrome's
+auto-hide, the edge reveals, the call minute, PTZ renewals, eased zooms)
+runs on a manual viewer clock (`Viewer.UseClock`) that the step advances,
+and everything else waits for a condition or a frame, picture, or event
+count. A few waits of 300 ms remain where a step proves that nothing happens
+(each says so). What a step proves that is pure logic is tested in
+`NvrView.Tiles.Tests` and `NvrView.Shell.Tests` on simulated time; the app
+run checks the wiring (for pacing, see docs/RENDERING.md "How the verdict is
+taken"). Each log line starts with the seconds since the start, so the time
+per step can be read from the log.
+
+`--smoke` (with `--selftest`) runs the startup area and one wiring check per
+other area instead (`SelfTest.Smoke.cs`); the check script runs it on the
+trimmed release build.
 
 It writes what it measured and `selftest: PASS` or `selftest: FAIL` to the
 log, which the script prints. `scripts/windows-worker.sh` builds the app on
