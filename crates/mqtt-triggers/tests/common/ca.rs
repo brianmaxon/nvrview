@@ -109,6 +109,16 @@ pub struct TestCa {
 
 impl TestCa {
     pub fn new() -> TestCa {
+        TestCa::with_san(seq(&[der(0x82, b"localhost"), der(0x87, &[127, 0, 0, 1])]))
+    }
+
+    /// A server certificate for the single DNS name `name` only, so a
+    /// client that dials loopback by address sees a name mismatch.
+    pub fn for_other_name(name: &str) -> TestCa {
+        TestCa::with_san(seq(&[der(0x82, name.as_bytes())]))
+    }
+
+    fn with_san(san: Vec<u8>) -> TestCa {
         let ca_key = new_signing_key();
         let ca_der = certificate(
             1,
@@ -122,7 +132,6 @@ impl TestCa {
             ],
         );
         let server_key = new_signing_key();
-        let san = seq(&[der(0x82, b"localhost"), der(0x87, &[127, 0, 0, 1])]);
         let server_der = certificate(
             2,
             "nvrview test CA",

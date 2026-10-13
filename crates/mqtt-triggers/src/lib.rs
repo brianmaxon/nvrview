@@ -18,14 +18,16 @@
 mod client;
 pub mod config;
 pub mod mapping;
+pub mod messages;
 pub mod net;
 pub mod packet;
 
 pub use client::{
-    Clock, Credentials, Handle, LogFn, Options, Sink, StartError, Stats, Status, SystemClock,
-    Trigger, backoff_ms, start,
+    Clock, Credentials, ErrorKind, Handle, LogFn, Options, Sink, StartError, Stats, Status,
+    SystemClock, Trigger, backoff_ms, start,
 };
 pub use config::{
     Broker, ConfigError, Limits, Mapping, Mode, Reconnect, RetainedPolicy, SourceConfig, TlsConfig,
 };
 pub use mapping::TriggerState;
+pub use messages::{MessageEntry, MessageOutcome, MessagePage};
