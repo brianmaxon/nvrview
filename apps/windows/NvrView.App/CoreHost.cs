@@ -109,7 +109,8 @@ internal sealed class CoreEvent
                 case "tier": e.Tier = v.GetString(); break;
                 case "name": e.Name = v.GetString(); break;
                 case "model": e.Model = v.GetString(); break;
-                case "key": e.Key = v.GetString(); break;
+                // A thumbnail event's key is an object (the recordings model takes those events above).
+                case "key" when v.ValueKind == JsonValueKind.String: e.Key = v.GetString(); break;
                 case "what": e.What = v.GetString(); break;
                 case "action": e.Action = v.GetString(); break;
                 case "position" when v.ValueKind == JsonValueKind.Number: e.Position = (int)Long(v); break;
