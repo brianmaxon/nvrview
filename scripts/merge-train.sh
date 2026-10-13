@@ -2,7 +2,7 @@
 # Merges several finished branches together: one Mac check and one Windows
 # check for the whole train instead of one pair per branch.
 #
-#   scripts/merge-train.sh [--messages FILE] BRANCH[=MESSAGE]...
+#   scripts/merge-train.sh [--messages FILE] [--full-check-after | --no-full-check-after] BRANCH[=MESSAGE]...
 #
 # Run it in the checkout that holds main (clean tree). Each branch gets its
 # own merge commit (message: its "=MESSAGE", else a line "BRANCH=MESSAGE" in
@@ -30,6 +30,10 @@
 #    isolated. The passing branches are merged; the failing one is reported
 #    with the tail of its log.
 #
+# 4. After the train, a full check (Mac and Windows, NVRVIEW_FULL_CHECK=1) of the
+#    new main starts in the background, as for scripts/merge-branch.sh (step 5
+#    there: on by default with two or more Windows computers configured).
+#
 # Prints a table: branch, merged / skipped (conflict) / failed (which check).
 # Exits 0 only when every branch merged. Also prints scripts/branch-ready.sh
 # for each branch first.
@@ -56,13 +60,16 @@ keep="${TMPDIR:-/tmp}/merge-train-logs.$$"
 : >"$logs/messages"
 : >"$logs/results"
 branches=""
+after_flag=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --messages)
       [ $# -ge 2 ] || { echo "--messages needs a file" >&2; exit 2; }
       cat "$2" >>"$logs/messages"
       shift 2 ;;
-    -*) echo "usage: $0 [--messages FILE] BRANCH[=MESSAGE]..." >&2; exit 2 ;;
+    --full-check-after) after_flag=1; shift ;;
+    --no-full-check-after) after_flag=0; shift ;;
+    -*) echo "usage: $0 [--messages FILE] [--full-check-after | --no-full-check-after] BRANCH[=MESSAGE]..." >&2; exit 2 ;;
     *=*)
       printf '%s\n' "$1" >>"$logs/messages"
       branches="$branches ${1%%=*}"
@@ -306,4 +313,5 @@ for b in $branches; do
   printf '%-40s %-28s %s\n' "$b" "$res" "$(echo "$line" | cut -d'|' -f3-)"
 done
 echo "$orig is now at $(git rev-parse --short HEAD)."
+if [ "$train_head" != "$pre" ] && background_full_check_wanted "$after_flag"; then start_background_full_check; fi
 [ "$bad" = 0 ]

@@ -17,8 +17,10 @@ export NVRVIEW_FULL_CHECK=1
 
 . scripts/stamps-lib.sh
 [ -n "$(windows_hosts)" ] || { echo "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer" >&2; exit 2; }
-# Releases get the Windows computer before agents' checks.
-NVRVIEW_WINDOWS_PRIORITY=merge
+# Releases get the Windows computer before agents' checks (the background full
+# check after a merge, scripts/full-check-bg.sh, runs this at priority
+# background instead).
+NVRVIEW_WINDOWS_PRIORITY=${NVRVIEW_WINDOWS_PRIORITY:-merge}
 export NVRVIEW_WINDOWS_PRIORITY
 [ -z "$(git status --porcelain)" ] || echo "release-check: the working tree is not clean, so no stamps will be written" >&2
 

@@ -500,10 +500,17 @@ missing; it never prints the key. Then it:
 5. prints the files and the upload order.
 
 Faster releases: `scripts/release-check.sh` runs the Mac and Windows checks at
-the same time and writes both stamps. When the Windows check passed for the
-same tree, the Windows package reuses the trimmed publish output that check
-tested (every file's hash must match; otherwise it is rebuilt), so the shipped
-files are the tested ones. After a version bump that changes only `VERSION`,
+the same time and writes both stamps (after each merge, with two Windows
+computers configured, the merge scripts start the same full check in the
+background, so a release usually finds the stamps and only packages). When the
+Windows check passed for the same tree, the Windows package is built on the host
+that ran the app half (the stamp records it) and reuses the trimmed publish
+output that check tested (every file's hash must match; otherwise it is
+rebuilt). On the Mac the full check runs the real-core self-test on the signed
+release bundle, with the bundled update defaults and release notes when
+`release.sh` runs the check, and the package zips that tested bundle (only the
+bundled files and the signature are redone). The shipped files are the tested
+ones. The two packages are made at the same time. After a version bump that changes only `VERSION`,
 `scripts/release.sh` accepts the stamps of the previous tree and says so
 (packages are still built and signed fresh); `--full-check` runs both checks
 fresh instead. A merge that skipped its Windows run

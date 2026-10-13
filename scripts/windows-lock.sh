@@ -1,7 +1,7 @@
 #!/bin/sh
 # The lock for the shared Windows test computer(s), with priorities.
 #
-#   scripts/windows-lock.sh acquire [--priority merge|agent] [--owner-pid PID]
+#   scripts/windows-lock.sh acquire [--priority merge|agent|background] [--owner-pid PID]
 #       Waits (in this one command) until a host is free, takes its lock, and
 #       prints the host alias on standard output. Messages go to standard
 #       error. The default priority is $NVRVIEW_WINDOWS_PRIORITY, else agent.
@@ -17,8 +17,11 @@
 #       Prints each host's lock owner and the waiting queue.
 #
 # Merges (merge-branch, merge-train, release) use priority "merge"; agents'
-# scripts/windows-check.sh uses "agent". Priority and order apply per host:
-# an agent does not take a free host that a waiting merge could use, so a
+# scripts/windows-check.sh uses "agent"; the full check that follows a merge
+# (scripts/full-check-bg.sh) uses "background", below both: it takes a host only
+# when no merge and no agent is waiting for it. Priority and order apply per host:
+# an agent does not take a free host that a waiting merge could use (nor a
+# background check one that a merge or an agent could use), so a
 # merge gets the next free computer it can run on, and waiters of the same
 # priority go first come, first served for the hosts they share. A waiter
 # pinned to other hosts (its own NVRVIEW_WINDOWS_HOSTS) never holds a check
@@ -141,7 +144,8 @@ wants() { # WAITER-FILE HOST
 # per host, so a merge pinned to one computer never holds agents off another.
 blocked() { # HOST
   {
-    if [ "$priority" = agent ]; then queue merge; fi
+    case "$priority" in agent | background) queue merge ;; esac
+    if [ "$priority" = background ]; then queue agent; fi
     queue "$priority" | sed "/^$wname\$/,\$d"
   } | while read -r w; do
     if [ -f "$waiters/$w" ] && wants "$waiters/$w" "$1"; then echo yes; break; fi
@@ -165,7 +169,7 @@ while [ $# -gt 0 ]; do
     *) echo "usage: $0 acquire|release|status [--priority merge|agent] [--owner-pid PID]" >&2; exit 2 ;;
   esac
 done
-case "$priority" in merge | agent) ;; *) echo "priority: merge or agent" >&2; exit 2 ;; esac
+case "$priority" in merge | agent | background) ;; *) echo "priority: merge, agent or background" >&2; exit 2 ;; esac
 
 case "$cmd" in
   acquire)
