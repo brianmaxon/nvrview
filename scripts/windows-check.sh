@@ -35,6 +35,7 @@ set -eu
 cd "$(git rev-parse --show-toplevel)"
 
 . scripts/stamps-lib.sh
+. scripts/suite-cache-lib.sh
 [ -n "$(windows_hosts)" ] || { echo "set NVRVIEW_WINDOWS_HOST (or NVRVIEW_WINDOWS_HOSTS) to the SSH host alias of the Windows computer" >&2; exit 2; }
 clean=0
 package_to=""
@@ -75,7 +76,7 @@ $2"
     IFS='
 '
     # shellcheck disable=SC2086 # split on newlines only
-    python3 -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
+    "$py" -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
     IFS=$oldifs
   fi
 elif [ $# -gt 0 ]; then
@@ -171,7 +172,7 @@ if [ -n "$package_to" ]; then
     oldifs=$IFS; IFS='
 '
     # shellcheck disable=SC2086
-    python3 -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
+    "$py" -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
     IFS=$oldifs
   fi
   ls -l "$package_to/$zip"
@@ -185,7 +186,6 @@ fi
 # check (NVRVIEW_FULL_CHECK=1, no full Windows pass in NVRVIEW_FULL_MAX_AGE_H
 # hours, NVRVIEW_FULL_EVERY). NVRVIEW_RETRIED=1 (a retry after a known flake)
 # records passes that never let a suite be skipped.
-sc() { python3 -I scripts/suite-cache.py "$@"; }
 logs=$(mktemp -d)
 run_file=""
 finish_cache() {
@@ -196,14 +196,14 @@ trap 'finish_cache --failed "Windows worker"; rm -rf "$logs"; windows_unlock' EX
 # shellcheck disable=SC2086,SC2029
 ssh $ssh_opts "$host" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
   </dev/null | tr -d '\r' >"$logs/tools"
-run_file=$(sc plan windows --tools-file "$logs/tools" ${NVRVIEW_RETRIED:+--retried})
+cache_start windows --tools-file "$logs/tools" ${NVRVIEW_RETRIED:+--retried}
 only="${NVRVIEW_WINDOWS_ONLY:-}"
 # Exported only so that they count as used; they travel in $vars below.
 export NVRVIEW_CLIPPY_CRATES=none NVRVIEW_TEST_CRATES=none NVRVIEW_DOCTEST_CRATES=none
 if [ -z "$only" ]; then
-  NVRVIEW_CLIPPY_CRATES=$(sc crates "$run_file" clippy --list)
-  NVRVIEW_TEST_CRATES=$(sc crates "$run_file" test --list)
-  NVRVIEW_DOCTEST_CRATES=$(sc crates "$run_file" doctest --list)
+  NVRVIEW_CLIPPY_CRATES=$(cache_crates clippy list)
+  NVRVIEW_TEST_CRATES=$(cache_crates test list)
+  NVRVIEW_DOCTEST_CRATES=$(cache_crates doctest list)
 fi
 NVRVIEW_SUITES=""
 wanted="shell-tests"
@@ -211,13 +211,13 @@ if [ "$only" != app ]; then wanted="csharp-smoke tiles-tests video-selftest $wan
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then
   # The app self-test is cached by area (scripts/windows-selftest-areas.txt), for the debug and the publish build.
   # NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no stamp, not a full pass).
-  for a in $(sc areas windows); do
+  for a in $(cache_areas); do
     case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a app-publish.$a" ;; esac
   done
   wanted="$wanted app-update"
 fi
 for s in $wanted; do
-  if sc want "$run_file" "$s"; then NVRVIEW_SUITES="$NVRVIEW_SUITES${NVRVIEW_SUITES:+,}$s"; fi
+  if cache_want "$s"; then NVRVIEW_SUITES="$NVRVIEW_SUITES${NVRVIEW_SUITES:+,}$s"; fi
 done
 NVRVIEW_SUITES=${NVRVIEW_SUITES:-none}
 
@@ -249,7 +249,7 @@ vars="$vars NVRVIEW_TREE=$tree_sent"
 rc=$(cat "$logs/rc")
 tr -d '\r' <"$logs/worker.log" | sed -n 's/^suite-result \([A-Za-z0-9_.-]*\) \([0-9]*\)$/\1 \2/p' >"$logs/results"
 while read -r name secs; do
-  sc pass "$run_file" "$secs" "$name"
+  cache_pass "$secs" "$name"
 done <"$logs/results"
 if [ "$rc" != 0 ]; then
   exit "$rc"
@@ -271,5 +271,5 @@ fi
 printf '\nWindows checks on %s took %ss in all (disk check and sync %ss).\n' "$host" "$((now - check_start))" "$((sent - check_start))"
 # Step times: the sync here, the worker's steps and background builds.
 printf '   (sync: %ss)\n' "$((sent - check_start))" >"$logs/steps"
-python3 -I scripts/timing.py table "$logs/steps" "$logs/worker.log"
-python3 -I scripts/timing.py log windows "$((now - check_start))" --tree "$tree_sent" "$logs/steps" "$logs/worker.log" || true
+"$py" -I scripts/timing.py table "$logs/steps" "$logs/worker.log"
+"$py" -I scripts/timing.py log windows "$((now - check_start))" --tree "$tree_sent" "$logs/steps" "$logs/worker.log" || true

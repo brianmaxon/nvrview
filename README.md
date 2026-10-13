@@ -226,7 +226,21 @@ at the end shows each suite as ran or cached, with its time.
 - **Where.** The cache lives in the git directory
   (`.git/nvrview-checks/suite-cache/`), shared by all worktrees, and is
   pruned after 14 days. On Windows the Mac decides which suites to run and
-  records the worker's results. `scripts/test-suite-cache.sh` tests the rules.
+  records the worker's results.
+- **One decision per run.** `scripts/suite-cache.py plan` decides every suite
+  once at the start of a check (the tree, tools, and store as they are then;
+  a pass recorded mid-run never changes a later decision) and writes the
+  answers to a plan file that `scripts/check.sh` and `scripts/windows-check.sh`
+  read with `awk` (`scripts/suite-cache-lib.sh`). The scripts append each
+  result to a run log with `printf`, and one `finish` call folds the log into
+  the store, also from the exit trap, so an interrupted run keeps the passes
+  of the suites that completed. Python runs twice per check, resolved once to
+  the real interpreter (not the pyenv shim).
+- **Tests.** `scripts/test_suite_cache.py` tests the decision rules in one
+  process; `scripts/test-suite-cache.sh` tests the shell wiring (plan file,
+  run log, finish, interrupted and retried runs). `scripts/run-script-tests.sh`
+  runs them with the stamp and merge-train tests at the same time, printing
+  each file's output in order.
 
 ## Versions
 

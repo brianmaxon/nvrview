@@ -9,11 +9,19 @@
 #                   own (scripts/merge-branch.sh); never enough for a release
 # Functions use the repository of the current directory.
 
+# The answer is remembered per directory (and GIT_DIR) in the current shell,
+# since it only changes when the repository does; a bare `stamp_dir >/dev/null`
+# (not in a subshell) fills the memory for the `$(stamp_dir)` calls after it.
 stamp_dir() {
-  printf '%s/nvrview-checks\n' "$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+  if [ "${_sd_key:-}" != "$PWD|${GIT_DIR:-}" ]; then
+    _sd_val=$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks
+    _sd_key="$PWD|${GIT_DIR:-}"
+  fi
+  printf '%s\n' "$_sd_val"
 }
 
 has_stamp() { # KIND TREE
+  stamp_dir >/dev/null
   [ -f "$(stamp_dir)/$2.$1" ]
 }
 
@@ -25,6 +33,7 @@ full_stamp() { # KIND TREE
 
 # The suites a stamp took from the cache, or nothing.
 stamp_cached() { # KIND TREE
+  stamp_dir >/dev/null
   sed -n 's/^cached=//p' "$(stamp_dir)/$2.$1" 2>/dev/null || true
 }
 
@@ -42,6 +51,7 @@ release_stamp_tree() { # KIND TREE
     printf '%s exact\n' "$2"
     return 0
   fi
+  stamp_dir >/dev/null
   for f in "$(stamp_dir)"/*."$1"; do
     [ -f "$f" ] || continue
     t=$(basename "$f" ".$1")
