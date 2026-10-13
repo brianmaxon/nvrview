@@ -65,8 +65,8 @@ private func minuteBinding(_ b: Binding<Int>) -> Binding<Date> {
 
 struct SmartAlertsGeneralView: View {
     let alerts: SmartAlertsModel
-    @State private var lat = ""
-    @State private var lon = ""
+
+    private var editor: NightLocationEditor { alerts.locationEditor }
 
     var body: some View {
         Form {
@@ -91,21 +91,29 @@ struct SmartAlertsGeneralView: View {
             Section("Night") {
                 Toggle(
                     "Use a location for sunset and sunrise",
-                    isOn: Binding(
-                        get: { alerts.settings.location != nil },
-                        set: { on in alerts.update { $0.location = on ? AlertLocation(lat: 0, lon: 0) : nil } }))
-                if let loc = alerts.settings.location {
+                    isOn: Binding(get: { editor.isOn }, set: { editor.setOn($0) }))
+                if editor.isOn {
+                    @Bindable var editor = editor
                     HStack {
-                        TextField("Latitude", text: $lat, prompt: Text(String(loc.lat)))
-                            .onSubmit(saveLocation)
-                        TextField("Longitude", text: $lon, prompt: Text(String(loc.lon)))
-                            .onSubmit(saveLocation)
-                        Button("Set", action: saveLocation)
+                        TextField("Latitude", text: $editor.latText, prompt: Text("12.3 or 12.3° N"))
+                            .onSubmit(editor.set)
+                        TextField("Longitude", text: $editor.lonText, prompt: Text("-45.6 or 45.6° W"))
+                            .onSubmit(editor.set)
+                        Button("Set", action: editor.set)
+                    }
+                    if let message = editor.message {
+                        Text(message).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                     }
                     caption(
-                        "Rounded to 0.1° (about 11 km) and kept on this Mac, used only for sunset and sunrise. Night is from \(alerts.settings.night.afterSunsetMin) minutes after sunset to \(alerts.settings.night.beforeSunriseMin) minutes before sunrise."
+                        "You can also paste \"lat, lon\" into either field. Rounded to 0.1° (about 11 km) and kept on this Mac, used only for sunset and sunrise. Night is from \(alerts.settings.night.afterSunsetMin) minutes after sunset to \(alerts.settings.night.beforeSunriseMin) minutes before sunrise."
                     )
-                } else {
+                    if alerts.settings.location == nil {
+                        caption("No location is set yet, so the night hours below are in use.")
+                    } else {
+                        SunTimesLines(alerts: alerts)
+                    }
+                }
+                if alerts.settings.location == nil {
                     DatePicker(
                         "Night starts", selection: minuteBinding(setting(alerts, \.night.fallbackStartMin)),
                         displayedComponents: .hourAndMinute)
@@ -143,20 +151,27 @@ struct SmartAlertsGeneralView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear(perform: loadLocation)
+        .onAppear { editor.load() }
     }
+}
 
-    private func loadLocation() {
-        lat = alerts.settings.location.map { String($0.lat) } ?? ""
-        lon = alerts.settings.location.map { String($0.lon) } ?? ""
-    }
+/// Today's predicted sunrise, sunset, and night window, in local time. It
+/// follows the location and the night margins (both are read here), and a
+/// new minute of the clock refreshes it, which covers midnight.
+private struct SunTimesLines: View {
+    let alerts: SmartAlertsModel
 
-    private func saveLocation() {
-        guard let la = Double(lat.replacingOccurrences(of: ",", with: ".")),
-            let lo = Double(lon.replacingOccurrences(of: ",", with: "."))
-        else { return loadLocation() }
-        alerts.update { $0.location = AlertLocation(lat: la, lon: lo) }
-        loadLocation()
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            let night = alerts.settings.night
+            let _ = (alerts.settings.location, night.afterSunsetMin, night.beforeSunriseMin)
+            if let times = alerts.sunTimes(now: context.date) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(times.lines(), id: \.self) { Text($0).font(.callout).monospacedDigit() }
+                }
+                .accessibilityIdentifier("sun-times")
+            }
+        }
     }
 }
 

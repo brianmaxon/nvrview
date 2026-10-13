@@ -90,6 +90,8 @@ playback-remove-camera       macos    gap: the Windows fake store (FakeRecording
 playback-split-here          macos    gap: the Windows fake store (FakeRecordings) does not model split; the split rule (IncidentSplit) is unit-tested
 export-real-core            macos    gap: the Windows playback steps run on the fakes only (playback-real-core); a keyframe trim and a range download against the mock are not driven on Windows yet
 alerts-settings-roundtrip    macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
+settings-tabs-fit           macos    n/a: the Windows Settings window has a pane of sections, not a tab bar that can run out of width
+alerts-night-location       macos    gap: Windows has no Smart Alerts settings screen yet (NOTIFICATIONS.md slice S7); the sun-times call is bound
 events-log-feedback          macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 events-log-filter            macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)
 verify-view-dismiss          macos    gap: Windows smart alerts UI is planned (NOTIFICATIONS.md slice S7)

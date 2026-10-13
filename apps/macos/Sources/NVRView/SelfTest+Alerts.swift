@@ -92,8 +92,76 @@ extension SelfTest {
             if secrets?["sensor-1"] != "example-password" || !alerts.hasSecret(.mqttPassword("sensor-1")) {
                 problems.append("the sensor's password did not go from the credential store to the core")
             }
+            nightLocationStep()
             verifyTileStep()
         }
+    }
+
+    /// Settings > Smart Alerts > Night: the location typed the way people
+    /// write it, refusals that keep what was there, and today's predicted
+    /// sunrise, sunset, and night window.
+    func nightLocationStep() {
+        guard let alerts = app.model?.alertsModel else { return }
+        let editor = alerts.locationEditor
+        // parity: alerts-night-location
+        // Switching the location on stores nothing; text that does not read
+        // gives a message and changes nothing; "12.3° N" and "45.6 W" are
+        // stored as 12.3 and -45.6 and shown that way; a pasted "lat, lon"
+        // fills both; the sun times follow the location and the margins.
+        let before = alerts.settings.location
+        editor.setOn(false)
+        editor.setOn(true)
+        if alerts.settings.location != nil || !editor.isOn {
+            problems.append("switching the location on stored \(String(describing: alerts.settings.location))")
+        }
+        editor.latText = "abc"
+        editor.lonText = "45.6 W"
+        editor.set()
+        if editor.message == nil || alerts.settings.location != nil || editor.latText != "abc" {
+            problems.append("unreadable text was not refused and kept: \(editor.message ?? "no message")")
+        }
+        editor.latText = "12.3° N"
+        editor.lonText = "45.6 W"
+        editor.set()
+        let want = AlertLocation(lat: 12.3, lon: -45.6)
+        if alerts.settings.location != want || editor.message != nil || editor.latText != "12.3" || editor.lonText != "-45.6" {
+            problems.append(
+                "\"12.3° N\", \"45.6 W\" gave \(String(describing: alerts.settings.location)), fields \(editor.latText) \(editor.lonText), \(editor.message ?? "no message")"
+            )
+        }
+        let utc = TimeZone(identifier: "UTC")!
+        let noon = Date(timeIntervalSince1970: 1_718_971_200)
+        var lines: [String] = []
+        if let times = alerts.sunTimes(now: noon, zone: utc), let rise = times.sunrise, let set = times.sunset,
+            let start = times.nightStart, let end = times.nightEnd
+        {
+            lines = times.lines(zone: utc, locale: Locale(identifier: "en_US"))
+            if !(rise < set && set < start && start < end) || lines.count != 2 {
+                problems.append("the sun times are out of order: \(lines)")
+            }
+            alerts.update { $0.night.afterSunsetMin = 60 }
+            if let later = alerts.sunTimes(now: noon, zone: utc)?.nightStart, later.timeIntervalSince(start) != 1800 {
+                problems.append("the night start did not follow the margin: \(later.timeIntervalSince(start)) s")
+            }
+            alerts.update { $0.night.afterSunsetMin = 30 }
+        } else {
+            problems.append("no sun times for a location")
+        }
+        editor.latText = "99"
+        editor.lonText = "x"
+        editor.set()
+        if editor.message == nil || alerts.settings.location != want || editor.latText != "99" || editor.lonText != "x" {
+            problems.append("bad input changed the stored location or the typed text: \(editor.message ?? "no message")")
+        }
+        editor.latText = "1.5, \u{2212}2.5"
+        editor.lonText = ""
+        editor.set()
+        if alerts.settings.location != AlertLocation(lat: 1.5, lon: -2.5) || editor.lonText != "-2.5" {
+            problems.append("a pasted pair did not fill both fields: \(String(describing: alerts.settings.location))")
+        }
+        print("night location: stored \(String(describing: alerts.settings.location)), sun times \(lines)")
+        alerts.update { $0.location = before }
+        editor.setOn(before != nil)
     }
 
     func verifyTileStep() {

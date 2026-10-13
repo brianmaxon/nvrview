@@ -2,6 +2,18 @@ import AppKit
 import NVRCore
 import SwiftUI
 
+/// The Settings window's size. The tab bar shows every tab (icon and label)
+/// in one row, so the window must stay at least as wide as that row: six tabs
+/// need about 640 points, and the width leaves room for a couple more. The
+/// self-test (`settings-tabs-fit`) measures the row against this minimum.
+enum SettingsLayout {
+    static let minWidth: CGFloat = 860
+    static let minHeight: CGFloat = 420
+    /// About one more tab's width (icon and label), which the tab bar must
+    /// still fit within the minimum width.
+    static let spareTab: CGFloat = 110
+}
+
 /// Settings: devices, per-camera options, and alerts.
 struct SettingsView: View {
     let model: AppModel
@@ -17,7 +29,7 @@ struct SettingsView: View {
                 UpdateSettingsView(updater: updater).tabItem { Label("Updates", systemImage: "arrow.down.circle") }
             }
         }
-        .frame(minWidth: 640, minHeight: 400)
+        .frame(minWidth: SettingsLayout.minWidth, minHeight: SettingsLayout.minHeight)
     }
 }
 
@@ -457,7 +469,7 @@ final class SettingsWindowController: NSWindowController {
     init(model: AppModel) {
         self.model = model
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 660, height: 400), styleMask: [.titled, .closable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: SettingsLayout.minWidth, height: SettingsLayout.minHeight), styleMask: [.titled, .closable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Settings"
         window.contentViewController = NSHostingController(rootView: SettingsView(model: model))

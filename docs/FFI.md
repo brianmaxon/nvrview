@@ -691,10 +691,29 @@ NvStatus nv_alert_snapshot_get(NvCore *core, uint64_t alert_id, uint8_t *out, si
                                size_t *len);
 NvStatus nv_alert_feedback(NvCore *core, const char *json);
 NvStatus nv_alert_mute(NvCore *core, const char *camera, uint32_t seconds);
+/* minor 13 */
+NvStatus nv_alerts_sun_times(NvCore *core, const char *request, char *out, size_t cap,
+                             size_t *len);
 ```
 
 All of them answer from memory and never wait on a device; none may be
 called from inside a callback.
+
+**Sun times (minor 13).** `nv_alerts_sun_times` lets a settings screen show
+what the night rule will do without repeating the sun arithmetic.
+`request` is `{"lat","lon","at_ms","utc_offset_min","after_sunset_min",
+"before_sunrise_min"}` (`lat`, `lon` in degrees, north and east positive,
+and `at_ms` required; the rest default to 0). The date is the local date of
+`at_ms` at the offset. The answer is `{"date":"YYYY-MM-DD","kind":
+"normal"|"polar_day"|"polar_night","sunrise_ms","sunset_ms",
+"night_start_ms","night_end_ms"}` (UTC milliseconds). `night_start_ms` is
+that day's sunset plus the after-sunset margin; `night_end_ms` is the next
+day's sunrise less the before-sunrise margin. A member that does not exist
+is null: no sunrise or sunset in a polar day or night, and no night start
+or end when the margins swallow a short summer night or the next day has no
+sunrise. It needs no `nv_alerts_configure` first. NV_ERR_INVALID_ARGUMENT for
+invalid JSON, a missing `lat`, `lon`, or `at_ms`, or a location out of range.
+Out-buffer rules as `nv_alerts_get`.
 
 **Settings.** `nv_alerts_configure` takes the settings document of
 NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
@@ -1538,6 +1557,7 @@ symbol at all, so a bound app checks first):
 | 10 | export (see "Export (minor 10)"): `nv_download_range`, `nv_still_plan`, the `trim` kind and `in_ms`/`out_ms` of `nv_edit_compute`, `dest` and `share_safe` on export requests, and `range` in the `download` event |
 | 11 | camera motion (see "Camera motion (PTZ)"): `nv_ptz_info`, `nv_ptz_move`, `nv_ptz_stop`, `nv_ptz_lens`, `nv_ptz_preset`, `nv_motion_grant`, and the `ptz` event |
 | 12 | smart alerts (see "Smart alerts"): `nv_alerts_configure`, `nv_alerts_get`, `nv_alerts_trigger_put`, `nv_alert_frames_get`, `nv_alert_detections_put`, `nv_alert_snapshot_put`, `nv_alert_snapshot_get`, `nv_alert_feedback`, `nv_alert_mute`, and the `verify_request`, `verify_request_done`, `verify_step`, `alert`, `alerts_configured`, and `trigger_rejected` events |
+| 13 | `nv_alerts_sun_times` (today's sunrise, sunset, and night window for a location; see "Smart alerts") |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

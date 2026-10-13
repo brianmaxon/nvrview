@@ -32,9 +32,9 @@
  * out_ms of nv_edit_compute, and dest and share_safe on export requests.
  * Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
  * nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
- * (docs/FFI.md, "Smart alerts").
+ * (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times.
  */
-#define NV_ABI_MINOR 12
+#define NV_ABI_MINOR 13
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -1774,6 +1774,25 @@ enum NvStatus nv_alerts_get(struct NvCore *core,
                             char *out,
                             size_t cap,
                             size_t *len);
+
+/**
+ * Today's sunrise and sunset and the night that starts this evening at a
+ * location (docs/FFI.md, "Smart alerts"): `request` is {"lat","lon",
+ * "at_ms","utc_offset_min","after_sunset_min","before_sunrise_min"};
+ * answers {"date","kind","sunrise_ms","sunset_ms","night_start_ms",
+ * "night_end_ms"} into `out` like nv_layouts_get. NV_ERR_INVALID_ARGUMENT
+ * for JSON that is not that or a location out of range. Answers from
+ * memory, on any thread, never inside a callback. Added in minor 13.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_alerts_sun_times(struct NvCore *core,
+                                  const char *request,
+                                  char *out,
+                                  size_t cap,
+                                  size_t *len);
 
 /**
  * Queues a trigger from the app (a source of its own, or a self-test)

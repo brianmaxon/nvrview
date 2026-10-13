@@ -102,7 +102,7 @@ fn smart_alerts_through_the_c_interface() {
     // SAFETY: valid pointers and strings throughout; the core is freed
     // once, at the end.
     unsafe {
-        assert!(nv_abi_minor() >= 12);
+        assert!(nv_abi_minor() >= 13);
         let (host, user, password) = (c("127.0.0.1"), c("example-user"), c("example-password"));
         let mut dev = 0u64;
         assert_eq!(
@@ -132,6 +132,61 @@ fn smart_alerts_through_the_c_interface() {
             nv_alert_mute(core, c(&cam).as_ptr(), 60),
             NvStatus::NV_ERR_NOT_CONFIGURED
         );
+        // Sun times need no configuration. 2024-06-21 12:00 UTC at a
+        // made-up place near the equator (UTC-3): the sun rises about
+        // 08:00 UTC and sets about 20:00 UTC; the margins move the night.
+        let sun = |req: Value| -> (NvStatus, Value) {
+            let mut buf = vec![0u8; 1024];
+            let mut len = 0usize;
+            let s = nv_alerts_sun_times(
+                core,
+                c(&req.to_string()).as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut len,
+            );
+            let v = if s == NvStatus::NV_OK {
+                serde_json::from_slice(&buf[..len]).unwrap()
+            } else {
+                Value::Null
+            };
+            (s, v)
+        };
+        let noon = 1_718_971_200_000i64;
+        let (s, v) = sun(json!({"lat": 12.3, "lon": -45.6, "at_ms": noon,
+            "utc_offset_min": -180, "after_sunset_min": 30, "before_sunrise_min": 20}));
+        assert_eq!(s, NvStatus::NV_OK);
+        assert_eq!(v["date"], "2024-06-21");
+        assert_eq!(v["kind"], "normal");
+        let ms = |k: &str| v[k].as_i64().unwrap();
+        let min = 60_000i64;
+        // Longitude -45.6: solar noon at 15:02 UTC, day length about 12.9 h.
+        assert!((ms("sunrise_ms") - (noon + (8 * 60 + 36 - 12 * 60) * min)).abs() <= 3 * min);
+        assert!((ms("sunset_ms") - (noon + (21 * 60 + 29 - 12 * 60) * min)).abs() <= 3 * min);
+        assert_eq!(ms("night_start_ms"), ms("sunset_ms") + 30 * min);
+        assert!(ms("night_end_ms") > ms("night_start_ms"));
+        // Polar day and night, with no times; a location out of range.
+        let (s, v) = sun(json!({"lat": 80.1, "lon": 10.2, "at_ms": noon}));
+        assert_eq!(
+            (s, v["kind"].as_str()),
+            (NvStatus::NV_OK, Some("polar_day"))
+        );
+        assert!(v["sunrise_ms"].is_null() && v["night_start_ms"].is_null());
+        let winter = 1_734_782_400_000i64; // 2024-12-21 12:00 UTC
+        let (_, v) = sun(json!({"lat": 80.1, "lon": 10.2, "at_ms": winter}));
+        assert_eq!(v["kind"], "polar_night");
+        for bad in [
+            json!({"lat": 91.0, "lon": 0.0, "at_ms": noon}),
+            json!({"lat": 0.0, "lon": 181.0, "at_ms": noon}),
+            json!({"lat": 0.0, "lon": 0.0}),
+            json!({"lat": "x", "lon": 0.0, "at_ms": noon}),
+        ] {
+            assert_eq!(
+                sun(bad.clone()).0,
+                NvStatus::NV_ERR_INVALID_ARGUMENT,
+                "{bad}"
+            );
+        }
         for bad in ["{", "[]", r#"{"enabled":"yes"}"#] {
             assert_eq!(
                 nv_alerts_configure(core, c(bad).as_ptr()),

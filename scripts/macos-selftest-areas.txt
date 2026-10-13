@@ -50,6 +50,7 @@ header  header-*
 
 # Settings: device search, updates.
 settings  discovery-*
+settings  settings-tabs-fit
 settings  updates-*
 
 # Calls: doorbell insets and call windows, their recording, alert insets.

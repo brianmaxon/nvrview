@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 12;
+    public const uint AbiMinor = 13;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;
@@ -853,6 +853,11 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_alerts_get(nint core, string? query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Today's sunrise, sunset, and night window at a location (request JSON; minor 13).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_sun_times(nint core, string request, byte* output, nuint cap, nuint* len);
 
     /// <summary>A trigger from the app; its ID (minor 12).</summary>
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]

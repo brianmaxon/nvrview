@@ -318,6 +318,10 @@ public sealed class FakeSmartAlerts(Action<string> sink) : ISmartAlerts
     }
 
     /// <inheritdoc/>
+    public string AlertsSunTimes(string request) =>
+        throw new NvException(NvStatus.Unsupported, "nv_alerts_sun_times");
+
+    /// <inheritdoc/>
     public string AlertsGet(string? query)
     {
         JsonObject q = string.IsNullOrEmpty(query) ? [] : ParseObject(query, "nv_alerts_get");

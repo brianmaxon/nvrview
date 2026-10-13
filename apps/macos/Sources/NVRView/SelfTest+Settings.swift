@@ -21,6 +21,7 @@ extension SelfTest {
             return checkLogNow()
         }
         let form = model.deviceForm
+        settingsTabsFit(settings)
         // The add form is what Settings shows with no device selected; its
         // list searches when it appears.
         // parity: discovery-list
@@ -87,6 +88,49 @@ extension SelfTest {
                 }
             }
         }
+    }
+
+    /// The tab bar of the Settings window shows every tab. On macOS 26 the
+    /// tabs are one toolbar item; a window too narrow for it drops the item
+    /// into the toolbar's overflow, and no tab shows. The window is sized to
+    /// its smallest width, as the user can drag it, and the item must be
+    /// there, whole; and again one more tab's width (`SettingsLayout.spareTab`)
+    /// narrower, so a seventh tab fits without a change here.
+    func settingsTabsFit(_ settings: SettingsWindowController) {
+        // parity: settings-tabs-fit
+        guard let window = settings.window, let frameView = window.contentView?.superview else {
+            return problems.append("the Settings window has no content view")
+        }
+        func tabItem() -> NSView? {
+            var found: NSView?
+            func walk(_ v: NSView) {
+                if "\(type(of: v))".hasPrefix("NSToolbarItemViewer"), !v.isHidden, v.frame.width > 1 { found = v }
+                v.subviews.forEach(walk)
+            }
+            walk(frameView)
+            return found
+        }
+        let saved = window.contentView?.frame.size ?? NSSize(width: SettingsLayout.minWidth, height: SettingsLayout.minHeight)
+        defer { window.setContentSize(saved) }
+        let minWidth = window.contentMinSize.width
+        if minWidth < SettingsLayout.minWidth {
+            problems.append("the Settings window can shrink to \(minWidth), below \(SettingsLayout.minWidth)")
+        }
+        var widths: [String] = []
+        for (what, width) in [("minimum", minWidth), ("minimum less a tab", minWidth - SettingsLayout.spareTab)] {
+            window.setContentSize(NSSize(width: width, height: saved.height))
+            window.contentView?.layoutSubtreeIfNeeded()
+            frameView.layoutSubtreeIfNeeded()
+            guard let item = tabItem() else {
+                problems.append("the Settings tabs are not shown at the \(what) width (\(width))")
+                continue
+            }
+            widths.append("\(what) \(Int(width)): tabs \(Int(item.frame.minX))...\(Int(item.frame.maxX))")
+            if item.frame.minX < 0 || item.frame.maxX > frameView.bounds.width {
+                problems.append("the Settings tabs are cut off at the \(what) width: \(item.frame)")
+            }
+        }
+        print("settings tabs: \(widths.joined(separator: ", "))")
     }
 
     func finishDiscovery(_ settings: SettingsWindowController) {
