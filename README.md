@@ -212,6 +212,18 @@ at the end shows each suite as ran or cached, with its time.
 - **Parallel merges.** `scripts/merge-branch.sh` and `scripts/merge-train.sh`
   run the Mac check and the Windows check at the same time, each with its own
   log; the merge reaches main only when both pass.
+- **Named failures, narrow retries.** A failed Mac or Windows check (merges,
+  trains, `scripts/release-check.sh`, `scripts/windows-check.sh`) prints the
+  suite or self-test area that was running and the failing step's lines, for
+  example `playback pacing: shown pictures are uneven (...)`. The merge scripts
+  retry the Windows check (up to 3 tries) only after a known environmental
+  flake (a software H.264 fallback, the real microphone step, the playback
+  pacing jitter bound), and a retry runs only the suites and areas that did not
+  pass: the earlier tries' passes come from this cache (`NVRVIEW_RETRY_SINCE`,
+  set by the retry loop, makes that hold in a full run too). Any other failure
+  is not retried. Each flake is appended to `flakes.jsonl` in the git
+  directory (date, tree, suite, step, line; last 500); `scripts/flakes.sh`
+  prints the most frequent flaky steps.
 - **Never cached.** A suite with an unstaged or untracked input runs and is
   not recorded. Failures are never recorded. A pass from a Windows run retried
   after a known flake is recorded as retried and never skips a suite.

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs the Mac check (scripts/check.sh) and the Windows check
 # (NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh) at the same time, prints
-# both summaries, and fails if either failed. On a clean committed tree each
+# both summaries (a failed one names the suite or area and the failing step,
+# scripts/flakes.py explain), and fails if either failed. On a clean committed tree each
 # leaves its check stamp (scripts/checked.sh), so the two together are what
 # scripts/release.sh needs. Takes the Windows lock (scripts/windows-lock.sh,
 # priority merge) for the Windows half.
@@ -47,6 +48,7 @@ summary() { # NAME LOG RC
     tail -n 4 "$2"
   else
     echo "== $1: FAIL (exit $3)"
+    python3 -I scripts/flakes.py explain "$2" | sed "s/^/$1: /"
     grep -E 'FAIL|error|panicked' "$2" | tail -n 8 || true
     tail -n 12 "$2"
   fi

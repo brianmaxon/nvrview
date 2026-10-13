@@ -252,6 +252,8 @@ while read -r name secs; do
   cache_pass "$secs" "$name"
 done <"$logs/results"
 if [ "$rc" != 0 ]; then
+  # Name the failure: the suite or area that was running and the failing step.
+  tr -d '\r' <"$logs/worker.log" | "$py" -I scripts/flakes.py explain /dev/stdin | sed 's/^/Windows check: /' >&2
   exit "$rc"
 fi
 partial=""
