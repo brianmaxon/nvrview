@@ -57,14 +57,11 @@ extension StageView {
         let before = insetBoard
         // An inset the user enlarged (swapped onto the stage) is on screen,
         // so its check is placed in the tile and is no longer "wanted" as an
-        // inset; it stays enlarged until the user swaps back or its check
-        // ends, not until the next refresh.
+        // inset. It stays enlarged until the user swaps back, or until the
+        // inset's own closing time (`InsetBoard.tick`), also after its check
+        // has ended: a real check ends within a second of the click.
         var enlarged: CameraRef?
-        if let s = insetBoard.swap, s.item.kind == .verification,
-            model.alertsModel.board.shown.contains(where: { ref($0) == s.shown })
-        {
-            enlarged = s.shown
-        }
+        if let s = insetBoard.swap, s.item.kind == .verification { enlarged = s.shown }
         insetBoard.remove { $0.kind == .verification && !wanted.contains($0.camera) && $0.camera != enlarged }
         let now = clock.now
         for cam in wanted where insetBoard.item(for: cam) == nil && insetBoard.swap?.shown != cam {

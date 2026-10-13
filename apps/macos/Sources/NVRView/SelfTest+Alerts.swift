@@ -365,6 +365,19 @@ extension SelfTest {
                 print("verify view stick: swapped \(swapped), still enlarged after refreshes \(kept)")
                 if !swapped { problems.append("clicking a verification inset did not enlarge it") }
                 if !kept { problems.append("an enlarged verification inset went back on a refresh") }
+                // A real check finishes within a second of the click (the
+                // detector answers); the enlarged view stays until the user
+                // swaps back or the inset's own closing time.
+                alerts.dismissAll()
+                var keptAfterEnd = true
+                for _ in 0..<3 {
+                    advance(2)
+                    stage.syncVerification()
+                    stage.refreshChrome()
+                    if stage.insetBoard.swap?.shown != top { keptAfterEnd = false }
+                }
+                print("verify view stick: still enlarged after its check ended \(keptAfterEnd)")
+                if !keptAfterEnd { problems.append("an enlarged verification inset went back when its check ended") }
                 // The user's way back.
                 _ = stage.handleInsetKey(.swap)
                 if stage.insetBoard.swap != nil { problems.append("Tab did not swap the enlarged inset back") }
