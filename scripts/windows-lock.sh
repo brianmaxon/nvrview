@@ -24,9 +24,12 @@
 # A lock directory without an owner file (made by hand) is never broken.
 #
 # Hosts: NVRVIEW_WINDOWS_HOSTS="host-a host-b" (ssh aliases), else
-# NVRVIEW_WINDOWS_HOST (one host). One lock per host: the first host uses
-# NVRVIEW_WINDOWS_LOCK (default /private/tmp/claude-<uid>/nvrview-windows.lock),
-# the others "<that path>-<alias>". A check takes the first free host. Waiting
+# NVRVIEW_WINDOWS_HOST (one host). One lock per host, named after its alias,
+# not its place in the list: "<NVRVIEW_WINDOWS_LOCK>-<alias>" (the base
+# defaults to /private/tmp/claude-<uid>/nvrview-windows.lock; the base itself
+# only when no host is set). So a computer listed alone, first, or second
+# always shares one lock with every other check that uses it, and two
+# computers never share one. A check takes the first free host. Waiting
 # is polled every NVRVIEW_LOCK_POLL seconds (default 10).
 set -eu
 
@@ -41,11 +44,7 @@ log() { echo "windows-lock: $*" >&2; }
 
 # One "lock path|host" line per lock (a single empty host when none is set).
 lock_list() {
-  i=0
-  for h in $hosts; do
-    if [ "$i" = 0 ]; then echo "$base|$h"; else echo "$base-$h|$h"; fi
-    i=$((i + 1))
-  done
+  for h in $hosts; do echo "$base-$h|$h"; done
   [ -n "$hosts" ] || echo "$base|"
 }
 

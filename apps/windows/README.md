@@ -983,7 +983,6 @@ parallel checks and merges finish sooner. To add one:
    export NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"
    ```
 
-   The first alias keeps the lock name single-computer setups already use.
    A check whose host cannot be reached fails rather than waiting for
    another, so never list a computer that has not passed steps 2 and 3.
    `NVRVIEW_WINDOWS_HOST` still works for a single computer; when both are
@@ -994,8 +993,9 @@ parallel checks and merges finish sooner. To add one:
    profile when it started, so pass `NVRVIEW_WINDOWS_HOSTS=...` inline there
    until the next session.
 
-There is one lock per host (`scripts/windows-lock.sh`; the first host uses
-`NVRVIEW_WINDOWS_LOCK`, the others add `-<alias>`). Merges and releases take a
+There is one lock per host, named after its alias (`scripts/windows-lock.sh`:
+`<NVRVIEW_WINDOWS_LOCK>-<alias>`), so a computer has the same lock whether it
+is listed alone (as in step 3), first, or second. Merges and releases take a
 host before any waiting agent. Check stamps and the test result cache are keyed
 by tree and platform, not host, so a pass on any host counts. Each host keeps
 its own worker folders (about 5 GB each).

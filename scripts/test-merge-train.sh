@@ -47,11 +47,11 @@ longlived; holder=$lp
 longlived; other=$lp
 got=$(sh "$lock" acquire --priority agent --owner-pid "$holder" 2>/dev/null)
 [ "$got" = win-test-1 ] && pass "acquire prints the host" || fail "acquire prints the host"
-check "the lock records its owner" grep -q "^pid=$holder$" "$NVRVIEW_WINDOWS_LOCK/owner"
+check "the lock records its owner" grep -q "^pid=$holder$" "$NVRVIEW_WINDOWS_LOCK-win-test-1/owner"
 sh "$lock" release --owner-pid "$other"
-check "release by another owner leaves the lock" test -d "$NVRVIEW_WINDOWS_LOCK"
+check "release by another owner leaves the lock" test -d "$NVRVIEW_WINDOWS_LOCK-win-test-1"
 sh "$lock" release --owner-pid "$holder"
-check "release by the owner removes it" test ! -d "$NVRVIEW_WINDOWS_LOCK"
+check "release by the owner removes it" test ! -d "$NVRVIEW_WINDOWS_LOCK-win-test-1"
 
 # Priority: a merge waiter beats an agent waiter that came earlier.
 sh "$lock" acquire --priority agent --owner-pid "$holder" >/dev/null 2>&1
@@ -81,15 +81,15 @@ sh "$lock" acquire --owner-pid "$dead" >/dev/null 2>&1
 got=$(sh "$lock" acquire --owner-pid "$holder" 2>"$work/stale.err")
 [ "$got" = win-test-1 ] && pass "a stale lock is broken and taken" || fail "a stale lock is broken and taken"
 check "...with a log line" grep -q "breaking the stale lock" "$work/stale.err"
-check "a live owner's lock was not broken first" grep -q "^pid=$holder$" "$NVRVIEW_WINDOWS_LOCK/owner"
+check "a live owner's lock was not broken first" grep -q "^pid=$holder$" "$NVRVIEW_WINDOWS_LOCK-win-test-1/owner"
 sh "$lock" release --owner-pid "$holder"
 # A lock made by hand (no owner file) is never broken.
-mkdir -p "$NVRVIEW_WINDOWS_LOCK"
+mkdir -p "$NVRVIEW_WINDOWS_LOCK-win-test-1"
 sh "$lock" acquire --owner-pid "$holder" >"$work/hand.out" 2>/dev/null &
 handpid=$!
 bgpids="$bgpids $handpid"
 wait_for waiter_count agent 1
-rmdir "$NVRVIEW_WINDOWS_LOCK"
+rmdir "$NVRVIEW_WINDOWS_LOCK-win-test-1"
 wait "$handpid" || true
 check "a hand-made lock is waited for, not broken" grep -q win-test-1 "$work/hand.out"
 sh "$lock" release --owner-pid "$holder"
@@ -108,6 +108,20 @@ d=$(sh "$lock" acquire --owner-pid "$holder" 2>/dev/null)
 [ "$d" = win-test-2 ] && pass "the free second host is chosen when the first is busy" || fail "the free second host is chosen when the first is busy ($d)"
 sh "$lock" release --owner-pid "$holder"
 sh "$lock" release --owner-pid "$mergepid"
+# Locks are named after the host, not its place in the list: while the first
+# host is held, a check that lists only the second host gets it at once.
+a=$(sh "$lock" acquire --owner-pid "$holder" 2>/dev/null)
+NVRVIEW_WINDOWS_HOSTS=win-test-2 sh "$lock" acquire --owner-pid "$other" >"$work/alone.out" 2>/dev/null &
+alonepid=$!
+bgpids="$bgpids $alonepid"
+if wait_for nonempty "$work/alone.out"; then
+  check "a host listed alone has its own lock" grep -q win-test-2 "$work/alone.out"
+else
+  fail "a host listed alone has its own lock (it waited for the first host's)"
+  kill "$alonepid" 2>/dev/null || true
+fi
+NVRVIEW_WINDOWS_HOSTS=win-test-2 sh "$lock" release --owner-pid "$other"
+sh "$lock" release --owner-pid "$holder"
 unset NVRVIEW_WINDOWS_HOSTS
 
 # --- merge trains -------------------------------------------------------------
