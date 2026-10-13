@@ -2,9 +2,13 @@ import AlertHost
 import DetectorKit
 import Foundation
 import NVRCore
+import Synchronization
 
 /// Self-test steps `alerts-e2e-verified`, `alerts-e2e-not-confirmed` and
-/// `alerts-ui-real-core` (docs/NOTIFICATIONS.md): smart alerts end to end on the real core against
+/// `alerts-ui-real-core`, and the debugging and review steps
+/// `alerts-sensor-messages`, `alerts-sensor-diagnostics`,
+/// `alerts-simulate-trigger`, `alerts-ha-test-alert`, `alerts-evidence-kept`
+/// and `alerts-events-overlay` (docs/NOTIFICATIONS.md): smart alerts end to end on the real core against
 /// the mock NVR, with the app's own host in the middle. A trigger (the path
 /// an MQTT message takes after the input module) wakes a mapped camera; the
 /// core announces pictures; the host decodes them with VideoToolbox and the
@@ -162,6 +166,7 @@ final class AlertsSelfTest {
                 fail(id, "the core did not keep the snapshot")
             }
             print("\(id): pulsed Home Assistant, notified \"\(note.title)\", snapshot \(note.snapshot?.count ?? 0) bytes")
+            await evidenceKept(trigger: trigger, decision: "alert", boxes: true)
         } else {
             guard kind == "quiet" else { return fail(id, "expected a quiet decision, got \(kind)") }
             // Proving that nothing happens takes a short fixed wait: a pulse
@@ -170,6 +175,8 @@ final class AlertsSelfTest {
             if ha.turnOns(Self.helper) != before { fail(id, "Home Assistant was pulsed for an unconfirmed trigger") }
             if !notifier.notifications.isEmpty { fail(id, "a notification was raised for an unconfirmed trigger") }
             print("\(id): quiet, no pulse, no notification")
+            await evidenceKept(trigger: trigger, decision: "quiet", boxes: false)
+            await motionOnlyKeepsNothing(device: device, channel: channel)
         }
         let configured = controller.lastConfigured ?? ""
         if configured.contains(Self.token) { fail(id, "the token appeared in an event") }
@@ -255,6 +262,176 @@ final class AlertsSelfTest {
         }
         if (try? core.alertsGet(query: "{}"))?.contains(Self.token) == true { fail(id, "the token appeared in the alert log") }
         print("\(id): saved settings configured the core, Events lists \"\(shown.explanation)\", \(steps) live steps, pulsed")
+        await reviewSteps(
+            alerts: alerts, core: core, ha: ha, events: events, stub: stub, controller: controller, shown: shown,
+            sensor: "sensor-ui", camera: camera)
+    }
+
+    /// Evidence for an outdoor person check is kept with its decision and
+    /// the detector's boxes (step `alerts-evidence-kept`).
+    private func evidenceKept(trigger: UInt64, decision: String, boxes: Bool) async {
+        let id = "alerts-evidence-kept"
+        let alerts = model.alertsModel!
+        var set: AlertEvidence?
+        let found = await wait(15) {
+            set = alerts.evidence(trigger: trigger)
+            return set?.decision != nil
+        }
+        guard found, let set else { return fail(id, "no evidence was kept for the \(decision) check of trigger \(trigger)") }
+        if set.decision != decision { fail(id, "the evidence holds a \(set.decision ?? "?") decision, not \(decision)") }
+        let drawn = set.method("detector")?.boxes.values.flatMap { $0 }.count
+        if drawn == nil || (boxes && drawn == 0) || (!boxes && drawn != 0) {
+            fail(id, "the detector's boxes in the evidence are \(drawn.map(String.init) ?? "missing")")
+        }
+        guard let frame = set.frames.first, alerts.evidenceFrame(trigger: trigger, index: frame.index) != nil else {
+            return fail(id, "the evidence has no readable frame")
+        }
+        if set.expiresMs == nil || set.pinned { fail(id, "the evidence has no expiry") }
+        print("\(id): kept \(set.frames.count) frame(s) and the detector's \(drawn ?? 0) box(es) with the \(decision) decision")
+    }
+
+    /// A motion-only decision keeps no evidence (the other half of
+    /// `alerts-evidence-kept`).
+    private func motionOnlyKeepsNothing(device: AppModel.DeviceRuntime, channel: Int) async {
+        let id = "alerts-evidence-kept"
+        guard let core = try? model.bridge.smartAlerts(), let deviceID = device.deviceID,
+            let trigger = try? core.alertsTriggerPut(
+                json: #"{"source":"device","camera":{"device":\#(deviceID),"channel":\#(channel)},"kind":"motion","state":"start"}"#)
+        else { return fail(id, "the motion trigger was refused") }
+        let decided = await wait(30) {
+            (try? core.alertsGet(query: #"{"trigger_id":\#(trigger)}"#)).map { $0.contains("\"decision\"") && !$0.contains("\"entries\":[]") }
+                ?? false
+        }
+        guard decided else { return fail(id, "no decision was made for the motion trigger") }
+        if model.alertsModel.evidence(trigger: trigger) != nil { fail(id, "a motion-only decision kept evidence") }
+        print("\(id): a motion-only decision kept none")
+    }
+
+    /// The debugging and review steps on the UI scenario's settings: a second
+    /// sensor on a local broker (messages), the closed port of the first
+    /// (diagnostics), simulated triggers, the Home Assistant test alert, and
+    /// the Events window's overlay.
+    private func reviewSteps(
+        alerts: SmartAlertsModel, core: any CoreAPI, ha: MockHomeAssistant, events: SmartAlertEventsModel,
+        stub: StubDetector, controller: SmartAlertsController, shown: SmartAlertLogEntry, sensor: String, camera: CameraRef
+    ) async {
+        // alerts-sensor-diagnostics: the first sensor's broker port is closed.
+        var diag = "alerts-sensor-diagnostics"
+        let refused = await wait(30) {
+            alerts.refreshStatus()
+            return SensorConnection.find(id: sensor, in: alerts.status)?.errorKind == "refused"
+        }
+        let line = alerts.sensorStatus(0) ?? ""
+        if !refused || !line.contains("Connection refused") || !line.contains("Never connected") {
+            fail(diag, "the sensor's status line is \"\(line)\"")
+        } else {
+            print("\(diag): \"\(line)\"")
+        }
+
+        // alerts-sensor-messages: a second sensor on a local broker.
+        let messages = "alerts-sensor-messages"
+        guard let broker = MockMQTTBroker() else { return fail(messages, "no local broker") }
+        defer { broker.stop() }
+        alerts.update { s in
+            var m = MQTTSensor(key: "sensor-msg", name: "Sensor Messages")
+            m.host = "127.0.0.1"
+            m.port = Int(broker.port)
+            m.topic = "example/sensors/messages"
+            s.sensors.append(m)
+        }
+        guard await wait(30, { broker.subscribers == 1 }) else { return fail(messages, "the sensor never subscribed to the broker") }
+        broker.publish(topic: "example/sensors/messages", payload: Data("ON".utf8))
+        broker.publish(topic: "example/sensors/messages", payload: Data("example-garbage".utf8))
+        var page: SensorMessagePage?
+        let arrived = await wait(15) {
+            page = alerts.sensorMessages(key: "sensor-msg", after: 0)
+            return (page?.entries.count ?? 0) == 2
+        }
+        guard arrived, let entries = page?.entries else { return fail(messages, "the messages did not arrive (\(page?.entries.count ?? -1))") }
+        if entries.map(\.outcomeCode) != ["matched", "not_a_trigger_value"]
+            || entries[0].outcomeText != "matched sensor sensor-msg as sensor_motion (start)"
+            || entries[1].payload != "example-garbage"
+        {
+            fail(messages, "the outcomes are \(entries.map { "\($0.outcomeCode): \($0.outcomeText)" })")
+        }
+        // Memory only: the payload is in no event and no saved file.
+        if (try? core.alertsGet(query: "{}"))?.contains("example-garbage") == true { fail(messages, "a payload reached the alert log") }
+        let window = SensorMessagesModel(app: model, key: "sensor-msg")
+        window.refresh()
+        if window.shown.count != 2 || window.connection?.hasPrefix("Connected") != true {
+            fail(messages, "the messages view shows \(window.shown.count) messages, connection \(window.connection ?? "-")")
+        }
+        window.filter = .matched
+        if window.shown.count != 1 { fail(messages, "the outcome filter shows \(window.shown.count)") }
+        window.clear()
+        window.stop()
+        if alerts.sensorMessages(key: "sensor-msg", after: 0)?.entries.isEmpty != true { fail(messages, "Clear left messages") }
+        print("\(messages): matched and ignored messages listed with their outcomes, filtered, cleared")
+
+        // alerts-ha-test-alert: a test alert through Home Assistant.
+        let test = "alerts-ha-test-alert"
+        let beforeTest = ha.turnOns(Self.helper)
+        alerts.sendHomeAssistantTestAlert()
+        let delivered = await wait(30) { alerts.lastOutputTest != nil }
+        let result = alerts.lastOutputTest
+        if !delivered || result?.ok != true || result?.httpStatus != 200 || !(alerts.homeAssistantSend ?? "").hasPrefix("Delivered (HTTP 200)")
+            || ha.turnOns(Self.helper) != beforeTest + 1
+        {
+            fail(test, "result \(String(describing: result)), line \(alerts.homeAssistantSend ?? "-"), pulses \(ha.turnOns(Self.helper) - beforeTest)")
+        } else {
+            print("\(test): \"\(alerts.homeAssistantSend ?? "")\"")
+        }
+
+        // alerts-simulate-trigger: a vehicle then an animal (their own
+        // cooldowns; the person alert above holds the person's).
+        let sim = "alerts-simulate-trigger"
+        let beforeSim = ha.turnOns(Self.helper)
+        stub.classID = 2  // car
+        guard let first = alerts.simulate(sensor: sensor, sendToHomeAssistant: false) else { return fail(sim, "the trigger was refused") }
+        var entry: SmartAlertLogEntry?
+        let decided = await wait(60) {
+            events.reload()
+            entry = events.entries.first { $0.triggerID == first }
+            return entry != nil
+        }
+        guard decided, let entry else { return fail(sim, "no test decision was logged") }
+        if !entry.isTest || entry.category != "test" || entry.decision != "alert" {
+            fail(sim, "the decision is \(entry.category)/\(entry.decision), test \(entry.isTest)")
+        }
+        if !SmartAlertEventsView.decisionLabel(entry).hasPrefix("Test") { fail(sim, "the Events window does not mark it a test") }
+        // A pulse would start within milliseconds of the decision: a short
+        // fixed wait proves that none comes.
+        try? await Task.sleep(for: .milliseconds(400))
+        if ha.turnOns(Self.helper) != beforeSim { fail(sim, "a simulated trigger reached Home Assistant unticked") }
+        stub.classID = 16  // dog
+        guard let second = alerts.simulate(sensor: sensor, sendToHomeAssistant: true) else { return fail(sim, "the ticked trigger was refused") }
+        guard await wait(60, { ha.turnOns(Self.helper) == beforeSim + 1 }) else {
+            return fail(sim, "the ticked simulated trigger did not reach Home Assistant: \(ha.log.suffix(4))")
+        }
+        _ = second
+        print("\(sim): a test decision with no Home Assistant delivery, then one with it when ticked")
+
+        // alerts-events-overlay: the Events window's detail pane for the
+        // sensor's first (person) alert shows the kept frame with its boxes.
+        let overlay = "alerts-events-overlay"
+        events.reload()
+        events.select(shown.id)
+        guard let set = events.evidence, let image = events.evidenceImages[events.frame] else {
+            return fail(overlay, "the Events window loaded no kept picture for the alert")
+        }
+        let drawn = EvidenceOverlay.layout(
+            set, frame: events.frame, visible: events.visibleMethods, picture: image.size, in: CGSize(width: 400, height: 240))
+        let pictureRect = EvidenceOverlay.pictureRect(picture: image.size, in: CGSize(width: 400, height: 240))
+        if drawn.isEmpty || !drawn.allSatisfy({ pictureRect.insetBy(dx: -0.5, dy: -0.5).contains($0.rect) }) {
+            fail(overlay, "\(drawn.count) boxes, inside the picture: \(drawn.map { pictureRect.contains($0.rect) })")
+        }
+        events.toggleMethod("detector")
+        if !EvidenceOverlay.layout(set, frame: events.frame, visible: events.visibleMethods, picture: image.size, in: CGSize(width: 400, height: 240)).isEmpty {
+            fail(overlay, "switching the method off left its boxes")
+        }
+        events.keepEvidence()
+        if events.evidence?.pinned != true { fail(overlay, "Keep did not pin the set") }
+        print("\(overlay): \(drawn.count) box(es) drawn over the kept picture, toggled off, kept")
     }
 
     /// Polls `condition` (about every 20 ms) until it holds or `seconds` pass.
@@ -272,14 +449,20 @@ final class AlertsSelfTest {
 /// every crop, or nothing.
 private final class StubDetector: CropDetecting, @unchecked Sendable {
     let person: Bool
+    private let cls = Mutex(0)
     init(person: Bool) { self.person = person }
+    /// The model class it reports (0 person, 2 car, 16 dog).
+    var classID: Int {
+        get { cls.withLock { $0 } }
+        set { cls.withLock { $0 = newValue } }
+    }
 
     func detect(picture: DetectorPicture, crops: [NormRect]) throws -> [CropDetections] {
         crops.map { crop in
             CropDetections(
                 crop: crop,
                 detections: person
-                    ? [RawDetection(classID: 0, score: 0.9, box: NormRect(x: 0.4, y: 0.3, width: 0.1, height: 0.4))]
+                    ? [RawDetection(classID: classID, score: 0.9, box: NormRect(x: 0.4, y: 0.3, width: 0.1, height: 0.4))]
                     : [])
         }
     }

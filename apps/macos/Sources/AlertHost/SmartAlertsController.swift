@@ -221,6 +221,8 @@ struct AlertSummary: Sendable, Equatable {
     var className: String
     var explanation: String
     var camera: AlertCamera?
+    /// A simulated trigger: the notification says so.
+    var isTest = false
 
     init?(eventJSON: String) {
         guard let data = eventJSON.data(using: .utf8),
@@ -230,6 +232,7 @@ struct AlertSummary: Sendable, Equatable {
             let id = (decision["alert_id"] as? NSNumber)?.uint64Value
         else { return nil }
         alertID = id
+        isTest = (object["test"] as? Bool) ?? false
         severity = (decision["severity"] as? String) ?? "normal"
         className = (decision["class"] as? String) ?? "other"
         explanation = (decision["explanation"] as? String) ?? ""
@@ -251,7 +254,8 @@ struct AlertSummary: Sendable, Equatable {
         default: noun = "\(className) alert"
         }
         let text = severity == "critical" ? "Critical \(noun)" : noun
-        return text.prefix(1).uppercased() + text.dropFirst()
+        let title = text.prefix(1).uppercased() + text.dropFirst()
+        return isTest ? "Test: \(title)" : title
     }
 
     var thread: String {

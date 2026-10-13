@@ -1676,6 +1676,33 @@ sentence; "Older…" pages back.
   camera, severity or higher, source (Camera AI, Sound, Sensor), decision
   (Alerts, Quiet, Suppressed), and class. They go to the core as the
   `nv_alerts_get` query, and new decisions refresh the list.
+- **More filters (minor 14):** the decision groups are Alerts, Not confirmed
+  (the camera's AI reported it and our check did not confirm it), Quiet,
+  Suppressed, and Tests (a simulated trigger, whatever its decision), and a
+  Sensor picker narrows to one configured sensor.
+- **Kept pictures.** When the core still holds the evidence of an entry (docs/NOTIFICATIONS.md,
+  "Evidence"), its pane shows the frame with every method's boxes: one color and
+  outline style per method (the camera's AI claim has no box, our detector's
+  boxes carry the class and score), a checkbox per method to switch its boxes
+  off, a picker between frames, the scores per method, and a "Methods disagree"
+  badge when the camera's AI and our detector differ. It says when the
+  pictures will be deleted; Keep saves them for 7 days. Below the list, a short
+  summary counts per class how often the camera's AI and our detector agreed,
+  over the kept checks.
+- **Tests** carry "Test:" before the decision in the list and the notification
+  title.
+- **Sensor Messages…** on an entry caused by a sensor opens the sensor's
+  message log (live; it is not a replay of that moment). The same window opens
+  from Settings > Smart Alerts > Sensors, which also has Simulate Trigger
+  (for the sensor, or only one of its cameras) with a box "Also send simulated
+  triggers to Home Assistant" (off), and from Settings > Smart Alerts >
+  Outputs, where Send Test Alert… (after a confirmation) shows "Delivered (HTTP
+  200) at 10:32:01" or what failed. The sensor's status line names why a
+  connection failed and when it last worked.
+- **Sensor Messages window.** Newest first: time, topic, payload (shortened;
+  hex when binary), and the outcome sentence (matched in green). A menu filters
+  by outcome (all, matched, ignored, or one reason); Clear empties the log.
+  The log lives in the core's memory only.
 - **An entry** shows its facts (always-alert rule, unverified, late), the
   explanation, its snapshot, and every step of its trace with the
   deliveries. Open Recording opens the Recordings window on that day at that

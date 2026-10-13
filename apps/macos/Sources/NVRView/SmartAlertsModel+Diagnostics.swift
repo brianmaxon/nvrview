@@ -32,8 +32,10 @@ extension SmartAlertsModel {
     /// Runs the whole chain as if the sensor fired (all its cameras, or just
     /// `camera`). The decision is marked as a test; Home Assistant gets it
     /// only with `sendToHomeAssistant`.
-    func simulate(sensor key: String, camera: AlertCamera? = nil, sendToHomeAssistant: Bool = false) {
-        guard let sensor = settings.sensors.first(where: { $0.key == key }) else { return }
+    @discardableResult
+    func simulate(sensor key: String, camera: AlertCamera? = nil, sendToHomeAssistant: Bool = false) -> UInt64? {
+        guard let sensor = settings.sensors.first(where: { $0.key == key }) else { return nil }
+        var sent: UInt64?
         var o: [String: Any] = [
             "source": "external", "origin": key, "kind": sensor.triggerKind, "state": "pulse", "test": true,
             "send_to_home_assistant": sendToHomeAssistant,
@@ -42,6 +44,7 @@ extension SmartAlertsModel {
         let data = (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data("{}".utf8)
         do throws(CoreStatus) {
             let id = try bridge.smartAlertsAPI().alertsTriggerPut(json: String(decoding: data, as: UTF8.self))
+            sent = id
             simulateNote =
                 "Simulated trigger \(id) sent\(camera.map { " for \(cameraName($0))" } ?? ""). "
                 + "The decision appears in Smart Alert Events marked Test"
@@ -54,6 +57,7 @@ extension SmartAlertsModel {
             simulateNote = "The trigger was not taken (\(error))."
         }
         changed()
+        return sent
     }
 
     func cameraName(_ c: AlertCamera) -> String { model.cameraRef(c).map(model.name(of:)) ?? "Camera \(c.channel + 1)" }
