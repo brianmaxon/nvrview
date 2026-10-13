@@ -274,6 +274,7 @@ impl DeviceSession {
                 catch_up: config.talk_catch_up,
                 reply_timeout: config.query_timeout,
                 tail: config.talk_tail,
+                pace: config.talk_pace.max(Duration::from_millis(1)),
             },
         );
         let ptz_control = Arc::new(PtzControl::new());

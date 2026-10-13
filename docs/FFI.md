@@ -1512,6 +1512,26 @@ The C smoke test opens a two-camera playback of the mock's recordings,
 plays it, seeks, changes the rate to 4x, and closes it, also under
 AddressSanitizer.
 
+## Self-tests
+
+The apps' self-tests and the C smoke test run the core against
+`tools/mock-nvr`, which needs none of the pauses a real device does. With
+the environment variable `NVRVIEW_MOCK_SPEEDUP` set to a whole number from
+2 to 64 when `nv_core_new` runs (anything else counts as 1), the core
+shortens them by that factor for every device added afterward:
+
+- talk-back sends its records that many times faster; the silent tail after
+  a draining stop is as many records as on a device, so `sent_ms` and
+  `tail_ms` in the `talk` events are the same, only sooner;
+- a play group's pause between its seeks and its plays (0.5 s on a device,
+  docs/protocol.md "Four plays at once") is that many times shorter.
+
+Their timing on a real device is proven by the session's and the core's
+tests on a simulated clock (`crates/bc-session/tests/talk.rs`,
+`crates/viewer-core/tests/talk.rs`). The core logs a warning at start when it
+is set. Never set it for a real device: a doorbell plays talk-back at its own
+pace and drops what arrives too fast.
+
 ## Logging
 
 The core logs to rotated files in `log_dir` (capped by file count and total

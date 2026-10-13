@@ -63,7 +63,16 @@ fn a_tile_switches_to_main_without_a_gap_and_back() {
         .collect();
     assert_eq!(timing.len(), 1);
     assert_eq!(timing[0]["tile"], t);
-    assert!(timing[0]["ns"].as_u64().unwrap() > 0);
+    // The mock's tiers share one clock, as a device's do, so the main
+    // stream's first picture is not older than the one shown and is shown
+    // at once, not at the alignment cap (the cap has tests of its own
+    // below); on the simulated clock that may take no time at all.
+    assert_eq!(timing[0]["capped"], false, "{}", timing[0]);
+    let ns = timing[0]["ns"].as_u64().unwrap();
+    assert!(
+        Duration::from_nanos(ns) < fast_config().tier_switch_align_cap,
+        "{ns} ns"
+    );
 
     // Generation 1 is a complete decoder protocol of its own, and its first
     // picture was decoded while generation 0 was still being fed; then

@@ -309,6 +309,18 @@ fn a_live_tile_records_to_a_finalized_mp4() {
     sim_until(&r.sim, &r.core, "4 s recorded", 20, || {
         r.last(id)["duration_ms"].as_u64().unwrap_or(0) >= 4000
     });
+    // The status is current to the recorder's tick (250 ms); the event
+    // stays once a second.
+    let events = r.events(id).len();
+    let at_event = r.last(id)["duration_ms"].as_u64().unwrap();
+    let status_ms = || {
+        let s: serde_json::Value = serde_json::from_str(&r.core.record_status()).unwrap();
+        s["recordings"][0]["duration_ms"].as_u64().unwrap_or(0)
+    };
+    sim_until(&r.sim, &r.core, "the status moves on", 5, || {
+        status_ms() >= at_event + 250
+    });
+    assert_eq!(r.events(id).len(), events, "a recording event came sooner");
     let decodes_before = r.rec.decodes(tile);
     let status: serde_json::Value = serde_json::from_str(&r.core.record_status()).unwrap();
     assert_eq!(status["recordings"][0]["recording"], id);

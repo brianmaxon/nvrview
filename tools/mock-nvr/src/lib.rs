@@ -363,6 +363,11 @@ struct Shared {
     /// Start of the shared replay clock of an `NVRREC02` replay: the first
     /// preview started on this server.
     replay_epoch: OnceLock<Instant>,
+    /// Start of the live streams' timestamp clock: the first live stream
+    /// started on this server. Every stream stamps its pictures on it, as a
+    /// device's sub- and main stream of one lens share one clock
+    /// (docs/protocol.md), so a tier switch can line the two up.
+    live_epoch: OnceLock<Instant>,
     /// Starts of third-party channels so far, by (channel, handle).
     third_party_starts: Mutex<HashMap<(u8, u32), u32>>,
     /// Every talk so far, oldest first.
@@ -528,6 +533,7 @@ fn new_shared(config: Config, runtime: Handle) -> Arc<Shared> {
         alarms,
         next_conn: AtomicU64::new(1),
         replay_epoch: OnceLock::new(),
+        live_epoch: OnceLock::new(),
         third_party_starts: Mutex::new(HashMap::new()),
         talks: Mutex::new(Vec::new()),
         talk_open_status: AtomicU32::new(200),
@@ -1680,7 +1686,18 @@ async fn stream_media(
         &encode_info(width, height, fps.min(255) as u8),
         &mut out,
     )?;
+    let speed = if cfg.live_speed.is_finite() && cfg.live_speed > 0.0 {
+        cfg.live_speed
+    } else {
+        1.0
+    };
     let start = Instant::now();
+    // Pictures are stamped on the server's live clock (whole frames since
+    // its first live stream), not from zero for each stream.
+    let epoch = *shared.live_epoch.get_or_init(|| start);
+    let frame_us = 1_000_000 / u64::from(fps);
+    let clock_us = (start.duration_since(epoch).as_secs_f64() * speed * 1e6) as u64;
+    let clock_us = clock_us / frame_us * frame_us;
     let mut due = start;
     for (item, send_us) in schedule {
         {
@@ -1695,7 +1712,14 @@ async fn stream_media(
             Item::Video { pts_us, .. } => {
                 let frame = &fix.frames()[index];
                 index = fix.next_index(index);
-                encode_video(first, frame.keyframe, fix.codec(), pts_us, &[], &frame.data)
+                encode_video(
+                    first,
+                    frame.keyframe,
+                    fix.codec(),
+                    clock_us + pts_us,
+                    &[],
+                    &frame.data,
+                )
             }
             Item::Audio { k } => {
                 let a = audio.expect("audio items only with audio");
@@ -1715,11 +1739,6 @@ async fn stream_media(
                 (send_us / group + 1e-6).floor() * group + (burst - 1.0) * frame_us
             }
             _ => send_us,
-        };
-        let speed = if cfg.live_speed.is_finite() && cfg.live_speed > 0.0 {
-            cfg.live_speed
-        } else {
-            1.0
         };
         let at = start
             + Duration::from_micros((send_us / speed) as u64)

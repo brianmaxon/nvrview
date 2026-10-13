@@ -768,13 +768,19 @@ static void playback(NvCore *core, const char *key) {
         problem("playback refusals");
     }
 
-    /* Play for a second. */
+    /* Play: the position moves on from where it was paused. */
     if (nv_playback_play(core, pb) != NV_OK) {
         problem("nv_playback_play");
     }
-    sleep_ms(1000);
-    if (nv_playback_position(core, pb, &pos, &state) != NV_OK || pos <= p0 ||
-        state != NV_PLAYBACK_PLAYING) {
+    bool moving = false;
+    for (int i = 0; i < 2000 && !moving; i++) {
+        moving = nv_playback_position(core, pb, &pos, &state) == NV_OK && pos > p0 &&
+                 state == NV_PLAYBACK_PLAYING;
+        if (!moving) {
+            sleep_ms(10);
+        }
+    }
+    if (!moving) {
         problem("playing");
     }
 
@@ -791,11 +797,22 @@ static void playback(NvCore *core, const char *key) {
     if (nv_playback_set_rate(core, pb, 4.0) != NV_OK || !wait_count(&g_pb_rate4, 1)) {
         problem("nv_playback_set_rate");
     }
+    /* Measured over 1.5 s of media (about 0.4 s at 4x) against the host
+     * clock read before the first position and after the last, so a slow
+     * machine can only make it look slower. */
     int64_t before = 0, after = 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     nv_playback_position(core, pb, &before, &state);
-    sleep_ms(1000);
-    nv_playback_position(core, pb, &after, &state);
-    if (after - before < 2500) {
+    after = before;
+    for (int i = 0; i < 1000 && after - before < 1500; i++) {
+        sleep_ms(10);
+        nv_playback_position(core, pb, &after, &state);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long long wall_ms = (long long)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    if (after - before < 1500 || (after - before) * 10 < wall_ms * 25) {
+        fprintf(stderr, "smoke: 4x moved %lld ms in %lld ms\n", (long long)(after - before), wall_ms);
         problem("4x did not run faster");
     }
     char id[32];
@@ -1277,7 +1294,8 @@ int main(int argc, char **argv) {
     if (nv_tile_set_tier(core, tile, NV_TIER_MAIN) != NV_OK) {
         problem("nv_tile_set_tier failed");
     }
-    for (int i = 0; i < 1000 && atomic_load(&g_gen_answered[1]) < 20; i++) {
+    for (int i = 0; i < 1000 && (atomic_load(&g_gen_answered[1]) < 20 ||
+                                  atomic_load(&g_gen_resets[0]) < 1); i++) {
         sleep_ms(10);
     }
     phase("tier-switch");
@@ -1406,13 +1424,18 @@ int main(int argc, char **argv) {
 
     /* Discovery (minor 1): bad requests are refused; a search on loopback
      * only (nothing answers there) starts and stops, and a search still
-     * running when the core is freed ends with it. */
+     * running when the core is freed ends with it. Both stay on loopback:
+     * nothing goes out on the network, and closing a socket bound to some
+     * other interfaces can take the system about a second (measured on
+     * macOS), which the free would wait for. NULL (the defaults) is
+     * covered by the Rust tests (tests/ffi.rs). */
     if (nv_discover_start(core, "{\"seconds\":0}") != NV_ERR_INVALID_ARGUMENT ||
         nv_discover_start(NULL, NULL) != NV_ERR_INVALID_ARGUMENT ||
         nv_discover_stop(core) != NV_OK ||
         nv_discover_start(core, "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"],\"onvif\":false}") !=
             NV_OK ||
-        nv_discover_stop(core) != NV_OK || nv_discover_start(core, NULL) != NV_OK) {
+        nv_discover_stop(core) != NV_OK ||
+        nv_discover_start(core, "{\"seconds\":30,\"interfaces\":[\"127.0.0.1\"]}") != NV_OK) {
         problem("discovery start/stop");
     }
 
