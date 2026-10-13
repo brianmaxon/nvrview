@@ -122,6 +122,28 @@ else
 fi
 NVRVIEW_WINDOWS_HOSTS=win-test-2 sh "$lock" release --owner-pid "$other"
 sh "$lock" release --owner-pid "$holder"
+# Priority and order are per host: a merge pinned to the first host, waiting
+# for it, does not hold an agent off the free second host.
+a=$(NVRVIEW_WINDOWS_HOSTS=win-test-1 sh "$lock" acquire --owner-pid "$holder" 2>/dev/null)
+NVRVIEW_WINDOWS_HOSTS=win-test-1 sh "$lock" acquire --priority merge --owner-pid "$mergepid" >"$work/pinned.out" 2>/dev/null &
+pinnedpid=$!
+bgpids="$bgpids $pinnedpid"
+wait_for waiter_count merge 1
+NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2" sh "$lock" acquire --owner-pid "$other" >"$work/free.out" 2>/dev/null &
+freepid=$!
+bgpids="$bgpids $freepid"
+if wait_for nonempty "$work/free.out"; then
+  check "a merge pinned elsewhere does not hold an agent off a free host" grep -q win-test-2 "$work/free.out"
+else
+  fail "a merge pinned elsewhere does not hold an agent off a free host (it waited)"
+  kill "$freepid" 2>/dev/null || true
+fi
+check "...while the merge still waits for its host" test ! -s "$work/pinned.out"
+NVRVIEW_WINDOWS_HOSTS=win-test-1 sh "$lock" release --owner-pid "$holder"
+wait_for nonempty "$work/pinned.out"
+check "...and the merge gets its host when it frees" grep -q win-test-1 "$work/pinned.out"
+NVRVIEW_WINDOWS_HOSTS=win-test-1 sh "$lock" release --owner-pid "$mergepid"
+NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2" sh "$lock" release --owner-pid "$other"
 unset NVRVIEW_WINDOWS_HOSTS
 
 # --- merge trains -------------------------------------------------------------

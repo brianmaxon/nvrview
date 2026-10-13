@@ -12,10 +12,12 @@
 #       Prints each host's lock owner and the waiting queue.
 #
 # Merges (merge-branch, merge-train, release) use priority "merge"; agents'
-# scripts/windows-check.sh uses "agent". While any merge waits, an agent waiter
-# does not take a free host, so a merge gets the next free computer; waiters of
-# the same priority go first come, first served. A running check is never
-# interrupted.
+# scripts/windows-check.sh uses "agent". Priority and order apply per host:
+# an agent does not take a free host that a waiting merge could use, so a
+# merge gets the next free computer it can run on, and waiters of the same
+# priority go first come, first served for the hosts they share. A waiter
+# pinned to other hosts (its own NVRVIEW_WINDOWS_HOSTS) never holds a check
+# off a host it cannot use. A running check is never interrupted.
 #
 # OWNER-PID is a long-lived process of the caller (default: the parent shell);
 # the lock belongs to it. A lock is a directory holding an owner file (pid,
@@ -117,6 +119,27 @@ queue() { # PRIORITY
   ls "$waiters" 2>/dev/null | grep "^$1-" | LC_ALL=C sort || true
 }
 
+# Whether a waiter can use HOST (its hosts= line; none: any host, as waiters
+# written by older copies of this script).
+wants() { # WAITER-FILE HOST
+  wh=$(field "$1" hosts)
+  [ -z "$wh" ] && return 0
+  case " $wh " in *" $2 "*) return 0 ;; esac
+  return 1
+}
+
+# Whether a waiter ahead of us wants HOST: any merge waiter when we are an
+# agent, and the older waiters of our own priority. Priority and order apply
+# per host, so a merge pinned to one computer never holds agents off another.
+blocked() { # HOST
+  {
+    if [ "$priority" = agent ]; then queue merge; fi
+    queue "$priority" | sed "/^$wname\$/,\$d"
+  } | while read -r w; do
+    if [ -f "$waiters/$w" ] && wants "$waiters/$w" "$1"; then echo yes; break; fi
+  done | grep -q yes
+}
+
 owner_pid="$PPID"
 priority="${NVRVIEW_WINDOWS_PRIORITY:-agent}"
 cmd="${1:-}"
@@ -134,24 +157,20 @@ case "$cmd" in
   acquire)
     mkdir -p "$waiters"
     wname="$priority-$(date +%s)-$$"
-    printf 'pid=%s\nmachine=%s\n' "$owner_pid" "$me" >"$waiters/$wname"
+    # shellcheck disable=SC2086 # the host list, one line
+    printf 'pid=%s\nmachine=%s\nhosts=%s\n' "$owner_pid" "$me" "$(echo $hosts)" >"$waiters/$wname"
     trap 'rm -f "$waiters/$wname"' EXIT
     trap 'exit 1' INT TERM HUP
     n=0
     while :; do
       prune_waiters
-      first=$(queue "$priority" | head -n 1)
-      may=1
-      if [ "$first" != "$wname" ]; then may=0; fi
-      if [ "$priority" = agent ] && [ -n "$(queue merge)" ]; then may=0; fi
-      if [ "$may" = 1 ]; then
-        for entry in $(lock_list); do
-          if try_take "${entry%%|*}" "${entry#*|}" "$priority" "$owner_pid"; then
-            printf '%s\n' "${entry#*|}"
-            exit 0
-          fi
-        done
-      fi
+      for entry in $(lock_list); do
+        if blocked "${entry#*|}"; then continue; fi
+        if try_take "${entry%%|*}" "${entry#*|}" "$priority" "$owner_pid"; then
+          printf '%s\n' "${entry#*|}"
+          exit 0
+        fi
+      done
       if [ $((n % 6)) = 0 ]; then
         log "waiting for the Windows computer (priority $priority; $(queue merge | wc -l | tr -d ' ') merge and $(queue agent | wc -l | tr -d ' ') agent waiters)"
       fi

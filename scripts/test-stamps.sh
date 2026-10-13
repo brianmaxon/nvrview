@@ -385,7 +385,7 @@ NVRVIEW_SCAN_NOW=1000100 scan >"$work/scan2"
 grep -q "no commits since the last clean scan" "$work/scan2" && [ "$(detects)" = 1 ] && pass "nothing new: nothing is scanned" || fail "nothing new: nothing is scanned"
 commit_file a.txt one
 NVRVIEW_SCAN_NOW=1000200 scan >"$work/scan3"
-grep -q "incremental): 1 new commits" "$work/scan3" && grep -q "log-opts=HEAD --not $first" "$calls" && pass "a new commit: only the range since the clean scan" || fail "a new commit: only the range since the clean scan"
+grep -q "incremental): 1 new commits" "$work/scan3" && grep -q "log-opts=--no-merges HEAD --not $first" "$calls" && ! grep -q -- "--merges -m" "$calls" && pass "a new commit: only the range since the clean scan" || fail "a new commit: only the range since the clean scan"
 second=$(git rev-parse HEAD)
 echo staged >s.txt
 git add s.txt
@@ -403,7 +403,7 @@ NVRVIEW_SCAN_NOW=1000400 scan >"$work/scan5" && fail "a finding fails the scan" 
 rm -f "$work/leak"
 : >"$calls"
 NVRVIEW_SCAN_NOW=1000500 scan >"$work/scan6"
-grep -q "log-opts=HEAD --not $second" "$calls" && pass "the next scan covers the same range again" || fail "the next scan covers the same range again"
+grep -q "log-opts=--no-merges HEAD --not $second" "$calls" && pass "the next scan covers the same range again" || fail "the next scan covers the same range again"
 grep -q "^clean=$leaky$" "$state" && pass "...and records it once it passes" || fail "...and records it once it passes"
 : >"$calls"
 NVRVIEW_SCAN_NOW=$((1000000 + 25 * 3600)) scan >"$work/scan7"
@@ -421,6 +421,19 @@ git add .gitleaksignore
 git commit -q -m "ignore list"
 NVRVIEW_SCAN_NOW=$((1000000 + 60 * 3600)) scan >"$work/scan11"
 grep -q "full history: the gitleaks rules or ignore list changed" "$work/scan11" && pass "a changed ignore list forces a full scan" || fail "a changed ignore list forces a full scan"
+# A range of merges alone (the branches' own commits already scanned clean):
+# plain `git log -p` shows merges no changes, so they are scanned with -m.
+git checkout -q -b mb
+commit_file m.txt branch
+NVRVIEW_SCAN_NOW=$((1000000 + 61 * 3600)) scan >/dev/null
+git checkout -q main
+commit_file n.txt main
+NVRVIEW_SCAN_NOW=$((1000000 + 61 * 3600)) scan >/dev/null
+git merge -q --no-ff mb -m "merge mb"
+: >"$calls"
+NVRVIEW_SCAN_NOW=$((1000000 + 61 * 3600)) scan >"$work/scan13" && pass "a range of merges alone passes" || { cat "$work/scan13"; fail "a range of merges alone passes"; }
+grep -q "1 new commits (0 with changes, 1 merges)" "$work/scan13" && grep -q -- "log-opts=--merges -m HEAD --not" "$calls" && ! grep -q -- "--no-merges" "$calls" &&
+  pass "...scanned with -m against each parent" || fail "...scanned with -m against each parent"
 touch "$work/leak"
 before_state=$(cat "$state")
 NVRVIEW_FULL_CHECK=1 scan >"$work/scan12" && fail "a failing full scan fails" || pass "a failing full scan fails"
