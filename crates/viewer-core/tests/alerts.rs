@@ -1155,6 +1155,8 @@ fn evidence_is_kept_with_the_decision_expires_and_can_be_pinned() {
     .unwrap();
     assert_eq!(set["decision"]["decision"], "alert", "{set}");
     assert_eq!(set["methods"]["camera_ai"]["claimed"], "person");
+    assert_eq!(set["trigger"]["source"], "device", "{set}");
+    assert_eq!(set["trigger"]["class"], "person");
     assert_eq!(set["frames"][0]["bytes"], jpeg.len());
     assert_eq!(set["pinned"], false);
     assert_eq!(h.core.alert_evidence_frame_get(ids[0], 0).unwrap(), jpeg);

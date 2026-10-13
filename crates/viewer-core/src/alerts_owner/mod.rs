@@ -1222,6 +1222,19 @@ impl Inner {
                 o.remove("trace");
             }
             let mut patch = json!({"decision": summary, "source": source_name});
+            // What triggered the check: the camera AI's claim (a device
+            // source) or the sensor's kind.
+            if let Some(t) = d.trace.steps.iter().find_map(|s| match &s.kind {
+                StepKind::TriggerReceived {
+                    source,
+                    kind,
+                    class,
+                    ..
+                } => Some(json!({"source": source, "kind": kind, "class": class})),
+                _ => None,
+            }) {
+                patch["trigger"] = t;
+            }
             if test_flag.is_some() {
                 patch["test"] = json!(true);
             }
