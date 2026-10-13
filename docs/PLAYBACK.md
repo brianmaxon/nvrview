@@ -353,6 +353,29 @@ the official client does. Earlier designs paused live view for three or
 four cameras; the measurements made that unnecessary, so there is no pause
 and no setting for it.
 
+## The player's pictures: zoom, fill, fisheye, save
+
+A playback tile is a live tile to the renderer, so the picture features of a
+live tile apply to it with nothing added to the decoder or the core: digital
+zoom and pan, Fill Tile, the fisheye views and Save Picture. They only change
+the rectangles the renderer draws and samples (and the dewarp constants) from
+the picture the tile already decoded, and the save reads that same picture, so
+the pacing of a playback (decode on release, one picture per release, the
+display stage in "Playback pacing" of RENDERING.md) is untouched and zooming
+costs no decode work.
+
+- The state is the player's, per camera (`PlayerTileViews`), not the
+  playback's: a seek, a pause, a speed change, the grid, large and single
+  views and another incident of the same cameras keep it; a camera that
+  leaves the player forgets it. Nothing in a download, an export or an edit
+  reads it (exports are full frame; the core has no region in `nv_still_plan`
+  or the edit requests), and it never reaches the device.
+- A playback's streams are fixed for the play (the tier is chosen at open), so
+  the live tiles' "zoomed past 2x asks for the main stream" has no playback
+  counterpart. A zoomed playback tile shows its stream's own detail enlarged.
+- Save Picture saves the picture the tile shows now, at the stream's size, with
+  the live tiles' naming (the camera and the moment of saving).
+
 ## Keeping cameras together
 
 Synchronized playback means the same moment shows on every camera, also
