@@ -93,6 +93,7 @@ internal static class Program
         LayoutTemplateTests.Run();
         DiscoveryTests.Run();
         UpdateTests.Run();
+        ReleaseNotesTests.Run();
         RecordingsTests.Run();
         PlaybackTests.Run();
         CaptureTests.Run();

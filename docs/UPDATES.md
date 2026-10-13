@@ -394,6 +394,41 @@ a small file, `update-defaults.json`, so users of that build need no setup:
   turns it off; a lost or leaked key cannot be revoked remotely, so release a
   build that no longer bundles it and tell users to turn it off.
 
+## Bundled release notes
+
+A release build also carries its own release notes, so the apps can show them
+without a network: a "What's New" window after an update and Help > Release
+Notes (macOS) or the About page's Release notes button (Windows).
+
+```json
+{"releases":[{"version":"1.2.0","notes":"Plain text.\n- a bullet"},{"version":"1.1.0","notes":"..."}]}
+```
+
+- **Where**: `release-notes.json`, next to `update-defaults.json` (macOS
+  `Contents/Resources`, written before code signing so the signature covers it;
+  Windows next to `NvrView.App.exe` at the top of the package).
+- **Source**: the notes are written outside the repository and never
+  committed or hardcoded. `scripts/release.sh --notes FILE` (the same file the
+  update manifest carries) gives this version's notes, and the optional
+  `--notes-history DIR` a folder of `<version>.txt` files, the notes of past
+  versions. `scripts/release-notes-bundle.py` builds the file: newest first,
+  at most 2000 characters per version (the manifest's limit), files whose name
+  is not a version skipped, this version's `--notes` replacing a same-named
+  history file. Without `--notes-history` only this version is bundled.
+  `scripts/package-macos.sh` takes `--release-notes FILE [--notes-history DIR]`
+  and `scripts/windows-check.sh --package` the same; the Windows file is added
+  to the fetched zip on the Mac.
+- **Format**: plain text; lines and `- ` (or `* `) bullets, shown with a
+  bullet character. No HTML, no links followed, no network.
+- **In the apps**: read at every start. On the first launch of a version newer
+  than the last one that ran (stored as `lastRunVersion` / `last_run_version`
+  in the update settings), a small window shows that version's notes once. A
+  first run (nothing stored), the same version, a downgrade (the older version
+  is stored, so going up again shows the notes), a version the file lacks, a
+  development build, or a missing or malformed file shows no window. The Help
+  item lists every version, newest first, or says "No release notes in this
+  build."
+
 ## Settings and checks in the apps
 
 - **Settings, Updates** (a tab on macOS; the Updates section of the
@@ -440,7 +475,7 @@ clean tree; a passing run leaves a stamp that `scripts/checked.sh --mac
 
 ```sh
 NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes notes.txt \
-    [--update-source https://updates.example.com/nvrview/]
+    [--update-source https://updates.example.com/nvrview/] [--notes-history notes-history/]
 ```
 
 `scripts/release.sh` refuses unless the working tree is clean and the stamps
@@ -455,10 +490,11 @@ missing; it never prints the key. Then it:
    `NvrView-<version>-win-x64.zip` (`scripts/windows-check.sh --package`; the
    package is the app folder zipped with Windows' own tar, the same as
    `scripts/windows-app.sh update` tests) and adds the same
-   `update-defaults.json`;
+   `update-defaults.json` and the `release-notes.json` of `--notes` and
+   `--notes-history` ("Bundled release notes");
 3. puts both in `dist/<version>/` (git-ignored; `--out DIR` picks another
    empty folder);
-4. checks both packages contain the public key, then runs `sign-update manifest` (`--notes-file`, `--expires-in 90`), `sign-update
+4. checks both packages contain the public key and the release notes, then runs `sign-update manifest` (`--notes-file`, `--expires-in 90`), `sign-update
    sign`, and `sign-update check --source <folder> --current 0.0.0` with the
    public key derived from the secret one;
 5. prints the files and the upload order.

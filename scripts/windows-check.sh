@@ -47,6 +47,8 @@ if [ "${1:-}" = "--lock-held" ]; then
   shift
 fi
 defaults_args=""
+release_notes=""
+notes_history=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
@@ -68,7 +70,13 @@ elif [ "${1:-}" = "--package" ]; then
 $1
 $2"
         shift 2 ;;
-      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]" >&2; exit 2 ;;
+      --release-notes)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        release_notes="$2"; shift 2 ;;
+      --notes-history)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        notes_history="$2"; shift 2 ;;
+      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE] [--release-notes FILE [--notes-history DIR]]" >&2; exit 2 ;;
     esac
   done
   if [ -n "$defaults_args" ]; then
@@ -78,6 +86,11 @@ $2"
     # shellcheck disable=SC2086 # split on newlines only
     "$py" -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
     IFS=$oldifs
+  fi
+  if [ -n "$release_notes" ]; then
+    # Validated now, before the build; added to the zip below as release-notes.json.
+    "$py" -I scripts/release-notes-bundle.py --version "$(tr -d '[:space:]' <VERSION)" --notes "$release_notes" \
+      ${notes_history:+--history "$notes_history"} --out /dev/null >/dev/null
   fi
 elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
@@ -174,6 +187,10 @@ if [ -n "$package_to" ]; then
     # shellcheck disable=SC2086
     "$py" -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
     IFS=$oldifs
+  fi
+  if [ -n "$release_notes" ]; then
+    "$py" -I scripts/release-notes-bundle.py --version "$version" --notes "$release_notes" \
+      ${notes_history:+--history "$notes_history"} --add-to-zip "$package_to/$zip"
   fi
   ls -l "$package_to/$zip"
   exit 0

@@ -750,6 +750,10 @@ internal sealed class SettingsPages
         aboutPage.Children.Add(new TextBlock { Text = "A native viewer for Reolink NVRs and cameras.", Opacity = 0.8 });
         aboutPage.Children.Add(new TextBlock { Text = "Licensed MIT OR Apache-2.0. Press F1 in a viewer window for the keyboard shortcuts.", Opacity = 0.8, TextWrapping = TextWrapping.Wrap });
 
+        var releaseNotes = new Button { Content = "Release notes…", HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0) };
+        releaseNotes.Click += (_, _) => _ = App.Instance.Updater?.ShowReleaseNotes();
+        aboutPage.Children.Add(releaseNotes);
+
         result.Pages[SettingsSection.Devices] = devicesPage;
         result.Pages[SettingsSection.Cameras] = camerasPage;
         result.Pages[SettingsSection.AlertsAndCalls] = alertsPage;

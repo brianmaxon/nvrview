@@ -255,7 +255,7 @@ maintainer's approval.
 Both apps can update themselves from a folder or web server you host, with
 packages signed by your own Ed25519 key; it is off until you set a source and
 trust a key, and nothing is installed without your say. See
-[docs/UPDATES.md](docs/UPDATES.md).
+[docs/UPDATES.md](docs/UPDATES.md), which also covers the release notes the builds carry (a What's New window after an update and a Release Notes item in Help on macOS or in About on Windows).
 
 ## Contributing
 

@@ -13,10 +13,13 @@ internal static class UpdateNotesView
     public const double Width = 420;
     public const double MaxHeight = 220;
 
+    /// <summary>The height bound of the Release notes list.</summary>
+    public const double ListMaxHeight = 360;
+
     /// <summary>The notes area alone: a ScrollViewer around selectable text.</summary>
-    public static ScrollViewer Notes(string notes) => new()
+    public static ScrollViewer Notes(string notes, double maxHeight = MaxHeight) => new()
     {
-        MaxHeight = MaxHeight,
+        MaxHeight = maxHeight,
         Width = Width,
         VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
         HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,

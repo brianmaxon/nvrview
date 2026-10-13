@@ -917,6 +917,16 @@ to the zip through `scripts/windows-check.sh --package <dir>
 [--trusted-key-file FILE] [--update-source SOURCE]`; a build from source has
 no such file and trusts nothing. See "Bundled defaults" in docs/UPDATES.md.
 
+The package also bundles `release-notes.json` (`--notes` and the optional
+`--notes-history DIR` of `scripts/release.sh`, added to the zip like the
+defaults). `NvrView.Shell/ReleaseNotes.cs` reads it (`BundledReleaseNotes`) and
+decides the "What's New" dialog (`WhatsNew.Decide`: only after an upgrade from
+a stored last-run version, never on a first run, a downgrade, a development
+build, or a missing file); the Updater shows it a moment after start and Settings,
+About has a Release notes button listing every version. Self-test step
+`updates-whats-new`; unit tests in `NvrView.Shell.Tests/ReleaseNotesTests.cs`.
+See "Bundled release notes" in docs/UPDATES.md.
+
 ## Adding a Windows test computer
 
 `scripts/windows-check.sh` runs the Windows checks on a computer reached over

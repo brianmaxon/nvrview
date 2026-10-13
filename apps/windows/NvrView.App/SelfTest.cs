@@ -167,6 +167,18 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"the bundled update defaults step threw: {e}");
         }
+        try
+        {
+            if (Runs("settings"))
+            {
+                // parity: updates-whats-new
+                _problems.AddRange(WhatsNewSelfTest.Run(app.Viewer!, line => Say(line)));
+            }
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the what's new step threw: {e}");
+        }
         Finish(_problems);
     }
 

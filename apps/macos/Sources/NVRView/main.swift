@@ -233,6 +233,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         updater.present = { [weak self] prompt in self?.presentUpdate(prompt) }
         model.updater = updater
         updater.start()
+        // What's New: once, on the first launch of a new version.
+        if options.selfTestSeconds == nil, let note = updater.takeWhatsNew() {
+            DispatchQueue.main.async { [weak self] in self?.showWhatsNew(note) }
+        }
+    }
+
+    /// The notes of the version that was just installed (docs/UX.md, "Release
+    /// notes"): a sheet on the front window, dismissed with Close.
+    private func showWhatsNew(_ note: ReleaseNote) {
+        let alert = NSAlert()
+        alert.messageText = "What's new in NVRView \(note.version)"
+        alert.accessoryView = UpdateNotesView.make(notes: ReleaseNotesText.format(note.notes))
+        alert.addButton(withTitle: "Close")
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// Help > Release Notes: every version in this build, newest first.
+    @objc func showReleaseNotes(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Release Notes"
+        if let notes = model?.updater?.releaseNotes, !notes.isEmpty {
+            alert.accessoryView = UpdateNotesView.make(notes: notes.displayText, maxHeight: UpdateNotesView.listMaxHeight)
+        } else {
+            alert.informativeText = "No release notes in this build."
+        }
+        alert.addButton(withTitle: "Close")
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
     }
 
     @objc func checkForUpdates(_ sender: Any?) { model?.updater?.menuAction() }
@@ -668,8 +703,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let windowItem = NSMenuItem()
         windowItem.submenu = window
         main.addItem(windowItem)
+        let help = NSMenu(title: "Help")
+        help.addItem(item("Release Notes", #selector(showReleaseNotes(_:)), "", []))
+        let helpItem = NSMenuItem()
+        helpItem.submenu = help
+        main.addItem(helpItem)
         NSApplication.shared.mainMenu = main
         NSApplication.shared.windowsMenu = window
+        NSApplication.shared.helpMenu = help
     }
 
     // MARK: Lifecycle
