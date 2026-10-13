@@ -423,6 +423,39 @@ fn a_removed_device_parks_requests_and_a_refused_login_stops_everything() {
 }
 
 #[test]
+fn a_second_entry_for_the_same_address_leaves_the_first_its_lane() {
+    // Two entries for one address share a key (a settings form saving a
+    // second one, or a wrong password tried); when the second goes, the
+    // first's session serves the key again.
+    let sim = SimRuntime::new();
+    let nvr = archive_mock(&sim, None, None);
+    let (core, rec) = start(config(&sim, None));
+    core.recordings_configure("{}").unwrap();
+    let (_dev, key) = add(&core, &nvr);
+    core.recordings_enable(&key, Some(r#"{"channels":[{"channel":0}]}"#))
+        .unwrap();
+    let (twin, same) = add_with(&core, &nvr, "wrong-password");
+    assert_eq!(same, key);
+    sim_until(&sim, &core, "ended on the twin", 10, || {
+        of(&rec, "recordings_index", &key)
+            .last()
+            .is_some_and(|e| e["state"] == "ended")
+    });
+    sim.run_free(|| core.remove_device(twin).unwrap());
+    let searches = nvr.command_count(14);
+    let want = json!({"cameras": [cam(&key, 0)], "days": [day(8)]}).to_string();
+    core.recordings_want(&want).unwrap();
+    sim_until(&sim, &core, "day searched on the first session", 20, || {
+        nvr.command_count(14) > searches && idle_with_nothing_pending(&rec, &key)
+    });
+    let day8 = parse(
+        core.recordings_events(&json!({"start": day(8), "end": day(8) + 86_399}).to_string()),
+    );
+    assert_eq!(day8["events"].as_array().unwrap().len(), 1, "{day8}");
+    sim.run_free(|| core.shutdown());
+}
+
+#[test]
 fn thumbnails_come_through_the_lane_into_the_cache() {
     let sim = SimRuntime::new();
     let nvr = archive_mock(&sim, None, None);

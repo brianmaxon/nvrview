@@ -1167,7 +1167,10 @@ fields must be ignored.
   (`LaneState`): `idle` (nothing waiting), `busy` (working through
   requests), `waiting_device` (not connected; requests stay queued),
   `ended` (login refused or session closed: every waiting request failed,
-  and nothing is searched until the app adds the device again).
+  and nothing is searched until the app adds the device again). Two
+  devices added for one address share a key; the lane uses the newest
+  one's session, and when that device is removed, the lane goes back to
+  the session of the one added before it.
   `pending_days` is the number of camera-days still queued. Sent on state
   changes and at most once a second while busy.
 - `recordings_day_failed`: one camera-day (or its month's calendar) could
