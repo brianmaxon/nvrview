@@ -2,7 +2,7 @@ import AppKit
 import NVRCore
 
 // Live smart-alert checks in a viewer window (docs/UX.md "Smart alerts",
-// "Live checks"). The checks live in `SmartAlertsController.board`; this
+// "Live checks"). The checks live in `SmartAlertsModel.board`; this
 // window shows each one where it belongs: a band over the camera's tile when
 // the window shows the camera, else (per the setting) a verification inset,
 // the same mechanism as the alert insets (draggable column, snapping,
@@ -11,11 +11,11 @@ import NVRCore
 extension StageView {
     func installVerification() {
         guard !fixedTile else { return }
-        verifyToken = model.smartAlerts.subscribe { [weak self] in self?.syncVerification() }
+        verifyToken = model.alertsModel.subscribe { [weak self] in self?.syncVerification() }
     }
 
     func tearDownVerification() {
-        if let verifyToken { model.smartAlerts.unsubscribe(verifyToken) }
+        if let verifyToken { model.alertsModel.unsubscribe(verifyToken) }
         verifyToken = nil
         for v in verifyBands.values { v.removeFromSuperview() }
         for v in verifyInsetOverlays.values { v.removeFromSuperview() }
@@ -31,7 +31,7 @@ extension StageView {
     private func verificationPlaces() -> (tiles: [CameraRef: [VerifyCheck]], insets: [CameraRef: [VerifyCheck]]) {
         var tiles: [CameraRef: [VerifyCheck]] = [:]
         var insets: [CameraRef: [VerifyCheck]] = [:]
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         for c in alerts.board.shown {
             // Every angle the check looks at that this window shows gets the
             // band; the first angle decides the inset.
@@ -69,7 +69,7 @@ extension StageView {
 
     /// The bands over the tiles (from the stage's chrome layout).
     func layoutVerification(_ leaves: [LeafFrame]) {
-        guard !fixedTile, let alerts = model.smartAlerts else { return }
+        guard !fixedTile, let alerts = model.alertsModel else { return }
         let tiles = verificationPlaces().tiles
         var used: Set<NodePath> = []
         for leaf in leaves {
@@ -127,16 +127,16 @@ extension StageView {
 
     private func makeOverlay(in parent: NSView) -> VerificationOverlayView {
         let v = VerificationOverlayView()
-        v.onClose = { [weak self] id in self?.model.smartAlerts.dismiss(id) }
-        v.onDismissAll = { [weak self] in self?.model.smartAlerts.dismissAll() }
-        v.onHover = { [weak self] id, inside in self?.model.smartAlerts.hover(id, inside) }
+        v.onClose = { [weak self] id in self?.model.alertsModel.dismiss(id) }
+        v.onDismissAll = { [weak self] in self?.model.alertsModel.dismissAll() }
+        v.onHover = { [weak self] id, inside in self?.model.alertsModel.hover(id, inside) }
         parent.addSubview(v)
         return v
     }
 
     /// The inset of a check was closed (its × or Esc): its checks go too.
     func verificationInsetDismissed(_ camera: CameraRef) {
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         for c in alerts.board.shown where ref(c) == camera { alerts.dismiss(c.id) }
     }
 

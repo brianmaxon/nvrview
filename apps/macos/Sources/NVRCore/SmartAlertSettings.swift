@@ -5,14 +5,16 @@ import Foundation
 // document the core takes (`nv_alerts_configure`, docs/FFI.md "Smart
 // alerts"). Two rules shape this file:
 //
-// - Secrets never live here. MQTT user names and passwords and the Home
-//   Assistant token go to the Keychain only (`SmartAlertSecret` names the
-//   item); the saved file and its JSON carry none. The document for the core
-//   gets them filled in, in memory, only when the caller passes a secrets
-//   lookup.
+// - Secrets never live here. MQTT passwords and the Home Assistant token go
+//   to the Keychain only (`SmartAlertSecret` names the item, account
+//   `alerts.<id>`); the saved file and its JSON carry none. The document for
+//   the core gets them, in memory, in its `secrets` map (keyed by the input's
+//   or output's `id`) only when the caller passes a secrets lookup.
 // - Cameras are stored by the stable `CameraRef` (device key, channel, lens);
 //   the core names them by this run's device IDs, so the document is built
-//   at send time and cameras of devices not added now are left out.
+//   at send time and cameras of devices not added now are left out. The
+//   stored form (`storedDocument`, the app's `alerts.json`) names them by
+//   `device_key` instead, for a host that resolves the IDs itself.
 
 public enum AlertExposure: String, Codable, CaseIterable, Sendable {
     case outside, perimeter, inside
@@ -190,8 +192,9 @@ public struct SensorCamera: Codable, Equatable, Sendable, Identifiable {
 }
 
 /// An external sensor reached through the user's MQTT broker, and the camera
-/// angles that confirm it. Its user name and password are Keychain items
-/// (`SmartAlertSecret.mqttUser`, `.mqttPassword`), never fields here.
+/// angles that confirm it. Its password is a Keychain item
+/// (`SmartAlertSecret.mqttPassword`), never a field here; the user name is a
+/// plain setting (it goes into the `mqtt` input entry).
 public struct MQTTSensor: Codable, Equatable, Sendable, Identifiable {
     /// The source key (`[a-z0-9_-]`, at most 32 bytes): the trigger's
     /// origin and the Keychain items' name.
@@ -199,6 +202,8 @@ public struct MQTTSensor: Codable, Equatable, Sendable, Identifiable {
     public var name: String
     /// The trigger kind the sensor's triggers carry.
     public var triggerKind = "sensor_motion"
+    /// The broker login's user name (nil or empty: no login).
+    public var username: String?
     public var host = ""
     public var port = 1883
     public var tls = false
@@ -400,18 +405,21 @@ public struct AlertVerifySettings: Codable, Equatable, Sendable {
 
 /// A Keychain item of the smart-alert settings.
 public enum SmartAlertSecret: Hashable, Sendable {
-    case mqttUser(String)
+    /// A sensor's broker password (by the sensor's key).
     case mqttPassword(String)
     case homeAssistantToken
 
-    /// The Keychain account name.
-    public var account: String {
+    /// The `id` of the input or output entry it belongs to: its key in the
+    /// document's `secrets` map (docs/FFI.md "Smart alerts").
+    public var id: String {
         switch self {
-        case .mqttUser(let key): "smart-alerts.mqtt.\(key).user"
-        case .mqttPassword(let key): "smart-alerts.mqtt.\(key).password"
-        case .homeAssistantToken: "smart-alerts.home-assistant.token"
+        case .mqttPassword(let key): key
+        case .homeAssistantToken: SmartAlertSettings.homeAssistantID
         }
     }
+
+    /// The Keychain account name: `alerts.<id>`.
+    public var account: String { "alerts.\(id)" }
 }
 
 /// Everything on Settings > Smart Alerts.
@@ -476,10 +484,7 @@ public struct SmartAlertSettings: Codable, Equatable, Sendable {
     /// sensors).
     public var secrets: Set<SmartAlertSecret> {
         var s: Set<SmartAlertSecret> = [.homeAssistantToken]
-        for sensor in sensors {
-            s.insert(.mqttUser(sensor.key))
-            s.insert(.mqttPassword(sensor.key))
-        }
+        for sensor in sensors { s.insert(.mqttPassword(sensor.key)) }
         return s
     }
 
@@ -648,6 +653,9 @@ extension SmartAlertSettings {
         /// The entrance mark the alert insets use (Settings > Cameras), when
         /// the app keeps it; else the settings' own.
         public var entrance: ((CameraRef) -> Bool)?
+        /// Name cameras by `device_key` (the stored form) instead of this
+        /// run's device IDs; no camera is left out.
+        public var byDeviceKey = false
 
         public init(
             deviceID: @escaping (String) -> UInt64?, name: @escaping (CameraRef) -> String? = { _ in nil },
@@ -663,9 +671,12 @@ extension SmartAlertSettings {
         }
     }
 
-    /// `{"device","channel","lens"}` with this run's device ID.
+    /// `{"device","channel","lens"}` with this run's device ID (or
+    /// `device_key` in the stored form).
     static func camera(_ ref: CameraRef, _ ctx: CoreContext) -> [String: Any]? {
-        guard let id = ctx.deviceID(ref.device), ref.channel >= 0, ref.lens >= 0 else { return nil }
+        guard ref.channel >= 0, ref.lens >= 0 else { return nil }
+        if ctx.byDeviceKey { return ["device_key": ref.device, "channel": ref.channel, "lens": ref.lens] }
+        guard let id = ctx.deviceID(ref.device) else { return nil }
         return ["device": id, "channel": ref.channel, "lens": ref.lens]
     }
 
@@ -733,6 +744,9 @@ extension SmartAlertSettings {
             if !s.name.isEmpty { o["name"] = s.name }
             return o
         }
+        var secrets: [String: String] = [:]
+        // The `mqtt` input module's entry: the `mqtt-triggers` source
+        // settings, flat, with `trigger_kind` and `username` beside them.
         doc["inputs"] = sensors.map { s -> [String: Any] in
             var broker: [String: Any] = ["host": s.host.trimmingCharacters(in: .whitespaces), "port": s.port]
             broker["tls"] = s.tls ? (s.caPEM.isEmpty ? [:] : ["ca_pem": s.caPEM]) as [String: Any] : NSNull()
@@ -742,18 +756,11 @@ extension SmartAlertSettings {
             ]
             mapping["json_path"] = s.payload == .json ? s.jsonPath : NSNull()
             var o: [String: Any] = [
-                "kind": "mqtt",
-                "source": [
-                    "id": s.key, "kind": s.triggerKind, "broker": broker, "topic": s.topic,
-                    "allow_wildcards": s.allowWildcards, "allow_public": s.allowPublic, "mapping": mapping,
-                ] as [String: Any],
+                "kind": "mqtt", "id": s.key, "trigger_kind": s.triggerKind, "broker": broker, "topic": s.topic,
+                "allow_wildcards": s.allowWildcards, "allow_public": s.allowPublic, "mapping": mapping,
             ]
-            if let secret = ctx.secret {
-                var cred: [String: Any] = [:]
-                if let u = secret(.mqttUser(s.key)), !u.isEmpty { cred["username"] = u }
-                if let p = secret(.mqttPassword(s.key)), !p.isEmpty { cred["password"] = p }
-                if !cred.isEmpty { o["credentials"] = cred }
-            }
+            if let u = s.username?.trimmingCharacters(in: .whitespaces), !u.isEmpty { o["username"] = u }
+            if let p = ctx.secret?(.mqttPassword(s.key)), !p.isEmpty { secrets[s.key] = p }
             return o
         }
         var outputs: [[String: Any]] = [
@@ -764,19 +771,18 @@ extension SmartAlertSettings {
         ]
         let ha = homeAssistant
         if ha.enabled, !ha.baseURL.isEmpty {
-            var o: [String: Any] = [
-                "kind": "home_assistant", "enabled": true, "endpoint": ha.baseURL,
+            // The `home_assistant` output module's entry: the common output
+            // fields plus the `ha-output` settings, flat.
+            outputs.append([
+                "kind": "home_assistant", "id": Self.homeAssistantID, "enabled": true, "endpoint": ha.baseURL,
                 "min_severity": ha.minSeverity.rawValue, "pictures": ha.pictures,
-                "home_assistant": [
-                    "base_url": ha.baseURL, "mode": ha.allMatches ? "all_matches" : "first_match",
-                    "pulse_gap_ms": ha.pulseGapMs, "cooldown_ms": ha.cooldownMs,
-                    "rules": ha.rules.map { Self.haRule($0, ctx) },
-                ] as [String: Any],
-            ]
-            if let secret = ctx.secret, let token = secret(.homeAssistantToken), !token.isEmpty { o["token"] = token }
-            outputs.append(o)
+                "mode": ha.allMatches ? "all_matches" : "first_match", "pulse_gap_ms": ha.pulseGapMs,
+                "cooldown_ms": ha.cooldownMs, "rules": ha.rules.map { Self.haRule($0, ctx) },
+            ])
+            if let token = ctx.secret?(.homeAssistantToken), !token.isEmpty { secrets[Self.homeAssistantID] = token }
         }
         doc["outputs"] = outputs
+        if !secrets.isEmpty { doc["secrets"] = secrets }
         return doc
     }
 
@@ -792,6 +798,35 @@ extension SmartAlertSettings {
         if let s = r.minSeverity { o["min_severity"] = s.rawValue }
         if let c = r.cooldownSeconds { o["cooldown_ms"] = c * 1000 }
         return o
+    }
+
+    /// The `id` of the Home Assistant output entry (its secret's key).
+    public static let homeAssistantID = "home_assistant"
+
+    /// The stored form of the document (the app's `alerts.json`): cameras
+    /// by `device_key`, every camera kept, no `utc_offset_min`, no secrets.
+    /// A host that resolves device keys and adds the offset and the
+    /// Keychain's secrets at send time can configure the core from it.
+    public func storedDocument(
+        name: @escaping (CameraRef) -> String? = { _ in nil }, allCameras: [CameraRef] = [],
+        entrance: ((CameraRef) -> Bool)? = nil
+    ) -> [String: Any] {
+        var ctx = CoreContext(
+            deviceID: { _ in nil }, name: name, utcOffsetMinutes: 0, allCameras: allCameras, entrance: entrance)
+        ctx.byDeviceKey = true
+        var doc = coreDocument(ctx)
+        doc["utc_offset_min"] = nil
+        return doc
+    }
+
+    /// The stored form as JSON bytes (sorted keys, pretty).
+    public func storedJSON(
+        name: @escaping (CameraRef) -> String? = { _ in nil }, allCameras: [CameraRef] = [],
+        entrance: ((CameraRef) -> Bool)? = nil
+    ) -> Data {
+        (try? JSONSerialization.data(
+            withJSONObject: storedDocument(name: name, allCameras: allCameras, entrance: entrance),
+            options: [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes])) ?? Data("{}".utf8)
     }
 
     /// The document as JSON text (sorted keys).

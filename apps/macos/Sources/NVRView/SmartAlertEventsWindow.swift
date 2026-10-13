@@ -43,14 +43,14 @@ final class SmartAlertEventsModel {
     init(app: AppModel) {
         self.app = app
         applyRange()
-        token = app.smartAlerts.subscribeEvents { [weak self] e in
+        token = app.alertsModel.subscribeEvents { [weak self] e in
             // A new decision: the list follows (once per burst).
             if case .alert = e { self?.queueReload() }
         }
     }
 
     func close() {
-        if let token { app.smartAlerts.unsubscribeEvents(token) }
+        if let token { app.alertsModel.unsubscribeEvents(token) }
         token = nil
     }
 
@@ -77,7 +77,7 @@ final class SmartAlertEventsModel {
     }
 
     func reload() {
-        guard let page = app.smartAlerts.log(filter) else {
+        guard let page = app.alertsModel.log(filter) else {
             unavailable = true
             entries = []
             more = false
@@ -92,7 +92,7 @@ final class SmartAlertEventsModel {
 
     /// The next page (older entries).
     func loadMore() {
-        guard more, let last = entries.last, let page = app.smartAlerts.log(filter, beforeMs: last.decidedMs) else { return }
+        guard more, let last = entries.last, let page = app.alertsModel.log(filter, beforeMs: last.decidedMs) else { return }
         entries += page.entries.filter(filter.matches).filter { e in !entries.contains { $0.id == e.id } }
         more = page.more
     }
@@ -106,7 +106,7 @@ final class SmartAlertEventsModel {
     }
 
     private func loadSnapshot() {
-        snapshot = selected.flatMap { e in e.hasSnapshot ? e.alertID.flatMap { app.smartAlerts.snapshot(alertID: $0) } : nil }
+        snapshot = selected.flatMap { e in e.hasSnapshot ? e.alertID.flatMap { app.alertsModel.snapshot(alertID: $0) } : nil }
     }
 
     func cameraName(_ c: AlertCamera) -> String { app.cameraRef(c).map(app.name(of:)) ?? "Camera \(c.channel + 1)" }
@@ -120,7 +120,7 @@ final class SmartAlertEventsModel {
 
     func feedback(_ e: SmartAlertLogEntry, useful: Bool, reason: AlertFeedbackReason? = nil) {
         guard let id = e.alertID else { return }
-        if app.smartAlerts.feedback(alertID: id, useful: useful, reason: reason) {
+        if app.alertsModel.feedback(alertID: id, useful: useful, reason: reason) {
             note = useful ? "Marked useful." : "Marked not useful\(reason.map { ": \($0.title.lowercased())" } ?? "")."
             reload()
         } else {
@@ -130,7 +130,7 @@ final class SmartAlertEventsModel {
 
     func mute(_ e: SmartAlertLogEntry, _ choice: AlertMuteChoice) {
         guard let c = e.camera else { return }
-        let ok = app.smartAlerts.mute(c, seconds: choice.seconds(now: Date()))
+        let ok = app.alertsModel.mute(c, seconds: choice.seconds(now: Date()))
         note = ok ? "\(cameraName(c)) muted (\(choice.title.lowercased()))." : "The camera could not be muted."
     }
 

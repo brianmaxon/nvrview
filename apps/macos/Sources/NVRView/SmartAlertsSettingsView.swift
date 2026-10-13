@@ -6,7 +6,7 @@ import SwiftUI
 // night, the always-alert rules, each camera's exposure, classes, schedule
 // and zones, the MQTT sensors and the cameras that confirm them, the
 // outputs (desktop, Home Assistant), and where live checks show. Every
-// edit goes through `SmartAlertsController.update` (saved, then sent to
+// edit goes through `SmartAlertsModel.update` (saved, then sent to
 // the core); passwords and tokens go to the Keychain only.
 
 enum SmartAlertsSection: String, CaseIterable, Identifiable {
@@ -18,7 +18,7 @@ struct SmartAlertsSettingsView: View {
     let model: AppModel
     @State private var section: SmartAlertsSection = .general
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,7 +43,7 @@ struct SmartAlertsSettingsView: View {
 
 /// A binding to one part of the settings.
 @MainActor
-private func setting<T>(_ alerts: SmartAlertsController, _ path: WritableKeyPath<SmartAlertSettings, T>) -> Binding<T> {
+private func setting<T>(_ alerts: SmartAlertsModel, _ path: WritableKeyPath<SmartAlertSettings, T>) -> Binding<T> {
     Binding(get: { alerts.settings[keyPath: path] }, set: { v in alerts.update { $0[keyPath: path] = v } })
 }
 
@@ -64,7 +64,7 @@ private func minuteBinding(_ b: Binding<Int>) -> Binding<Date> {
 // MARK: General
 
 struct SmartAlertsGeneralView: View {
-    let alerts: SmartAlertsController
+    let alerts: SmartAlertsModel
     @State private var lat = ""
     @State private var lon = ""
 
@@ -167,7 +167,7 @@ struct SmartAlertsCamerasView: View {
     @State private var selection: CameraRef?
     @State private var editingZone: Int?
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -365,11 +365,10 @@ struct SmartAlertsCamerasView: View {
 struct SmartAlertsSensorsView: View {
     let model: AppModel
     @State private var selection: String?
-    @State private var user = ""
     @State private var password = ""
     @State private var regionFor: CameraRef?
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -474,21 +473,19 @@ struct SmartAlertsSensorsView: View {
                     }
                 }
                 TextField(
-                    "User name", text: $user,
-                    prompt: Text(alerts.hasSecret(.mqttUser(s.key)) ? "Saved in the Keychain" : "None"))
+                    "User name", text: Binding(get: { s.username ?? "" }, set: { v in alerts.update { $0.sensors[i].username = v.isEmpty ? nil : v } }),
+                    prompt: Text("None"))
                 SecureField(
                     "Password", text: $password,
                     prompt: Text(alerts.hasSecret(.mqttPassword(s.key)) ? "Saved in the Keychain" : "None"))
                 HStack {
-                    caption("The user name and password are stored only in the macOS Keychain, never in a file. A login the broker rejects is not retried.")
+                    caption("The password is stored only in the macOS Keychain, never in a file. A login the broker rejects is not retried.")
                     Spacer()
-                    Button("Save Login") {
-                        alerts.setSecret(user, for: .mqttUser(s.key))
+                    Button("Save Password") {
                         alerts.setSecret(password, for: .mqttPassword(s.key))
-                        user = ""
                         password = ""
                     }
-                    .disabled(user.isEmpty && password.isEmpty)
+                    .disabled(password.isEmpty)
                 }
                 if !AlertEndpoint.hostIsLocal(s.host), !s.host.isEmpty {
                     Toggle("Allow a broker outside the local network", isOn: b(i, \.allowPublic))
@@ -586,7 +583,7 @@ struct SmartAlertsOutputsView: View {
     let model: AppModel
     @State private var token = ""
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     var body: some View {
         let ha = alerts.settings.homeAssistant
@@ -653,7 +650,7 @@ struct HARuleRow: View {
     let model: AppModel
     let index: Int
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     private func b<T>(_ path: WritableKeyPath<HARule, T>) -> Binding<T> {
         Binding(
@@ -719,7 +716,7 @@ struct HARuleRow: View {
 // MARK: Live view
 
 struct SmartAlertsLiveViewSettings: View {
-    let alerts: SmartAlertsController
+    let alerts: SmartAlertsModel
 
     var body: some View {
         Form {
@@ -743,7 +740,7 @@ struct SmartAlertsLiveViewSettings: View {
 // MARK: Drawing a region on a still
 
 struct RegionEditorSheet: View {
-    let alerts: SmartAlertsController
+    let alerts: SmartAlertsModel
     let camera: CameraRef
     let title: String
     let points: [ROIPoint]

@@ -106,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The live checks' window and whether a camera is on any viewer window
     /// (docs/UX.md "Smart alerts").
     private func startSmartAlerts(_ model: AppModel) {
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         alerts.isOnScreen = { [weak self] camera in self?.windows.contains { $0.stage.showsCamera(camera) } ?? false }
         alerts.showPanel = { [weak self, weak model] show in
             guard let self, let model else { return }
@@ -289,10 +289,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             recordingsFile: JSONFileStore(
                 file: options.dataDirectory?.appendingPathComponent("recordings-cameras.json")
                     ?? JSONFileStore<RecordingsEnablement>.appSupport("recordings-cameras.json")),
-            // No secret in it: those are Keychain items.
+            // No secret in either: those are Keychain items.
             smartAlertsFile: SmartAlertSettingsFile(
                 file: options.dataDirectory?.appendingPathComponent("smart-alerts.json")
-                    ?? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json")),
+                    ?? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json"),
+                stored: options.dataDirectory?.appendingPathComponent("alerts.json")
+                    ?? JSONFileStore<DeviceConfig>.appSupport("alerts.json")),
             clock: testClock ?? SystemViewerClock(),
             callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }

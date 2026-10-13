@@ -16,9 +16,24 @@ import VideoKit
 // `subscribeEvents` (every smart-alert event, after the views took it).
 
 /// The settings file: one JSON document, written atomically; in memory only
-/// when `file` is nil.
+/// when `file` is nil. Beside it, `stored` gets the document's stored form
+/// (`alerts.json`: cameras by device key, no secrets), the file a host that
+/// configures the core itself reads (docs/NOTIFICATIONS.md).
 struct SmartAlertSettingsFile {
     let file: URL?
+    var stored: URL?
+
+    init(file: URL?, stored: URL? = nil) {
+        self.file = file
+        self.stored = stored
+    }
+
+    /// Writes the stored form when it changed.
+    func saveStored(_ data: Data) {
+        guard let stored, (try? Data(contentsOf: stored)) != data else { return }
+        try? FileManager.default.createDirectory(at: stored.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: stored, options: .atomic)
+    }
 
     func load() -> SmartAlertSettings {
         guard let file, let data = try? Data(contentsOf: file) else { return SmartAlertSettings() }
@@ -34,7 +49,7 @@ struct SmartAlertSettingsFile {
 
 @MainActor
 @Observable
-final class SmartAlertsController {
+final class SmartAlertsModel {
     @ObservationIgnored private unowned let model: AppModel
     @ObservationIgnored private let bridge: CoreBridge
     @ObservationIgnored private let credentials: any CredentialStore
@@ -108,6 +123,10 @@ final class SmartAlertsController {
             deviceID: { ids[$0] }, name: { [model] in model.name(of: $0) }, utcOffsetMinutes: offset,
             secret: { [weak self] in self?.secret($0) }, allCameras: model.allCameras,
             entrance: { [model] in model.cameraOptions($0).entrance })
+        file.saveStored(
+            settings.storedJSON(
+                name: { [model] in model.name(of: $0) }, allCameras: model.allCameras,
+                entrance: { [model] in model.cameraOptions($0).entrance }))
         do throws(CoreStatus) {
             try bridge.smartAlertsAPI().alertsConfigure(json: settings.coreJSON(ctx))
             sendError = nil
@@ -141,7 +160,6 @@ final class SmartAlertsController {
     /// Removes a sensor and its Keychain items.
     func removeSensor(_ key: String) {
         update { $0.sensors.removeAll { $0.key == key } }
-        credentials.deletePassword(for: SmartAlertSecret.mqttUser(key).account)
         credentials.deletePassword(for: SmartAlertSecret.mqttPassword(key).account)
     }
 

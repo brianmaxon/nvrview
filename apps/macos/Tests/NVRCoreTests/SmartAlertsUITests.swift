@@ -30,6 +30,7 @@ private func sampleSettings() -> SmartAlertSettings {
     s.setCamera(AlertCameraSettings(camera: gone))
     var sensor = MQTTSensor(key: "sensor-1", name: "Sensor 1")
     sensor.host = "broker.local"
+    sensor.username = "example-user"
     sensor.topic = "example/sensors/motion"
     sensor.payload = .json
     sensor.jsonPath = "state"
@@ -54,7 +55,6 @@ private func context(secrets: Bool) -> SmartAlertSettings.CoreContext {
         secret: secrets
             ? { s in
                 switch s {
-                case .mqttUser: "example-user"
                 case .mqttPassword: "example-password"
                 case .homeAssistantToken: "example-token"
                 }
@@ -67,7 +67,7 @@ private func context(secrets: Bool) -> SmartAlertSettings.CoreContext {
         let data = s.fileData()
         #expect(SmartAlertSettings.fromFile(data) == s)
         let text = String(decoding: data, as: UTF8.self)
-        for word in ["example-password", "example-token", "example-user", "password", "token"] {
+        for word in ["example-password", "example-token", "password", "token"] {
             #expect(!text.contains(word), "the settings file holds \(word)")
         }
         // A file from an older or newer app: missing and unknown members.
@@ -119,15 +119,20 @@ private func context(secrets: Bool) -> SmartAlertSettings.CoreContext {
         #expect((source["cameras"] as? [[String: Any]])?.last?["roi"] as? [[Double]] == [])
         #expect(source["window_before_ms"] as? Int == 2000 && source["on_unavailable"] as? String == "quiet")
         let input = try #require((doc["inputs"] as? [[String: Any]])?.first)
-        #expect(input["kind"] as? String == "mqtt" && input["credentials"] == nil)
-        let mqtt = try #require(input["source"] as? [String: Any])
+        // The `mqtt` module's entry: flat, the user name beside the settings.
+        #expect(input["kind"] as? String == "mqtt" && input["trigger_kind"] as? String == "sensor_motion")
+        #expect(input["username"] as? String == "example-user" && doc["secrets"] == nil)
+        let mqtt = input
         #expect(mqtt["id"] as? String == "sensor-1" && mqtt["topic"] as? String == "example/sensors/motion")
         #expect((mqtt["broker"] as? [String: Any])?["host"] as? String == "broker.local")
         #expect((mqtt["mapping"] as? [String: Any])?["json_path"] as? String == "state")
         let outputs = try #require(doc["outputs"] as? [[String: Any]])
         #expect(outputs.map { $0["kind"] as? String } == ["desktop", "home_assistant"])
         #expect(outputs[1]["token"] == nil && outputs[1]["pictures"] as? Bool == true)
-        let ha = try #require(outputs[1]["home_assistant"] as? [String: Any])
+        // The `home_assistant` module's entry: flat, with the secret's id.
+        let ha = outputs[1]
+        #expect(ha["id"] as? String == "home_assistant" && ha["endpoint"] as? String == "http://homeassistant.local:8123")
+        #expect(ha["mode"] as? String == "first_match" && ha["home_assistant"] == nil)
         let rule = try #require((ha["rules"] as? [[String: Any]])?.first)
         #expect((rule["action"] as? [String: String]) == ["kind": "pulse", "entity_id": "input_boolean.example_alert"])
         #expect((rule["cameras"] as? [[String: Int]])?.count == 1 && rule["min_severity"] as? String == "high")
@@ -136,11 +141,29 @@ private func context(secrets: Bool) -> SmartAlertSettings.CoreContext {
     @Test func secretsGoOnlyToTheCoreAndOnlyWhenAsked() throws {
         let s = sampleSettings()
         let withSecrets = object(s.coreJSON(context(secrets: true)))
-        let input = try #require((withSecrets["inputs"] as? [[String: Any]])?.first)
-        #expect((input["credentials"] as? [String: String]) == ["username": "example-user", "password": "example-password"])
-        #expect((withSecrets["outputs"] as? [[String: Any]])?.last?["token"] as? String == "example-token")
-        #expect(s.secrets == [.homeAssistantToken, .mqttUser("sensor-1"), .mqttPassword("sensor-1")])
-        #expect(SmartAlertSecret.mqttPassword("sensor-1").account == "smart-alerts.mqtt.sensor-1.password")
+        // One `secrets` map, keyed by the entry ids (docs/FFI.md).
+        #expect((withSecrets["secrets"] as? [String: String]) == ["sensor-1": "example-password", "home_assistant": "example-token"])
+        #expect((withSecrets["inputs"] as? [[String: Any]])?.first?["password"] == nil)
+        #expect((withSecrets["outputs"] as? [[String: Any]])?.last?["token"] == nil)
+        #expect(s.secrets == [.homeAssistantToken, .mqttPassword("sensor-1")])
+        #expect(SmartAlertSecret.mqttPassword("sensor-1").account == "alerts.sensor-1")
+        #expect(SmartAlertSecret.homeAssistantToken.account == "alerts.home_assistant")
+    }
+
+    @Test func theStoredFormNamesCamerasByKeyAndHoldsNoSecret() throws {
+        let s = sampleSettings()
+        let data = s.storedJSON(allCameras: [cam2])
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains("example-password") && !text.contains("example-token") && !text.contains("\"secrets\""))
+        let doc = try #require((try JSONSerialization.jsonObject(with: data)) as? [String: Any])
+        #expect(doc["utc_offset_min"] == nil && doc["enabled"] as? Bool == true)
+        let cameras = try #require(doc["cameras"] as? [[String: Any]])
+        // Every camera is kept, a device not added now included.
+        #expect(cameras.count == 3)
+        let first = try #require(cameras.first?["camera"] as? [String: Any])
+        #expect(first["device_key"] as? String == "dev-a" && first["device"] == nil && first["channel"] as? Int == 1)
+        let sourceCameras = try #require((doc["sources"] as? [[String: Any]])?.first?["cameras"] as? [[String: Any]])
+        #expect(sourceCameras.count == 3)
     }
 
     @Test func offSendsOnlyEnabledFalse() {

@@ -1527,7 +1527,12 @@ this section covers the settings, the live checks, and the event log.
 
 A tab of its own with five parts (a segmented control at the top). Every
 change is saved at once to `smart-alerts.json` in the app's data folder and
-sent to the core; the file holds no secret.
+sent to the core. Beside it, `alerts.json` holds the document in the form the
+core takes, with cameras named by device key rather than this run's IDs (see
+NOTIFICATIONS.md). Neither file holds a secret: the MQTT passwords and the
+Home Assistant token are Keychain items with the account `alerts.<id>`, the
+`id` of their input or output, and reach the core only in memory, in the
+document's `secrets` map.
 
 - **General.** The Smart alerts switch (off until turned on; off sends the
   core only `{"enabled":false}`, so it lets go of everything). Always alert:
@@ -1548,8 +1553,9 @@ sent to the core; the file holds no secret.
   stream opened for at most 5 s); each zone is "alert only here" or "never
   here (mask)".
 - **Sensors.** MQTT sensors: name, key, trigger kind; the broker (address,
-  port, TLS with an optional CA as PEM); the user name and password, saved to
-  the Keychain only ("Save Login"; the fields show "Saved in the Keychain");
+  port, TLS with an optional CA as PEM); the user name (a setting) and the
+  password, saved to the Keychain only ("Save Password"; the field shows
+  "Saved in the Keychain");
   the topic (wildcards only when allowed), the payload (ON/OFF values, or
   JSON with a path), level or pulse, retained messages, debounce; a broker
   outside the local network needs "Allow a broker outside the local

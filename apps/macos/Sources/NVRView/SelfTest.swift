@@ -2942,8 +2942,8 @@ final class SelfTest {
     /// each of the check's open requests.
     private func answerCheck(_ trigger: UInt64, _ boxes: [AlertDetection]) {
         guard let model = app.model, let fake = model.fake else { return }
-        for r in model.smartAlerts.requests(trigger: trigger) {
-            model.smartAlerts.recordDetections(request: r.request, detections: boxes)
+        for r in model.alertsModel.requests(trigger: trigger) {
+            model.alertsModel.recordDetections(request: r.request, detections: boxes)
             try? fake.alertDetectionsPut(request: r.request, json: AlertDetection.json(boxes))
         }
         fake.completeAlertWork()
@@ -2952,7 +2952,7 @@ final class SelfTest {
     /// A camera check from trigger to decision: waits for its two pictures,
     /// answers them, and waits for the decision.
     private func scriptedCheck(_ camera: CameraRef, then next: @escaping @MainActor (UInt64?) -> Void) {
-        guard let alerts = app.model?.smartAlerts, let t = smartTrigger(camera, kind: "people") else { return next(nil) }
+        guard let alerts = app.model?.alertsModel, let t = smartTrigger(camera, kind: "people") else { return next(nil) }
         when({ alerts.requests(trigger: t).count == 2 }, timeout: 3) { [self] in
             answerCheck(t, Self.personBoxes)
             when({ alerts.board.check(t)?.decision != nil }, timeout: 3) { next(t) }
@@ -2961,7 +2961,7 @@ final class SelfTest {
 
     private func smartAlertsSettingsStep() {
         guard let model = app.model, let fake = model.fake, let key = model.runtime("fake-1")?.key else { return checkLog() }
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         // parity: alerts-settings-roundtrip
         // Settings > Smart Alerts: an edit is saved and sent to the core, the
         // cameras named by this run's device IDs; the sensor's password goes
@@ -2990,7 +2990,7 @@ final class SelfTest {
             let device = model.runtime("fake-1")?.deviceID ?? 0
             let source = (doc["sources"] as? [[String: Any]])?.first
             let camera = (source?["cameras"] as? [[String: Any]])?.first?["camera"] as? [String: Any]
-            let credentials = (doc["inputs"] as? [[String: Any]])?.first?["credentials"] as? [String: String]
+            let secrets = doc["secrets"] as? [String: String]
             print(
                 "smart alerts settings: sent \(sent.count) bytes, mode \(doc["mode"] ?? "-"), "
                     + "location \(doc["location"] ?? "-"), sensor camera \(camera ?? [:]), file \(file.count) bytes")
@@ -3006,7 +3006,7 @@ final class SelfTest {
             if (camera?["device"] as? Int).map(UInt64.init) != device || camera?["channel"] as? Int != 1 {
                 problems.append("the sensor's camera was not named by this run's device ID")
             }
-            if credentials?["password"] != "example-password" || !alerts.hasSecret(.mqttPassword("sensor-1")) {
+            if secrets?["sensor-1"] != "example-password" || !alerts.hasSecret(.mqttPassword("sensor-1")) {
                 problems.append("the sensor's password did not go from the credential store to the core")
             }
             verifyTileStep()
@@ -3015,7 +3015,7 @@ final class SelfTest {
 
     private func verifyTileStep() {
         guard let model = app.model, let window else { return checkLog() }
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         let stage = window.stage
         guard let camera = stage.frames.leaves.first?.camera else { return checkLog() }
         // parity: verify-view-tile
@@ -3046,7 +3046,7 @@ final class SelfTest {
 
     private func verifyDismissStep(_ t: UInt64, _ camera: CameraRef, alertID: UInt64?) {
         guard let model = app.model, let fake = model.fake, let window, let alertID else { return checkLog() }
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         let stage = window.stage
         // parity: verify-view-dismiss
         // On the viewer clock: an alert's check stays while its episode
@@ -3085,7 +3085,7 @@ final class SelfTest {
 
     private func verifyInsetStep() {
         guard let model = app.model, let window else { return checkLog() }
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         let stage = window.stage
         let leaves = stage.frames.leaves
         guard leaves.count >= 3, let a = leaves[1].camera, let b = leaves[2].camera else { return checkLog() }
@@ -3136,7 +3136,7 @@ final class SelfTest {
 
     private func eventsLogStep() {
         guard let model = app.model, let window, let events = app.openSmartAlertEvents()?.events else { return checkLog() }
-        let alerts = model.smartAlerts!
+        let alerts = model.alertsModel!
         _ = window
         guard let first = smartTileCamera, let firstAlert = model.alertCamera(first) else { return checkLog() }
         // parity: events-log-filter
@@ -3196,8 +3196,8 @@ final class SelfTest {
 
     private func finishEvents() {
         app.eventsWindow?.close()
-        app.model?.smartAlerts.dismissAll()
-        app.model?.smartAlerts.update { $0.enabled = false }
+        app.model?.alertsModel.dismissAll()
+        app.model?.alertsModel.update { $0.enabled = false }
         checkLog()
     }
 

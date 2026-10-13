@@ -37,7 +37,7 @@ extension VerifyOverlayContent {
         boxes = camera.flatMap { c.pictures[$0]?.boxes } ?? []
         self.others = others
         critical = c.severity == "critical" || c.candidate
-        canDismissAll = model.smartAlerts.board.shown.count > 1
+        canDismissAll = model.alertsModel.board.shown.count > 1
     }
 }
 
@@ -231,7 +231,7 @@ struct VerificationPanelView: View {
     let model: AppModel
     @State private var tick = 0
 
-    private var alerts: SmartAlertsController { model.smartAlerts }
+    private var alerts: SmartAlertsModel { model.alertsModel }
 
     var body: some View {
         let checks = alerts.panelChecks
@@ -271,7 +271,7 @@ struct VerificationCard: View {
                 Text(check.headline(cameraName: name)).font(.subheadline.bold())
                 Spacer()
                 Button {
-                    model.smartAlerts.dismiss(check.id)
+                    model.alertsModel.dismiss(check.id)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                 }
@@ -279,7 +279,7 @@ struct VerificationCard: View {
                 .accessibilityLabel("Close Check")
             }
             ForEach(check.cameras, id: \.self) { cam in
-                BoxedPicture(image: model.smartAlerts.pictures[check.id]?[cam], boxes: check.pictures[cam]?.boxes ?? [])
+                BoxedPicture(image: model.alertsModel.pictures[check.id]?[cam], boxes: check.pictures[cam]?.boxes ?? [])
                     .frame(height: 150)
                     .overlay(alignment: .topLeading) {
                         Text(name(cam)).font(.caption2).padding(3).background(.black.opacity(0.6)).foregroundStyle(.white)
@@ -290,7 +290,7 @@ struct VerificationCard: View {
         }
         .padding(8)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
-        .onHover { model.smartAlerts.hover(check.id, $0) }
+        .onHover { model.alertsModel.hover(check.id, $0) }
     }
 }
 
