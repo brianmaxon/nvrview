@@ -36,6 +36,8 @@ internal static class PlaybackTests
                 Parse("""{"type":"playback_state","playback":3,"state":"playing","position_ms":1791618127000,"rate":1.0}"""));
             T.Equal(new PlaybackEvent.Camera(3, 11, "buffering", null),
                 Parse("""{"type":"playback_camera","playback":3,"tile":11,"state":"buffering"}"""));
+            T.Equal(new PlaybackEvent.Camera(3, 12, "failed", "start_rejected", 400),
+                Parse("""{"type":"playback_camera","playback":3,"tile":12,"state":"failed","reason":"start_rejected","status":400}"""));
             T.Equal(new PlaybackEvent.Camera(3, 12, "failed", "start_rejected"),
                 Parse("""{"type":"playback_camera","playback":3,"tile":12,"state":"failed","reason":"start_rejected"}"""));
             T.Equal(new PlaybackEvent.Seek(3, 1791618130000, 4, "active"),

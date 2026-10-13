@@ -832,7 +832,7 @@ final class RecordingsModel {
     func applyPlayback(_ e: PlaybackEvent) {
         let id: UInt64
         switch e {
-        case .state(let p, _, _, _), .camera(let p, _, _, _), .seek(let p, _, _, _), .closed(let p, _): id = p
+        case .state(let p, _, _, _), .camera(let p, _, _, _, _), .seek(let p, _, _, _), .closed(let p, _): id = p
         }
         guard let player = players[id]?.value else { return }
         if case .closed = e { players[id] = nil }

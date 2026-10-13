@@ -30,6 +30,17 @@ public sealed class PlayerCell(RecordingCamera camera, ulong tile)
 
     /// <summary>Why it failed, if it did.</summary>
     public string? Reason { get; set; }
+
+    /// <summary>With <c>start_rejected</c>: the status the device refused the play with.</summary>
+    public int? Status { get; set; }
+
+    /// <summary>
+    /// The message across a cell without a picture when the device refused its play (FFI-RECORDINGS.md); null
+    /// otherwise.
+    /// </summary>
+    public string? RefusedText => State == "failed" && Reason == "start_rejected" && Status is { } s
+        ? $"The NVR refused this playback (status {s})"
+        : null;
 }
 
 /// <summary>The player of one Recordings window (see the file comment).</summary>
@@ -422,6 +433,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
                 {
                     cell.State = c.Value;
                     cell.Reason = c.Reason;
+                    cell.Status = c.Status;
                     Changed?.Invoke();
                 }
                 break;

@@ -831,9 +831,24 @@ pub struct PlayRequest {
     pub file_id: String,
     /// The file's `name` from the file search (the stop names it).
     pub file_name: String,
+    /// The file's start time from the file search (the by-name form's play
+    /// names it).
+    pub file_start: DateTime,
     /// `playSpeed`: one of [`PLAY_SPEEDS`] (anything else is sent as
     /// [`PLAY_SPEED_NORMAL`]).
     pub speed: u32,
+}
+
+impl PlayRequest {
+    /// Whether this play takes the by-name form (docs/protocol.md, "Plays
+    /// on older firmware"): the device's file search gave the file a `name`
+    /// but no `Id`, as older firmware does. The play is then a 13 naming
+    /// the file, answered 200, and a 5 on the same message ID naming the
+    /// file's start time instead of an `Id`. With an `Id` (newer firmware)
+    /// the play is a 5 naming it, as before.
+    pub fn by_name(&self) -> bool {
+        self.file_id.is_empty()
+    }
 }
 
 /// Body of a seek (command 123): where the next play starts, tagged with
@@ -857,14 +872,34 @@ pub const fn play_support_sub(stream: StreamTier) -> u8 {
     }
 }
 
-/// Body of a play (command 5) at the request's speed (normal speed when it
-/// is not one of [`PLAY_SPEEDS`]).
-pub fn play_body(q: &PlayRequest) -> String {
-    let speed = if PLAY_SPEEDS.contains(&q.speed) {
+/// The `playSpeed` sent for a request: its speed when it is one of
+/// [`PLAY_SPEEDS`], else [`PLAY_SPEED_NORMAL`].
+fn sent_speed(q: &PlayRequest) -> u32 {
+    if PLAY_SPEEDS.contains(&q.speed) {
         q.speed
     } else {
         PLAY_SPEED_NORMAL
-    };
+    }
+}
+
+/// Body of a play (command 5) at the request's speed (normal speed when it
+/// is not one of [`PLAY_SPEEDS`]). The `Id` form names the file by `Id`;
+/// the by-name form ([`PlayRequest::by_name`]) names the file's start time
+/// and no file at all (the 13 before it named the file), in the order the
+/// official client sent on older firmware.
+pub fn play_body(q: &PlayRequest) -> String {
+    let speed = sent_speed(q);
+    if q.by_name() {
+        return wrap(&format!(
+            "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n\
+             <supportSub>{}</supportSub>\n<streamType>{}</streamType>\n{}\
+             <playSpeed>{speed}</playSpeed>\n</FileInfo>\n</FileInfoList>\n",
+            q.channel,
+            play_support_sub(q.stream),
+            q.stream.name(),
+            q.file_start.xml("startTime"),
+        ));
+    }
     wrap(&format!(
         "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<Id>{}</Id>\n{}\
          <supportSub>{}</supportSub>\n<playSpeed>{speed}</playSpeed>\n\
@@ -873,6 +908,23 @@ pub fn play_body(q: &PlayRequest) -> String {
         escape(&q.file_id),
         opt_uid(q.uid.as_deref()),
         play_support_sub(q.stream),
+        q.stream.name(),
+    ))
+}
+
+/// Body of the file-information request (command 13) that comes before a
+/// by-name play ([`PlayRequest::by_name`]): the file by `name`, with the
+/// play's `supportSub`, `playSpeed`, and `streamType`, in the official
+/// client's order. The device answers 200 with the file's details.
+pub fn play_file_info_body(q: &PlayRequest) -> String {
+    wrap(&format!(
+        "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<name>{}</name>\n\
+         <supportSub>{}</supportSub>\n<playSpeed>{}</playSpeed>\n<streamType>{}</streamType>\n\
+         </FileInfo>\n</FileInfoList>\n",
+        q.channel,
+        escape(&q.file_name),
+        play_support_sub(q.stream),
+        sent_speed(q),
         q.stream.name(),
     ))
 }
@@ -905,6 +957,7 @@ mod tests {
             stream: StreamTier::Sub,
             file_id: "1-3-0-example".into(),
             file_name: "example".into(),
+            file_start: t(2026, 1, 2, 3, 0, 0),
             speed: 1,
         };
         let b = play_body(&q);
@@ -925,6 +978,64 @@ mod tests {
             let fi = root.find("FileInfo").unwrap();
             assert_eq!(fi.text_of("playSpeed"), Some(sent));
         }
+    }
+
+    #[test]
+    fn by_name_play_names_the_start_time_and_no_file() {
+        // Observed on older firmware: no `Id` in the file search, so the
+        // play is a 13 by name, then a 5 by the file's start time.
+        let q = PlayRequest {
+            channel: 8,
+            uid: Some("UID-EXAMPLE".into()),
+            stream: StreamTier::Main,
+            file_id: String::new(),
+            file_name: "example-name".into(),
+            file_start: t(2026, 1, 2, 23, 59, 57),
+            speed: 16,
+        };
+        assert!(q.by_name());
+        let b = play_body(&q);
+        let root = Element::parse(&b).unwrap();
+        let fi = root.find("FileInfo").unwrap();
+        assert_eq!(fi.text_of("Id"), None);
+        assert_eq!(fi.text_of("uid"), None);
+        assert_eq!(fi.text_of("name"), None);
+        assert_eq!(fi.text_of("supportSub"), Some("0"));
+        assert_eq!(fi.text_of("streamType"), Some("mainStream"));
+        assert_eq!(fi.text_of("playSpeed"), Some("16"));
+        assert_eq!(fi.time("startTime").unwrap(), q.file_start);
+        // The client's element order.
+        let order: Vec<usize> = [
+            "channelId",
+            "supportSub",
+            "streamType",
+            "startTime",
+            "playSpeed",
+        ]
+        .iter()
+        .map(|n| b.find(&format!("<{n}>")).unwrap())
+        .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{b}");
+
+        let b = play_file_info_body(&q);
+        let root = Element::parse(&b).unwrap();
+        let fi = root.find("FileInfo").unwrap();
+        assert_eq!(fi.text_of("channelId"), Some("8"));
+        assert_eq!(fi.text_of("name"), Some("example-name"));
+        assert_eq!(fi.text_of("supportSub"), Some("0"));
+        assert_eq!(fi.text_of("playSpeed"), Some("16"));
+        assert_eq!(fi.text_of("streamType"), Some("mainStream"));
+        assert_eq!(fi.text_of("Id"), None);
+
+        // With an `Id` the play keeps the newer firmware's form.
+        let q = PlayRequest {
+            file_id: "0-8-0-example".into(),
+            ..q
+        };
+        assert!(!q.by_name());
+        let b = play_body(&q);
+        assert!(b.contains("<Id>0-8-0-example</Id>"));
+        assert!(!b.contains("startTime"));
     }
 
     #[test]

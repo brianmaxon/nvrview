@@ -509,23 +509,27 @@ internal sealed partial class RecordingsWindow
         _labels.Children.Add(message);
     }
 
+    /// <summary>The message across a player cell for its state (null while it plays).</summary>
+    internal static string? CellMessage(PlayerCell cell) => cell.State switch
+    {
+        "buffering" => "Loading…",
+        "late" => "Catching up…",
+        "no_recording" => "No recording at this time",
+        "ended" => "End of this camera's recording",
+        "failed" when cell.RefusedText is { } refused => refused,
+        "failed" => cell.Reason switch
+        {
+            "device_in_use" => "Playing in another window",
+            "limit" => "Too many plays on this device",
+            "undecodable" => "This picture cannot be decoded",
+            _ => "Could not play",
+        },
+        _ => null,
+    };
+
     private void AddLabel(PlayerCell cell, Rect r)
     {
-        string? state = cell.State switch
-        {
-            "buffering" => "Loading…",
-            "late" => "Catching up…",
-            "no_recording" => "No recording at this time",
-            "ended" => "End of this camera's recording",
-            "failed" => cell.Reason switch
-            {
-                "device_in_use" => "Playing in another window",
-                "limit" => "Too many plays on this device",
-                "undecodable" => "This picture cannot be decoded",
-                _ => "Could not play",
-            },
-            _ => null,
-        };
+        string? state = CellMessage(cell);
         var name = new TextBlock { Text = Service.CameraName(cell.Camera), FontSize = 12, Foreground = new SolidColorBrush(Colors.White), Padding = new Thickness(6, 2, 6, 2) };
         var chip = new Border { Child = name, Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x90, 0, 0, 0)), CornerRadius = new CornerRadius(3) };
         Canvas.SetLeft(chip, r.X + 6);

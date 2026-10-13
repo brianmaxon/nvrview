@@ -27,10 +27,13 @@ final class RecordingsPlayer {
         /// `late`, `no_recording`, `ended`, `failed`.
         var state: String = ""
         var reason: String?
+        /// With `start_rejected`: the status the device refused the play with.
+        var status: Int?
         var id: ObjectIdentifier { ObjectIdentifier(tile) }
 
         static func == (a: Cell, b: Cell) -> Bool {
             a.camera == b.camera && a.tile === b.tile && a.state == b.state && a.reason == b.reason
+                && a.status == b.status
         }
     }
 
@@ -293,10 +296,11 @@ final class RecordingsPlayer {
             state = s
             positionMs = position
             if r != rate, PlaybackSpeed.all.contains(r) { rate = r }
-        case .camera(_, let tile, let s, let reason):
+        case .camera(_, let tile, let s, let reason, let status):
             if let i = cells.firstIndex(where: { $0.tile.id == tile }) {
                 cells[i].state = s
                 cells[i].reason = reason
+                cells[i].status = status
             }
         case .seek:
             break

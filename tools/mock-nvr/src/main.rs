@@ -15,6 +15,7 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
+    \x20               [--older-playback] [--refuse-play-speed N]\n\
     \x20               [--multi-lens CH:BITS,BITS] [--extern CH:MODE,CH:MODE]\n\
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
     \x20               [--talk CH,CH] [--fisheye CH,CH] [--fisheye-fixture FILE]\n\
@@ -28,6 +29,10 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     --third-party makes channels behave like third-party cameras behind an NVR: every\n\
     preview is answered 400, the first N (default 2) per channel and tier send nothing,\n\
     later ones stream after the delay (default 200 ms) with `:0dc`/`:1dc` magics.\n\
+    --older-playback makes recordings play as on older NVR firmware: file searches list no Id,\n\
+    a play is a file-information request (13) by name and then a play (5) by the file's start\n\
+    time on its message ID; a play naming an Id is answered 400 (docs/protocol.md).\n\
+    --refuse-play-speed N answers every play at playSpeed N with status 400 (a refused play).\n\
     --talk gives channels a speaker (doorbell talk-back: ipcAudioTalk, ability, talk).\n\
     --ptz makes channels cameras that move: CH pans, tilts, zooms and has 3 presets; CH:lens\n\
     has only a motorized zoom and focus lens; CH.1 is the second lens of a multi-lens\n\
@@ -51,6 +56,8 @@ fn run() -> Result<(), String> {
     let mut replay: Option<PathBuf> = None;
     let (mut replay_loop, mut replay_speed) = (false, 1.0f64);
     let mut recording_days = 0u32;
+    let mut older_playback = false;
+    let mut refuse_play_speed: Option<u32> = None;
     let mut aitype = 0u32;
     let mut multi_lens: Option<(u8, Vec<u32>)> = None;
     let mut extern_modes: Vec<(u8, ExternMode)> = Vec::new();
@@ -70,6 +77,10 @@ fn run() -> Result<(), String> {
         }
         if a == "--replay-loop" {
             replay_loop = true;
+            continue;
+        }
+        if a == "--older-playback" {
+            older_playback = true;
             continue;
         }
         let v = args.next().ok_or(format!("{a} needs a value"))?;
@@ -101,6 +112,9 @@ fn run() -> Result<(), String> {
             "--replay" => replay = Some(PathBuf::from(v)),
             "--recordings" => {
                 recording_days = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
+            "--refuse-play-speed" => {
+                refuse_play_speed = Some(v.parse().map_err(|_| format!("bad value for {a}: {v}"))?)
             }
             "--aitype" => aitype = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
             "--multi-lens" => {
@@ -233,6 +247,8 @@ fn run() -> Result<(), String> {
                 AudioFixture::load(path).map_err(|e| e.to_string())?,
             ));
         }
+        a.older_playback = older_playback;
+        a.refuse_play_speed = refuse_play_speed;
         cfg.archive = Some(a);
     }
     // Every channel advertises the same capabilities.

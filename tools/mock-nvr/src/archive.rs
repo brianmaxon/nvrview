@@ -143,6 +143,15 @@ pub struct ArchiveConfig {
     /// cameras of one playback are kept together). Shared: a test keeps a
     /// clone and adds faults while the mock runs.
     pub play_faults: PlayFaults,
+    /// Plays take the by-name form observed on older firmware
+    /// (docs/protocol.md, "Plays on older firmware"): file searches list no
+    /// `Id`, a file-information request (13) names the file, and the play
+    /// (5) goes out on its message ID naming the file's start time; a play
+    /// that names an `Id` is answered 400 with an empty body (observed).
+    pub older_playback: bool,
+    /// Plays at this `playSpeed` are answered 400 with an empty body (the
+    /// mock's refusing mode, for tests of how a refused play is shown).
+    pub refuse_play_speed: Option<u32>,
 }
 
 /// How one play misbehaves (a fault for tests).
@@ -197,7 +206,10 @@ impl PlayFaults {
 pub struct PlayLog {
     /// Channel.
     pub channel: u8,
-    /// The file `Id` it named.
+    /// Whether it took the by-name form (no `Id`; older firmware).
+    pub by_name: bool,
+    /// The file `Id` it named (in the by-name form, the `Id` of the file
+    /// its 13 named).
     pub file_id: String,
     /// The latest seek's time when the play arrived.
     pub at: DateTime,
@@ -242,6 +254,8 @@ impl ArchiveConfig {
             missing: Vec::new(),
             silent_plays: Vec::new(),
             play_faults: PlayFaults::default(),
+            older_playback: false,
+            refuse_play_speed: None,
         }
     }
 
@@ -322,6 +336,39 @@ impl FileEntry {
     pub fn id(&self) -> String {
         format!("mock-file-{}-{}", self.channel, self.start.to_naive_secs())
     }
+
+    pub fn name(&self) -> String {
+        format!("mock-name-{}-{}", self.channel, self.start.to_naive_secs())
+    }
+}
+
+/// The file of `channel` whose `name` is `name`, if the store holds it.
+pub(crate) fn file_by_name(cfg: &ArchiveConfig, channel: u8, name: &str) -> Option<FileEntry> {
+    let start = name
+        .strip_prefix(&format!("mock-name-{channel}-"))?
+        .parse::<i64>()
+        .ok()?;
+    let at = dt(start);
+    files(cfg, channel, at, at)
+        .into_iter()
+        .find(|f| ts(f.start) == start)
+}
+
+/// The 13 reply: one file's details, as older firmware answered it
+/// (observed: `handle`, `name`, sizes, start and end; no `Id`).
+pub(crate) fn file_info_reply(f: &FileEntry) -> String {
+    let size: u64 = (ts(f.end) - ts(f.start)) as u64 * 250_000;
+    format!(
+        "<FileInfoList version=\"1.1\">\n<FileInfo>\n<channelId>{}</channelId>\n<handle>0</handle>\n\
+         <name>{}</name>\n<containsAudio>0</containsAudio>\n<recordType>none</recordType>\n\
+         <supportSub>1</supportSub>\n<sizeL>{}</sizeL>\n<sizeH>{}</sizeH>\n{}{}</FileInfo>\n</FileInfoList>\n",
+        f.channel,
+        f.name(),
+        size & 0xffff_ffff,
+        size >> 32,
+        time_xml(f.start, "startTime"),
+        time_xml(f.end, "endTime"),
+    )
 }
 
 pub(crate) fn ts(t: DateTime) -> i64 {
@@ -513,19 +560,24 @@ pub(crate) fn file_search_summary(
     )
 }
 
-/// One 15 reply page.
-pub(crate) fn file_page(handle: u32, files: &[FileEntry]) -> String {
+/// One 15 reply page; without `with_id` the files carry no `Id`, as older
+/// firmware lists them (observed).
+pub(crate) fn file_page(handle: u32, files: &[FileEntry], with_id: bool) -> String {
     let mut s = String::from("<FileInfoList version=\"1.1\">\n");
     for f in files {
         let size: u64 = (ts(f.end) - ts(f.start)) as u64 * 250_000;
+        let id = if with_id {
+            format!("<Id>{}</Id>\n", f.id())
+        } else {
+            String::new()
+        };
         s.push_str(&format!(
             "<FileInfo>\n<channelId>{}</channelId>\n<handle>{handle}</handle>\n<name>{}</name>\n\
-             <Id>{}</Id>\n<streamType>mainStream</streamType>\n<containsAudio>1</containsAudio>\n\
+             {id}<streamType>mainStream</streamType>\n<containsAudio>1</containsAudio>\n\
              <recordType>sched</recordType>\n<sizeL>{}</sizeL>\n<sizeH>{}</sizeH>\n\
              <supportSub>1</supportSub>\n<encrypt>0</encrypt>\n{}{}</FileInfo>\n",
             f.channel,
-            format_args!("mock-name-{}-{}", f.channel, ts(f.start)),
-            f.id(),
+            f.name(),
             size & 0xffff_ffff,
             size >> 32,
             time_xml(f.start, "startTime"),

@@ -1327,7 +1327,52 @@ extension SelfTest {
             p.pause()
             when({ p.state == .paused }, timeout: 10) { [self] in
                 if p.state != .paused { problems.append("recordings: the real core's playback did not pause") }
-                recordingsRealPacing(b, rec) { [self] in recordingsRealDownload(b, rec, calls) }
+                recordingsRealPacing(b, rec) { [self] in
+                    recordingsRealRefused(b) { [self] in recordingsRealDownload(b, rec, calls) }
+                }
+            }
+        }
+    }
+
+    /// A play the device refuses (FFI-RECORDINGS.md, `status` on a failed
+    /// camera): the mock answers every play at 16x with status 400
+    /// (`--refuse-play-speed 16` in scripts/macos-real-selftest.sh), so at
+    /// 16x every camera of the player says the NVR refused it, with the
+    /// status, instead of showing an empty tile; back at 1x they play again.
+    func recordingsRealRefused(_ b: RecordingsBrowser, then next: @escaping @MainActor () -> Void) {
+        // parity: playback-refused
+        let p = b.player
+        if p.playback == nil || p.cells.isEmpty {
+            guard let incident = b.dayIncidents.first(where: { !$0.growing }) ?? b.dayIncidents.first else {
+                problems.append("playback refused: no incident to play")
+                return next()
+            }
+            b.click(incident.key, extend: false)
+        }
+        when({ p.playback != nil && !p.cells.isEmpty }, timeout: 30) { [self] in
+            guard p.playback != nil, !p.cells.isEmpty else {
+                problems.append("playback refused: the player did not open (\(p.message ?? "no message"))")
+                return next()
+            }
+            p.play()
+            p.setRate(16)
+            let refused = "The NVR refused this playback (status 400)"
+            when({ p.cells.allSatisfy { PlayerCellOverlay.message($0) == refused } }, timeout: 30) { [self] in
+                let shown = p.cells.map { PlayerCellOverlay.message($0) ?? "\($0.state) \($0.reason ?? "")" }
+                print("playback refused: at 16x \(shown)")
+                if !p.cells.allSatisfy({ PlayerCellOverlay.message($0) == refused }) {
+                    problems.append("playback refused: the cameras show \(shown), expected \"\(refused)\"")
+                }
+                p.setRate(1)
+                when({ p.cells.allSatisfy { $0.state == "playing" || $0.state == "buffering" } }, timeout: 30) { [self] in
+                    let states = p.cells.map(\.state)
+                    print("playback refused: back at 1x \(states)")
+                    if !p.cells.allSatisfy({ $0.state == "playing" || $0.state == "buffering" }) {
+                        problems.append("playback refused: back at 1x the cameras are \(states)")
+                    }
+                    p.pause()
+                    next()
+                }
             }
         }
     }

@@ -82,6 +82,10 @@ pub enum Command {
     PlayFile = 5,
     /// 7: stop a play.
     PlayStop = 7,
+    /// 13: one recording file's details by `name` (viewing tier: a
+    /// read-only query). Sent before a by-name play on older firmware
+    /// (docs/protocol.md, "Plays on older firmware").
+    FileInfo = 13,
     /// 192: start alarm report: subscribes this session to the device's
     /// detection pushes (33). Viewing tier: it changes no settings.
     AlarmReport = 192,
@@ -155,6 +159,7 @@ impl Command {
             123 => Command::ReplaySeek,
             5 => Command::PlayFile,
             7 => Command::PlayStop,
+            13 => Command::FileInfo,
             192 => Command::AlarmReport,
             10 => Command::TalkAbility,
             201 => Command::TalkOpen,
@@ -855,6 +860,42 @@ impl Session {
         seq: u32,
     ) -> Result<(u32, Vec<u8>), SessionError> {
         let id = self.alloc_id()?;
+        let bytes = self.play_on(id, q, seq)?;
+        Ok((id, bytes))
+    }
+
+    /// Builds the file-information request (command 13) of a by-name play
+    /// ([`PlayRequest::by_name`]). An ordinary control reply (status 200,
+    /// the file's details) answers it; the play then goes out on the same
+    /// message ID ([`Session::start_play_after_file_info`]), as the
+    /// official client sent it on older firmware.
+    pub fn play_file_info(&mut self, q: &PlayRequest) -> Result<(u32, Vec<u8>), SessionError> {
+        let id = self.alloc_id()?;
+        let body = archive::play_file_info_body(q);
+        let bytes = self.send(Command::FileInfo, id, &[], body.as_bytes())?;
+        Ok((id, bytes))
+    }
+
+    /// Builds a play (command 5) on the message ID of its file-information
+    /// request ([`Session::play_file_info`]); otherwise as
+    /// [`Session::start_play`].
+    pub fn start_play_after_file_info(
+        &mut self,
+        id: u32,
+        q: &PlayRequest,
+        seq: u32,
+    ) -> Result<(u32, Vec<u8>), SessionError> {
+        self.issued(id)?;
+        if self.transfers.contains_key(&id) {
+            return Err(SessionError::WrongState(
+                "message id already carries a transfer",
+            ));
+        }
+        let bytes = self.play_on(id, q, seq)?;
+        Ok((id, bytes))
+    }
+
+    fn play_on(&mut self, id: u32, q: &PlayRequest, seq: u32) -> Result<Vec<u8>, SessionError> {
         let body = archive::play_body(q);
         let bytes = self.send(Command::PlayFile, id, &[], body.as_bytes())?;
         self.transfers.insert(
@@ -865,7 +906,7 @@ impl Session {
                 seq: Some(seq),
             },
         );
-        Ok((id, bytes))
+        Ok(bytes)
     }
 
     /// Builds the stop (command 7) of the play started with `play_id`, and
@@ -1373,10 +1414,11 @@ impl Session {
     /// that of any recent seek; the first reply (status 200, a stream-info
     /// record) is media too.
     ///
-    /// How a device ends a play, or refuses one, has not been observed
-    /// (docs/MILESTONE-P.md, B6). Here: an empty body ends the play (status
-    /// 200 when it came with the play's `seq`, else its status), and a
-    /// non-media message with a status other than 200 is a refusal.
+    /// How a device ends a play has not been observed (docs/MILESTONE-P.md,
+    /// B6). Here: an empty body ends the play (status 200 when it came with
+    /// the play's `seq`, else its status), and a non-media message with a
+    /// status other than 200 is a refusal (observed: older firmware answers
+    /// a play it does not take with 400 and an empty body).
     fn handle_play(&mut self, msg: &RawMessage) -> Result<Event, SessionError> {
         let h = msg.header;
         let Some(t) = self.transfers.get(&h.message_id) else {
@@ -1721,7 +1763,7 @@ mod tests {
     #[test]
     fn allowlist() {
         for n in [
-            1, 2, 3, 4, 5, 7, 10, 11, 14, 15, 16, 18, 19, 80, 93, 123, 142, 143, 144, 145, 146,
+            1, 2, 3, 4, 5, 7, 10, 11, 13, 14, 15, 16, 18, 19, 80, 93, 123, 142, 143, 144, 145, 146,
             190, 192, 199, 201, 202, 272, 273, 274, 294, 295, 298, 318, 340,
         ] {
             assert!(Command::is_allowed(n));
@@ -1732,7 +1774,7 @@ mod tests {
         for n in [11, 18, 19, 201, 202, 295] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Motion);
         }
-        for n in [1, 2, 3, 4, 5, 7, 10, 93, 123, 143, 190, 199, 294, 340] {
+        for n in [1, 2, 3, 4, 5, 7, 10, 13, 93, 123, 143, 190, 199, 294, 340] {
             assert_eq!(Command::from_number(n).unwrap().tier(), Tier::Viewing);
         }
         // Never: playback commands not observed in use (381–383, 150, 8, 9),
@@ -1742,8 +1784,8 @@ mod tests {
         // and the PTZ commands not observed (433, 468, 445, 545, 709, 224,
         // 742); 20, 34, 35, 64, 225, 331, 332 and 708 change settings.
         for n in [
-            0, 8, 9, 12, 13, 20, 33, 34, 35, 44, 58, 64, 76, 102, 150, 193, 203, 204, 205, 224,
-            225, 300, 303, 331, 332, 381, 382, 383, 433, 445, 468, 511, 545, 600, 708, 709, 742,
+            0, 8, 9, 12, 20, 33, 34, 35, 44, 58, 64, 76, 102, 150, 193, 203, 204, 205, 224, 225,
+            300, 303, 331, 332, 381, 382, 383, 433, 445, 468, 511, 545, 600, 708, 709, 742,
         ] {
             assert!(!Command::is_allowed(n), "{n}");
         }
@@ -2166,6 +2208,62 @@ mod tests {
     }
 
     #[test]
+    fn by_name_play_is_file_info_then_play_on_its_message_id() {
+        let (mut s, key) = logged_in();
+        let text = |m: &RawMessage| {
+            let mut b = m.payload().to_vec();
+            key.decrypt(&mut b);
+            String::from_utf8(b).unwrap()
+        };
+        let q = PlayRequest {
+            channel: 8,
+            uid: None,
+            stream: StreamTier::Sub,
+            file_id: String::new(),
+            file_name: "file-name-1".into(),
+            file_start: t(6, 59, 58),
+            speed: 4,
+        };
+        let (fid, bytes) = s.play_file_info(&q).unwrap();
+        let info = decode_one(&bytes);
+        assert_eq!((info.header.command, info.header.message_id), (13, fid));
+        let x = text(&info);
+        assert_eq!(
+            find_text(&x, "name").unwrap().as_deref(),
+            Some("file-name-1")
+        );
+        assert_eq!(find_text(&x, "playSpeed").unwrap().as_deref(), Some("4"));
+        assert_eq!(find_text(&x, "supportSub").unwrap().as_deref(), Some("1"));
+        // Its reply is an ordinary control reply.
+        let ok = encode_message_with_status(13, fid, 200, Class::Device, &[], &[]).unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&ok)).unwrap(),
+            Event::Control {
+                command: 13,
+                status: 200,
+                ..
+            }
+        ));
+        let (pid, bytes) = s.start_play_after_file_info(fid, &q, 77).unwrap();
+        assert_eq!(pid, fid);
+        let play = decode_one(&bytes);
+        assert_eq!((play.header.command, play.header.message_id), (5, fid));
+        let x = text(&play);
+        assert_eq!(find_text(&x, "Id").unwrap(), None);
+        assert!(x.contains("<startTime>") && x.contains("<second>58</second>"));
+        assert_eq!(s.active_plays().collect::<Vec<_>>(), vec![fid]);
+        // Not twice on one ID, and not on an ID that was never issued.
+        assert!(s.start_play_after_file_info(fid, &q, 78).is_err());
+        assert!(s.start_play_after_file_info(9999, &q, 78).is_err());
+        // A refusal (status 400, empty body) ends it with that status.
+        let refused = encode_message_with_status(5, fid, 400, Class::Device, &[], &[]).unwrap();
+        assert!(matches!(
+            s.handle(&decode_one(&refused)).unwrap(),
+            Event::TransferEnd { status: 400, .. }
+        ));
+    }
+
+    #[test]
     fn play_seek_play_media_by_seq_end_and_stop() {
         let (mut s, key) = logged_in();
         let text = |key: &SessionKey, m: &RawMessage| {
@@ -2198,6 +2296,7 @@ mod tests {
             stream: StreamTier::Sub,
             file_id: "file-id-1".into(),
             file_name: "file-name-1".into(),
+            file_start: t(7, 0, 0),
             speed: 1,
         };
         let (pid, bytes) = s.start_play(&q, seq).unwrap();

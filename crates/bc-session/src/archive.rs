@@ -581,18 +581,22 @@ impl DeviceSession {
         kind: TransferKind,
         build: Build,
     ) -> Result<Arc<TransferSink>, SearchError> {
-        self.transfer_with(kind, build, None, self.download_buffer_bytes)
+        self.transfer_with(kind, build, None, self.download_buffer_bytes, None)
             .await
     }
 
     /// Like [`DeviceSession::transfer`], with what a play's stop needs and
-    /// a buffer size of its own.
+    /// a buffer size of its own. With `conn`, the request goes out only on that
+    /// connection generation and otherwise fails with
+    /// [`TransferItem::ConnectionLost`] (a play on the message ID of an
+    /// earlier request means nothing on a new connection).
     pub(crate) async fn transfer_with(
         &self,
         kind: TransferKind,
         build: Build,
         play: Option<PlayRequest>,
         buffer: usize,
+        conn: Option<u64>,
     ) -> Result<Arc<TransferSink>, SearchError> {
         if self.shared.is_closing() {
             return Err(SearchError::Query(QueryError::Closed));
@@ -604,6 +608,7 @@ impl DeviceSession {
                 build,
                 sink: sink.clone(),
                 play,
+                conn,
             }))
             .await
             .map_err(|_| SearchError::Query(QueryError::Closed))?;

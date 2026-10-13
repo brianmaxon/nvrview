@@ -22,7 +22,9 @@
 //!
 //! Only commands the session's viewing tier allows are sent: the file
 //! search (14, 15, 16), live preview (3, 4), seek (123), play (5) at
-//! `playSpeed` 1, and stop (7).
+//! `playSpeed` 1, and stop (7); on older firmware, whose file search gives
+//! no `Id`, each play is preceded by the file-information request (13) the
+//! session sends for a by-name play.
 
 use crate::{CliError, wait_logged_in};
 use bc_protocol::archive::{DateTime, FileSearch, PlayRequest, RecordFile};
@@ -847,6 +849,7 @@ async fn probe<W: Write>(
                     stream: cfg.tier,
                     file_id: file.id.clone(),
                     file_name: file.name.clone(),
+                    file_start: file.start,
                     speed: 1,
                 },
                 at: if cfg.batched {

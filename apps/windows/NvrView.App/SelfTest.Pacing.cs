@@ -135,8 +135,31 @@ internal sealed partial class SelfTest
         Expect(report.ShownRatio >= RealShownRatio, $"playback pacing: the display drew {report.Shown.Pictures} of {report.Released.Pictures} released pictures");
         // The same playback, after the verdict: the player's picture features (zoom, pan, Fill, Save Picture).
         await PlaybackZoomStep(v, w, p);
+        await PlaybackRefusedStep(p);
         w.Close();
         await Until(() => w.IsClosed, 5);
         service.SetEnabled(camera, false);
+    }
+
+    /// <summary>
+    /// A play the device refuses (FFI-RECORDINGS.md, <c>status</c> on a failed camera): the mock answers every play at
+    /// 16x with status 400 (<c>--refuse-play-speed 16</c>, App.xaml.cs), so at 16x the player's camera says the NVR
+    /// refused it, with the status, instead of showing an empty tile; back at 1x it plays again.
+    /// </summary>
+    private async Task PlaybackRefusedStep(RecordingsPlayer p)
+    {
+        // parity: playback-refused
+        const string refused = "The NVR refused this playback (status 400)";
+        p.Play();
+        p.SetRate(16);
+        bool shown = await Until(() => p.Cells.Count > 0 && p.Cells.All(c => RecordingsWindow.CellMessage(c) == refused), 30);
+        string seen = string.Join(", ", p.Cells.Select(c => RecordingsWindow.CellMessage(c) ?? $"{c.State} {c.Reason}"));
+        Say($"playback refused: at 16x {seen}");
+        Expect(shown, $"playback refused: the cameras show {seen}, expected \"{refused}\"");
+        p.SetRate(1);
+        bool again = await Until(() => p.Cells.All(c => c.State is "playing" or "buffering"), 30);
+        Say($"playback refused: back at 1x {string.Join(", ", p.Cells.Select(c => c.State))}");
+        Expect(again, "playback refused: the cameras did not play again at 1x");
+        p.Pause();
     }
 }

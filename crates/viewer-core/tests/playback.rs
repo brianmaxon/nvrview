@@ -756,6 +756,70 @@ fn removing_a_device_or_shutting_down_stops_every_play() {
     assert!(closed.iter().all(|e| e["reason"] == "core_shutdown"));
 }
 
+/// Older firmware (docs/protocol.md, "Plays on older firmware"): its file
+/// search gives no `Id` and it answers a play naming one with 400; the
+/// engine plays by name. A play the device refuses shows its status.
+#[test]
+fn older_firmware_plays_by_name_and_a_refused_play_shows_its_status() {
+    let rig = Rig::new();
+    let nvr = archive_mock(&rig.sim, 2, |a| {
+        a.older_playback = true;
+        a.refuse_play_speed = Some(16);
+    });
+    let (_dev, key) = rig.add(&nvr, &[0, 1]);
+    let (pb, tiles) = rig.open(json!({
+        "start_ms": ms(8, 10, 0, 0), "end_ms": ms(8, 12, 0, 0), "position_ms": ms(8, 10, 0, 10),
+        "cameras": [
+            {"camera": {"device": key, "channel": 0}, "tier": "sub"},
+            {"camera": {"device": key, "channel": 1}, "tier": "main"},
+        ],
+    }));
+    rig.until("the opening seek", 20, || rig.seek_active(pb, 1));
+    rig.core.playback_play(pb).unwrap();
+    rig.until("playing", 20, || {
+        tiles.iter().all(|t| {
+            rig.camera_state(pb, *t)
+                .is_some_and(|e| e["state"] == "playing")
+        })
+    });
+    let log = nvr.play_log();
+    assert_eq!(log.len(), 2);
+    assert!(log.iter().all(|l| l.by_name && l.served), "{log:?}");
+    assert_eq!(nvr.command_count(13), 2);
+
+    // 16x is refused by this device: each camera says so, with the status.
+    rig.core.playback_set_rate(pb, 16.0).unwrap();
+    rig.until("refused", 20, || {
+        tiles.iter().all(|t| {
+            rig.camera_state(pb, *t).is_some_and(|e| {
+                e["state"] == "failed" && e["reason"] == "start_rejected" && e["status"] == 400
+            })
+        })
+    });
+    let status: Value = serde_json::from_str(&rig.core.playback_status(pb).unwrap()).unwrap();
+    let cameras = status["cameras"].as_array().unwrap();
+    assert!(cameras.iter().all(|c| c["status"] == 400), "{status}");
+    // Back at 1x the cameras play again, and the status is gone.
+    rig.core.playback_set_rate(pb, 1.0).unwrap();
+    rig.until("playing again", 20, || {
+        tiles.iter().all(|t| {
+            rig.camera_state(pb, *t)
+                .is_some_and(|e| e["state"] == "playing")
+        })
+    });
+    let status: Value = serde_json::from_str(&rig.core.playback_status(pb).unwrap()).unwrap();
+    assert!(
+        status["cameras"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.get("status").is_none())
+    );
+    rig.core.playback_close(pb).unwrap();
+    rig.sim.settle();
+    assert_eq!(nvr.active_plays(), 0);
+}
+
 #[test]
 fn a_newer_playback_takes_the_device_and_the_older_shows_unavailable() {
     let rig = Rig::new();

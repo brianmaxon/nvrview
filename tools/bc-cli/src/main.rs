@@ -117,7 +117,9 @@ to back at one time (5 s after the latest start of the stage's recordings;
 when they share no such time, each at its own recording's start + 5 s), a
 0.5 s pause, then all plays back to back, instead of seek, play, seek, play
 at each play's own time. Only the file search, live
-preview, seek (123), play (5) and stop (7) are sent. Keep its output in the
+preview, seek (123), play (5) and stop (7) are sent, plus, on older firmware
+whose file search gives no Id, the file-information request (13) before each
+play. Keep its output in the
 ignored captures/ directory.
 ptz-probe moves a real camera briefly, through the core's own camera motion
 path (docs/protocol.md, \"Camera motion control\"): only with --allow-ptz-probe

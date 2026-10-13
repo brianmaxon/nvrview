@@ -207,6 +207,10 @@ pub(crate) struct ShownTile {
     pub position_ms: Option<i64>,
 }
 
+/// Why a group did not start, the device's status when it refused it, and
+/// the group's cameras (tile, run).
+type StartFailure = (&'static str, Option<u16>, Vec<(u64, u64)>);
+
 /// Reports from the playback's own tasks.
 enum Note {
     Started {
@@ -214,7 +218,7 @@ enum Note {
         token: u64,
         plays: Vec<(u64, u64, Play)>,
         missing: Vec<(u64, u64)>,
-        failed: Option<(&'static str, Vec<(u64, u64)>)>,
+        failed: Option<StartFailure>,
     },
     Suspended {
         tile: u64,
@@ -306,7 +310,9 @@ enum CamState {
     Late,
     NoRecording,
     Ended,
-    Failed(&'static str),
+    /// Failed for a reason; with the device's status when the device
+    /// refused the play (`start_rejected`).
+    Failed(&'static str, Option<u16>),
 }
 
 impl CamState {
@@ -317,7 +323,7 @@ impl CamState {
             CamState::Late => "late",
             CamState::NoRecording => "no_recording",
             CamState::Ended => "ended",
-            CamState::Failed(_) => "failed",
+            CamState::Failed(..) => "failed",
         }
     }
 
@@ -718,7 +724,7 @@ impl Engine {
                 let _ = ack.send(());
             }
             Cmd::Evict(key, ack) => {
-                let readers = self.give_up(&key, CamState::Failed("device_in_use"));
+                let readers = self.give_up(&key, CamState::Failed("device_in_use", None));
                 info!(playback = self.id, "device taken over by a newer playback");
                 tokio::spawn(async move {
                     for r in readers {
@@ -728,7 +734,7 @@ impl Engine {
                 });
             }
             Cmd::DeviceGone(key, ack) => {
-                let readers = self.give_up(&key, CamState::Failed("session_closed"));
+                let readers = self.give_up(&key, CamState::Failed("session_closed", None));
                 for r in readers {
                     r.stop().await;
                 }
@@ -835,14 +841,14 @@ impl Engine {
                         no_recording(c, i64::MIN);
                     }
                 }
-                if let Some((reason, items)) = failed {
+                if let Some((reason, status, items)) = failed {
                     for (tile, run) in items {
                         if let Some(c) = self
                             .cams
                             .iter_mut()
                             .find(|c| c.tile == tile && c.run == run)
                         {
-                            fail(c, reason);
+                            fail_with(c, reason, status);
                         }
                     }
                 }
@@ -881,9 +887,8 @@ impl Engine {
                 c.reader = None;
                 match error {
                     DownloadError::Closed => fail(c, "session_closed"),
-                    DownloadError::Refused(_) | DownloadError::NotAllowed => {
-                        fail(c, "start_rejected");
-                    }
+                    DownloadError::Refused(s) => fail_with(c, "start_rejected", Some(s)),
+                    DownloadError::NotAllowed => fail(c, "start_rejected"),
                     DownloadError::BadMedia => fail(c, "undecodable"),
                     DownloadError::Overflow => c.suspended = true,
                     DownloadError::Stalled | DownloadError::ConnectionLost => {
@@ -1202,7 +1207,7 @@ impl Engine {
             && self
                 .cams
                 .iter()
-                .all(|c| matches!(c.state, CamState::Failed(_)))
+                .all(|c| matches!(c.state, CamState::Failed(..)))
         {
             "failed"
         } else if !self.playing {
@@ -1540,8 +1545,11 @@ impl Engine {
                 c.reported = Some(c.state);
                 let mut o = json!({"type": "playback_camera", "playback": self.id,
                                    "tile": c.tile, "state": c.state.name()});
-                if let CamState::Failed(r) = c.state {
+                if let CamState::Failed(r, status) = c.state {
                     o["reason"] = json!(r);
+                    if let Some(s) = status {
+                        o["status"] = json!(s);
+                    }
                 }
                 self.events.send(o.to_string(), Priority::State);
             }
@@ -1613,8 +1621,11 @@ impl Engine {
                     "state": c.state.name(),
                     "generation": c.generation,
                 });
-                if let CamState::Failed(r) = c.state {
+                if let CamState::Failed(r, status) = c.state {
                     o["reason"] = json!(r);
+                    if let Some(s) = status {
+                        o["status"] = json!(s);
+                    }
                 }
                 o
             })
@@ -1647,7 +1658,13 @@ fn no_recording(c: &mut Cam, quiet_until_ms: i64) {
 }
 
 fn fail(c: &mut Cam, reason: &'static str) {
-    c.state = CamState::Failed(reason);
+    fail_with(c, reason, None);
+}
+
+/// Like [`fail`], with the device's status when it refused the play (shown
+/// to the user as such).
+fn fail_with(c: &mut Cam, reason: &'static str, status: Option<u16>) {
+    c.state = CamState::Failed(reason, status);
     c.pending = false;
     c.suspended = false;
     if let Some(f) = &c.feed {
@@ -1727,11 +1744,11 @@ impl StartJob {
                 Tier::Main => it
                     .main_file
                     .as_ref()
-                    .map(|f| (f.id.clone(), f.name.clone())),
+                    .map(|f| (f.id.clone(), f.name.clone(), date_time(f.start))),
                 Tier::Sub => self.sub_file(it.camera).await,
             };
             match file {
-                Some((file_id, file_name)) => {
+                Some((file_id, file_name, file_start)) => {
                     starts.push(PlayStart {
                         request: PlayRequest {
                             channel: it.camera.channel,
@@ -1739,6 +1756,7 @@ impl StartJob {
                             stream: it.camera.stream(it.tier),
                             file_id,
                             file_name,
+                            file_start,
                             speed: self.speed,
                         },
                         at,
@@ -1789,12 +1807,16 @@ impl StartJob {
                     SearchError::Query(QueryError::Busy) => "limit",
                     _ => "start_rejected",
                 };
+                let status = match e {
+                    SearchError::Refused(s) => Some(s),
+                    _ => None,
+                };
                 Note::Started {
                     device: self.key.clone(),
                     token: self.my_token,
                     plays: Vec::new(),
                     missing,
-                    failed: Some((reason, ids)),
+                    failed: Some((reason, status, ids)),
                 }
             }
         }
@@ -1802,7 +1824,10 @@ impl StartJob {
 
     /// The camera's sub-stream file that holds the seek time (its day's
     /// sub-stream files are searched once per playback).
-    async fn sub_file(&self, camera: DeviceCamera) -> Option<(String, String)> {
+    async fn sub_file(
+        &self,
+        camera: DeviceCamera,
+    ) -> Option<(String, String, bc_protocol::archive::DateTime)> {
         let day = day_start(self.at);
         let cached = lock(&self.sub_files).get(&(camera, day)).cloned();
         let files = match cached {
@@ -1831,6 +1856,6 @@ impl StartJob {
         files
             .iter()
             .find(|f| recordings::secs(f.start) <= self.at && self.at <= recordings::secs(f.end))
-            .map(|f| (f.id.clone(), f.name.clone()))
+            .map(|f| (f.id.clone(), f.name.clone(), f.start))
     }
 }

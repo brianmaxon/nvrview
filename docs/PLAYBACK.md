@@ -109,8 +109,11 @@ Events from all cameras are grouped into incidents:
 - **Synchronized multi-camera playback**: the cameras of an incident play
   side by side on one clock (the cameras' recorded times), scrub together,
   step frame by frame, and switch any lane to full size. Playback uses the
-  observed seek-and-play flow (123, 5, 7), one stream per visible lane,
-  within the device's session limits.
+  observed seek-and-play flow (123, 5, 7; on older firmware, whose file
+  search lists no `Id`, 123, 13, 5, 7: docs/protocol.md, "Plays on older
+  firmware"), one stream per visible lane, within the device's session
+  limits. A camera whose play the device refuses says so in its tile, with
+  the device's status.
 
 ## Device AI search
 
