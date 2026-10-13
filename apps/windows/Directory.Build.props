@@ -7,10 +7,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <!-- The trim analyzer runs on every build, not only on the trimmed publish: code that
-         reflects on something trimming may remove fails the ordinary build (warnings are errors),
-         so the trimmed release build needs only a short run (SelfTest.Smoke.cs). -->
-    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <!-- The trim analyzer runs on every build of what the app ships, not only on the trimmed
+         publish: code that reflects on something trimming may remove fails the ordinary build
+         (warnings are errors), so the trimmed release build needs only a short run
+         (SelfTest.Smoke.cs). The tests, the smoke test, and the demo are not shipped. -->
+    <EnableTrimAnalyzer Condition="'$(MSBuildProjectName)' == 'NvrView.App' Or '$(MSBuildProjectName)' == 'NvrView.Interop' Or '$(MSBuildProjectName)' == 'NvrView.Video' Or '$(MSBuildProjectName)' == 'NvrView.Tiles' Or '$(MSBuildProjectName)' == 'NvrView.Shell'">true</EnableTrimAnalyzer>
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <!-- Keep the build machine's paths out of the binaries. -->
