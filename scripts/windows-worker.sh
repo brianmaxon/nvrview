@@ -40,9 +40,9 @@ only="${NVRVIEW_WINDOWS_ONLY:-}"
 
 # Which suites to run, decided on the Mac by the test result cache
 # (scripts/suite-cache.py; the cache lives there): NVRVIEW_SUITES is a comma
-# list of suites (csharp-smoke, tiles-tests, video-selftest, shell-tests, app-update, and
-# app-debug.AREA and app-publish.AREA for each app self-test area in
-# scripts/windows-selftest-areas.txt; "none" for nothing), and NVRVIEW_CLIPPY_CRATES,
+# list of suites (csharp-smoke, tiles-tests, video-selftest, shell-tests, app-publish (the
+# trimmed build's plain start and short self-test), app-update, and app-debug.AREA for each
+# app self-test area in scripts/windows-selftest-areas.txt; "none" for nothing), and NVRVIEW_CLIPPY_CRATES,
 # NVRVIEW_TEST_CRATES, NVRVIEW_DOCTEST_CRATES say which crates the Rust steps
 # cover (all, none, or a comma list). Unset means everything. Each passing
 # suite prints "suite-result NAME SECONDS" for the Mac to record.
@@ -64,9 +64,9 @@ report() { # SUITE START
 }
 app_tests=0
 if [ "${NVRVIEW_APP_SELFTEST:-0}" = 1 ]; then app_tests=1; fi
-# The app self-test areas to run for a build (app-debug or app-publish): a
-# comma list, "all" when every area runs (then the app gets no --areas), or
-# empty. The app starts once with the list; "startup" is part of every run.
+# The debug build's app self-test areas to run: a comma list, "all" when every
+# area runs (then the app gets no --areas), or empty. The app starts once with
+# the list; "startup" is part of every run.
 all_areas=$(awk '!/^#/ && NF && !seen[$1]++ { print $1 }' scripts/windows-selftest-areas.txt)
 app_areas() { # PREFIX
   local a out="" n=0 total=0
@@ -84,17 +84,17 @@ report_areas() { # PREFIX AREAS START
   done
 }
 debug_areas=
-publish_areas=
+publish_smoke=0
 if [ "$app_tests" = 1 ]; then
   debug_areas=$(app_areas app-debug)
-  publish_areas=$(app_areas app-publish)
+  if want app-publish; then publish_smoke=1; fi
 fi
 areas_arg() { # AREAS
   if [ "$1" != all ]; then printf -- '--areas %s' "$1"; fi
 }
 need_lib=0
 if { [ "$only" != app ] && { want csharp-smoke || want video-selftest; }; } ||
-  { [ "$app_tests" = 1 ] && { [ -n "$debug_areas" ] || [ -n "$publish_areas" ] || want app-update; }; } ||
+  { [ "$app_tests" = 1 ] && { [ -n "$debug_areas" ] || [ "$publish_smoke" = 1 ] || want app-update; }; } ||
   [ "$app_tests" = 0 ]; then
   need_lib=1
 fi
@@ -109,6 +109,20 @@ if command -v sccache >/dev/null 2>&1; then
   export CARGO_INCREMENTAL=0
   sccache --start-server >/dev/null 2>&1 || true
   sccache --zero-stats >/dev/null 2>&1 || true
+fi
+
+# Link with rust-lld instead of link.exe on the worker (the shipping package
+# build, scripts/windows-app.sh package, does not come through here and keeps
+# link.exe). Measured here: the test build of all targets went from 96 s to
+# 57 s with a warm compile cache, the release library from 21 s to 17 s. The
+# linker is part of sccache's key, so the first run after a change recompiles.
+# NVRVIEW_WORKER_LINKER=msvc keeps link.exe.
+if [ "${NVRVIEW_WORKER_LINKER:-lld}" = lld ]; then
+  lld_dir="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin"
+  if [ -f "$lld_dir/rust-lld.exe" ]; then
+    export PATH="$lld_dir:$PATH"
+    export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe
+  fi
 fi
 
 # Worker-only build settings (CI and shipping builds are unchanged). No
@@ -246,22 +260,21 @@ if [ "$app_tests" = 1 ]; then
     report_areas app-debug "$debug_areas" "$app_start"
   fi
 
-  if [ -n "$publish_areas" ] || want app-update; then
+  if [ "$publish_smoke" = 1 ] || want app-update; then
+    # Also checks statically that trimming kept the app's own assemblies whole (windows-app.sh kept_whole).
     step "Windows app, trimmed release build (publish)"
     app_start=$step_start
     scripts/windows-app.sh publish
   fi
 
-  if [ -n "$publish_areas" ]; then
-    if want app-publish.startup; then
-      step "Windows app plain start, trimmed release build (interactive session)"
-      NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
-    fi
+  if [ "$publish_smoke" = 1 ]; then
+    step "Windows app plain start, trimmed release build (interactive session)"
+    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh startup
 
-    step "Windows app self-test, trimmed release build, areas: $publish_areas (interactive session)"
-    # shellcheck disable=SC2046,SC2086
-    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test $mic_test $(areas_arg "$publish_areas")
-    report_areas app-publish "$publish_areas" "$app_start"
+    # The whole self-test ran on the debug build; the trimmed build runs startup and one wiring check per area.
+    step "Windows app self-test, trimmed release build, smoke (interactive session)"
+    NVRVIEW_APP_PUBLISHED=1 scripts/windows-app.sh selftest "${NVRVIEW_APP_SELFTEST_SECONDS:-10}" --credential-test --smoke
+    report app-publish "$app_start"
   fi
 
   if want app-update; then
@@ -273,7 +286,7 @@ if [ "$app_tests" = 1 ]; then
   # Everything on the publish output passed: a later `windows-check.sh
   # --package` for the same tree ships exactly these files. (When a publish
   # suite was cached, the package step builds the publish output afresh.)
-  if [ "$publish_areas" = all ] && want app-update; then
+  if [ "$publish_smoke" = 1 ] && want app-update; then
     scripts/windows-app.sh mark-tested
   fi
 fi

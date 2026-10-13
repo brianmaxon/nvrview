@@ -1,9 +1,7 @@
 //! Randomized inputs: nothing panics, every protocol invariant holds, and all
 //! state stays bounded. Deterministic seeds, so failures reproduce.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use video_pipeline::{
     AccessUnit, Codec, DecodeFailureKind, ParameterSets, PipelineConfig, VideoFormat, analyze,
     h264, h265, nal_units,

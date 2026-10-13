@@ -1,7 +1,6 @@
 //! Engine behavior on explicit times, with golden explanations.
 
-mod common;
-
+use crate::common::*;
 use alerts::decision::{Outcome, QuietReason, SuppressReason};
 use alerts::episode::EpisodeState;
 use alerts::model::{Exposure, Severity};
@@ -13,7 +12,6 @@ use alerts::time::{MINUTE_MS, SECOND_MS};
 use alerts::trace::{GateResult, StepKind};
 use alerts::trigger::TriggerState;
 use alerts::{AlertSettings, Class, DecideInputs, Engine, Next, Rarity};
-use common::*;
 
 fn engine(s: AlertSettings) -> Engine {
     Engine::new(s).0

@@ -4,9 +4,7 @@
 //! MAC address reaches an event. Searches run on the core's real runtime
 //! with short, bounded durations; nothing leaves the loopback interface.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use discovery::native::{self, RecordKind, SearchRecord};
 use discovery::onvif::{self, ProbeMatch};
 use discovery::runner::Ports;

@@ -8,8 +8,10 @@ import AppKit
 enum UpdateNotesView {
     static let width: CGFloat = 380
     static let maxHeight: CGFloat = 220
+    /// The height bound of the Help > Release Notes list.
+    static let listMaxHeight: CGFloat = 360
 
-    static func make(notes: String) -> NSScrollView {
+    static func make(notes: String, maxHeight: CGFloat = maxHeight) -> NSScrollView {
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: maxHeight))
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -28,12 +30,12 @@ enum UpdateNotesView {
         text.string = notes
         scroll.documentView = text
         // Short notes get a short view; long ones stop at the bound and scroll.
-        scroll.setFrameSize(NSSize(width: width, height: min(maxHeight, max(40, contentHeight(text)))))
+        scroll.setFrameSize(NSSize(width: width, height: min(maxHeight, max(40, contentHeight(text, maxHeight: maxHeight)))))
         return scroll
     }
 
     /// The height the text needs at the view's width.
-    static func contentHeight(_ text: NSTextView) -> CGFloat {
+    static func contentHeight(_ text: NSTextView, maxHeight: CGFloat = maxHeight) -> CGFloat {
         guard let container = text.textContainer, let layout = text.layoutManager else { return maxHeight }
         container.containerSize = NSSize(width: width - 20, height: .greatestFiniteMagnitude)
         layout.ensureLayout(for: container)

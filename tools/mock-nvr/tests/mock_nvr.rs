@@ -1,12 +1,10 @@
 //! End-to-end tests: the real `bc-protocol` client session against the mock.
 
-mod common;
-
+use crate::common::{Link, TestNvr};
 use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Codec, Demuxer, Record};
 use bc_protocol::session::{Command, Event, Session};
 use bc_protocol::stream::StreamTier;
-use common::{Link, TestNvr};
 use mock_nvr::Config;
 use mock_nvr::fixture::Fixture;
 use std::io::{Read, Write};

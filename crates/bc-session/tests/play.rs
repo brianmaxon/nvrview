@@ -3,13 +3,11 @@
 //! does past the observed facts (how a play ends, refusals) is the mock's
 //! choice, not a device fact; see docs/MILESTONE-P.md, B5 and B6.
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::archive::{DateTime, PlayRequest};
 use bc_protocol::media::{Record, wall_clock_secs};
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, Item, Play, PlayStart, QueryError, SearchError, SessionConfig};
-use common::mock_connector;
 use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;

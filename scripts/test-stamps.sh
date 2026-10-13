@@ -27,7 +27,7 @@ expect_not() { # NAME CMD...  (the command must fail)
 # A fresh repository with the scripts under test, main holding a few files.
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$here/windows-lock.sh" "$here/branch-ready.sh" "$here/timing.py" "$here/secret-scan.sh" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/suite-cache-lib.sh" "$here/windows-selftest-areas.txt" "$here/flakes.py" "$here/flakes.sh" "$here/checked.sh" "$here/merge-branch.sh" "$here/suite-cache.py" "$here/windows-lock.sh" "$here/branch-ready.sh" "$here/timing.py" "$here/secret-scan.sh" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .
@@ -270,6 +270,77 @@ git checkout -q main
 run_merge pb3 "merge pb3" >"$work/outp3" 2>&1 && fail "a Windows failure fails the merge although Mac passed" || pass "a Windows failure fails the merge although Mac passed"
 [ "$(git rev-parse HEAD)" = "$head_par" ] && [ -z "$(git branch --list 'merge-branch-*')" ] && pass "...and main is untouched" || fail "...and main is untouched"
 grep -q "Mac check: PASS" "$work/outp3" && pass "...and the Mac summary is still printed" || fail "...and the Mac summary is still printed"
+
+# --- narrow retries and the flake log -------------------------------------------
+# A fake Windows check wired like scripts/windows-check.sh (the real plan and
+# run log of the test result cache, one suite per app self-test area) that
+# fails one area the first time. The retry may run only what did not pass.
+cat >"$work/fake-win.sh" <<'EOF'
+set -eu
+py=$(python3 -I -c 'import sys; print(sys.executable)')
+. scripts/suite-cache-lib.sh
+cache_start windows ${NVRVIEW_RETRIED:+--retried}
+echo "try retried=${NVRVIEW_RETRIED:-} since=${NVRVIEW_RETRY_SINCE:-}" >>"$FW_RAN"
+for a in $(cache_areas); do
+  if cache_want "app-debug.$a" >/dev/null; then
+    echo "app-debug.$a" >>"$FW_RAN"
+    if [ "$a" = viewer ] && [ -f "$FW_FAIL_ONCE" ]; then
+      rm -f "$FW_FAIL_ONCE"
+      echo "== Windows app self-test, areas: $a (interactive session)"
+      echo "  $FW_PROBLEM"
+      echo "selftest: FAIL"
+      sc finish "$run_file" --failed "Windows worker" >/dev/null || true
+      exit 1
+    fi
+    cache_pass 1 "app-debug.$a"
+  fi
+done
+sc finish "$run_file" --ok --partial >/dev/null
+scripts/checked.sh --record windows 1 fake
+EOF
+r="$work/narrow"
+new_repo "$r"
+cd "$r"
+. scripts/stamps-lib.sh
+echo '{"workspace_root": "'"$r"'", "packages": []}' >"$work/empty-metadata.json"
+export NVRVIEW_CACHE_METADATA="$work/empty-metadata.json" NVRVIEW_CACHE_TOOLS="fake tools" NVRVIEW_FLAKE_LOG="$work/flakes.jsonl"
+export NVRVIEW_WINDOWS_HOST=fake FW_RAN="$work/fw-ran" FW_FAIL_ONCE="$work/fw-fail-once"
+export NVRVIEW_MERGE_MAC_CMD="echo mac"
+export NVRVIEW_MERGE_WINDOWS_CMD="sh $work/fake-win.sh"
+export NVRVIEW_FULL_WINDOWS_EVERY=1
+: >"$FW_RAN"
+touch "$FW_FAIL_ONCE"
+export FW_PROBLEM="playback pacing: shown pictures are uneven (jitter p95 9.0 ms, max 40.0 ms)"
+git checkout -q -b n1
+commit_file b.txt narrow1
+git checkout -q main
+run_merge n1 "merge n1" >"$work/outn1" 2>&1 && pass "a flaky area failure was retried and the merge succeeded" || { cat "$work/outn1"; fail "a flaky area failure was retried and the merge succeeded"; }
+check_n() { grep -c "^app-debug\.$1\$" "$FW_RAN" || true; }
+[ "$(check_n viewer)" = 2 ] && pass "only the failed area ran again" || fail "only the failed area ran again ($(check_n viewer) runs of viewer)"
+others=$(grep '^app-debug\.' "$FW_RAN" | grep -v '^app-debug\.viewer$' | sort | uniq -d)
+[ -z "$others" ] && [ "$(check_n startup)" = 1 ] && [ "$(check_n ptz)" = 1 ] && pass "...and no area that passed ran again" || fail "...and no area that passed ran again ($others)"
+grep -q '^try retried=1 since=[0-9]' "$FW_RAN" && pass "the retry ran as a retry, with the start of its sequence" || fail "the retry ran as a retry, with the start of its sequence"
+grep -q 'Windows check: failed in: Windows app self-test, areas: viewer' "$work/outn1" && grep -q "Windows check: failing step: $FW_PROBLEM" "$work/outn1" &&
+  pass "the failure names the area and the failing step" || fail "the failure names the area and the failing step"
+grep -q 'trying again' "$work/outn1" && pass "...and the retry is announced" || fail "...and the retry is announced"
+retried_entries=$(find "$(git rev-parse --git-common-dir)/nvrview-checks/suite-cache/entries/windows" -name '*.retried.json' | wc -l | tr -d ' ')
+[ "$retried_entries" -ge 1 ] && pass "the passes of the retry are recorded as retried" || fail "the passes of the retry are recorded as retried"
+[ "$(wc -l <"$work/flakes.jsonl" | tr -d ' ')" = 1 ] && grep -q '"step":"playback pacing"' "$work/flakes.jsonl" && grep -q '"platform":"windows"' "$work/flakes.jsonl" &&
+  pass "the flake is logged with its step name and platform" || fail "the flake is logged with its step name ($(cat "$work/flakes.jsonl"))"
+sh scripts/flakes.sh >"$work/flakes.out" 2>&1; grep -q 'playback pacing x1' "$work/flakes.out" && pass "flakes.sh lists the most frequent flaky steps" || fail "flakes.sh lists the most frequent flaky steps ($(cat "$work/flakes.out"))"
+# A failure that does not look environmental is not retried.
+: >"$FW_RAN"
+touch "$FW_FAIL_ONCE"
+export FW_PROBLEM="tile 0: picture is flat (spread 1.0)"
+git checkout -q -b n2
+commit_file c.txt narrow2
+git checkout -q main
+head_before=$(git rev-parse HEAD)
+run_merge n2 "merge n2" >"$work/outn2" 2>&1 && fail "a real failure fails the merge" || pass "a real failure fails the merge"
+[ "$(grep -c '^try ' "$FW_RAN")" = 1 ] && pass "...and was not retried" || fail "...and was not retried"
+grep -q 'failing step: tile 0: picture is flat' "$work/outn2" && pass "...and the failing step is named" || fail "...and the failing step is named"
+[ "$(wc -l <"$work/flakes.jsonl" | tr -d ' ')" = 1 ] && [ "$(git rev-parse HEAD)" = "$head_before" ] && pass "...nor logged as a flake" || fail "...nor logged as a flake"
+unset NVRVIEW_FLAKE_LOG NVRVIEW_CACHE_METADATA NVRVIEW_CACHE_TOOLS NVRVIEW_FULL_WINDOWS_EVERY
 
 # --- timing log -----------------------------------------------------------------
 export NVRVIEW_TIMING_LOG="$work/timings.jsonl" NVRVIEW_TIMING_KEEP=5

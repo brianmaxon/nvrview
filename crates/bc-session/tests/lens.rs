@@ -1,10 +1,8 @@
 //! The second-lens probe against the mock's channel kinds (docs/protocol.md,
 //! "Second lenses").
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_session::{ConnState, DeviceSession, FnConnector, LensProbe, SessionConfig};
-use common::mock_connector;
 use mock_nvr::ExternMode;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;

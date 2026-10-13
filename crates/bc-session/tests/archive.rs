@@ -1,15 +1,13 @@
 //! Recording searches, cover images, and downloads against the in-process
 //! mock NVR's fake recording store, alongside live view on the same session.
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::archive::{
     CoverRequest, DateTime, DayRecordChannel, DownloadRequest, EventSearch, FileSearch,
 };
 use bc_protocol::media::Record;
 use bc_protocol::stream::StreamTier;
 use bc_session::{DeviceSession, Download, DownloadError, DownloadEvent, Item, SessionConfig};
-use common::mock_connector;
 use mock_nvr::archive::{ArchiveConfig, DownloadFault, FaultKind, MockEvent};
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;

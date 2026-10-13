@@ -389,7 +389,7 @@ internal sealed partial class SelfTest
             cws.PopOut(camera);
             CallWindow? cw2 = cws.WindowFor(camera);
             bool windowShows = cw2 is { Card: { KeepTalkingShown: true } card2 } && card2.ReplyText == "Be right there";
-            await Task.Delay(300);
+            await Task.Delay(300); // proves that nothing happens: the talk is not stopped or restarted after the pops
             bool kept = call.Talk.IsActive && mic.Running && mic.Starts == talkStarts;
             Say($"calls: pop in and out while talking: talking {talking}, talk kept {kept}, latch {call.Latched}, draft \"{call.Draft}\", cards show them {insetsShow}, window shows them {windowShows}");
             Expect(talking, "Keep talking did not start the talk before the pop");
@@ -410,7 +410,7 @@ internal sealed partial class SelfTest
             // A viewer window opened while the call is popped out has no card for it, and shows it after Pop In like the others.
             ViewerWindow third = app.OpenWindow(new WindowContent.Scratch("Third", LayoutNode.Leaf(other)));
             opened.Add(third);
-            await Task.Delay(300);
+            await Task.Delay(300); // proves that nothing happens: the new window does not build a card for the popped-out call
             bool hidden = third.Stage.CallCards.Cards.Count == 0 && third.Stage.CallCards.LeasesHeld == 0 && cws.WindowFor(camera) is not null;
             Say($"calls: new window while popped out: no card {hidden}, leases {v.Leases.LeaseCount(camera)}");
             Expect(hidden, "a viewer window opened while the call was popped out shows its card");
@@ -976,7 +976,9 @@ internal sealed partial class SelfTest
             sapi.Feed(new float[16_000]);
             await Until(() => texts.Count > 0 || statuses.Any(s => s.StartsWith("Unavailable", StringComparison.Ordinal)), 10);
             sapi.Finish();
-            await Task.Delay(1500);
+            // The final result after the end of the audio, or nothing more where the recognizer is unavailable.
+            await Until(() => statuses.Any(s => s.StartsWith("Unavailable", StringComparison.Ordinal)) ||
+                string.Join(" ", texts).Contains("moment", StringComparison.OrdinalIgnoreCase), 5);
             Say($"calls: desktop recognizer: {string.Join(", ", statuses)}; heard \"{string.Join(" ", texts)}\", guesses \"{string.Join(" | ", guesses.TakeLast(3))}\"; {sapi.Counts}");
             Expect(statuses.Any(x => x.StartsWith("Unavailable", StringComparison.Ordinal)) ||
                 string.Join(" ", texts).Contains("moment", StringComparison.OrdinalIgnoreCase),

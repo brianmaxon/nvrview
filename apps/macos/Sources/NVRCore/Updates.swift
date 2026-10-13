@@ -133,10 +133,13 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
     public var lastCheck: Date?
     /// What this build bundles; read from the app, never stored.
     public var bundled = BundledUpdateDefaults.none
+    /// The version that ran last, for the "What's New" window (nil: a first
+    /// run). Stored here, with the other update settings.
+    public var lastRunVersion: String?
 
     public init() {}
 
-    private enum CodingKeys: String, CodingKey { case source, keys, disabledBundledKeys, automatic, lastCheck }
+    private enum CodingKeys: String, CodingKey { case source, keys, disabledBundledKeys, automatic, lastCheck, lastRunVersion }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -145,6 +148,7 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
         disabledBundledKeys = try c.decodeIfPresent([String].self, forKey: .disabledBundledKeys) ?? []
         automatic = try c.decodeIfPresent(Bool.self, forKey: .automatic) ?? false
         lastCheck = try c.decodeIfPresent(Date.self, forKey: .lastCheck)
+        lastRunVersion = try c.decodeIfPresent(String.self, forKey: .lastRunVersion)
     }
 
     /// The source a check uses: the user's, else the bundled default.

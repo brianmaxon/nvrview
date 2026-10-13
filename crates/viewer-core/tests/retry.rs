@@ -2,9 +2,7 @@
 //! Retry (`Core::retry_tile`) recovers it at once, against the in-process
 //! mock NVR on a simulated clock.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::time::Duration;
 use viewer_core::{CoreConfig, StreamTier};

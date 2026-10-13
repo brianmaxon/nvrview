@@ -6,10 +6,8 @@
 //! source the test supplies. The mock NVR interleaves a synthetic smoke
 //! alarm (fixtures/synthetic/aac-smoke-t3.aac) with its video.
 
-mod common;
-
+use crate::common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use bc_protocol::archive::DateTime;
-use common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use serde_json::{Value, json};
 use simtime::SimRuntime;
 use std::path::{Path, PathBuf};

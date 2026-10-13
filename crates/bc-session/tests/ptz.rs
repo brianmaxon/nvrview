@@ -2,14 +2,12 @@
 //! simulated time: what is sent, the stop on every path, the limits, and
 //! the grants.
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::ptz::{Direction, LensAxis, Request};
 use bc_session::{
     ConnState, DeviceSession, MotionOrigin, PtzNotice, PtzOutcome, PtzRefusal, SessionConfig,
     StopCause,
 };
-use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::ptz::{PtzCamera, PtzLogEntry, PtzRequest};
 use std::path::PathBuf;

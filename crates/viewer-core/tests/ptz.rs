@@ -3,9 +3,7 @@
 //! when the app stops renewing, when the tile closes, when the device is
 //! removed, and at shutdown.
 
-mod common;
-
-use common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
+use crate::common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use mock_nvr::ptz::PtzCamera;
 use simtime::SimRuntime;
 use std::path::PathBuf;
@@ -25,7 +23,7 @@ fn mock(sim: &SimRuntime) -> mock_nvr::MockNvr {
     sim_spawn(sim, cfg)
 }
 
-fn ptz_events(rec: &common::Recorder, tile: u64) -> Vec<serde_json::Value> {
+fn ptz_events(rec: &crate::common::Recorder, tile: u64) -> Vec<serde_json::Value> {
     rec.events_of("ptz")
         .into_iter()
         .filter(|e| e["tile"] == tile)
@@ -33,7 +31,7 @@ fn ptz_events(rec: &common::Recorder, tile: u64) -> Vec<serde_json::Value> {
 }
 
 /// `action/state/reason` of each `ptz` event of `tile`.
-fn summary(rec: &common::Recorder, tile: u64) -> Vec<String> {
+fn summary(rec: &crate::common::Recorder, tile: u64) -> Vec<String> {
     ptz_events(rec, tile)
         .iter()
         .map(|e| {

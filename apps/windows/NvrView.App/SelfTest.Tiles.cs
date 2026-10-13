@@ -174,8 +174,9 @@ internal sealed partial class SelfTest
         bool zoomedMain = await Until(() => q.ShownTier == "main", 10);
         q.Zoom = 1.7f;
         v.Tick();
-        await Task.Delay(1500);
-        bool stays = q.ShownTier == "main" && q.RequestedTier == StreamTier.Main;
+        // The planner decides on the tick, so the tier asked for right after it is the decision (no wait); the
+        // hysteresis itself (up past 2x, down below 1.6x) is ZoomHysteresis in NvrView.Tiles, tested there.
+        bool stays = q.ShownTier == "main" && q.RequestedTier == StreamTier.Main && v.Planner.WantedTier(q.Camera) == StreamTier.Main;
         q.Zoom = 1.5f;
         v.Tick();
         bool back = await Until(() => q.ShownTier == "sub", 10);
@@ -338,7 +339,8 @@ internal sealed partial class SelfTest
             _problems.Add($"fisheye {what}: the tile is not dewarped");
             return;
         }
-        await Task.Delay(200);
+        long drawn = r.DewarpDraws;
+        await Until(() => r.DewarpDraws > drawn + 1, 5);
         Task<StageCapture> task = r.CaptureAsync();
         if (await Task.WhenAny(task, Task.Delay(5000)) != task)
         {

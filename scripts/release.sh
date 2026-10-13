@@ -5,9 +5,15 @@
 #
 #   NVRVIEW_WINDOWS_HOST=<ssh host alias> scripts/release.sh --notes FILE
 #       [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows]
-#       [--full-check]
+#       [--full-check] [--notes-history DIR]
 #
 #   --notes FILE      the release notes (plain text) shown by the apps; required
+#   --notes-history DIR
+#                     a folder of <version>.txt files, the notes of past
+#                     versions. With --notes they are bundled in both packages
+#                     as release-notes.json (newest first, signed with the
+#                     package), for the apps' What's New and Help > Release
+#                     Notes. Without it only this version's notes are bundled.
 #   --key-file PATH   the secret signing key (default ~/.config/nvrview-signing/update.key);
 #                     never printed; the script refuses if it is missing
 #   --out DIR         where the packages and the signed manifest go
@@ -56,6 +62,7 @@ notes=""
 key="$HOME/.config/nvrview-signing/update.key"
 out=""
 update_source=""
+notes_history=""
 skip_windows=0
 full_check=0
 while [ $# -gt 0 ]; do
@@ -64,13 +71,15 @@ while [ $# -gt 0 ]; do
     --key-file) key="${2:?--key-file needs a path}"; shift 2 ;;
     --out) out="${2:?--out needs a directory}"; shift 2 ;;
     --update-source) update_source="${2:?--update-source needs a folder path or URL}"; shift 2 ;;
+    --notes-history) notes_history="${2:?--notes-history needs a folder}"; shift 2 ;;
     --skip-windows) skip_windows=1; shift ;;
     --full-check) full_check=1; shift ;;
-    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--update-source SOURCE] [--skip-windows] [--full-check]" >&2; exit 2 ;;
+    *) echo "usage: $0 --notes FILE [--key-file PATH] [--out DIR] [--update-source SOURCE] [--notes-history DIR] [--skip-windows] [--full-check]" >&2; exit 2 ;;
   esac
 done
 [ -n "$notes" ] || die "--notes FILE is required"
 [ -s "$notes" ] || die "the notes file $notes is missing or empty"
+[ -z "$notes_history" ] || [ -d "$notes_history" ] || die "the notes history $notes_history is not a folder"
 [ -f "$key" ] || die "the signing key $key does not exist (docs/UPDATES.md, Maintainer workflow: sign-update keygen)"
 
 version=$(tr -d '[:space:]' <VERSION)
@@ -126,6 +135,12 @@ if [ -n "$update_source" ]; then
   python3 -I scripts/update-defaults.py --update-source "$update_source" --out /dev/null >/dev/null ||
     die "--update-source is not usable"
 fi
+# The bundled release notes (docs/UPDATES.md, "Bundled release notes"),
+# validated here before the long builds and given to both packagers.
+set -- --release-notes "$notes"
+if [ -n "$notes_history" ]; then set -- "$@" --notes-history "$notes_history"; fi
+python3 -I scripts/release-notes-bundle.py --version "$version" --notes "$notes" ${notes_history:+--history "$notes_history"} \
+  --out /dev/null >/dev/null || die "the release notes cannot be bundled"
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 mac_zip="NVRView-$version-macos-arm64.zip"
@@ -133,9 +148,9 @@ win_zip="NvrView-$version-win-x64.zip"
 
 echo "== macOS package"
 if [ -n "$update_source" ]; then
-  scripts/package-macos.sh --trusted-key-file "$pubfile" --update-source "$update_source"
+  scripts/package-macos.sh --trusted-key-file "$pubfile" --update-source "$update_source" "$@"
 else
-  scripts/package-macos.sh --trusted-key-file "$pubfile"
+  scripts/package-macos.sh --trusted-key-file "$pubfile" "$@"
 fi
 cp "build/$mac_zip" "$out/$mac_zip"
 
@@ -145,9 +160,9 @@ if [ "$skip_windows" = 1 ]; then
 else
   echo "== Windows package (built on the Windows computer)"
   if [ -n "$update_source" ]; then
-    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source"
+    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" --update-source "$update_source" "$@"
   else
-    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile"
+    scripts/windows-check.sh --package "$out" --trusted-key-file "$pubfile" "$@"
   fi
   [ -s "$out/$win_zip" ] || die "the Windows package $win_zip was not fetched"
   chmod 644 "$out/$win_zip"
@@ -166,8 +181,11 @@ echo "== manifest, signature, check"
 want_key=$(sed -n 's/^nvrview-ed25519-pub \([0-9a-f]*\)$/\1/p' "$pubfile")
 unzip -p "$out/$mac_zip" NVRView.app/Contents/Resources/update-defaults.json | grep -q "$want_key" ||
   die "the macOS package does not bundle the public key"
+unzip -p "$out/$mac_zip" NVRView.app/Contents/Resources/release-notes.json | grep -q "\"$version\"" ||
+  die "the macOS package does not bundle the release notes"
 if [ "$skip_windows" != 1 ]; then
   unzip -p "$out/$win_zip" update-defaults.json | grep -q "$want_key" || die "the Windows package does not bundle the public key"
+  unzip -p "$out/$win_zip" release-notes.json | grep -q "\"$version\"" || die "the Windows package does not bundle the release notes"
 fi
 "$sign" check --source "$out" --key "$pubfile" --current 0.0.0
 

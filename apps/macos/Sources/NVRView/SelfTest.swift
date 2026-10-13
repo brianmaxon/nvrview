@@ -119,22 +119,58 @@ import VideoKit
 /// animations, easing and the idle delay finish when the test advances it,
 /// not after real time. What really takes time (frames decoding, tier
 /// switches, display refreshes, drawable resizes) is waited for by polling
-/// for the condition, with a timeout.
+/// for the condition (or a count of pictures), with a timeout. The one fixed
+/// wait left is the launch step's 1.5 s: it shows that AppKit's own hover
+/// timer, which the test cannot advance, does not peek the sidebar.
+///
+/// The steps are in areas (scripts/macos-selftest-areas.txt; `--areas a,b`
+/// runs only those and the startup smoke, so the test result cache reruns
+/// what a change touches). This file has the order and the shared helpers;
+/// the larger areas' steps are in SelfTest+Area.swift files.
 ///
 /// Every step carries a parity marker (a comment naming a kebab-case ID) above its code, shared with
 /// the Windows self-test where it checks the same thing (docs/PARITY.md;
 /// `scripts/check-parity.py` compares them).
 ///
-/// Prints what it measured and exits 0 or 1.
+/// Prints what it measured, each line with the seconds since the start, and
+/// exits 0 or 1.
+
+/// When the app started (host seconds): every line the self-test prints
+/// starts with the seconds since, so a run shows where its time went.
+nonisolated(unsafe) var selfTestStarted = CACurrentMediaTime()
+
+/// The self-test's own `print`: the elapsed seconds in front of the line
+/// (the verdict lines at the end use `Swift.print`, unprefixed).
+func selfTestPrint(_ line: String) {
+    Swift.print(String(format: "[%6.2f] ", CACurrentMediaTime() - selfTestStarted) + line)
+}
+
+private func print(_ line: String) { selfTestPrint(line) }
+
 @MainActor
 final class SelfTest {
-    private unowned let app: AppDelegate
-    private var problems: [String] = []
+    unowned let app: AppDelegate
+    var problems: [String] = []
     /// Viewer windows a step opened besides the second (closed with it).
-    private var extraWindows: [ViewerWindowController] = []
-    private let began = CACurrentMediaTime()
+    var extraWindows: [ViewerWindowController] = []
+    let began = CACurrentMediaTime()
+    /// The areas asked for with `--areas` (nil: all).
+    let areas: Set<String>?
 
-    init(app: AppDelegate) { self.app = app }
+    /// The self-test's areas: scripts/macos-selftest-areas.txt puts every
+    /// step in exactly one, and scripts/suite-cache.py fingerprints each.
+    /// "startup" is the smoke that always runs.
+    static let areaNames = [
+        "startup", "viewer", "tiles", "layouts", "header", "settings", "calls", "recordings", "capture", "ptz", "alerts",
+    ]
+
+    init(app: AppDelegate, areas: Set<String>? = nil) {
+        self.app = app
+        self.areas = areas
+    }
+
+    /// True when the run covers the area (without --areas, all of them).
+    func runs(_ area: String) -> Bool { area == "startup" || areas?.contains(area) ?? true }
 
     /// Lines AppKit must never log (it says the first will become an assert;
     /// the second is a layout whose constraints cannot all hold, such as a
@@ -147,6 +183,11 @@ final class SelfTest {
     func start(seconds: Double) {
         // Line by line, also into a pipe (a run that hangs still shows how far it got).
         setvbuf(stdout, nil, _IOLBF, 0)
+        selfTestStarted = began
+        if let unknown = areas?.subtracting(Self.areaNames), !unknown.isEmpty {
+            finish(["unknown self-test areas: \(unknown.sorted().joined(separator: ", ")) (known: \(Self.areaNames.joined(separator: ", ")))"])
+        }
+        print("areas: \(areas == nil ? "all" : Self.areaNames.filter(runs).joined(separator: ", "))")
         launchPeekStep { [self] in
             when({ [self] in gridReady }, timeout: seconds) { [self] in checkGrid() }
         }
@@ -161,7 +202,7 @@ final class SelfTest {
     /// overlay and leaves the sidebar collapsed and the stage where it was
     /// (AppKit's peek used to push the stage aside; see
     /// `ViewerSplitViewController`).
-    private func launchPeekStep(then next: @escaping @MainActor () -> Void) {
+    func launchPeekStep(then next: @escaping @MainActor () -> Void) {
         guard let window else { return next() }
         // parity: sidebar-system-peek
         window.restoreSidebar(collapsed: true)
@@ -202,7 +243,7 @@ final class SelfTest {
 
     /// Advances the viewer's clock and steps every window at the new time
     /// (what the display link does on a refresh).
-    private func advance(_ seconds: Double) {
+    func advance(_ seconds: Double) {
         guard let clock = app.testClock else { return }
         clock.advance(by: seconds)
         for w in app.windows {
@@ -214,7 +255,7 @@ final class SelfTest {
 
     /// Every device connected, every tile playing, and the first tile's
     /// device and shown rates measured.
-    private var gridReady: Bool {
+    var gridReady: Bool {
         guard let model = app.model, let window, !model.devices.isEmpty else { return false }
         guard model.devices.allSatisfy({ $0.link.state == .connected }) else { return false }
         let cameras = window.state.tree.cameras
@@ -226,23 +267,23 @@ final class SelfTest {
         return window.stage.shownRate(of: first) != nil
     }
 
-    private func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
+    func after(_ seconds: Double, _ body: @escaping @MainActor () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { MainActor.assumeIsolated { body() } }
     }
 
     /// Runs `body` after everything already queued on the main queue (the
     /// hops a fake's events and callbacks make), instead of after a
     /// guessed delay: the queue is first in, first out.
-    private func afterQueued(_ body: @escaping @MainActor () -> Void) {
+    func afterQueued(_ body: @escaping @MainActor () -> Void) {
         DispatchQueue.main.async { MainActor.assumeIsolated { body() } }
     }
 
-    private var window: ViewerWindowController? { app.windows.first }
+    var window: ViewerWindowController? { app.windows.first }
 
     /// Runs `body` once `condition` holds or `timeout` seconds have passed
     /// (a window behind others gets few display refreshes, and animations
     /// advance only on refreshes).
-    private func when(
+    func when(
         _ condition: @escaping @MainActor () -> Bool, timeout: Double, _ body: @escaping @MainActor () -> Void
     ) {
         let deadline = CACurrentMediaTime() + timeout
@@ -253,7 +294,7 @@ final class SelfTest {
         poll()
     }
 
-    private func checkGrid() {
+    func checkGrid() {
         // parity: grid-plays
         guard let model = app.model, let window else { finish(["no window"]) }
         let connected = model.devices.filter { $0.link.state == .connected }.count
@@ -275,17 +316,22 @@ final class SelfTest {
             if model.fake != nil, abs((tile.deviceRate ?? 0) - 20) > 1 { problems.append("device rate not measured") }
             if shown == nil { problems.append("shown rate not measured") }
         }
-        capture("grid") { [self] in livePacing { [self] in resizeStep() } }
+        capture("grid") { [self] in
+            if runs("viewer") { livePacing { [self] in resizeStep() } } else { resizeStep() }
+        }
     }
 
-    /// Live pacing (docs/RENDERING.md "Playback pacing"): for five seconds
-    /// every live tile of the first window notes when each picture reaches
-    /// the app, and the window's renderer counts the pictures it draws for
-    /// the first time; together the tiles must draw at least 90% of the
-    /// pictures delivered (what the header's "Device" and "Shown" rates
-    /// compare). Real time on purpose: it measures the real display refresh
-    /// and decoders.
-    private func livePacing(then next: @escaping @MainActor () -> Void) {
+    /// Live pacing (docs/RENDERING.md "Playback pacing"): until every live
+    /// tile of the first window has been delivered `livePacingPictures`
+    /// pictures (a count, not a time), each tile notes when each picture
+    /// reaches the app, and the window's renderer counts the pictures it
+    /// draws for the first time; together the tiles must draw at least 90%
+    /// of the pictures delivered (what the header's "Device" and "Shown"
+    /// rates compare). The pictures come in at the stream's own pace, so this
+    /// takes a second or two; the release pacing itself is proven on a
+    /// simulated clock in the core's tests (tests/core.rs, live pictures
+    /// delivered in groups) and the bounds in PacingStatsTests.
+    func livePacing(then next: @escaping @MainActor () -> Void) {
         // parity: live-pacing
         guard let model = app.model, let window else { return next() }
         let tiles = window.state.tree.cameras.compactMap { model.leases.tile(for: $0) }
@@ -311,9 +357,11 @@ final class SelfTest {
             }
         }
         RunLoop.main.add(probe, forMode: .common)
-        after(5) { [self] in
+        let began = CACurrentMediaTime()
+        when({ tiles.allSatisfy { $0.pacing.report().released.pictures >= Self.livePacingPictures } }, timeout: 15) { [self] in
             probe.invalidate()
-            print(String(format: "live pacing: main thread %d timer ticks of 500, longest gap %.0f ms; window visible %@", ticks, longest * 1000,
+            let seconds = CACurrentMediaTime() - began
+            print(String(format: "live pacing: main thread %d timer ticks in %.2f s, longest gap %.0f ms; window visible %@", ticks, seconds, longest * 1000,
                          window.window?.occlusionState.contains(.visible) == true ? "yes" : "no"))
             window.window?.orderBack(nil)
             renderer.onNewPicture = nil
@@ -325,7 +373,7 @@ final class SelfTest {
             let ratio = arrived > 0 ? Double(shown) / Double(arrived) : 0
             let made = window.stage.grid.refreshes - refreshes
             let first = reports.first.map { String(describing: $0) } ?? "none"
-            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in 5 s; first tile: \(first)")
+            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in \(String(format: "%.2f", seconds)) s; first tile: \(first)")
             if ratio < Self.pacingShownRatio {
                 problems.append("live pacing: \(shown) of \(arrived) delivered pictures were drawn")
             }
@@ -336,7 +384,7 @@ final class SelfTest {
     /// Resizes the window in a burst of steps, one per run-loop turn (each
     /// costs a layout pass), like a full-screen transition: the grid keeps drawing while the drawable
     /// size follows only now and then, and exactly once it settles.
-    private func resizeStep() {
+    func resizeStep() {
         // parity: resize
         guard let window, let nsWindow = window.window else { finish(problems) }
         let grid = window.stage.grid
@@ -379,16 +427,17 @@ final class SelfTest {
     }
 
     /// The drawable size a view's bounds want, in pixels.
-    private static func pixelSize(of view: NSView) -> CGSize {
+    static func pixelSize(of view: NSView) -> CGSize {
         let scale = view.window?.backingScaleFactor ?? 1
         return CGSize(width: (view.bounds.width * scale).rounded(), height: (view.bounds.height * scale).rounded())
     }
 
-    private func focusStep() {
+    func focusStep() {
         guard let model = app.model, let window else { finish(problems) }
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera else {
             finish(problems + ["no camera to focus"])
         }
+        guard runs("viewer") else { return qualityStep(camera) }
         // parity: focus-content-change
         // Replacing the window's content while a tile is focused must only
         // end the focus: the renderer keeps following the stage (it once
@@ -412,7 +461,7 @@ final class SelfTest {
         }
     }
 
-    private func listenStep(_ camera: CameraRef) {
+    func listenStep(_ camera: CameraRef) {
         guard let model = app.model else { finish(problems) }
         // parity: audio-level-muted
         // A muted camera's meter (on hover) reads its decoded audio too.
@@ -431,7 +480,7 @@ final class SelfTest {
         }
     }
 
-    private func unfocusStep(_ camera: CameraRef) {
+    func unfocusStep(_ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
         // parity: unfocus-sub-stream
         window.stage.unfocus()
@@ -448,19 +497,16 @@ final class SelfTest {
             for (what, ns) in model.timings.sorted(by: { $0.key < $1.key }) {
                 print(String(format: "timing %@: %.1f ms", what, Double(ns) / 1e6))
             }
-            // parity: core-contract
-            if let fake = model.fake {
-                problems += fake.violations.map { "core contract: \($0)" }
-            }
             qualityStep(camera)
         }
     }
 
     /// Clear on a tile switches its camera to the main stream in the grid;
     /// back to Auto returns it to the sub stream.
-    private func qualityStep(_ camera: CameraRef) {
+    func qualityStep(_ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
         guard let leaf = window.state.tree.leaves.first(where: { $0.camera == camera }) else { return sidebarStep() }
+        guard runs("tiles") else { return sidebarStep() }
         // parity: quality-clear-auto
         window.stage.setQuality(.clear, at: leaf.path)
         when({ model.leases.tile(for: camera)?.tierState.shown == .main }, timeout: 5) { [self] in
@@ -480,10 +526,11 @@ final class SelfTest {
 
     /// Rows inserted and removed in two places of the sidebar in one update:
     /// what made a table-backed sidebar re-enter its row-height cache.
-    private func sidebarStep() {
+    func sidebarStep() {
         guard let model = app.model else { finish(problems) }
         // Only with `--fake`: never touch the user's stored groups.
         guard model.fake != nil else { return checkLog() }
+        guard runs("layouts") else { return lensStep() }
         let cameras = model.allCameras
         // parity: sidebar-rows-update
         let group = model.createGroup(name: "Self-Test", cameras: Array(cameras.prefix(2)))
@@ -500,7 +547,7 @@ final class SelfTest {
     /// left edge slides the sidebar over the stage without resizing the stage
     /// or its drawable, and it slides away again after the pointer leaves.
     /// The dwell and the hide delay run on the test clock.
-    private func revealStep() {
+    func revealStep() {
         guard let window else { return lensStep() }
         // parity: sidebar-reveal
         window.setSidebarCollapsedForTest(true)
@@ -545,8 +592,9 @@ final class SelfTest {
 
     /// With `--fake` (one made-up channel has two lenses): the second lens
     /// streams as its own tile on the grid's lens-2 tier.
-    private func lensStep() {
+    func lensStep() {
         guard let model = app.model else { finish(problems) }
+        guard runs("tiles") else { return keyStep() }
         guard let lens = model.allCameras.first(where: { $0.lens == 1 }) else {
             problems.append("no second lens among the cameras")
             return checkLog()
@@ -568,7 +616,7 @@ final class SelfTest {
 
     /// A key press as AppKit delivers it to the window (the app stays
     /// inactive and the window behind; events are addressed by number).
-    private func press(_ characters: String, keyCode: UInt16) {
+    func press(_ characters: String, keyCode: UInt16) {
         guard let nsWindow = window?.window else { return }
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard
@@ -581,8 +629,9 @@ final class SelfTest {
         }
     }
 
-    private func keyStep() {
+    func keyStep() {
         guard let window else { finish(problems) }
+        guard runs("viewer") else { return headerStep() }
         let stage = window.stage
         let frames = window.state.tree.frames(in: stage.bounds)
         guard let first = frames.leaves.first?.path, let right = frames.neighbor(of: first, .right) else {
@@ -609,7 +658,7 @@ final class SelfTest {
         zoomStep(right)
     }
 
-    private func zoomStep(_ path: NodePath) {
+    func zoomStep(_ path: NodePath) {
         guard let model = app.model, let window else { finish(problems) }
         let stage = window.stage
         guard let leaf = window.state.tree.frames(in: stage.bounds).leaf(path), let camera = leaf.camera else {
@@ -676,7 +725,7 @@ final class SelfTest {
         }
     }
 
-    private func chromeStep(_ path: NodePath, _ camera: CameraRef) {
+    func chromeStep(_ path: NodePath, _ camera: CameraRef) {
         guard let model = app.model, let window else { finish(problems) }
         let stage = window.stage
         let grid = stage.grid
@@ -742,7 +791,7 @@ final class SelfTest {
     /// drag on its header swaps it; the window's record restores the crop
     /// and the single tile's choice; the window's switch then sets every
     /// tile.
-    private func fillPanStep(_ path: NodePath, _ camera: CameraRef) {
+    func fillPanStep(_ path: NodePath, _ camera: CameraRef) {
         guard let window else { return headerStep() }
         let stage = window.stage
         let grid = stage.grid
@@ -814,7 +863,7 @@ final class SelfTest {
 
     /// A drag on the shown header of a tile whose picture pans swaps the
     /// tiles; the crop goes with the camera.
-    private func fillPanHeaderSwapStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+    func fillPanHeaderSwapStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
         guard let window else { return headerStep() }
         let stage = window.stage
         // parity: fill-pan-header-swap
@@ -849,7 +898,7 @@ final class SelfTest {
     /// under the tile's identity; a window restored from it shows the same
     /// part of the picture in that tile. Then the window's switch sets
     /// every tile, and Reset Position recenters.
-    private func fillPanRestoreStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+    func fillPanRestoreStep(_ path: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
         guard let window, let saved = window.savedWindow,
             let otherPath = window.state.tree.leaves.first(where: { $0.camera == otherCamera })?.path,
             let key = window.state.viewKey(path), let otherKey = window.state.viewKey(otherPath)
@@ -917,7 +966,7 @@ final class SelfTest {
     /// Two tiles of one camera are independent views: Show Camera puts the
     /// camera in a second tile at the default view; each tile zooms on its
     /// own, focus keeps a tile's zoom, and resetting one leaves the other.
-    private func zoomPerTileStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+    func zoomPerTileStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
         guard let window else { return headerStep() }
         let stage = window.stage
         let grid = stage.grid
@@ -956,7 +1005,7 @@ final class SelfTest {
 
     /// Swapping two tiles moves each view with its camera; the tiles keep
     /// their identities. Then the layout is put back as it was.
-    private func zoomFollowsSwapStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
+    func zoomFollowsSwapStep(_ path: NodePath, _ second: NodePath, _ camera: CameraRef, _ otherCamera: CameraRef) {
         guard let window else { return headerStep() }
         let stage = window.stage
         // parity: zoom-follows-swap
@@ -996,7 +1045,7 @@ final class SelfTest {
     /// release (through the mouse handlers, many small moves, the header
     /// shown); the tile's frame (its chrome: outline and header) is the
     /// tile's whole area at 1x, zoomed, and focused.
-    private func panAndFrameStep(_ path: NodePath, _ camera: CameraRef) {
+    func panAndFrameStep(_ path: NodePath, _ camera: CameraRef) {
         guard let window else { return headerStep() }
         let stage = window.stage
         func frameIsTile(_ rect: CGRect?) -> Bool {
@@ -1068,7 +1117,7 @@ final class SelfTest {
     /// `channels` event put Start Conversation in a doorbell's header and
     /// the PTZ buttons in a moving camera's. Then the recording steps
     /// (`recordStep`).
-    private func headerStep() {
+    func headerStep() {
         guard let model = app.model, let window else { return insetStep() }
         let stage = window.stage
         // The chrome as the model says now (the step before faked an alert).
@@ -1079,6 +1128,7 @@ final class SelfTest {
             problems.append("no tile with a header")
             return insetStep()
         }
+        guard runs("header") else { return recordStep(leaf.path, camera) }
         let saved = chrome.frame
         let buttons = TileHeaderLayout.buttons(for: tile)
         let m = TileHeaderMetrics.standard
@@ -1141,1585 +1191,16 @@ final class SelfTest {
 
     // MARK: Recording (docs/CAPTURE.md "Live recording")
 
-    /// Runs `body` once the capture board says `done` (the fake core's
-    /// queued `recording` events are sent first, on each poll).
-    private func whenCapture(
-        _ timeout: Double, _ done: @escaping @MainActor (RecordingBoard) -> Bool,
-        _ body: @escaping @MainActor () -> Void
-    ) {
-        guard let model = app.model else { return body() }
-        when({
-            model.fake?.completeCaptureWork()
-            return done(model.capture.board)
-        }, timeout: timeout, body)
-    }
-
-    /// R records the selected tile's camera from the next keyframe: the
-    /// pill ("● REC") on its tile stays when the header fades and at any
-    /// width, the header's Record says Stop, the toolbar and the Camera
-    /// menu list it, and the header's Stop ends it ("Recording saved").
-    /// Then a start under the free-space guard says why, and a device's
-    /// third main-stream recording offers the sub-stream instead. Both
-    /// cores (the fake writes nothing; the real one writes into the
-    /// self-test's folder).
-    private func recordStep(_ path: NodePath, _ camera: CameraRef) {
-        guard let model = app.model, let window, let chrome = window.stage.chromes[path] else { return pictureStep() }
-        let stage = window.stage
-        // parity: capture-encoder-priming
-        do {
-            let (reported, measured) = try AACCaptureEncoder.measurePriming()
-            print("capture: AAC priming reported \(reported), impulse back at \(measured.map { $0 - 4096 } ?? -1)")
-            if measured.map({ abs($0 - 4096 - Int(reported)) > 48 }) ?? true {
-                problems.append("capture: the encoder's priming \(reported) is not where the audio comes back")
-            }
-        } catch {
-            problems.append("capture: the AAC round trip failed (\(error))")
-        }
-        if model.capture.encoder == nil || !model.capture.configured {
-            problems.append("capture: the encoder was not installed or the core not configured")
-        }
-        // parity: capture-record-tile
-        window.window?.makeFirstResponder(stage)
-        window.state.selected = path
-        press("r", keyCode: 15)
-        let started = model.capture.board.live(of: camera)
-        whenCapture(20, { $0.live(of: camera)?.state == "recording" }) { [self] in
-            stage.refreshChrome()
-            let entry = model.capture.board.live(of: camera)
-            let tile = stage.headerTile(camera, path: path)
-            let label = tile.flatMap { TileHeaderLayout.menu(for: $0).first { $0.item == .record }?.label }
-            print(
-                "capture: R started \(started.map { ($0.file as NSString).lastPathComponent } ?? "nothing"), "
-                    + "state \(entry?.state ?? "none"), Record says \(label ?? "?")")
-            if started == nil { problems.append("capture: R did not start a recording (\(stage.toastText ?? "no message"))") }
-            if entry?.state != "recording" { problems.append("capture: the recording did not reach its first keyframe") }
-            if label != "Stop Recording" { problems.append("capture: the header's Record did not become Stop") }
-            if let f = started?.file, !f.hasPrefix(model.recordingsFolder.path) {
-                problems.append("capture: the recording is not in the recordings folder")
-            }
-            // parity: capture-record-indicator
-            let pill = chrome.pillText
-            chrome.fadeOut()
-            let stays = chrome.pillText != nil
-            chrome.showChrome()
-            let narrow = tile.map {
-                TileHeaderLayout.compute(width: 100, titleWidth: 200, tile: $0, previous: nil).visible.contains(.recordingPill)
-            }
-            let toolbar = window.recordingItemTitle
-            let menu = NSMenu()
-            RecordingsMenu.shared.fill(menu)
-            let listed = menu.items.filter { $0.action == #selector(ViewerWindowController.stopRecordingItem(_:)) }.count
-            print(
-                "capture: pill \(pill ?? "none"), stays when the header fades \(stays), at 100 pt \(narrow ?? false), "
-                    + "toolbar \(toolbar ?? "none"), Camera menu lists \(listed)")
-            if pill?.hasPrefix("● REC") != true || !stays { problems.append("capture: the tile's pill did not show or did not stay") }
-            if narrow != true { problems.append("capture: a narrow header dropped the recording pill") }
-            if toolbar != "● 1 recording" { problems.append("capture: the toolbar item said \(toolbar ?? "nothing")") }
-            if listed != 1 { problems.append("capture: the Recordings submenu listed \(listed) recordings") }
-            chrome.pressHeader(.record)
-            whenCapture(15, { $0.running.isEmpty }) { [self] in
-                stage.refreshChrome()
-                let ended = model.capture.board.ended.last
-                let toast = stage.toastText
-                print("capture: Stop ended it \(ended?.state ?? "no") (\(ended?.reason ?? "-")), message \(toast ?? "none")")
-                if ended?.state != "finished" || ended?.reason != "stopped" { problems.append("capture: Stop did not finish the recording") }
-                if toast != "Recording saved" { problems.append("capture: the end said \(toast ?? "nothing")") }
-                if chrome.pillText != nil { problems.append("capture: the pill stayed after the recording ended") }
-                advance(ToastView.actionDuration + 0.1)
-                recordLimitsStep(path, camera)
-            }
-        }
-    }
-
-    /// The free-space guard and the main-stream limit, as messages.
-    private func recordLimitsStep(_ path: NodePath, _ camera: CameraRef) {
-        guard let model = app.model, let window else { return pictureStep() }
-        let stage = window.stage
-        // parity: capture-record-disk-low
-        model.capture.minFreeOverride = 1 << 62
-        model.fake?.setCaptureFreeBytes(1)
-        stage.performHeaderItem(.record, at: path, from: nil)
-        let refused = stage.toastText
-        let none = model.capture.board.running.isEmpty
-        model.capture.minFreeOverride = nil
-        model.fake?.setCaptureFreeBytes(.max)
-        advance(ToastView.actionDuration + 0.1)
-        print("capture: low disk says \(refused ?? "nothing"), nothing started \(none)")
-        if refused?.contains("free disk space") != true || !none { problems.append("capture: low disk did not refuse with its reason") }
-        // parity: capture-record-main-limit
-        let cameras = stage.frames.leaves.compactMap(\.camera).filter { $0.device == camera.device && $0.lens == 0 }
-        guard cameras.count >= 3 else {
-            print("capture: fewer than three cameras of one device, the main-stream limit is not checked")
-            return pictureStep()
-        }
-        model.capture.startLive(cameras[0], quality: .main)
-        model.capture.startLive(cameras[1], quality: .main)
-        model.capture.startLive(cameras[2], quality: .main)
-        let message = stage.toastText ?? "nothing"
-        let action = stage.toast.actionTitle
-        if action == "Record Sub-stream" { stage.toast.pressAction() }
-        let third = model.capture.board.live(of: cameras[2])
-        print("capture: a third main stream says \(message), offers \(action ?? "nothing"), then \(third?.tier ?? "nothing")")
-        if !message.contains("two main streams") || action != "Record Sub-stream" || third?.tier != "sub" {
-            problems.append("capture: the main-stream limit did not offer the sub-stream")
-        }
-        whenCapture(20, { b in b.list.count == 3 && b.list.allSatisfy { $0.state == "recording" } }) { [self] in
-            window.stopAllRecordings(nil)
-            whenCapture(15, { $0.running.isEmpty }) { [self] in
-                if !model.capture.board.running.isEmpty { problems.append("capture: Stop All left recordings running") }
-                advance(ToastView.actionDuration + 0.1)
-                pictureStep()
-            }
-        }
-    }
-
-    // MARK: Save picture (docs/CAPTURE.md "Save picture")
-
-    /// A throwaway pictures folder for the model to save into.
-    private func freshPictureFolder(_ model: AppModel) -> URL {
-        let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("nvrview-selftest-pictures-\(UUID().uuidString)", isDirectory: true)
-        model.picturesFolder = folder
-        model.pictureFormat = .png
-        model.shareSafeNames = false
-        return folder
-    }
-
-    /// Runs `action` (a key or a menu item), waits for the save it starts to
-    /// finish, and gives the record (nil if none came).
-    private func saving(
-        _ stage: StageView, _ action: () -> Void, then body: @escaping @MainActor (PictureSaveRecord?) -> Void
-    ) {
-        let before = stage.pictureSaves
-        action()
-        when({ stage.pictureSaves > before }, timeout: 8) {
-            body(stage.pictureSaves > before ? stage.lastPictureSave : nil)
-        }
-    }
-
-    /// Checks one finished save: a file with the naming rule's shape and
-    /// extension, its size, its dimensions (`size`, within a pixel, when
-    /// given), and, for a copy of the decoded picture, its pixels against a
-    /// CPU conversion of the buffer it was made from. Returns the image.
-    @discardableResult
-    private func checkSaved(
-        _ record: PictureSaveRecord?, _ what: String, ext: String, nameEnds: String, size: CGSize?, tolerance: Int
-    ) -> RenderedImage? {
-        guard let record else {
-            problems.append("\(what): no picture was saved")
-            return nil
-        }
-        guard case .success(let saved) = record.result else {
-            problems.append("\(what): the save failed: \(record.result)")
-            return nil
-        }
-        let name = saved.url.lastPathComponent
-        let shape = /\d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}\.\d{3} .+/
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: saved.url.path)[.size] as? Int) ?? nil
-        guard let data = try? Data(contentsOf: saved.url), let image = PictureEncoder.decode(data) else {
-            problems.append("\(what): \(name) is not an image file")
-            return nil
-        }
-        let sized = size.map { abs(CGFloat(image.width) - $0.width) <= 1 && abs(CGFloat(image.height) - $0.height) <= 1 } ?? true
-        let named = name.wholeMatch(of: shape) != nil && name.hasSuffix(nameEnds + "." + ext)
-        let toast = window?.stage.toastText
-        print("\(what): \(name), \(image.width)x\(image.height), \(data.count) bytes, toast \(toast ?? "none")")
-        if !named { problems.append("\(what): the file name \(name) does not follow the rule") }
-        if fileSize != data.count || data.count < 100 { problems.append("\(what): the file has \(fileSize ?? -1) bytes") }
-        if !sized { problems.append("\(what): \(image.width)x\(image.height), expected \(size.map { "\($0)" } ?? "?")") }
-        if toast != "Picture saved" || window?.stage.toast.actionTitle != "Show in Finder" {
-            problems.append("\(what): the confirmation toast said \(toast ?? "nothing")")
-        }
-        if !record.dewarped {
-            // A JPEG is compared with the same encoder's JPEG of the decoded
-            // picture: its losses (far off on a sharp color edge, so they
-            // vary with the frame saved) cancel out.
-            let buffer = record.picture.pixelBuffer
-            let (checked, matched) =
-                ext == "jpg"
-                ? PictureCheck.compareEncoded(
-                    image, buffer: buffer, color: record.color, region: record.region, encoding: PictureFormat.jpeg.encoding,
-                    tolerance: tolerance) ?? (0, 0)
-                : PictureCheck.compare(image, buffer: buffer, color: record.color, region: record.region, tolerance: tolerance)
-            print("\(what): \(matched) of \(checked) sampled pixels match the decoded picture")
-            if checked < 20 || matched * 100 < checked * 95 {
-                problems.append("\(what): only \(matched) of \(checked) pixels match the decoded picture")
-            }
-        }
-        return image
-    }
-
-    /// P saves the tile's full picture as PNG, a share-safe JPEG names the
-    /// camera Camera A, and Save Zoomed Area saves the visible region of a
-    /// zoomed tile at the source's resolution; each file is read back and its
-    /// pixels compared with the decoded buffer.
-    private func pictureStep() {
-        guard let model = app.model, let window else { return insetStep() }
-        let stage = window.stage
-        guard let leaf = stage.frames.leaves.first(where: { $0.camera.map { !model.isFisheye($0) } == true }),
-            let camera = leaf.camera
-        else {
-            problems.append("no plain tile to save a picture from")
-            return insetStep()
-        }
-        let path = leaf.path
-        let folder = freshPictureFolder(model)
-        let name = PictureNaming.sanitize(model.name(of: camera))
-        when({ model.leases.tile(for: camera)?.latestPicture() != nil }, timeout: 3) { [self] in
-            // parity: capture-picture-tile
-            window.window?.makeFirstResponder(stage)
-            window.state.selected = path
-            let size = stage.pictureSizes[camera]
-            saving(stage, { press("p", keyCode: 35) }) { [self] record in
-                checkSaved(record, "picture", ext: "png", nameEnds: " " + name, size: size, tolerance: 3)
-                // Share-safe names and JPEG.
-                model.shareSafeNames = true
-                model.pictureFormat = .jpeg
-                saving(stage, { press("p", keyCode: 35) }) { [self] record in
-                    checkSaved(record, "picture (share-safe JPEG)", ext: "jpg", nameEnds: " Camera A", size: size, tolerance: 8)
-                    model.shareSafeNames = false
-                    model.pictureFormat = .png
-                    zoomedPictureStep(path, camera, folder: folder)
-                }
-            }
-        }
-    }
-
-    private func zoomedPictureStep(_ path: NodePath, _ camera: CameraRef, folder: URL) {
-        guard let model = app.model, let window else { return insetStep() }
-        let stage = window.stage
-        guard let leaf = stage.frames.leaves.first(where: { $0.path == path }) else { return insetStep() }
-        // parity: capture-picture-zoomed
-        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: true)
-        advance(1)
-        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
-        let want = stage.renderedSource(of: path)
-        let full = stage.pictureSizes[camera]
-        let name = PictureNaming.sanitize(model.name(of: camera))
-        saving(stage, { stage.performOnSelected(.saveZoomedArea) }) { [self] record in
-            if let want, let full {
-                checkSaved(record, "zoomed area", ext: "png", nameEnds: " " + name, size: want.size, tolerance: 3)
-                if let r = record?.region, abs(r.minX - want.minX) > 1 || abs(r.minY - want.minY) > 1 {
-                    problems.append("zoomed area: the region \(r) is not the one shown, \(want)")
-                }
-                if want.width >= full.width || want.height >= full.height {
-                    problems.append("zoomed area: the region \(want.size) is not smaller than the picture \(full)")
-                }
-            } else {
-                problems.append("zoomed area: the tile drew no source rectangle")
-            }
-            stage.resetZoom(at: path)
-            advance(1)
-            try? FileManager.default.removeItem(at: folder)
-            insetStep()
-        }
-    }
-
-    /// A fisheye tile's saved view is the dewarped picture at the source's
-    /// resolution (its pixels match the fixture's colors where the reference
-    /// mapping says), and Save Original Fisheye Picture is the circle as
-    /// received.
-    private func fisheyePictureStep(_ path: NodePath, _ camera: CameraRef) {
-        guard let model = app.model, let window else { return checkLog() }
-        let stage = window.stage
-        let folder = freshPictureFolder(model)
-        let name = PictureNaming.sanitize(model.name(of: camera))
-        stage.setFisheyeMode(.panorama, at: path)
-        stage.grid.prepare?(stage.grid.renderer, stage.grid.drawableSize)
-        window.window?.makeFirstResponder(stage)
-        window.state.selected = path
-        // parity: capture-picture-fisheye
-        saving(stage, { stage.performOnSelected(.savePicture) }) { [self] record in
-            let image = checkSaved(record, "fisheye view", ext: "png", nameEnds: " " + name, size: nil, tolerance: 3)
-            if record?.dewarped != true { problems.append("fisheye view: the saved picture was not dewarped") }
-            if let image, let record,
-                let dewarp = stage.fisheyeDewarp(
-                    camera: camera, path: path, picture: record.picture,
-                    tileSize: CGSize(width: image.width, height: image.height))
-            {
-                let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-                let (checked, matched) = Self.fisheyeMatches(dewarp, in: rect) { image.rgb(x: $0, y: $1) }
-                print("fisheye view: \(matched) of \(checked) saved pixels match the fixture")
-                if checked < 20 || Double(matched) < 0.9 * Double(checked) {
-                    problems.append("fisheye view: \(matched) of \(checked) saved pixels match the fixture")
-                }
-            }
-            saving(stage, { stage.performOnSelected(.saveOriginalFisheye) }) { [self] original in
-                let circle = checkSaved(original, "original fisheye", ext: "png", nameEnds: " " + name, size: nil, tolerance: 3)
-                if original?.dewarped != false { problems.append("original fisheye: the saved picture was dewarped") }
-                if let circle, let image, circle.width != image.width || circle.height != image.height {
-                    problems.append("original fisheye: \(circle.width)x\(circle.height), not the source's size \(image.width)x\(image.height)")
-                }
-                try? FileManager.default.removeItem(at: folder)
-                checkLog()
-            }
-        }
-    }
-
-    // MARK: Alert insets and doorbell calls
-
-    private func insetStep() {
-        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
-        let stage = window.stage
-        guard let device = model.runtime("fake-1"), let id = device.deviceID else {
-            problems.append("no fake device for the doorbell")
-            return checkLog()
-        }
-        let doorbell = CameraRef(device: device.key, channel: 3)
-        guard let other = window.state.tree.leaves.first(where: { $0.camera != nil && $0.camera != doorbell }),
-            let otherCamera = other.camera
-        else {
-            problems.append("no other camera to focus")
-            return checkLog()
-        }
-        model.stopListening()
-        stage.focus(other.path)
-        advance(StageView.focusDuration)
-        let startsBefore = fake.talkStarts
-        // parity: call-press-opens-call
-        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-        when({ stage.insetBoard.item(for: doorbell) != nil && model.calls.call(for: doorbell) != nil }, timeout: 3) { [self] in
-            guard stage.insetBoard.item(for: doorbell) != nil, let call = model.calls.call(for: doorbell) else {
-                problems.append("a doorbell press did not open its inset and call")
-                return checkLog()
-            }
-            let views = stage.shownInsetViews
-            print("doorbell: inset \(views.count), unmute shown \(views.first?.unmuteShown == true), talk \(call.talk.text)")
-            if views.count != 1 { problems.append("expected one inset view, saw \(views.count)") }
-            if !call.showsUnmute || views.first?.unmuteShown != true {
-                problems.append("the doorbell call did not show Unmute while nothing was playing")
-            }
-            if model.audible.contains(doorbell) { problems.append("the doorbell became audible without listening or the setting") }
-            if fake.talkStarts != startsBefore { problems.append("talk-back started on its own") }
-            // parity: alert-inset-in-grid
-            // The inset is one more tile of the same grid, drawn on top.
-            let grid = stage.grid
-            grid.prepare?(grid.renderer, grid.drawableSize)
-            // In focus the grid draws the focused tile; the inset adds one.
-            if grid.renderer.tiles.count != 2 {
-                problems.append("the grid draws \(grid.renderer.tiles.count) tiles for the focused tile and one inset")
-            }
-            guard let tile = model.leases.tile(for: doorbell) else {
-                problems.append("the doorbell has no tile")
-                return checkLog()
-            }
-            if grid.renderer.tiles.last.map({ ObjectIdentifier($0.picture as AnyObject) }) != ObjectIdentifier(tile) {
-                problems.append("the inset is not drawn last (on top)")
-            }
-            // parity: call-camera-audio-recognized
-            // parity: call-captions
-            // Its tapped audio reaches the visitor's transcript (fake engine).
-            fake.pumpAudio(tile: tile.id, count: 17)
-            when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
-                let lines = model.calls.call(for: doorbell)?.transcript.lines ?? []
-                print("transcript: \(lines.map { "\($0.source.label): \($0.text)" })")
-                if lines.first?.source != .visitor { problems.append("the doorbell's audio did not reach the transcript") }
-                talkStep(doorbell, otherCamera, startsBefore)
-            }
-        }
-    }
-
-    private func talkStep(_ doorbell: CameraRef, _ otherCamera: CameraRef, _ startsBefore: Int) {
-        guard let model = app.model, let fake = model.fake, let tile = model.leases.tile(for: doorbell) else {
-            return checkLog()
-        }
-        // parity: call-talk-permission-prompt
-        // Without the permission Talk asks first; Cancel sends nothing, the
-        // call stays open, and the camera's option stays off.
-        guard let prompter = model.calls.fakePrompter else { return checkLog() }
-        prompter.answers = [false]
-        model.calls.startTalking(doorbell)
-        let name = model.name(of: doorbell)
-        print("talk without permission: asked \(prompter.asked.map(\.title)), \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
-        if prompter.asked.map(\.title) != ["Allow talk-back for \(name)?"] {
-            problems.append("Talk without the permission did not ask to allow talk-back for the camera")
-        }
-        if model.calls.call(for: doorbell)?.talk.phase != .idle { problems.append("a canceled prompt left talk-back started") }
-        if fake.talkStarts != startsBefore { problems.append("talk-back reached the device before the user allowed it") }
-        if model.cameraOptions(doorbell).allowTalk { problems.append("Cancel turned talk-back on") }
-        if model.calls.call(for: doorbell) == nil { problems.append("Cancel ended the call") }
-        model.calls.stopTalking(doorbell)
-        // A typed reply asks too; Cancel keeps the text (accepted false) and sends nothing.
-        prompter.answers = [false]
-        var accepted: Bool?
-        model.calls.setDraft(doorbell, "Not yet")
-        model.calls.sendReply("Not yet", to: doorbell) { accepted = $0 }
-        if accepted != false || prompter.asked.count != 2 { problems.append("a typed reply without the permission did not ask and keep its text") }
-        if model.calls.call(for: doorbell)?.draft != "Not yet" { problems.append("a canceled typed reply lost the call's draft") }
-        if fake.talkStarts != startsBefore || model.calls.fakeSpeech?.rendered.isEmpty == false {
-            problems.append("a canceled typed reply was rendered or sent")
-        }
-        // parity: call-talk-allowed
-        // Allow persists the option and starts the talk without pressing
-        // again; the microphone's audio goes out while Talk is held.
-        prompter.answers = [true]
-        model.calls.startTalking(doorbell)
-        if !model.cameraOptions(doorbell).allowTalk { problems.append("Allow did not turn talk-back on for the camera") }
-        when({ model.calls.call(for: doorbell)?.talk.isActive == true }, timeout: 2) { [self] in
-            model.calls.fakeMicrophone?.speak(count: 16_000)
-            let sent = fake.talkPushedMilliseconds(tile: tile.id)
-            print(String(format: "talk with permission: %@, %.0f ms pushed", model.calls.call(for: doorbell)?.talk.text ?? "-", sent))
-            if model.calls.call(for: doorbell)?.talk.isActive != true { problems.append("talk-back did not become active") }
-            if abs(sent - 1000) > 1 { problems.append("the microphone's audio was not pushed (\(sent) ms)") }
-            model.calls.stopTalking(doorbell)
-            when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
-                // parity: call-typed-reply
-                // A typed reply: rendered, pushed once active, drained.
-                model.calls.setDraft(doorbell, "Hello, one moment please")
-                model.calls.sendReply("Hello, one moment please", to: doorbell)
-                if model.calls.call(for: doorbell)?.draft.isEmpty != true { problems.append("a sent reply stayed in the call's draft") }
-                // (Letting go of Talk above also drained, so "finished"
-                // alone does not show that the reply went out.)
-                when({
-                    guard model.calls.fakeSpeech?.rendered.isEmpty == false else { return false }
-                    if case .stopped(let r)? = model.calls.call(for: doorbell)?.talk.phase { return r == "finished" }
-                    return false
-                }, timeout: 3) { [self] in
-                    let phase = model.calls.call(for: doorbell)?.talk.phase
-                    print("typed reply: \(model.calls.fakeSpeech?.rendered ?? []), talk \(String(describing: phase))")
-                    if model.calls.fakeSpeech?.rendered != ["Hello, one moment please"] {
-                        problems.append("the typed reply was not rendered")
-                    }
-                    if phase != .stopped(reason: "finished") { problems.append("the typed reply's talk did not drain") }
-                    // parity: call-caption-echo
-                    // The doorbell's microphone hears its speaker play the reply: the
-                    // visitor caption that repeats it is dropped; other speech is kept.
-                    guard let engine = model.calls.visitorEngine(doorbell) else { return checkLog() }
-                    engine.onPartial?("Hello, one moment")
-                    engine.onFinal?("Hello, one moment please.")
-                    engine.onFinal?("I have a delivery for the house")
-                    when({ model.calls.call(for: doorbell)?.transcript.finals.contains { $0.text.hasPrefix("I have a delivery") } == true }, timeout: 2) { [self] in
-                        let call = model.calls.call(for: doorbell)
-                        let texts = call?.transcript.finals.map(\.text) ?? []
-                        print("caption echo: \(texts), shown \(call?.transcript.lines.map(\.text) ?? [])")
-                        if texts.contains(where: { $0.hasPrefix("Hello, one moment") }) { problems.append("the reply came back as a visitor caption (echo not dropped)") }
-                        if call?.transcript.partials[.visitor] != nil { problems.append("the echo's volatile caption is still shown") }
-                        if call?.echo.dropped != 2 { problems.append("expected two dropped echo captions, saw \(call?.echo.dropped ?? -1)") }
-                        coreRefusalStep(doorbell, otherCamera, startsBefore: fake.talkStarts)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The core still refuses (its permission was revoked behind the app's
-    /// back): the same prompt appears; Cancel leaves it refused.
-    private func coreRefusalStep(_ doorbell: CameraRef, _ otherCamera: CameraRef, startsBefore: Int) {
-        guard let model = app.model, let fake = model.fake, let prompter = model.calls.fakePrompter,
-            let id = model.runtime(doorbell.device)?.deviceID
-        else { return checkLog() }
-        // macOS only: the core's own refusal (its permission revoked behind
-        // the app's back) shows the same prompt. Windows re-sends the setting
-        // before every start, so it cannot be out of sync there.
-        try? model.bridge.setTalkPermission(device: id, channel: UInt8(doorbell.channel), allowed: false)
-        let asked = prompter.asked.count
-        prompter.answers = [false]
-        // With "Keep talking": the latch is the call's, and a refusal turns it off.
-        model.calls.setLatched(doorbell, true)
-        when({ prompter.asked.count == asked + 1 }, timeout: 2) { [self] in
-            print("core refusal: asked again \(prompter.asked.count == asked + 1), \(model.calls.call(for: doorbell)?.talk.text ?? "-")")
-            if fake.talkStarts != startsBefore { problems.append("a refused talk reached the device") }
-            if model.calls.call(for: doorbell)?.talk.isTalking == true { problems.append("Cancel after a core refusal left talk-back running") }
-            if model.calls.call(for: doorbell)?.latched == true { problems.append("Keep talking stayed on after a refusal") }
-            model.calls.stopTalking(doorbell)
-            model.setAllowTalk(doorbell, false)
-            swapStep(doorbell, otherCamera)
-        }
-    }
-
-    private func swapStep(_ doorbell: CameraRef, _ otherCamera: CameraRef) {
-        guard let model = app.model, let window else { return checkLog() }
-        let stage = window.stage
-        // parity: call-unmute
-        model.calls.unmute(doorbell)
-        if !model.audible.contains(doorbell) { problems.append("Unmute did not make the doorbell audible") }
-        // parity: alert-inset-swap
-        // A click swaps: the doorbell fills the stage, the focused camera
-        // goes into the return inset. Clicking a call's inset is call activity.
-        let clicked = model.clock.now
-        stage.swapInset(doorbell)
-        if (model.calls.call(for: doorbell)?.lastActivity ?? 0) < clicked { problems.append("clicking the call's inset did not count as call activity") }
-        let swapped = stage.insetBoard.swap?.shown == doorbell
-            && stage.insetBoard.items.first.map { $0.isReturn && $0.camera == otherCamera } == true
-        print("swap: doorbell on the stage \(swapped), wants \(model.leases.wantedTier(doorbell).name)")
-        if !swapped { problems.append("clicking the inset did not swap it with the focused camera") }
-        if model.leases.wantedTier(doorbell) != .main { problems.append("the swapped-in doorbell did not ask for the main stream") }
-        if !stage.showsCamera(doorbell) || stage.showsCamera(otherCamera) {
-            problems.append("after the swap the stage does not show the doorbell")
-        }
-        press("\t", keyCode: ViewerKeys.tab)
-        let back = stage.insetBoard.swap == nil && stage.insetBoard.item(for: doorbell) != nil
-        print("tab: swapped back \(back)")
-        if !back { problems.append("Tab did not swap back") }
-        // parity: call-close-ends
-        press("\u{1b}", keyCode: ViewerKeys.escape)
-        let gone = stage.insetBoard.isEmpty && model.calls.call(for: doorbell) == nil
-        print("esc: inset dismissed and call ended \(gone), audible \(model.audible.count)")
-        if !gone {
-            problems.append("Esc did not dismiss the inset and end the call: \(stage.insetBoard.items.map { "\($0.camera) \($0.kind)" })")
-        }
-        if !model.audible.isEmpty { problems.append("ending the call did not restore what played before") }
-        if window.state.focused == nil { problems.append("Esc on an inset also left focus") }
-        autoCloseStep(doorbell)
-    }
-
-    /// A doorbell inset closes by itself a minute after the press ended.
-    private func autoCloseStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake, let id = model.runtime("fake-1")?.deviceID else {
-            return checkLog()
-        }
-        let stage = window.stage
-        // parity: call-auto-close
-        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: false, alarm: true)
-        when({ stage.insetBoard.item(for: doorbell)?.active == false }, timeout: 3) { [self] in
-            advance(InsetBoard.autoCloseDelay - 1)
-            let stayed = stage.insetBoard.item(for: doorbell) != nil
-            advance(2)
-            let closed = stage.insetBoard.item(for: doorbell) == nil
-            print("doorbell inset: open after 59 s \(stayed), closed after 61 s \(closed), call ended \(model.calls.call(for: doorbell) == nil)")
-            if !stayed || !closed { problems.append("the doorbell inset did not close a minute after the press") }
-            if model.calls.call(for: doorbell) != nil { problems.append("the call did not end a minute after the last activity") }
-            conversationStep(doorbell)
-        }
-    }
-
-    /// "Start Conversation" opens the call with no press, sends nothing by
-    /// itself, refuses Talk without the permission, and ends through the
-    /// same paths.
-    private func conversationStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
-        let stage = window.stage
-        let startsBefore = fake.talkStarts
-        // parity: call-conversation-start
-        stage.startConversation(doorbell)
-        let call = model.calls.call(for: doorbell)
-        let opened = stage.insetBoard.item(for: doorbell)?.kind == .conversation
-        print("conversation: inset \(opened), presses \(call?.presses ?? -1), audible \(model.audible.contains(doorbell))")
-        if !opened || call == nil || call?.presses != 0 || call?.origin != .conversation {
-            problems.append("Start Conversation did not open the inset and a call with no press")
-        }
-        if !model.audible.contains(doorbell) { problems.append("a conversation did not make the camera audible") }
-        if fake.talkStarts != startsBefore { problems.append("a conversation sent talk-back by itself") }
-        // parity: call-talk-conversation
-        // The core is told the call is open on the doorbell's tile (its talk
-        // starts skip the per-minute limit), and told again when it ends.
-        let markedTile = model.leases.tile(for: doorbell)
-        let marked = markedTile.map { fake.inConversation(tile: $0.id) } ?? false
-        print("conversation: core told the call is open \(marked)")
-        if !marked || model.calls.conversationTile(doorbell) !== markedTile {
-            problems.append("opening a conversation did not tell the core (no talk-back limit during a call)")
-        }
-        model.calls.startTalking(doorbell)
-        if model.calls.fakePrompter?.asked.count != 5 || model.calls.call(for: doorbell)?.talk.phase != .idle {
-            problems.append("Talk in a conversation did not ask first (and send nothing on Cancel)")
-        }
-        if fake.talkStarts != startsBefore { problems.append("a canceled Talk in a conversation reached the device") }
-        model.calls.stopTalking(doorbell)
-        // parity: call-conversation-end
-        stage.endConversation(doorbell)
-        let ended = model.calls.call(for: doorbell) == nil && stage.insetBoard.item(for: doorbell) == nil
-        print("conversation: ended through the close path \(ended), still audible \(model.audible.contains(doorbell))")
-        if !ended { problems.append("ending a conversation left its call or inset open") }
-        if let markedTile, fake.inConversation(tile: markedTile.id) {
-            problems.append("ending a conversation did not tell the core it ended")
-        }
-        if model.audible.contains(doorbell) { problems.append("ending a conversation left the camera audible") }
-        echoStep(doorbell)
-    }
-
-    /// Echo cancellation (docs/AUDIO.md "Echo cancellation"): the fake
-    /// microphone reports the system's canceller on, then unavailable. Real
-    /// echo cannot be heard in a self-test: this checks what the call shows
-    /// and logs, and the caption gate's rule in each mode (the microphone is
-    /// always sent; only its captions are gated).
-    private func echoStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake, let mic = model.calls.fakeMicrophone else {
-            return checkLog()
-        }
-        let stage = window.stage
-        // parity: call-echo-cancellation
-        stage.startConversation(doorbell)
-        guard let tile = model.leases.tile(for: doorbell) else {
-            problems.append("the conversation has no tile")
-            return transcriptFileStep(doorbell)
-        }
-        let prepared = mic.prepared
-        func youFinals() -> Int { model.calls.call(for: doorbell)?.transcript.finals.filter { $0.source == .you }.count ?? 0 }
-        let allowed = model.cameraOptions(doorbell).allowTalk
-        model.setAllowTalk(doorbell, true)
-        mic.echo = .system
-        // The doorbell plays ordinary speech (above the half-duplex gate's
-        // threshold, below the safety duck's).
-        fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.3, rms: 0.1))
-        model.calls.startTalking(doorbell)
-        let talking: @MainActor () -> Bool = { model.calls.call(for: doorbell)?.talk.isActive == true && model.calls.echoCancellation(for: doorbell) != nil }
-        when(talking, timeout: 2) { [self] in
-            let state = model.calls.echoCancellation(for: doorbell)
-            let note = model.calls.note(for: doorbell) ?? "-"
-            let gateOn = model.calls.echoGateCancelled(doorbell)
-            mic.speak(count: 16_000)
-            when({ youFinals() > 0 }, timeout: 1) { [self] in
-                let fullDuplex = youFinals()
-                // Very loud: the short safety duck.
-                fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.8, rms: 0.4))
-                mic.speak(count: 16_000)
-                // The samples were processed inside `speak`; any caption they
-                // make is queued behind this hop.
-                afterQueued { [self] in
-                    let ducked = youFinals() == fullDuplex
-                    model.calls.stopTalking(doorbell)
-                    print("echo cancellation on: \(String(describing: state)), note \"\(note)\", captions while the doorbell speaks \(fullDuplex > 0), ducked when very loud \(ducked), prepared at call open \(prepared)")
-                    if state != .system || gateOn != true { problems.append("the microphone's echo cancellation was not taken up by the call") }
-                    if note != "Talking · Echo cancellation on" { problems.append("the call does not show that echo cancellation is on: \(note)") }
-                    if fullDuplex == 0 { problems.append("with echo cancellation the microphone was not captioned while the doorbell spoke") }
-                    if !ducked { problems.append("with echo cancellation a very loud doorbell did not duck the microphone's captions") }
-                    if !prepared { problems.append("opening a call did not prepare echo cancellation") }
-                    // The drained talk ends first (its end would stop the next one's microphone).
-                    when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 3) { [self] in
-                        echoFallbackStep(doorbell, tile: tile, allowed: allowed)
-                    }
-                }
-            }
-        }
-    }
-
-    /// The fallback: no echo canceller; the half-duplex caption gate.
-    private func echoFallbackStep(_ doorbell: CameraRef, tile: CoreTile, allowed: Bool) {
-        guard let model = app.model, let window, let fake = model.fake, let mic = model.calls.fakeMicrophone else {
-            return checkLog()
-        }
-        mic.echo = .gated("self-test: no echo canceller")
-        fake.setAudioLevel(tile: tile.id, AudioLevel(peak: 0.3, rms: 0.1))
-        func youFinals() -> Int { model.calls.call(for: doorbell)?.transcript.finals.filter { $0.source == .you }.count ?? 0 }
-        let before = youFinals()
-        model.calls.startTalking(doorbell)
-        let talking: @MainActor () -> Bool = { model.calls.call(for: doorbell)?.talk.isActive == true && model.calls.echoCancellation(for: doorbell) != nil }
-        when(talking, timeout: 2) { [self] in
-            let pushedBefore = fake.talkPushedMilliseconds(tile: tile.id)
-            let note = model.calls.note(for: doorbell) ?? "-"
-            let gateOn = model.calls.echoGateCancelled(doorbell)
-            mic.speak(count: 16_000)
-            afterQueued { [self] in
-                let gated = youFinals() == before
-                let pushed = fake.talkPushedMilliseconds(tile: tile.id) - pushedBefore
-                model.calls.stopTalking(doorbell)
-                let log = model.alerts.log.map(\.text)
-                let onLogged = log.filter { $0 == "Talk-back microphone: echo cancellation on" }.count
-                let offLogged = log.filter { $0.hasPrefix("Talk-back microphone: echo cancellation unavailable (self-test: no echo canceller)") }.count
-                print("echo cancellation off: note \"\(note)\", captions gated \(gated), \(Int(pushed)) ms still sent, logged on \(onLogged)x, off \(offLogged)x")
-                if gateOn != false { problems.append("without echo cancellation the caption gate did not take over") }
-                if note != "Talking · No echo cancellation" { problems.append("the call does not show that echo cancellation is off: \(note)") }
-                if !gated { problems.append("without echo cancellation the microphone was captioned while the doorbell spoke") }
-                if abs(pushed - 1000) > 1 { problems.append("without echo cancellation the microphone was not sent (\(pushed) ms)") }
-                if onLogged != 1 || offLogged != 1 { problems.append("echo cancellation was not logged once per outcome") }
-                fake.setAudioLevel(tile: tile.id, nil)
-                mic.echo = .system
-                model.setAllowTalk(doorbell, allowed)
-                window.stage.endConversation(doorbell)
-                if mic.prepared { problems.append("the last call ending did not release echo cancellation's preparation") }
-                transcriptFileStep(doorbell)
-            }
-        }
-    }
-
-    /// "Save call transcripts" on: a call's transcript is written as a text
-    /// file when it ends (in a temporary folder here); off: nothing is.
-    private func transcriptFileStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake else { return checkLog() }
-        let stage = window.stage
-        // parity: call-transcript-file
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "nvrview-selftest-transcripts-\(UUID().uuidString)", isDirectory: true)
-        let before = model.transcripts.folder
-        model.transcripts.folder = folder
-        model.saveCallTranscripts = true
-        stage.startConversation(doorbell)
-        guard let tile = model.leases.tile(for: doorbell) else {
-            problems.append("the conversation has no tile")
-            return popOutStep(doorbell)
-        }
-        fake.pumpAudio(tile: tile.id, count: 17)
-        when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
-            stage.endConversation(doorbell)
-            let names = model.transcripts.names()
-            let text = names.first.flatMap { try? String(contentsOf: folder.appendingPathComponent($0), encoding: .utf8) } ?? ""
-            let camera = CallTranscriptFile.sanitized(model.name(of: doorbell))
-            print("transcript file: \(names), \(text.split(separator: "\n").count) lines")
-            if names.count != 1 || names.first?.hasSuffix(" \(camera).txt") != true {
-                problems.append("ending a call with saving on did not write one transcript file named for the camera: \(names)")
-            }
-            if !text.hasPrefix("NVRView call transcript\nCamera: \(model.name(of: doorbell))\n")
-                || !text.contains("\nCall: conversation started in the app\n") || !text.contains(" Visitor: ")
-            {
-                problems.append("the transcript file lacks its header or the visitor's line")
-            }
-            // Off (the default): the next call writes nothing.
-            model.saveCallTranscripts = false
-            stage.startConversation(doorbell)
-            fake.pumpAudio(tile: tile.id, count: 17)
-            when({ model.calls.call(for: doorbell)?.transcript.finals.isEmpty == false }, timeout: 2) { [self] in
-                stage.endConversation(doorbell)
-                if model.transcripts.names().count != 1 { problems.append("a call with saving off wrote a transcript file") }
-                try? FileManager.default.removeItem(at: folder)
-                model.transcripts.folder = before
-                popOutStep(doorbell)
-            }
-        }
-    }
-
-    // MARK: Calls in their own windows (docs/UX.md "A call in its own window")
-
-    /// A press shown in two viewer windows' insets pops out into a call
-    /// window: the insets go from both, the window draws exactly the
-    /// doorbell's shared tile, and the call (tap, talk, leases) is untouched.
-    private func popOutStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake, let calls = app.callWindows,
-            let id = model.runtime(doorbell.device)?.deviceID,
-            let otherCamera = window.state.tree.cameras.first(where: { $0.firstLens != doorbell })
-        else { return smokeStep() }
-        // A second viewer window that does not show the doorbell either.
-        guard let second = app.openWindow(.scratch(name: "Second", root: .leaf(otherCamera))) else {
-            problems.append("could not open a second viewer window")
-            return smokeStep()
-        }
-        let stages = [window.stage, second.stage]
-        let baseline = model.leases.leaseCount(doorbell)
-        // parity: call-popout-open
-        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-        when({ model.calls.call(for: doorbell) != nil && stages.allSatisfy { !$0.shownInsetViews.isEmpty } }, timeout: 3) { [self] in
-            guard let before = model.calls.call(for: doorbell), let tile = model.leases.tile(for: doorbell) else {
-                problems.append("a press did not open the call in both viewer windows")
-                return finishPopOut(second)
-            }
-            let insetsBefore = stages.map { $0.shownInsetViews.count }
-            let leasesBefore = model.leases.leaseCount(doorbell)
-            let starts = fake.talkStarts
-            let popButtons = stages.allSatisfy { $0.shownInsetViews.first?.popShown == true }
-            model.popOutCall(doorbell)
-            guard let c = calls.controller(for: doorbell) else {
-                problems.append("Pop Out opened no call window")
-                return finishPopOut(second)
-            }
-            let gone = stages.allSatisfy { stage in
-                stage.shownInsetViews.isEmpty && stage.insetBoard.detachedCameras == [doorbell]
-                    && !stage.insetBoard.shown.contains { $0.camera == doorbell }
-            }
-            draw(c)
-            let drawn = c.stage.grid.renderer.tiles
-            let exact = drawn.count == 1 && drawn.first.map { ObjectIdentifier($0.picture as AnyObject) } == ObjectIdentifier(tile)
-            let after = model.calls.call(for: doorbell)
-            let same = after?.startedAt == before.startedAt && after?.presses == before.presses
-                && after?.transcript == before.transcript && after?.presentation == .window
-            let tapped = model.calls.isTapped(doorbell) && fake.pumpAudio(tile: tile.id, count: 1) == 1
-            let leases = model.leases.leaseCount(doorbell)
-            let wantedLeases = leasesBefore - insetsBefore.reduce(0, +) + 1
-            let tier = model.leases.wantedTier(doorbell)
-            let tiers = model.leases.tiers(for: doorbell)
-            print(
-                "pop out: insets \(insetsBefore) -> gone \(gone), window draws the doorbell tile \(exact), same call \(same), "
-                    + "tapped \(tapped), leases \(leasesBefore) -> \(leases), main \(c.asksForMainStream) (wants \(tier.name))")
-            if !popButtons { problems.append("a call's inset did not offer Pop Out in its header") }
-            if !gone { problems.append("Pop Out left the call's inset in a viewer window") }
-            if !exact { problems.append("the call window does not draw exactly the doorbell's tile (\(drawn.count) tiles)") }
-            if !same { problems.append("Pop Out changed the call") }
-            if !tapped { problems.append("Pop Out stopped the doorbell's audio tap") }
-            if fake.talkStarts != starts { problems.append("Pop Out started talk-back") }
-            if leases != wantedLeases || model.leases.tile(for: doorbell) !== tile {
-                problems.append("Pop Out leases: \(leases), expected \(wantedLeases) on the same tile")
-            }
-            if tier != (c.asksForMainStream ? tiers.focus : tiers.grid) {
-                problems.append("the call window's stream demand did not reach the leases (\(tier.name))")
-            }
-            if c.window?.isKeyWindow == true || NSApp.isActive { problems.append("the call window took the focus in the self-test") }
-            callTileStep(doorbell, c) { [self] in
-                popOutTalkStep(doorbell, tile: tile, stages: stages, second: second, baseline: baseline)
-            }
-        }
-    }
-
-    /// The call window's picture is a regular tile (docs/CAPTURE.md "The
-    /// call window is a regular tile"): a pinch zooms it, the zoom map
-    /// shows, the renderer samples the zoomed region, Auto asks for the
-    /// main stream, and the header's Reset Zoom eases it back; its menu is
-    /// the header model's (Pop In, End Conversation, Record Call) with no
-    /// layout items, and focus and split do nothing there.
-    private func callTileStep(_ doorbell: CameraRef, _ c: CallWindowController, then next: @escaping @MainActor () -> Void) {
-        guard let model = app.model else { return next() }
-        let stage = c.stage
-        draw(c)
-        guard stage.fixedTile, stage.frames.leaves.count == 1, let leaf = stage.frames.leaves.first,
-            leaf.camera == doorbell, let full = stage.renderedSource(of: leaf.path)
-        else {
-            problems.append("the call window's picture is not one tile of the doorbell")
-            return next()
-        }
-        // parity: call-window-tile-zoom
-        stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 2, eased: false)
-        stage.noteInteraction()
-        draw(c)
-        let zoomed = stage.zoom(atTile: leaf.path)
-        let map = stage.zoomMapShown(leaf.path) == true
-        let source = stage.renderedSource(of: leaf.path)
-        let narrower = source.map { $0.width < full.width * 0.9 || $0.height < full.height * 0.9 } == true
-        let wantsMain = c.asksForMainStream && model.leases.wantedTier(doorbell) == model.leases.tiers(for: doorbell).focus
-        let resetShown = stage.chromes[leaf.path]?.shownHeaderButtons.contains(.resetZoom) == true
-        stage.chromes[leaf.path]?.pressHeader(.resetZoom)
-        advance(1)
-        draw(c)
-        let back = stage.zoom(atTile: leaf.path) == .none && !stage.isEasingZoom
-        print(
-            String(format: "call window tile: pinch to %.2fx, ", zoomed.scale)
-                + "zoom map \(map), source cropped \(narrower), main stream \(wantsMain), "
-                + "header Reset Zoom shown \(resetShown) and back to 1x \(back)")
-        if abs(zoomed.scale - 2) > 0.01 { problems.append("a pinch did not zoom the call window's tile") }
-        if !map { problems.append("the call window's zoomed tile showed no zoom map") }
-        if !narrower { problems.append("the call window's renderer did not sample the zoomed region") }
-        if !wantsMain { problems.append("the zoomed call window tile did not ask for the main stream") }
-        if !resetShown || !back { problems.append("the call window's header did not offer Reset Zoom or did not reset") }
-        // parity: call-window-tile-menu
-        let menu = stage.contextMenu(for: leaf).items.map(\.title)
-        let want = stage.headerTile(doorbell, path: leaf.path).map { TileHeaderLayout.menu(for: $0).map(\.label) } ?? []
-        let callItems = ["Pop In Call", "End Conversation", "Record Call", "Save Picture"].allSatisfy(menu.contains)
-        let layoutItems = ["Focus", "Split Side by Side", "Remove Tile", "Clear Tile", "Show Camera", "Record Main Stream"]
-            .filter(menu.contains)
-        stage.toggleFocus()
-        stage.split(.row)
-        let fixed = stage.state.focused == nil && stage.state.tree.leafCount == 1 && stage.selectedPath == leaf.path
-        let header = stage.chromes[leaf.path]?.shownHeaderButtons ?? []
-        print(
-            "call window tile menu: the model's \(want.count) items \(menu == want), call items \(callItems), "
-                + "layout items \(layoutItems), focus and split ignored \(fixed), header \(header.map(\.rawValue))")
-        if menu != want || !callItems { problems.append("the call window tile's menu is not the header model's call menu: \(menu)") }
-        if !layoutItems.isEmpty { problems.append("the call window tile's menu offers \(layoutItems)") }
-        if !fixed { problems.append("focus or split changed the call window's single tile") }
-        if !header.contains(.conversation) { problems.append("the doorbell's call window header has no conversation button") }
-        callRecordStep(c, doorbell, next)
-    }
-
-    /// ⇧⌘R in a call window records the call (docs/CAPTURE.md "Recording
-    /// calls"): beside the transcripts under the stem the transcript will
-    /// take, the four tracks through the app's AAC encoder, the call bar's
-    /// "● Recording" pill, and ⇧⌘R again stops it.
-    private func callRecordStep(_ c: CallWindowController, _ doorbell: CameraRef, _ next: @escaping @MainActor () -> Void) {
-        guard let model = app.model else { return next() }
-        // parity: capture-call-record-button
-        let answeredBefore = model.capture.encoder?.answered ?? 0
-        c.captureRecord(nil)
-        let entry = model.capture.callRecording(doorbell)
-        let stem = model.capture.reservedCallStem(doorbell)
-        whenCapture(20, { $0.call(of: doorbell)?.state == "recording" }) { [self] in
-            c.refresh()
-            let pill = c.inset.recordingText
-            let header = c.stage.headerTile(doorbell, path: c.stage.frames.leaves.first?.path ?? [])
-            let label = header.flatMap { TileHeaderLayout.menu(for: $0).first { $0.item == .record }?.label }
-            let file = entry.map { URL(fileURLWithPath: $0.file) }
-            let besideTranscripts = file?.deletingLastPathComponent().path == model.transcripts.folder.path
-            let named = stem.map { file?.lastPathComponent == $0 + ".mp4" } ?? false
-            c.captureRecord(nil)
-            whenCapture(15, { $0.call(of: doorbell) == nil }) { [self] in
-                let ended = model.capture.board.ended.last
-                let answered = (model.capture.encoder?.answered ?? 0) - answeredBefore
-                print(
-                    "call recording: \(file?.lastPathComponent ?? "none"), beside the transcripts \(besideTranscripts), "
-                        + "named for the transcript \(named), pill \(pill ?? "none"), Record says \(label ?? "?"), "
-                        + "tracks \(ended?.tracks ?? []), ended \(ended?.state ?? "no"), encoder answered \(answered)")
-                if entry == nil { problems.append("call recording: ⇧⌘R did not start it (\(c.stage.toastText ?? "no message"))") }
-                if !besideTranscripts || !named { problems.append("call recording: not beside the transcripts under its stem") }
-                if pill?.hasPrefix("● Recording") != true { problems.append("call recording: the call bar showed no pill") }
-                if label != "Stop Recording Call" { problems.append("call recording: Record Call did not become Stop") }
-                if ended?.kind != "call" || ended?.tracks != ["video", "Conversation", "Visitor", "You"] {
-                    problems.append("call recording: the tracks were \(ended?.tracks ?? [])")
-                }
-                if answered <= 0 || (model.capture.encoder?.refused ?? 1) != 0 {
-                    problems.append("call recording: the AAC encoder answered \(answered) units")
-                }
-                c.refresh()
-                if c.inset.recordingText != nil { problems.append("call recording: the pill stayed after it stopped") }
-                advance(ToastView.actionDuration + 0.1)
-                next()
-            }
-        }
-    }
-
-    /// Lays out a call window and runs one display refresh's preparation
-    /// (a window behind the others gets few refreshes).
-    private func draw(_ c: CallWindowController) {
-        c.window?.contentView?.layoutSubtreeIfNeeded()
-        let grid = c.stage.grid
-        let scale = c.window?.backingScaleFactor ?? 1
-        let b = grid.bounds
-        grid.prepare?(grid.renderer, CGSize(width: b.width * scale, height: b.height * scale))
-    }
-
-    /// Talk with "Keep talking" and a typed draft survives popping in and
-    /// out again: no stop, no new start, the latch and the draft shown.
-    private func popOutTalkStep(
-        _ doorbell: CameraRef, tile: CoreTile, stages: [StageView], second: ViewerWindowController, baseline: Int
-    ) {
-        guard let model = app.model, let fake = model.fake, let calls = app.callWindows else { return finishPopOut(second) }
-        // parity: call-popout-talk
-        model.setAllowTalk(doorbell, true)
-        model.calls.setLatched(doorbell, true)
-        model.calls.setDraft(doorbell, "Be right there")
-        when({ model.calls.call(for: doorbell)?.talk.isActive == true }, timeout: 2) { [self] in
-            let starts = fake.talkStarts
-            model.popInCall(doorbell)
-            let insetsShow = stages.allSatisfy { stage in
-                stage.shownInsetViews.first.map { $0.callPanel.keepTalkingShown && $0.callPanel.replyText == "Be right there" } == true
-            }
-            model.popOutCall(doorbell)
-            let panel = calls.controller(for: doorbell)?.inset.callPanel
-            let windowShows = panel?.keepTalkingShown == true && panel?.replyText == "Be right there"
-            // Any stop or start would arrive as an event, queued behind this hop.
-            afterQueued { [self] in
-                let call = model.calls.call(for: doorbell)
-                let kept = call?.talk.isActive == true && fake.isTalking(tile: tile.id) && fake.talkStarts == starts
-                print(
-                    "pop in and out while talking: talk kept \(kept), latch \(call?.latched == true), draft \(call?.draft ?? "-"), "
-                        + "insets show them \(insetsShow), window shows them \(windowShows)")
-                if !kept { problems.append("popping in and out stopped or restarted talk-back") }
-                if call?.latched != true || call?.draft != "Be right there" { problems.append("popping lost Keep talking or the draft") }
-                if !insetsShow { problems.append("the insets did not show Keep talking and the draft after Pop In") }
-                if !windowShows { problems.append("the call window did not show Keep talking and the draft") }
-                model.calls.setLatched(doorbell, false)
-                when({ model.calls.call(for: doorbell)?.talk.isTalking == false }, timeout: 2) { [self] in
-                    model.setAllowTalk(doorbell, false)
-                    model.calls.setDraft(doorbell, "")
-                    newWindowStep(doorbell, stages: stages, second: second, baseline: baseline)
-                }
-            }
-        }
-    }
-
-    /// A viewer window opened while the call is popped out records the
-    /// call's item, detached, so Pop In shows the inset there too.
-    private func newWindowStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
-        guard let model = app.model, let window,
-            let otherCamera = window.state.tree.cameras.first(where: { $0.firstLens != doorbell })
-        else { return finishPopOut(second) }
-        // parity: call-popin-new-window
-        guard let third = app.openWindow(.scratch(name: "Third", root: .leaf(otherCamera))) else {
-            problems.append("could not open a third viewer window")
-            return popInStep(doorbell, stages: stages, second: second, baseline: baseline)
-        }
-        extraWindows.append(third)
-        when({ third.stage.insetBoard.detachedCameras == [doorbell] }, timeout: 1) { [self] in
-            let recorded = third.stage.insetBoard.detachedCameras == [doorbell] && third.stage.shownInsetViews.isEmpty
-            print("new window while popped out: call recorded detached \(recorded), leases \(model.leases.leaseCount(doorbell))")
-            if !recorded { problems.append("a viewer window opened while the call was popped out has no detached item for it") }
-            popInStep(doorbell, stages: stages + [third.stage], second: second, baseline: baseline)
-        }
-    }
-
-    /// Pop In: the window closes, every viewer window shows the inset again
-    /// on top with a fresh minute, and the leases follow.
-    private func popInStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
-        guard let model = app.model, let calls = app.callWindows else { return finishPopOut(second) }
-        // parity: call-popin
-        let panel = calls.controller(for: doorbell)?.window
-        let leasesBefore = model.leases.leaseCount(doorbell)
-        model.popInCall(doorbell)
-        let now = model.clock.now
-        let back = stages.allSatisfy { stage in
-            stage.insetBoard.shown.first?.camera == doorbell && stage.insetBoard.detachedCameras.isEmpty
-                && stage.shownInsetViews.first?.callPanel.isHidden == false
-                && stage.insetBoard.item(for: doorbell).flatMap(InsetBoard.closesAt).map { $0 >= now + InsetBoard.autoCloseDelay } == true
-        }
-        let leases = model.leases.leaseCount(doorbell)
-        let tiers = model.leases.tiers(for: doorbell)
-        let closed = calls.controller(for: doorbell) == nil && panel?.isVisible != true
-        print(
-            "pop in: window closed \(closed), insets back on top \(back), "
-                + "leases \(leasesBefore) -> \(leases), wants \(model.leases.wantedTier(doorbell).name)")
-        if !closed { problems.append("Pop In left the call window open") }
-        if !back { problems.append("Pop In did not bring the inset back on top, with a fresh minute, in every viewer window") }
-        if leases != leasesBefore - 1 + stages.count {
-            problems.append("Pop In leases: \(leases), expected \(leasesBefore - 1 + stages.count)")
-        }
-        if model.leases.wantedTier(doorbell) != tiers.grid { problems.append("the closed call window's stream demand stayed") }
-        popOutEndStep(doorbell, stages: stages, second: second, baseline: baseline)
-    }
-
-    /// Closing the call window and Esc in it end the call and close the
-    /// window; the viewer windows keep nothing. A call in its own window
-    /// never ends by inactivity; Pop In restarts the minute.
-    private func popOutEndStep(_ doorbell: CameraRef, stages: [StageView], second: ViewerWindowController, baseline: Int) {
-        guard let model = app.model, let calls = app.callWindows, let window else { return finishPopOut(second) }
-        // parity: call-popout-end
-        func ended(_ how: String) {
-            let clean = model.calls.call(for: doorbell) == nil && calls.controller(for: doorbell) == nil
-                && stages.allSatisfy { $0.insetBoard.items.isEmpty } && model.leases.leaseCount(doorbell) == baseline
-            print("call window \(how): call ended and window closed \(clean), leases \(model.leases.leaseCount(doorbell))")
-            if !clean { problems.append("\(how) did not end the call, close its window and let its insets and leases go") }
-        }
-        // The close button (and Cmd-W): performClose.
-        model.popOutCall(doorbell)
-        let first = calls.controller(for: doorbell)?.window
-        first?.performClose(nil)
-        if first?.isVisible == true { problems.append("the closed call window is still visible") }
-        ended("closed")
-        // Esc while the reply field is not being edited.
-        window.stage.startConversation(doorbell)
-        model.popOutCall(doorbell)
-        if let panel = calls.controller(for: doorbell)?.window,
-            let esc = NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: panel.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
-                isARepeat: false, keyCode: ViewerKeys.escape)
-        {
-            panel.sendEvent(esc)
-        }
-        ended("Esc")
-        // No expiry while popped out: ten minutes without activity, on the
-        // manual clock, leave the call and its window open.
-        window.stage.startConversation(doorbell)
-        model.popOutCall(doorbell)
-        advance(10 * DoorbellCall.idleTimeout)
-        let stayed = calls.controller(for: doorbell) != nil && model.calls.call(for: doorbell) != nil
-        print("call window after 10 min without activity: still open \(stayed)")
-        if !stayed { problems.append("a call in its own window ended by itself without activity") }
-        // Pop In restores the minute, starting fresh.
-        model.popInCall(doorbell)
-        advance(DoorbellCall.idleTimeout - 1)
-        let fresh = model.calls.call(for: doorbell) != nil
-        advance(2)
-        print("popped in: open after 59 s \(fresh), ended after 61 s \(model.calls.call(for: doorbell) == nil)")
-        if !fresh { problems.append("Pop In did not give the call a fresh minute") }
-        ended("expiry after Pop In")
-        callWindowFrameStep(doorbell, second: second)
-    }
-
-    /// The remembered frame is reused; one whose screen is gone falls back
-    /// to the top right of the active viewer window's screen.
-    private func callWindowFrameStep(_ doorbell: CameraRef, second: ViewerWindowController) {
-        guard let model = app.model, let calls = app.callWindows, let window,
-            let screen = window.window?.screen ?? NSScreen.screens.first
-        else { return finishPopOut(second) }
-        // parity: call-window-frame
-        let visible = CallWindows.topLeft(screen.visibleFrame)
-        let remembered = WindowRect(x: visible.x + 40, y: visible.y + 60, width: 400, height: 360)
-        calls.placementMode = .remembered
-        calls.rememberedFrame = remembered
-        window.stage.startConversation(doorbell)
-        model.popOutCall(doorbell)
-        let reused = calls.controller(for: doorbell)?.window.map { CallWindows.topLeft($0.frame) }
-        // The user moves it: that frame is remembered.
-        if let panel = calls.controller(for: doorbell)?.window {
-            panel.setFrameOrigin(NSPoint(x: panel.frame.minX + 30, y: panel.frame.minY - 20))
-        }
-        let moved = calls.rememberedFrame
-        model.calls.end(doorbell, reason: "closed")
-        // A frame on a screen that is gone.
-        calls.rememberedFrame = WindowRect(x: -100_000, y: -100_000, width: 400, height: 360)
-        window.stage.startConversation(doorbell)
-        model.popOutCall(doorbell)
-        let fallback = calls.controller(for: doorbell)?.window.map { CallWindows.topLeft($0.frame) }
-        let m = CallWindowPlacement.margin
-        let topRight = WindowRect(x: visible.maxX - m - 400, y: visible.minY + m, width: 400, height: 360)
-        model.calls.end(doorbell, reason: "closed")
-        func near(_ a: WindowRect?, _ b: WindowRect) -> Bool {
-            guard let a else { return false }
-            return abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5 && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
-        }
-        let movedTo = WindowRect(x: remembered.x + 30, y: remembered.y + 20, width: 400, height: 360)
-        print(
-            "call window frame: remembered reused \(near(reused, remembered)), move remembered \(near(moved, movedTo)), "
-                + "gone screen -> top right of the active screen \(near(fallback, topRight))")
-        if !near(reused, remembered) {
-            problems.append("the call window did not open at the remembered frame: \(String(describing: reused))")
-        }
-        if !near(moved, movedTo) { problems.append("moving the call window did not remember its frame: \(String(describing: moved))") }
-        if !near(fallback, topRight) {
-            problems.append("a remembered frame off every screen did not fall back to the top right: \(String(describing: fallback))")
-        }
-        callDefaultRingStep(doorbell, second: second)
-    }
-
-    /// "Open calls in their own window": a ring opens the call in a call
-    /// window that does not take the focus, the viewer windows keep its
-    /// item detached, a press that joins keeps the presentation, and the
-    /// doorbell's own choice (Inset) wins over the setting.
-    private func callDefaultRingStep(_ doorbell: CameraRef, second: ViewerWindowController) {
-        guard let model = app.model, let window, let fake = model.fake, let calls = app.callWindows,
-            let id = model.runtime(doorbell.device)?.deviceID
-        else { return finishPopOut(second) }
-        let stages = [window.stage, second.stage]
-        // parity: call-default-ring
-        model.callsOpenInWindow = true
-        let saved = calls.defaults.bool(forKey: AppModel.callsOpenInWindowKey)
-        fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-        when({ calls.controller(for: doorbell) != nil && stages.allSatisfy { !$0.insetBoard.detachedCameras.isEmpty } }, timeout: 3) {
-            [self] in
-            let call = model.calls.call(for: doorbell)
-            let c = calls.controller(for: doorbell)
-            let detached = stages.allSatisfy { $0.insetBoard.detachedCameras == [doorbell] && $0.shownInsetViews.isEmpty }
-            let quiet = calls.lastOpenActivated == false && c?.window?.isKeyWindow != true && !NSApp.isActive
-            // A press that joins keeps the call where it is, whatever the setting says now.
-            model.callsOpenInWindow = false
-            fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-            when({ model.calls.call(for: doorbell)?.presses == 2 }, timeout: 3) { [self] in
-                let joined = model.calls.call(for: doorbell)
-                let kept = joined?.presentation == .window && calls.controller(for: doorbell) === c
-                    && stages.allSatisfy { $0.shownInsetViews.isEmpty }
-                model.calls.end(doorbell, reason: "closed")
-                print(
-                    "ring with calls in windows: saved \(saved), window \(call?.presentation == .window && c != nil), "
-                        + "opened without focus \(quiet), insets detached \(detached), a joining press kept it \(kept)")
-                if !saved { problems.append("Open calls in their own window was not saved") }
-                if call?.presentation != .window || c == nil { problems.append("with the setting on, a ring did not open a call window") }
-                if !quiet { problems.append("a call window opened by a ring took the focus (or asked to)") }
-                if !detached { problems.append("a ring into a call window left an inset or no detached item in a viewer window") }
-                if !kept { problems.append("a press joining a call in its window moved it") }
-                // The doorbell's own choice wins: Inset with the setting on.
-                model.callsOpenInWindow = true
-                model.setCallPresentation(doorbell, .inset)
-                fake.emitDetection(device: id, channel: 3, kind: "visitor", start: true, alarm: true)
-                when({ stages.allSatisfy { !$0.shownInsetViews.isEmpty } }, timeout: 3) { [self] in
-                    let inset = model.calls.call(for: doorbell)?.presentation == .inset && calls.controller(for: doorbell) == nil
-                    print("ring with the doorbell set to Inset: insets in both windows \(inset)")
-                    if !inset { problems.append("the doorbell's Inset choice did not win over Open calls in their own window") }
-                    for stage in stages { stage.dismissInset(doorbell) }
-                    model.callsOpenInWindow = false
-                    callDefaultConversationStep(doorbell, second: second)
-                }
-            }
-        }
-    }
-
-    /// The doorbell's Window choice opens Start Conversation in a call
-    /// window (brought forward: the user asked for it) with the setting off;
-    /// Default again leaves the camera's options empty.
-    private func callDefaultConversationStep(_ doorbell: CameraRef, second: ViewerWindowController) {
-        guard let model = app.model, let window, let calls = app.callWindows else { return finishPopOut(second) }
-        // parity: call-default-conversation
-        model.setCallPresentation(doorbell, .window)
-        let stored = model.cameraOptions(doorbell)
-        window.stage.startConversation(doorbell)
-        let call = model.calls.call(for: doorbell)
-        let opened = call?.presentation == .window && call?.origin == .conversation && calls.controller(for: doorbell) != nil
-        let activates = calls.lastOpenActivated == true
-        let detached = window.stage.insetBoard.detachedCameras == [doorbell] && window.stage.shownInsetViews.isEmpty
-        model.calls.end(doorbell, reason: "closed")
-        model.setCallPresentation(doorbell, nil)
-        let cleared = model.cameraOptions(doorbell).callWindow == nil && model.cameraOptions(doorbell).isDefault
-        // The saved choice reads back; a file without it reads as Default.
-        let encoder = JSONEncoder()
-        let roundTrip = (try? encoder.encode(stored)).flatMap { try? JSONDecoder().decode(CameraOptions.self, from: $0) }
-        let plain = (try? encoder.encode(CameraOptions(camera: doorbell))).flatMap { String(data: $0, encoding: .utf8) }
-        let readsBack = roundTrip?.callPresentation == .window && plain?.contains("callWindow") == false
-        print(
-            "conversation with the doorbell set to Window: call window \(opened), brought forward \(activates), "
-                + "inset detached \(detached), Default clears the option \(cleared), saved choice reads back \(readsBack)")
-        if !opened { problems.append("the doorbell's Window choice did not open Start Conversation in a call window") }
-        if !activates { problems.append("a call window opened by Start Conversation was not brought forward") }
-        if !detached { problems.append("Start Conversation into a call window left an inset in the viewer window") }
-        if !cleared { problems.append("choosing Default did not clear the camera's call option") }
-        if !readsBack { problems.append("the camera's call choice did not save and read back") }
-        finishPopOut(second)
-    }
-
-    private func finishPopOut(_ second: ViewerWindowController) {
-        app.model?.calls.endAll()
-        for w in extraWindows { w.close() }
-        extraWindows = []
-        // The throwaway suite with the frame and pin goes.
-        app.callWindows?.defaults.removePersistentDomain(forName: AppDelegate.selfTestDefaults)
-        second.close()
-        insetDragSnapStep()
-    }
-
-    // MARK: Moving the insets (docs/UX.md "Alert insets", "Moving them")
-
-    /// A mouse event as AppKit delivers it to a viewer window (behind the
-    /// others, the app inactive), at a point in the stage's inset layer.
-    private func mouse(_ type: NSEvent.EventType, _ p: CGPoint, in controller: ViewerWindowController) {
-        guard let nsWindow = controller.window else { return }
-        let at = controller.stage.insetLayer.convert(p, to: nil)
-        guard
-            let e = NSEvent.mouseEvent(
-                with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                windowNumber: nsWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
-                pressure: type == .leftMouseUp ? 0 : 1)
-        else { return }
-        nsWindow.sendEvent(e)
-    }
-
-    /// Presses at `from`, moves to `to` in a few steps, and lets go.
-    private func drag(from: CGPoint, to: CGPoint, in controller: ViewerWindowController, steps: Int = 5) {
-        mouse(.leftMouseDown, from, in: controller)
-        for i in 1...steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            mouse(.leftMouseDragged, CGPoint(x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t), in: controller)
-        }
-        mouse(.leftMouseUp, to, in: controller)
-    }
-
-    /// The anchor the column's frame measures as now (unsnapped).
-    private static func measuredAnchor(_ column: CGRect, stage: CGRect) -> (x: Double, y: Double) {
-        let m = InsetGeometry.margin
-        let fx = Double(stage.width) - 2 * m - Double(column.width)
-        let fy = Double(stage.height) - 2 * m - Double(column.height)
-        return (fx > 0 ? (Double(column.minX) - m) / fx : 0, fy > 0 ? (Double(column.minY) - m) / fy : 0)
-    }
-
-    /// A conversation's inset (no press needed) dragged by its header lands
-    /// where it was dropped, snapping each axis within 24 pt of an edge; a
-    /// small move on the picture is still a click (it swaps); a longer one
-    /// drags. The window is saved with the new position.
-    private func insetDragSnapStep() {
-        guard let model = app.model, let window, let device = model.runtime("fake-1") else { return smokeStep() }
-        let stage = window.stage
-        let doorbell = CameraRef(device: device.key, channel: 3)
-        // parity: inset-drag-snap
-        stage.startConversation(doorbell)
-        guard let view = stage.shownInsetViews.first, let column = stage.insetColumn else {
-            problems.append("no inset to drag")
-            return smokeStep()
-        }
-        let b = stage.insetLayer.bounds
-        let atDefault = stage.insetAnchor == nil
-            && Self.near(Self.measuredAnchor(column, stage: b), InsetAnchor(corner: model.insetCorner))
-        // A small move on the picture: a click, which swaps.
-        let picture = view.videoRect.offsetBy(dx: view.frame.minX, dy: view.frame.minY)
-        let p = CGPoint(x: picture.midX, y: picture.midY)
-        drag(from: p, to: CGPoint(x: p.x + 3, y: p.y + 2), in: window, steps: 2)
-        let clickSwapped = stage.insetBoard.swap?.shown == doorbell && stage.insetAnchor == nil
-        press("\t", keyCode: ViewerKeys.tab)
-        guard let header = stage.shownInsetViews.first?.frame, let start = stage.insetColumn else {
-            problems.append("the inset did not come back after swapping back")
-            return smokeStep()
-        }
-        // The header, to 10 pt from the right edge (snaps) and 40% down (does not).
-        let m = InsetGeometry.margin
-        let freeX = Double(b.width) - 2 * m - Double(start.width)
-        let freeY = Double(b.height) - 2 * m - Double(start.height)
-        let target = CGPoint(x: m + freeX - 10, y: m + 0.4 * freeY)
-        let grab = CGPoint(x: header.minX + 40, y: header.minY + 8)
-        let saves = savesCount
-        drag(from: grab, to: CGPoint(x: grab.x + target.x - start.minX, y: grab.y + target.y - start.minY), in: window)
-        let anchor = stage.insetAnchor
-        let snapped = anchor.map { $0.x == 1 && abs($0.y - 0.4) < 0.01 } == true
-        let placed = stage.insetColumn.map { abs(Double($0.maxX) - (Double(b.width) - m)) < 0.5 } == true
-        let saved = window.savedWindow?.insetAnchor == anchor && anchor != nil
-        let noSwap = stage.insetBoard.swap == nil
-        // The picture past the click's slop drags too (40 pt left: off the snap).
-        guard let moved = stage.shownInsetViews.first else { return smokeStep() }
-        let pic = moved.videoRect.offsetBy(dx: moved.frame.minX, dy: moved.frame.minY)
-        drag(from: CGPoint(x: pic.midX, y: pic.midY), to: CGPoint(x: pic.midX - 40, y: pic.midY), in: window)
-        let pictureDrag = stage.insetAnchor.map { abs($0.x - (freeX - 40) / freeX) < 0.01 && abs($0.y - 0.4) < 0.01 } == true
-            && stage.insetBoard.swap == nil
-        print(
-            "inset drag: default corner \(atDefault) at \(Int(column.minX)),\(Int(column.minY)), small move on the picture swaps "
-                + "\(clickSwapped), header drag snaps x \(snapped) (anchor \(anchor.map { "\($0.x), \($0.y)" } ?? "-"), right edge "
-                + "\(placed)), no swap \(noSwap), saved with the window \(saved), picture drag past the slop \(pictureDrag)")
-        if window.window?.isKeyWindow == true || NSApp.isActive { problems.append("the self-test's mouse events took the focus") }
-        if !atDefault { problems.append("the inset column did not start in the default corner") }
-        if !clickSwapped { problems.append("a click with a small move on the inset's picture did not swap") }
-        if !snapped || !placed { problems.append("dragging the inset's header did not snap to the right edge and keep 40% down") }
-        if !noSwap { problems.append("dragging an inset swapped it") }
-        if !saved || savesCount == saves { problems.append("the moved column was not saved with the window") }
-        if !pictureDrag { problems.append("dragging the inset's picture past 6 pt did not move the column") }
-        insetDragResizeStep(doorbell)
-    }
-
     /// How often the windows asked to be saved (they save after a delay).
-    private var savesCount: Int { app.windowSaveRequests }
-
-    private static func near(_ a: (x: Double, y: Double), _ b: InsetAnchor) -> Bool {
-        abs(a.x - b.x) < 0.01 && abs(a.y - b.y) < 0.01
-    }
-
-    /// Resizing the window keeps the column at the same fraction of the
-    /// free space (full screen is a resize too; the self-test never enters
-    /// it).
-    private func insetDragResizeStep(_ doorbell: CameraRef) {
-        guard let window, let nsWindow = window.window, let anchor = window.stage.insetAnchor else { return insetDragRestoreStep(doorbell) }
-        let stage = window.stage
-        // parity: inset-drag-resize
-        let frame = nsWindow.frame
-        var results: [Bool] = []
-        for grow in [CGSize(width: 220, height: 120), CGSize(width: -120, height: -60)] {
-            nsWindow.setFrame(
-                NSRect(x: frame.minX, y: frame.minY, width: frame.width + grow.width, height: frame.height + grow.height),
-                display: false)
-            nsWindow.contentView?.layoutSubtreeIfNeeded()
-            stage.layoutInsetViews()
-            let kept = stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: stage.insetLayer.bounds), anchor) } == true
-            results.append(kept && stage.insetAnchor == anchor)
-        }
-        nsWindow.setFrame(frame, display: false)
-        nsWindow.contentView?.layoutSubtreeIfNeeded()
-        print("inset drag: the column keeps its place when the window grows \(results[0]) and shrinks \(results[1])")
-        if results.contains(false) { problems.append("resizing the window moved the inset column off its fraction") }
-        insetDragRestoreStep(doorbell)
-    }
-
-    /// The position is saved with the window: windows.json's record reads
-    /// back, a window restored from it puts its column there, and "Reset
-    /// Position" in the inset's menu returns it to the default corner.
-    private func insetDragRestoreStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let saved = window.savedWindow, let anchor = window.stage.insetAnchor else {
-            return insetDragMultiStep(doorbell)
-        }
-        // parity: inset-drag-restore
-        let record = (try? JSONEncoder().encode([saved])).flatMap { try? JSONDecoder().decode([SavedWindow].self, from: $0) }
-        let readsBack = record?.first?.insetAnchor == anchor
-        guard let restored = app.openWindow(window.state.content) else {
-            problems.append("could not open a window to restore into")
-            return insetDragMultiStep(doorbell)
-        }
-        restored.restoreInsetAnchor(record?.first?.insetAnchor)
-        // The new window adopts the open conversation (after a turn of the main queue).
-        when({ !restored.stage.shownInsetViews.isEmpty }, timeout: 2) { [self] in
-            restored.window?.contentView?.layoutSubtreeIfNeeded()
-            restored.stage.layoutInsetViews()
-            let there = restored.stage.insetAnchor == anchor
-                && restored.stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: restored.stage.insetLayer.bounds), anchor) } == true
-            restored.close()
-            // Reset Position, from the inset's own menu.
-            let stage = window.stage
-            var reset = false
-            if let view = stage.shownInsetViews.first, let nsWindow = window.window,
-                let e = NSEvent.mouseEvent(
-                    with: .rightMouseDown, location: view.convert(CGPoint(x: 20, y: 8), to: nil), modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: nsWindow.windowNumber, context: nil,
-                    eventNumber: 0, clickCount: 1, pressure: 1),
-                let menu = view.menu(for: e), let item = menu.items.firstIndex(where: { $0.title == "Reset Position" })
-            {
-                menu.performActionForItem(at: item)
-                reset = stage.insetAnchor == nil
-                    && stage.insetColumn.map { Self.near(Self.measuredAnchor($0, stage: stage.insetLayer.bounds), InsetAnchor(corner: model.insetCorner)) } == true
-                    && window.savedWindow?.insetAnchor == nil
-            }
-            print("inset drag: saved record reads back \(readsBack), a restored window puts the column there \(there), Reset Position \(reset)")
-            if !readsBack { problems.append("the window's saved record lost the inset position") }
-            if !there { problems.append("a window restored from the record did not put its insets there") }
-            if !reset { problems.append("Reset Position did not return the column to the default corner") }
-            insetDragMultiStep(doorbell)
-        }
-    }
-
-    /// Several insets move as one column; at the bottom the newest is at
-    /// the bottom and the others stack upward, at the top the reverse.
-    private func insetDragMultiStep(_ doorbell: CameraRef) {
-        guard let model = app.model, let window, let fake = model.fake, let device = model.runtime("fake-1"),
-            let id = device.deviceID
-        else { return smokeStep() }
-        let stage = window.stage
-        let hall = CameraRef(device: device.key, channel: 4)
-        // parity: inset-drag-multi
-        // A smoke alarm's inset (it stays after the stop) beside the conversation's.
-        fake.emitSoundDetection(device: id, channel: 4, start: true)
-        fake.emitSoundDetection(device: id, channel: 4, start: false)
-        when({ stage.shownInsetViews.count == 2 }, timeout: 3) { [self] in
-            guard let header = stage.shownInsetViews.first?.frame, let start = stage.insetColumn else {
-                problems.append("a second inset did not open")
-                return finishInsetDrag(doorbell, hall)
-            }
-            let b = stage.insetLayer.bounds
-            @MainActor func column() -> [CGRect] { stage.shownInsetViews.map { $0.frame } }
-            // To the bottom left (both axes snap).
-            let grab = CGPoint(x: header.minX + 40, y: header.minY + 8)
-            let bottomLeft = CGPoint(x: 15, y: b.height - start.height - 15)
-            drag(from: grab, to: CGPoint(x: grab.x + bottomLeft.x - start.minX, y: grab.y + bottomLeft.y - start.minY), in: window)
-            let low = column()
-            let m = CGFloat(InsetGeometry.margin), gap = CGFloat(InsetGeometry.gap)
-            let upward = stage.insetAnchor == InsetAnchor(x: 0, y: 1) && low.count == 2
-                && low.allSatisfy { $0.minX == m } && abs(low[0].maxY - (b.height - m)) < 0.5
-                && abs(low[1].maxY - (low[0].minY - gap)) < 0.5
-            // To the top, a third of the way across (x does not snap).
-            guard let newest = stage.shownInsetViews.first?.frame, let now = stage.insetColumn else {
-                return finishInsetDrag(doorbell, hall)
-            }
-            let grab2 = CGPoint(x: newest.minX + 40, y: newest.minY + 8)
-            let topThird = CGPoint(x: m + (b.width - 2 * m - now.width) / 3, y: 20)
-            drag(from: grab2, to: CGPoint(x: grab2.x + topThird.x - now.minX, y: grab2.y + topThird.y - now.minY), in: window)
-            let high = column()
-            let downward = stage.insetAnchor.map { $0.y == 0 && abs($0.x - 1.0 / 3) < 0.01 } == true && high.count == 2
-                && high[0].minX == high[1].minX && abs(high[0].minY - m) < 0.5 && abs(high[1].minY - (high[0].maxY + gap)) < 0.5
-            print("inset drag with two insets: one column, bottom grows upward \(upward), top grows downward \(downward)")
-            if !upward { problems.append("two insets at the bottom did not stack upward from it in one column: \(low)") }
-            if !downward { problems.append("two insets at the top did not stack downward from it in one column: \(high)") }
-            finishInsetDrag(doorbell, hall)
-        }
-    }
-
-    private func finishInsetDrag(_ doorbell: CameraRef, _ hall: CameraRef) {
-        guard let window else { return smokeStep() }
-        let stage = window.stage
-        stage.dismissInset(hall)
-        stage.endConversation(doorbell)
-        stage.resetInsetPosition()
-        smokeStep()
-    }
-
-    /// A smoke alarm's inset stays until dismissed; dismissing it dismisses
-    /// the alert.
-    private func smokeStep() {
-        guard let model = app.model, let window, let fake = model.fake, let device = model.runtime("fake-1"),
-            let id = device.deviceID
-        else { return checkLog() }
-        let stage = window.stage
-        let hall = CameraRef(device: device.key, channel: 4)
-        // parity: alert-inset-smoke-stays
-        fake.emitSoundDetection(device: id, channel: 4, start: true)
-        fake.emitSoundDetection(device: id, channel: 4, start: false)
-        when({ stage.insetBoard.item(for: hall)?.active == false }, timeout: 3) { [self] in
-            let critical = stage.insetBoard.item(for: hall)?.kind.isCritical == true
-            advance(InsetBoard.lostStopAfter + InsetBoard.autoCloseDelay + 60)
-            let stays = stage.insetBoard.item(for: hall) != nil
-            print("smoke inset: critical \(critical), still open after 4 min \(stays), alert \(model.alerts.isActive(hall))")
-            if !critical || !stays { problems.append("the smoke alarm's inset did not stay") }
-            press("\u{1b}", keyCode: ViewerKeys.escape)
-            print("smoke inset dismissed \(stage.insetBoard.isEmpty), alert dismissed \(!model.alerts.isActive(hall))")
-            if !stage.insetBoard.isEmpty { problems.append("Esc did not dismiss the smoke alarm's inset") }
-            if model.alerts.isActive(hall) { problems.append("dismissing the smoke inset did not dismiss its alert") }
-            stage.unfocus()
-            advance(StageView.focusDuration)
-            fisheyeStep()
-        }
-    }
-
-    // MARK: Fisheye (docs/UX.md "Fisheye cameras")
-
-    /// The synthetic fisheye fixture's colors by azimuth quadrant, ceiling
-    /// mount (fixtures/synthetic/make-fisheye.sh): 0-90° red, 90-180° green,
-    /// 180-270° blue, 270-360° yellow; 15° checker cells, a white dot at
-    /// tilt 20°. Nil when a pixel is none of them clearly.
-    private static func fixtureSector(_ c: SIMD3<Int>) -> Int? {
-        let (r, g, b) = (c.x, c.y, c.z)
-        if r > g + 40 && r > b + 40 { return 0 }
-        if g > r + 30 && g > b + 30 { return 1 }
-        if b > r + 40 && b > g + 40 { return 2 }
-        if r > b + 50 && g > b + 50 { return 3 }
-        return nil
-    }
-
-    /// With `--fake` and the fisheye fixture: a fisheye camera put in a tile
-    /// finds its circle, and every view draws through the dewarp pipeline
-    /// with pixels matching the fixture's colors where the reference mapping
-    /// says they should; a drag and a wheel step move the virtual camera
-    /// (eased on the clock), saved with the layout; 0 resets it.
-    private func fisheyeStep() {
-        guard let model = app.model, let window else { finish(problems) }
-        // parity: fisheye-detected
-        guard let camera = model.allCameras.first(where: { model.isFisheye($0) }) else {
-            problems.append("no fisheye camera (run with fixtures/synthetic/fisheye/h264-fisheye.h264 among the files)")
-            return checkLog()
-        }
-        let stage = window.stage
-        guard let path = window.state.tree.frames(in: stage.bounds).leaves.first?.path else {
-            problems.append("no tile for the fisheye camera")
-            return checkLog()
-        }
-        stage.assign(camera, at: path)
-        when({ model.leases.tile(for: camera)?.latestPicture() != nil }, timeout: 3) { [self] in
-            let grid = stage.grid
-            // parity: fisheye-circle
-            // The circle is measured from the first pictures, on the clock.
-            stage.setFisheyeMode(.panorama, at: path)
-            for _ in 0..<FisheyeCircleTracker.maxTries where stage.fisheyeDewarp(of: path) == nil {
-                grid.prepare?(grid.renderer, grid.drawableSize)
-                advance(FisheyeCircleTracker.interval)
-            }
-            guard let lens = stage.fisheyeDewarp(of: path)?.lens else {
-                problems.append("the fisheye tile is not dewarped")
-                return checkLog()
-            }
-            let c = lens.circle
-            print(String(format: "fisheye circle: center %.4f, %.4f radius %.4f (fixture 0.49, 0.505, 0.46)", c.cx, c.cy, c.r))
-            if abs(c.cx - 0.49) > 0.01 || abs(c.cy - 0.505) > 0.01 || abs(c.r - 0.46) > 0.01 {
-                problems.append("the fisheye circle is more than 1% off the fixture's")
-            }
-            // parity: fisheye-view-pixels
-            for mode in FisheyeViewMode.allCases where mode.dewarps {
-                stage.setFisheyeMode(mode, at: path)
-                checkFisheyePixels(path, mode)
-            }
-            // parity: fisheye-ptz-drag
-            // Virtual PTZ: a drag turns it, a wheel step zooms it (eased).
-            let size = window.state.tree.frames(in: stage.bounds).leaf(path)?.rect.size ?? .zero
-            stage.turnFisheye(path, by: CGVector(dx: size.width / 4, dy: 0), size: size)
-            // parity: fisheye-ptz-zoom
-            stage.zoomFisheye(path, by: 2, eased: true)
-            advance(0.03)
-            let midway = window.state.tree[path]?.fisheye.aim?.fov ?? 0
-            advance(1)
-            let aim = window.state.tree[path]?.fisheye.aim
-            print(String(format: "virtual PTZ: pan %.1f, field of view %.1f after a second (%.1f midway)",
-                aim?.pan ?? .nan, aim?.fov ?? .nan, midway))
-            if aim.map({ abs($0.pan + 22.5) < 0.01 }) != true { problems.append("a drag did not turn the virtual camera") }
-            if aim?.fov != 45 || stage.isEasingFisheye || !(midway > 45 && midway < 90) {
-                problems.append("the virtual camera did not ease its zoom to 45°")
-            }
-            checkFisheyePixels(path, .ptz)
-            // parity: fisheye-reset-key
-            stage.resetZoom(at: path)
-            if window.state.tree[path]?.fisheye.aim != nil { problems.append("0 did not reset the virtual camera") }
-            // parity: fisheye-original
-            stage.setFisheyeMode(.original, at: path)
-            grid.prepare?(grid.renderer, grid.drawableSize)
-            if stage.fisheyeDewarp(of: path) != nil { problems.append("Original still dewarps") }
-            fisheyePictureStep(path, camera)
-        }
-    }
-
-    /// How many of the fisheye view's sample points show the fixture's color
-    /// for the direction they look along (`pixel` reads the picture at
-    /// whole-pixel positions of `rect`, where the view is drawn).
-    private static func fisheyeMatches(
-        _ dewarp: FisheyeDewarp, in rect: CGRect, pixel: (Int, Int) -> SIMD3<Int>
-    ) -> (checked: Int, matched: Int) {
-        var checked = 0, matched = 0
-        let step = max(rect.width, rect.height) / 40
-        for y in stride(from: rect.minY + 1, to: rect.maxY - 1, by: step) {
-            for x in stride(from: rect.minX + 1, to: rect.maxX - 1, by: step) {
-                let t = CGPoint(x: (x + 0.5 - rect.minX) / rect.width, y: (y + 0.5 - rect.minY) / rect.height)
-                guard let d = dewarp.direction(atTile: t), dewarp.picturePoint(atTile: t) != nil else { continue }
-                let (pan, tilt) = panTilt(of: d)
-                let psi = (pan + 360).truncatingRemainder(dividingBy: 360)
-                func clear(_ a: Double) -> Bool {
-                    let m = a.truncatingRemainder(dividingBy: 15)
-                    return m > 3 && m < 12
-                }
-                guard tilt > 5, tilt < 80, abs(tilt - 20) > 7, clear(psi), clear(tilt) else { continue }
-                checked += 1
-                if fixtureSector(pixel(Int(x), Int(y))) == Int(psi / 90) % 4 { matched += 1 }
-            }
-        }
-        return (checked, matched)
-    }
-
-    /// Draws the window offscreen and compares the fisheye tile's pixels
-    /// with the fixture's color at the direction each one looks along.
-    private func checkFisheyePixels(_ path: NodePath, _ mode: FisheyeViewMode) {
-        guard let window else { return }
-        let stage = window.stage
-        let grid = stage.grid
-        grid.prepare?(grid.renderer, grid.drawableSize)
-        guard let dewarp = stage.fisheyeDewarp(of: path), let rect = stage.renderedDestination(of: path),
-            let image = grid.renderer.renderOffscreen(width: Int(grid.drawableSize.width), height: Int(grid.drawableSize.height))
-        else {
-            problems.append("\(mode.title): not drawn through the dewarp pipeline")
-            return
-        }
-        let drawn = grid.renderer.dewarpedTilesDrawn
-        let (checked, matched) = Self.fisheyeMatches(dewarp, in: rect) { image.rgb(x: $0, y: $1) }
-        print("fisheye \(mode.title): dewarped tiles drawn \(drawn), pixels matching the fixture \(matched) of \(checked)")
-        if drawn < 1 { problems.append("\(mode.title): the dewarp pipeline drew nothing") }
-        if checked < 20 || Double(matched) < 0.9 * Double(checked) {
-            problems.append("\(mode.title): \(matched) of \(checked) pixels match the fixture")
-        }
-    }
+    var savesCount: Int { app.windowSaveRequests }
 
     /// The zoomed tile's letterbox bar at 1x, in drawable pixels (the
     /// zoom-fills-tile check reads it at 2x and back at 1x).
-    private var zoomBar: CGRect?
+    var zoomBar: CGRect?
 
     /// One of the tile's bars at 1x (drawable pixels, a pixel in from its
     /// edges), or nil if the picture fills the tile.
-    private static func bar(cell: CGRect, picture: CGRect) -> CGRect? {
+    static func bar(cell: CGRect, picture: CGRect) -> CGRect? {
         if picture.minY - cell.minY >= 4 {
             return CGRect(x: cell.minX + 2, y: cell.minY + 1, width: cell.width - 4, height: picture.minY - cell.minY - 2)
         }
@@ -2731,7 +1212,7 @@ final class SelfTest {
 
     /// The share of `rect`'s pixels (sampled) that are not black, drawn
     /// offscreen now.
-    private func litShare(_ rect: CGRect) -> Double? {
+    func litShare(_ rect: CGRect) -> Double? {
         guard let window else { return nil }
         let grid = window.stage.grid
         grid.prepare?(grid.renderer, grid.drawableSize)
@@ -2754,202 +1235,14 @@ final class SelfTest {
 
     // MARK: Camera motion (docs/UX.md "Pan, tilt, and zoom")
 
-    private var ptzChecked = false
+    var ptzChecked = false
 
-    /// An Option key as AppKit delivers it to the window.
-    private func pressOption(_ keyCode: UInt16, up: Bool = false) {
-        guard let nsWindow = window?.window,
-            let e = NSEvent.keyEvent(
-                with: up ? .keyUp : .keyDown, location: .zero, modifierFlags: up ? [] : [.option],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: nsWindow.windowNumber, context: nil,
-                characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)
-        else { return }
-        NSApp.sendEvent(e)
-    }
+    var discoveryChecked = false
+    var retryChecked = false
+    var captureRealChecked = false
 
-    /// The pad holds a move and renews it, a key does too, the app going
-    /// quiet lets the camera stop by itself, presets recall by menu and key,
-    /// the lens stays within its range, and a second lens is addressed as
-    /// its own camera. Against the fake core's model of the camera, and on
-    /// the real core against the mock's.
-    private func ptzStep() {
-        guard let model = app.model, let window else { return checkLog() }
-        let stage = window.stage
-        guard let camera = model.allCameras.first(where: { $0.lens == 0 && model.channelInfo($0)?.ptz.panTilt == true }),
-            let leaf = stage.frames.leaves.first
-        else {
-            problems.append("no camera that pans and tilts")
-            return checkLog()
-        }
-        let original = leaf.camera
-        stage.assign(camera, at: leaf.path)
-        window.state.selected = leaf.path
-        window.window?.makeFirstResponder(stage)
-        let fake = model.fake
-        let ptz = model.ptz!
-        func finishPTZ() {
-            stage.closePTZPopover()
-            ptz.frozenForTest = false
-            ptz.stopAll()
-            stage.assign(original, at: leaf.path)
-            checkLog()
-        }
-        func sent(_ action: String, _ reason: String? = nil) -> Int {
-            ptz.events.filter { $0.action == action && $0.state == .sent && (reason == nil || $0.reason == reason) }.count
-        }
-        when({ model.leases.tile(for: camera) != nil }, timeout: 5) { [self] in
-            ptz.load(camera)
-            when({ ptz.info(for: camera) != nil }, timeout: 10) { [self] in
-                guard let info = ptz.info(for: camera), let tile = model.leases.tile(for: camera) else {
-                    problems.append("the camera's capabilities were not read")
-                    return finishPTZ()
-                }
-                // parity: ptz-pad-hold
-                stage.performHeaderItem(.panTilt, at: leaf.path, from: nil)
-                guard let pad = stage.ptzPopoverController?.pad[.left] else {
-                    problems.append("the pan and tilt pad did not open")
-                    return finishPTZ()
-                }
-                let c0 = ptz.calls.count
-                let moves0 = sent("move")
-                pad.pressDown()
-                for _ in 0..<12 { advance(0.1) }
-                let held = Array(ptz.calls[c0...])
-                let gaps = zip(held, held.dropFirst()).map { $1.at - $0.at }
-                let renewed = held.filter { $0.text.hasPrefix("move left") }.count
-                let movingNow = fake.map { $0.ptzMoving(channel: Int(tile.channel)) } ?? true
-                pad.pressUp()
-                print("ptz pad: \(renewed) move calls over 1.2 s, longest gap \(gaps.max() ?? 0) s, held until release \(movingNow)")
-                if renewed < 4 || (gaps.max() ?? 1) > 0.5 { problems.append("a held pad did not renew the move at least every 500 ms") }
-                if !movingNow { problems.append("the camera stopped while the pad was held") }
-                if ptz.calls.last?.text != "stop" || ptz.held != nil { problems.append("releasing the pad did not stop the camera") }
-                if let fake {
-                    if fake.ptzMoving(channel: Int(tile.channel)) { problems.append("the camera still moves after the pad's release") }
-                    if fake.ptzCalls.filter({ $0.text == "move left 20" }).count != 1 { problems.append("renewals were counted as moves") }
-                }
-                stage.closePTZPopover()
-                when({ sent("move") > moves0 && sent("stop", "released") >= 1 }, timeout: 5) { [self] in
-                    if sent("move") <= moves0 || sent("stop", "released") < 1 {
-                        problems.append("the core did not report the pad's move and stop")
-                    }
-                    // The Option arrow holds the move; its release stops it.
-                    pressOption(ViewerKeys.rightArrow)
-                    advance(0.3)
-                    let keyHeld = ptz.held == camera
-                    pressOption(ViewerKeys.rightArrow, up: true)
-                    if !keyHeld || ptz.held != nil || ptz.calls.last?.text != "stop" {
-                        problems.append("Option+arrow did not move the camera while held and stop it on release")
-                    }
-                    // parity: ptz-deadman
-                    pressOption(ViewerKeys.upArrow)
-                    advance(0.3)
-                    ptz.frozenForTest = true
-                    let deadman0 = sent("stop", "deadman")
-                    app.testClock?.advance(by: 1.2)
-                    let waitForCore = fake == nil
-                    when({ fake.map { !$0.ptzMoving(channel: Int(tile.channel)) } ?? (sent("stop", "deadman") > deadman0) },
-                        timeout: waitForCore ? 6 : 0.1
-                    ) { [self] in
-                        let stopped = fake.map { !$0.ptzMoving(channel: Int(tile.channel)) } ?? (sent("stop", "deadman") > deadman0)
-                        print("ptz dead-man: camera stopped by itself \(stopped)")
-                        if !stopped { problems.append("the camera was not stopped by itself after the app went quiet") }
-                        ptz.frozenForTest = false
-                        pressOption(ViewerKeys.upArrow, up: true)
-                        ptzPresets(finishPTZ)
-                    }
-                }
-                _ = info
-            }
-        }
-
-        func ptzPresets(_ next: @escaping () -> Void) {
-            guard let info = ptz.info(for: camera), let tile = model.leases.tile(for: camera) else { return next() }
-            // parity: ptz-preset-recall
-            let menu = presetsMenu(info: info, camera: camera, ptz: ptz)
-            let base = sent("preset")
-            if let item = menu.items.first, let action = item.action {
-                NSApp.sendAction(action, to: item.target, from: item)
-            }
-            if info.presets.count > 1 { pressOption(19); pressOption(19, up: true) }
-            let wanted = min(info.presets.count, 2)
-            when({ sent("preset") >= base + wanted }, timeout: 5) { [self] in
-                let got = sent("preset") - base
-                print("ptz presets: \(info.presets.count) listed, \(got) recalled by menu and Option+2")
-                if got != wanted { problems.append("preset recalls by menu and key did not reach the camera (\(got) of \(wanted))") }
-                if let fake {
-                    let texts = fake.ptzCalls.map(\.text).filter { $0.hasPrefix("preset") }
-                    if texts != ["preset 0", "preset 1"].prefix(wanted).map({ $0 }) { problems.append("the camera recalled \(texts)") }
-                }
-                // parity: ptz-lens-clamp
-                guard let zoom = info.zoom else { return ptzLens1(next) }
-                for _ in 0..<(Int(zoom.max - zoom.min) / max(1, (zoom.max - zoom.min) / 20) + 6) {
-                    pressOption(24)
-                    pressOption(24, up: true)
-                }
-                try? model.bridge.ptzLens(tile, .zoom, position: zoom.max + 5000)
-                when({ sent("lens") >= 1 }, timeout: 5) { [self] in
-                    let position = ptz.lensPosition(camera, .zoom)
-                    print("ptz lens: zoom held at \(position ?? -1) of \(zoom.min)...\(zoom.max)")
-                    if position != zoom.max { problems.append("Option+= went past the lens range (\(position ?? -1))") }
-                    let last = ptz.events.last(where: { $0.action == "lens" && $0.state == .sent })
-                    if last?.position != zoom.max { problems.append("the core did not clamp a position past the range (\(last?.position ?? -1))") }
-                    if let f = fake, f.ptzLensPositions(channel: Int(tile.channel))?.zoom != zoom.max {
-                        problems.append("the camera's zoom was not at its limit")
-                    }
-                    // A drag sends at most five positions a second and the last one at its end.
-                    stage.performHeaderItem(.lens, at: leaf.path, from: nil)
-                    let calls0 = fake?.ptzCalls.count ?? 0
-                    if let row = stage.ptzPopoverController?.lensRows[.zoom] {
-                        for i in 0..<5 { row.drag(to: zoom.min + i * 10, ended: false) }
-                        row.drag(to: zoom.min + 50, ended: true)
-                        if let f = fake, f.ptzCalls.count - calls0 != 2 {
-                            problems.append("a lens drag sent \(f.ptzCalls.count - calls0) positions instead of the first and the last")
-                        }
-                    } else {
-                        problems.append("the lens popover has no zoom slider")
-                    }
-                    stage.closePTZPopover()
-                    ptzLens1(next)
-                }
-            }
-        }
-
-        func ptzLens1(_ next: @escaping () -> Void) {
-            // parity: ptz-lens1-addressing
-            guard let second = model.allCameras.first(where: { $0.lens == 1 && model.channelInfo($0)?.ptz(lens: 1).panTilt == true })
-            else {
-                print("ptz second lens: no camera whose second lens moves")
-                return next()
-            }
-            let firstMoves = model.channelInfo(second.firstLens)?.ptz(lens: 0).panTilt == true
-            model.leases.acquire(second)
-            when({ model.leases.tile(for: second) != nil }, timeout: 5) { [self] in
-                ptz.load(second)
-                when({ ptz.info(for: second) != nil }, timeout: 10) { [self] in
-                    let base = sent("move")
-                    ptz.press(.up, camera: second)
-                    when({ sent("move") > base }, timeout: 5) { [self] in
-                        let failed = ptz.events.contains { $0.state == .failed || $0.state == .refused }
-                        ptz.release()
-                        let lens = fake?.ptzCalls.last(where: { $0.text.hasPrefix("move up") })?.lens
-                        print("ptz second lens: addressed lens \(lens.map(String.init) ?? "on the device"), first lens moves \(firstMoves)")
-                        if sent("move") <= base || failed { problems.append("the second lens's move was not accepted") }
-                        if let fake, lens != 1 { problems.append("the second lens's move was addressed to lens \(lens ?? -1)") }
-                        if firstMoves { problems.append("the first lens of the multi-lens camera claims to move") }
-                        model.leases.release(second)
-                        next()
-                    }
-                }
-            }
-        }
-    }
-
-    private var discoveryChecked = false
-    private var retryChecked = false
-    private var captureRealChecked = false
-
-    private func checkLog() {
-        if !ptzChecked {
+    func checkLog() {
+        if !ptzChecked, runs("ptz") {
             ptzChecked = true
             return ptzStep()
         }
@@ -2957,392 +1250,38 @@ final class SelfTest {
             retryChecked = true
             return retryStep()
         }
-        if !captureRealChecked, app.model.map({ $0.fake == nil }) == true {
+        if !captureRealChecked, runs("capture"), app.model.map({ $0.fake == nil }) == true {
             captureRealChecked = true
             return captureRealStep()
         }
-        if !recordingsChecked, app.model?.recordings.available == true {
+        if !recordingsChecked, runs("recordings"), app.model?.recordings.available == true {
             recordingsChecked = true
             return app.model?.fake != nil ? recordingsStep() : recordingsRealStep()
         }
-        if !smartAlertsChecked, app.model?.fake != nil {
+        if !smartAlertsChecked, runs("alerts"), app.model?.fake != nil {
             smartAlertsChecked = true
             return smartAlertsSettingsStep()
         }
-        guard !discoveryChecked, app.model?.fake != nil else { return checkLogNow() }
+        guard !discoveryChecked, runs("settings"), app.model?.fake != nil else { return checkLogNow() }
         discoveryChecked = true
         discoveryStep()
     }
 
     // MARK: Smart alerts (docs/UX.md "Smart alerts")
 
-    private var smartAlertsChecked = false
+    var smartAlertsChecked = false
     /// The camera of the first scripted check (the event log step filters by it).
-    private var smartTileCamera: CameraRef?
+    var smartTileCamera: CameraRef?
 
-    private static let personBoxes = [
+    static let personBoxes = [
         AlertDetection(label: "person", score: 0.82, x: 0.4, y: 0.3, w: 0.12, h: 0.45),
         AlertDetection(label: "person", score: 0.31, x: 0.1, y: 0.4, w: 0.08, h: 0.3),
     ]
 
-    /// A trigger from the app's side (the fake core checks it like its own).
-    private func smartTrigger(_ camera: CameraRef, kind: String, source: String = "device") -> UInt64? {
-        guard let model = app.model, let fake = model.fake, let c = model.alertCamera(camera) else { return nil }
-        let id = try? fake.alertsTriggerPut(json: #"{"source":"\#(source)","camera":\#(c.json),"kind":"\#(kind)","state":"start"}"#)
-        fake.completeAlertWork()
-        return id
-    }
-
-    /// Plays the detector: the boxes go to the live view and to the core for
-    /// each of the check's open requests.
-    private func answerCheck(_ trigger: UInt64, _ boxes: [AlertDetection]) {
-        guard let model = app.model, let fake = model.fake else { return }
-        for r in model.alertsModel.requests(trigger: trigger) {
-            model.alertsModel.recordDetections(request: r.request, detections: boxes)
-            try? fake.alertDetectionsPut(request: r.request, json: AlertDetection.json(boxes))
-        }
-        fake.completeAlertWork()
-    }
-
-    /// A camera check from trigger to decision: waits for its two pictures,
-    /// answers them, and waits for the decision.
-    private func scriptedCheck(_ camera: CameraRef, then next: @escaping @MainActor (UInt64?) -> Void) {
-        guard let alerts = app.model?.alertsModel, let t = smartTrigger(camera, kind: "people") else { return next(nil) }
-        when({ alerts.requests(trigger: t).count == 2 }, timeout: 3) { [self] in
-            answerCheck(t, Self.personBoxes)
-            when({ alerts.board.check(t)?.decision != nil }, timeout: 3) { next(t) }
-        }
-    }
-
-    private func smartAlertsSettingsStep() {
-        guard let model = app.model, let fake = model.fake, let key = model.runtime("fake-1")?.key else { return checkLog() }
-        let alerts = model.alertsModel!
-        // parity: alerts-settings-roundtrip
-        // Settings > Smart Alerts: an edit is saved and sent to the core, the
-        // cameras named by this run's device IDs; the sensor's password goes
-        // to the credential store and into the document for the core only,
-        // never into the saved settings.
-        var sensor = MQTTSensor(key: "sensor-1", name: "Sensor 1")
-        sensor.host = "broker.local"
-        sensor.topic = "example/sensors/motion"
-        sensor.cameras = [
-            SensorCamera(
-                camera: CameraRef(device: key, channel: 1),
-                roi: [ROIPoint(x: 0, y: 0.5), ROIPoint(x: 1, y: 0.5), ROIPoint(x: 1, y: 1)])
-        ]
-        alerts.update { s in
-            s.enabled = true
-            s.mode = .away
-            s.location = AlertLocation(lat: 12.34, lon: 56.78)
-            s.sensors = [sensor]
-        }
-        alerts.setSecret("example-password", for: .mqttPassword("sensor-1"))
-        fake.completeAlertWork()
-        when({ alerts.configured != nil }, timeout: 3) { [self] in
-            let file = String(decoding: alerts.settings.fileData(), as: UTF8.self)
-            let sent = fake.lastAlertsConfiguration ?? ""
-            let doc = (try? JSONSerialization.jsonObject(with: Data(sent.utf8))) as? [String: Any] ?? [:]
-            let device = model.runtime("fake-1")?.deviceID ?? 0
-            let source = (doc["sources"] as? [[String: Any]])?.first
-            let camera = (source?["cameras"] as? [[String: Any]])?.first?["camera"] as? [String: Any]
-            let secrets = doc["secrets"] as? [String: String]
-            print(
-                "smart alerts settings: sent \(sent.count) bytes, mode \(doc["mode"] ?? "-"), "
-                    + "location \(doc["location"] ?? "-"), sensor camera \(camera ?? [:]), file \(file.count) bytes")
-            if SmartAlertSettings.fromFile(alerts.settings.fileData()) != alerts.settings {
-                problems.append("the smart-alert settings did not survive their file")
-            }
-            if file.contains("example-password") { problems.append("the settings file holds the sensor's password") }
-            if doc["enabled"] as? Bool != true || doc["mode"] as? String != "away"
-                || (doc["location"] as? [String: Double]) != ["lat": 12.3, "lon": 56.8]
-            {
-                problems.append("the core did not get the edited settings: \(sent.prefix(200))")
-            }
-            if (camera?["device"] as? Int).map(UInt64.init) != device || camera?["channel"] as? Int != 1 {
-                problems.append("the sensor's camera was not named by this run's device ID")
-            }
-            if secrets?["sensor-1"] != "example-password" || !alerts.hasSecret(.mqttPassword("sensor-1")) {
-                problems.append("the sensor's password did not go from the credential store to the core")
-            }
-            verifyTileStep()
-        }
-    }
-
-    private func verifyTileStep() {
-        guard let model = app.model, let window else { return checkLog() }
-        let alerts = model.alertsModel!
-        let stage = window.stage
-        guard let camera = stage.frames.leaves.first?.camera else { return checkLog() }
-        // parity: verify-view-tile
-        // A scripted check of a camera on screen: its band shows in the
-        // tile with the detector's boxes (a hit, and one below the floor,
-        // labeled) and its steps through the decision; no inset opens.
-        scriptedCheck(camera) { [self] t in
-            let check = t.flatMap { alerts.board.check($0) }
-            let content = stage.verificationBand(for: camera)?.content
-            print(
-                "verify view tile: \(check?.decision ?? "no decision"), band \(content != nil), boxes "
-                    + "\(content?.boxes.map(\.caption) ?? []), last step \(content?.lines.last ?? "-")")
-            if check?.decision != "alert" { problems.append("the scripted check did not alert") }
-            if content == nil { problems.append("the check's band did not show in the camera's tile") }
-            if content?.boxes.map(\.verdict) != [.hit, .belowFloor] {
-                problems.append("the band's boxes are \(content?.boxes.map(\.caption) ?? [])")
-            }
-            if content?.lines.contains(where: { $0.hasPrefix("Decision: alert") }) != true {
-                problems.append("the band's steps lack the decision: \(content?.lines ?? [])")
-            }
-            if stage.insetBoard.items.contains(where: { $0.kind == .verification }) {
-                problems.append("a check of a camera on screen opened an inset")
-            }
-            smartTileCamera = camera
-            verifyDismissStep(t ?? 0, camera, alertID: check?.alertID)
-        }
-    }
-
-    private func verifyDismissStep(_ t: UInt64, _ camera: CameraRef, alertID: UInt64?) {
-        guard let model = app.model, let fake = model.fake, let window, let alertID else { return checkLog() }
-        let alerts = model.alertsModel!
-        let stage = window.stage
-        // parity: verify-view-dismiss
-        // On the viewer clock: an alert's check stays while its episode
-        // lasts and at least 60 s after it settles; then the close button
-        // and Dismiss All.
-        advance(300)
-        alerts.tick()
-        let whileActive = stage.verificationBand(for: camera) != nil
-        fake.settleAlert(alertID)
-        fake.completeAlertWork()
-        when({ alerts.board.check(t)?.settledAt != nil }, timeout: 3) { [self] in
-            advance(59)
-            alerts.tick()
-            let at59 = stage.verificationBand(for: camera) != nil
-            advance(2)
-            alerts.tick()
-            let at61 = alerts.board.check(t) == nil && stage.verificationBand(for: camera) == nil
-            print("verify view dismiss: shown while active \(whileActive), at 59 s \(at59), gone at 61 s \(at61)")
-            if !whileActive || !at59 || !at61 { problems.append("a check's time on screen is wrong") }
-            guard let other = stage.frames.leaves.dropFirst().first?.camera,
-                let a = smartTrigger(camera, kind: "smoke_alarm", source: "local_audio"),
-                let b = smartTrigger(other, kind: "smoke_alarm", source: "local_audio")
-            else { return checkLog() }
-            when({ alerts.board.check(a)?.decision != nil && alerts.board.check(b)?.decision != nil }, timeout: 3) { [self] in
-                stage.verificationBand(for: camera)?.clickCloseForTest()
-                let closed = alerts.board.check(a) == nil && alerts.board.check(b) != nil
-                alerts.dismissAll()
-                let all = alerts.board.shown.isEmpty && stage.verificationBand(for: other) == nil
-                print("verify view dismiss: close button \(closed), dismiss all \(all)")
-                if !closed { problems.append("the band's close button did not close its check alone") }
-                if !all { problems.append("Dismiss All left checks on screen") }
-                verifyInsetStep()
-            }
-        }
-    }
-
-    private func verifyInsetStep() {
-        guard let model = app.model, let window else { return checkLog() }
-        let alerts = model.alertsModel!
-        let stage = window.stage
-        let leaves = stage.frames.leaves
-        guard leaves.count >= 3, let a = leaves[1].camera, let b = leaves[2].camera else { return checkLog() }
-        // parity: verify-view-inset
-        // With another tile focused, checks of cameras the window does not
-        // show open verification insets (the alert insets' column), newest
-        // on top, without taking the keyboard; Esc closes the top one and
-        // its check.
-        stage.focus(leaves[0].path)
-        advance(StageView.focusDuration)
-        let key = NSApp.keyWindow
-        let responder = window.window?.firstResponder
-        scriptedCheck(a) { [self] t1 in
-            scriptedCheck(b) { [self] t2 in
-                let insets = stage.insetBoard.shown.filter { $0.kind == .verification }.map(\.camera)
-                let overlay = stage.verificationInsetOverlay(for: b)?.content
-                let focusKept = NSApp.keyWindow === key && window.window?.firstResponder === responder
-                print(
-                    "verify view inset: insets \(insets), overlay boxes \(overlay?.boxes.count ?? 0), "
-                        + "focus kept \(focusKept)")
-                if insets != [b, a] { problems.append("the checks' insets are \(insets), not the newest on top") }
-                if overlay?.boxes.count != 2 { problems.append("the inset did not show the check's boxes") }
-                if !focusKept { problems.append("a check's inset took the keyboard") }
-                _ = stage.handleInsetKey(.dismiss)
-                if let t2, alerts.board.check(t2) != nil || stage.insetBoard.item(for: b) != nil {
-                    problems.append("Esc did not close the top check and its inset")
-                }
-                // The window setting: off-screen checks go to the small
-                // window, which never becomes key.
-                alerts.update { $0.view.placement = .tileThenWindow }
-                let panelShown = app.verificationPanel?.window?.isVisible == true
-                let panelKey = app.verificationPanel?.window?.isKeyWindow == true
-                let insetGone = stage.insetBoard.item(for: a) == nil
-                print("verify view window: shown \(panelShown), key \(panelKey), inset gone \(insetGone)")
-                if !panelShown || panelKey || !insetGone {
-                    problems.append("the window setting did not move the check to a window that never takes focus")
-                }
-                alerts.dismissAll()
-                alerts.update { $0.view.placement = .tileThenInset }
-                if app.verificationPanel?.window?.isVisible == true { problems.append("the empty checks window stayed") }
-                _ = t1
-                stage.unfocus()
-                advance(StageView.focusDuration)
-                eventsLogStep()
-            }
-        }
-    }
-
-    private func eventsLogStep() {
-        guard let model = app.model, let window, let events = app.openSmartAlertEvents()?.events else { return checkLog() }
-        let alerts = model.alertsModel!
-        _ = window
-        guard let first = smartTileCamera, let firstAlert = model.alertCamera(first) else { return checkLog() }
-        // parity: events-log-filter
-        // The Events window lists every decision; the filters narrow it and
-        // an entry opens its whole trace.
-        events.range = .all
-        let all = events.entries.count
-        events.filter.sources = [.sound]
-        let sound = events.entries.map(\.className)
-        events.filter.sources = []
-        events.filter.camera = firstAlert
-        let onFirst = events.entries.allSatisfy { $0.camera == firstAlert } && !events.entries.isEmpty
-        if !onFirst { print("events on \(firstAlert): \(events.entries.map { "\($0.camera.map { "\($0.device)/\($0.channel)" } ?? "-") \($0.decision)" })") }
-        events.filter.decisions = ["alert"]
-        events.filter.text = "person"
-        let person = events.entries.first
-        events.select(person?.id)
-        let lines = events.selected.map { e in e.allSteps.map { TraceText.line($0, cameraName: events.cameraName) } } ?? []
-        print(
-            "events log: \(all) entries, sound \(sound), on the first camera \(onFirst), "
-                + "trace of \(lines.count) steps ending \(lines.last ?? "-")")
-        if all < 5 { problems.append("the event log has \(all) entries") }
-        if sound.isEmpty || sound.contains(where: { $0 != "smoke" }) { problems.append("the sound filter showed \(sound)") }
-        if !onFirst { problems.append("the camera filter let other cameras through") }
-        if !lines.contains(where: { $0.hasPrefix("Gate: passed") }) || !lines.contains(where: { $0.hasPrefix("Delivered") }) {
-            problems.append("the opened entry's trace is incomplete: \(lines)")
-        }
-        // parity: events-log-feedback
-        // Feedback on an entry is kept and shown; a mute suppresses the
-        // camera's next trigger until it is lifted.
-        guard let entry = person else { return finishEvents() }
-        events.feedback(entry, useful: false, reason: .nothingThere)
-        let down = events.selected.map { ($0.vote, $0.voteReason) }
-        events.feedback(entry, useful: true)
-        let up = events.selected?.vote
-        events.mute(entry, .minutes15)
-        let muted = alerts.status.map { SmartAlertLogPage(status: $0).muted.map(\.camera) } ?? []
-        let t = smartTrigger(first, kind: "smoke_alarm", source: "local_audio")
-        when({ t.flatMap { alerts.board.check($0)?.decision } != nil || events.entries.contains { $0.triggerID == t } }, timeout: 3) {
-            [self] in
-            events.filter = SmartAlertLogFilter()
-            let suppressed = events.entries.first { $0.triggerID == t }
-            print(
-                "events feedback: down \(String(describing: down)), up \(up ?? "-"), muted \(muted), "
-                    + "next trigger \(suppressed?.decision ?? "-") (\(suppressed?.reason ?? "-"))")
-            if down?.0 != "down" || down?.1 != "nothing_there" || up != "up" {
-                problems.append("feedback was not kept: \(String(describing: down)) then \(up ?? "-")")
-            }
-            if muted != [firstAlert] { problems.append("the mute did not show in the status: \(muted)") }
-            if suppressed?.decision != "suppress" || suppressed?.reason != "muted" {
-                problems.append("a muted camera's trigger was not suppressed")
-            }
-            alerts.mute(firstAlert, seconds: 0)
-            finishEvents()
-        }
-    }
-
-    private func finishEvents() {
-        app.eventsWindow?.close()
-        app.model?.alertsModel.dismissAll()
-        app.model?.alertsModel.update { $0.enabled = false }
-        checkLog()
-    }
-
-    /// The add-device screen's "Find Devices on This Network" list against the
-    /// fake core's made-up devices (docs/UX.md, "Finding devices").
-    private func discoveryStep() {
-        guard let model = app.model, let fake = model.fake, let settings = app.settingsWindowForTest() else {
-            problems.append("no settings window")
-            return checkLogNow()
-        }
-        let form = model.deviceForm
-        // The add form is what Settings shows with no device selected; its
-        // list searches when it appears.
-        // parity: discovery-list
-        form.startNew()
-        when({ model.discovery.devices.count == FakeDiscoverable.samples.count }, timeout: 5) { [self] in
-            let list = model.discovery
-            print("discovery: \(list.devices.count) devices, searching \(list.isSearching)")
-            if list.devices.count != FakeDiscoverable.samples.count || !list.isSearching {
-                problems.append("the list did not fill while searching")
-                return finishDiscovery(settings)
-            }
-            let byAddress = Dictionary(uniqueKeysWithValues: list.devices.map { ($0.address, $0) })
-            guard let known = byAddress["192.0.2.10"], let fresh = byAddress["192.0.2.12"],
-                let battery = byAddress["192.0.2.30"], let onvif = byAddress["192.0.2.40"]
-            else {
-                problems.append("a made-up device is missing from the list")
-                return finishDiscovery(settings)
-            }
-            if !model.isAdded(known) || model.isAdded(fresh) { problems.append("added devices were not marked") }
-            if fresh.channels != 16 || fresh.kind != .nvr || battery.batteryPercent != 80 {
-                problems.append("device details did not arrive")
-            }
-            // parity: discovery-choose
-            // A click on a row.
-            model.chooseDiscovered(fresh)
-            if form.draft.host != "192.0.2.12" || form.port != "9000" || form.draft.name != "NVR 3" {
-                problems.append("choosing a device did not fill the form: \(form.draft.host) \(form.port) \(form.draft.name)")
-            }
-            // A device without a port in its answer gets the usual one; a name the user
-            // changed stays; one the viewer cannot add is not chosen.
-            form.draft.name = "My NVR"
-            model.chooseDiscovered(battery)
-            if form.draft.host != "192.0.2.30" || form.port != "9000" || form.draft.name != "My NVR" {
-                problems.append("choosing the second device went wrong: \(form.draft.host) \(form.port) \(form.draft.name)")
-            }
-            model.chooseDiscovered(onvif)
-            if form.draft.host != "192.0.2.30" { problems.append("a device the viewer cannot add was chosen") }
-            model.chooseDiscovered(known)
-            if form.draft.host != "192.0.2.30" { problems.append("an added device was chosen") }
-
-            // The search's time is up; the list stays.
-            fake.finishDiscovery()
-            when({ !model.discovery.isSearching }, timeout: 5) { [self] in
-                if model.discovery.devices.count != FakeDiscoverable.samples.count || model.discovery.foundNothing {
-                    problems.append("the list changed when the search ended")
-                }
-                // parity: discovery-search-again
-                // Search Again twice in a row: the list shows each device once.
-                model.startDiscovery()
-                model.startDiscovery()
-                when({ model.discovery.isSearching && model.discovery.devices.count == FakeDiscoverable.samples.count },
-                    timeout: 5
-                ) { [self] in
-                    let n = model.discovery.devices.count
-                    print("discovery after Search Again twice: \(n) devices")
-                    if n != FakeDiscoverable.samples.count { problems.append("a restarted search listed \(n) devices") }
-                    // parity: discovery-stop-on-close
-                    // Closing the window stops the search.
-                    settings.window?.close()
-                    if fake.isDiscovering || model.discovery.isSearching {
-                        problems.append("closing Settings did not stop the search")
-                    }
-                    finishDiscovery(settings)
-                }
-            }
-        }
-    }
-
-    private func finishDiscovery(_ settings: SettingsWindowController) {
-        settings.window?.close()
-        app.model?.stopDiscovery()
-        if let fake = app.model?.fake { problems += fake.violations.map { "core contract: \($0)" } }
-        checkLogNow()
-    }
-
     /// The Retry button (docs/UX.md, "Tiles without a picture"): a device that
     /// has been reconnecting for a long time offers it under the message, a
     /// click reaches the core, and reconnecting takes it away.
-    private func retryStep() {
+    func retryStep() {
         guard let model = app.model, let window, let fake = model.fake,
             let leaf = window.state.tree.leaves.first(where: { $0.camera != nil }), let camera = leaf.camera,
             let id = model.devices.first(where: { $0.key == camera.device })?.deviceID,
@@ -3381,1466 +1320,18 @@ final class SelfTest {
 
     // MARK: Recordings
 
-    private var recordingsChecked = false
+    var recordingsChecked = false
 
-    /// What the recordings screens handed to the system (the Trash, the
-    /// Finder) during the step: recorded, never done.
-    private final class SystemCalls {
-        var trashed: [URL] = []
-        var revealed: [[URL]] = []
-    }
-
-    /// The recordings window (docs/UX.md "Recordings") against the fake
-    /// core's made-up recording store: choosing cameras, the day asked for
-    /// and today held under the window's own hold, the calendar and the
-    /// timeline lanes, the animal filter, a cover thumbnail decoded, shrunk
-    /// and put back, the edits, a lock, the downloads panel, camera groups,
-    /// and the hold released when the window closes. The fake finishes
-    /// fetches and downloads only when told (`completeRecordingWork`).
-    private func recordingsStep() {
-        guard let model = app.model, let fake = model.fake, let rec = model.recordings, rec.available,
-            let device = model.devices.first?.key
-        else { return checkLog() }
-        let calls = SystemCalls()
-        rec.trasher = { calls.trashed.append($0) }
-        rec.revealer = { calls.revealed.append($0) }
-        // parity: recordings-enable
-        let cams = (0..<3).map { RecordingCamera(device: device, channel: $0) }
-        for c in cams { rec.setEnabled(c, true) }
-        if rec.enabledCameras != cams { problems.append("recordings: the chosen cameras are \(rec.enabledCameras)") }
-        guard let controller = app.openRecordingsWindow() else {
-            problems.append("recordings: no window opened")
-            return checkLog()
-        }
-        let b = controller.browser
-        // parity: recordings-hold-today
-        when({ fake.recordingsHolds[b.holdID]?.count == 3 && b.lanes.count == 3 }, timeout: 3) { [self] in
-            print("recordings: hold \(b.holdID) on \(fake.recordingsHolds[b.holdID]?.count ?? 0) cameras, \(b.lanes.count) lanes")
-            if !b.holding || fake.recordingsHolds[b.holdID]?.count != 3 { problems.append("recordings: today is not held") }
-            // parity: recordings-calendar-lanes
-            when({ b.recordedDays.contains(b.day) && b.lanes.allSatisfy { !$0.spans.isEmpty } && b.dayIncidents.count == 7 },
-                timeout: 3
-            ) { [self] in
-                let events = b.lanes.reduce(0) { $0 + $1.events.count }
-                print("recordings: calendar \(b.recordedDays.count) days, \(events) events, \(b.dayIncidents.count) incidents")
-                if !b.recordedDays.contains(b.day) { problems.append("recordings: the calendar does not mark today") }
-                if events != 7 || b.dayIncidents.count != 7 {
-                    problems.append("recordings: \(events) events and \(b.dayIncidents.count) incidents, expected 7 and 7")
-                }
-                if let lane = b.lanes.first, let e = lane.events.first {
-                    b.select(event: e)
-                    if b.selected?.involves(e.camera) != true { problems.append("recordings: a timeline click selected nothing") }
-                }
-                // parity: recordings-animal-filter
-                b.kindFilters = [.animal]
-                let animals = b.incidents.map(\.kinds)
-                print("recordings: animal filter \(animals)")
-                if animals != [["dog_cat"]] { problems.append("recordings: the animal filter shows \(animals)") }
-                b.kindFilters = [.people, .vehicle]
-                if b.incidents.count != 6 { problems.append("recordings: people and vehicles show \(b.incidents.count), expected 6") }
-                b.kindFilters = []
-                recordingsNavigate(b, fake, rec, calls)
-            }
-        }
-    }
-
-    /// A day before today is asked for but not held; back on today it is held again.
-    private func recordingsNavigate(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: recordings-navigate-day
-        let today = b.day
-        b.previousDay()
-        if b.holding || fake.recordingsHolds[b.holdID] != nil { problems.append("recordings: yesterday is held") }
-        when({ b.dayIncidents.count == 7 && b.recordedDays.contains(today - DeviceTime.day) }, timeout: 3) { [self] in
-            print("recordings: yesterday has \(b.dayIncidents.count) incidents")
-            b.nextDay()
-            if b.day != today || fake.recordingsHolds[b.holdID]?.count != 3 { problems.append("recordings: today is not held again") }
-            when({ b.dayIncidents.count == 7 }, timeout: 3) { [self] in recordingsThumbnail(b, fake, rec, calls) }
-        }
-    }
-
-    /// A cover thumbnail: pending, its event, the keyframe decoded and shrunk
-    /// off the main thread, and the small image put back into the core's cache.
-    private func recordingsThumbnail(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: recordings-thumbnail
-        guard let incident = b.dayIncidents.first, let key = incident.coverKeys.first else {
-            problems.append("recordings: no incident for a thumbnail")
-            return recordingsEdits(b, fake, rec, calls)
-        }
-        rec.requestThumbnail(key)
-        if rec.thumbnails[key] != .pending { problems.append("recordings: a thumbnail was not pending first") }
-        fake.completeRecordingWork()
-        when({
-            if case .image = rec.thumbnails[key] { return true }
-            if case .failed = rec.thumbnails[key] { return true }
-            return false
-        }, timeout: 5) { [self] in
-            guard case .image(let jpeg) = rec.thumbnails[key] else {
-                problems.append("recordings: the thumbnail is \(String(describing: rec.thumbnails[key]))")
-                return recordingsEdits(b, fake, rec, calls)
-            }
-            let image = NSImage(data: jpeg)
-            let cached = try? fake.thumbnailGet(key: key.json)
-            var putBack = false
-            if case .ready(let t)? = cached, t.kind == .image, t.data == jpeg { putBack = true }
-            let size = image.map { "\(Int($0.size.width))x\(Int($0.size.height))" } ?? "none"
-            print("recordings: thumbnail \(jpeg.count) bytes, \(size), put back \(putBack)")
-            if image == nil || (image?.size.width ?? 0) > 320 { problems.append("recordings: the thumbnail image is \(size)") }
-            if !putBack { problems.append("recordings: the small image was not put back in the core's cache") }
-            recordingsEdits(b, fake, rec, calls)
-        }
-    }
-
-    /// Rename, merge, split, add and remove a camera, and revert, through
-    /// the browser as the window's controls call them.
-    private func recordingsEdits(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: recordings-edits
-        let people = b.dayIncidents.filter { $0.kinds == ["people"] }.sorted { $0.start < $1.start }
-        guard people.count == 3 else {
-            problems.append("recordings: \(people.count) people incidents, expected 3")
-            return recordingsLock(b, fake, rec, calls)
-        }
-        b.rename(people[0].key, "Delivery")
-        when({ b.dayIncidents.contains { $0.name == "Delivery" } }, timeout: 2) { [self] in
-            b.selection = [people[0].key, people[1].key]
-            b.merge()
-            when({ b.dayIncidents.count == 6 }, timeout: 2) { [self] in
-                guard let merged = b.selected, merged.cameras.count == 2 else {
-                    problems.append("recordings: the merge did not make one incident of two cameras")
-                    return recordingsLock(b, fake, rec, calls)
-                }
-                print("recordings: merged into \(merged.cameras.count) cameras, edited \(merged.edited)")
-                b.split(merged.key, at: people[1].start)
-                when({ b.dayIncidents.count == 7 }, timeout: 2) { [self] in
-                    let first = people[0].key
-                    b.add(RecordingCamera(device: people[2].cameras[0].camera.device, channel: 2), to: first)
-                    when({ b.dayIncidents.first { $0.key == first }?.cameras.count == 2 }, timeout: 2) { [self] in
-                        b.remove(RecordingCamera(device: people[2].cameras[0].camera.device, channel: 2), from: first)
-                        when({ b.dayIncidents.first { $0.key == first }?.cameras.count == 1 }, timeout: 2) { [self] in
-                            b.revert(first)
-                            when({ b.dayIncidents.allSatisfy { !$0.edited } && b.dayIncidents.count == 7 }, timeout: 2) {
-                                [self] in
-                                print("recordings: rename, merge, split, add, remove, revert done")
-                                if b.dayIncidents.contains(where: \.edited) { problems.append("recordings: revert left an edit") }
-                                recordingsLock(b, fake, rec, calls)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Locking queues the incident's download and says so; unlocking keeps it.
-    private func recordingsLock(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: recordings-lock
-        guard let vehicle = b.dayIncidents.first(where: { $0.kinds == ["vehicle"] }) else {
-            problems.append("recordings: no vehicle incident to lock")
-            return recordingsDownloads(b, fake, rec, calls)
-        }
-        b.setLocked(vehicle.key, true)
-        when({ b.dayIncidents.first { $0.key == vehicle.key }?.locked == true && rec.downloads.count == 1 }, timeout: 2) {
-            [self] in
-            print("recordings: locked; \(rec.notice ?? "no message"); downloads \(rec.downloads.count)")
-            if rec.notice?.contains("downloading") != true { problems.append("recordings: locking did not say the video is kept") }
-            b.lockedOnly = true
-            if b.incidents.map(\.key) != [vehicle.key] { problems.append("recordings: the Locked filter shows \(b.incidents.count)") }
-            b.lockedOnly = false
-            b.setLocked(vehicle.key, false)
-            when({ b.dayIncidents.first { $0.key == vehicle.key }?.locked == false }, timeout: 2) { [self] in
-                if rec.downloads.count != 1 { problems.append("recordings: unlocking touched the download") }
-                recordingsDownloads(b, fake, rec, calls)
-            }
-        }
-    }
-
-    /// The downloads panel: pause, resume, done, Show in Finder, forget,
-    /// and the Trash once the core has let go of the folder.
-    private func recordingsDownloads(
-        _ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls
-    ) {
-        // parity: recordings-downloads
-        guard let first = rec.downloads.first, let other = b.dayIncidents.first(where: { $0.kinds == ["dog_cat"] }) else {
-            problems.append("recordings: nothing to download")
-            return recordingsGroups(b, fake, rec, calls)
-        }
-        b.center = .downloads
-        rec.pause(first.download, true)
-        when({ rec.downloads.first?.paused == true }, timeout: 2) { [self] in
-            fake.completeRecordingWork()
-            if rec.downloads.first?.state == "done" { problems.append("recordings: a paused download finished") }
-            rec.pause(first.download, false)
-            when({ rec.downloads.first?.paused == false }, timeout: 2) { [self] in
-                fake.completeRecordingWork()
-                when({ rec.downloads.first?.state == "done" }, timeout: 2) { [self] in
-                    guard let done = rec.downloads.first else { return }
-                    rec.reveal(done)
-                    if calls.revealed.last?.map(\.path) != done.outputs { problems.append("recordings: Show in Finder showed \(calls.revealed)") }
-                    rec.forget(done.download)
-                    b.download(other.key)
-                    when({ rec.downloads.count == 1 && rec.downloads.first?.download != done.download }, timeout: 2) { [self] in
-                        guard let queued = rec.downloads.first, let folder = queued.folder else { return }
-                        rec.trash(queued.download)
-                        when({ !calls.trashed.isEmpty }, timeout: 2) { [self] in
-                            print("recordings: downloads done, forgotten, trashed \(calls.trashed.count)")
-                            if calls.trashed.map(\.path) != [folder] { problems.append("recordings: the Trash got \(calls.trashed)") }
-                            if !rec.downloads.isEmpty { problems.append("recordings: \(rec.downloads.count) downloads left") }
-                            b.center = .player
-                            recordingsGroups(b, fake, rec, calls)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// A camera group joins its cameras' overlapping events; the window
-    /// closing releases its hold.
-    private func recordingsGroups(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: recordings-groups
-        let two = Array(b.cameras.prefix(2))
-        rec.putGroups(IncidentGroups(groups: [.init(name: "Front", cameras: two)]))
-        when({ rec.groups.groups.count == 1 && b.dayIncidents.count == 5 }, timeout: 2) { [self] in
-            print("recordings: with a group of two, \(b.dayIncidents.count) incidents")
-            if b.dayIncidents.count != 5 { problems.append("recordings: a group of two gave \(b.dayIncidents.count) incidents") }
-            b.scope = .group("Front")
-            if b.incidents.count != 2 { problems.append("recordings: the group scope shows \(b.incidents.count)") }
-            b.scope = .all
-            rec.putGroups(IncidentGroups())
-            when({ rec.groups.groups.isEmpty && b.dayIncidents.count == 7 }, timeout: 2) { [self] in
-                recordingsMonth(b, fake, rec)
-            }
-        }
-    }
-
-    /// Paging the calendar to the previous month asks for that month's
-    /// calendar alone (minor 7) and marks its days; camera names are the
-    /// camera list's.
-    private func recordingsMonth(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: recordings-calendar-month
-        let asked = fake.recordingsMonthRequests
-        let shown = b.month
-        b.showMonth(adding: -1)
-        let previous = b.month
-        when({ fake.recordingsMonthRequests > asked && !b.recordedDays.isEmpty }, timeout: 2) { [self] in
-            let inMonth = b.recordedDays.allSatisfy { DeviceTime.month(containing: $0).start == previous }
-            print("recordings: previous month asked \(fake.recordingsMonthRequests - asked) time(s), \(b.recordedDays.count) days marked")
-            if fake.recordingsMonthRequests != asked + 1 { problems.append("recordings: paging asked \(fake.recordingsMonthRequests - asked) months") }
-            if b.recordedDays.isEmpty || !inMonth { problems.append("recordings: the previous month shows \(b.recordedDays.count) days") }
-            // Paging back and forth asks nothing again.
-            b.showMonth(adding: 1)
-            b.showMonth(adding: -1)
-            if fake.recordingsMonthRequests != asked + 1 { problems.append("recordings: a month already asked was asked again") }
-            b.showMonth(adding: 1)
-            if b.month != shown { problems.append("recordings: the calendar did not come back to the shown day's month") }
-            // parity: recordings-camera-names
-            let names = b.lanes.map(\.name)
-            let listed = b.cameras.map { c in rec.app?.name(of: CameraRef(device: c.device, channel: c.channel, lens: c.lens)) ?? "" }
-            print("recordings: camera names \(names)")
-            if names != listed { problems.append("recordings: lanes are named \(names), the camera list \(listed)") }
-            recordingsPlayback(b, fake, rec)
-        }
-    }
-
-    /// The player (milestone P, M2): selecting an incident plays its cameras
-    /// from its start less the margin; the pictures decode and reach the
-    /// screen; pause, skip, speed (keyframes only and no sound from 2×), the
-    /// grid's large and single views with the sound following, a lane click
-    /// that seeks, Remove from Incident and Split Here at the playhead
-    /// without reopening the playback, and the playback closed with the
-    /// window.
-    private func recordingsPlayback(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: playback-open
-        let p = b.player
-        // The three cameras' people incidents (a second apart) as one.
-        let people = b.dayIncidents.filter { $0.kinds == ["people"] }.map(\.key)
-        guard people.count == 3 else {
-            problems.append("recordings: \(people.count) people incidents to play, expected 3")
-            return recordingsClose(b, fake)
-        }
-        b.selection = Set(people)
-        b.merge()
-        let opens = p.opens
-        whenPlayback(fake, {
-            p.playback != nil && p.cells.count == 3 && p.cells.allSatisfy { $0.tile.latestPicture() != nil }
-                && (self.app.recordingsWindows.first?.stage?.framesDrawn ?? 0) > 0
-        }, timeout: 5) { [self] in
-            guard let incident = b.selected else { return failPlayback("the merge selected nothing", b, fake) }
-            let start = (incident.start - incident.margin) * 1000
-            print("recordings: playback \(p.playback ?? 0) of \(p.cells.count) cameras, \(p.state.map { "\($0)" } ?? "no state"), opens \(p.opens - opens + 1), frames drawn \(app.recordingsWindows.first?.stage?.framesDrawn ?? 0)")
-            if p.playback == nil || p.cells.count != 3 { return failPlayback("the incident did not play its three cameras", b, fake) }
-            if p.cells.contains(where: { $0.tile.latestPicture() == nil }) {
-                let detail = p.cells.map { "\($0.camera.channel): \($0.state) \($0.tile.snapshot.status) configures \($0.tile.snapshot.configures)" }
-                problems.append("recordings: a playback tile decoded no picture (\(detail))")
-            }
-            if (app.recordingsWindows.first?.stage?.framesDrawn ?? 0) == 0 { problems.append("recordings: the player drew no frame") }
-            if p.positionMs < start || p.positionMs > start + 5_000 { problems.append("recordings: the playback starts at \(p.positionMs), not \(start)") }
-            if !p.transport.isPlaying { problems.append("recordings: the selected incident is not playing") }
-            if p.incidentKey != incident.key { problems.append("recordings: the player plays another incident") }
-            playbackTransport(b, fake, rec)
-        }
-    }
-
-    /// `when` for the playback steps: the fake core sends its queued
-    /// playback events and starts its tiles' streams only when told
-    /// (`Options.recordingWorkIsManual`), so each poll tells it.
-    private func whenPlayback(
-        _ fake: FakeCore, _ condition: @escaping @MainActor () -> Bool, timeout: Double,
-        _ body: @escaping @MainActor () -> Void
-    ) {
-        when({
-            fake.completePlaybackWork()
-            return condition()
-        }, timeout: timeout, body)
-    }
-
-    private func failPlayback(_ why: String, _ b: RecordingsBrowser, _ fake: FakeCore) {
-        problems.append("recordings: " + why)
-        recordingsClose(b, fake)
-    }
-
-    private func playbackTransport(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: playback-transport
-        let p = b.player
-        let opens = p.opens
-        p.pause()
-        whenPlayback(fake, { p.state == .paused }, timeout: 2) { [self] in
-            let before = p.positionMs
-            p.skip(by: TransportState.skipMs)
-            if p.positionMs != min(before + TransportState.skipMs, p.endMs) { problems.append("recordings: +10 s moved to \(p.positionMs) from \(before)") }
-            p.setRate(4)
-            let sound = p.cells.compactMap { fake.audioSetting(tile: $0.tile.id)?.audible }
-            if PlaybackSpeed.hint(p.rate) != "Keyframes only, no sound" || sound.contains(true) {
-                problems.append("recordings: at 4× the hint is \(PlaybackSpeed.hint(p.rate) ?? "none") and sound \(sound)")
-            }
-            p.setRate(1)
-            p.play()
-            whenPlayback(fake, { p.state == .playing && p.rate == 1 }, timeout: 2) { [self] in
-                let audible = p.cells.map { fake.audioSetting(tile: $0.tile.id)?.audible ?? false }
-                print("recordings: paused, skipped 10 s, 4× and back, playing; audible \(audible)")
-                if audible != [true, false, false] { problems.append("recordings: at 1× the sound is \(audible), expected the first camera") }
-                if p.opens != opens { problems.append("recordings: the transport reopened the playback") }
-                playbackGrid(b, fake, rec)
-            }
-        }
-    }
-
-    private func playbackGrid(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: playback-grid
-        let p = b.player
-        let opens = p.opens
-        p.click(1)
-        let emphasis = p.mode
-        let afterClick = p.cells.map { fake.audioSetting(tile: $0.tile.id)?.audible ?? false }
-        p.doubleClick(1)
-        let single = p.mode
-        p.doubleClick(1)
-        print("recordings: grid click \(emphasis), double click \(single), back \(p.mode); sound \(afterClick)")
-        if emphasis != .emphasis(1) || single != .single(1) || p.mode != .grid {
-            problems.append("recordings: the grid went \(emphasis), \(single), \(p.mode)")
-        }
-        if afterClick != [false, true, false] { problems.append("recordings: the large camera's sound did not play (\(afterClick))") }
-        p.muted = true
-        if p.cells.contains(where: { fake.audioSetting(tile: $0.tile.id)?.audible == true }) { problems.append("recordings: muted, a camera is audible") }
-        p.muted = false
-        // parity: playback-scrub
-        guard let lane = b.lanes.first(where: { p.cameras.contains($0.camera) }), let incident = b.playingIncident else {
-            return failPlayback("no lane of a playing camera", b, fake)
-        }
-        let target = incident.end + 2
-        let seeks = p.seeks
-        b.laneClick(lane.camera, at: target)
-        if p.seeks != seeks + 1 || p.positionMs != target * 1000 || p.opens != opens {
-            problems.append("recordings: a lane click went to \(p.positionMs) (seeks \(p.seeks - seeks), opens \(p.opens - opens))")
-        }
-        whenPlayback(fake, { p.state == .playing && p.positionMs >= target * 1000 }, timeout: 2) { [self] in
-            print("recordings: a lane click seeked to \(TransportState.clock(p.positionMs)) and plays")
-            playbackEdits(b, fake, rec)
-        }
-    }
-
-    private func playbackEdits(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: playback-remove-camera
-        let p = b.player
-        let opens = p.opens
-        guard let incident = b.playingIncident, incident.cameras.count == 3, let third = p.cameras.last else {
-            return failPlayback("the playing incident does not have three cameras", b, fake)
-        }
-        b.remove(third, from: incident.key)
-        whenPlayback(fake, { b.playingIncident?.cameras.count == 2 && p.cells.count == 2 }, timeout: 2) { [self] in
-            print("recordings: removed a camera; the player has \(p.cells.count), opens \(p.opens - opens)")
-            if p.cells.count != 2 || p.opens != opens || p.cameras.contains(third) {
-                problems.append("recordings: Remove from Incident left \(p.cells.count) cameras, \(p.opens - opens) opens")
-            }
-            // parity: playback-split-here
-            guard let playing = b.playingIncident else { return failPlayback("nothing plays after the removal", b, fake) }
-            p.seek(to: (playing.start + 1) * 1000)
-            let at = b.splitSecond(playing)
-            if at != playing.start + 1 { problems.append("recordings: Split Here would split at \(String(describing: at))") }
-            let before = b.dayIncidents.count
-            b.splitHere(playing)
-            whenPlayback(fake, { b.dayIncidents.count == before + 1 && p.cells.count == 1 }, timeout: 2) { [self] in
-                print("recordings: split at the playhead; \(b.dayIncidents.count - before) more incident, the player has \(p.cells.count), opens \(p.opens - opens)")
-                if b.dayIncidents.count != before + 1 { problems.append("recordings: Split Here made \(b.dayIncidents.count - before) more incidents") }
-                if p.opens != opens || b.playingIncident == nil || b.playingIncident?.key != b.selected?.key {
-                    problems.append("recordings: after Split Here the player reopened or lost its incident")
-                }
-                editViews(b, fake, rec)
-            }
-        }
-    }
-
-    // MARK: Follow cut and grids (milestone P, M3)
-
-    /// The edit player's simulated host clock (seconds).
-    private final class ManualClock {
-        var now: Double = 1000
-    }
-
-    /// Synthetic files being written.
-    private final class Writing {
-        var done = false
-        var failure: String?
-    }
-
-    /// The follow cut and the 4-up grid of a downloaded incident, on the fake
-    /// core's plans (`editCompute`) over synthetic files written where its
-    /// download says they are: each camera's pictures are its own color with
-    /// the frame number in a strip (`SyntheticRecording`). Frames of each are
-    /// drawn with Metal from the VideoToolbox-decoded files and checked at
-    /// sample times for which camera is shown and which of its frames; then
-    /// the cuts, the sound following the shown camera, the transport on a
-    /// simulated clock, the picture on screen, and the way back to the
-    /// cameras.
-    private func editViews(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel) {
-        // parity: edit-download
-        let vehicles = b.dayIncidents.filter { $0.kinds == ["vehicle"] }.map(\.key)
-        guard vehicles.count == 3 else {
-            problems.append("edits: \(vehicles.count) vehicle incidents, expected 3")
-            return recordingsLayout(b, fake)
-        }
-        b.selection = Set(vehicles)
-        b.merge()
-        when({ b.selected?.cameras.count == 3 }, timeout: 2) { [self] in
-            guard let incident = b.selected, incident.cameras.count == 3 else {
-                problems.append("edits: the vehicle incidents did not merge")
-                return recordingsLayout(b, fake)
-            }
-            if b.editable != nil { problems.append("edits: an incident not downloaded offers a follow cut") }
-            b.show(view: .follow)
-            if b.playerView != .cameras { problems.append("edits: Follow Cut showed without a download") }
-            b.message = nil
-            b.download(incident.key)
-            when({
-                fake.completeRecordingWork()
-                return rec.finishedDownload(of: incident.key) != nil
-            }, timeout: 3) { [self] in
-                guard let d = rec.finishedDownload(of: incident.key),
-                    let raw = try? fake.editCompute(json: #"{"kind":"follow","download":"\#(d.download)"}"#),
-                    let object = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
-                    let sources = object["sources"] as? [[String: Any]]
-                else {
-                    problems.append("edits: the incident did not download, or the fake planned nothing")
-                    return recordingsLayout(b, fake)
-                }
-                let files = sources.compactMap { s -> (URL, SyntheticRecording.Spec)? in
-                    guard let file = s["file"] as? String, let n = s["source"] as? Int,
-                        let ms = (s["duration_ms"] as? NSNumber)?.intValue
-                    else { return nil }
-                    return (URL(fileURLWithPath: file), SyntheticRecording.Spec(frames: ms / 100 + 1, color: n))
-                }
-                let writing = Writing()
-                Task { @MainActor in
-                    do {
-                        for (url, spec) in files { try await SyntheticRecording.write(spec, to: url) }
-                    } catch {
-                        writing.failure = String(describing: error)
-                    }
-                    writing.done = true
-                }
-                when({ writing.done }, timeout: 30) { [self] in
-                    print("edits: downloaded \(d.download), \(files.count) synthetic files written\(writing.failure.map { ", failed: \($0)" } ?? "")")
-                    if let f = writing.failure { problems.append("edits: the synthetic files were not written (\(f))") }
-                    if files.count != 3 { problems.append("edits: the download has \(files.count) files, expected 3") }
-                    editFollow(b, fake, rec, incident, folder: d.folder)
-                }
-            }
-        }
-    }
-
-    /// Renders `samples` of a plan offscreen and returns what did not match.
-    private func editMismatches(
-        _ session: EditSession, _ renderer: GridRenderer, samples: [Int64], width: Int, height: Int
-    ) -> [String] {
-        let plan = session.plan
-        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        var out: [String] = []
-        for t in samples {
-            guard let image = session.render(at: t, width: width, height: height, with: renderer) else {
-                out.append("\(t): nothing rendered")
-                continue
-            }
-            switch plan.kind {
-            case .follow:
-                guard let shot = EditTimeline.shot(plan, at: t) else { continue }
-                let got = SyntheticRecording.read(image, picture: bounds)
-                if got.color != shot.source || got.frame != Int(shot.filePositionMs / 100) {
-                    out.append("\(t - plan.startMs) ms: camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(shot.source) frame \(shot.filePositionMs / 100)")
-                }
-            case .grid:
-                let rects = EditComposition.cellRects(plan, in: bounds)
-                for i in 0..<4 {
-                    let cell = i < rects.count ? rects[i] : CGRect(x: width / 2, y: height / 2, width: width / 2, height: height / 2)
-                    if i < plan.cells.count, let p = EditTimeline.cellPosition(plan, cell: i, at: t) {
-                        let picture = PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination
-                        let got = SyntheticRecording.read(image, picture: picture)
-                        if got.color != plan.cells[i].source || got.frame != Int(p / 100) {
-                            out.append("\(t - plan.startMs) ms cell \(i): camera \(got.color.map(String.init) ?? "none") frame \(got.frame), expected \(plan.cells[i].source) frame \(p / 100)")
-                        }
-                    } else {
-                        let c = image.rgb(x: Int(cell.midX), y: Int(cell.midY))
-                        if max(c.x, c.y, c.z) > 40 { out.append("\(t - plan.startMs) ms cell \(i): \(c), expected black") }
-                    }
-                }
-            }
-        }
-        return out
-    }
-
-    private func editFollow(_ b: RecordingsBrowser, _ fake: FakeCore, _ rec: RecordingsModel, _ incident: Incident, folder: String?) {
-        // parity: edit-follow-cut
-        let ep = b.editPlayer
-        let clock = ManualClock()
-        ep.now = { clock.now }
-        b.show(view: .follow)
-        // The device playback's pause arrives as a core event, so it is
-        // waited for too (the edit can draw its first frame before it).
-        when({ ep.session != nil && (b.editStage?.framesDrawn ?? 0) > 0 && !b.player.transport.isPlaying }, timeout: 5) { [self] in
-            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
-                problems.append("edits: the follow cut did not open (\(ep.message ?? b.message ?? "no message"))")
-                return editBack(b, fake, folder: folder)
-            }
-            let s = incident.start * 1000
-            print("edits: follow cut \(plan.segments.map { "\($0.source)@\($0.startMs - s)" }), cuts \(ep.cuts.map { $0 - s }), frames drawn \(b.editStage?.framesDrawn ?? 0)")
-            if b.playerView != .follow { problems.append("edits: the follow cut is not shown") }
-            if !session.failures.isEmpty { problems.append("edits: files not opened: \(session.failures)") }
-            if ep.cuts != [s + 1000, s + 2000] || plan.segments.map(\.source) != [0, 1, 2] {
-                problems.append("edits: the follow cut cuts at \(ep.cuts.map { $0 - s }) to \(plan.segments.map(\.source))")
-            }
-            let n: Int64 = 24
-            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) }
-                + [s + 500, s + 999, s + 1000, s + 1500, s + 1999, s + 2000, s + 2100, s + 700]
-            let bad = editMismatches(session, renderer, samples: samples, width: 320, height: 180)
-            print("edits: follow cut rendered \(samples.count) frames, \(bad.count) wrong")
-            if !bad.isEmpty { problems.append("edits: follow cut pictures: \(bad.prefix(4).joined(separator: "; "))") }
-            // The transport on the simulated clock, and the sound following the picture.
-            ep.pause()
-            ep.setRate(1)
-            ep.seek(to: s + 500)
-            ep.play()
-            var heard: [Int?] = [ep.playingSoundSource]
-            clock.now += 1
-            ep.tick()
-            heard.append(ep.playingSoundSource)
-            clock.now += 1
-            ep.tick()
-            heard.append(ep.playingSoundSource)
-            let position = ep.positionMs
-            ep.setRate(4)
-            heard.append(ep.playingSoundSource)
-            ep.setRate(1)
-            ep.muted = true
-            heard.append(ep.playingSoundSource)
-            ep.muted = false
-            ep.pause()
-            print("edits: played 2 s on the simulated clock to \(position - s) ms; sound from \(heard)")
-            if position != s + 2500 { problems.append("edits: 2 s of play moved to \(position - s) ms, expected 2500") }
-            if heard != [0, 1, 2, nil, nil] { problems.append("edits: the sound came from \(heard), expected [0, 1, 2, nil, nil]") }
-            // On screen: the third camera's picture at 2.5 s.
-            when({ session.files[2]?.shownPositionMs == 5500 }, timeout: 3) { [self] in
-                var seen: SIMD3<Int>?
-                b.editStage?.grid?.captureNextFrame { image in seen = image.rgb(x: image.width / 2, y: image.height / 2) }
-                when({ seen != nil }, timeout: 2) { [self] in
-                    let want = SyntheticRecording.palette[2]
-                    print("edits: on screen \(seen.map { "\($0)" } ?? "nothing"), expected \(want)")
-                    if let c = seen, abs(c.x - want.x) > 40 || abs(c.y - want.y) > 40 || abs(c.z - want.z) > 40 {
-                        problems.append("edits: the screen shows \(c) at 2.5 s, expected the third camera's \(want)")
-                    } else if seen == nil {
-                        problems.append("edits: the screen drew no frame")
-                    }
-                    editGrid(b, fake, folder: folder)
-                }
-            }
-        }
-    }
-
-    private func editGrid(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
-        // parity: edit-grid
-        let ep = b.editPlayer
-        // The core's pause event arrives some moments after the request, so this waits until here.
-        if b.player.transport.isPlaying { problems.append("edits: the device playback still plays under the follow cut") }
-        b.show(view: .grid4)
-        when({ ep.session != nil && ep.plan?.kind == .grid }, timeout: 5) { [self] in
-            guard let session = ep.session, let plan = ep.plan, let renderer = try? GridRenderer() else {
-                problems.append("edits: the grid did not open (\(ep.message ?? "no message"))")
-                return editBack(b, fake, folder: folder)
-            }
-            print("edits: grid \(plan.layout ?? "?") of \(plan.cells.count) cells on \(plan.canvas.map { "\($0.width)×\($0.height)" } ?? "no canvas")")
-            if plan.layout != "4up" || plan.cells.count != 3 || plan.canvas != .init(width: 1920, height: 1080) {
-                problems.append("edits: the 4-up grid is \(plan.layout ?? "none") with \(plan.cells.count) cells")
-            }
-            let n: Int64 = 16
-            let samples = (0..<n).map { plan.startMs + $0 * (plan.endMs - plan.startMs) / (n - 1) } + [plan.startMs + 500, plan.startMs + 1500]
-            let bad = editMismatches(session, renderer, samples: samples, width: 640, height: 360)
-            print("edits: grid rendered \(samples.count) frames, \(bad.count) wrong")
-            if !bad.isEmpty { problems.append("edits: grid pictures: \(bad.prefix(4).joined(separator: "; "))") }
-            ep.seek(to: plan.startMs + 6000)
-            ep.play()
-            let first = ep.playingSoundSource
-            ep.gridSound = 1
-            let second = ep.playingSoundSource
-            ep.pause()
-            ep.gridSound = 0
-            if first != 0 || second != 1 { problems.append("edits: the grid's sound came from \(String(describing: first)), then \(String(describing: second))") }
-            exportTrim(b, fake, folder: folder)
-        }
-    }
-
-    // MARK: Export
-
-    /// The files an export step writes and the switches it restores.
-    private final class ExportRun {
-        let dir: URL
-        let shareSafe: Bool
-        let folder: ExportFolder
-        init(shareSafe: Bool, folder: ExportFolder) {
-            dir = FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-selftest-\(UUID().uuidString)")
-            self.shareSafe = shareSafe
-            self.folder = folder
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
-    }
-
-    private final class Box<T>: @unchecked Sendable {
-        var value: T?
-    }
-
-    /// Runs async work and continues on the main actor when it is done.
-    private func awaiting<T: Sendable>(_ work: @escaping @Sendable () async -> T, then next: @escaping @MainActor (T) -> Void) {
-        let box = Box<T>()
-        Task { box.value = await work() }
-        when({ box.value != nil }, timeout: 60) { next(box.value!) }
-    }
-
-    /// What a picture of a synthetic export at `ms` shows.
-    private nonisolated static func lookFile(_ url: URL, at ms: Int64) async -> (color: Int?, frame: Int)? {
-        guard let file = try? await RecordedFileSource.open(url) else { return nil }
-        defer { file.close() }
-        file.show(ms)
-        guard let picture = file.latestPicture(),
-            let image = await PictureRenderer().render(
-                PictureRender(
-                    picture: picture, color: file.info.color, source: CGRect(x: 0, y: 0, width: picture.width, height: picture.height),
-                    width: 320, height: 180))
-        else { return nil }
-        return SyntheticRecording.read(image, picture: CGRect(x: 0, y: 0, width: 320, height: 180))
-    }
-
-    private func exportTrim(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
-        // parity: export-trim
-        guard let plan = b.editPlayer.plan, let source = plan.sources.first else { return editBack(b, fake, folder: folder) }
-        let suite = UserDefaults(suiteName: "nvrview.selftest.export") ?? .standard
-        suite.removePersistentDomain(forName: "nvrview.selftest.export")
-        let run = ExportRun(shareSafe: b.export.shareSafe, folder: b.export.folder)
-        b.export.folder = ExportFolder(defaults: suite)
-        b.export.saveURL = { name, _, _ in run.dir.appendingPathComponent(name) }
-        b.export.chooseFolder = { _, _ in run.dir }
-        b.export.shareSafe = false
-        b.export.trimExact = false
-        let s = plan.startMs
-        b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
-        b.trim(cameras: [source.camera])
-        when({ b.export.job?.running == false }, timeout: 60) { [self] in
-            guard let job = b.export.job, job.files.count == 1, let url = job.files.first else {
-                problems.append("export: the trim wrote \(b.export.job?.files.count ?? 0) files (\(b.export.job?.result ?? b.message ?? "no message"))")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            // The core's own plan for the same trim says where it starts and ends.
-            let request = ExportRequest.trim(
-                download: plan.download, cameras: [source.camera], inMs: s + 2_500, outMs: s + 5_000, exact: false, options: .init())
-            guard let trim = (try? fake.editCompute(json: request)).flatMap(TrimPlan.parse), let out = trim.outputs.first else {
-                problems.append("export: the fake planned no trim")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            awaiting({ () async -> (Double, Int, Int, (color: Int?, frame: Int)?)? in
-                let asset = AVURLAsset(url: url)
-                guard let d = try? await asset.load(.duration).seconds,
-                    let track = try? await asset.loadTracks(withMediaType: .video).first,
-                    let size = try? await track.load(.naturalSize)
-                else { return nil }
-                return (d, Int(size.width), Int(size.height), await Self.lookFile(url, at: 0))
-            }) { [self] got in
-                let want = Double(out.sourceOutMs - out.sourceInMs) / 1000
-                print("export: trim \(url.lastPathComponent) \(got.map { "\($0.0) s, \($0.1)×\($0.2), first \(String(describing: $0.3))" } ?? "unreadable"), expected \(want) s from file ms \(out.sourceInMs)")
-                if let g = got {
-                    if abs(g.0 - want) > 0.25 { problems.append("export: the trim lasts \(g.0) s, expected \(want)") }
-                    if g.1 != 640 || g.2 != 360 { problems.append("export: the trim is \(g.1)×\(g.2), expected 640×360") }
-                    let expectedSource = plan.sources.first { $0.file == out.file }?.source
-                    if g.3?.color != expectedSource || g.3?.frame != Int(out.sourceInMs / 100) {
-                        problems.append("export: the trim starts at \(String(describing: g.3)), expected camera \(String(describing: expectedSource)) frame \(out.sourceInMs / 100)")
-                    }
-                } else {
-                    problems.append("export: the trimmed file could not be read")
-                }
-                if !out.copyPossible { problems.append("export: a keyframe trim should be a copy") }
-                exportShareSafe(b, fake, run, plan: plan, source: source, folder: folder)
-            }
-        }
-    }
-
-    private func exportShareSafe(
-        _ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, plan: EditPlan, source: EditPlan.Source, folder: String?
-    ) {
-        // parity: export-share-safe
-        b.export.shareSafe = true
-        b.export.dismissJob()
-        let s = plan.startMs
-        b.export.points = InOutPoints(inMs: s + 2_500, outMs: s + 5_000)
-        b.trim(cameras: [source.camera])
-        when({ b.export.job?.running == false }, timeout: 60) { [self] in
-            guard let url = b.export.job?.files.first else {
-                problems.append("export: the share-safe trim wrote nothing (\(b.export.job?.result ?? "no message"))")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            let bytes = (try? Data(contentsOf: url)) ?? Data()
-            let leaks = ["Core Media", "udta", "meta"].filter { bytes.range(of: Data($0.utf8)) != nil }
-            print("export: share-safe trim \(url.lastPathComponent), \(bytes.count) bytes, leaks \(leaks)")
-            if bytes.isEmpty || !leaks.isEmpty { problems.append("export: the share-safe trim holds \(leaks)") }
-            if url.lastPathComponent.contains("Camera 1") || url.lastPathComponent.contains("Camera 2") || url.lastPathComponent.contains("Camera 3") {
-                problems.append("export: the share-safe file is named \(url.lastPathComponent)")
-            }
-            b.export.shareSafe = false
-            b.export.dismissJob()
-            exportFollow(b, fake, run, folder: folder)
-        }
-    }
-
-    private func exportFollow(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
-        // parity: export-follow-cut
-        guard let plan = b.editPlayer.plan, let incident = b.editable?.incident else { return exportFinish(b, fake, run, folder: folder) }
-        let s = incident.start * 1000
-        b.export.points = InOutPoints(inMs: s + 500, outMs: s + 2_500)
-        b.export.codec = .hevc
-        b.exportEdit(.follow)
-        when({ b.export.job?.running == false }, timeout: 90) { [self] in
-            guard let url = b.export.job?.files.first else {
-                problems.append("export: the follow cut wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            let request = ExportRequest.edit(grid: nil, download: plan.download, window: (s + 500, s + 2_500), options: .init())
-            guard let cut = (try? fake.editCompute(json: request)).flatMap(EditPlan.parse) else {
-                problems.append("export: the fake planned no follow cut")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            let samples: [Int64] = [0, 400, 600, 1_100, 1_400, 1_900]
-            awaiting({ () async -> (Double, Int, Int, [(color: Int?, frame: Int)?])? in
-                let asset = AVURLAsset(url: url)
-                guard let d = try? await asset.load(.duration).seconds,
-                    let track = try? await asset.loadTracks(withMediaType: .video).first,
-                    let size = try? await track.load(.naturalSize)
-                else { return nil }
-                var looks: [(color: Int?, frame: Int)?] = []
-                for t in samples { looks.append(await Self.lookFile(url, at: t)) }
-                return (d, Int(size.width), Int(size.height), looks)
-            }) { [self] got in
-                guard let g = got else {
-                    problems.append("export: the follow cut file could not be read")
-                    return exportFinish(b, fake, run, folder: folder)
-                }
-                let length = Double(cut.endMs - cut.startMs) / 1000
-                print("export: follow cut \(url.lastPathComponent) \(g.0) s of \(length), \(g.1)×\(g.2), cuts \(EditTimeline.cuts(cut).map { $0 - s })")
-                if abs(g.0 - length) > 0.25 { problems.append("export: the follow cut lasts \(g.0) s, expected \(length)") }
-                if g.1 != 640 || g.2 != 360 { problems.append("export: the follow cut is \(g.1)×\(g.2), expected 640×360") }
-                for (t, look) in zip(samples, g.3) {
-                    guard let shot = EditTimeline.shot(cut, at: cut.startMs + t) else { continue }
-                    let frame = Int(shot.filePositionMs / 100)
-                    if look?.color != shot.source || abs((look?.frame ?? -9) - frame) > 1 {
-                        problems.append("export: the follow cut at \(t) ms shows \(String(describing: look)), expected camera \(shot.source) frame \(frame)")
-                    }
-                }
-                b.export.dismissJob()
-                exportGrid(b, fake, run, folder: folder)
-            }
-        }
-    }
-
-    private func exportGrid(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
-        // parity: export-grid
-        guard let plan = b.editPlayer.plan, let incident = b.editable?.incident else { return exportFinish(b, fake, run, folder: folder) }
-        let s = incident.start * 1000
-        b.export.points = InOutPoints(inMs: s, outMs: s + 2_000)
-        b.export.codec = .h264
-        b.exportEdit(.grid4)
-        when({ b.export.job?.running == false }, timeout: 90) { [self] in
-            guard let url = b.export.job?.files.first else {
-                problems.append("export: the grid wrote nothing (\(b.export.job?.result ?? b.message ?? "no message"))")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            let request = ExportRequest.edit(grid: "4up", download: plan.download, window: (s, s + 2_000), options: .init())
-            guard let grid = (try? fake.editCompute(json: request)).flatMap(EditPlan.parse) else {
-                problems.append("export: the fake planned no grid")
-                return exportFinish(b, fake, run, folder: folder)
-            }
-            let samples: [Int64] = [200, 1_000, 1_800]
-            let bounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)
-            awaiting({ () async -> (Double, Int, Int, [[(color: Int?, frame: Int)]])? in
-                let asset = AVURLAsset(url: url)
-                guard let d = try? await asset.load(.duration).seconds,
-                    let track = try? await asset.loadTracks(withMediaType: .video).first,
-                    let size = try? await track.load(.naturalSize),
-                    let file = try? await RecordedFileSource.open(url)
-                else { return nil }
-                defer { file.close() }
-                var all: [[(color: Int?, frame: Int)]] = []
-                for t in samples {
-                    file.show(t)
-                    guard let picture = file.latestPicture(),
-                        let image = await PictureRenderer().render(
-                            PictureRender(
-                                picture: picture, color: file.info.color,
-                                source: CGRect(x: 0, y: 0, width: picture.width, height: picture.height), width: 1920, height: 1080))
-                    else { return nil }
-                    all.append(
-                        EditComposition.cellRects(grid, in: bounds).map { cell in
-                            let fit = PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination
-                            return SyntheticRecording.read(image, picture: fit)
-                        })
-                }
-                return (d, Int(size.width), Int(size.height), all)
-            }) { [self] got in
-                guard let g = got else {
-                    problems.append("export: the grid file could not be read")
-                    return exportFinish(b, fake, run, folder: folder)
-                }
-                print("export: grid \(url.lastPathComponent) \(g.0) s, \(g.1)×\(g.2), \(grid.cells.count) cells")
-                if abs(g.0 - 2.0) > 0.25 { problems.append("export: the grid lasts \(g.0) s, expected 2") }
-                if g.1 != 1920 || g.2 != 1080 { problems.append("export: the grid is \(g.1)×\(g.2), expected 1920×1080") }
-                for (t, cells) in zip(samples, g.3) {
-                    for (i, look) in cells.enumerated() where i < grid.cells.count {
-                        guard let p = EditTimeline.cellPosition(grid, cell: i, at: s + t) else { continue }
-                        if look.color != grid.cells[i].source || abs(look.frame - Int(p / 100)) > 1 {
-                            problems.append("export: the grid at \(t) ms cell \(i) shows camera \(String(describing: look.color)) frame \(look.frame), expected \(grid.cells[i].source) frame \(p / 100)")
-                        }
-                    }
-                }
-                b.export.dismissJob()
-                exportRange(b, fake, run, folder: folder)
-            }
-        }
-    }
-
-    private func exportRange(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
-        // parity: export-range-download
-        guard let plan = b.editPlayer.plan, let rec = Optional(b.model) else { return exportFinish(b, fake, run, folder: folder) }
-        let s = plan.startMs
-        b.export.points = InOutPoints(inMs: s + 1_000, outMs: s + 4_200)
-        b.beginRangeDownload()
-        guard var request = b.export.rangeRequest else {
-            problems.append("export: the range sheet did not open")
-            return exportFinish(b, fake, run, folder: folder)
-        }
-        if request.cameras.count != plan.sources.count { problems.append("export: the range sheet offers \(request.cameras.count) cameras, expected \(plan.sources.count)") }
-        request.cameras = [plan.sources[0].camera, plan.sources[1].camera]
-        b.downloadRange(request)
-        let wantStart = Int64((Double(s + 1_000) / 1000).rounded(.down)), wantEnd = Int64((Double(s + 4_200) / 1000).rounded(.up))
-        when({
-            fake.completeRecordingWork()
-            return rec.downloads.contains { $0.range != nil && $0.state == "done" }
-        }, timeout: 5) { [self] in
-            let d = rec.downloads.last { $0.range != nil }
-            print("export: range download \(d?.rangeText ?? "none"), \(d?.cameras.count ?? 0) cameras, \(d?.state ?? "?")")
-            if d?.range != DownloadRange(start: wantStart, end: wantEnd) || d?.cameras.count != 2 || d?.state != "done" {
-                problems.append("export: the range download is \(String(describing: d?.range)) with \(d?.cameras.count ?? 0) cameras (\(d?.state ?? "none"), \(rec.notice ?? "")), expected \(wantStart)–\(wantEnd) with 2")
-            }
-            if b.center != .downloads { problems.append("export: a range download did not show the downloads") }
-            b.center = .player
-            exportStills(b, fake, run, folder: folder)
-        }
-    }
-
-    private func exportStills(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
-        // parity: export-stills
-        guard let plan = b.editPlayer.plan else { return exportFinish(b, fake, run, folder: folder) }
-        b.editPlayer.pause()
-        b.editPlayer.seek(to: plan.startMs + 2_500)
-        b.saveStills(eachCamera: false)
-        when({ b.export.job?.running == false }, timeout: 30) { [self] in
-            let one = b.export.job?.files ?? []
-            print("export: current picture \(one.map(\.lastPathComponent))")
-            if one.count != 1 {
-                problems.append("export: the current picture wrote \(one.count) files (\(b.export.job?.result ?? "no message"))")
-            } else if let data = try? Data(contentsOf: one[0]), let image = PictureEncoder.decode(data) {
-                let size = ExportGeometry.outputSize(plan)
-                // The grid's four cells: the first camera's color in its cell.
-                let cell = EditComposition.cellRects(plan, in: CGRect(x: 0, y: 0, width: image.width, height: image.height)).first ?? .zero
-                let got = SyntheticRecording.read(image, picture: PictureFit.fit(picture: CGSize(width: 640, height: 360), in: cell, fill: false).destination)
-                if image.width != size.width || image.height != size.height { problems.append("export: the picture is \(image.width)×\(image.height), expected \(size)") }
-                if got.color != plan.cells.first?.source { problems.append("export: the picture's first cell shows camera \(String(describing: got.color))") }
-            } else {
-                problems.append("export: the picture could not be read back")
-            }
-            b.export.dismissJob()
-            b.saveStills(eachCamera: true)
-            when({ b.export.job?.running == false }, timeout: 30) { [self] in
-                let many = b.export.job?.files ?? []
-                print("export: a picture per camera \(many.map(\.lastPathComponent))")
-                if many.count != plan.sources.count || Set(many.map(\.lastPathComponent)).count != many.count {
-                    problems.append("export: a picture per camera wrote \(many.count) files, expected \(plan.sources.count) (\(b.export.job?.result ?? "no message"))")
-                }
-                for url in many {
-                    if let data = try? Data(contentsOf: url), let image = PictureEncoder.decode(data) {
-                        if image.width != 640 || image.height != 360 { problems.append("export: \(url.lastPathComponent) is \(image.width)×\(image.height)") }
-                    } else {
-                        problems.append("export: \(url.lastPathComponent) could not be read back")
-                    }
-                }
-                b.export.dismissJob()
-                exportFinish(b, fake, run, folder: folder)
-            }
-        }
-    }
-
-    private func exportFinish(_ b: RecordingsBrowser, _ fake: FakeCore, _ run: ExportRun, folder: String?) {
-        b.export.points.clear()
-        b.export.shareSafe = run.shareSafe
-        b.export.folder = run.folder
-        b.export.saveURL = ExportPanels.save
-        b.export.chooseFolder = ExportPanels.folder
-        try? FileManager.default.removeItem(at: run.dir)
-        b.export.dismissJob()
-        editBack(b, fake, folder: folder)
-    }
-
-    /// Back to the cameras: the edit closes, the device playback continues from its position.
-    private func editBack(_ b: RecordingsBrowser, _ fake: FakeCore, folder: String?) {
-        // parity: edit-back-to-cameras
-        let at = b.editPlayer.positionMs
-        b.show(view: .cameras)
-        print("edits: back to the cameras at \(TransportState.clock(b.player.positionMs))")
-        if b.playerView != .cameras || b.editPlayer.session != nil { problems.append("edits: the edit did not close") }
-        if b.player.playback != nil, b.player.positionMs != at {
-            problems.append("edits: the cameras continue at \(b.player.positionMs), not the edit's \(at)")
-        }
-        b.editPlayer.now = { CACurrentMediaTime() }
-        if let folder { try? FileManager.default.removeItem(at: URL(fileURLWithPath: folder)) }
-        // The edit's download is forgotten, so the analysis steps start
-        // with nothing downloaded for the day.
-        let rec = b.model
-        for d in rec.downloads { rec.forget(d.download) }
-        when({ rec.downloads.isEmpty }, timeout: 2) { [self] in
-            if !rec.downloads.isEmpty { problems.append("edits: the edit's download was not forgotten") }
-            recordingsLayout(b, fake)
-        }
-    }
-
-    /// The window at its smallest and at a large size: the side panes give
-    /// way in a narrow window (inspector first) and come back in a wide
-    /// one, and the window keeps the size it was given. With
-    /// NVRVIEW_RECORDINGS_SNAPSHOTS=<folder>, writes what it looked like.
-    private func recordingsLayout(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-layout
-        guard let window = app.recordingsWindows.first?.window else { return recordingsClose(b, fake) }
-        let saved = window.frame
-        let sizes = [RecordingsPanes.windowMin, CGSize(width: 900, height: 640), CGSize(width: 1400, height: 900)]
-        var results: [String] = []
-        func next(_ i: Int) {
-            guard i < sizes.count else {
-                window.setFrame(saved, display: false)
-                print("recordings: layout \(results.joined(separator: "; "))")
-                return recordingsWheelZoom(b, fake)
-            }
-            let size = sizes[i]
-            let want = RecordingsPanes.shown(width: size.width, sidebar: true, inspector: true)
-            window.setContentSize(size)
-            // The panes follow the width SwiftUI lays out (on its next pass).
-            when({ b.shownPanes?.width == size.width }, timeout: 2) { [self] in
-                let got = window.contentLayoutRect.size
-                let panes = b.shownPanes
-                results.append(
-                    "\(Int(size.width))×\(Int(size.height)): \(Int(got.width))×\(Int(got.height)), sidebar \(panes?.sidebar == true), inspector \(panes?.inspector == true)")
-                if abs(got.width - size.width) > 1 || abs(got.height - size.height) > 1 {
-                    problems.append("recordings: the window is \(got) when given \(size)")
-                }
-                if panes?.width != size.width || panes?.sidebar != want.sidebar || panes?.inspector != want.inspector {
-                    problems.append("recordings: at \(size) the panes are \(String(describing: panes)), expected \(want)")
-                }
-                if let dir = ProcessInfo.processInfo.environment["NVRVIEW_RECORDINGS_SNAPSHOTS"] {
-                    // The window as on screen (pictures included); needs the
-                    // screen-recording permission, so only on request.
-                    let path = URL(fileURLWithPath: dir).appendingPathComponent("recordings-\(Int(size.width))x\(Int(size.height)).png").path
-                    let shot = Process()
-                    shot.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-                    shot.arguments = ["-x", "-o", "-l", String(window.windowNumber), path]
-                    try? shot.run()
-                    shot.waitUntilExit()
-                }
-                next(i + 1)
-            }
-        }
-        next(0)
-    }
-
-    /// The timeline lanes' wheel and trackpad, through the lanes' own event
-    /// catcher with real scroll events: a mouse wheel notch zooms around the
-    /// pointer (its time stays under it), many clamp at 48x, a horizontal
-    /// two-finger scroll pans, a vertical one is left to the lanes'
-    /// scrolling, and notches the other way go back to the whole day.
-    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-timeline-wheel-zoom
-        func catcher(in view: NSView?) -> TimelineInputCatcher.CatcherView? {
-            guard let view else { return nil }
-            if let c = view as? TimelineInputCatcher.CatcherView { return c }
-            for v in view.subviews { if let c = catcher(in: v) { return c } }
-            return nil
-        }
-        let window = app.recordingsWindows.first?.window
-        // The lanes are laid out again after the layout step's last resize.
-        when({ catcher(in: window?.contentView).map { !$0.visibleRect.isEmpty } == true }, timeout: 2) { [self] in
-            guard let c = catcher(in: window?.contentView), !c.visibleRect.isEmpty else {
-                problems.append("recordings: no timeline lanes to scroll")
-                return recordingsClose(b, fake)
-            }
-            recordingsWheelZoom(b, c)
-            recordingsListen(b, fake)
-        }
-    }
-
-    /// Listening for sounds: a camera's switch reaches `nv_sound_watch` and
-    /// its `sound_watch` state comes back; a fifth camera of one device is
-    /// refused; switching off takes it off the core's list.
-    private func recordingsListen(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-listen-for-sounds
-        let rec = b.model
-        guard let device = b.cameras.first?.device else { return recordingsClose(b, fake) }
-        let cams = (0..<5).map { RecordingCamera(device: device, channel: $0) }
-        for c in cams.prefix(4) where !rec.setListening(c, true) {
-            problems.append("recordings: listening to \(c) was refused (\(rec.notice ?? ""))")
-        }
-        if rec.setListening(cams[4], true) { problems.append("recordings: a fifth camera of a device listens") }
-        if fake.soundWatched != Array(cams.prefix(4)) { problems.append("recordings: the core listens to \(fake.soundWatched)") }
-        when({ rec.listenStates[cams[0]]?.state == "watching" }, timeout: 2) { [self] in
-            print("recordings: listening to \(rec.listeningCameras.count) cameras, the fifth refused: \(rec.notice ?? "")")
-            if rec.listenStates[cams[0]]?.state != "watching" { problems.append("recordings: no sound_watch state for a listening camera") }
-            for c in cams.dropFirst() { rec.setListening(c, false) }
-            if fake.soundWatched != [cams[0]] { problems.append("recordings: switching off left \(fake.soundWatched) listening") }
-            recordingsLoudness(b, fake, listening: cams[0])
-        }
-    }
-
-    /// The loudness strips: a listening camera's lane has loudness (the fake
-    /// answers a steady level), the others are blank; zooming in asks again
-    /// with a finer bucket.
-    private func recordingsLoudness(_ b: RecordingsBrowser, _ fake: FakeCore, listening: RecordingCamera) {
-        // parity: recordings-loudness-lanes
-        b.timeline = TimelineViewport()
-        b.reloadLoudness(force: true)
-        let whole = b.loudnessBucket
-        let heard = b.lanes.filter { b.loudness(of: $0.camera)?.heard == true }.map(\.camera)
-        print("recordings: loudness at \(whole) s buckets, heard on \(heard)")
-        if heard != [listening] { problems.append("recordings: loudness heard on \(heard), expected \(listening)") }
-        if b.loudness(of: listening)?.bucket != whole { problems.append("recordings: the loudness lane is not at the bucket asked") }
-        let reads = b.loudnessReads
-        b.timeline = TimelineViewport(zoom: 48)
-        if b.loudnessReads != reads + 1 || b.loudness(of: listening)?.bucket != b.loudnessBucket || b.loudnessBucket >= whole {
-            problems.append("recordings: zooming in did not ask for finer loudness (\(b.loudnessBucket) s)")
-        }
-        b.timeline = TimelineViewport()
-        recordingsSoundLabels(b, fake, camera: listening)
-    }
-
-    /// Sound labels (as the app's classifier would put them): a label becomes
-    /// an event from sound on its camera's lane and an incident of its own,
-    /// with the sound badge, which the Sounds filter alone shows.
-    private func recordingsSoundLabels(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
-        // parity: recordings-sound-labels
-        let at = b.day + 10 * 3600
-        let json = #"{"camera":\#(camera.json),"analyzer":"selftest-v1","start":\#(at - 60),"end":\#(at + 60),"labels":[{"kind":"dog_bark","start":\#(at),"end":\#(at + 4),"confidence":0.9,"label":"dog_bark"}]}"#
-        do throws(CoreStatus) {
-            try fake.soundLabelsPut(json: json)
-        } catch {
-            problems.append("recordings: the sound labels were refused (status \(error.code))")
-            return recordingsClose(b, fake)
-        }
-        when({ b.dayIncidents.contains { $0.kinds == ["dog_bark"] } }, timeout: 2) { [self] in
-            let lane = b.lanes.first { $0.camera == camera }
-            let onLane = lane?.events.contains { $0.kind == "dog_bark" && $0.source == SoundKinds.localAudio } == true
-            b.kindFilters = [.sound]
-            let shown = b.incidents.map(\.kinds)
-            let badge = b.incidents.first.map { SoundKinds.names($0.events) } ?? []
-            print("recordings: a sound label on the lane \(onLane), the Sounds filter shows \(shown), badge \(badge)")
-            if !onLane { problems.append("recordings: the sound label is not on its camera's lane") }
-            if shown != [["dog_bark"]] { problems.append("recordings: the Sounds filter shows \(shown)") }
-            if badge != ["Dog barking"] { problems.append("recordings: the sound badge says \(badge)") }
-            b.kindFilters = []
-            b.model.setListening(camera, false)
-            recordingsAnalyzeNoAudio(b, fake)
-        }
-    }
-
-    /// Analyze Sounds with nothing downloaded for the day: the analysis
-    /// fails `no_audio` with its message, the lane shows no progress and no
-    /// loudness.
-    private func recordingsAnalyzeNoAudio(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-analyze-no-audio
-        let rec = b.model
-        guard let camera = b.lanes.first?.camera else { return recordingsClose(b, fake) }
-        if !rec.downloads.isEmpty { problems.append("recordings: \(rec.downloads.count) downloads before the analysis steps") }
-        b.analyzeSound(camera)
-        if b.analysis(of: camera)?.state != .queued { problems.append("recordings: Analyze Sounds queued nothing on the lane") }
-        when({ fake.completeRecordingWork(); return rec.analysis(camera, day: b.day)?.state == .failed }, timeout: 2) { [self] in
-            let message = SoundAnalysis.failure(reason: "no_audio")
-            print("recordings: analyze with nothing downloaded: \(rec.analysis(camera, day: b.day)?.reason ?? "no result"), \(rec.notice ?? "no message")")
-            if rec.analysis(camera, day: b.day)?.reason != "no_audio" { problems.append("recordings: the analysis did not fail no_audio") }
-            if rec.notice != message { problems.append("recordings: the no_audio message was \(rec.notice ?? "missing")") }
-            if b.analysis(of: camera) != nil { problems.append("recordings: a failed analysis still shows progress") }
-            b.reloadLoudness(force: true)
-            if b.loudness(of: camera)?.heard == true { problems.append("recordings: loudness appeared without audio") }
-            recordingsAnalyzeDay(b, fake)
-        }
-    }
-
-    /// Analyze Sounds after a download: progress, then loudness and a sound
-    /// label on the lane and the done message.
-    private func recordingsAnalyzeDay(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-analyze-day
-        let rec = b.model
-        guard let incident = b.dayIncidents.first(where: { $0.kinds == ["vehicle"] }) ?? b.dayIncidents.first(where: { !$0.cameras.isEmpty }),
-            let camera = incident.cameras.first?.camera
-        else {
-            problems.append("recordings: no incident to download for the analysis")
-            return recordingsClose(b, fake)
-        }
-        b.download(incident.key)
-        when({ fake.completeRecordingWork(); return rec.downloads.contains { $0.state == "done" } }, timeout: 2) { [self] in
-            b.analyzeSound(camera)
-            // The day header's action skips the camera that is already being analyzed.
-            if !rec.isAnalyzing(camera, day: b.day) { problems.append("recordings: Analyze Sounds shows no progress") }
-            when({ fake.completeRecordingWork(); return rec.analysis(camera, day: b.day)?.state == .done }, timeout: 2) { [self] in
-                let entry = rec.analysis(camera, day: b.day)
-                print("recordings: analyzed \(entry?.seconds ?? 0) s, \(entry?.labels ?? 0) labels; \(rec.notice ?? "no message")")
-                if (entry?.seconds ?? 0) <= 0 || entry?.labels != 1 { problems.append("recordings: the analysis found \(String(describing: entry))") }
-                if b.analysis(of: camera) != nil { problems.append("recordings: a finished analysis still shows progress") }
-                if rec.notice != entry.flatMap(SoundAnalysis.outcome) { problems.append("recordings: the done message was \(rec.notice ?? "missing")") }
-                when({ b.loudness(of: camera)?.heard == true && b.lanes.first { $0.camera == camera }?.events.contains { $0.kind == "smoke_alarm" && $0.source == SoundKinds.localAudio } == true }, timeout: 2) { [self] in
-                    if b.loudness(of: camera)?.heard != true { problems.append("recordings: no loudness after the analysis") }
-                    let onLane = b.lanes.first { $0.camera == camera }?.events.contains { $0.kind == "smoke_alarm" && $0.source == SoundKinds.localAudio } == true
-                    if !onLane { problems.append("recordings: no sound label on the lane after the analysis") }
-                    recordingsAnalyzeCancel(b, fake, camera: camera)
-                }
-            }
-        }
-    }
-
-    /// Canceling an analysis before it runs: it ends canceled, shows no
-    /// progress, and does not come back when the core's work is done.
-    private func recordingsAnalyzeCancel(_ b: RecordingsBrowser, _ fake: FakeCore, camera: RecordingCamera) {
-        // parity: recordings-analyze-cancel
-        let rec = b.model
-        // Another camera, so the finished analysis above does not stand in for this one.
-        guard let other = b.lanes.map(\.camera).first(where: { $0 != camera }) else { return recordingsClose(b, fake) }
-        b.analyzeSound(other)
-        if b.analysis(of: other) == nil { problems.append("recordings: nothing to cancel") }
-        b.cancelAnalysis(other)
-        when({ rec.analysis(other, day: b.day)?.state == .canceled }, timeout: 2) { [self] in
-            fake.completeRecordingWork()
-            print("recordings: analysis canceled: \(rec.notice ?? "no message")")
-            if rec.analysis(other, day: b.day)?.state != .canceled { problems.append("recordings: the analysis did not end canceled") }
-            if b.analysis(of: other) != nil { problems.append("recordings: a canceled analysis still shows progress") }
-            if rec.notice != SoundAnalysis.outcome(SoundAnalysis.Entry(request: 0, state: .canceled)) {
-                problems.append("recordings: the cancel message was \(rec.notice ?? "missing")")
-            }
-            if b.loudness(of: other)?.heard == true { problems.append("recordings: a canceled analysis left loudness") }
-            for d in rec.downloads { rec.forget(d.download) }
-            recordingsClose(b, fake)
-        }
-    }
-
-    private func recordingsWheelZoom(_ b: RecordingsBrowser, _ c: TimelineInputCatcher.CatcherView) {
-        func scroll(_ units: CGScrollEventUnit, dy: Int32, dx: Int32 = 0) -> NSEvent? {
-            CGEvent(scrollWheelEvent2Source: nil, units: units, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)
-                .flatMap(NSEvent.init(cgEvent:))
-        }
-        b.timeline = TimelineViewport()
-        let at = NSPoint(x: c.bounds.width * 0.25, y: c.visibleRect.midY)
-        let before = b.timeline.fraction(atPointer: 0.25)
-        guard let notch = scroll(.line, dy: 1), let input = TimelineInput(notch), c.handle(notch, at: at) else {
-            problems.append("recordings: a wheel notch over the lanes was not taken")
-            return
-        }
-        let one = b.timeline
-        print("recordings: a wheel notch (\(notch.scrollingDeltaY) lines) zooms to \(one.zoom)x, input \(input)")
-        if case .zoom(_, true) = input {} else { problems.append("recordings: a wheel notch did not zoom eased (\(input))") }
-        if one.zoom <= 1 || abs(one.fraction(atPointer: 0.25) - before) > 1e-9 {
-            problems.append("recordings: a wheel notch made \(one), the time under the pointer moved")
-        }
-        for _ in 0..<40 { if let e = scroll(.line, dy: 3) { _ = c.handle(e, at: at) } }
-        if b.timeline.zoom != TimelineViewport.maxZoom { problems.append("recordings: the wheel zoomed to \(b.timeline.zoom)x, not 48x") }
-        let zoomed = b.timeline
-        if let pan = scroll(.pixel, dy: 0, dx: -40), c.handle(pan, at: at) {
-            if b.timeline.start <= zoomed.start { problems.append("recordings: a two-finger scroll left did not pan later") }
-        } else {
-            problems.append("recordings: a horizontal two-finger scroll was not taken")
-        }
-        if let vertical = scroll(.pixel, dy: -40), c.handle(vertical, at: at) {
-            problems.append("recordings: a vertical two-finger scroll was taken from the lanes' scrolling")
-        }
-        for _ in 0..<40 { if let e = scroll(.line, dy: -3) { _ = c.handle(e, at: at) } }
-        print("recordings: wheel zoom to 48x panned from \(zoomed.start) and back to \(b.timeline)")
-        if b.timeline != TimelineViewport() { problems.append("recordings: wheeling back left \(b.timeline)") }
-    }
-
-    private func recordingsClose(_ b: RecordingsBrowser, _ fake: FakeCore) {
-        // parity: recordings-window-close
-        let hold = b.holdID
-        app.recordingsWindows.first?.window?.close()
-        if fake.recordingsHolds[hold] != nil { problems.append("recordings: closing the window kept its hold") }
-        if !app.recordingsWindows.isEmpty { problems.append("recordings: the window is still listed") }
-        // parity: playback-close
-        if !fake.openPlaybacks.isEmpty || b.player.playback != nil {
-            problems.append("recordings: closing the window left playbacks \(fake.openPlaybacks) open")
-        }
-        checkLog()
-    }
-
-    /// The recordings window on the real core, against a device with
-    /// recordings (tools/mock-nvr `--recordings 3`; never a real NVR in a
-    /// self-test): every camera of the first device chosen, today asked for
-    /// and held, a lane per camera with spans and the day's incidents from
-    /// the device's search, a cover keyframe decoded with VideoToolbox and
-    /// put back, yesterday asked for and not held, a lock that downloads an
-    /// incident to the end, the Trash hand-over (recorded, not done), and the
-    /// hold released when the window closes. Skipped for a device without
-    /// recordings.
-    private func recordingsRealStep() {
-        // Only against a device on this computer (the mock): locking
-        // downloads, and a self-test pointed at a real NVR must not.
-        guard let model = app.model, let rec = model.recordings, rec.available,
-            let device = model.devices.first(where: { $0.link.state == .connected && !$0.channels.isEmpty }),
-            ["127.0.0.1", "localhost", "::1"].contains(device.config.host)
-        else { return checkLog() }
-        // parity: recordings-real-core
-        let calls = SystemCalls()
-        rec.trasher = { calls.trashed.append($0) }
-        rec.revealer = { calls.revealed.append($0) }
-        let cams = device.channels.map { RecordingCamera(device: device.key, channel: $0.channel) }
-        rec.setEnabled(device: device.key, cameras: cams)
-        guard let controller = app.openRecordingsWindow() else {
-            problems.append("recordings: no window opened")
-            return checkLog()
-        }
-        let b = controller.browser
-        let ready = { b.lanes.count == cams.count && b.lanes.allSatisfy { !$0.spans.isEmpty } && !b.dayIncidents.isEmpty }
-        when({ ready() && !rec.searching.busy }, timeout: 30) { [self] in
-            print("recordings (real core): \(b.lanes.map(\.spans.count)) spans, \(b.dayIncidents.count) incidents, holding \(b.holding)")
-            guard ready() else {
-                problems.append("recordings: the device's day did not arrive (\(b.lanes.map(\.spans.count)) spans)")
-                return recordingsRealClose(b)
-            }
-            if !b.holding { problems.append("recordings: today is not held") }
-            guard let key = b.dayIncidents.first?.coverKeys.first else { return recordingsRealClose(b) }
-            rec.requestThumbnail(key)
-            when({
-                switch rec.thumbnails[key] {
-                case .image, .failed, .empty: true
-                default: false
-                }
-            }, timeout: 30) { [self] in
-                var putBack = false
-                if case .ready(let t)? = try? model.bridge.recordings().thumbnailGet(key: key.json), t.kind == .image {
-                    putBack = true
-                }
-                var bytes = 0
-                if case .image(let jpeg) = rec.thumbnails[key] { bytes = jpeg.count }
-                print("recordings (real core): thumbnail image \(bytes) bytes, put back \(putBack)")
-                if !putBack { problems.append("recordings: the cover keyframe was not decoded and put back") }
-                recordingsRealPlayback(b, rec, calls)
-            }
-        }
-    }
-
-    /// The player on the real core: the day's first finished incident plays
-    /// through the playback engine against the mock, its pictures decode
-    /// on the tile pipeline, the clock moves, and pausing holds it.
-    private func recordingsRealPlayback(_ b: RecordingsBrowser, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        // parity: playback-real-core
-        let p = b.player
-        guard let incident = b.dayIncidents.first(where: { !$0.growing }) ?? b.dayIncidents.first else {
-            problems.append("recordings: no incident to play on the real core")
-            return recordingsRealDownload(b, rec, calls)
-        }
-        b.click(incident.key, extend: false)
-        var first: Int64?
-        when({
-            guard p.playback != nil, p.cells.allSatisfy({ $0.tile.latestPicture() != nil }) else { return false }
-            if first == nil { first = p.positionMs }
-            return p.positionMs > (first ?? 0) + 500
-        }, timeout: 30) { [self] in
-            print("recordings (real core): playback of \(p.cells.count) camera(s), \(p.cells.map(\.state)), at \(TransportState.clock(p.positionMs)), moved \(p.positionMs - (first ?? p.positionMs)) ms")
-            if p.playback == nil || p.cells.contains(where: { $0.tile.latestPicture() == nil }) {
-                problems.append("recordings: the real core's playback showed no picture (\(p.message ?? "no message"))")
-            } else if p.positionMs <= (first ?? 0) + 500 {
-                problems.append("recordings: the real core's playback clock did not move")
-            }
-            recordingsRealPacing(b) { [self] in
-                p.pause()
-                when({ p.state == .paused }, timeout: 10) { [self] in
-                    if p.state != .paused { problems.append("recordings: the real core's playback did not pause") }
-                    recordingsRealDownload(b, rec, calls)
-                }
-            }
-        }
-    }
-
-    /// Jitter (ms) the shown pictures may have at the 95th percentile, and at most (the Windows step's bounds).
-    static let pacingJitterP95Ms = 20.0
-    static let pacingJitterMaxMs = 34.0
-    /// Share of the released pictures that must be drawn.
-    static let pacingShownRatio = 0.9
-
-    /// Playback pacing (docs/RENDERING.md "Playback pacing"), on the path a
-    /// viewer takes: a finished one-camera incident selected on the day's
-    /// timeline plays at 1x from its start less its margin. For ten seconds
-    /// the tile notes when each picture is released to the app, decoded, and
-    /// first drawn by the player's renderer; the drawn pictures must keep up
-    /// with the released ones and follow their own timestamps. Real time on
-    /// purpose: what is measured is real pacing (release clock, decoder,
-    /// display refresh).
-    private func recordingsRealPacing(_ b: RecordingsBrowser, then next: @escaping @MainActor () -> Void) {
-        // parity: playback-pacing
-        let p = b.player
-        guard let incident = b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 }),
-            let renderer = app.recordingsWindows.first?.stage?.grid?.renderer
-        else {
-            problems.append("playback pacing: no one-camera incident or player stage")
-            return next()
-        }
-        b.click(incident.key, extend: false)
-        var recorder: PacingRecorder?
-        renderer.onNewPicture = { tile, pts, at in
-            if tile == 0 { recorder?.shown(pts, at: at) }
-        }
-        when({
-            if recorder == nil, p.cells.count == 1 {
-                recorder = p.cells[0].tile.pacing
-                recorder?.enabled = true
-            }
-            return p.state == .playing && (recorder?.report().shown.pictures ?? 0) >= 10
-        }, timeout: 30) { [self] in
-            guard let recorder, p.state == .playing, recorder.report().shown.pictures >= 10 else {
-                renderer.onNewPicture = nil
-                problems.append("playback pacing: the incident's playback did not start (\(p.message ?? "no message"))")
-                return next()
-            }
-            after(2) { [self] in
-                recorder.reset()
-                let before = p.positionMs
-                after(10) { [self] in
-                    renderer.onNewPicture = nil
-                    recorder.enabled = false
-                    let r = recorder.report()
-                    let ratio = r.released.pictures > 0 ? Double(r.shown.pictures) / Double(r.released.pictures) : 0
-                    print("playback pacing: incident \(incident.start)..\(incident.end) margin \(incident.margin) s, position moved \(p.positionMs - before) ms in 10 s, shown/released \(String(format: "%.2f", ratio)); \(r)")
-                    if r.shown.pairs < 50 { problems.append("playback pacing: only \(r.shown.pairs) picture pairs were shown in 10 s") }
-                    if ratio < Self.pacingShownRatio { problems.append("playback pacing: \(r.shown.pictures) of \(r.released.pictures) released pictures were shown") }
-                    if r.shown.jitterP95 > Self.pacingJitterP95Ms || r.shown.jitterMax > Self.pacingJitterMaxMs {
-                        problems.append("playback pacing: shown pictures are uneven (\(r.shown))")
-                    }
-                    next()
-                }
-            }
-        }
-    }
-
-    private func recordingsRealDownload(_ b: RecordingsBrowser, _ rec: RecordingsModel, _ calls: SystemCalls) {
-        b.previousDay()
-        if b.player.playback != nil { problems.append("recordings: another day kept the playback open") }
-        if b.holding { problems.append("recordings: yesterday is held") }
-        when({ b.dayIncidents.contains { !$0.growing } && !rec.searching.busy }, timeout: 30) { [self] in
-            guard let incident = b.dayIncidents.first(where: { !$0.growing }) else {
-                problems.append("recordings: yesterday has no incidents")
-                return recordingsRealClose(b)
-            }
-            b.setLocked(incident.key, true)
-            when({ rec.downloads.contains { $0.state == "done" || $0.state == "failed" } }, timeout: 60) { [self] in
-                guard let d = rec.downloads.first(where: { $0.incident == incident.key }) else {
-                    problems.append("recordings: locking downloaded nothing")
-                    return recordingsRealClose(b)
-                }
-                print("recordings (real core): lock \(rec.notice ?? ""), download \(d.stateText), \(d.outputs.count) files")
-                if d.state != "done" || d.outputs.isEmpty { problems.append("recordings: the download ended \(d.stateText)") }
-                recordingsRealAnalyze(b, rec, camera: d.cameras.first?.camera) { [self] in
-                    recordingsRealExport(rec, incident: incident, download: d) { [self] in
-                        rec.trash(d.download)
-                        when({ !calls.trashed.isEmpty }, timeout: 10) { [self] in
-                            if calls.trashed.map(\.path) != [d.folder ?? ""] { problems.append("recordings: the Trash got \(calls.trashed)") }
-                            b.setLocked(incident.key, false)
-                            recordingsRealClose(b)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Export on the real core: a keyframe trim of the finished download's
-    /// first camera (planned by the core, copied by `TrimExporter`, read back),
-    /// then a range download of that camera, planned and finished by the core
-    /// against the mock, whose `download` event carries its range.
-    private func recordingsRealExport(
-        _ rec: RecordingsModel, incident: Incident, download d: DownloadProgress, then next: @escaping @MainActor () -> Void
-    ) {
-        // parity: export-real-core
-        guard let camera = d.cameras.first?.camera else { return next() }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("nvrview-export-real-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let from = incident.start * 1000 + 500, to = from + 2_000
-        let request = ExportRequest.trim(download: d.download, cameras: [camera], inMs: from, outMs: to, exact: false, options: .init())
-        switch rec.trimPlan(json: request) {
-        case .failure(let refusal):
-            problems.append("export: the real core planned no trim (\(refusal.text))")
-            try? FileManager.default.removeItem(at: dir)
-            return next()
-        case .success(let plan):
-            let out = plan.outputs[0]
-            let target = dir.appendingPathComponent("trim.mp4")
-            awaiting({ () async -> (ExportOutcome, Double)? in
-                let outcome = await TrimExporter.export(out, exact: false, to: target, shareSafe: true, control: ExportControl())
-                guard let seconds = try? await AVURLAsset(url: target).load(.duration).seconds else { return nil }
-                return (outcome, seconds)
-            }) { [self] got in
-                let want = Double(out.sourceOutMs - out.sourceInMs) / 1000
-                print("export (real core): trim \(out.sourceInMs)–\(out.sourceOutMs) ms, copy \(out.copyPossible), wrote \(got.map { "\($0.0.result) \($0.1) s" } ?? "nothing"), expected \(want) s")
-                if got?.0.result != .done || abs((got?.1 ?? 0) - want) > 0.5 || !out.copyPossible {
-                    problems.append("export: the real core's trim wrote \(String(describing: got?.0.result)) lasting \(got?.1 ?? 0) s, expected \(want) s")
-                }
-                try? FileManager.default.removeItem(at: dir)
-                let queued = rec.downloadRange(cameras: [camera], startMs: from, endMs: to, name: nil, options: .init())
-                guard let id = queued?.download else {
-                    problems.append("export: the real core refused the range download (\(rec.notice ?? "no message"))")
-                    return next()
-                }
-                when({ rec.downloads.first { $0.download == id }.map { $0.state == "done" || $0.state == "failed" } == true }, timeout: 60) { [self] in
-                    let r = rec.downloads.first { $0.download == id }
-                    print("export (real core): range download \(r?.rangeText ?? "none"), \(r?.stateText ?? "?"), \(r?.outputs.count ?? 0) files")
-                    if r?.state != "done" || r?.range != DownloadRange(start: from / 1000, end: (to + 999) / 1000) || r?.outputs.count != 1 {
-                        problems.append("export: the real core's range download is \(String(describing: r?.range)) \(r?.stateText ?? "missing")")
-                    }
-                    next()
-                }
-            }
-        }
-    }
-
-    // MARK: Recording on the real core
+    /// Share of the delivered pictures the live tiles must draw.
+    static let pacingShownRatio = PacingVerdict.shownRatio
+    /// Pictures every live tile is delivered while live pacing measures.
+    static let livePacingPictures = 30
+    /// Share of the released pictures the real display must draw in the
+    /// playback pacing step (a wiring check; the verdict is the simulated
+    /// display's).
+    static let playbackDrawnRatio = 0.8
+    /// Shown pairs the playback pacing verdict needs.
+    static let playbackPacingPairs = 40
 
     /// A live tile and a call recorded by the real core against the mock
     /// (never a real device: the step runs only for a device on this
@@ -4849,170 +1340,25 @@ final class SelfTest {
     /// the events said; the call has the video and the three audio tracks,
     /// only Conversation enabled, every one decoding, and it ends with the
     /// call.
-    private func captureRealStep() {
-        guard let model = app.model, let window,
-            let device = model.devices.first(where: { $0.link.state == .connected && !$0.channels.isEmpty }),
-            ["127.0.0.1", "localhost", "::1"].contains(device.config.host),
-            let camera = window.stage.frames.leaves.compactMap(\.camera).first(where: { $0.device == device.key }),
-            model.leases.tile(for: camera) != nil
-        else { return checkLog() }
-        // parity: capture-record-real-core
-        model.capture.startLive(camera)
-        guard let id = model.capture.board.live(of: camera)?.id else {
-            problems.append("capture (real core): the live recording did not start (\(model.capture.lastRefusal ?? "?"))")
-            return checkLog()
-        }
-        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 3000 }) { [self] in
-            model.capture.stop(id)
-            whenCapture(20, { $0.running[id] == nil }) { [self] in
-                guard let end = model.capture.board.ended.last(where: { $0.recording == id }) else {
-                    problems.append("capture (real core): the live recording did not end")
-                    return checkLog()
-                }
-                inspectRecording(end) { [self] r in
-                    if let r {
-                        let aac = r.audio.first
-                        print(
-                            "capture (real core): live \((end.file as NSString).lastPathComponent), \(r.videoTracks) video, "
-                                + "\(r.audio.count) audio (\(end.audio)), \(String(format: "%.2f", r.duration)) s for "
-                                + "\(end.durationMs) ms, keyframe start \(r.startsOnKeyframe), AAC decoded \(aac?.decodedFrames ?? 0) frames")
-                        if r.videoTracks != 1 || !r.startsOnKeyframe { problems.append("capture (real core): the live file's video is wrong") }
-                        if abs(r.duration - Double(end.durationMs) / 1000) > 0.5 {
-                            problems.append("capture (real core): the file lasts \(r.duration) s, the events said \(end.durationMs) ms")
-                        }
-                        if end.audio == "passthrough" && (r.audio.count != 1 || (aac?.decodedFrames ?? 0) == 0) {
-                            problems.append("capture (real core): the camera's AAC is not in the file or does not decode")
-                        }
-                    }
-                    captureRealCallStep(camera)
-                }
-            }
-        }
-    }
+    /// Media time (ms) the real-core recordings run before they are stopped:
+    /// enough for a keyframe start, a duration check, and decoding sound in
+    /// every track (the core's own tests cover caps, gaps and long files).
+    static let realRecordingMs: UInt64 = 1200
 
-    private func captureRealCallStep(_ camera: CameraRef) {
-        guard let model = app.model else { return checkLog() }
-        // parity: capture-call-record-real-core
-        model.calls.startConversation(camera.firstLens, at: Date())
-        model.capture.startCall(camera.firstLens)
-        guard let id = model.capture.callRecording(camera)?.id else {
-            problems.append("capture (real core): the call recording did not start (\(model.capture.lastRefusal ?? "?"))")
-            model.calls.end(camera.firstLens, reason: "closed")
-            return checkLog()
+    func checkLogRest() {
+        if runs("settings") {
+            // parity: updates-notes-scroll
+            problems += UpdateNotesSelfTest.run()
+            // parity: updates-bundled-defaults
+            if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
+            // parity: updates-whats-new
+            if let model = app.model { problems += WhatsNewSelfTest.run(bridge: model.bridge) }
         }
-        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 2500 }) { [self] in
-            // The recording ends with the call.
-            model.calls.end(camera.firstLens, reason: "closed")
-            whenCapture(20, { $0.running[id] == nil }) { [self] in
-                guard let end = model.capture.board.ended.last(where: { $0.recording == id }) else {
-                    problems.append("capture (real core): the call recording did not end with the call")
-                    return checkLog()
-                }
-                inspectRecording(end) { [self] r in
-                    if let r {
-                        let enabled = r.audio.map(\.enabled)
-                        let decoded = r.audio.map(\.decodedFrames)
-                        print(
-                            "capture (real core): call \((end.file as NSString).lastPathComponent) ended \(end.state) "
-                                + "(\(end.reason ?? "-")), tracks \(end.tracks), \(r.videoTracks) video, audio enabled \(enabled), "
-                                + "decoded \(decoded) frames, peaks \(r.audio.map { String(format: "%.2f", $0.peak) })")
-                        if end.state != "finished" || end.reason != "stopped" {
-                            problems.append("capture (real core): the call recording ended \(end.state) (\(end.reason ?? "-"))")
-                        }
-                        if r.videoTracks != 1 || enabled != [true, false, false] {
-                            problems.append("capture (real core): the call file's tracks are \(r.videoTracks) video, audio \(enabled)")
-                        }
-                        if decoded.count != 3 || decoded.contains(0) {
-                            problems.append("capture (real core): a call track did not decode (\(decoded))")
-                        }
-                        if !r.startsOnKeyframe { problems.append("capture (real core): the call file does not start on a keyframe") }
-                    }
-                    checkLog()
-                }
-            }
+        // parity: core-contract
+        // At the end, so it covers every step that ran.
+        if let fake = app.model?.fake {
+            problems += fake.violations.map { "core contract: \($0)" }
         }
-    }
-
-    /// Reads a finished recording back (nil, and a problem, if it cannot).
-    private func inspectRecording(_ end: RecordingEvent, _ body: @escaping @MainActor (RecordingFileCheck?) -> Void) {
-        let url = URL(fileURLWithPath: end.file)
-        Task { @MainActor [self] in
-            do {
-                body(try await RecordingFileCheck.inspect(url))
-            } catch {
-                problems.append("capture (real core): \(url.lastPathComponent) could not be read (\(error))")
-                body(nil)
-            }
-        }
-    }
-
-    /// Analyze Sounds on the real core over the day just downloaded from the
-    /// mock (which records the same synthetic audio on every channel): the
-    /// core reads the files' audio, and the lane has loudness. Skipped (and
-    /// said so) when the mock was started without audio.
-    private func recordingsRealAnalyze(
-        _ b: RecordingsBrowser, _ rec: RecordingsModel, camera: RecordingCamera?, then next: @escaping @MainActor () -> Void
-    ) {
-        // parity: recordings-analyze-real-core
-        guard let camera, b.lanes.contains(where: { $0.camera == camera }) else {
-            problems.append("recordings: no lane for the downloaded camera")
-            return next()
-        }
-        b.analyzeSound(camera)
-        when({ !rec.isAnalyzing(camera, day: b.day) && rec.analysis(camera, day: b.day)?.active == false }, timeout: 60) { [self] in
-            let entry = rec.analysis(camera, day: b.day)
-            print("recordings (real core): analyzed \(entry?.seconds ?? 0) s, \(entry?.labels ?? 0) labels, \(entry?.state.rawValue ?? "no result"): \(rec.notice ?? "no message")")
-            if entry?.state != .done {
-                problems.append("recordings: the real core's analysis ended \(String(describing: entry))")
-                return next()
-            }
-            if (entry?.seconds ?? 0) <= 0 { problems.append("recordings: the real core heard no seconds of the download") }
-            b.reloadLoudness(force: true)
-            if b.loudness(of: camera)?.heard != true { problems.append("recordings: no loudness on the lane after the real analysis") }
-            next()
-        }
-    }
-
-    private func recordingsRealClose(_ b: RecordingsBrowser) {
-        app.recordingsWindows.first?.window?.close()
-        if b.holding { problems.append("recordings: closing the window kept its hold") }
-        checkLog()
-    }
-
-    private func checkLogNow() {
-        // parity: alerts-detector-benchmark
-        // Started here and awaited before the rest, so a slow model load does
-        // not delay the earlier steps.
-        awaitDetector(DetectorSelfTest())
-    }
-
-    private func awaitDetector(_ detector: DetectorSelfTest) {
-        guard detector.finished else { return after(0.05) { [self] in awaitDetector(detector) } }
-        problems += detector.problems
-        alertsEndToEndStep()
-    }
-
-    /// Smart alerts end to end on the real core (`AlertsSelfTest`).
-    private func alertsEndToEndStep() {
-        guard let model = app.model else { return checkLogRest() }
-        if let why = AlertsSelfTest.unavailable(model) {
-            print("alerts end to end: skipped (\(why))")
-            return checkLogRest()
-        }
-        // parity: alerts-e2e-verified
-        // parity: alerts-e2e-not-confirmed
-        // parity: alerts-ui-real-core
-        Task { @MainActor [self] in
-            problems += await AlertsSelfTest(model: model, openEvents: { [weak app] in app?.openSmartAlertEvents() }).run()
-            checkLogRest()
-        }
-    }
-
-    private func checkLogRest() {
-        // parity: updates-notes-scroll
-        problems += UpdateNotesSelfTest.run()
-        // parity: updates-bundled-defaults
-        if let model = app.model { problems += UpdateDefaultsSelfTest.run(bridge: model.bridge) }
         // parity: appkit-warnings
         if let watch = app.logWatch {
             for p in watch.patterns {
@@ -5026,7 +1372,7 @@ final class SelfTest {
         finish(problems)
     }
 
-    private func capture(_ what: String, then next: @escaping @MainActor () -> Void) {
+    func capture(_ what: String, then next: @escaping @MainActor () -> Void) {
         guard let window else { finish(problems + ["no window"]) }
         print("\(what): display refreshes \(window.stage.grid.refreshes), frames drawn \(window.stage.grid.framesDrawn)")
         var done = false
@@ -5047,7 +1393,7 @@ final class SelfTest {
         }
     }
 
-    private static func spread(_ image: RenderedImage) -> Double {
+    static func spread(_ image: RenderedImage) -> Double {
         var sum = 0.0, sumSq = 0.0, n = 0.0
         for y in stride(from: 0, to: image.height, by: 4) {
             for x in stride(from: 0, to: image.width, by: 4) {
@@ -5061,15 +1407,15 @@ final class SelfTest {
         return max(sumSq / max(n, 1) - mean * mean, 0).squareRoot()
     }
 
-    private func finish(_ problems: [String]) -> Never {
+    func finish(_ problems: [String]) -> Never {
         app.model?.shutdown()
         print(String(format: "selftest took %.2f s", CACurrentMediaTime() - began))
         if problems.isEmpty {
-            print("selftest: PASS")
+            Swift.print("selftest: PASS")
             exit(0)
         }
-        for p in problems { print("  \(p)") }
-        print("selftest: FAIL")
+        for p in problems { Swift.print("  \(p)") }
+        Swift.print("selftest: FAIL")
         exit(1)
     }
 }

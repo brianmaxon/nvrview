@@ -213,6 +213,7 @@ attempt() { # BRANCH...
   parallel_checks "$logs" "$mac_cmd" "$win_cmd" "$skip"
   if [ "$mac_rc" != 0 ]; then
     fail_kind="Mac check"
+    cat "$logs/mac.msgs" >&2
     cp "$logs/mac.log" "$logs/fail.log"
     git reset -q --hard "$base"
     return 1
@@ -225,6 +226,7 @@ attempt() { # BRANCH...
   fi
   if [ "$win_rc" != 0 ]; then
     fail_kind="Windows check"
+    cat "$logs/windows.msgs" >&2
     { cat "$logs/windows.msgs"; cat "$logs/windows.log"; } >"$logs/fail.log"
     git reset -q --hard "$base"
     return 1

@@ -5,10 +5,8 @@
 //! lane, thumbnails, downloads (dedupe, pause, retry, forget, trash), and
 //! what survives a restart.
 
-mod common;
-
+use crate::common::*;
 use bc_protocol::archive::DateTime;
-use common::*;
 use mock_nvr::archive::{ArchiveConfig, MockEvent};
 use serde_json::{Value, json};
 use simtime::SimRuntime;

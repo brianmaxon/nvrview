@@ -139,14 +139,21 @@ self-test, smoke test, tile tests, shell tests; `DOTNET_REFS` in the cache
 script mirrors the project references) and the update test by its updater
 files, so a recordings-only change reruns only the recordings area.
 
-**Trimmed build: daily, not per merge.** The trimmed publish and its self-test
-(`app-publish.*`, the update test) take minutes and fail only when trimming
-breaks something. Agent checks and merges run the debug-build areas only and
-print the trimmed suites as `deferred` (a stamp with them serves merges, never a
-release); they run in release checks, with `NVRVIEW_FULL_CHECK=1`, and when the
-last passing trimmed run on Windows is over 24 h old (`NVRVIEW_TRIMMED_MAX_AGE_H`).
-A trimming problem therefore shows at the daily run or the release, not at the
-merge that caused it: when one fails, bisect the day's merges.
+**Trimmed build: daily, not per merge.** Trimming is checked statically on
+every build (the trim analyzer's warnings are errors for the shipped projects,
+and publish fails if a shipped assembly loses more than 10% of its size). The
+trimmed publish itself, one `app-publish` smoke suite (startup plus one wiring
+step per area) and the update test run in release checks, with
+`NVRVIEW_FULL_CHECK=1`, and when the last passing trimmed run on Windows is over
+24 h old (`NVRVIEW_TRIMMED_MAX_AGE_H`); agent checks and merges print them as
+`deferred` (a stamp with them serves merges, never a release). When one fails,
+bisect the day's merges.
+
+**App self-tests on both apps.** The Mac check runs the fake-core app self-test
+by area (`mac-app.AREA`, `scripts/macos-selftest-areas.txt`), cached like the
+Windows areas; the real-core Mac self-test runs in full checks and releases. No
+self-test step waits on the real clock: timed behavior uses a test clock, and
+steps wait on conditions.
 
 **Secret scan and timings.** The scan covers the commits added since the last
 clean scan plus staged and unstaged changes (`scripts/secret-scan.sh`; record in

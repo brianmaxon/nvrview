@@ -29,8 +29,7 @@ internal sealed partial class SelfTest
         {
             return;
         }
-        await Task.Delay(500);
-        bool searching = await Until(() => v.Discovery.IsSearching, 5);
+        bool searching = await Until(() => sw.IsLoaded && v.Discovery.IsSearching, 5);
         Say($"settings window: sections {string.Join(" / ", sw.SectionTitles)}; on {sw.Section.Title()}, searching {searching}");
         Expect(sw.IsLoaded && sw.Section == SettingsSection.Devices && searching, "Find devices did not show the Devices section and start the search");
         Expect(sw.SectionTitles.SequenceEqual(SettingsSections.All.Select(s => s.Title())), "the Settings pane does not list every section");
@@ -80,7 +79,7 @@ internal sealed partial class SelfTest
         sw.Close();
         bool closed = await Until(() => SettingsWindow.Current is null, 5);
         SettingsWindow reopened = SettingsWindow.Open(v, development: true, background: true);
-        await Task.Delay(300);
+        await Until(() => reopened.IsLoaded, 5);
         WindowRect frame = reopened.CurrentFrame;
         Say($"settings window: reopened at {frame.Width:0}x{frame.Height:0}");
         Expect(closed && Math.Abs(frame.Width - 700) <= 2 && Math.Abs(frame.Height - 480) <= 2, "the Settings window did not reopen at its remembered size");

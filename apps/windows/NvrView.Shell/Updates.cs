@@ -180,6 +180,9 @@ public sealed class UpdateSettings
     /// <summary>When the last check finished, wall-clock time.</summary>
     public DateTimeOffset? LastCheck { get; set; }
 
+    /// <summary>The version that ran last, for the "What's New" window (null: a first run). Stored here, with the other update settings.</summary>
+    public string? LastRunVersion { get; set; }
+
     /// <summary>What this build bundles; read from the app folder, never stored.</summary>
     public BundledUpdateDefaults Bundled { get; set; } = BundledUpdateDefaults.None;
 
@@ -249,6 +252,7 @@ public sealed class UpdateSettings
                 s.DisabledBundledKeys = [.. disabled.Select(k => k?.GetValue<string>()).OfType<string>()];
             }
             s.Automatic = o["automatic"]?.GetValue<bool>() ?? false;
+            s.LastRunVersion = o["last_run_version"]?.GetValue<string>();
             if (o["last_check"]?.GetValue<string>() is { } last &&
                 DateTimeOffset.TryParse(last, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out DateTimeOffset at))
             {
@@ -275,6 +279,10 @@ public sealed class UpdateSettings
             ["disabled_bundled_keys"] = new JsonArray([.. DisabledBundledKeys.Select(k => (JsonNode?)JsonValue.Create(k))]),
             ["automatic"] = Automatic,
         };
+        if (LastRunVersion is { } lastRun)
+        {
+            o["last_run_version"] = lastRun;
+        }
         if (LastCheck is { } at)
         {
             o["last_check"] = at.ToString("O", System.Globalization.CultureInfo.InvariantCulture);

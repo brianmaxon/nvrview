@@ -167,6 +167,18 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"the bundled update defaults step threw: {e}");
         }
+        try
+        {
+            if (Runs("settings"))
+            {
+                // parity: updates-whats-new
+                _problems.AddRange(WhatsNewSelfTest.Run(app.Viewer!, line => Say(line)));
+            }
+        }
+        catch (Exception e)
+        {
+            _problems.Add($"the what's new step threw: {e}");
+        }
         Finish(_problems);
     }
 
@@ -176,7 +188,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         StageView stage = app.Stage!;
         StageRenderer r = app.Renderer!;
         Say($"GPU: {v.Host.Gpu.Describe()}");
-        Say($"areas: {(options.Areas is null ? "all" : string.Join(", ", AreaNames.Where(Runs)))}");
+        Say($"areas: {(options.Areas is null ? "all" : string.Join(", ", AreaNames.Where(Runs)))}{(options.Smoke ? " and one wiring check per area (smoke)" : "")}");
 
         // parity: credential-store
         if (options.CredentialTest)
@@ -200,44 +212,18 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         app.Windows[0].Show(new WindowContent.Scratch("Self-test", LayoutNode.Balanced(
             mockDevice.Channels.Keys.Order().Select(c => new CameraRef(mockDevice.Key, c)))));
 
-        // parity: grid-plays
-        // 1. Tiles play.
-        bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
-            Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
+        // The tiles start; the last channel (a third-party camera behind the NVR) is refused first and waits for the
+        // core's preview retry (6 s, preview_retry_interval; the retry itself is tested in the core's third_party
+        // tests), so the steps that need no picture of it run while it waits.
+        int ready = options.MockChannels >= 2 ? options.MockChannels - 1 : options.MockChannels;
+        bool started = await Until(() => Tiles.Length >= options.MockChannels &&
+            Tiles.Take(ready).All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
         Say($"devices {v.Devices.Count} ({string.Join(", ", v.Devices.Select(d => d.State))}), tiles {Tiles.Length}, " +
             $"first picture {Ms(v.Timings.GetValueOrDefault("first_picture"))}");
-        if (!playing)
+        if (!started)
         {
-            _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
+            _problems.Add($"tiles did not play: {string.Join("; ", Tiles.Select(Describe))}");
             return;
-        }
-        await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.SelfTestSeconds * 0.2)));
-        long memoryBefore = PrivateBytes();
-        await CheckFrame("grid", Tiles);
-        if (Runs("viewer"))
-        {
-            await LivePacingStep(r);
-        }
-        // parity: third-party-channel
-        if (options.MockChannels >= 2)
-        {
-            StageTile last = Tiles[^1];
-            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {app.Stage!.StatusText(last) ?? "playing"}");
-            if (!v.WaitedTiles.Contains(last.Id))
-            {
-                _problems.Add("the third-party channel never reported waiting for the camera");
-            }
-        }
-
-        // parity: render-no-alloc
-        // Steady state: the render thread allocates nothing per frame.
-        long bytes = r.AllocatedBytes, framesBefore = r.Frames;
-        await Until(() => r.Frames - framesBefore >= 30, 10);
-        long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
-        Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
-        if (allocated > 0)
-        {
-            _problems.Add($"the render thread allocated {allocated} bytes in steady state");
         }
 
         // parity: wrong-password
@@ -315,6 +301,45 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             }
         }
 
+        // parity: grid-plays
+        // 1. Tiles play.
+        var gridWait = Stopwatch.StartNew();
+        bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
+            Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
+        Say($"grid: every tile plays (waited {gridWait.Elapsed.TotalSeconds:0.00} s more for the third-party channel)");
+        if (!playing)
+        {
+            _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
+            return;
+        }
+        long memoryBefore = PrivateBytes();
+        await CheckFrame("grid", Tiles);
+        if (Runs("viewer"))
+        {
+            await LivePacingStep(r);
+        }
+        // parity: third-party-channel
+        if (options.MockChannels >= 2)
+        {
+            StageTile last = Tiles[^1];
+            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {app.Stage!.StatusText(last) ?? "playing"}");
+            if (!v.WaitedTiles.Contains(last.Id))
+            {
+                _problems.Add("the third-party channel never reported waiting for the camera");
+            }
+        }
+
+        // parity: render-no-alloc
+        // Steady state: the render thread allocates nothing per frame.
+        long bytes = r.AllocatedBytes, framesBefore = r.Frames;
+        await Until(() => r.Frames - framesBefore >= 30, 10);
+        long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
+        Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
+        if (allocated > 0)
+        {
+            _problems.Add($"the render thread allocated {allocated} bytes in steady state");
+        }
+
         if (Runs("viewer"))
         {
             await ViewerSteps(v, stage, r, first);
@@ -344,7 +369,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         }
         else
         {
-            await Task.Delay(500);
+            // Every tile has drawn a picture of its rebuilt decoder before the frame is read back.
+            long[] shownBefore = [.. Tiles.Select(t => t.Shown)];
+            await Until(() => Tiles.Select((t, i) => t.Shown > shownBefore[i] + 2).All(x => x), 5);
             await CheckFrame("after device loss", Tiles);
         }
 
@@ -386,6 +413,11 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             {
                 _problems.Add("no detection events arrived");
             }
+        }
+
+        if (options.Smoke)
+        {
+            await SmokeSteps(v, stage);
         }
 
         // parity: tile-retry
@@ -560,7 +592,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         };
         var rtb = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
         stage.HostTemporarily(ground, true);
-        await Task.Delay(300);
+        await Until(() => ground.IsLoaded && ground.ActualWidth > 0 && strip.ActualWidth > 0, 5);
         await rtb.RenderAsync(ground);
         stage.HostTemporarily(ground, false);
         byte[] pixels = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(await rtb.GetPixelsAsync());
@@ -632,11 +664,12 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         }
     }
 
+    // The tile's audio peak, read until it is above zero or `seconds` have passed (a condition, not a fixed wait).
     private static async Task<float> MaxLevel(Viewer v, StageTile t, double seconds)
     {
         float max = 0;
         var sw = Stopwatch.StartNew();
-        while (sw.Elapsed.TotalSeconds < seconds)
+        while (sw.Elapsed.TotalSeconds < seconds && max <= 0)
         {
             max = Math.Max(max, v.Core.TileAudioLevel(t.Id).Peak);
             await Task.Delay(10);
@@ -655,9 +688,19 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             double t = i / (double)steps;
             w.Resize(new SizeInt32(start.Width + (int)(240 * t), start.Height + (int)(135 * t)));
+            // One step per 60 Hz refresh: a live resize is real time (the window manager and the swap chain).
             await Task.Delay(16);
         }
-        await Task.Delay(400);
+        // The buffers settle at the panel's final size.
+        (uint, uint) last = (0, 0);
+        int still = 0;
+        await Until(() =>
+        {
+            (uint, uint) now = r.WantedSize;
+            still = now == last && r.BufferSize == now ? still + 1 : 0;
+            last = now;
+            return still >= 3;
+        }, 2);
         double elapsed = sw.Elapsed.TotalSeconds;
         long made = r.Frames - frames, resized = r.TotalResizes - resizes;
         (uint bw, uint bh) = r.BufferSize;
@@ -675,8 +718,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"the grid stopped presenting during the resize ({made} frames in {elapsed:0.00} s)");
         }
+        (uint, uint) grown = r.WantedSize;
         w.Resize(start);
-        await Task.Delay(400);
+        await Until(() => r.WantedSize != grown && r.BufferSize == r.WantedSize, 3);
     }
 
     private async Task CheckFrame(string what, IReadOnlyList<StageTile> tiles, StageRenderer? renderer = null)

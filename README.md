@@ -44,6 +44,7 @@ scripts/setup-dev.sh        # commit hook, identity check
 scripts/check.sh            # everything CI runs, plus the macOS app tests
 scripts/package-macos.sh    # builds build/NVRView.app with the Rust core
 open build/NVRView.app
+scripts/restart-macos-app.sh [--build]   # quit it cleanly and reopen it (optionally rebuilt)
 ```
 
 Add your NVR or camera in **Settings**: the new-device form lists what answers
@@ -75,8 +76,12 @@ runs the app against a built-in fake core with no network at all.
 cd apps/macos
 swift test                                  # app and bridge tests (fake core)
 swift run NVRView --fake ../../fixtures/synthetic/h264-basic.h264
+# the app's self-test on the fake core (about 20 s; --areas a,b runs some, see scripts/macos-selftest-areas.txt)
+swift run NVRView --fake --data-dir "$(mktemp -d)" --selftest 60 ../../fixtures/synthetic/h264-basic.h264 \
+  ../../fixtures/synthetic/h265-basic.h265 ../../fixtures/synthetic/fisheye/h264-fisheye.h264
 scripts/build-xcframework.sh                # from the repository root: the real core
 NVRVIEW_REAL_CORE=1 swift test              # against the real core (after copying the XCFramework, see Package.swift)
+scripts/macos-real-selftest.sh              # from the repository root: the self-test on the real core against mock-nvr
 ```
 
 ## Building on Windows
@@ -151,7 +156,11 @@ folders (and programs) for speed.
 sanitization and a full-history secret scan, `cargo fmt`, `clippy`, the Rust
 tests, the C header check, the C smoke test (plain and with AddressSanitizer),
 Windows and Linux compile checks, the C# smoke test in Docker, the macOS app
-tests, and the macOS GUI self-tests (their windows open behind other windows).
+tests, and the macOS GUI self-tests: the app's self-test on the fake core,
+by area, and the two renderer demos (their windows open behind other windows;
+with no desktop session they are skipped and the run writes no stamp). Full
+runs (`NVRVIEW_FULL_CHECK=1`, the release checks) add the app's self-test on
+the real core against `tools/mock-nvr` (`scripts/macos-real-selftest.sh`).
 Environment variables skip the slow or optional steps:
 `NVRVIEW_CSHARP_TESTS=0`, `NVRVIEW_GUI_TESTS=0`, `NVRVIEW_SECRET_SCAN=0`.
 `NVRVIEW_LINUX_TESTS=1` adds the full Linux tests in Docker (CI runs them on
@@ -177,7 +186,7 @@ at the end shows each suite as ran or cached, with its time.
   header, and the fixtures; the C# and Windows app suites `apps/windows/`, the
   core crates they load, and the fixtures. The Windows app self-test is split
   into areas (startup, viewer, tiles, layouts, header, settings, calls,
-  recordings, capture, ptz), each cached for the debug and the publish build:
+  recordings, capture, ptz), each cached on its own for the debug build:
   `scripts/windows-selftest-areas.txt` maps every `// parity:` step to one
   area (`scripts/check-selftest-areas.py` fails otherwise), the app runs only
   the areas asked for with `--areas a,b` (starting once), and an area's
@@ -185,6 +194,13 @@ at the end shows each suite as ran or cached, with its time.
   another area exercises (`WINDOWS_OWNED` in `scripts/suite-cache.py`), so
   shared code reruns every area and a change to a recordings file reruns
   recordings and the always-run startup smoke. A full run covers all areas.
+  The macOS app self-test (fake core) is cached by area the same way
+  (`mac-app.AREA`: startup, viewer, tiles, layouts, header, settings, calls,
+  recordings, capture, ptz, alerts): `scripts/macos-selftest-areas.txt` maps
+  its steps, `NVRView --selftest N --areas a,b` runs some, the larger areas'
+  steps live in `SelfTest+Area.swift` files, and `MAC_OWNED` in
+  `scripts/suite-cache.py` lists the files only one area exercises. Its
+  real-core run is not cached; it runs in full runs only.
   The other Windows suites cover only the C# projects they build (and what
   those reference): the video self-test the video demo project, the smoke test
   the smoke project, the tile tests and the shell tests their own projects,
@@ -193,13 +209,17 @@ at the end shows each suite as ran or cached, with its time.
   project table in `scripts/suite-cache.py` is checked against the project
   files by `suite-cache.py check-projects`). Sanitization, self-test parity,
   the secret scan, and `cargo fmt` always run.
-- **Trimmed build.** The trimmed publish and its app self-test
-  (`app-publish.*`) and the update test run in full runs (releases) and when
-  the last passing trimmed run on Windows is more than 24 hours old
-  (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs print them as `deferred` and count
-  them like cached suites (merge stamps, never a release). The trade-off: a
-  problem that only trimming causes shows at the daily run or the release, not
-  at the merge that introduced it.
+- **Trimmed build.** Trimming is checked statically on every build (the trim
+  analyzer, warnings as errors) and at publish (the app's own assemblies are
+  trimmer roots, kept whole). The trimmed publish with its plain start and a
+  short self-test (`app-publish`: `--smoke`, the startup area and one wiring
+  check per area; the whole self-test runs on the debug build) and the update
+  test run in full runs (releases) and when the last passing trimmed run on
+  Windows is more than 24 hours old (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs
+  print them as `deferred` and count them like cached suites (merge stamps,
+  never a release). The trade-off: a problem that only trimming causes at run
+  time shows at the daily run or the release, not at the merge that
+  introduced it.
 - **Secret scan.** Normal checks scan the commits not yet covered by a clean
   scan (`scripts/secret-scan.sh` records them in the git directory) and the
   staged and unstaged changes; the whole history is scanned when the last full
@@ -212,6 +232,18 @@ at the end shows each suite as ran or cached, with its time.
 - **Parallel merges.** `scripts/merge-branch.sh` and `scripts/merge-train.sh`
   run the Mac check and the Windows check at the same time, each with its own
   log; the merge reaches main only when both pass.
+- **Named failures, narrow retries.** A failed Mac or Windows check (merges,
+  trains, `scripts/release-check.sh`, `scripts/windows-check.sh`) prints the
+  suite or self-test area that was running and the failing step's lines, for
+  example `playback pacing: shown pictures are uneven (...)`. The merge scripts
+  retry the Windows check (up to 3 tries) only after a known environmental
+  flake (a software H.264 fallback, the real microphone step, the playback
+  pacing jitter bound), and a retry runs only the suites and areas that did not
+  pass: the earlier tries' passes come from this cache (`NVRVIEW_RETRY_SINCE`,
+  set by the retry loop, makes that hold in a full run too). Any other failure
+  is not retried. Each flake is appended to `flakes.jsonl` in the git
+  directory (date, tree, suite, step, line; last 500); `scripts/flakes.sh`
+  prints the most frequent flaky steps.
 - **Never cached.** A suite with an unstaged or untracked input runs and is
   not recorded. Failures are never recorded. A pass from a Windows run retried
   after a known flake is recorded as retried and never skips a suite.
@@ -255,7 +287,7 @@ maintainer's approval.
 Both apps can update themselves from a folder or web server you host, with
 packages signed by your own Ed25519 key; it is off until you set a source and
 trust a key, and nothing is installed without your say. See
-[docs/UPDATES.md](docs/UPDATES.md).
+[docs/UPDATES.md](docs/UPDATES.md), which also covers the release notes the builds carry (a What's New window after an update and a Release Notes item in Help on macOS or in About on Windows).
 
 ## Contributing
 

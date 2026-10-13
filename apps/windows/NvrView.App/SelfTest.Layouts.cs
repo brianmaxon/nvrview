@@ -119,8 +119,9 @@ internal sealed partial class SelfTest
             // The sidebar: collapse it (the stage grows), then reveal it at the
             // edge on a manual clock: the overlay slides over the stage, whose
             // buffers are not resized.
+            (uint, uint) dockedSize = r.WantedSize;
             w1.SetSidebarDocked(false);
-            await Task.Delay(700);
+            await Until(() => r.WantedSize != dockedSize && r.BufferSize == r.WantedSize, 5);
             (uint bw, uint bh) = r.BufferSize;
             long resizes = r.TotalResizes;
             var clock = new ManualViewerClock(1000);
@@ -152,8 +153,9 @@ internal sealed partial class SelfTest
             Expect(saved.Count == 1 && saved[0].Content == new WindowContent.Layout(id) && saved[0].SidebarCollapsed && saved[0].Frame.Width >= ViewerWindow.MinWidth,
                 "the window's restore record is wrong");
             w1.RevealClock = SystemClockInstance;
+            (uint, uint) collapsedSize = r.WantedSize;
             w1.SetSidebarDocked(true);
-            await Task.Delay(300);
+            await Until(() => r.WantedSize != collapsedSize && r.BufferSize == r.WantedSize, 5);
         }
         finally
         {

@@ -162,8 +162,7 @@ internal sealed partial class SelfTest
         StageView.ResetZoom(t);
         stage.Interact();
         stage.Tick();
-        await Task.Delay(100);
-        bool idleHidden = !chrome.MapShown && !chrome.ResetShown;
+        bool idleHidden = await Until(() => !chrome.MapShown && !chrome.ResetShown, 1);
         // The pinch: spreading zooms in around the point between the fingers; closing zooms back out; junk changes nothing.
         double cx = t.ViewX + t.ViewWidth * 0.25, cy = t.ViewY + t.ViewHeight * 0.25;
         stage.PinchDigital(t, cx, cy, 2);
@@ -204,15 +203,29 @@ internal sealed partial class SelfTest
         Expect(shown, "zoomed and active, the tile shows no zoom map or no reset control");
         Expect(corner && shape && region, $"the zoom map is misplaced or marks the wrong region: frame {frame}, visible {visible}, wanted corner at {left:0},{bottom:0}");
 
-        // It fades with the chrome (a few idle seconds) and returns with the pointer.
-        bool faded = await Until(() =>
+        // It fades with the chrome (a few idle seconds, on a manual clock) and returns with the pointer.
+        Viewer viewer = app.Viewer!;
+        var fadeClock = new ManualViewerClock(new SystemViewerClock().Now);
+        viewer.UseClock(fadeClock);
+        bool faded, back;
+        try
         {
+            stage.Interact();
             stage.Tick();
-            return !chrome.MapShown;
-        }, ChromeIdle.HideAfterSeconds + 4);
-        stage.Interact();
-        stage.Tick();
-        bool back = await Until(() => chrome.MapShown, 3);
+            fadeClock.Advance(ChromeIdle.HideAfterSeconds + 0.5);
+            faded = await Until(() =>
+            {
+                stage.Tick();
+                return !chrome.MapShown;
+            }, 3);
+            stage.Interact();
+            stage.Tick();
+            back = await Until(() => chrome.MapShown, 3);
+        }
+        finally
+        {
+            viewer.UseClock(SystemClockInstance);
+        }
         Say($"zoom map: fades with the chrome {faded}, returns with the pointer {back}, hidden at 1x before {idleHidden}");
         Expect(faded && back, "the zoom map did not fade with the chrome and return with the pointer");
         Expect(idleHidden, "at 1x the tile showed a zoom map or a reset control");

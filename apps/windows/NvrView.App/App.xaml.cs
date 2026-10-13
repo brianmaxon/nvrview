@@ -232,6 +232,16 @@ public partial class App : Application
             OpenWindow(ViewerWindow.AllCameras(_viewer));
         }
 
+        // What's New: once, on the first launch of a new version (never in a test run or a background start).
+        if (!o.SelfTest && !o.StartupTest && !o.Background && Updater?.TakeWhatsNew() is { } whatsNew)
+        {
+            Microsoft.UI.Dispatching.DispatcherQueueTimer shown = ui.CreateTimer();
+            shown.Interval = TimeSpan.FromSeconds(2);
+            shown.IsRepeating = false;
+            shown.Tick += (_, _) => _ = Updater?.ShowWhatsNew(whatsNew);
+            shown.Start();
+        }
+
         if (o.SelfTest)
         {
             _selfTest = new SelfTest(this, o);

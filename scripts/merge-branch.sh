@@ -32,9 +32,16 @@
 #    Otherwise NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh runs, up to 3
 #    tries when the failure looks like a known environmental flake (a
 #    software H.264 decoder fallback in the video self-test, the real
-#    microphone step); passes of a retry are recorded as retried and never
-#    let a suite be skipped later. The script prints which suites, on
-#    either side, came from the test result cache.
+#    microphone step). A failed check names the suite or area that was
+#    running and the failing step's lines (scripts/flakes.py explain). A
+#    retry runs only what did not pass: the suites and self-test areas the
+#    earlier tries passed come from the test result cache
+#    (NVRVIEW_RETRY_SINCE marks where the sequence began, so this holds in a
+#    full run too). Passes of a retry are recorded as retried and never let a
+#    suite be skipped later. Each flake is appended to flakes.jsonl in the
+#    common git directory (scripts/flakes.sh lists the most frequent). A
+#    failure that does not look like a flake is not retried. The script
+#    prints which suites, on either side, came from the test result cache.
 # 4. If a check fails, the merge is dropped and the script exits 1. It ends
 #    with the total time and the slowest three steps (scripts/timing.py), and
 #    adds a line to the timing log.
@@ -148,13 +155,14 @@ if [ "$mac_rc" = 0 ]; then
   echo "Mac suites taken from the test result cache: ${mac_cached:-none}"
 else
   echo "Mac check: FAIL (exit $mac_rc) after ${mac_secs}s" >&2
+  cat "$logs/mac.msgs" >&2
   tail -n 25 "$logs/mac.log" >&2
 fi
 if [ "$skip" = 1 ]; then
   echo "Windows check: skipped"
 elif [ "$win_rc" = 0 ]; then
   echo "Windows check: PASS in ${win_secs}s"
-  grep -E 'trying again|try [0-9] of' "$logs/windows.msgs" || true
+  grep -E 'trying again|try [0-9] of|check: ' "$logs/windows.msgs" || true
   tail -n 3 "$logs/windows.log"
   echo "Windows suites taken from the test result cache: $(sed -n 's/.*; cached suites: //p' "$logs/windows.log" | tail -n 1)"
 else

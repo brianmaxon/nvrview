@@ -35,7 +35,7 @@ Commands (RUN is the path that `plan` prints):
                         start a run and decide every suite once; prints RUN.
                         Writes RUN.json (the decisions and fingerprints),
                         RUN.plan (the same decisions as tab-separated lines for
-                        the shell: full, areas, want, crates, cmsg) and an
+                        the shell: full, areas, macareas, want, crates, cmsg) and an
                         empty RUN.log
   finish RUN [--ok [--partial]] [--failed LABEL]
                         folds RUN.log into the store, prints the table, ends
@@ -43,8 +43,9 @@ Commands (RUN is the path that `plan` prints):
                         as the platform's full pass only with --ok and without
                         --partial (steps were skipped)
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
-  areas windows         the Windows app self-test areas (suites app-debug.AREA
-                        and app-publish.AREA; see WINDOWS_OWNED below)
+  areas windows|mac     the app self-test areas: Windows (suites app-debug.AREA;
+                        see WINDOWS_OWNED below) or the Mac (suites
+                        mac-app.AREA; see MAC_OWNED)
   check-projects        fails when DOTNET_REFS differs from the C# project files
 
 The scripts call Python twice per run (plan, finish), not once per suite. The
@@ -60,7 +61,8 @@ the suites that had completed. In RUN.plan, `want SUITE run` means run it,
 ARGS LIST` the cargo arguments and the --list form (`cmsg` lines are the
 cached-crate messages for stderr). A suite not in the plan runs.
 
-The trimmed publish build and what runs on it (app-publish.AREA) are deferred
+The trimmed publish build and what runs on it (app-publish: the plain start and
+the short self-test, `--smoke`, startup and one wiring check per area) are deferred
 in ordinary runs ("deferred ...", counted like cached suites: a stamp with them
 serves merges, not a release); they run in full runs and when the last passing
 trimmed run on the platform is older than NVRVIEW_TRIMMED_MAX_AGE_H (24). app-update
@@ -154,13 +156,15 @@ SUITES = {
         # updater and start-up handling, the packaging script, and the
         # signing tool's crates. The rest of the app is the self-test areas'.
         "app-update": (UPDATE_FILES + ["scripts/windows-app.sh", "VERSION"], ["viewer-ffi", "sign-update"], ["rust"]),
-        # app-debug.AREA and app-publish.AREA are added below (WINDOWS_AREAS).
+        # app-debug.AREA and app-publish are added below (WINDOWS_AREAS).
     },
 }
 
 # The Windows app self-test runs by area (scripts/windows-selftest-areas.txt;
-# SelfTest.AreaNames in the app). Each area is cached on its own, for the debug
-# build (app-debug.AREA) and for the trimmed publish build (app-publish.AREA).
+# SelfTest.AreaNames in the app). Each area of the debug build is cached on its
+# own (app-debug.AREA). The trimmed publish build runs only a short smoke
+# (app-publish: startup and one wiring check per area, SelfTest.Smoke.cs; the
+# trimming itself is checked statically), so it is one suite over the whole app.
 # An area's inputs are all of apps/windows/ except the projects that are not
 # part of the app and the files that only some other area exercises
 # (WINDOWS_OWNED), so a file nobody owns and every shared one (App.xaml.cs,
@@ -183,8 +187,9 @@ WINDOWS_OWNED = {
     "layouts": [_A + "SelfTest.Layouts.cs", _S + "SidebarReveal.cs"],
     "header": [_A + "SelfTest.Header.cs", _A + "HeaderBar.cs", _A + "LayoutIcon.cs", _S + "HeaderChrome.cs"],
     "settings": [_A + "SelfTest.Settings.cs", _A + "SettingsPages.cs", _A + "SettingsWindow.cs",
-                 _A + "UpdateSettingsPanel.cs", _A + "UpdateDefaultsSelfTest.cs", _A + "UpdateNotesSelfTest.cs",
-                 _A + "UpdateNotesView.cs", _A + "Updater.cs", _S + "Discovery.cs", _S + "Updates.cs"],
+                 _A + "UpdateSettingsPanel.cs", _A + "UpdateDefaultsSelfTest.cs", _A + "UpdateNotesSelfTest.cs", _A + "WhatsNewSelfTest.cs",
+                 _A + "UpdateNotesView.cs", _A + "Updater.cs", _S + "Discovery.cs", _S + "Updates.cs",
+                 _S + "ReleaseNotes.cs"],
     "calls": [_A + "SelfTest.Calls.cs", _A + "CallPanel.cs", _A + "Calls.cs", _A + "CallServices.cs",
               _A + "CallWindows.cs", _A + "TranscriptStore.cs", _T + "CallWindow.cs", _T + "Calls.cs",
               _T + "CaptionEcho.cs", _T + "EchoCancellation.cs", _T + "Insets.cs", _T + "TranscriptFiles.cs"],
@@ -223,10 +228,62 @@ def windows_area_excludes(area):
     return out
 
 
-for _prefix in ("app-debug", "app-publish"):
-    for _area in WINDOWS_AREAS:
-        SUITES["windows"]["%s.%s" % (_prefix, _area)] = (
-            ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
+for _area in WINDOWS_AREAS:
+    SUITES["windows"]["app-debug.%s" % _area] = (
+        ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
+SUITES["windows"]["app-publish"] = (
+    ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes("startup"))
+
+# The macOS app self-test (fake core) runs by area the same way
+# (scripts/macos-selftest-areas.txt; SelfTest.areaNames in the app), cached as
+# mac-app.AREA. An area's inputs are the Swift package (apps/macos/) except
+# what is not part of the app and the files only another area exercises
+# (MAC_OWNED: mostly the SelfTest+Area.swift files and the screens behind
+# them), plus the C header copy, the area table, and the fixtures. "startup"
+# takes everything, owned files too. The real-core self-test
+# (scripts/macos-real-selftest.sh) is not cached: it runs in full runs only.
+MAC_AREAS = ["startup", "viewer", "tiles", "layouts", "header", "settings",
+             "calls", "recordings", "capture", "ptz", "alerts"]
+MAC_NOT_APP = ["apps/macos/Sources/NVRViewDemo/", "apps/macos/Tests/", "apps/macos/Packaging/"]
+_N, _C, _F = "apps/macos/Sources/NVRView/", "apps/macos/Sources/NVRCore/", "apps/macos/Sources/FakeCore/"
+MAC_OWNED = {
+    "tiles": [_N + "SelfTest+Fisheye.swift", _C + "Fisheye.swift"],
+    "settings": [_N + "SelfTest+Settings.swift", _N + "UpdateDefaultsSelfTest.swift", _N + "UpdateNotesSelfTest.swift", _N + "WhatsNewSelfTest.swift",
+                 _N + "UpdateNotesView.swift", _C + "Discovery.swift", _F + "FakeDiscovery.swift"],
+    "calls": [_N + "SelfTest+Calls.swift", _N + "CallServices.swift", _N + "CallWindow.swift", _N + "DoorbellCalls.swift",
+              _N + "TranscriptStore.swift", _C + "CaptionEcho.swift", _C + "CallTranscriptFile.swift",
+              _C + "EchoCancellation.swift", _C + "TalkAudioConverter.swift"],
+    "recordings": [_N + "SelfTest+Recordings.swift", _N + "EditPlayer.swift", _N + "EditStage.swift",
+                   _N + "PlayerStage.swift", _N + "RecordingsBrowser.swift", _N + "RecordingsExport.swift",
+                   _N + "RecordingsModel.swift", _N + "RecordingsPlayer.swift", _N + "RecordingsPlayerView.swift",
+                   _N + "RecordingsWindow.swift", _C + "EditExporter.swift", _C + "EditPlan.swift",
+                   _C + "EditSession.swift", _C + "ExportPlan.swift", _C + "ExportSupport.swift", _C + "MP4ShareSafe.swift",
+                   _C + "Playback.swift", _C + "PlayerRules.swift", _C + "Recordings.swift", _C + "RecordingsBrowse.swift",
+                   _C + "RecordingsSound.swift", _C + "SoundAnalysis.swift", _C + "TrimExporter.swift",
+                   _F + "FakePlayback.swift", _F + "FakeRecordings.swift", _F + "SyntheticRecording.swift"],
+    "capture": [_N + "SelfTest+Capture.swift"],
+    "ptz": [_N + "SelfTest+PTZ.swift", _N + "PTZControls.swift", _N + "PTZModel.swift", _N + "StageView+PTZ.swift",
+            _C + "PTZ.swift"],
+    "alerts": [_N + "SelfTest+Alerts.swift", _N + "AlertsSelfTest.swift", _N + "DetectorSelfTest.swift",
+               _N + "MockHomeAssistant.swift", _N + "SmartAlertEventsWindow.swift", _N + "SmartAlertsModel.swift",
+               _N + "SmartAlertsSettingsView.swift", _N + "StageView+Verify.swift", _N + "VerificationViews.swift",
+               _C + "SmartAlerts.swift", _C + "SmartAlertSettings.swift", _C + "VerificationBoard.swift",
+               _F + "FakeAlerts.swift", "apps/macos/Sources/AlertHost/", "apps/macos/Sources/DetectorKit/"],
+}
+MAC_APP_EXTRA = ["docs/nvrview.h", "crates/viewer-ffi/include/", "scripts/macos-selftest-areas.txt", "VERSION"] + FIXTURES
+
+
+def mac_area_excludes(area):
+    out = list(MAC_NOT_APP)
+    if area != "startup":
+        for other, paths in MAC_OWNED.items():
+            if other != area:
+                out += paths
+    return out
+
+
+for _area in MAC_AREAS:
+    SUITES["mac"]["mac-app.%s" % _area] = (["apps/macos/"] + MAC_APP_EXTRA, [], ["swift"], mac_area_excludes(_area))
 
 RUST_FAMILIES = {"mac": FAMILIES, "windows": ("clippy", "test", "doctest")}
 
@@ -413,7 +470,7 @@ def entry_path(base, platform, suite, key, retried=False):
 
 def is_trimmed(suite):
     """The suites that need the trimmed publish build."""
-    return suite.startswith("app-publish.") or suite == "app-update"
+    return suite in ("app-publish", "app-update")
 
 
 def trimmed_reason(base, platform, full):
@@ -524,7 +581,8 @@ def crates_decision(base, run, fam):
 
 def plan_text(run):
     """The decisions as tab-separated lines for the shell."""
-    lines = ["full\t%s" % run["reason"], "areas\t%s" % " ".join(WINDOWS_AREAS)]
+    lines = ["full\t%s" % run["reason"], "areas\t%s" % " ".join(WINDOWS_AREAS),
+             "macareas\t%s" % " ".join(MAC_AREAS)]
     for suite, d in sorted(run["wants"].items()):
         lines.append("want\t%s\t%s\t%s" % (suite, d["status"], d["line"]))
     for fam, d in run["crate_plans"].items():
@@ -578,13 +636,23 @@ def plan(platform, full=False, retried=False, tools_file=None):
 
 def cached_entry(base, run, suite):
     """The cached clean pass that lets SUITE be skipped, or None."""
-    if run["full"]:
+    # A retry after a known flake (NVRVIEW_RETRY_SINCE = when the first try
+    # started) takes the passes of the earlier tries of that same sequence,
+    # also in a full run and also those recorded as retried, and nothing older.
+    since = int(os.environ.get("NVRVIEW_RETRY_SINCE") or 0) if run["retried"] else 0
+    if run["full"] and not since:
         return None
     s = run["suites"].get(suite)
     if not s or s["dirty"]:
         return None
     e = read_json(entry_path(base, run["platform"], suite, s["key"]))
-    if not e or e.get("retried") or now() - e["time"] > hours("NVRVIEW_CACHE_MAX_AGE_H", 72) * 3600:
+    if since:
+        r = read_json(entry_path(base, run["platform"], suite, s["key"], True))
+        if r and r["time"] >= since and (not e or r["time"] > e["time"]):
+            e = r
+        if e and e["time"] < since and run["full"]:
+            return None
+    if not e or (e.get("retried") and not since) or now() - e["time"] > hours("NVRVIEW_CACHE_MAX_AGE_H", 72) * 3600:
         return None
     return e
 
@@ -730,8 +798,8 @@ def cmd_check_projects(args):
 
 
 def cmd_areas(args):
-    """Prints the Windows app self-test areas, space separated."""
-    print(" ".join(WINDOWS_AREAS))
+    """Prints the Windows (or, with `mac`, the Mac) app self-test areas, space separated."""
+    print(" ".join(MAC_AREAS if args and args[0] == "mac" else WINDOWS_AREAS))
     return 0
 
 

@@ -1,10 +1,8 @@
 //! Info queries and the channel list, against the in-process mock NVR.
 
-mod common;
-
+use crate::common::mock_connector;
 use bc_protocol::session::Command;
 use bc_session::{DeviceSession, QueryError, SessionConfig};
-use common::mock_connector;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
 use std::time::Duration;

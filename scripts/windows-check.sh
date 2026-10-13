@@ -47,6 +47,8 @@ if [ "${1:-}" = "--lock-held" ]; then
   shift
 fi
 defaults_args=""
+release_notes=""
+notes_history=""
 if [ "${1:-}" = "--clean" ]; then
   clean=1
   NVRVIEW_WINDOWS_WORKER="${2:?usage: $0 --clean <worker name>}"
@@ -68,7 +70,13 @@ elif [ "${1:-}" = "--package" ]; then
 $1
 $2"
         shift 2 ;;
-      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]" >&2; exit 2 ;;
+      --release-notes)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        release_notes="$2"; shift 2 ;;
+      --notes-history)
+        [ $# -ge 2 ] || { echo "$1 needs a value" >&2; exit 2; }
+        notes_history="$2"; shift 2 ;;
+      *) echo "usage: $0 --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE] [--release-notes FILE [--notes-history DIR]]" >&2; exit 2 ;;
     esac
   done
   if [ -n "$defaults_args" ]; then
@@ -78,6 +86,11 @@ $2"
     # shellcheck disable=SC2086 # split on newlines only
     "$py" -I scripts/update-defaults.py $defaults_args --out /dev/null >/dev/null
     IFS=$oldifs
+  fi
+  if [ -n "$release_notes" ]; then
+    # Validated now, before the build; added to the zip below as release-notes.json.
+    "$py" -I scripts/release-notes-bundle.py --version "$(tr -d '[:space:]' <VERSION)" --notes "$release_notes" \
+      ${notes_history:+--history "$notes_history"} --out /dev/null >/dev/null
   fi
 elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
@@ -175,6 +188,10 @@ if [ -n "$package_to" ]; then
     "$py" -I scripts/update-defaults.py $defaults_args --add-to-zip "$package_to/$zip"
     IFS=$oldifs
   fi
+  if [ -n "$release_notes" ]; then
+    "$py" -I scripts/release-notes-bundle.py --version "$version" --notes "$release_notes" \
+      ${notes_history:+--history "$notes_history"} --add-to-zip "$package_to/$zip"
+  fi
   ls -l "$package_to/$zip"
   exit 0
 fi
@@ -209,11 +226,13 @@ NVRVIEW_SUITES=""
 wanted="shell-tests"
 if [ "$only" != app ]; then wanted="csharp-smoke tiles-tests video-selftest $wanted"; fi
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then
-  # The app self-test is cached by area (scripts/windows-selftest-areas.txt), for the debug and the publish build.
-  # NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no stamp, not a full pass).
+  # The debug build's app self-test is cached by area (scripts/windows-selftest-areas.txt); the trimmed publish
+  # build runs a short smoke (app-publish). NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no
+  # stamp, not a full pass, no trimmed build).
   for a in $(cache_areas); do
-    case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a app-publish.$a" ;; esac
+    case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a" ;; esac
   done
+  if [ -z "${NVRVIEW_APP_AREAS:-}" ]; then wanted="$wanted app-publish"; fi
   wanted="$wanted app-update"
 fi
 for s in $wanted; do
@@ -252,6 +271,8 @@ while read -r name secs; do
   cache_pass "$secs" "$name"
 done <"$logs/results"
 if [ "$rc" != 0 ]; then
+  # Name the failure: the suite or area that was running and the failing step.
+  tr -d '\r' <"$logs/worker.log" | "$py" -I scripts/flakes.py explain /dev/stdin | sed 's/^/Windows check: /' >&2
   exit "$rc"
 fi
 partial=""

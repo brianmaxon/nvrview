@@ -150,7 +150,7 @@ unset NVRVIEW_WINDOWS_HOSTS
 export NVRVIEW_WINDOWS_LOCK="$work/l4/windows.lock"
 new_repo() { # DIR
   mkdir -p "$1/scripts"
-  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-train.sh" "$here/branch-ready.sh" "$here/windows-lock.sh" "$here/suite-cache.py" "$here/timing.py" "$1/scripts/"
+  cp "$here/stamps-lib.sh" "$here/checked.sh" "$here/merge-train.sh" "$here/branch-ready.sh" "$here/windows-lock.sh" "$here/suite-cache.py" "$here/timing.py" "$here/flakes.py" "$1/scripts/"
   (
     cd "$1"
     git init -q -b main .

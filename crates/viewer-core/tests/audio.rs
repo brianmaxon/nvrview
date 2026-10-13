@@ -12,11 +12,9 @@
 //! all in simulated time, so the timing checks are exact and do not depend
 //! on how busy the machine is.
 
-mod common;
-
+use crate::common::{PASSWORD, USER, on_sim, sim_spawn, sim_until, wait_until};
 use audio_pipeline::adts::split_frames;
 use audio_pipeline::decode::Decoder;
-use common::{PASSWORD, USER, on_sim, sim_spawn, sim_until, wait_until};
 use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1,12 +1,18 @@
-// The playback pacing step of the self-test (docs/RENDERING.md "Playback pacing"): one camera of the mock's
-// recordings plays at 1x in a Recordings window on the real core, while the first window keeps its live tiles, and
-// the tile's pacing trace measures when each picture reached the app, was decoded, and was first drawn. The shown
-// pictures' intervals must follow their own timestamps within a bound. The macOS self-test measures the same
-// (the shared step ID is playback-pacing).
+// The pacing steps of the self-test (docs/RENDERING.md "Playback pacing" and "Live pacing"): the tiles' pacing traces
+// record when each picture reached the app, was decoded, and was first drawn. The macOS self-test measures the same
+// (the shared step IDs are live-pacing and playback-pacing).
 //
-// This step waits on real time on purpose: what it measures is real pacing (the engine's release clock, the
-// decoder, the display refresh), which a simulated clock cannot show. Ten seconds give about a hundred pictures at
-// the mock's 10 fps.
+// Where each part is proven:
+// - that the core releases pictures at their own pace (live pictures a device sends in pairs, a recording whose device
+//   clock is in another zone): the core's tests on a simulated clock (crates/viewer-core/tests/core.rs
+//   live_pictures_delivered_in_groups_are_decoded_at_their_own_pace, tests/playback.rs
+//   pictures_are_released_evenly_when_the_given_utc_offset_is_not_the_devices);
+// - the display stage and the bounds, including the old bugs injected (decode on arrival, bursts from a wrong UTC
+//   offset): PacingRefresh and PacingVerdict in NvrView.Shell, with the tests in NvrView.Shell.Tests/PacingTests.cs;
+// - here, end to end in the running app: the real core against the mock, the real decoder, and the real renderer. The
+//   verdict is taken on the decode times shown by an ideal 60 Hz display (PacingRefresh), so it does not depend on
+//   how many refreshes the real display gave a window behind the others; the real display's share of drawn pictures
+//   is checked as wiring. The steps wait for picture counts, never for a fixed time.
 
 using NvrView.Shell;
 using NvrView.Video;
@@ -15,21 +21,18 @@ namespace NvrView.App;
 
 internal sealed partial class SelfTest
 {
-    /// <summary>Jitter (ms) the shown pictures may have at the 95th percentile: one 60 Hz refresh plus a few ms.</summary>
-    internal const double PacingJitterP95Ms = 20;
+    /// <summary>Share of the released pictures the real display must draw (wiring: the renderer takes new pictures).</summary>
+    internal const double RealShownRatio = 0.8;
 
-    /// <summary>Largest jitter (ms) allowed for any shown picture: two refreshes.</summary>
-    internal const double PacingJitterMaxMs = 34;
+    /// <summary>Live pictures each tile must deliver before the live verdict.</summary>
+    internal const int LivePictures = 30;
 
-    /// <summary>Share of the released pictures that must be drawn.</summary>
-    internal const double PacingShownRatio = 0.9;
-
-    private static double ShownRatio(PacingReport r) => r.Released.Pictures > 0 ? (double)r.Shown.Pictures / r.Released.Pictures : 0;
+    /// <summary>Shown picture pairs the playback verdict needs (about four seconds at the mock's 10 fps).</summary>
+    internal const int PlaybackPairs = 40;
 
     /// <summary>
-    /// Live pacing: for five seconds every live tile of the first window traces its pictures; together the tiles
-    /// must draw at least <see cref="PacingShownRatio"/> of the pictures delivered (the mock sends them in pairs,
-    /// as devices bunch them; the core paces them to their timestamps). Real time on purpose, like the playback step.
+    /// Live pacing: every live tile of the first window traces its pictures until each delivered
+    /// <see cref="LivePictures"/>; the pictures the mock sends in pairs must be shown at their own pace.
     /// </summary>
     private async Task LivePacingStep(StageRenderer r)
     {
@@ -40,17 +43,21 @@ internal sealed partial class SelfTest
             video.Pacing = trace;
         }
         long frames = r.Frames;
-        await Task.Delay(5000);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        bool enough = await Until(() => traces.All(t => t.Trace.Counts.Decoded >= LivePictures), 15);
         foreach ((VideoTile video, _) in traces)
         {
             video.Pacing = null;
         }
         PacingReport[] reports = [.. traces.Select(t => t.Trace.Report())];
         int delivered = reports.Sum(x => x.Released.Pictures), shown = reports.Sum(x => x.Shown.Pictures);
-        double ratio = delivered > 0 ? (double)shown / delivered : 0;
-        Say($"live pacing: {traces.Length} tiles, {delivered} pictures delivered, {shown} drawn ({ratio:0.00}), {r.Frames - frames} frames in 5 s; " +
-            $"first tile: {(reports.Length > 0 ? reports[0].ToString() : "none")}");
-        Expect(ratio >= PacingShownRatio, $"live pacing: {shown} of {delivered} delivered pictures were drawn");
+        int simulated = reports.Sum(x => x.Simulated.Pictures);
+        double ratio = delivered > 0 ? (double)shown / delivered : 0, simRatio = delivered > 0 ? (double)simulated / delivered : 0;
+        Say($"live pacing: {traces.Length} tiles, {delivered} pictures delivered, {shown} drawn ({ratio:0.00}), {simulated} on the simulated display ({simRatio:0.00}), " +
+            $"{r.Frames - frames} frames in {watch.Elapsed.TotalSeconds:0.0} s; first tile: {(reports.Length > 0 ? reports[0].ToString() : "none")}");
+        Expect(enough, $"live pacing: the tiles did not each deliver {LivePictures} pictures");
+        Expect(simRatio >= PacingVerdict.ShownRatio, $"live pacing: {simulated} of {delivered} delivered pictures would be shown at 60 Hz");
+        Expect(ratio >= RealShownRatio, $"live pacing: {shown} of {delivered} delivered pictures were drawn");
     }
 
     private async Task PlaybackPacingStep(Viewer v)
@@ -69,11 +76,12 @@ internal sealed partial class SelfTest
         RecordingsPlayer p = b.Player;
         // The owner's path: an incident selected on the day's timeline opens a playback from its start less its
         // margin (the Incident scrubber), here a finished one of the one enabled camera.
-        bool listed = await Until(() => b.DayIncidents.Any(i => !i.Growing) && !service.Searching.Busy, 30);
+        // Once the day is searched it may hold only a growing incident (the mock records days by UTC date, so early in
+        // its day, or just after midnight east of UTC, its newest day has no finished incident yet): then yesterday.
+        await Until(() => !service.Searching.Busy && b.DayIncidents.Count > 0, 30);
+        bool listed = b.DayIncidents.Any(i => !i.Growing);
         if (!listed)
         {
-            // The mock records days by UTC date; just after midnight east of UTC its newest day is this computer's
-            // yesterday.
             b.PreviousDay();
             listed = await Until(() => b.DayIncidents.Any(i => !i.Growing) && !service.Searching.Busy, 30);
         }
@@ -98,7 +106,7 @@ internal sealed partial class SelfTest
                 video = found;
                 video.Pacing = trace;
             }
-            return p.State == NvrView.Interop.NvPlaybackState.Playing && trace.Report().Shown.Pictures >= 10;
+            return p.State == NvrView.Interop.NvPlaybackState.Playing && trace.Counts.Shown >= 10;
         }, 30);
         if (!started || video is null)
         {
@@ -108,26 +116,23 @@ internal sealed partial class SelfTest
             return;
         }
         VideoTile tile = video;
-        // Past the play's opening burst, then ten seconds measured.
-        await Task.Delay(2000);
-        async Task<PacingReport> Measure(string label)
-        {
-            trace.Reset();
-            long positionBefore = p.PositionMs;
-            await Task.Delay(10_000);
-            PacingReport r = trace.Report();
-            Say($"playback pacing ({label}): decoder {tile.DecoderName} ({tile.DecoderKind}), " +
-                $"position moved {p.PositionMs - positionBefore} ms in 10 s, shown/released {ShownRatio(r):0.00}; {r}");
-            return r;
-        }
-        PacingReport report = await Measure("incident at 1x");
+        // Past the play's opening burst (ten more pictures), then measured until enough pictures were decoded.
+        trace.Reset();
+        await Until(() => trace.Counts.Decoded >= 10, 10);
+        trace.Reset();
+        long positionBefore = p.PositionMs;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        bool enough = await Until(() => trace.Counts.Decoded >= PlaybackPairs + 5, 20);
+        PacingReport report = trace.Report(PlaybackPairs);
         tile.Pacing = null;
-        Expect(report.Shown.Pairs >= 50, $"playback pacing: only {report.Shown.Pairs} picture pairs were shown in 10 s");
-        Expect(report.Shown.JitterP95 <= PacingJitterP95Ms && report.Shown.JitterMax <= PacingJitterMaxMs,
-            $"playback pacing: shown pictures are uneven (jitter p95 {report.Shown.JitterP95:0.0} ms, max {report.Shown.JitterMax:0.0} ms; " +
-            $"bounds {PacingJitterP95Ms} and {PacingJitterMaxMs} ms)");
-        Expect(ShownRatio(report) >= PacingShownRatio, $"playback pacing: {report.Shown.Pictures} of {report.Released.Pictures} released pictures were shown");
-        Expect(report.Skipped == 0, $"playback pacing: {report.Skipped} decoded pictures were never shown");
+        Say($"playback pacing (incident at 1x): decoder {tile.DecoderName} ({tile.DecoderKind}), " +
+            $"position moved {p.PositionMs - positionBefore} ms in {watch.Elapsed.TotalSeconds:0.0} s, drawn/released {report.ShownRatio:0.00}; {report}");
+        Expect(enough, $"playback pacing: only {trace.Counts.Decoded} pictures were decoded in 20 s");
+        foreach (string problem in report.Problems)
+        {
+            _problems.Add($"playback pacing (simulated 60 Hz display): {problem}");
+        }
+        Expect(report.ShownRatio >= RealShownRatio, $"playback pacing: the display drew {report.Shown.Pictures} of {report.Released.Pictures} released pictures");
         w.Close();
         await Until(() => w.IsClosed, 5);
         service.SetEnabled(camera, false);

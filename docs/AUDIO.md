@@ -165,7 +165,7 @@ the crate's `Renderer`.
   and a week in; and the adaptive delay settles on its target and stays.
   The original 3-hour runs are one ignored test, run by hand only when a
   sync problem is suspected:
-  `cargo nextest run -p audio-pipeline --test sim --run-ignored only --no-capture`.
+  `cargo nextest run -p audio-pipeline -E 'test(/^sim::/)' --run-ignored only --no-capture`.
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the

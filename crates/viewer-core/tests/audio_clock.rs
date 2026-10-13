@@ -9,9 +9,7 @@
 //! to the machine, and the jitter comes from a seeded generator, so each
 //! run renders exactly the same calls.
 
-mod common;
-
-use common::{PASSWORD, USER, on_sim, sim_spawn, sim_until};
+use crate::common::{PASSWORD, USER, on_sim, sim_spawn, sim_until};
 use simtime::SimRuntime;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
