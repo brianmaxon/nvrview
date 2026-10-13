@@ -80,7 +80,10 @@ function Install-WingetPackage([string]$Id, [string[]]$ExtraArgs = @()) {
     return
   }
   Write-Host "installing $Id"
-  $wingetArgs = @('install', '--id', $Id, '--exact', '--silent',
+  # Every package here is in the community 'winget' source. Naming it keeps a
+  # broken msstore source (an outdated App Installer fails its certificate
+  # check) from stopping the install.
+  $wingetArgs = @('install', '--id', $Id, '--exact', '--silent', '--source', 'winget',
     '--accept-package-agreements', '--accept-source-agreements') + $ExtraArgs
   & winget @wingetArgs
   # winget returns non-zero for "already installed" on some versions; check again.
