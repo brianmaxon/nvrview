@@ -4,7 +4,7 @@
 // markers there). What trimming can break is code reached only by reflection or by the XAML and JSON paths, and each
 // check below goes through such a path once: a window of each kind, a menu, a settings file, a picture file, a core
 // request of each kind. That trimming keeps what the app reflects on is also checked statically when the app is
-// published (TrimmerRootDescriptor and trim analysis warnings as errors in NvrView.App.csproj).
+// published (TrimmerRootAssembly in NvrView.App.csproj, the trim analyzer in Directory.Build.props).
 
 using NvrView.Shell;
 using NvrView.Tiles;

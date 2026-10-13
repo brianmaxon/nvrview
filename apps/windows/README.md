@@ -273,9 +273,10 @@ no `.pdb` files and no debugger or crash-dump helpers (`mscordaccore*.dll`,
 about 34 MB zipped and 85 MB in 318 files, against 101 MB and 266 MB in 613
 files before. Trimming breaks things silently, so it is checked twice:
 statically, by the trim analyzer on every build (`EnableTrimAnalyzer` in
-`Directory.Build.props`, warnings are errors) and by `publish`, which fails
-unless the app's own assemblies reach the output byte for byte as compiled
-(kept whole, so nothing they reflect on is gone); and at run time, where the
+`Directory.Build.props`, warnings are errors), by the app's own assemblies
+being trimmer roots (`TrimmerRootAssembly`: every type and member kept, so
+nothing they reflect on is gone), and by `publish`, which fails when one of
+them lost more than 10% of its compiled size; and at run time, where the
 check script's app steps (`NVRVIEW_APP_SELFTEST=1`, in full runs, releases,
 and the daily trimmed run) run the plain start, a short self-test
 (`--smoke`: the startup area and one wiring check per other area, each going

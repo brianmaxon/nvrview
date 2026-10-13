@@ -73,24 +73,30 @@ publish() {
   fi
 }
 
-# Partial trimming keeps the app's own assemblies whole (NvrView.App.csproj), so
-# nothing they reflect on can be removed: each must reach the publish output
-# exactly as it was compiled. A static check, so the trimmed build needs only a
-# short run of its own (`selftest ... --smoke`).
+# The app's own assemblies are trimmer roots (NvrView.App.csproj), so nothing
+# they reflect on can be removed. The linker rewrites them (the bytes differ
+# from the compiled files), but a whole assembly keeps about its size while a
+# trimmed one shrinks a lot: each must keep at least 90% of its compiled size.
+# A static check, so the trimmed build needs only a short run of its own
+# (`selftest ... --smoke`).
 kept_whole() {
-  local dir name built status=0
+  local dir name built size_built size_out status=0
   dir=$(dirname "$exe")
   for name in NvrView.App NvrView.Interop NvrView.Video NvrView.Tiles NvrView.Shell; do
     built=$(find "$out/obj/$name" -path '*release*' -name "$name.dll" -not -path '*/ref/*' -not -path '*/refint/*' 2>/dev/null | head -1)
     if [ -z "$built" ] || [ ! -f "$dir/$name.dll" ]; then
       echo "trim check: $name.dll is missing from the build or the publish output" >&2
       status=1
-    elif ! cmp -s "$built" "$dir/$name.dll"; then
-      echo "trim check: $name.dll in the publish output differs from the compiled one (trimmed?)" >&2
+      continue
+    fi
+    size_built=$(wc -c <"$built")
+    size_out=$(wc -c <"$dir/$name.dll")
+    echo "trim check: $name.dll $size_built bytes compiled, $size_out published"
+    if [ $((size_out * 10)) -lt $((size_built * 9)) ]; then
+      echo "trim check: $name.dll lost more than 10% in the publish output (trimmed?)" >&2
       status=1
     fi
   done
-  [ "$status" = 0 ] && echo "trim check: the app's assemblies are kept whole"
   return "$status"
 }
 

@@ -209,8 +209,8 @@ at the end shows each suite as ran or cached, with its time.
   files by `suite-cache.py check-projects`). Sanitization, self-test parity,
   the secret scan, and `cargo fmt` always run.
 - **Trimmed build.** Trimming is checked statically on every build (the trim
-  analyzer, warnings as errors) and at publish (the app's own assemblies must
-  reach the output unchanged). The trimmed publish with its plain start and a
+  analyzer, warnings as errors) and at publish (the app's own assemblies are
+  trimmer roots, kept whole). The trimmed publish with its plain start and a
   short self-test (`app-publish`: `--smoke`, the startup area and one wiring
   check per area; the whole self-test runs on the debug build) and the update
   test run in full runs (releases) and when the last passing trimmed run on
