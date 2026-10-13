@@ -36,6 +36,10 @@ use std::collections::VecDeque;
 /// UTC offsets come in quarter hours.
 const OFFSET_STEP_S: i64 = 900;
 
+/// A jump in recorded time between two pictures of at least this many ms
+/// is a gap in the recording, not media.
+const GAP_MS: i64 = 3_000;
+
 /// Keyframes kept for refining the anchor.
 const ANCHOR_KEYFRAMES: usize = 64;
 
@@ -92,6 +96,10 @@ pub(crate) struct CamBuf {
     newest_pts: Option<u64>,
     /// Pictures of the run up to this timestamp were held already.
     skip_through: Option<u64>,
+    /// Timestamp of the first picture after the newest gap in the recording
+    /// (a jump of at least [`GAP_MS`] between pictures): empty time is not
+    /// media, so the limit counts from here.
+    span_from: Option<u64>,
     /// Waiting for the run's first keyframe.
     gated: bool,
     /// Something arrived in this run.
@@ -115,6 +123,7 @@ impl CamBuf {
             seek_ms: 0,
             newest_pts: None,
             skip_through: None,
+            span_from: None,
             gated: true,
             got_media: false,
             max_ms,
@@ -129,6 +138,7 @@ impl CamBuf {
         self.bytes = 0;
         self.newest_pts = None;
         self.skip_through = None;
+        self.span_from = None;
         self.offset_checked = false;
         self.begin(run, seek_ms);
     }
@@ -183,6 +193,13 @@ impl CamBuf {
                 if self.anchor.is_none() && self.fallback_us.is_none() {
                     self.fallback_us = Some(self.seek_ms * 1000 - *pts_us as i64);
                 }
+                if let (Some(prev), Some(now)) = (
+                    self.newest_pts.and_then(|p| self.recorded_ms(p)),
+                    self.recorded_ms(*pts_us),
+                ) && now - prev >= GAP_MS
+                {
+                    self.span_from = Some(*pts_us);
+                }
                 self.newest_pts = Some(*pts_us);
             }
             Record::Audio { .. } if self.gated => return Push::Kept,
@@ -230,9 +247,13 @@ impl CamBuf {
         self.bytes > bytes || self.span_ms().is_some_and(|s| s > ms)
     }
 
-    /// Media time held: newest picture less the oldest one held.
+    /// Media time held: newest picture less the oldest one held (or the
+    /// first after the newest gap in the recording: the empty time of a gap
+    /// is not media, and counting it would stop a play that skips the gap
+    /// by itself and start another where the recording returns).
     fn span_ms(&self) -> Option<i64> {
         let oldest = self.entries.iter().find_map(Entry::pts)?;
+        let oldest = self.span_from.map_or(oldest, |f| oldest.max(f));
         Some(self.recorded_ms(self.newest_pts?)? - self.recorded_ms(oldest)?)
     }
 
@@ -282,6 +303,7 @@ impl CamBuf {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.span_from = None;
     }
 
     /// Whether nothing is held.
@@ -343,6 +365,28 @@ mod tests {
         assert_eq!(b.entries.len(), n);
         assert_eq!(b.push(2, video(1005, 200, false, 10)), Push::Kept);
         assert_eq!(b.entries.len(), n + 1);
+    }
+
+    #[test]
+    fn the_empty_time_of_a_gap_is_not_counted_toward_the_limit() {
+        let mut b = CamBuf::new(-3600, 4_000, 1 << 20);
+        b.restart(1, 1_000_000);
+        assert_eq!(b.push(1, video(1001, 0, true, 10)), Push::Kept);
+        for i in 1..10 {
+            assert_eq!(b.push(1, video(1001, i * 100, false, 10)), Push::Kept);
+        }
+        // The recording resumes 30 s later: the held pictures are 1 s
+        // before the gap and 1 s after it, not 31 s.
+        assert_eq!(b.push(1, video(1031, 0, true, 10)), Push::Kept);
+        for i in 1..10 {
+            assert_eq!(b.push(1, video(1031, i * 100, false, 10)), Push::Kept);
+        }
+        assert!(b.low_water());
+        // Media after the gap counts as usual.
+        for s in 1032..1036 {
+            b.push(1, video(s, 0, true, 10));
+        }
+        assert_eq!(b.push(1, video(1036, 0, true, 10)), Push::Full);
     }
 
     #[test]
