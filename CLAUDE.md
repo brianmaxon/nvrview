@@ -180,7 +180,7 @@ merged / skipped / failed.
 **Windows lock and hosts.** `scripts/windows-lock.sh` (taken by
 `windows-check.sh`, `merge-branch.sh`, `merge-train.sh`, `release-check.sh`) is
 the one lock for the Windows computer. Merges and releases wait at priority
-`merge`, agents at `agent`: while a merge waits, no agent check starts. The lock
+`merge`, agents at `agent`: an agent check does not take a computer a waiting merge could use (priority is per host). The lock
 records its owner; one whose process has been gone for 2 minutes is broken
 with a log line. `NVRVIEW_WINDOWS_HOSTS="host-a host-b"` makes a pool with one
 lock per host (setup: apps/windows/README.md); stamps and the cache are keyed
