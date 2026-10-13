@@ -25,6 +25,8 @@
 //!   every stream, input, and output on shutdown.
 
 mod api;
+mod diag;
+mod evidence;
 mod frames;
 mod modules;
 mod seams;
@@ -34,7 +36,7 @@ pub use modules::{home_assistant_factory, mqtt_factory};
 pub use seams::{
     AlertError, AlertFrames, AlertInput, AlertNotice, AlertOutput, DeliveryDone, ExternalTrigger,
     ExternalTriggers, InputContext, InputFactory, NoticeState, OutputContext, OutputFactory,
-    RecordingOutput, Secret, TriggerRejected,
+    RecordingOutput, Secret, TestDone, TestResult, TriggerRejected,
 };
 
 use crate::clock::HostClock;
@@ -50,6 +52,7 @@ use alerts::verify::{Detection, Sample};
 use alerts::zone::BBox;
 use bc_protocol::stream::StreamTier;
 use bc_session::DeviceSession;
+use evidence::EvidenceStore;
 use frames::{Bundle, Note, Want};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -89,6 +92,8 @@ const SUMMARY_MAX: usize = 200;
 const EVENT_SUMMARY_MAX: usize = 200;
 /// Most trigger inputs and outputs configured.
 const MAX_PLUGINS: usize = 16;
+/// Simulated triggers remembered as tests.
+pub(crate) const MAX_TESTS: usize = 256;
 
 /// Host-side tunables of picture acquisition (`acquisition` in the
 /// settings document).
@@ -282,7 +287,13 @@ struct State {
     mutes: BTreeMap<CameraId, i64>,
     log: AlertLog,
     snapshots: SnapshotCache,
+    evidence: EvidenceStore,
     feedback: FeedbackStore,
+    /// Triggers started by "simulate trigger" (the newest [`MAX_TESTS`]),
+    /// with whether a test may also go to Home Assistant.
+    tests: BTreeMap<u64, bool>,
+    /// The alerts those triggers raised, with the same flag.
+    test_alerts: BTreeMap<u64, bool>,
     next_alert_id: u64,
     last_tick: Option<Instant>,
 }
@@ -389,6 +400,9 @@ impl AlertHub {
                 mutes: BTreeMap::new(),
                 log,
                 snapshots: SnapshotCache::open(dir.clone(), now_ms),
+                evidence: EvidenceStore::open(dir.clone(), now_ms),
+                tests: BTreeMap::new(),
+                test_alerts: BTreeMap::new(),
                 feedback: FeedbackStore::open(dir),
                 next_alert_id: high_alert + 1,
                 last_tick: None,
@@ -1197,7 +1211,47 @@ impl Inner {
             Outcome::Alert { .. } => "update",
             _ => "logged",
         };
+        let test_flag = st.tests.get(&d.trigger_id).copied();
+        // The configured sensor that triggered it, by its key.
+        let sensor_key = st.engine.as_ref().map(Engine::settings).and_then(|s| {
+            d.trace.steps.iter().find_map(|step| match &step.kind {
+                StepKind::TriggerReceived {
+                    sensor: Some(i), ..
+                } => s.sources.get(*i as usize).map(|m| m.key.clone()),
+                _ => None,
+            })
+        });
         let mut line = json!({"logged_ms": now.ms, "source": source_name, "decision": decision});
+        if let Some(k) = &sensor_key {
+            line["sensor"] = json!(k);
+        }
+        if test_flag.is_some() {
+            line["test"] = json!(true);
+        }
+        if st.evidence.has(d.trigger_id) {
+            let mut summary = decision.clone();
+            if let Some(o) = summary.as_object_mut() {
+                o.remove("trace");
+            }
+            let mut patch = json!({"decision": summary, "source": source_name});
+            // What triggered the check: the camera AI's claim (a device
+            // source) or the sensor's kind.
+            if let Some(t) = d.trace.steps.iter().find_map(|s| match &s.kind {
+                StepKind::TriggerReceived {
+                    source,
+                    kind,
+                    class,
+                    ..
+                } => Some(json!({"source": source, "kind": kind, "class": class})),
+                _ => None,
+            }) {
+                patch["trigger"] = t;
+            }
+            if test_flag.is_some() {
+                patch["test"] = json!(true);
+            }
+            st.evidence.merge_doc(d.trigger_id, &patch, now.ms);
+        }
         if let Some(k) = &device_key {
             line["device_key"] = json!(k);
         }
@@ -1214,6 +1268,12 @@ impl Inner {
         }
         let mut ev = json!({"type": "alert", "state": state, "source": source_name,
                             "decision": event_decision});
+        if test_flag.is_some() {
+            ev["test"] = json!(true);
+        }
+        if let Some(k) = &sensor_key {
+            ev["sensor"] = json!(k);
+        }
         if let Some(k) = &device_key {
             ev["device_key"] = json!(k);
         }
@@ -1233,6 +1293,12 @@ impl Inner {
         } = &d.outcome
         {
             st.next_alert_id = st.next_alert_id.max(alert_id + 1);
+            if let Some(to_ha) = test_flag {
+                st.test_alerts.insert(*alert_id, to_ha);
+                while st.test_alerts.len() > MAX_TESTS {
+                    st.test_alerts.pop_first();
+                }
+            }
             if let Some(cam) = d.camera {
                 st.alerted.insert(
                     EpisodeKey {
@@ -1289,6 +1355,7 @@ impl Inner {
                 at_ms: d.decided_ms,
                 decision_json: decision.to_string(),
                 snapshot: None,
+                test: test_flag.is_some(),
             };
             self.queue_notice(st, d.trigger_id, notice, *severity, instant, fx);
         }
@@ -1315,6 +1382,14 @@ impl Inner {
                 continue;
             };
             if !cfg.enabled || severity < cfg.min_severity {
+                continue;
+            }
+            // A simulated trigger reaches Home Assistant only when the
+            // person asked for it.
+            if notice.test
+                && o.kind == OutputKind::HomeAssistant
+                && st.test_alerts.get(&notice.alert_id) != Some(&true)
+            {
                 continue;
             }
             let wait = notice.state != NoticeState::Settled
@@ -1738,6 +1813,7 @@ impl Inner {
             "camera": camera_json(key.camera),
             "class": class_name(key.class),
             "at_ms": now.ms,
+            "test": st.test_alerts.contains_key(&a.alert_id),
         }));
         let notice = AlertNotice {
             state: NoticeState::Settled,
@@ -1760,6 +1836,7 @@ impl Inner {
             at_ms: now.ms,
             decision_json: String::new(),
             snapshot: None,
+            test: st.test_alerts.contains_key(&a.alert_id),
         };
         self.queue_notice(st, a.trigger_id, notice, a.severity, instant, fx);
     }

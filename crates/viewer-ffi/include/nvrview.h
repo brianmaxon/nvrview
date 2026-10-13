@@ -32,9 +32,10 @@
  * out_ms of nv_edit_compute, and dest and share_safe on export requests.
  * Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
  * nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
- * (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times.
+ * (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times. Minor 14: smart-alert debugging and
+ * review (nv_alerts_messages, nv_alerts_output_test, nv_alert_evidence_*).
  */
-#define NV_ABI_MINOR 13
+#define NV_ABI_MINOR 14
 
 /**
  * Most bytes of an AudioSpecificConfig an encoder's `open` may write.
@@ -1890,6 +1891,91 @@ enum NvStatus nv_alert_feedback(struct NvCore *core, const char *json);
  * `core` is a live handle; `camera` is a NUL-terminated string.
  */
 enum NvStatus nv_alert_mute(struct NvCore *core, const char *camera, uint32_t seconds);
+
+/**
+ * A trigger input's message log (docs/FFI.md, "Smart alerts", minor 14):
+ * `request` is {"input":"<id>","after":0,"limit":100,"clear":false};
+ * answers a page of entries into `out` like nv_alerts_get. In memory only.
+ * NV_ERR_UNKNOWN_ID for no input with that id.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string; `out` is
+ * null or valid for writing `cap` bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_alerts_messages(struct NvCore *core,
+                                 const char *request,
+                                 char *out,
+                                 size_t cap,
+                                 size_t *len);
+
+/**
+ * Sends one test alert through a configured output (minor 14): `request`
+ * is {"output":<index in outputs[]>,"rule":n?,"camera":{...}?,"class":"person"?}.
+ * Returns at once; the result arrives as an `alerts_output_test` event.
+ * NV_ERR_UNKNOWN_ID for no such output, NV_ERR_NOT_CONFIGURED before the
+ * first nv_alerts_configure.
+ *
+ * # Safety
+ * `core` is a live handle; `request` is a NUL-terminated string.
+ */
+enum NvStatus nv_alerts_output_test(struct NvCore *core, const char *request);
+
+/**
+ * Stores evidence of a check (minor 14): `json` is {"trigger_id":N,
+ * "frame":k?,"at_ms":ms?,"doc":{...}?}, `data` the JPEG for frame `k`
+ * (copied; NULL and 0 when only `doc` is given). NV_ERR_UNKNOWN_ID for a
+ * trigger never given, NV_ERR_LIMIT above 1 MiB or a ninth frame.
+ *
+ * # Safety
+ * `core` is a live handle; `json` is a NUL-terminated string; `data` is
+ * null or valid for reading `len` bytes.
+ */
+enum NvStatus nv_alert_evidence_put(struct NvCore *core,
+                                    const char *json,
+                                    const uint8_t *data,
+                                    size_t len);
+
+/**
+ * Evidence as JSON (minor 14): {"trigger_id":N} answers one set, NULL or
+ * "{}" (or {"since_ms":ms}) answers {"sets":[...],"retention_min":n}, into
+ * `out` like nv_alerts_get. NV_ERR_UNKNOWN_ID for a set that is gone.
+ *
+ * # Safety
+ * `core` is a live handle; `query` is null or a NUL-terminated string;
+ * `out` is null or valid for writing `cap` bytes; `len` is valid for one
+ * write.
+ */
+enum NvStatus nv_alert_evidence_get(struct NvCore *core,
+                                    const char *query,
+                                    char *out,
+                                    size_t cap,
+                                    size_t *len);
+
+/**
+ * Copies one kept frame (JPEG) into `out` (*len gets its size; minor 14).
+ * NV_ERR_UNKNOWN_ID when the set or frame is gone; NV_ERR_BUFFER_TOO_SMALL
+ * with *len set.
+ *
+ * # Safety
+ * `core` is a live handle; `out` is null or valid for writing `cap`
+ * bytes; `len` is valid for one write.
+ */
+enum NvStatus nv_alert_evidence_frame_get(struct NvCore *core,
+                                          uint64_t trigger_id,
+                                          uint32_t index,
+                                          uint8_t *out,
+                                          size_t cap,
+                                          size_t *len);
+
+/**
+ * Keeps a set of evidence (minor 14): it leaves the short-lived store and
+ * keeps the per-alert snapshot limits. NV_ERR_UNKNOWN_ID for a set that is
+ * gone.
+ *
+ * # Safety
+ * `core` is a live handle.
+ */
+enum NvStatus nv_alert_evidence_pin(struct NvCore *core, uint64_t trigger_id);
 
 #ifdef __cplusplus
 }  // extern "C"

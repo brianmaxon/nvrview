@@ -127,6 +127,17 @@ impl AlertInput for MqttInput {
         v["queue_dropped"] = json!(self.queue_dropped.load(Ordering::Relaxed));
         Some(v)
     }
+
+    fn messages(&self, after: u64, limit: usize) -> Option<Value> {
+        let page = self.handle.as_ref()?.messages(after, limit);
+        serde_json::to_value(page).ok()
+    }
+
+    fn clear_messages(&self) {
+        if let Some(h) = &self.handle {
+            h.clear_messages();
+        }
+    }
 }
 
 impl Drop for MqttInput {

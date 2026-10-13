@@ -325,6 +325,68 @@ fn smart_alerts_through_the_c_interface() {
         );
         assert_eq!(&out, jpeg);
 
+        // Evidence (minor 14): put, list, get a frame, pin, bad ids.
+        assert!(nv_abi_minor() >= 14);
+        let put = c(&json!({"trigger_id": id, "frame": 0,
+                            "doc": {"methods": {"camera_ai": {"claimed": "person"}}}})
+        .to_string());
+        assert_eq!(
+            nv_alert_evidence_put(core, put.as_ptr(), jpeg.as_ptr(), jpeg.len()),
+            NvStatus::NV_OK
+        );
+        assert_eq!(
+            nv_alert_evidence_put(
+                core,
+                c(r#"{"trigger_id":999999,"doc":{}}"#).as_ptr(),
+                ptr::null(),
+                0
+            ),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        let mut doc = vec![0 as c_char; 64 * 1024];
+        let mut dlen = 0usize;
+        let q = c(&json!({"trigger_id": id}).to_string());
+        assert_eq!(
+            nv_alert_evidence_get(core, q.as_ptr(), doc.as_mut_ptr(), doc.len(), &mut dlen),
+            NvStatus::NV_OK
+        );
+        let set: Value =
+            serde_json::from_str(CStr::from_ptr(doc.as_ptr()).to_str().unwrap()).unwrap();
+        assert_eq!(set["methods"]["camera_ai"]["claimed"], "person");
+        assert_eq!(set["frames"][0]["bytes"], jpeg.len());
+        let mut frame = vec![0u8; jpeg.len()];
+        let mut flen = 0usize;
+        assert_eq!(
+            nv_alert_evidence_frame_get(core, id, 0, frame.as_mut_ptr(), frame.len(), &mut flen),
+            NvStatus::NV_OK
+        );
+        assert_eq!(&frame, jpeg);
+        assert_eq!(
+            nv_alert_evidence_frame_get(core, id, 5, frame.as_mut_ptr(), frame.len(), &mut flen),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(nv_alert_evidence_pin(core, id), NvStatus::NV_OK);
+        assert_eq!(
+            nv_alert_evidence_pin(core, 999_999),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        // The message log and the output test need an input and an output.
+        let mut mlen = 0usize;
+        assert_eq!(
+            nv_alerts_messages(
+                core,
+                c(r#"{"input":"none"}"#).as_ptr(),
+                doc.as_mut_ptr(),
+                doc.len(),
+                &mut mlen
+            ),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+        assert_eq!(
+            nv_alerts_output_test(core, c(r#"{"output":3}"#).as_ptr()),
+            NvStatus::NV_ERR_UNKNOWN_ID
+        );
+
         // Feedback and mute.
         let fb = c(
             &json!({"alert_id": alert_id, "vote": "down", "reason": "nothing_there"}).to_string(),

@@ -174,6 +174,14 @@ pub trait AlertInput: Send + 'static {
     fn status(&self) -> Option<serde_json::Value> {
         None
     }
+    /// The input's message log: entries with `seq >= after`, at most
+    /// `limit` (a page as `mqtt-triggers` makes it). `None` for an input
+    /// that keeps none. Memory only; never written anywhere.
+    fn messages(&self, _after: u64, _limit: usize) -> Option<serde_json::Value> {
+        None
+    }
+    /// Forgets the logged messages.
+    fn clear_messages(&self) {}
 }
 
 /// Builds an input from its settings entry (the whole JSON object of one
@@ -254,6 +262,9 @@ pub struct AlertNotice {
     /// A picture of the alert (JPEG from the app), when the app put one in
     /// time and the output asked for pictures.
     pub snapshot: Option<Arc<[u8]>>,
+    /// A simulated or test alert: outputs mark it so the receiver can tell
+    /// it from a real one.
+    pub test: bool,
 }
 
 /// The core's callback for one delivery's result and its summary line.
@@ -301,6 +312,19 @@ impl fmt::Debug for DeliveryDone {
     }
 }
 
+/// The result of [`AlertOutput::send_test`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestResult {
+    pub ok: bool,
+    /// A short generic line; no secrets.
+    pub summary: String,
+    /// The last HTTP status seen, for outputs that speak HTTP.
+    pub http_status: Option<u16>,
+}
+
+/// Where [`AlertOutput::send_test`] reports; called once, from any thread.
+pub type TestDone = Box<dyn FnOnce(TestResult) + Send>;
+
 /// An alert output (Home Assistant, ntfy, a webhook). Called on the
 /// service's task: [`AlertOutput::deliver`] must return at once and do
 /// its I/O elsewhere (on the runtime from [`OutputContext`]), reporting
@@ -312,6 +336,17 @@ pub trait AlertOutput: Send + Sync + 'static {
     /// ([`crate::Core::alert_snapshot_put`]) before delivery.
     fn wants_picture(&self) -> bool {
         false
+    }
+    /// Sends one test alert through this output now, whether or not any
+    /// rule would match, and reports the result through `done`. `rule`
+    /// picks one of the output's rules (by index); `None` tests all of
+    /// them. The default reports that the output cannot be tested.
+    fn send_test(&self, _notice: &AlertNotice, _rule: Option<usize>, done: TestDone) {
+        done(TestResult {
+            ok: false,
+            summary: "this output cannot send a test".to_owned(),
+            http_status: None,
+        });
     }
     /// The output is no longer used (settings changed, shutdown). Must not
     /// block for long.

@@ -126,6 +126,16 @@ struct SmartAlertsGeneralView: View {
                 }
                 caption("Home: people on inside cameras are expected. Away: everything one step more urgent. Night: treated as night whatever the sun does.")
             }
+            Section("Review") {
+                Picker("Keep checked pictures for", selection: setting(alerts, \.evidenceRetentionMinutes)) {
+                    ForEach([30, 60, 120, 360, 720, 1440], id: \.self) { m in
+                        Text(m < 60 ? "\(m) minutes" : m == 60 ? "1 hour" : "\(m / 60) hours").tag(m)
+                    }
+                }
+                caption(
+                    "For checks of an outdoor person, animal or vehicle, the pictures and what each method found are kept on this computer so you can see in Smart Alert Events why an alert was or was not raised. They are never sent anywhere and are deleted when this time is up (at most 300 sets or 200 MB). Keep in the Events window saves one for 7 days."
+                )
+            }
             Section("Alerting") {
                 Picker("Lowest severity that alerts", selection: setting(alerts, \.minAlertSeverity)) {
                     ForEach([AlertSeverity.low, .normal, .high], id: \.self) { Text($0.title).tag($0) }
@@ -476,6 +486,31 @@ struct SmartAlertsSensorsView: View {
                 LabeledContent("Key", value: s.key)
                 TextField("Trigger kind", text: b(i, \.triggerKind), prompt: Text("sensor_motion"))
                 if let status = alerts.sensorStatus(i) { LabeledContent("Status", value: status) }
+                HStack {
+                    Button("Sensor Messages…") { alerts.showSensorMessages(s.key) }
+                    Menu("Simulate Trigger") {
+                        Button("As if the sensor fired") {
+                            alerts.simulate(sensor: s.key, sendToHomeAssistant: alerts.simulateToHomeAssistant)
+                        }
+                        if !s.cameras.isEmpty { Divider() }
+                        ForEach(s.cameras) { sc in
+                            if let camera = model.alertCamera(sc.camera) {
+                                Button("Only for \(model.name(of: sc.camera))") {
+                                    alerts.simulate(
+                                        sensor: s.key, camera: camera, sendToHomeAssistant: alerts.simulateToHomeAssistant)
+                                }
+                            }
+                        }
+                    }
+                    .fixedSize()
+                }
+                Toggle(
+                    "Also send simulated triggers to Home Assistant",
+                    isOn: Binding(get: { alerts.simulateToHomeAssistant }, set: { alerts.simulateToHomeAssistant = $0 }))
+                if let note = alerts.simulateNote { caption(note) }
+                caption(
+                    "Simulate Trigger runs the whole chain: the cameras wake, the pictures are checked, and the decision is made. The decision is marked Test in Smart Alert Events. Home Assistant gets it only if the box is ticked."
+                )
             }
             Section("Broker") {
                 TextField("Address", text: b(i, \.host), prompt: Text("broker.local"))
@@ -597,6 +632,7 @@ struct SmartAlertsSensorsView: View {
 struct SmartAlertsOutputsView: View {
     let model: AppModel
     @State private var token = ""
+    @State private var confirmTestAlert = false
 
     private var alerts: SmartAlertsModel { model.alertsModel }
 
@@ -626,8 +662,11 @@ struct SmartAlertsOutputsView: View {
                     }
                     .disabled(token.isEmpty)
                     Button("Test") { alerts.testHomeAssistant() }
+                    Button("Send Test Alert…") { confirmTestAlert = true }
+                        .disabled(!ha.enabled || ha.baseURL.isEmpty)
                 }
                 if let t = alerts.homeAssistantTest { caption(t) }
+                if let t = alerts.homeAssistantSend { caption(t) }
                 if let status = alerts.homeAssistantStatus { LabeledContent("Status", value: status) }
                 Picker("From severity", selection: setting(alerts, \.homeAssistant.minSeverity)) {
                     ForEach(AlertSeverity.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -647,6 +686,7 @@ struct SmartAlertsOutputsView: View {
                 )
             }
             Section("Home Assistant rules") {
+                // (The test alert's confirmation is attached to the form below.)
                 ForEach(ha.rules.indices, id: \.self) { i in HARuleRow(model: model, index: i) }
                 Button("Add Rule") { alerts.update { $0.homeAssistant.rules.append(HARule()) } }
             }
@@ -658,6 +698,16 @@ struct SmartAlertsOutputsView: View {
             }
         }
         .formStyle(.grouped)
+        .confirmationDialog(
+            "Send a test alert to Home Assistant?", isPresented: $confirmTestAlert, titleVisibility: .visible
+        ) {
+            Button("Send Test Alert") { alerts.sendHomeAssistantTestAlert() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This runs the rules below as if an alert had happened: a pulse turns its helper on and off again, a notify rule sends a message, a script runs. Do it when that is safe."
+            )
+        }
     }
 }
 

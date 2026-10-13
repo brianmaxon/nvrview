@@ -188,6 +188,7 @@ fn alert(class: Class) -> Alert {
         at_ms: 1_718_900_000_000,
         utc_offset_min: 0,
         explanation: "Person on Example Camera at night".into(),
+        test: false,
     }
 }
 
@@ -672,4 +673,39 @@ fn the_worker_queue_is_bounded_and_reports_results_in_order() {
     w.shutdown();
     assert_eq!(done_rx.recv().unwrap(), (1, true));
     assert_eq!(done_rx.recv().unwrap(), (2, true));
+}
+
+#[test]
+fn a_test_alert_pulses_every_target_ignoring_matching_and_cooldown() {
+    let rig = Rig::new();
+    rig.mock.set(E, "off");
+    // The rule would never match a person alert.
+    let mut r = pulse_rule(E);
+    r.classes = vec![Class::Vehicle];
+    let out = rig.output(vec![r], |c| c.cooldown_ms = 30_000);
+    assert_eq!(
+        out.deliver(&alert(Class::Person)).summary,
+        "Home Assistant: no mapping matched"
+    );
+    let first = out.deliver_test(&alert(Class::Person), None);
+    assert!(first.ok, "{first:?}");
+    assert_eq!(first.summary, format!("Home Assistant: {E} pulsed (200)"));
+    // A second test straight away is not held back by the cooldown.
+    let second = out.deliver_test(&alert(Class::Person), Some(0));
+    assert_eq!(second.entities[0].status, EntityStatus::Done);
+    // Out of range names no rule and is not ok.
+    let none = out.deliver_test(&alert(Class::Person), Some(5));
+    assert!(!none.ok && none.entities.is_empty());
+}
+
+#[test]
+fn a_failed_test_alert_reports_the_http_status() {
+    let rig = Rig::new();
+    let out = rig.output(vec![pulse_rule(E)], |_| {});
+    let r = out.deliver_test(&alert(Class::Person), None);
+    assert!(!r.ok);
+    assert_eq!(
+        r.entities[0].attempts.last().unwrap().http_status,
+        Some(404)
+    );
 }

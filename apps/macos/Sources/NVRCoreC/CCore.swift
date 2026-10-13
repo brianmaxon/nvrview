@@ -680,6 +680,60 @@ public final class CCore: CoreAPI {
         try check(nv_alert_mute(try core(), cameraJSON, seconds))
     }
 
+    // MARK: Smart alerts, debugging and review (minor 14)
+
+    public func alertsMessages(request: String) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { nv_alerts_messages(c, request, $0, $1, $2) }
+    }
+
+    public func alertsOutputTest(request: String) throws(CoreStatus) {
+        try check(nv_alerts_output_test(try core(), request))
+    }
+
+    public func alertEvidencePut(json: String, data: Data?) throws(CoreStatus) {
+        let c = try core()
+        guard let data, !data.isEmpty else {
+            try check(nv_alert_evidence_put(c, json, nil, 0))
+            return
+        }
+        let status = data.withUnsafeBytes { b in
+            nv_alert_evidence_put(c, json, b.bindMemory(to: UInt8.self).baseAddress, b.count)
+        }
+        try check(status)
+    }
+
+    public func alertEvidenceGet(query: String?) throws(CoreStatus) -> String {
+        let c = try core()
+        return try Self.string { out, cap, len in
+            if let query { nv_alert_evidence_get(c, query, out, cap, len) } else { nv_alert_evidence_get(c, nil, out, cap, len) }
+        }
+    }
+
+    public func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data {
+        let c = try core()
+        var capacity = 128 * 1024
+        for _ in 0..<4 {
+            var data = Data(count: capacity)
+            var length = 0
+            let status = CoreStatus(
+                data.withUnsafeMutableBytes { b in
+                    nv_alert_evidence_frame_get(c, triggerID, index, b.bindMemory(to: UInt8.self).baseAddress, b.count, &length)
+                })
+            if status == .bufferTooSmall {
+                capacity = max(length, 1)
+                continue
+            }
+            if !status.isOK { throw status }
+            return data.prefix(length)
+        }
+        throw .internal
+    }
+
+    public func alertEvidencePin(triggerID: UInt64) throws(CoreStatus) {
+        try check(nv_alert_evidence_pin(try core(), triggerID))
+    }
+
     // MARK: Recorded playback (minor 6)
 
     public func playbackOpen(json: String) throws(CoreStatus) -> OpenedPlayback {

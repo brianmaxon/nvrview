@@ -27,6 +27,10 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
     /// `up` or `down`, and the reason given with `down`.
     public var vote: String?
     public var voteReason: String?
+    /// A simulated trigger or a test alert.
+    public var isTest: Bool
+    /// The configured sensor that triggered it, by key.
+    public var sensor: String?
 
     public var id: String { "\(triggerID)-\(alertID ?? 0)-\(decidedMs)" }
 
@@ -53,6 +57,17 @@ public struct SmartAlertLogEntry: Sendable, Equatable, Identifiable {
         hasSnapshot = json["snapshot"]?.bool ?? false
         vote = json["feedback"]?["vote"]?.string
         voteReason = json["feedback"]?["reason"]?.string
+        isTest = json["test"]?.bool ?? false
+        sensor = json["sensor"]?.string
+    }
+
+    /// The Events window's decision group: `test`, `alert`, `not_confirmed`
+    /// (the camera's AI reported it and our check did not confirm it),
+    /// `quiet`, or `suppress`.
+    public var category: String {
+        if isTest { return "test" }
+        if decision == "quiet", reason == "not_confirmed" { return "not_confirmed" }
+        return decision
     }
 
     /// The explanation's first sentence (the list's line).
@@ -133,6 +148,8 @@ public struct SmartAlertLogFilter: Sendable, Equatable {
     public var decisions: Set<String> = []
     public var classes: Set<String> = []
     public var minSeverity: AlertSeverity?
+    /// A configured sensor's key.
+    public var sensor: String?
     public var sinceMs: Int64?
     public var untilMs: Int64?
     public var text = ""
@@ -140,7 +157,8 @@ public struct SmartAlertLogFilter: Sendable, Equatable {
 
     public init() {}
 
-    public static let decisionKinds = ["alert", "quiet", "suppress"]
+    /// The decision groups the window offers (`SmartAlertLogEntry.category`).
+    public static let decisionKinds = ["alert", "not_confirmed", "quiet", "suppress", "test"]
 
     /// The `nv_alerts_get` query (docs/FFI.md "The event log"); `beforeMs`
     /// pages back from the last entry's decision time.
@@ -148,7 +166,12 @@ public struct SmartAlertLogFilter: Sendable, Equatable {
         var q: [String: Any] = ["limit": min(max(limit, 1), 1000)]
         if let camera { q["camera"] = ["device": camera.device, "channel": camera.channel, "lens": camera.lens] }
         if !sources.isEmpty { q["source"] = sources.flatMap(\.sources).sorted() }
-        if !decisions.isEmpty { q["decision"] = decisions.sorted() }
+        if !decisions.isEmpty, !decisions.contains("test") {
+            // A test can have any decision: asking for tests drops the filter
+            // (`matches` narrows it).
+            q["decision"] = Set(decisions.map { $0 == "not_confirmed" ? "quiet" : $0 }).sorted()
+        }
+        if let sensor { q["sensor"] = sensor }
         if !classes.isEmpty { q["class"] = classes.sorted() }
         if let minSeverity { q["min_severity"] = minSeverity.rawValue }
         if let sinceMs { q["since_ms"] = sinceMs }
@@ -169,7 +192,8 @@ public struct SmartAlertLogFilter: Sendable, Equatable {
             return false
         }
         if !sources.isEmpty, !sources.contains(e.sourceGroup) { return false }
-        if !decisions.isEmpty, !decisions.contains(e.decision) { return false }
+        if !decisions.isEmpty, !decisions.contains(e.category) { return false }
+        if let sensor, e.sensor != sensor { return false }
         if !classes.isEmpty, !classes.contains(e.className ?? "") { return false }
         if let minSeverity {
             guard let s = e.severity.flatMap(AlertSeverity.init(rawValue:)), s >= minSeverity else { return false }

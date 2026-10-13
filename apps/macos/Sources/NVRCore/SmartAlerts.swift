@@ -165,10 +165,13 @@ public enum SmartAlertEvent: Sendable, Equatable {
     /// `alerts_configured`: issues and the inputs' and outputs' results.
     case configured(json: String)
     case triggerRejected(reason: String)
+    /// `alerts_output_test`: the result of a test alert through an output
+    /// (`ok`, `summary`, `http_status`, `at_ms`).
+    case outputTest(json: String)
 
     public static let types: Set<String> = [
         "verify_request", "verify_request_done", "verify_step", "alert", "alerts_configured",
-        "trigger_rejected",
+        "trigger_rejected", "alerts_output_test",
     ]
 
     private struct Head: Decodable {
@@ -199,6 +202,8 @@ public enum SmartAlertEvent: Sendable, Equatable {
             return .configured(json: text)
         case "trigger_rejected":
             return .triggerRejected(reason: h.reason ?? "")
+        case "alerts_output_test":
+            return .outputTest(json: text)
         default:
             return nil
         }
@@ -218,4 +223,11 @@ extension CoreAPI {
     public func alertSnapshotGet(alertID: UInt64) throws(CoreStatus) -> Data { throw .unsupported }
     public func alertFeedback(json: String) throws(CoreStatus) { throw .unsupported }
     public func alertMute(cameraJSON: String, seconds: UInt32) throws(CoreStatus) { throw .unsupported }
+    // Minor 14: debugging and review.
+    public func alertsMessages(request: String) throws(CoreStatus) -> String { throw .unsupported }
+    public func alertsOutputTest(request: String) throws(CoreStatus) { throw .unsupported }
+    public func alertEvidencePut(json: String, data: Data?) throws(CoreStatus) { throw .unsupported }
+    public func alertEvidenceGet(query: String?) throws(CoreStatus) -> String { throw .unsupported }
+    public func alertEvidenceFrameGet(triggerID: UInt64, index: UInt32) throws(CoreStatus) -> Data { throw .unsupported }
+    public func alertEvidencePin(triggerID: UInt64) throws(CoreStatus) { throw .unsupported }
 }

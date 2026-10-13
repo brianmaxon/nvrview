@@ -41,6 +41,10 @@ pub struct Trigger {
     /// Found by an event-log search after a reconnect, not pushed live.
     #[serde(default)]
     pub catch_up: bool,
+    /// For a simulated external trigger: look only at this one of the
+    /// source's mapped cameras. Never set by a real input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only_camera: Option<CameraId>,
 }
 
 impl Trigger {
@@ -92,6 +96,7 @@ pub fn from_detection(
         at_ms: received_ms,
         received_ms,
         catch_up: false,
+        only_camera: None,
     })
 }
 
@@ -156,6 +161,7 @@ pub fn from_external(
         at_ms,
         received_ms,
         catch_up: false,
+        only_camera: None,
     })
 }
 

@@ -41,6 +41,9 @@ pub struct Alert {
     /// Minutes east of UTC, for the `{time}` placeholder.
     pub utc_offset_min: i32,
     pub explanation: String,
+    /// A test (a simulated trigger or "send test alert"): rules are not
+    /// held back by their cooldown, and the host marks the message.
+    pub test: bool,
 }
 
 /// Time and sleeping, injected so tests do not wait.
@@ -247,6 +250,45 @@ impl HaOutput {
         out
     }
 
+    /// Delivers a test alert to the rule at `rule` (an index into the
+    /// configured rules), or to every distinct target when `None`, whether
+    /// or not the rule would match the alert. Blocks like [`HaOutput::deliver`].
+    /// The answer has no rules when `rule` is out of range.
+    pub fn deliver_test(&self, alert: &Alert, rule: Option<usize>) -> OutputResult {
+        let mut alert = alert.clone();
+        alert.test = true;
+        let mut chosen: Vec<&Rule> = Vec::new();
+        for (i, r) in self.config.rules.iter().enumerate() {
+            if rule.is_some_and(|n| n != i) {
+                continue;
+            }
+            if chosen
+                .iter()
+                .any(|o| o.action.target() == r.action.target())
+            {
+                continue;
+            }
+            chosen.push(r);
+        }
+        let entities: Vec<EntityResult> = chosen.iter().map(|r| self.run(r, &alert)).collect();
+        let ok = !entities.is_empty() && entities.iter().all(|e| e.status != EntityStatus::Failed);
+        let summary = if entities.is_empty() {
+            "Home Assistant: no such rule to test".to_string()
+        } else {
+            entities
+                .iter()
+                .map(|e| e.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        OutputResult {
+            output: "home_assistant".to_string(),
+            ok,
+            summary,
+            entities,
+        }
+    }
+
     /// Delivers one alert. Blocks (retries, and the pulse gap).
     pub fn deliver(&self, alert: &Alert) -> OutputResult {
         let mut entities = Vec::new();
@@ -282,12 +324,13 @@ impl HaOutput {
         let target = rule.action.target();
         let cooldown = rule.cooldown_ms.unwrap_or(self.config.cooldown_ms);
         let now = self.clock.now_ms();
-        let recent = self
-            .cooldowns
-            .lock()
-            .unwrap()
-            .get(&target)
-            .is_some_and(|&last| now.saturating_sub(last) < cooldown);
+        let recent = !alert.test
+            && self
+                .cooldowns
+                .lock()
+                .unwrap()
+                .get(&target)
+                .is_some_and(|&last| now.saturating_sub(last) < cooldown);
         if recent {
             return EntityResult {
                 summary: format!("Home Assistant: {target} skipped (cooldown)"),

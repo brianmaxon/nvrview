@@ -75,6 +75,36 @@ public final class PictureCache: Sendable {
     public func latest(for camera: AlertCamera) -> CheckedPicture? { held.withLock { $0[camera] } }
 }
 
+/// Which checks leave evidence for review (docs/NOTIFICATIONS.md,
+/// "Evidence"): outdoor person, animal and vehicle checks, from a camera's AI
+/// or an external sensor, whatever their outcome; not motion-only checks (they
+/// ask for no class) and not rechecks. Cameras the user marked as inside a
+/// building are left out.
+public final class EvidencePolicy: Sendable {
+    private let inside = Mutex<Set<AlertCamera>>([])
+    private let counts = Mutex<[UInt64: Int]>([:])
+
+    public init() {}
+
+    public func setInside(_ cameras: Set<AlertCamera>) { inside.withLock { $0 = cameras } }
+
+    public func keeps(_ request: VerifyRequest) -> Bool {
+        guard request.purpose == "check", !inside.withLock({ $0.contains(request.camera) }) else { return false }
+        return !Set(request.classes).isDisjoint(with: ["person", "vehicle", "animal"])
+    }
+
+    /// The next frame index for a trigger, nil once it has the 8 the core keeps.
+    func nextFrame(trigger: UInt64) -> Int? {
+        counts.withLock { c in
+            let n = c[trigger] ?? 0
+            guard n < 8 else { return nil }
+            c[trigger] = n + 1
+            if c.count > 256, let drop = c.keys.min() { c[drop] = nil }
+            return n
+        }
+    }
+}
+
 /// Answers the core's verification requests (docs/FFI.md, "Verification"):
 /// fetches the access units, decodes the picture, runs the detector on the
 /// crops, and returns the boxes. All of it off the main thread. With no
@@ -84,15 +114,18 @@ public final class AlertVerifier: Sendable {
     private let core: @Sendable () throws -> any CoreAPI
     private let detector: @Sendable () async -> DetectorHandle?
     public let pictures: PictureCache
+    public let evidence: EvidencePolicy
 
     public init(
         core: @escaping @Sendable () throws -> any CoreAPI,
         detector: @escaping @Sendable () async -> DetectorHandle?,
-        pictures: PictureCache = PictureCache()
+        pictures: PictureCache = PictureCache(),
+        evidence: EvidencePolicy = EvidencePolicy()
     ) {
         self.core = core
         self.detector = detector
         self.pictures = pictures
+        self.evidence = evidence
     }
 
     /// What happened to a request (for tests and the status line).
@@ -116,12 +149,33 @@ public final class AlertVerifier: Sendable {
         case .failure(let outcome):
             return outcome
         case .success(let boxes):
+            // The evidence goes first: the core adds the decision to it.
+            keepEvidence(request, boxes: boxes)
             do {
                 try core().alertDetectionsPut(request: request.request, json: AlertDetection.json(boxes))
             } catch {
                 return .failed
             }
             return .answered(boxes: boxes.count)
+        }
+    }
+
+    /// Puts the checked picture and our detector's boxes with the core for
+    /// each trigger of the request, when the policy says so. Failures are
+    /// not the check's: it goes on without evidence.
+    private func keepEvidence(_ request: VerifyRequest, boxes: [AlertDetection]) {
+        guard evidence.keeps(request), let picture = pictures.latest(for: request.camera),
+            let jpeg = SnapshotMaker.jpeg(of: picture)
+        else { return }
+        let evidenceBoxes = boxes.map {
+            EvidenceBox(label: $0.label, score: $0.score, x: $0.x, y: $0.y, w: $0.w, h: $0.h)
+        }
+        for trigger in request.triggerIDs {
+            guard let frame = evidence.nextFrame(trigger: trigger) else { continue }
+            let json = EvidenceDocument.request(
+                triggerID: trigger, frame: frame, atMs: request.atMs,
+                methods: ["detector": (claimed: nil, boxes: evidenceBoxes)])
+            try? core().alertEvidencePut(json: json, data: jpeg)
         }
     }
 

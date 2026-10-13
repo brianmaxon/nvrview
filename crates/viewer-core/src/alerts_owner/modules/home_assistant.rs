@@ -10,7 +10,8 @@
 //! under the entry's `id` (else `home_assistant`).
 
 use crate::alerts_owner::{
-    AlertNotice, AlertOutput, DeliveryDone, NoticeState, OutputContext, OutputFactory,
+    AlertNotice, AlertOutput, DeliveryDone, NoticeState, OutputContext, OutputFactory, TestDone,
+    TestResult,
 };
 use alerts::model::{CameraId, Severity};
 use ha_output::{Alert, Clock, Config, DecisionKind, HaOutput, Http, OutputResult, Token, Worker};
@@ -37,6 +38,7 @@ pub fn home_assistant_factory(
 }
 
 struct HomeAssistant {
+    output: Arc<HaOutput>,
     worker: Mutex<Option<Worker>>,
     pending: Pending,
 }
@@ -85,7 +87,8 @@ fn build(
     .map_err(|e| format!("Home Assistant settings: {e}"))?;
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let p = pending.clone();
-    let worker = Worker::spawn(Arc::new(output), QUEUE, move |alert, result| {
+    let output = Arc::new(output);
+    let worker = Worker::spawn(output.clone(), QUEUE, move |alert, result| {
         let done = p
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -96,6 +99,7 @@ fn build(
     });
     info!("Home Assistant output started");
     Ok(Arc::new(HomeAssistant {
+        output,
         worker: Mutex::new(Some(worker)),
         pending,
     }))
@@ -126,7 +130,12 @@ fn alert_of(n: &AlertNotice) -> Alert {
         decision: DecisionKind::Alert,
         at_ms: n.at_ms,
         utc_offset_min: n.utc_offset_min,
-        explanation: n.explanation.clone(),
+        explanation: if n.test {
+            format!("Test: {}", n.explanation)
+        } else {
+            n.explanation.clone()
+        },
+        test: n.test,
     }
 }
 
@@ -163,6 +172,32 @@ impl AlertOutput for HomeAssistant {
                     Some(format!("Home Assistant: alert dropped ({why})")),
                 );
             }
+        }
+    }
+
+    fn send_test(&self, notice: &AlertNotice, rule: Option<usize>, done: TestDone) {
+        let alert = alert_of(notice);
+        let output = self.output.clone();
+        // The request blocks (retries, the pulse gap): its own thread, so
+        // the alert service never waits on Home Assistant.
+        let spawned = std::thread::Builder::new()
+            .name("ha-output-test".to_owned())
+            .spawn(move || {
+                let result = output.deliver_test(&alert, rule);
+                let http_status = result
+                    .entities
+                    .iter()
+                    .flat_map(|e| e.attempts.iter())
+                    .rev()
+                    .find_map(|a| a.http_status);
+                done(TestResult {
+                    ok: result.ok,
+                    summary: summary(&result),
+                    http_status,
+                });
+            });
+        if spawned.is_err() {
+            tracing::warn!("could not start the Home Assistant test thread");
         }
     }
 

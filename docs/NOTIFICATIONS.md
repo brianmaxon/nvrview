@@ -606,6 +606,60 @@ sensor, class, decision, severity, and the explanation's first sentence.
   snapshots 7 days; entries marked "keep for evaluation" until deleted. All
   local, under the app's data directory.
 
+### Diagnostics
+
+Debugging a sensor and a Home Assistant output needs the reason, not just the
+state (docs/FFI.md, "Debugging and review (minor 14)").
+
+- **Connection.** When a broker connection fails, the sensor's status names
+  why: the broker's name did not resolve, nothing is listening on the port
+  (refused), no answer in time, another network error, the TLS certificate is
+  not trusted or has expired, the certificate is not for the broker's name, a
+  login the broker rejected (not retried), or a protocol error. The reason,
+  the last time the connection worked, and the counters are in the input's
+  state in `nv_alerts_get`, in the settings status line, and in the rate-limited
+  log line. No password or payload text is in any of them.
+- **Sensor messages.** The core keeps the last 500 messages of each MQTT sensor
+  with their outcome ("matched sensor ... as sensor_motion", "ignored: topic
+  not mapped", "ignored: payload not a trigger value", "ignored:
+  rate-limited", ...). **Privacy:** payloads may be private, so this log is in
+  memory only, never written to disk, to events or to the log file, shortened to
+  512 bytes (binary payloads shown as hex), and gone when the sensor stops or
+  the app quits. The app shows it live in a "Sensor messages" view and can clear
+  it.
+- **Simulate trigger.** A test runs the whole chain as if a sensor (or one of
+  its mapped cameras) fired. The decision, its log entry, and the notification
+  are marked Test. Home Assistant receives it only if the person ticks "also
+  send to Home Assistant" (off by default, each time). A test uses the same
+  cooldowns as a real trigger, so it can suppress a real alert for that camera
+  and class for the cooldown.
+- **Send test alert.** After a confirmation, one test alert is delivered through
+  the Home Assistant output (its rules' entities are pulsed or notified, ignoring
+  matching and cooldown) and the result is shown: delivered or not, the HTTP
+  status, and the time. The read-only "Test" (an API ping) stays.
+
+### Evidence
+
+For checks of an outdoor person, animal, or vehicle (from a camera's AI or a
+sensor, whatever the outcome including "not confirmed" and quiet; not
+motion-only checks, not inside cameras, not re-checks) the app keeps the frames
+the check judged and every method's detections: the camera AI's claim, our
+detector's boxes, classes and scores per crop, and any other verifier that
+ran, together with the decision. The core owns storage and expiry:
+
+- **Retention:** 2 hours by default (Settings, 30 minutes to 24 hours), capped
+  at 300 sets and 200 MiB, whichever comes first, oldest first, under
+  `data_dir/alerts/evidence/`.
+- **Keep** moves a set into the per-alert snapshot store's limits (7 days, 256
+  sets, 64 MiB).
+- **Privacy:** local only, never sent anywhere, deleted automatically when the
+  time is up. The sets are pictures from the cameras, so they are as private as
+  the recordings.
+- The Events window shows the frames with each method's boxes in its own color
+  and outline (switchable per method), the scores, a "Methods disagree" badge
+  when the camera's AI and our detector differ, and over the kept window a
+  summary of how often they agreed per class (UX.md, "Events").
+
 ### Data
 
 The trace is the engine's typed, ordered list of steps (see "Contracts"),

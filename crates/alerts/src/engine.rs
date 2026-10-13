@@ -287,7 +287,14 @@ impl Engine {
         let class = trigger.kind.class();
         let late = trigger.is_late(self.settings.timing.stale_ms());
         let sensor = match (&trigger.source, &trigger.origin) {
-            (Source::External, Some(key)) => self.settings.source(key).map(|(i, m)| (i, m.clone())),
+            (Source::External, Some(key)) => self.settings.source(key).map(|(i, m)| {
+                let mut m = m.clone();
+                // A simulated trigger for one mapped camera.
+                if let Some(only) = trigger.only_camera {
+                    m.cameras.retain(|c| c.camera == only);
+                }
+                (i, m)
+            }),
             _ => None,
         };
 

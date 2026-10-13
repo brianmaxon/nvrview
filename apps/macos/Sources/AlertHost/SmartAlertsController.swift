@@ -56,6 +56,9 @@ public final class SmartAlertsController {
     public private(set) var alertsSeen = 0
     /// The `alerts_configured` event's JSON, as the core sent it.
     public private(set) var lastConfigured: String?
+    /// How many times the core took the settings (for tests that wait for
+    /// a change to be applied).
+    public private(set) var configureCount = 0
 
     private let environment: Environment
     private let installer: ModelInstaller
@@ -121,11 +124,13 @@ public final class SmartAlertsController {
                 stored: stored, deviceID: { environment.deviceID($0) },
                 utcOffsetMinutes: environment.utcOffsetMinutes(), secrets: environment.secrets)
             desktop = DesktopOutput(document: built.json)
+            verifier.evidence.setInside(Self.insideCameras(in: built.json))
             guard built.enabled || state != .off else {
                 state = .off
                 return
             }
             try environment.core().alertsConfigure(json: built.json)
+            configureCount += 1
             state = built.enabled ? .running(issues: []) : .off
         } catch let error as AlertSettingsError {
             state = .failed(error == .notAnObject ? "alerts.json is not a settings object." : "alerts.json is unusable.")
@@ -154,12 +159,30 @@ public final class SmartAlertsController {
         case .configured(let json):
             lastConfigured = json
             if case .running = self.state, let issues = Self.issues(in: json) { self.state = .running(issues: issues) }
-        case .verifyRequestDone, .verifyStep, .triggerRejected:
+        case .verifyRequestDone, .verifyStep, .triggerRejected, .outputTest:
             break
         }
     }
 
     private func finished() { inFlight -= 1 }
+
+    /// The cameras the settings mark as inside a building: their checks leave
+    /// no evidence.
+    static func insideCameras(in json: String) -> Set<AlertCamera> {
+        guard let data = json.data(using: .utf8),
+            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let cameras = object["cameras"] as? [[String: Any]]
+        else { return [] }
+        var out: Set<AlertCamera> = []
+        for entry in cameras where (entry["exposure"] as? String) == "inside" {
+            if let c = entry["camera"] as? [String: Any], let device = (c["device"] as? NSNumber)?.uint64Value,
+                let channel = (c["channel"] as? NSNumber)?.uint16Value
+            {
+                out.insert(AlertCamera(device: device, channel: channel, lens: (c["lens"] as? NSNumber)?.uint8Value ?? 0))
+            }
+        }
+        return out
+    }
 
     private static func issues(in json: String) -> [String]? {
         guard let data = json.data(using: .utf8),
@@ -202,6 +225,8 @@ struct AlertSummary: Sendable, Equatable {
     var className: String
     var explanation: String
     var camera: AlertCamera?
+    /// A simulated trigger: the notification says so.
+    var isTest = false
 
     init?(eventJSON: String) {
         guard let data = eventJSON.data(using: .utf8),
@@ -211,6 +236,7 @@ struct AlertSummary: Sendable, Equatable {
             let id = (decision["alert_id"] as? NSNumber)?.uint64Value
         else { return nil }
         alertID = id
+        isTest = (object["test"] as? Bool) ?? false
         severity = (decision["severity"] as? String) ?? "normal"
         className = (decision["class"] as? String) ?? "other"
         explanation = (decision["explanation"] as? String) ?? ""
@@ -232,7 +258,8 @@ struct AlertSummary: Sendable, Equatable {
         default: noun = "\(className) alert"
         }
         let text = severity == "critical" ? "Critical \(noun)" : noun
-        return text.prefix(1).uppercased() + text.dropFirst()
+        let title = text.prefix(1).uppercased() + text.dropFirst()
+        return isTest ? "Test: \(title)" : title
     }
 
     var thread: String {

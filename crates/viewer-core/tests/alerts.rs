@@ -903,6 +903,315 @@ fn home_assistant_without_a_token_is_reported() {
     assert!(out["error"].as_str().unwrap().contains("token"));
 }
 
+// ---- Debugging and review: message log, diagnostics, tests, evidence ----
+
+impl Harness {
+    fn messages(&self, extra: Value) -> Value {
+        let mut req = json!({"input": "sensor-1"});
+        for (k, v) in extra.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        serde_json::from_str(&self.core.alerts_messages(&req.to_string()).unwrap()).unwrap()
+    }
+
+    fn test_decisions(&self) -> Vec<Value> {
+        self.rec
+            .events_of("alert")
+            .into_iter()
+            .filter(|e| e["state"] != "settled" && e["test"] == true)
+            .collect()
+    }
+}
+
+/// The sensor's message log has an outcome per message, is cleared on
+/// request, and its payloads are never written to events, the alert log, or
+/// any file.
+#[test]
+fn mqtt_messages_are_logged_with_outcomes_and_stay_in_memory() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    let h = Harness::new(2, NOON_S, true);
+    h.configure(glue_settings(&h, broker.port, &ha.url()));
+    broker.wait_subscribed();
+    broker.publish("example/topic", b"ON", false);
+    broker.publish("example/topic", b"example-private-payload", false);
+    h.wait_real("both messages", |h| h.mqtt_status()["messages"] == 2);
+    let page = h.messages(json!({}));
+    let outcomes: Vec<&str> = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["outcome"]["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["matched", "not_a_trigger_value"]);
+    assert_eq!(
+        page["entries"][0]["outcome"]["text"],
+        "matched sensor sensor-1 as sensor_motion (start)"
+    );
+    assert_eq!(page["entries"][1]["payload"], "example-private-payload");
+    // Paging by sequence number.
+    let next = h.messages(json!({"after": page["next_seq"]}));
+    assert_eq!(next["entries"].as_array().unwrap().len(), 0);
+    assert_eq!(h.messages(json!({"limit": 1}))["more"], true);
+    // Unknown input, bad request.
+    assert_eq!(
+        h.core.alerts_messages(r#"{"input":"nope"}"#),
+        Err(AlertError::UnknownId)
+    );
+    assert_eq!(
+        h.core.alerts_messages("{}"),
+        Err(AlertError::InvalidArgument)
+    );
+    // Memory only.
+    h.core.flush_events();
+    assert!(!h.everything_written().contains("example-private-payload"));
+    assert_eq!(h.messages(json!({"clear": true}))["total"], 0);
+}
+
+/// A broker nothing listens on is reported with its reason in the input's
+/// state, with the log line.
+#[test]
+fn mqtt_connection_failure_names_its_reason() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    let h = Harness::new(1, NOON_S, false);
+    h.configure(glue_settings(&h, port, &ha.url()));
+    h.wait_real("the reason", |h| {
+        h.mqtt_status()["last_error_kind"] == "refused"
+    });
+    let status = h.mqtt_status();
+    assert!(
+        status["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing is listening")
+    );
+    assert!(status["last_error_ms"].as_i64().unwrap() > 0);
+    assert!(status["last_success_ms"].is_null());
+    h.core.flush_events();
+    let log_lines: Vec<String> = h
+        .rec
+        .events_of("alerts_input_status")
+        .iter()
+        .filter_map(|e| e["status"]["log"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        log_lines.iter().any(|l| l.contains("nothing is listening")),
+        "{log_lines:?}"
+    );
+}
+
+/// A simulated trigger runs the whole chain, is marked as a test in the
+/// decision, the log and the events, and reaches Home Assistant only when
+/// asked.
+#[test]
+fn a_simulated_trigger_is_a_test_and_skips_home_assistant_unless_ticked() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.set(HELPER, "off");
+    let mut h = Harness::new(2, NOON_S, false);
+    h.configure(glue_settings(&h, broker.port, &ha.url()));
+    h.core
+        .alerts_trigger_put(
+            &json!({"source": "external", "origin": "sensor-1", "kind": "sensor_motion",
+                    "test": true, "only_camera": h.cam(1)})
+            .to_string(),
+        )
+        .unwrap();
+    h.run_until_with("a test decision", 20, &mut |_, _| Answer::Person, |h| {
+        !h.test_decisions().is_empty()
+    });
+    let requests = h.rec.events_of("verify_request");
+    assert!(!requests.is_empty());
+    assert!(
+        requests.iter().all(|r| r["camera"]["channel"] == 1),
+        "only the chosen camera"
+    );
+    let ev = &h.test_decisions()[0];
+    assert_eq!(ev["decision"]["decision"], "alert", "{ev}");
+    let log: Value = serde_json::from_str(&h.core.alerts_get("{}").unwrap()).unwrap();
+    assert_eq!(log["entries"][0]["test"], true);
+    assert_eq!(log["entries"][0]["sensor"], "sensor-1");
+    let by_sensor: Value = serde_json::from_str(
+        &h.core
+            .alerts_get(r#"{"sensor":"sensor-1","test":true}"#)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(by_sensor["entries"].as_array().unwrap().len(), 1);
+    let real_only: Value =
+        serde_json::from_str(&h.core.alerts_get(r#"{"test":false}"#).unwrap()).unwrap();
+    assert_eq!(real_only["entries"].as_array().unwrap().len(), 0);
+    // The desktop output (the app) sees the alert; Home Assistant does not.
+    h.core.flush_events();
+    assert!(
+        h.delivery_steps()
+            .iter()
+            .all(|s| s["kind"] != "home_assistant")
+    );
+    assert_eq!(ha.turn_ons(HELPER), 0, "{:?}", ha.log());
+    drop(h);
+
+    // Ticked: Home Assistant receives it.
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.set(HELPER, "off");
+    let mut h = Harness::new(2, NOON_S, false);
+    h.configure(glue_settings(&h, broker.port, &ha.url()));
+    h.core
+        .alerts_trigger_put(
+            &json!({"source": "external", "origin": "sensor-1", "kind": "sensor_motion",
+                    "test": true, "send_to_home_assistant": true})
+            .to_string(),
+        )
+        .unwrap();
+    h.run_until_with("a test decision", 20, &mut |_, _| Answer::Person, |h| {
+        !h.test_decisions().is_empty()
+    });
+    h.wait_real("the delivery", |h| !h.delivery_steps().is_empty());
+    assert_eq!(ha.turn_ons(HELPER), 1, "{:?}", ha.log());
+    // A real trigger afterwards is not marked.
+    assert_eq!(
+        h.core.alerts_trigger_put(
+            &json!({"source": "external", "origin": "sensor-1", "kind": "sensor_motion",
+                    "only_camera": h.cam(0)})
+            .to_string()
+        ),
+        Err(AlertError::InvalidArgument),
+        "only_camera is for tests"
+    );
+}
+
+/// "Send test alert" delivers through the output now and reports the HTTP
+/// status; a missing entity reports 404.
+#[test]
+fn a_test_alert_goes_through_home_assistant_and_reports_the_result() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.set(HELPER, "off");
+    let h = Harness::new(1, NOON_S, false);
+    h.configure(glue_settings(&h, broker.port, &ha.url()));
+    assert_eq!(
+        h.core.alerts_output_test(r#"{"output":7}"#),
+        Err(AlertError::UnknownId)
+    );
+    h.core.alerts_output_test(r#"{"output":1}"#).unwrap();
+    h.wait_real("the result", |h| {
+        !h.rec.events_of("alerts_output_test").is_empty()
+    });
+    let ev = h.rec.events_of("alerts_output_test")[0].clone();
+    assert_eq!(
+        (ev["ok"].clone(), ev["http_status"].clone()),
+        (json!(true), json!(200)),
+        "{ev}"
+    );
+    assert_eq!(ev["kind"], "home_assistant");
+    assert!(ev["at_ms"].as_i64().unwrap() > 0);
+    assert_eq!(ha.turn_ons(HELPER), 1);
+    // A second test straight away is not held back by a cooldown.
+    ha.set(HELPER, "off");
+    h.core.alerts_output_test(r#"{"output":1}"#).unwrap();
+    h.wait_real("the second result", |h| {
+        h.rec.events_of("alerts_output_test").len() == 2
+    });
+    assert_eq!(ha.turn_ons(HELPER), 2);
+    // The desktop entry cannot send a test: reported, not an error.
+    h.core.alerts_output_test(r#"{"output":0}"#).ok();
+    drop(ha);
+}
+
+/// Evidence is kept with the decision, expires on the (simulated) clock,
+/// and a pin keeps a set.
+#[test]
+fn evidence_is_kept_with_the_decision_expires_and_can_be_pinned() {
+    let mut h = Harness::new(1, NOON_S, true);
+    h.configure(
+        json!({"cameras": [{"camera": h.cam(0), "exposure": "outside"}],
+                       "evidence": {"retention_min": 30},
+                       "acquisition": {"recheck": false}}),
+    );
+    let jpeg = b"\xff\xd8example-frame\xff\xd9";
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let id = h
+            .core
+            .alerts_trigger_put(
+                &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
+            )
+            .unwrap();
+        h.core
+            .alert_evidence_put(
+                &json!({"trigger_id": id, "frame": 0,
+                        "doc": {"methods": {"camera_ai": {"claimed": "person"},
+                                            "detector": {"boxes": []}}}})
+                .to_string(),
+                jpeg,
+            )
+            .unwrap();
+        let n = ids.len() + 1;
+        h.run_until_with("a decision", 20, &mut |_, _| Answer::Person, |h| {
+            h.decisions().len() == n
+        });
+        // Out of the cooldown for the next one.
+        h.sim.advance(Duration::from_secs(600));
+        ids.push(id);
+    }
+    let set: Value = serde_json::from_str(
+        &h.core
+            .alert_evidence_get(&json!({"trigger_id": ids[0]}).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(set["decision"]["decision"], "alert", "{set}");
+    assert_eq!(set["methods"]["camera_ai"]["claimed"], "person");
+    assert_eq!(set["trigger"]["source"], "device", "{set}");
+    assert_eq!(set["trigger"]["class"], "person");
+    assert_eq!(set["frames"][0]["bytes"], jpeg.len());
+    assert_eq!(set["pinned"], false);
+    assert_eq!(h.core.alert_evidence_frame_get(ids[0], 0).unwrap(), jpeg);
+    // Bad input.
+    assert_eq!(
+        h.core
+            .alert_evidence_put(r#"{"trigger_id":999999,"frame":0}"#, jpeg),
+        Err(AlertError::UnknownId)
+    );
+    assert_eq!(
+        h.core
+            .alert_evidence_put(&json!({"trigger_id": ids[0]}).to_string(), b""),
+        Err(AlertError::InvalidArgument)
+    );
+    let list: Value = serde_json::from_str(&h.core.alert_evidence_get("{}").unwrap()).unwrap();
+    assert_eq!(list["sets"].as_array().unwrap().len(), 2);
+    assert_eq!(list["retention_min"], 30);
+    // Keep the first one; the clock passes the retention.
+    h.core.alert_evidence_pin(ids[0]).unwrap();
+    let snapshot_alert = set["decision"]["alert_id"].as_u64().unwrap();
+    assert_eq!(h.core.alert_snapshot_get(snapshot_alert).unwrap(), jpeg);
+    h.sim.advance(Duration::from_secs(31 * 60));
+    assert_eq!(
+        h.core
+            .alert_evidence_get(&json!({"trigger_id": ids[1]}).to_string()),
+        Err(AlertError::UnknownId)
+    );
+    assert_eq!(
+        h.core.alert_evidence_frame_get(ids[1], 0),
+        Err(AlertError::UnknownId)
+    );
+    let kept: Value = serde_json::from_str(
+        &h.core
+            .alert_evidence_get(&json!({"trigger_id": ids[0]}).to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(kept["pinned"], true);
+    assert_eq!(
+        h.core.alert_evidence_pin(ids[1]),
+        Err(AlertError::UnknownId)
+    );
+}
+
 mod property {
     use super::*;
     use proptest::prelude::*;

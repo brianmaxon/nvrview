@@ -376,6 +376,12 @@ extension SelfTest {
         // parity: alerts-e2e-verified
         // parity: alerts-e2e-not-confirmed
         // parity: alerts-ui-real-core
+        // parity: alerts-sensor-messages
+        // parity: alerts-sensor-diagnostics
+        // parity: alerts-simulate-trigger
+        // parity: alerts-ha-test-alert
+        // parity: alerts-evidence-kept
+        // parity: alerts-events-overlay
         Task { @MainActor [self] in
             problems += await AlertsSelfTest(model: model, openEvents: { [weak app] in app?.openSmartAlertEvents() }).run()
             checkLogRest()

@@ -715,6 +715,111 @@ sunrise. It needs no `nv_alerts_configure` first. NV_ERR_INVALID_ARGUMENT for
 invalid JSON, a missing `lat`, `lon`, or `at_ms`, or a location out of range.
 Out-buffer rules as `nv_alerts_get`.
 
+### Debugging and review (minor 14)
+
+```c
+NvStatus nv_alerts_messages(NvCore *core, const char *request, char *out, size_t cap, size_t *len);
+NvStatus nv_alerts_output_test(NvCore *core, const char *request);
+NvStatus nv_alert_evidence_put(NvCore *core, const char *json, const uint8_t *data, size_t len);
+NvStatus nv_alert_evidence_get(NvCore *core, const char *query, char *out, size_t cap, size_t *len);
+NvStatus nv_alert_evidence_frame_get(NvCore *core, uint64_t trigger_id, uint32_t index,
+                                     uint8_t *out, size_t cap, size_t *len);
+NvStatus nv_alert_evidence_pin(NvCore *core, uint64_t trigger_id);
+```
+
+All answer from memory or the local disk, never wait on a device, and may not
+be called from inside a callback. `NV_ABI_MINOR` is 14; nothing existing
+changed.
+
+**Message log.** `nv_alerts_messages` takes `{"input":"<id>","after":0,
+"limit":100,"clear":false}` (`id` is the input entry's `id`, which for the
+`mqtt` input is the sensor's key; `limit` at most 500) and answers
+`{"entries":[...],"next_seq":n,"total":n,"more":bool}` into `out` like
+`nv_alerts_get`, oldest first. An app polls with `after` set to the last
+`next_seq` it saw. Each entry is `{"seq","at_ms","topic","payload",
+"payload_len","truncated","binary","retained","outcome":{"code","text"}}`:
+`payload` is the first 512 bytes as text, or `hex: ` and the bytes when it is
+not printable UTF-8 (`binary`); `outcome.code` is `matched` (text "matched
+sensor <key> as <trigger kind> (start|stop|pulse)"), `topic_not_mapped`,
+`not_a_trigger_value`, `rate_limited`, `oversized`, `retained`, `seeded`,
+`repeat`, `transition`, or `debounced` (texts start with "ignored: ").
+The core keeps the last 500 messages per input **in memory only**: payloads
+may be private, so they are never written to disk, to events, or to the core's
+log, and the log is gone when the input stops. With `"clear":true` the log is
+emptied first (sequence numbers go on). NV_ERR_UNKNOWN_ID for no input with
+that id (or one that keeps no log), NV_ERR_INVALID_ARGUMENT for a request
+without `input`. Out-buffer rules as `nv_alerts_get`.
+
+**Connection diagnostics.** An input's `status` in `nv_alerts_get`
+(`input_status[]`, now with the entry's `id`) gains `last_error_kind`
+(`dns`, `refused`, `timeout`, `network`, `tls_certificate`, `tls_hostname`,
+`tls`, `login`, `protocol`, `not_local`), `last_error_ms`, and
+`last_success_ms` (when the subscription was last accepted, or the working
+connection ended), beside `status` and `last_error` (a fixed sentence naming
+the reason, such as "the broker refused the connection (nothing is listening
+on that port)"). The same sentence is the log line and the
+`alerts_input_status` event's `log`. A rejected login is still not retried.
+
+**Simulated triggers.** `nv_alerts_trigger_put` takes `"test":true`: the
+trigger runs the whole chain (wake, verify, decide, outputs) as if the source
+had fired, and its decision is marked `"test":true` in the `alert` event, the
+event log (`nv_alerts_get` entries, filter `"test":true|false`), and the
+evidence. An alert raised by a test reaches outputs with `AlertNotice.test`
+set (the Home Assistant output marks the message "Test: ..."), but a Home
+Assistant output gets it only with `"send_to_home_assistant":true` (default
+false). `"only_camera":{...}` (tests only) looks at one of an external
+source's mapped cameras. A test uses the same cooldowns as a real trigger.
+Event log lines and `alert` events carry the configured `sensor` key, and
+`nv_alerts_get` filters by `"sensor":"<key>"`.
+
+**Test alert.** `nv_alerts_output_test` takes `{"output":<index in outputs[]>,
+"rule":n?,"camera":{...}?,"class":"person"?}` and returns at once; the result
+is an `alerts_output_test` event `{"type","output","kind","ok","summary",
+"http_status"?,"at_ms"}`. The Home Assistant output pulses the rule's entity
+(or notifies, or runs the script) whether or not the rule would match, and
+ignores its cooldown. NV_ERR_UNKNOWN_ID for no such output (an output the core
+could not build is not one), NV_ERR_NOT_CONFIGURED before the first
+`nv_alerts_configure`.
+
+**Evidence.** The core keeps, for a short time, the frames a check judged and
+every method's detections, so a person can review why an alert was or was
+not raised. The app decides what to keep (it runs the detector): outdoor
+person, animal, or vehicle checks, from a camera's AI or a sensor, whatever the
+outcome, and not motion-only ones. Order of calls per verification request:
+`nv_alert_evidence_put` (the picture as a JPEG and the boxes), then
+`nv_alert_detections_put`; the core adds the decision to the set when it is
+made.
+
+- `nv_alert_evidence_put(json, data, len)`: `json` is `{"trigger_id":N,
+  "frame":k?,"at_ms":ms?,"doc":{...}?}`; `data` is the JPEG of frame `k` (up
+  to 8 frames of 1 MiB per set; NULL and 0 when only `doc` is put). `doc` is
+  merged, object by object, into the set's document: `methods.<name>` holds
+  one method's boxes as `frames.<k>.boxes[]` of `{label, score, box:{x,y,w,h}}`
+  (normalized), plus `claimed` for a method that names a class (`camera_ai`
+  and `detector` are the usual names); `min_score` may be added. The core adds
+  `decision` (the decision without its trace), `trigger` (`source`, `kind`,
+  `class`: the camera AI's claim when a camera raised it), `source`, `test`,
+  and `created_ms`. NV_ERR_UNKNOWN_ID for a trigger never given,
+  NV_ERR_LIMIT for a frame above 1 MiB or a ninth frame.
+- `nv_alert_evidence_get(query)`: `{"trigger_id":N}` answers one set
+  (the document with `created_ms`, `expires_ms`, `pinned`, `bytes`, and
+  `frames[]` of `{index, at_ms, bytes}`); NULL, `{}` or `{"since_ms":ms}`
+  answers `{"sets":[...],"retention_min":n}`, newest first.
+- `nv_alert_evidence_frame_get`: the JPEG of one frame.
+- `nv_alert_evidence_pin` ("Keep"): the set leaves the short-lived store for
+  `alerts/evidence/pinned/` with the per-alert snapshot limits (7 days from the
+  pin, 256 sets, 64 MiB); when the decision was an alert with no picture yet,
+  the first frame also becomes that alert's snapshot (`nv_alert_snapshot_get`).
+
+Retention is a setting of `nv_alerts_configure`: `"evidence":
+{"retention_min":120}` (30 to 1440, clamped; default 120). A set expires that
+long after it was created, and the short-lived store is capped at 300 sets
+and 200 MiB, oldest first, whichever comes first. Everything is local, under
+`data_dir/alerts/evidence/` (memory only without a data directory), and
+deleted when it expires; the core expires on its own clock, so an expired set
+answers NV_ERR_UNKNOWN_ID. `nv_alerts_get`'s status gains `evidence`
+(`sets`, `pinned`, `bytes`, `retention_min`).
+
 **Settings.** `nv_alerts_configure` takes the settings document of
 NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
 `location`, `night`, `sources`, `timing`, `verification`,
@@ -1578,6 +1683,7 @@ symbol at all, so a bound app checks first):
 | 11 | camera motion (see "Camera motion (PTZ)"): `nv_ptz_info`, `nv_ptz_move`, `nv_ptz_stop`, `nv_ptz_lens`, `nv_ptz_preset`, `nv_motion_grant`, and the `ptz` event |
 | 12 | smart alerts (see "Smart alerts"): `nv_alerts_configure`, `nv_alerts_get`, `nv_alerts_trigger_put`, `nv_alert_frames_get`, `nv_alert_detections_put`, `nv_alert_snapshot_put`, `nv_alert_snapshot_get`, `nv_alert_feedback`, `nv_alert_mute`, and the `verify_request`, `verify_request_done`, `verify_step`, `alert`, `alerts_configured`, and `trigger_rejected` events |
 | 13 | `nv_alerts_sun_times` (today's sunrise, sunset, and night window for a location; see "Smart alerts") |
+| 14 | smart-alert debugging and review (see "Smart alerts", "Debugging and review (minor 14)"): `nv_alerts_messages`, `nv_alerts_output_test`, `nv_alert_evidence_put`, `nv_alert_evidence_get`, `nv_alert_evidence_frame_get`, `nv_alert_evidence_pin`, the `alerts_output_test` event, the `test`, `send_to_home_assistant`, and `only_camera` members of `nv_alerts_trigger_put`, the `sensor` and `test` filters of `nv_alerts_get`, and the connection diagnostics in an input's status |
 
 Later minors are taken in the order the additions land; this table is the
 source of truth. Stepping a playback (`nv_playback_step`) takes the next

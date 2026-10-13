@@ -2,6 +2,7 @@
 
 use crate::config::SourceConfig;
 use crate::mapping::{Mapper, Outcome, Reason, TriggerState};
+use crate::messages::{MessageLog, MessageOutcome, MessagePage};
 use crate::packet::{Decoder, Packet, Secret, encode};
 use serde::Serialize;
 use std::io::{self, Read, Write};
@@ -97,6 +98,34 @@ pub enum Status {
     Stopped,
 }
 
+/// Why the last connection attempt (or connection) failed, in the terms a
+/// person fixes it by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// The broker's name did not resolve.
+    Dns,
+    /// The address is not on the local network and `allow_public` is off.
+    NotLocal,
+    /// Something answered at the address and refused the connection (nothing
+    /// is listening on the port).
+    Refused,
+    /// No answer in time.
+    Timeout,
+    /// Another network failure (unreachable, reset, closed).
+    Network,
+    /// The broker's certificate is not trusted, or has expired.
+    TlsCertificate,
+    /// The certificate is not for the name used to reach the broker.
+    TlsHostname,
+    /// Another TLS failure (protocol, handshake).
+    Tls,
+    /// The broker rejected the user name or password.
+    Login,
+    /// The broker spoke MQTT in a way this client does not accept.
+    Protocol,
+}
+
 /// Audit counters. Every message ends in exactly one of `triggers` or a
 /// `dropped_*` counter (or `retained_seeded`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -104,6 +133,13 @@ pub struct Stats {
     pub status: Status,
     /// The last connection problem, from a fixed list of phrases.
     pub last_error: Option<&'static str>,
+    /// The kind of `last_error`.
+    pub last_error_kind: Option<ErrorKind>,
+    /// When `last_error` happened (the clock's Unix milliseconds).
+    pub last_error_ms: Option<u64>,
+    /// When the connection last worked: the subscription was accepted, or
+    /// the connection that had been working ended.
+    pub last_success_ms: Option<u64>,
     pub connects: u64,
     pub reconnects: u64,
     pub connect_failures: u64,
@@ -159,6 +195,7 @@ struct Inner {
 struct Shared {
     inner: Mutex<Inner>,
     cv: Condvar,
+    messages: Mutex<MessageLog>,
     log_state: Mutex<(Option<u64>, u64)>,
 }
 
@@ -187,6 +224,17 @@ pub struct Handle {
 impl Handle {
     pub fn stats(&self) -> Stats {
         lock(&self.shared.inner).stats.clone()
+    }
+
+    /// Received messages with `seq >= after`, oldest first, at most
+    /// `limit` (memory only; see [`crate::messages`]).
+    pub fn messages(&self, after: u64, limit: usize) -> MessagePage {
+        lock(&self.shared.messages).page(after, limit)
+    }
+
+    /// Forgets the logged messages (the sequence numbers go on).
+    pub fn clear_messages(&self) {
+        lock(&self.shared.messages).clear();
     }
 
     /// Blocks until `pred` holds for the stats. `timeout` is a safety bound
@@ -264,6 +312,7 @@ pub fn start(
             sock: None,
         }),
         cv: Condvar::new(),
+        messages: Mutex::new(MessageLog::default()),
         log_state: Mutex::new((None, 0)),
     });
     let ctx = Ctx {
@@ -401,13 +450,18 @@ impl Conn {
             }
             let mut buf = [0u8; 4096];
             match self.wire.read(&mut buf) {
-                Ok(0) => return Err(Fail::Io("the broker closed the connection")),
+                Ok(0) => {
+                    return Err(Fail::Io(
+                        ErrorKind::Network,
+                        "the broker closed the connection",
+                    ));
+                }
                 Ok(n) => {
                     self.last_rx = Instant::now();
                     self.dec.push(&buf[..n]);
                 }
                 Err(e) if is_tick(&e) => return Ok(None),
-                Err(_) => return Err(Fail::Io("the connection failed")),
+                Err(_) => return Err(Fail::Io(ErrorKind::Network, "the connection failed")),
             }
         }
     }
@@ -424,7 +478,7 @@ enum Fail {
     Stopped,
     Auth,
     Refused,
-    Io(&'static str),
+    Io(ErrorKind, &'static str),
     Protocol(&'static str),
 }
 
@@ -490,28 +544,39 @@ fn run(ctx: Ctx) {
         if connected {
             attempt = 0;
         }
-        let (status, msg) = match fail {
+        let now = ctx.clock.now_ms();
+        let (status, kind, msg) = match fail {
             Fail::Stopped => break,
             Fail::Auth => {
                 ctx.shared.update(|s| {
                     s.status = Status::AuthFailed;
                     s.auth_failures += 1;
                     s.last_error = Some("the broker rejected the login");
+                    s.last_error_kind = Some(ErrorKind::Login);
+                    s.last_error_ms = Some(now);
                 });
-                ctx.log("the broker rejected the login; not retrying");
+                ctx.log("the broker rejected the login (check the user name and password); not retrying");
                 return;
             }
-            Fail::Refused => (Status::Refused, "the broker is not on the local network"),
-            Fail::Io(m) => (Status::Backoff, m),
+            Fail::Refused => (
+                Status::Refused,
+                ErrorKind::NotLocal,
+                "the broker is not on the local network",
+            ),
+            Fail::Io(k, m) => (Status::Backoff, k, m),
             Fail::Protocol(m) => {
                 ctx.shared.update(|s| s.protocol_errors += 1);
-                (Status::Backoff, m)
+                (Status::Backoff, ErrorKind::Protocol, m)
             }
         };
         ctx.shared.update(|s| {
             s.status = status;
             s.last_error = Some(msg);
-            if !connected {
+            s.last_error_kind = Some(kind);
+            s.last_error_ms = Some(now);
+            if connected {
+                s.last_success_ms = Some(now);
+            } else {
                 s.connect_failures += 1;
             }
         });
@@ -545,11 +610,13 @@ fn run(ctx: Ctx) {
     ctx.shared.update(|s| s.status = Status::Stopped);
 }
 
+const DNS: &str = "the broker's name did not resolve";
+
 fn resolve(ctx: &Ctx) -> Result<Vec<SocketAddr>, Fail> {
     let b = &ctx.cfg.broker;
     let all: Vec<SocketAddr> = (b.host.as_str(), b.port)
         .to_socket_addrs()
-        .map_err(|_| Fail::Io("the broker's name did not resolve"))?
+        .map_err(|_| Fail::Io(ErrorKind::Dns, DNS))?
         .collect();
     check_addrs(all, ctx.cfg.allow_public)
 }
@@ -568,12 +635,65 @@ fn check_addrs(all: Vec<SocketAddr>, allow_public: bool) -> Result<Vec<SocketAdd
         .collect();
     if local.is_empty() {
         return Err(if all.is_empty() {
-            Fail::Io("the broker's name did not resolve")
+            Fail::Io(ErrorKind::Dns, DNS)
         } else {
             Fail::Refused
         });
     }
     Ok(local)
+}
+
+fn tcp_fail(kind: Option<io::ErrorKind>) -> Fail {
+    match kind {
+        Some(io::ErrorKind::ConnectionRefused) => Fail::Io(
+            ErrorKind::Refused,
+            "the broker refused the connection (nothing is listening on that port)",
+        ),
+        Some(io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) => Fail::Io(
+            ErrorKind::Timeout,
+            "the broker did not answer in time (wrong address, or a firewall)",
+        ),
+        _ => Fail::Io(
+            ErrorKind::Network,
+            "the broker could not be reached (network unreachable or connection reset)",
+        ),
+    }
+}
+
+/// Names the TLS failure by what a person changes to fix it.
+fn tls_fail(e: &io::Error) -> Fail {
+    use rustls::{CertificateError as C, Error as E};
+    let inner = e.get_ref().and_then(|i| i.downcast_ref::<E>());
+    match inner {
+        Some(E::InvalidCertificate(c)) => match c {
+            C::NotValidForName | C::NotValidForNameContext { .. } => Fail::Io(
+                ErrorKind::TlsHostname,
+                "TLS failed: the certificate is not valid for the broker's name",
+            ),
+            C::UnknownIssuer | C::UnhandledCriticalExtension => Fail::Io(
+                ErrorKind::TlsCertificate,
+                "TLS failed: the broker's certificate is not trusted (add its CA)",
+            ),
+            C::Expired
+            | C::ExpiredContext { .. }
+            | C::NotValidYet
+            | C::NotValidYetContext { .. } => Fail::Io(
+                ErrorKind::TlsCertificate,
+                "TLS failed: the broker's certificate has expired or is not valid yet",
+            ),
+            _ => Fail::Io(
+                ErrorKind::TlsCertificate,
+                "TLS failed: the broker's certificate was rejected",
+            ),
+        },
+        _ => match e.kind() {
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => Fail::Io(
+                ErrorKind::Tls,
+                "TLS failed: the broker closed the connection (is the port a plain MQTT port?)",
+            ),
+            _ => Fail::Io(ErrorKind::Tls, "the TLS handshake failed"),
+        },
+    }
 }
 
 fn session(ctx: &Ctx, mapper: &mut Mapper, connected: &mut bool) -> Fail {
@@ -593,16 +713,20 @@ fn session_inner(
     let connect_timeout = Duration::from_millis(cfg.connect_timeout_ms);
     let addrs = resolve(ctx)?;
     let mut sock = None;
+    let mut last_err = None;
     for a in addrs {
         if ctx.shared.stopped() {
             return Err(Fail::Stopped);
         }
-        if let Ok(s) = TcpStream::connect_timeout(&a, connect_timeout) {
-            sock = Some(s);
-            break;
+        match TcpStream::connect_timeout(&a, connect_timeout) {
+            Ok(s) => {
+                sock = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e.kind()),
         }
     }
-    let sock = sock.ok_or(Fail::Io("could not connect to the broker"))?;
+    let sock = sock.ok_or_else(|| tcp_fail(last_err))?;
     let _ = sock.set_nodelay(true);
     let _ = sock.set_read_timeout(Some(ctx.tick()));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(10)));
@@ -621,10 +745,15 @@ fn session_inner(
             let name = match cfg.broker.host.parse::<IpAddr>() {
                 Ok(ip) => rustls::pki_types::ServerName::IpAddress(ip.into()),
                 Err(_) => rustls::pki_types::ServerName::try_from(cfg.broker.host.clone())
-                    .map_err(|_| Fail::Io("the broker's name is not valid for TLS"))?,
+                    .map_err(|_| {
+                        Fail::Io(
+                            ErrorKind::TlsHostname,
+                            "the broker's name is not valid for TLS",
+                        )
+                    })?,
             };
             let conn = rustls::ClientConnection::new(tls.clone(), name)
-                .map_err(|_| Fail::Io("TLS could not start"))?;
+                .map_err(|_| Fail::Io(ErrorKind::Tls, "TLS could not start"))?;
             let mut s = rustls::StreamOwned::new(conn, sock);
             while s.conn.is_handshaking() {
                 if ctx.shared.stopped() {
@@ -634,10 +763,13 @@ fn session_inner(
                     Ok(_) => {}
                     Err(e) if is_tick(&e) => {
                         if Instant::now() >= deadline {
-                            return Err(Fail::Io("the TLS handshake timed out"));
+                            return Err(Fail::Io(
+                                ErrorKind::Timeout,
+                                "the TLS handshake timed out",
+                            ));
                         }
                     }
-                    Err(_) => return Err(Fail::Io("the TLS handshake failed")),
+                    Err(e) => return Err(tls_fail(&e)),
                 }
             }
             Wire::Tls(Box::new(s))
@@ -650,7 +782,7 @@ fn session_inner(
         last_tx: Instant::now(),
     };
 
-    let io_fail = |_e: io::Error| Fail::Io("the connection failed");
+    let io_fail = |_e: io::Error| Fail::Io(ErrorKind::Network, "the connection failed");
     conn.send(&Packet::Connect {
         client_id: cfg.client_id.clone(),
         keepalive_secs: cfg.keepalive_secs,
@@ -666,13 +798,25 @@ fn session_inner(
         match conn.poll()? {
             Some(Packet::ConnAck { code: 0, .. }) => break,
             Some(Packet::ConnAck { code: 4 | 5, .. }) => return Err(Fail::Auth),
+            Some(Packet::ConnAck { code: 1, .. }) => {
+                return Err(Fail::Protocol("the broker does not accept MQTT 3.1.1"));
+            }
+            Some(Packet::ConnAck { code: 2, .. }) => {
+                return Err(Fail::Protocol("the broker rejected the client ID"));
+            }
             Some(Packet::ConnAck { .. }) => {
-                return Err(Fail::Io("the broker refused the connection"));
+                return Err(Fail::Io(
+                    ErrorKind::Network,
+                    "the broker is not available (it refused the connection)",
+                ));
             }
             Some(_) => return Err(Fail::Protocol("unexpected packet before CONNACK")),
             None => {
                 if Instant::now() >= deadline {
-                    return Err(Fail::Io("the broker did not answer the connection"));
+                    return Err(Fail::Io(
+                        ErrorKind::Timeout,
+                        "the broker did not answer the connection",
+                    ));
                 }
             }
         }
@@ -715,6 +859,8 @@ fn session_inner(
                         }
                         s.status = Status::Connected;
                         s.last_error = None;
+                        s.last_error_kind = None;
+                        s.last_success_ms = Some(ctx.clock.now_ms());
                     });
                 }
             }
@@ -734,6 +880,13 @@ fn session_inner(
                 }
                 let now = ctx.clock.now_ms();
                 let outcome = mapper.on_message(&topic, &payload, retain, now);
+                lock(&ctx.shared.messages).push(
+                    now,
+                    &topic,
+                    &payload,
+                    retain,
+                    describe(&outcome, &cfg.id, &cfg.kind),
+                );
                 ctx.shared.update(|s| {
                     s.messages += 1;
                     match outcome {
@@ -767,11 +920,53 @@ fn session_inner(
         }
         let now = Instant::now();
         if now.duration_since(conn.last_rx) > keepalive + keepalive / 2 {
-            return Err(Fail::Io("the broker stopped answering"));
+            return Err(Fail::Io(ErrorKind::Timeout, "the broker stopped answering"));
         }
         if now.duration_since(conn.last_tx) >= keepalive / 2 {
             conn.send(&Packet::PingReq).map_err(io_fail)?;
         }
+    }
+}
+
+/// The log entry's outcome for a message.
+fn describe(outcome: &Outcome, sensor: &str, kind: &str) -> MessageOutcome {
+    let (code, text): (&'static str, String) = match outcome {
+        Outcome::Emit(state) => (
+            "matched",
+            format!("matched sensor {sensor} as {kind} ({})", state_name(*state)),
+        ),
+        Outcome::Seeded => (
+            "seeded",
+            "ignored: retained value recorded as the starting state".to_owned(),
+        ),
+        Outcome::Dropped(r) => match r {
+            Reason::Topic => ("topic_not_mapped", "ignored: topic not mapped".to_owned()),
+            Reason::Oversized => ("oversized", "ignored: payload too large".to_owned()),
+            Reason::RateLimited => ("rate_limited", "ignored: rate-limited".to_owned()),
+            Reason::Retained => (
+                "retained",
+                "ignored: retained message (setting: ignore)".to_owned(),
+            ),
+            Reason::Unmapped => (
+                "not_a_trigger_value",
+                "ignored: payload not a trigger value".to_owned(),
+            ),
+            Reason::Repeat => ("repeat", "ignored: same state as before".to_owned()),
+            Reason::Transition => (
+                "transition",
+                "ignored: this change is not set to trigger".to_owned(),
+            ),
+            Reason::Debounced => ("debounced", "ignored: within the debounce time".to_owned()),
+        },
+    };
+    MessageOutcome { code, text }
+}
+
+fn state_name(s: TriggerState) -> &'static str {
+    match s {
+        TriggerState::Start => "start",
+        TriggerState::Stop => "stop",
+        TriggerState::Pulse => "pulse",
     }
 }
 

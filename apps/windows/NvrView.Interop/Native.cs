@@ -407,7 +407,7 @@ public static unsafe partial class NvNative
     public const uint AbiVersion = 3;
 
     /// <summary>NV_ABI_MINOR of the header these bindings were written for.</summary>
-    public const uint AbiMinor = 13;
+    public const uint AbiMinor = 14;
 
     /// <summary>NV_ASC_MAX: most bytes of an AudioSpecificConfig an encoder's open may write (minor 9).</summary>
     public const int AscMax = 64;
@@ -894,6 +894,40 @@ public static unsafe partial class NvNative
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial NvStatus nv_alert_mute(nint core, string camera, uint seconds);
+
+    // Smart-alert debugging and review (minor 14; docs/FFI.md, "Smart alerts"). Bound for
+    // the Windows Smart Alerts screen to come (docs/PARITY.md); no screen calls them yet.
+
+    /// <summary>A trigger input's message log (request JSON; memory only; minor 14).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_messages(nint core, string request, byte* output, nuint cap, nuint* len);
+
+    /// <summary>One test alert through a configured output; the result is an event (minor 14).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alerts_output_test(nint core, string request);
+
+    /// <summary>A kept frame (JPEG, copied) and the methods' boxes for a check (JSON; minor 14).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_evidence_put(nint core, string json, byte* data, nuint len);
+
+    /// <summary>One set of evidence, or the list (query JSON or null; minor 14).</summary>
+    [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_evidence_get(nint core, string? query, byte* output, nuint cap, nuint* len);
+
+    /// <summary>One kept frame (JPEG; minor 14).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_evidence_frame_get(
+        nint core, ulong triggerId, uint index, byte* output, nuint cap, nuint* len);
+
+    /// <summary>Keeps a set of evidence for 7 days (minor 14).</summary>
+    [LibraryImport(Library)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial NvStatus nv_alert_evidence_pin(nint core, ulong triggerId);
 
     // Recorded playback (minor 6; docs/FFI.md, "Recorded playback (minor 6)").
 
