@@ -97,7 +97,11 @@ function Install-WingetPackage([string]$Id, [string[]]$ExtraArgs = @()) {
   $wingetArgs = @('install', '--id', $Id, '--exact', '--silent', '--source', 'winget',
     '--accept-package-agreements', '--accept-source-agreements') + $ExtraArgs
   & winget @wingetArgs
-  # winget returns non-zero for "already installed" on some versions; check again.
+  # Trust winget's own success: 'winget list' does not always show portable
+  # (zip) packages such as ffmpeg right after they install. Already installed
+  # (0x8A150061) and no applicable upgrade (0x8A15002B) count as success too.
+  if ($LASTEXITCODE -in 0, -1978335135, -1978335189) { return }
+  # Some winget versions use other codes for "already installed"; check again.
   $listed = winget list --id $Id --exact 2>$null | Out-String
   if ($listed -notmatch [regex]::Escape($Id)) { throw "winget could not install $Id" }
 }
