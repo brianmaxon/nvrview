@@ -11,7 +11,7 @@ py=$(python3 -I -c 'import sys; print(sys.executable)')
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-tests="test-stamps.sh test-docker-slot.sh test-merge-train.sh test-windows-split.sh test-suite-cache.sh test_suite_cache.py test_release_notes_bundle.py"
+tests="test-stamps.sh test-docker-slot.sh test-merge-train.sh test-windows-split.sh test-macos-package.sh test-suite-cache.sh test_suite_cache.py test_release_notes_bundle.py"
 for t in $tests; do
   case "$t" in
     *.py) cmd="$py -I scripts/$t" ;;

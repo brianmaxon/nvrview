@@ -29,7 +29,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 root=$(pwd)
-if [ -d /opt/homebrew/opt/rustup/bin ]; then
+if [ -d /opt/homebrew/opt/rustup/bin ] && [ -z "${NVRVIEW_KEEP_PATH:-}" ]; then
   PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 fi
 

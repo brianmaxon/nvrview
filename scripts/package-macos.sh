@@ -40,7 +40,7 @@
 # signature and notarization, which this script does not do.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
-if [ -d /opt/homebrew/opt/rustup/bin ]; then
+if [ -d /opt/homebrew/opt/rustup/bin ] && [ -z "${NVRVIEW_KEEP_PATH:-}" ]; then
   PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 fi
 
