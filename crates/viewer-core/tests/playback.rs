@@ -640,7 +640,18 @@ fn live_view_keeps_running_and_playback_tiles_are_tiles() {
         rig.core.close_tile(tiles[0]),
         Err(viewer_core::CoreError::InvalidArgument)
     );
-    // ...and a tier switch restarts its device's plays in the new tier.
+    // ...and a tier switch restarts its device's plays in the new tier,
+    // at the position, with the status reporting each camera's tier.
+    let tiers = |pb: u64| -> Vec<String> {
+        let st: Value = serde_json::from_str(&rig.core.playback_status(pb).unwrap()).unwrap();
+        st["cameras"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["tier"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let position_before = rig.position(pb).0;
     rig.core.set_tile_tier(tiles[0], StreamTier::Main).unwrap();
     rig.until("the main-stream play", 20, || {
         nvr.play_log()
@@ -662,6 +673,23 @@ fn live_view_keeps_running_and_playback_tiles_are_tiles() {
                 .is_some_and(|e| e["state"] == "playing")
         }) && rig.position(pb).1 == PlaybackState::Playing
     });
+    assert_eq!(tiers(pb)[0], "main");
+    let position_after = rig.position(pb).0;
+    assert!(
+        position_after >= position_before && position_after - position_before < 20_000,
+        "{position_before} -> {position_after}"
+    );
+    let playing_log = nvr.play_log();
+    let resumed = playing_log
+        .iter()
+        .rev()
+        .find(|l| l.channel == 0 && l.stream == Some(StreamTier::Main))
+        .unwrap();
+    assert!(resumed.served);
+    assert!(
+        resumed.at.to_naive_secs() * 1000 >= position_before - 5000,
+        "restarted at the position, not the start: {resumed:?} vs {position_before}"
+    );
     // Removing a camera closes its tile and restarts the other's play.
     rig.core.playback_remove_camera(pb, tiles[1]).unwrap();
     rig.until("one play", 20, || nvr.active_plays() == 1);
