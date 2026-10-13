@@ -126,6 +126,17 @@ import VideoKit
 /// `scripts/check-parity.py` compares them).
 ///
 /// Prints what it measured and exits 0 or 1.
+
+/// When the app started (host seconds): every line the self-test prints
+/// starts with the seconds since, so a run shows where its time went.
+nonisolated(unsafe) private var selfTestStarted = CACurrentMediaTime()
+
+/// The self-test's own `print`: the elapsed seconds in front of the line
+/// (the verdict lines at the end use `Swift.print`, unprefixed).
+private func print(_ line: String) {
+    Swift.print(String(format: "[%6.2f] ", CACurrentMediaTime() - selfTestStarted) + line)
+}
+
 @MainActor
 final class SelfTest {
     private unowned let app: AppDelegate
@@ -147,6 +158,7 @@ final class SelfTest {
     func start(seconds: Double) {
         // Line by line, also into a pipe (a run that hangs still shows how far it got).
         setvbuf(stdout, nil, _IOLBF, 0)
+        selfTestStarted = began
         launchPeekStep { [self] in
             when({ [self] in gridReady }, timeout: seconds) { [self] in checkGrid() }
         }
@@ -278,13 +290,16 @@ final class SelfTest {
         capture("grid") { [self] in livePacing { [self] in resizeStep() } }
     }
 
-    /// Live pacing (docs/RENDERING.md "Playback pacing"): for five seconds
-    /// every live tile of the first window notes when each picture reaches
-    /// the app, and the window's renderer counts the pictures it draws for
-    /// the first time; together the tiles must draw at least 90% of the
-    /// pictures delivered (what the header's "Device" and "Shown" rates
-    /// compare). Real time on purpose: it measures the real display refresh
-    /// and decoders.
+    /// Live pacing (docs/RENDERING.md "Playback pacing"): until every live
+    /// tile of the first window has been delivered `livePacingPictures`
+    /// pictures (a count, not a time), each tile notes when each picture
+    /// reaches the app, and the window's renderer counts the pictures it
+    /// draws for the first time; together the tiles must draw at least 90%
+    /// of the pictures delivered (what the header's "Device" and "Shown"
+    /// rates compare). The pictures come in at the stream's own pace, so this
+    /// takes a second or two; the release pacing itself is proven on a
+    /// simulated clock in the core's tests (tests/core.rs, live pictures
+    /// delivered in groups) and the bounds in PacingStatsTests.
     private func livePacing(then next: @escaping @MainActor () -> Void) {
         // parity: live-pacing
         guard let model = app.model, let window else { return next() }
@@ -311,9 +326,11 @@ final class SelfTest {
             }
         }
         RunLoop.main.add(probe, forMode: .common)
-        after(5) { [self] in
+        let began = CACurrentMediaTime()
+        when({ tiles.allSatisfy { $0.pacing.report().released.pictures >= Self.livePacingPictures } }, timeout: 15) { [self] in
             probe.invalidate()
-            print(String(format: "live pacing: main thread %d timer ticks of 500, longest gap %.0f ms; window visible %@", ticks, longest * 1000,
+            let seconds = CACurrentMediaTime() - began
+            print(String(format: "live pacing: main thread %d timer ticks in %.2f s, longest gap %.0f ms; window visible %@", ticks, seconds, longest * 1000,
                          window.window?.occlusionState.contains(.visible) == true ? "yes" : "no"))
             window.window?.orderBack(nil)
             renderer.onNewPicture = nil
@@ -325,7 +342,7 @@ final class SelfTest {
             let ratio = arrived > 0 ? Double(shown) / Double(arrived) : 0
             let made = window.stage.grid.refreshes - refreshes
             let first = reports.first.map { String(describing: $0) } ?? "none"
-            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in 5 s; first tile: \(first)")
+            print("live pacing: \(tiles.count) tiles, \(arrived) pictures delivered, \(shown) drawn (\(String(format: "%.2f", ratio))), \(made) display refreshes in \(String(format: "%.2f", seconds)) s; first tile: \(first)")
             if ratio < Self.pacingShownRatio {
                 problems.append("live pacing: \(shown) of \(arrived) delivered pictures were drawn")
             }
@@ -3851,7 +3868,11 @@ final class SelfTest {
                 let writing = Writing()
                 Task { @MainActor in
                     do {
-                        for (url, spec) in files { try await SyntheticRecording.write(spec, to: url) }
+                        for (url, spec) in files {
+                            let t0 = CACurrentMediaTime()
+                            try await SyntheticRecording.write(spec, to: url)
+                            print(String(format: "edits: wrote %d frames in %.2f s", spec.frames, CACurrentMediaTime() - t0))
+                        }
                     } catch {
                         writing.failure = String(describing: error)
                     }
@@ -4700,27 +4721,39 @@ final class SelfTest {
         }
     }
 
-    /// Jitter (ms) the shown pictures may have at the 95th percentile, and at most (the Windows step's bounds).
-    static let pacingJitterP95Ms = 20.0
-    static let pacingJitterMaxMs = 34.0
-    /// Share of the released pictures that must be drawn.
-    static let pacingShownRatio = 0.9
+    /// Share of the delivered pictures the live tiles must draw.
+    static let pacingShownRatio = PacingVerdict.shownRatio
+    /// Pictures every live tile is delivered while live pacing measures.
+    static let livePacingPictures = 30
+    /// Share of the released pictures the real display must draw in the
+    /// playback pacing step (a wiring check; the verdict is the simulated
+    /// display's).
+    static let playbackDrawnRatio = 0.8
+    /// Shown pairs the playback pacing verdict needs.
+    static let playbackPacingPairs = 40
 
     /// Playback pacing (docs/RENDERING.md "Playback pacing"), on the path a
     /// viewer takes: a finished one-camera incident selected on the day's
-    /// timeline plays at 1x from its start less its margin. For ten seconds
-    /// the tile notes when each picture is released to the app, decoded, and
-    /// first drawn by the player's renderer; the drawn pictures must keep up
-    /// with the released ones and follow their own timestamps. Real time on
-    /// purpose: what is measured is real pacing (release clock, decoder,
-    /// display refresh).
+    /// timeline plays at 1x from its start less its margin. The tile notes
+    /// when each picture is released to the app, decoded, and first drawn by
+    /// the player's renderer. The verdict (`PacingVerdict`) is given on a
+    /// simulated 60 Hz display fed with the real decode times
+    /// (`PacingRefresh`), so it does not depend on the refreshes the real
+    /// display missed; the real display must still draw most of the
+    /// released pictures (a wiring check). The waits are counts of pictures:
+    /// past the play's opening burst, then until enough pairs are decoded.
+    /// What this cannot show on its own is proven on simulated time: the
+    /// release pacing in the core's tests (tests/playback.rs, a wrong UTC
+    /// offset), the bounds and the old bugs injected in PacingStatsTests.
     private func recordingsRealPacing(_ b: RecordingsBrowser, then next: @escaping @MainActor () -> Void) {
         // parity: playback-pacing
         let p = b.player
-        guard let incident = b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 }),
-            let renderer = app.recordingsWindows.first?.stage?.grid?.renderer
-        else {
-            problems.append("playback pacing: no one-camera incident or player stage")
+        let oneCamera = b.dayIncidents.first(where: { !$0.growing && $0.cameras.count == 1 })
+        guard let incident = oneCamera, let renderer = app.recordingsWindows.first?.stage?.grid?.renderer else {
+            let counts = b.dayIncidents.map { "\($0.cameras.count)\($0.growing ? "+" : "")" }.joined(separator: ",")
+            problems.append(
+                "playback pacing: no one-camera incident (cameras per incident: \(counts)) or player stage "
+                    + "(\(app.recordingsWindows.first?.stage == nil ? "none" : "present"))")
             return next()
         }
         b.click(incident.key, extend: false)
@@ -4733,29 +4766,30 @@ final class SelfTest {
                 recorder = p.cells[0].tile.pacing
                 recorder?.enabled = true
             }
-            return p.state == .playing && (recorder?.report().shown.pictures ?? 0) >= 10
+            // Past the opening burst: the device sends its first pictures faster than their time.
+            return p.state == .playing && (recorder?.report().decoded ?? 0) >= 20
         }, timeout: 30) { [self] in
-            guard let recorder, p.state == .playing, recorder.report().shown.pictures >= 10 else {
+            guard let recorder, p.state == .playing, recorder.report().decoded >= 20 else {
                 renderer.onNewPicture = nil
                 problems.append("playback pacing: the incident's playback did not start (\(p.message ?? "no message"))")
                 return next()
             }
-            after(2) { [self] in
-                recorder.reset()
-                let before = p.positionMs
-                after(10) { [self] in
-                    renderer.onNewPicture = nil
-                    recorder.enabled = false
-                    let r = recorder.report()
-                    let ratio = r.released.pictures > 0 ? Double(r.shown.pictures) / Double(r.released.pictures) : 0
-                    print("playback pacing: incident \(incident.start)..\(incident.end) margin \(incident.margin) s, position moved \(p.positionMs - before) ms in 10 s, shown/released \(String(format: "%.2f", ratio)); \(r)")
-                    if r.shown.pairs < 50 { problems.append("playback pacing: only \(r.shown.pairs) picture pairs were shown in 10 s") }
-                    if ratio < Self.pacingShownRatio { problems.append("playback pacing: \(r.shown.pictures) of \(r.released.pictures) released pictures were shown") }
-                    if r.shown.jitterP95 > Self.pacingJitterP95Ms || r.shown.jitterMax > Self.pacingJitterMaxMs {
-                        problems.append("playback pacing: shown pictures are uneven (\(r.shown))")
-                    }
-                    next()
+            recorder.reset()
+            let before = p.positionMs, began = CACurrentMediaTime()
+            when({ recorder.report().decoded > Self.playbackPacingPairs + 2 }, timeout: 30) { [self] in
+                renderer.onNewPicture = nil
+                recorder.enabled = false
+                let r = recorder.report()
+                let drawn = r.released.pictures > 0 ? Double(r.shown.pictures) / Double(r.released.pictures) : 0
+                print(
+                    "playback pacing: incident \(incident.start)..\(incident.end) margin \(incident.margin) s, position moved "
+                        + "\(p.positionMs - before) ms in \(String(format: "%.2f", CACurrentMediaTime() - began)) s, "
+                        + "real display drew \(String(format: "%.2f", drawn)); \(r)")
+                problems.append(contentsOf: r.verdict(minPairs: Self.playbackPacingPairs).map { "playback pacing: \($0)" })
+                if drawn < Self.playbackDrawnRatio {
+                    problems.append("playback pacing: the real display drew \(r.shown.pictures) of \(r.released.pictures) released pictures")
                 }
+                next()
             }
         }
     }
@@ -4849,6 +4883,11 @@ final class SelfTest {
     /// the events said; the call has the video and the three audio tracks,
     /// only Conversation enabled, every one decoding, and it ends with the
     /// call.
+    /// Media time (ms) the real-core recordings run before they are stopped:
+    /// enough for a keyframe start, a duration check, and decoding sound in
+    /// every track (the core's own tests cover caps, gaps and long files).
+    static let realRecordingMs: UInt64 = 1200
+
     private func captureRealStep() {
         guard let model = app.model, let window,
             let device = model.devices.first(where: { $0.link.state == .connected && !$0.channels.isEmpty }),
@@ -4862,7 +4901,7 @@ final class SelfTest {
             problems.append("capture (real core): the live recording did not start (\(model.capture.lastRefusal ?? "?"))")
             return checkLog()
         }
-        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 3000 }) { [self] in
+        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= Self.realRecordingMs }) { [self] in
             model.capture.stop(id)
             whenCapture(20, { $0.running[id] == nil }) { [self] in
                 guard let end = model.capture.board.ended.last(where: { $0.recording == id }) else {
@@ -4900,7 +4939,7 @@ final class SelfTest {
             model.calls.end(camera.firstLens, reason: "closed")
             return checkLog()
         }
-        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= 2500 }) { [self] in
+        whenCapture(30, { ($0.running[id]?.durationMs ?? 0) >= Self.realRecordingMs }) { [self] in
             // The recording ends with the call.
             model.calls.end(camera.firstLens, reason: "closed")
             whenCapture(20, { $0.running[id] == nil }) { [self] in
@@ -5065,11 +5104,11 @@ final class SelfTest {
         app.model?.shutdown()
         print(String(format: "selftest took %.2f s", CACurrentMediaTime() - began))
         if problems.isEmpty {
-            print("selftest: PASS")
+            Swift.print("selftest: PASS")
             exit(0)
         }
-        for p in problems { print("  \(p)") }
-        print("selftest: FAIL")
+        for p in problems { Swift.print("  \(p)") }
+        Swift.print("selftest: FAIL")
         exit(1)
     }
 }
