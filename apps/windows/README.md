@@ -955,13 +955,34 @@ parallel checks and merges finish sooner. To add one:
    ```
 
    `ssh win-test-2 ver` should print the Windows version without asking for
-   a password.
+   a password. A timeout on port 22 means the SSH server is not running yet
+   (the script ran without `-EnableSsh`) or the Mac is not on the computer's
+   local subnet, the only one its firewall rule admits.
 
-3. Name every alias in `NVRVIEW_WINDOWS_HOSTS`, for example in the shell
-   profile: `export NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"`.
-   `NVRVIEW_WINDOWS_HOST` still works for a single computer.
-4. Run one full check on it to prime its build output:
-   `NVRVIEW_WINDOWS_HOSTS=win-test-2 NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh`.
+3. Run one full check on it alone, to prime its build output and see its
+   timings before any shared check can land on it:
+
+   ```sh
+   NVRVIEW_WINDOWS_HOSTS=win-test-2 NVRVIEW_APP_SELFTEST=1 scripts/windows-check.sh
+   ```
+
+4. Only then add it to the pool: name every alias in `NVRVIEW_WINDOWS_HOSTS`
+   in the Mac's shell profile (`~/.zshrc`), the existing computer first:
+
+   ```sh
+   export NVRVIEW_WINDOWS_HOSTS="win-test-1 win-test-2"
+   ```
+
+   The first alias keeps the lock name single-computer setups already use.
+   A check whose host cannot be reached fails rather than waiting for
+   another, so never list a computer that has not passed steps 2 and 3.
+   `NVRVIEW_WINDOWS_HOST` still works for a single computer; when both are
+   set, the pool wins (the lock picks a free host from
+   `NVRVIEW_WINDOWS_HOSTS` and sets `NVRVIEW_WINDOWS_HOST` to it), so
+   commands that pass `NVRVIEW_WINDOWS_HOST` inline join the pool unchanged.
+   New terminals see the profile change; a running agent session read the
+   profile when it started, so pass `NVRVIEW_WINDOWS_HOSTS=...` inline there
+   until the next session.
 
 There is one lock per host (`scripts/windows-lock.sh`; the first host uses
 `NVRVIEW_WINDOWS_LOCK`, the others add `-<alias>`). Merges and releases take a
