@@ -2,15 +2,13 @@
 //! external motion sensor covering two of them, sunrise and sunset from a
 //! coarse location, and a reconnect gap at night.
 
-mod common;
-
+use crate::common::*;
 use alerts::decision::Outcome;
 use alerts::model::Exposure;
 use alerts::settings::{CameraSettings, Location, SourceCamera, SourceMapping};
 use alerts::time::{Millis, SECOND_MS};
 use alerts::trace::StepKind;
 use alerts::{AlertSettings, Class, DecideInputs, Decision, Detection, Engine, Next, Now, Trigger};
-use common::*;
 
 /// UTC+1, as a summer offset would be.
 const OFFSET: i32 = 60;

@@ -1,9 +1,7 @@
 //! End-to-end tests: pure-Rust structural checks (always on) and ffprobe/ffmpeg
 //! checks (skipped when ffmpeg is not installed).
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mp4_remux::{Error, Mp4Writer, Options, VideoCodec, VideoFrame};
 use std::io::Cursor;
 

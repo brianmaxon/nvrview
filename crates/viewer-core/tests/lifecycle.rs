@@ -4,9 +4,7 @@
 //! except the test of a slow `on_action`, which needs the core's own tile
 //! threads.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};

@@ -4,9 +4,7 @@
 //! tile close, and permission withdrawal. On a simulated clock: the talk's
 //! pacing and the device's acknowledgments take simulated time.
 
-mod common;
-
-use common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
+use crate::common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use mock_nvr::talk::TalkEnd;
 use simtime::SimRuntime;
 use std::path::PathBuf;
@@ -32,14 +30,14 @@ fn tone(rate: u32, freq: f64, n: usize) -> Vec<f32> {
         .collect()
 }
 
-fn talk_events(rec: &common::Recorder, tile: u64) -> Vec<serde_json::Value> {
+fn talk_events(rec: &crate::common::Recorder, tile: u64) -> Vec<serde_json::Value> {
     rec.events_of("talk")
         .into_iter()
         .filter(|e| e["tile"] == tile)
         .collect()
 }
 
-fn states(rec: &common::Recorder, tile: u64) -> Vec<String> {
+fn states(rec: &crate::common::Recorder, tile: u64) -> Vec<String> {
     talk_events(rec, tile)
         .iter()
         .map(|e| e["state"].as_str().unwrap().to_owned())
@@ -224,7 +222,7 @@ fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
 fn start_and_stop(
     sim: &SimRuntime,
     core: &viewer_core::Core,
-    rec: &common::Recorder,
+    rec: &crate::common::Recorder,
     tile: u64,
 ) -> String {
     let before = talk_events(rec, tile).len();

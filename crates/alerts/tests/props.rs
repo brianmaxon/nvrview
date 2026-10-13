@@ -1,14 +1,12 @@
 //! Properties over random settings and trigger sequences.
 
-mod common;
-
+use crate::common::*;
 use alerts::decision::Outcome;
 use alerts::model::{Exposure, Mode, Severity};
 use alerts::settings::{CameraSettings, DailyWindow, Schedule};
 use alerts::time::{Millis, SECOND_MS};
 use alerts::trace::StepKind;
 use alerts::{AlertSettings, Class, DecideInputs, Engine, Rarity};
-use common::*;
 use proptest::prelude::*;
 
 fn arb_settings() -> impl Strategy<Value = AlertSettings> {

@@ -3,9 +3,7 @@
 //! simulated clock: probe delays, quiet periods, and probe windows take
 //! simulated time.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mock_nvr::ExternMode;
 use simtime::SimRuntime;
 use std::net::SocketAddr;

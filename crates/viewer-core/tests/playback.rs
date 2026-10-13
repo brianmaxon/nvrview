@@ -6,10 +6,8 @@
 //! clock at `playSpeed`, main streams thinned to keyframes from 2x, and no
 //! end-of-play message.
 
-mod common;
-
+use crate::common::*;
 use bc_protocol::archive::DateTime;
-use common::*;
 use mock_nvr::archive::ArchiveConfig;
 use serde_json::{Value, json};
 use simtime::SimRuntime;

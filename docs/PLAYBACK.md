@@ -240,7 +240,7 @@ section 2a.
   session up to 1 s late while the mock sent them on time. The end-to-end
   test checks live view during a three-camera download (no gap over
   400 ms) in simulated time, and, opt-in, in real time with every core busy
-  (`cargo test -p recordings --test e2e -- --ignored`).
+  (`cargo test -p recordings --test main -- e2e:: --ignored`).
 - **Scheduling**: jobs from a whole incident are queued together. Devices
   work in parallel; per device, downloads share one session with a small
   concurrency limit (one download and one search at a time by default) so

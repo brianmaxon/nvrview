@@ -4,12 +4,10 @@
 //! disk guard, crash recovery of a partial file, and shutdown (or dropping
 //! the core) finalizing a recording in progress.
 
-mod common;
-
 #[path = "../../mp4/tests/common/mod.rs"]
 mod mp4_common;
 
-use common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
+use crate::common::{PASSWORD, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use mp4_common::{boxes_in, child, top, top_box, tracks};
 use simtime::SimRuntime;
 use std::collections::HashMap;
@@ -129,7 +127,7 @@ struct Rig {
     sim: SimRuntime,
     nvr: mock_nvr::MockNvr,
     core: Arc<Core>,
-    rec: Arc<common::Recorder>,
+    rec: Arc<crate::common::Recorder>,
     data: tempfile::TempDir,
     live: tempfile::TempDir,
     free: Arc<FakeFree>,
@@ -466,7 +464,7 @@ fn a_call_recording_holds_both_sides() {
         .seen(tile)
         .into_iter()
         .filter_map(|s| match s {
-            common::Seen::Decode { keyframe, .. } => Some(keyframe),
+            crate::common::Seen::Decode { keyframe, .. } => Some(keyframe),
             _ => None,
         })
         .collect();
@@ -820,7 +818,7 @@ fn a_recording_outlives_its_tile_and_ends_with_its_device() {
 /// time).
 #[test]
 fn recorders_run_on_their_own_threads() {
-    let nvr = common::mock(1);
+    let nvr = crate::common::mock(1);
     let data = tempfile::tempdir().unwrap();
     let live = tempfile::tempdir().unwrap();
     let (core, rec) = start(config(data.path()));
@@ -845,11 +843,11 @@ fn recorders_run_on_their_own_threads() {
             .into_iter()
             .rfind(|e| e["recording"] == id)
     };
-    common::wait_until("a second recorded", 20, || {
+    crate::common::wait_until("a second recorded", 20, || {
         last().is_some_and(|e| e["duration_ms"].as_u64().unwrap_or(0) >= 1000)
     });
     core.record_stop(id).unwrap();
-    common::wait_until("finished", 20, || {
+    crate::common::wait_until("finished", 20, || {
         last().is_some_and(|e| e["state"] == "finished")
     });
     let (_, t) = read_mp4(&file);

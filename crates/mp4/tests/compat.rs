@@ -7,9 +7,7 @@
 //! the output with values recorded from the writer before multi-track audio
 //! was added. Any change to the bytes these callers get fails here.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mp4_remux::{
     AudioLayout, ChangePolicy, FileOptions, FragmentOptions, FragmentedFile, Fragmenter, Mp4Writer,
     Options, Segment, VideoCodec, VideoFrame, finalize_to_mp4, parse_adts,

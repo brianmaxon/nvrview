@@ -2,14 +2,12 @@
 //! back record for record, at the recorded pace, accelerated, and looped.
 //! On a simulated clock, so the pace is measured in simulated time.
 
-mod common;
-
+use crate::common::{Link, TestNvr};
 use bc_protocol::framer::{Decoder, RawMessage};
 use bc_protocol::media::{Codec, Record};
 use bc_protocol::recording::{Writer, encode_record};
 use bc_protocol::session::{Event, Session};
 use bc_protocol::stream::StreamTier;
-use common::{Link, TestNvr};
 use mock_nvr::Config;
 use mock_nvr::fixture::Fixture;
 use mock_nvr::replay::{Replay, ReplayConfig};

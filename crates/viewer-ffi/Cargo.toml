@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+autotests = false
 
 [lib]
 # libnvrview.a (macOS XCFramework), nvrview.dll + import library (Windows),
@@ -31,3 +32,9 @@ updates = { path = "../updates" }
 
 [lints]
 workspace = true
+
+# One test executable per crate (each links the whole dependency graph); each
+# file under tests/ is a module of it, named as the file was.
+[[test]]
+name = "main"
+path = "tests/main.rs"

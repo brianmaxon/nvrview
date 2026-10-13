@@ -1,9 +1,7 @@
 //! Two devices at once, detection events, device keys, and layouts, against
 //! two in-process mock NVRs, on a simulated clock.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use simtime::SimRuntime;
 use std::path::PathBuf;
 use viewer_core::{CoreConfig, CoreError, StreamTier};

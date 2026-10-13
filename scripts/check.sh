@@ -136,6 +136,9 @@ step sanitization "sanitization"
 step parity "self-test parity"
 "$py" -I scripts/check-parity.py
 
+step test-modules "test files are modules of the one test executable"
+"$py" -I scripts/check-test-modules.py
+
 step selftest-areas "self-test areas (Windows and macOS)"
 "$py" -I scripts/check-selftest-areas.py
 

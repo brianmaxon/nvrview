@@ -111,6 +111,20 @@ if command -v sccache >/dev/null 2>&1; then
   sccache --zero-stats >/dev/null 2>&1 || true
 fi
 
+# Link with rust-lld instead of link.exe on the worker (the shipping package
+# build, scripts/windows-app.sh package, does not come through here and keeps
+# link.exe). Measured here: the test build of all targets went from 96 s to
+# 57 s with a warm compile cache, the release library from 21 s to 17 s. The
+# linker is part of sccache's key, so the first run after a change recompiles.
+# NVRVIEW_WORKER_LINKER=msvc keeps link.exe.
+if [ "${NVRVIEW_WORKER_LINKER:-lld}" = lld ]; then
+  lld_dir="$(rustc --print sysroot)/lib/rustlib/x86_64-pc-windows-msvc/bin"
+  if [ -f "$lld_dir/rust-lld.exe" ]; then
+    export PATH="$lld_dir:$PATH"
+    export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe
+  fi
+fi
+
 # Worker-only build settings (CI and shipping builds are unchanged). No
 # debug information in the test builds: measured on this worker, a clean
 # `cargo test --no-run` took about half as long and the target folder shrank

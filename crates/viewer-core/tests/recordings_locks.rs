@@ -5,10 +5,8 @@
 //! survives a restart, keeps its edits and index days past the age limit,
 //! and keeps its day when the index evicts by size.
 
-mod common;
-
+use crate::common::*;
 use bc_protocol::archive::DateTime;
-use common::*;
 use mock_nvr::archive::{ArchiveConfig, MockEvent};
 use serde_json::{Value, json};
 use simtime::SimRuntime;

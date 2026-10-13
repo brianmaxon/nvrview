@@ -5,10 +5,8 @@
 //! smoke alarm (fixtures/synthetic/aac-smoke-t3.aac) as the recorded audio.
 //! Everything runs on the simulated clock.
 
-mod common;
-
+use crate::common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use bc_protocol::archive::DateTime;
-use common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, sim_until, start};
 use mock_nvr::archive::{ArchiveConfig, MockEvent};
 use serde_json::{Value, json};
 use simtime::SimRuntime;

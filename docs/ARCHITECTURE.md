@@ -503,8 +503,8 @@ other threads, a slow `on_action`, calls from callbacks), the C interface
 end to end on the production configuration, the TCP server's behavior with
 a full socket buffer, the log writer's thread, the host clock itself, and
 the C and C# smoke tests and Linux Docker run. A real-load stress test of
-live view during downloads is opt-in (`cargo test -p recordings --test e2e
--- --ignored`).
+live view during downloads is opt-in (`cargo test -p recordings --test main
+-- e2e:: --ignored`).
 
 ## Milestones
 

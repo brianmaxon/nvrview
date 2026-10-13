@@ -1,9 +1,7 @@
 //! Fragmented MP4: structural checks (always on) and ffprobe/ffmpeg checks
 //! (skipped when ffmpeg is not installed).
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mp4_remux::{
     AudioLayout, Error, FileOptions, FragmentOptions, FragmentedFile, Fragmenter, Options, Segment,
     SegmentKind, SegmentTrack, VideoCodec, VideoFrame, finalize_to_mp4, parse_adts,

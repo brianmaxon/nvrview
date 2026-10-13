@@ -1,8 +1,6 @@
 //! Concatenation, 64-bit offsets, and property tests.
 
-mod common;
-
-use common::*;
+use crate::common::*;
 use mp4_remux::{Chunk, Concatenator, Mp4Writer, Options, TimedAudio, VideoCodec, VideoFrame};
 use proptest::prelude::*;
 use std::io::Cursor;
