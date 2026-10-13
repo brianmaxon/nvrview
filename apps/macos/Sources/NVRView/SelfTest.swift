@@ -818,6 +818,29 @@ final class SelfTest {
         print("fill per tile: this tile fills \(stage.fills(atTile: path)), another \(stage.fills(atTile: other.path)), Fill Tiles \(fillsMenu.state == .mixed ? "mixed" : "not mixed"), item checked \(checked)")
         if !single { problems.append("Fill Tile on one tile did not fill only it, with Fill Tiles mixed") }
         if !checked { problems.append("Fill Tile is not checked on the tile that fills") }
+        // parity: fill-focused-tile-menu
+        // A full-screen (focused) tile has a right-click menu too, through
+        // the window's own event routing: the picture items (Fill Tile and
+        // the rest) and Exit Full Screen, without the layout edits.
+        stage.focus(path)
+        advance(StageView.focusDuration)
+        let center = stage.convert(CGPoint(x: stage.bounds.midX, y: stage.bounds.midY), to: nil)
+        var focusedTitles: [String] = []
+        if let nsWindow = window.window, let content = nsWindow.contentView,
+            let event = NSEvent.mouseEvent(
+                with: .rightMouseDown, location: center, modifierFlags: [], timestamp: 0,
+                windowNumber: nsWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+            let hit = content.hitTest(content.convert(center, from: nil))
+        {
+            focusedTitles = hit.menu(for: event)?.items.map(\.title) ?? []
+        }
+        print("focused tile menu: \(focusedTitles.filter { !$0.isEmpty }.joined(separator: ", "))")
+        if !focusedTitles.contains("Fill Tile") || !focusedTitles.contains("Exit Full Screen") {
+            problems.append("a full-screen tile has no right-click menu with its picture items and Exit Full Screen")
+        }
+        if focusedTitles.contains("Split Side by Side") { problems.append("a full-screen tile's menu offers layout edits") }
+        stage.unfocus()
+        advance(StageView.focusDuration)
         prepare()
         guard let picture = stage.pictureSizes[camera], let before = stage.renderedSource(of: path) else {
             problems.append("no picture to pan")

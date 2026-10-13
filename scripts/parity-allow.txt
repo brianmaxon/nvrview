@@ -111,3 +111,4 @@ alerts-ha-test-alert         macos    gap: Windows has no Smart Alerts screen ye
 alerts-evidence-kept         macos    gap: Windows has no Smart Alerts screen yet (the calls are bound; NOTIFICATIONS.md slice S7)
 alerts-events-overlay        macos    gap: Windows has no Smart Alerts screen yet (the calls are bound; NOTIFICATIONS.md slice S7)
 alerts-events-image          macos    gap: Windows has no Smart Alerts screen yet (the calls are bound; NOTIFICATIONS.md slice S7)
+fill-focused-tile-menu  macos  gap: Windows should check that a full-screen tile keeps its right-click menu (picture items, exit full screen)

@@ -1482,7 +1482,10 @@ final class StageView: NSView {
     /// (`TileHeaderLayout.menu(for:)`, the header's order and wording),
     /// then, in a viewer window, the layout's own items.
     fileprivate func menu(at p: CGPoint) -> NSMenu? {
-        guard state.focused == nil, let leaf = frames.leaf(at: p) else { return nil }
+        // A full-screen (focused) tile gets its menu too: the picture and
+        // camera items (Quality, Fisheye View, Fill, Save Picture, ...),
+        // with Exit Full Screen in place of the layout edits.
+        guard let leaf = state.focused == nil ? frames.leaf(at: p) : drawnLeaf(at: p) else { return nil }
         state.selected = leaf.path
         refreshChrome()
         return contextMenu(for: leaf)
@@ -1500,9 +1503,13 @@ final class StageView: NSView {
             }
             if fixedTile { return menu }
             menu.addItem(.separator())
+            if state.focused != nil {
+                item("Exit Full Screen") { [weak self] in self?.unfocus() }
+                return menu
+            }
             item("Focus") { [weak self] in self?.focus(leaf.path) }
         }
-        if fixedTile { return menu }
+        if fixedTile || state.focused != nil { return menu }
         item("Split Side by Side") { [weak self] in self?.split(.row) }
         item("Split Stacked") { [weak self] in self?.split(.col) }
         item("Remove Tile") { [weak self] in self?.removeSelected() }
