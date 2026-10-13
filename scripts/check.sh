@@ -179,23 +179,108 @@ if [ -n "$args" ]; then
   cargo clippy $args --all-targets -- -D warnings
 fi
 
+# ---------------------------------------------------------------------------
+# The heavy steps are independent of each other, so they run side by side, one
+# "lane" each, with every lane's output buffered and printed in order after
+# they finish (scripts/run-script-tests.sh does the same for the script
+# tests). A step line inside a lane prints "(label: Ns)" like a serial one.
+# A failure fails the check and names the step. What they share:
+#   cargo      one lane (rust) runs all the cargo builds and tests, as cargo
+#              locks the target directory; the C smoke tests' library and mock
+#              are built and copied first, before any lane starts
+#   SwiftPM    one lane (swift) runs swift test, the app builds, and the GUI
+#              self-tests one after another (one .build lock, one desktop)
+#   Docker     each Docker lane takes a host-wide slot (scripts/docker-slot.sh)
+# NVRVIEW_SERIAL_CHECK=1 runs the lanes one after another instead.
+# ---------------------------------------------------------------------------
+
+# Cache decisions are made here, in order, before any lane starts.
+lane_dir=$(mktemp -d)
+lanes=""
+lane_wall_start=0
+# lstep ROW LABEL CMD...: runs one step inside a lane. ROW is "-" or a comma
+# separated list of cache rows that a pass records.
+lstep() {
+  _row=$1
+  _label=$2
+  shift 2
+  printf '\n== %s\n' "$_label" >>"$lane_out"
+  _s=$(date +%s)
+  _rc=0
+  "$@" >>"$lane_out" 2>&1 || _rc=$?
+  printf '%s\t%s\t%s\t%s\n' "$_row" "$(($(date +%s) - _s))" "$_rc" "$_label" >>"$lane_res"
+  if [ "$_rc" != 0 ]; then exit "$_rc"; fi
+}
+# lane NAME FUNCTION: starts FUNCTION in the background as lane NAME.
+lane() {
+  _name=$1
+  shift
+  lane_out="$lane_dir/$_name.out"
+  lane_res="$lane_dir/$_name.res"
+  : >"$lane_out"
+  : >"$lane_res"
+  if [ "${NVRVIEW_SERIAL_CHECK:-0}" = 1 ]; then
+    ("$@") || true
+  else
+    ("$@") &
+  fi
+  lanes="$lanes $_name"
+}
+# lwant SUITE: decides a suite for a lane; prints why when it is cached.
+lwant() {
+  end_step
+  if [ -n "$run_file" ] && ! cache_want "$1"; then return 1; fi
+  return 0
+}
+
+# --- the cargo lane ---------------------------------------------------------
 # nextest fails a test that runs past its limit (.config/nextest.toml) and
 # names it; it does not run doctests, so those run separately.
 crates test
-if [ -n "$args" ]; then
-  step test "tests, per-test time limit ($args)"
-  cargo nextest run $args
-fi
+test_args=$args
 crates doctest
-if [ -n "$args" ]; then
-  step doctest "doctests ($args)"
-  cargo test $args --doc
+doctest_args=$args
+crates wincheck
+wincheck_args=$args
+linuxcheck_args=""
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
+  crates linuxcheck
+  linuxcheck_args=$args
+else
+  step - "Linux compile check"
+  echo "Linux target not installed (rustup target add x86_64-unknown-linux-gnu); skipped"
 fi
+lane_rust() {
+  if [ -n "$test_args" ]; then lstep test "tests, per-test time limit ($test_args)" cargo nextest run $test_args; fi
+  if [ -n "$doctest_args" ]; then lstep doctest "doctests ($doctest_args)" cargo test $doctest_args --doc; fi
+  if [ -n "$wincheck_args" ]; then
+    lstep wincheck "Windows compile check ($wincheck_args)" cargo check $wincheck_args --all-targets --target x86_64-pc-windows-msvc
+  fi
+  if [ -n "$linuxcheck_args" ]; then
+    lstep linuxcheck "Linux compile check ($linuxcheck_args)" cargo check $linuxcheck_args --all-targets --target x86_64-unknown-linux-gnu
+  fi
+}
 
-if want script-tests "check-stamp, merge, merge-train, lock, and cache scripts (throwaway repositories, fake checks)"; then
-  scripts/run-script-tests.sh
+# --- the C interface smoke tests ---------------------------------------------
+run_c_smoke=0
+run_c_asan=0
+if lwant c-smoke; then run_c_smoke=1; fi
+if [ "$(uname)" = "Darwin" ] && lwant c-smoke-asan; then run_c_asan=1; fi
+if [ "$run_c_smoke" = 1 ] || [ "$run_c_asan" = 1 ]; then
+  step - "C interface smoke tests: build the library and mock once"
+  scripts/test-c-ffi.sh --prepare
 fi
+lane_c_smoke() { lstep c-smoke "C interface smoke test" env NVRVIEW_C_FFI_PREPARED=1 scripts/test-c-ffi.sh; }
+lane_c_asan() { lstep c-smoke-asan "C interface smoke test, AddressSanitizer" env NVRVIEW_C_FFI_PREPARED=1 scripts/test-c-ffi.sh --asan; }
 
+# --- the script tests ---------------------------------------------------------
+run_script_tests=0
+if lwant script-tests; then run_script_tests=1; fi
+lane_scripts() {
+  lstep script-tests "check-stamp, merge, merge-train, lock, and cache scripts (throwaway repositories, fake checks)" scripts/run-script-tests.sh
+}
+
+# --- the C header (quick, so before the lanes) ------------------------------
 if command -v cbindgen >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cbindgen" ]; then
   if want c-header "C header up to date"; then
     scripts/gen-header.sh --check
@@ -205,138 +290,178 @@ else
   echo "cbindgen not installed (cargo install cbindgen --locked); skipped"
 fi
 
-if want c-smoke "C interface smoke test"; then
-  scripts/test-c-ffi.sh
-fi
-if [ "$(uname)" = "Darwin" ] && want c-smoke-asan "C interface smoke test, AddressSanitizer"; then
-  scripts/test-c-ffi.sh --asan
-fi
-
-crates wincheck
-if [ -n "$args" ]; then
-  step wincheck "Windows compile check ($args)"
-  cargo check $args --all-targets --target x86_64-pc-windows-msvc
-fi
-
-if rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-gnu; then
-  crates linuxcheck
-  if [ -n "$args" ]; then
-    step linuxcheck "Linux compile check ($args)"
-    cargo check $args --all-targets --target x86_64-unknown-linux-gnu
-  fi
-else
-  step - "Linux compile check"
-  echo "Linux target not installed (rustup target add x86_64-unknown-linux-gnu); skipped"
-fi
-
+# --- Docker lanes -----------------------------------------------------------
 # The full Linux tests in Docker repeat the Rust tests in a slower VM, and CI
 # runs them on every push, so they are opt-in: NVRVIEW_LINUX_TESTS=1 runs them
 # when the Docker daemon is running.
+run_linux=0
 if [ "${NVRVIEW_LINUX_TESTS:-0}" != "1" ]; then
   step - "Linux tests skipped (NVRVIEW_LINUX_TESTS=1 runs them)"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   ran_optional="$ran_optional, Linux tests"
-  if want linux-tests "Linux tests (Docker)"; then
-    scripts/linux-check.sh
-  fi
+  if lwant linux-tests; then run_linux=1; fi
 else
   step - "Linux tests skipped (Docker is not running)"
 fi
+lane_linux() { lstep linux-tests "Linux tests (Docker)" scripts/linux-check.sh; }
 
-# The C# bindings and smoke test (apps/windows) on Linux in Docker, when the
-# Docker daemon is running. NVRVIEW_CSHARP_TESTS=0 skips them.
+# The C# bindings, shell tests, and tile tests (apps/windows) on Linux in
+# Docker, when the Docker daemon is running; one cached suite per project, one
+# container run for those that changed. NVRVIEW_CSHARP_TESTS=0 skips them.
+csharp_parts=""
+csharp_rows=""
 if [ "${NVRVIEW_CSHARP_TESTS:-1}" = "0" ]; then
-  step - "C# smoke test skipped (NVRVIEW_CSHARP_TESTS=0)"
+  step - "C# tests skipped (NVRVIEW_CSHARP_TESTS=0)"
   skip "C# tests"
 elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  if want csharp-docker "C# smoke test (Docker)"; then
-    scripts/csharp-check.sh
-  fi
+  for part in smoke shell tiles; do
+    if lwant "csharp-docker-$part"; then
+      csharp_parts="$csharp_parts $part"
+      csharp_rows="$csharp_rows,csharp-docker-$part"
+    fi
+  done
 else
-  step - "C# smoke test skipped (Docker is not running)"
+  step - "C# tests skipped (Docker is not running)"
   skip "C# tests"
 fi
+lane_csharp() {
+  # shellcheck disable=SC2086 # csharp_parts is a list of words
+  lstep "${csharp_rows#,}" "C# tests (Docker):$csharp_parts" scripts/csharp-check.sh $csharp_parts
+}
 
+# --- the macOS app lane -------------------------------------------------------
+# swift test, then the app's self-tests (they open a window for a few seconds,
+# behind all other windows and without taking focus, so they need a desktop
+# session; NVRVIEW_GUI_TESTS=0 skips them), one after another: one .build
+# directory and one desktop.
+run_swift_test=0
+mac_areas=""
+mac_all=1
+run_real=0
+run_demo_metal=0
+run_demo_layer=0
 if [ "$(uname)" = "Darwin" ] && [ -d apps/macos ]; then
-  if want swift-test "macOS app tests"; then
-    # An overall limit (the whole run takes a few minutes); on a hang the
-    # test that last started is named.
-    (cd apps/macos &&
-      "$py" -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
-  fi
-
-  # Opens a window for a few seconds, behind all other windows and without
-  # taking focus, so it needs a desktop session. NVRVIEW_GUI_TESTS=0 skips it.
+  if lwant swift-test; then run_swift_test=1; fi
   if [ "${NVRVIEW_GUI_TESTS:-1}" = "0" ]; then
     step - "macOS GUI self-tests skipped (NVRVIEW_GUI_TESTS=0)"
     skip "GUI self-tests"
   elif [ "$(launchctl managername 2>/dev/null)" = "Aqua" ]; then
-    # The app's self-test on the fake core, by area (scripts/macos-selftest-areas.txt):
-    # the areas with a cached pass are skipped, the rest run in one start of the app
-    # (startup always runs). Its lines go to a log; a failure prints its problems.
-    mac_areas=""
-    mac_all=1
+    # By area (scripts/macos-selftest-areas.txt): the areas with a cached pass
+    # are skipped, the rest run in one start of the app (startup always runs).
     mac_list=$(cache_mac_areas)
     [ -n "$mac_list" ] || mac_list=$(awk '!/^#/ && NF && !seen[$1]++ { print $1 }' scripts/macos-selftest-areas.txt)
     for a in $mac_list; do
       if cache_want "mac-app.$a"; then mac_areas="$mac_areas,$a"; else mac_all=0; fi
     done
     mac_areas=${mac_areas#,}
-    if [ -n "$mac_areas" ]; then
-      end_step
-      step - "macOS app self-test, fake core, areas: $([ "$mac_all" = 1 ] && echo all || echo "$mac_areas")"
-      mac_log=$(mktemp)
-      mac_data=$(mktemp -d)
-      mac_rc=0
-      mac_start=$(date +%s)
-      (cd apps/macos && swift build --product NVRView &&
-        .build/debug/NVRView --fake --data-dir "$mac_data" --selftest 60 $([ "$mac_all" = 1 ] || echo "--areas $mac_areas") \
-          ../../fixtures/synthetic/h264-basic.h264 ../../fixtures/synthetic/h265-basic.h265 \
-          ../../fixtures/synthetic/fisheye/h264-fisheye.h264) >"$mac_log" 2>&1 || mac_rc=$?
-      rm -rf "$mac_data"
-      if [ "$mac_rc" != 0 ]; then
-        grep -E '^  |error:' "$mac_log" | tail -n 20 || true
-        tail -n 30 "$mac_log"
-        rm -f "$mac_log"
-        exit "$mac_rc"
-      fi
-      grep -E 'selftest took|^selftest: ' "$mac_log" || true
-      rm -f "$mac_log"
-      for a in $(echo "$mac_areas" | tr "," " "); do
-        cache_pass "$(($(date +%s) - mac_start))" "mac-app.$a"
-      done
-    fi
-    # The real-core self-test (the Rust library against tools/mock-nvr) builds the
-    # release core, so it runs in full runs only (NVRVIEW_FULL_CHECK=1, the release
-    # checks, and the periodic full run).
+    # The real-core self-test (the Rust library against tools/mock-nvr) builds
+    # the release core, so it runs in full runs only (NVRVIEW_FULL_CHECK=1, the
+    # release checks, and the periodic full run).
     if [ -n "$(cache_full)" ]; then
-      step macos-real-selftest "macOS app self-test, real core against mock-nvr"
-      real_log=$(mktemp)
-      real_rc=0
-      scripts/macos-real-selftest.sh >"$real_log" 2>&1 || real_rc=$?
-      if [ "$real_rc" != 0 ]; then
-        grep -E '^  |error:' "$real_log" | tail -n 20 || true
-        tail -n 30 "$real_log"
-        rm -f "$real_log"
-        exit "$real_rc"
-      fi
-      grep -E 'selftest took|^selftest: ' "$real_log" || true
-      rm -f "$real_log"
+      run_real=1
     else
       step - "macOS real-core self-test deferred (full runs and releases run it)"
     fi
-    if want macos-demo-metal "macOS demo self-test, Metal renderer"; then
-      (cd apps/macos && swift build --product NVRViewDemo &&
-        .build/debug/NVRViewDemo --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
-    fi
-    if want macos-demo-layer "macOS demo self-test, display-layer renderer"; then
-      (cd apps/macos && swift build --product NVRViewDemo &&
-        .build/debug/NVRViewDemo --renderer layer --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
-    fi
+    if lwant macos-demo-metal; then run_demo_metal=1; fi
+    if lwant macos-demo-layer; then run_demo_layer=1; fi
   else
     step - "macOS demo self-tests skipped (no desktop session)"
     skip "GUI self-tests"
   fi
+fi
+mac_selftest() {
+  # The app's self-test on the fake core. Its lines go to a log; a failure
+  # prints its problems.
+  mac_log=$(mktemp)
+  mac_data=$(mktemp -d)
+  mac_rc=0
+  # shellcheck disable=SC2046 # --areas and its list are separate words
+  (cd apps/macos && swift build --product NVRView &&
+    .build/debug/NVRView --fake --data-dir "$mac_data" --selftest 60 $([ "$mac_all" = 1 ] || echo "--areas $mac_areas") \
+      ../../fixtures/synthetic/h264-basic.h264 ../../fixtures/synthetic/h265-basic.h265 \
+      ../../fixtures/synthetic/fisheye/h264-fisheye.h264) >"$mac_log" 2>&1 || mac_rc=$?
+  rm -rf "$mac_data"
+  if [ "$mac_rc" != 0 ]; then
+    grep -E '^  |error:' "$mac_log" | tail -n 20 || true
+    tail -n 30 "$mac_log"
+    rm -f "$mac_log"
+    return "$mac_rc"
+  fi
+  grep -E 'selftest took|^selftest: ' "$mac_log" || true
+  rm -f "$mac_log"
+}
+mac_real_selftest() {
+  real_log=$(mktemp)
+  real_rc=0
+  scripts/macos-real-selftest.sh >"$real_log" 2>&1 || real_rc=$?
+  if [ "$real_rc" != 0 ]; then
+    grep -E '^  |error:' "$real_log" | tail -n 20 || true
+    tail -n 30 "$real_log"
+    rm -f "$real_log"
+    return "$real_rc"
+  fi
+  grep -E 'selftest took|^selftest: ' "$real_log" || true
+  rm -f "$real_log"
+}
+swift_test() {
+  # An overall limit (the whole run takes a few minutes); on a hang the test
+  # that last started is named.
+  (cd apps/macos &&
+    "$py" -I ../../scripts/with-timeout.py "${NVRVIEW_SWIFT_TEST_TIMEOUT:-600}" "swift test" swift test)
+}
+demo_selftest() { # [renderer args]
+  (cd apps/macos && swift build --product NVRViewDemo &&
+    .build/debug/NVRViewDemo "$@" --tiles 6 --fps 200 --selftest 60 --until-frames 20 ../../fixtures/synthetic/*.h264 ../../fixtures/synthetic/*.h265)
+}
+lane_swift() {
+  if [ "$run_swift_test" = 1 ]; then lstep swift-test "macOS app tests" swift_test; fi
+  if [ -n "$mac_areas" ]; then
+    rows=""
+    for a in $(echo "$mac_areas" | tr "," " "); do rows="$rows,mac-app.$a"; done
+    lstep "${rows#,}" "macOS app self-test, fake core, areas: $([ "$mac_all" = 1 ] && echo all || echo "$mac_areas")" mac_selftest
+  fi
+  if [ "$run_real" = 1 ]; then lstep macos-real-selftest "macOS app self-test, real core against mock-nvr" mac_real_selftest; fi
+  if [ "$run_demo_metal" = 1 ]; then lstep macos-demo-metal "macOS demo self-test, Metal renderer" demo_selftest; fi
+  if [ "$run_demo_layer" = 1 ]; then lstep macos-demo-layer "macOS demo self-test, display-layer renderer" demo_selftest --renderer layer; fi
+}
+
+# --- start the lanes, wait, and report in order -------------------------------
+end_step
+step_name=""
+lane_wall_start=$(date +%s)
+if [ -n "$test_args$doctest_args$wincheck_args$linuxcheck_args" ]; then lane rust lane_rust; fi
+if [ "$run_script_tests" = 1 ]; then lane scripts lane_scripts; fi
+if [ "$run_c_smoke" = 1 ]; then lane c-smoke lane_c_smoke; fi
+if [ "$run_c_asan" = 1 ]; then lane c-asan lane_c_asan; fi
+if [ -n "$csharp_parts" ]; then lane csharp lane_csharp; fi
+if [ "$run_linux" = 1 ]; then lane linux lane_linux; fi
+if [ "$run_swift_test" = 1 ] || [ -n "$mac_areas" ] || [ "$run_real" = 1 ] || [ "$run_demo_metal" = 1 ] || [ "$run_demo_layer" = 1 ]; then
+  lane swift lane_swift
+fi
+wait
+lanes_failed=""
+for l in $lanes; do
+  cat "$lane_dir/$l.out"
+  while IFS="$(printf '\t')" read -r row secs rc label; do
+    if [ "$rc" = 0 ]; then
+      printf '   (%s [side by side]: %ss)\n' "$label" "$secs" | tee -a "$timing_file"
+      if [ -n "$run_file" ] && [ "$row" != "-" ]; then
+        for r in $(echo "$row" | tr "," " "); do cache_pass "$secs" "$r"; done
+      fi
+    else
+      printf '   (%s: %ss, FAILED with exit %s)\n' "$label" "$secs" "$rc"
+      lanes_failed="$lanes_failed; $label"
+    fi
+  done <"$lane_dir/$l.res"
+done
+rm -rf "$lane_dir"
+if [ -n "$lanes" ]; then
+  printf '\n   (side by side: the lanes%s took %ss together)\n' "$(echo "$lanes" | sed 's/ /, /g; s/^,//')" "$(($(date +%s) - lane_wall_start))"
+fi
+if [ -n "$lanes_failed" ]; then
+  step_name="${lanes_failed#; }"
+  printf '\ncheck failed in: %s\n' "$step_name" >&2
+  exit 1
 fi
 
 # Plays the Media Source samples in real browsers (headless Chrome and

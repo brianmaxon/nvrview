@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--fixture FILE]\n\
-    \x20               [--user NAME] [--max-logins N] [--fps N] [--video-burst N] [--width N] [--height N]\n\
+    \x20               [--user NAME] [--max-logins N] [--fps N] [--video-burst N] [--live-speed X] [--width N] [--height N]\n\
     \x20               [--audio FILE.aac] [--audio-clock HZ] [--audio-jitter-ms N]\n\
     \x20               [--replay FILE.nvrrec] [--replay-loop] [--replay-speed N]\n\
     \x20               [--recordings DAYS] [--aitype BITS] [--detections SECONDS]\n\
@@ -19,6 +19,8 @@ const USAGE: &str = "usage: mock-nvr [--bind ADDR] [--port N] [--channels N] [--
     \x20               [--third-party CH,CH] [--third-party-refusals N] [--third-party-delay-ms N]\n\
     \x20               [--talk CH,CH] [--fisheye CH,CH] [--fisheye-fixture FILE]\n\
     \x20               [--fisheye-size N] [--ptz CH[.LENS][:lens],...]\n\
+    --live-speed X sends live video and audio X times faster than real time with their picture\n\
+    times unchanged (default 1), so a test that waits on media time finishes sooner.\n\
     --multi-lens makes channel CH a two-lens camera, each lens with its aitype bits.\n\
     --extern sets how channel CH lists and answers externStream/mobileStream: listed\n\
     (default), hidden (not listed, served: a second lens), info-only (not listed, one\n\
@@ -42,6 +44,7 @@ fn run() -> Result<(), String> {
     let (mut channels, mut max_logins, mut fps) = (4u8, 4usize, 25u32);
     let (mut width, mut height) = (320u32, 240u32);
     let mut video_burst = 1u32;
+    let mut live_speed = 1.0f64;
     let mut user = String::from("example-user");
     let mut audio: Option<PathBuf> = None;
     let (mut audio_clock, mut audio_jitter_ms) = (16_000.0f64, 0u32);
@@ -80,6 +83,9 @@ fn run() -> Result<(), String> {
                 max_logins = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
             "--fps" => fps = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?,
+            "--live-speed" => {
+                live_speed = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
+            }
             "--video-burst" => {
                 video_burst = v.parse().map_err(|_| format!("bad value for {a}: {v}"))?
             }
@@ -177,6 +183,9 @@ fn run() -> Result<(), String> {
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
     }
+    if !(live_speed.is_finite() && live_speed > 0.0) {
+        return Err("--live-speed must be positive".into());
+    }
     if !(replay_speed.is_finite() && replay_speed > 0.0) {
         return Err("--replay-speed must be positive".into());
     }
@@ -187,6 +196,7 @@ fn run() -> Result<(), String> {
     cfg.max_logins = max_logins;
     cfg.fps = fps;
     cfg.video_burst = video_burst;
+    cfg.live_speed = live_speed;
     cfg.width = width;
     cfg.height = height;
     cfg.user = user;

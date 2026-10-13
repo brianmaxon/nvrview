@@ -486,6 +486,37 @@ same("C# suites: the shared build settings rerun every suite", csuites(),
 commit_file("crates/viewer-ffi/src/lib.rs", "// ffi 2")
 same("C# suites: the core library reruns the ones that load it", csuites(), "csharp-smoke,video-selftest,app-update")
 
+# The C# tests in Docker (Mac suites) are split the same way: one suite per
+# project, and a change reruns only the ones built on it.
+def dsuites():
+    tick(60)
+    mrun, _ = plan("mac")
+    out = []
+    for s in ("csharp-docker-smoke", "csharp-docker-shell", "csharp-docker-tiles"):
+        if want(mrun, s):
+            out.append(s)
+            passed(mrun, 1, s)
+    sc.finish(mrun, ok=True)
+    return ",".join(out) or "-"
+
+
+dsuites()
+same("Docker C#: unchanged, all cached", dsuites(), "-")
+commit_file("apps/windows/NvrView.Shell.Tests/Tests.cs", "// shell tests 3")
+same("Docker C#: a shell test file reruns the shell tests only", dsuites(), "csharp-docker-shell")
+commit_file("apps/windows/NvrView.Tiles.Tests/Tests.cs", "// tiles tests 3")
+same("Docker C#: a tile test file reruns the tile tests only", dsuites(), "csharp-docker-tiles")
+commit_file("apps/windows/NvrView.Smoke/Program.cs", "// smoke 3")
+same("Docker C#: a smoke file reruns the smoke test only", dsuites(), "csharp-docker-smoke")
+commit_file("crates/viewer-ffi/src/lib.rs", "// ffi 3")
+same("Docker C#: the core library reruns the smoke test only", dsuites(), "csharp-docker-smoke")
+commit_file("apps/windows/NvrView.Tiles/Zoom.cs", "// tiles 3")
+same("Docker C#: the tiles project reruns the tile and shell tests and the smoke test", dsuites(),
+     "csharp-docker-smoke,csharp-docker-shell,csharp-docker-tiles")
+commit_file("scripts/csharp-check.sh", "# csharp check 2")
+same("Docker C#: the Docker script reruns all three", dsuites(),
+     "csharp-docker-smoke,csharp-docker-shell,csharp-docker-tiles")
+
 # The Mac app self-test (fake core) is cached by area the same way
 # (mac-app.AREA): the area files and the screens only one area exercises
 # rerun that area and startup; shared code, the main self-test file, and the

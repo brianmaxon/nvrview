@@ -130,8 +130,17 @@ SUITES = {
         "c-smoke": (["scripts/test-c-ffi.sh"] + FIXTURES, ["viewer-ffi", "mock-nvr"], ["rust", "cc"]),
         "c-smoke-asan": (["scripts/test-c-ffi.sh"] + FIXTURES, ["viewer-ffi", "mock-nvr"], ["rust", "cc"]),
         "linux-tests": (["scripts/linux-check.sh", "scripts/test-c-ffi.sh"], ["*"], ["linux-image"]),
-        "csharp-docker": (["apps/windows/", "scripts/csharp-check.sh", "VERSION"] + FIXTURES,
-                          ["viewer-ffi", "mock-nvr"], ["linux-image", "dotnet-image"]),
+        # The C# tests in Docker, one suite per project (scripts/csharp-check.sh
+        # smoke|shell|tiles), like the Windows C# suites below: a Rust or
+        # bindings change reruns the smoke test only; a shell or tile change
+        # reruns those tests only.
+        "csharp-docker-smoke": (dotnet_inputs("Smoke") + [W + "layout/", "scripts/csharp-check.sh",
+                                "scripts/docker-slot.sh", "scripts/docker-rust-image.sh", "VERSION"] + FIXTURES,
+                                ["viewer-ffi", "mock-nvr"], ["linux-image", "dotnet-image"]),
+        "csharp-docker-shell": (dotnet_inputs("Shell.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh", "VERSION"] + FIXTURES,
+                                [], ["dotnet-image"]),
+        "csharp-docker-tiles": (dotnet_inputs("Tiles.Tests") + ["scripts/csharp-check.sh", "scripts/docker-slot.sh", "VERSION"],
+                                [], ["dotnet-image"]),
         # The Swift package compiles against a header-only copy of the C
         # interface (docs/nvrview.h) and never links the Rust library by
         # default, so the Rust crates are not its inputs; the header is.
