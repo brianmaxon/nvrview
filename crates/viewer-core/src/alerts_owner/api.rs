@@ -4,8 +4,8 @@
 use super::store::{LogLines, SNAPSHOT_MAX_BYTES};
 use super::{
     Acquisition, AlertError, AlertFrames, ExternalTriggers, InputContext, InputFactory, InputSlot,
-    Intake, MAX_PLUGINS, OutputContext, OutputFactory, OutputSlot, Purpose, camera_json, lock,
-    parse_detections,
+    Intake, MAX_PLUGINS, OutputContext, OutputFactory, OutputSlot, Purpose, Secret, camera_json,
+    lock, parse_detections,
 };
 use crate::CoreError;
 use alerts::engine::{Engine, Now};
@@ -14,6 +14,7 @@ use alerts::settings::{AlertSettings, OutputKind};
 use alerts::trigger::{ExternalBody, Trigger, TriggerState, from_external};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -115,6 +116,36 @@ fn parse_acquisition(v: &Value) -> Result<Acquisition, AlertError> {
     })
 }
 
+/// The `secrets` object: credential text by the id of the input or output
+/// it belongs to. Values must be strings.
+fn parse_secrets(settings: &Value) -> Result<HashMap<String, Secret>, AlertError> {
+    let mut out = HashMap::new();
+    match settings.get("secrets") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(m)) => {
+            for (k, v) in m {
+                let text = v.as_str().ok_or(AlertError::InvalidArgument)?;
+                if out.len() >= MAX_PLUGINS * 2 {
+                    return Err(AlertError::InvalidArgument);
+                }
+                out.insert(k.clone(), Secret::new(text));
+            }
+        }
+        Some(_) => return Err(AlertError::InvalidArgument),
+    }
+    Ok(out)
+}
+
+/// The credential for an `inputs[]` or `outputs[]` entry: keyed by its
+/// `id`, else by its `kind`.
+fn secret_for(secrets: &HashMap<String, Secret>, entry: &Value) -> Option<Secret> {
+    let key = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("kind").and_then(Value::as_str))?;
+    secrets.get(key).cloned()
+}
+
 fn severity_of(text: &str) -> Option<Severity> {
     serde_json::from_value(json!(text)).ok()
 }
@@ -177,6 +208,12 @@ impl crate::Core {
 
         // Outputs the engine knows; others are reported and left out.
         let mut doc = v.clone();
+        // Credentials are for the modules only: not part of the settings
+        // the engine keeps, and never echoed.
+        if let Some(o) = doc.as_object_mut() {
+            o.remove("secrets");
+        }
+        let secrets = parse_secrets(&v)?;
         let mut outputs_raw: Vec<Value> = Vec::new();
         if let Some(list) = v.get("outputs") {
             let list = list.as_array().ok_or(AlertError::InvalidArgument)?;
@@ -222,7 +259,11 @@ impl crate::Core {
             let kind: OutputKind =
                 serde_json::from_value(raw["kind"].clone()).unwrap_or(OutputKind::Desktop);
             let index = u32::try_from(i).unwrap_or(u32::MAX);
-            if let Some(p) = old_outputs.iter().position(|o| o.raw == *raw) {
+            let secret = secret_for(&secrets, raw);
+            if let Some(p) = old_outputs
+                .iter()
+                .position(|o| o.raw == *raw && o.secret == secret)
+            {
                 let mut slot = old_outputs.remove(p);
                 slot.index = index;
                 outputs.push(slot);
@@ -239,6 +280,7 @@ impl crate::Core {
             };
             let ctx = OutputContext {
                 runtime: inner.runtime.clone(),
+                secret: secret.clone(),
             };
             match f(&ctx, raw) {
                 Ok(output) => {
@@ -246,6 +288,7 @@ impl crate::Core {
                         index,
                         kind,
                         raw: raw.clone(),
+                        secret,
                         output,
                     });
                     output_report.push(json!({"index": i, "kind": kind_name, "ok": true}));
@@ -260,7 +303,11 @@ impl crate::Core {
         let mut input_report = Vec::new();
         for (i, raw) in inputs_raw.iter().enumerate().take(MAX_PLUGINS) {
             let kind_name = raw["kind"].as_str().unwrap_or_default().to_owned();
-            if let Some(p) = old_inputs.iter().position(|o| o.raw == *raw) {
+            let secret = secret_for(&secrets, raw);
+            if let Some(p) = old_inputs
+                .iter()
+                .position(|o| o.raw == *raw && o.secret == secret)
+            {
                 inputs.push(old_inputs.remove(p));
                 input_report.push(json!({"index": i, "kind": kind_name, "ok": true}));
                 continue;
@@ -269,14 +316,28 @@ impl crate::Core {
                 input_report.push(json!({"index": i, "kind": kind_name, "ok": false, "error": "no module for this kind"}));
                 continue;
             };
+            let status_events: Arc<dyn Fn(Value) + Send + Sync> = {
+                let me = std::sync::Arc::downgrade(inner);
+                let kind = kind_name.clone();
+                let index = i;
+                Arc::new(move |status| {
+                    if let Some(inner) = me.upgrade() {
+                        inner.send(json!({"type": "alerts_input_status", "index": index,
+                                          "kind": kind, "status": status}));
+                    }
+                })
+            };
             let ctx = InputContext {
                 runtime: inner.runtime.clone(),
                 triggers: self.alerts_external_triggers(),
+                secret: secret.clone(),
+                status_events,
             };
             match f(&ctx, raw) {
                 Ok(input) => {
                     inputs.push(InputSlot {
                         raw: raw.clone(),
+                        secret,
                         input,
                     });
                     input_report.push(json!({"index": i, "kind": kind_name, "ok": true}));
@@ -743,6 +804,11 @@ impl crate::Core {
             "rechecks": st.requests.values().filter(|r| r.purpose == Purpose::Recheck).count(),
             "outputs": st.outputs.len(),
             "inputs": st.inputs.len(),
+            "input_status": st.inputs.iter().enumerate().map(|(i, s)| json!({
+                "index": i,
+                "kind": s.raw["kind"],
+                "status": s.input.status(),
+            })).collect::<Vec<_>>(),
         })
     }
 

@@ -4,11 +4,16 @@ Status: **designed; the rules engine (`crates/alerts`) is built, and so is
 its service in `viewer-core` with the C interface (ABI 3 minor 12;
 [FFI.md](FFI.md), "Smart alerts")**: trigger intake, camera wakes and
 picture acquisition, the verification request and answer, decisions, the
-event log, and the seams for trigger inputs and outputs. On macOS the
-settings, the live verification view, and the Events window are built
-([UX.md](UX.md) "Smart alerts"). Not built yet: the rest of the apps' side
-(detector, notifications, the Windows screens), the input and output modules
-themselves, standby, the coordinator, and models. Each section says what is built, what is planned, and what is still
+event log, the seams for trigger inputs and outputs, and the two modules
+the core ships: the MQTT input and the Home Assistant output, wired end to
+end with credentials passed in memory. **On macOS the glue and the views are
+built**: `AlertHost` (the verification host with the detector, snapshots,
+the model fetched on first use, desktop notifications, the Keychain) and
+Settings > Smart Alerts, the live verification view, and the Events window
+([UX.md](UX.md) "Smart alerts"). Settings > Smart Alerts saves the
+document's stored form (`alerts.json`) and the host configures the core from
+it. Not built yet: Windows' host and screens, standby, the coordinator, the
+local API, and the other outputs. Each section says what is built, what is planned, and what is still
 to be measured. Protocol facts are marked **observed** or **reported**
 exactly as in [protocol.md](protocol.md); nothing here may depend on a
 reported fact until it is observed.
@@ -869,6 +874,80 @@ alerts"):
 - **Storage**: the decision log, snapshots, and feedback under
   `data_dir/alerts/`, each bounded (FFI.md).
 
+## Wiring it up (NOTIFY-GLUE)
+
+**Built.** The core ships both modules, registered when it starts, and
+FFI.md "Smart alerts" has their settings entries.
+
+- **Credentials.** The app reads the MQTT password and the Home Assistant
+  token from its keychain at startup (macOS Keychain, service = the app's
+  Keychain service, account `alerts.<id>`; Windows Credential Manager,
+  target `nvrview/alerts/<id>`) and passes them in memory in the `secrets`
+  object of every `nv_alerts_configure`, keyed by the input's or output's
+  `id`. The core keeps them in memory only; they are not in the settings the
+  engine keeps, and a test checks that no event, log line, file, or
+  `nv_alerts_get` answer contains them. A changed credential rebuilds only
+  its own input or output.
+- **MQTT input.** `inputs[]` entry `{"kind":"mqtt","id":<source key>,
+  "trigger_kind":..., "username":..., "broker":{...}, "topic":...}`; each
+  trigger enters `ExternalTriggers::put` (stamped with the core's clock).
+  Its status is in `nv_alerts_get` (`status.input_status`); connection
+  problems are also `alerts_input_status` events. It stops when the entry is
+  dropped or changed, and at shutdown.
+- **Home Assistant output.** `outputs[]` entry `{"kind":"home_assistant",
+  "id":..., "endpoint":..., ...}` plus the `ha-output` settings; it runs on
+  that crate's worker thread behind a bounded queue (16), and the result is
+  a `delivery` step with a short `summary` ("input_boolean.example_alert
+  pulsed (200)").
+- **Re-checks use the sub stream.** After an alert, the camera is kept
+  woken on its low-quality stream (`sub`; a second lens `mobile`) for the
+  "still present" re-checks; a refused sub stream falls back to the main
+  one, and a new check on the camera returns it to the main stream.
+- **Events.** Only alerts carry the full trace in `alert` events; quiet and
+  suppressed decisions carry a short `summary`. The full trace stays in the
+  alert log and `nv_alerts_get`.
+- **macOS host (`AlertHost`).** Smart alerts are **off unless the settings
+  say `"enabled": true`**. The host configures the core from what Settings >
+  Smart Alerts saved (its stored form, also written to `alerts.json` in
+  Application Support or `--data-dir`); until the user saves there, a
+  hand-written `alerts.json` is used. Credentials come from the Keychain
+  (account `alerts.<id>`) each time the settings are sent. Cameras may be
+  named by `device_key` (the stable device key) and are given this run's
+  device IDs when sent. Every smart-alert event goes to the views (live
+  checks, the Events window) and then to the host. With the fake core there
+  is no host and the settings screen sends the document itself. It answers `verify_request` off the event thread
+  (`alert_frames_get`, VideoToolbox decode, `DetectorKit` on the crops,
+  `alert_detections_put`), keeps the last decoded picture per camera and
+  uses it for the snapshot JPEG of an alert (`alert_snapshot_put`), and raises
+  a `UNUserNotificationCenter` notification with the explanation and the
+  snapshot (critical alerts are time-sensitive, which needs the app's
+  time-sensitive entitlement to break through a Focus). With no model it
+  answers nothing and the core fails open as designed.
+- **The model is fetched on first use** when smart alerts are enabled and no
+  model is found (`NVRVIEW_DETECTOR_MODEL`, the bundle, the per-user Models
+  folder): from `<update source>/models/rtdetr_r18vd.mlmodelc.zip`, where
+  the update source is the user's (or the bundled default), a folder, a
+  `file://` or `https://` URL, or a local `http://` one (a URL may name the
+  folder or its `updates.json`). The size and SHA-256 pinned in
+  `scripts/detector-model.json` (copied into the app's Resources by
+  `scripts/package-macos.sh`) are checked before the archive is unpacked
+  into Application Support/NVRView/Models; a mismatch installs nothing. The
+  status is a plain sentence ("No detector model: set an update source...")
+  in `SmartAlertsController.modelStatus`. The manifest pins no published
+  archive yet, so until `scripts/detector-model.sh build` output is
+  published and recorded there, the host reports that and stays unable to
+  detect.
+- **Windows** has the settings builder (`AlertSettingsDocument`, the same
+  rules and tests as macOS) and the Credential Manager store
+  (`WindowsAlertSecrets`); its host (decode, detector, notifications) is
+  planned.
+- **Self-tests (macOS, on the real core against the mock):**
+  `alerts-e2e-verified` (a trigger, the host's decode and a person from a
+  stub detector, an alert, a pulse of a mock Home Assistant with the token,
+  a notification with the explanation and a snapshot) and
+  `alerts-e2e-not-confirmed` (the real model when present, else a stub that
+  finds nothing: a quiet decision, no pulse, no notification).
+
 ## Testing and evaluation
 
 - **Engine** (built): unit tests for every rule and state transition on
@@ -911,12 +990,12 @@ alerts"):
 | S3 | Verification maths: crop and tile plan, box merge, per-class thresholds, IoU tracking across pictures and angles, moving vs parked, static memory, repeat suppression | S2 |
 | S4 | `viewer-core` orchestration: wake streams, picture collection, caps, still-present re-checks, catch-up, decision log store, trace events; ABI minor; `mock-nvr` end-to-end | S2, S3 |
 | S5 | Baselines: index backfill, Gamma–Poisson rates, novelty map | S2 |
-| S6 | macOS: Core ML runtime (**detector, queue and benchmark done**: `DetectorKit`), notifications and actions, settings, verification view, event log, feedback | S4 |
+| S6 | macOS: Core ML runtime (**detector, queue and benchmark done**: `DetectorKit`; **verification host, snapshots, model fetch, notifications done**: `AlertHost`), actions, settings, verification view, event log, feedback | S4 |
 | S7 | Windows: Windows ML, the same contract, app notifications, settings, verification view, event log, feedback | S4 |
 | S8 | Standby in both apps ("not watching since", energy and traffic) | S4, S1 |
 | S9 | Coordinator: discovery, pairing between apps, ranked election, lease, handoff, startup check | S4, local API |
 | S10 | Minimal local API: pairing, the `trigger:{source}` grant, webhook, action callbacks, audit log, limits | S2 |
-| S11 | Outputs: ntfy, MQTT (also as trigger input), webhook; quiet hours, escalation, digests | S4 |
+| S11 | Outputs: ntfy, MQTT (also as trigger input), webhook; quiet hours, escalation, digests (Home Assistant and the MQTT input are built and wired) | S4 |
 | S12 | External triggers end to end: mapping UI, pre-trigger fetch, cross-angle k-of-n, source statistics | S3, S4, S10, S1 |
 | S13 | Feedback learning | S6, S7 |
 | S14 | Optional multimodal verifier (borderline band, captions after the fact, budget, fail open) | S4 |

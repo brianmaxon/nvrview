@@ -1,3 +1,4 @@
+import AlertHost
 import AppKit
 import FakeCore
 import Foundation
@@ -84,6 +85,9 @@ final class AppModel {
     /// Self-update (set by the app delegate); receives the core's `update`
     /// events.
     @ObservationIgnored var updater: Updater?
+    /// Smart alerts on this computer (docs/NOTIFICATIONS.md); nil until the app creates it.
+    @ObservationIgnored var smartAlerts: SmartAlertsController?
+    @ObservationIgnored private var alertsConfigurePending = false
 
     private(set) var devices: [DeviceRuntime] = []
     /// The "find devices" list (docs/UX.md "Finding devices"). The core
@@ -699,6 +703,7 @@ final class AppModel {
             applyTalkPermissions(devices[i].key)
             applyMotionGrants(devices[i].key)
             leases.reopen(device: devices[i].key)
+            smartAlertsNeedConfigure()
         } catch {
             devices[i].link = DeviceLink(state: .other("cannot add (status \(error.code))"), since: Self.now)
         }
@@ -787,7 +792,22 @@ final class AppModel {
         for i in groups.indices { groups[i].cameras.removeAll { $0.device == key } }
         groupFile.save(groups)
         audible = audible.filter { $0.device != key }
+        smartAlertsNeedConfigure()
         notify()
+    }
+
+    /// Sends the smart-alert settings to the core once the devices of this
+    /// moment are added (several changes in a row make one call).
+    func smartAlertsNeedConfigure() {
+        guard smartAlerts != nil, !alertsConfigurePending else { return }
+        alertsConfigurePending = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.alertsConfigurePending = false
+                if !self.closed { self.smartAlerts?.configure() }
+            }
+        }
     }
 
     /// Adds the device again with its current password (after a failed
@@ -1123,7 +1143,10 @@ final class AppModel {
         case .recording(let e):
             capture.apply(e)
         case .smartAlert(let e):
+            // The views (live checks, the Events window), then the host
+            // (detector, snapshots, desktop notifications).
             alertsModel.handle(e)
+            smartAlerts?.handle(e)
             return
         }
         notify()

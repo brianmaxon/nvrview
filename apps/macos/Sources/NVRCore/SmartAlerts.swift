@@ -72,6 +72,14 @@ public struct VerifyRequest: Sendable, Equatable, Decodable {
         public var y: Double
         public var w: Double
         public var h: Double
+
+        public init(what: String, x: Double, y: Double, w: Double, h: Double) {
+            self.what = what
+            self.x = x
+            self.y = y
+            self.w = w
+            self.h = h
+        }
     }
 
     public var request: String

@@ -75,7 +75,7 @@ struct SmartAlertsGeneralView: View {
                 caption(
                     "A camera's own AI, a smoke or CO alarm, or a sensor starts a check: this Mac looks at the camera's main stream, confirms what is there, and only then alerts, saying why. Everything runs on this Mac; nothing leaves the local network unless you set up an output that sends it."
                 )
-                if let error = alerts.sendError { Text(error).foregroundStyle(.red) }
+                if let error = alerts.sendError ?? alerts.hostProblem { Text(error).foregroundStyle(.red) }
                 if let issues = alerts.configured?["issues"]?.array?.compactMap(\.string), !issues.isEmpty {
                     caption("Adjusted: " + issues.joined(separator: "; "))
                 }

@@ -1,4 +1,5 @@
-//! Picture acquisition: a woken camera's main stream (shared with any tile
+//! Picture acquisition: a woken camera's main stream, or its low-quality one
+//! for the re-checks of an alerted camera (shared with any tile
 //! already showing it, since the session runs one preview per channel and
 //! tier), the access units of the current GOP, and the pictures the
 //! service asks for, handed over as frame bundles (a keyframe and the
@@ -115,6 +116,17 @@ pub(crate) fn tier_of(camera: CameraId) -> StreamTier {
     }
 }
 
+/// The stream for the re-checks of an alerted camera: the low-quality one
+/// (`sub`; `mobile` for a second lens), which is cheaper to decode and to
+/// carry for a "still present" look.
+pub(crate) fn recheck_tier_of(camera: CameraId) -> StreamTier {
+    if camera.lens == 0 {
+        StreamTier::Sub
+    } else {
+        StreamTier::Mobile
+    }
+}
+
 /// The picture size, from the stream info, else from the SPS.
 fn size_or_sps(codec: Codec, width: u32, height: u32, au: &[u8]) -> (u32, u32) {
     if width > 0 && height > 0 {
@@ -168,12 +180,13 @@ pub(crate) async fn run_wake(
     session: Arc<DeviceSession>,
     camera: CameraId,
     generation: u64,
+    tier: StreamTier,
 ) {
     let Ok(channel) = u8::try_from(camera.channel) else {
         inner.wake_note(camera, generation, Note::Refused);
         return;
     };
-    let Ok(mut sub) = session.subscribe(channel, tier_of(camera)).await else {
+    let Ok(mut sub) = session.subscribe(channel, tier).await else {
         inner.wake_note(camera, generation, Note::Ended);
         return;
     };

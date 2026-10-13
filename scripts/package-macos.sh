@@ -114,6 +114,10 @@ if [ -n "$key_files" ] || [ -n "$update_source" ]; then
   python3 -I scripts/update-defaults.py "$@"
 fi
 
+# The pinned size and checksum of the detector model, so the app can fetch it
+# on first use from the folder next to the update source and check it.
+cp scripts/detector-model.json "$app/Contents/Resources/detector-model.json"
+
 if [ "$bundle_detector" = 1 ]; then
   scripts/detector-model.sh fetch --into "$app/Contents/Resources/Models"
 fi

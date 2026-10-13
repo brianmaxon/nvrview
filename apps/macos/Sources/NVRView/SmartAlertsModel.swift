@@ -1,3 +1,4 @@
+import AlertHost
 import AppKit
 import Foundation
 import NVRCore
@@ -5,15 +6,15 @@ import VideoKit
 
 // Smart alerts on the app's side (docs/UX.md "Smart alerts",
 // docs/NOTIFICATIONS.md): the settings (a file of their own; secrets in the
-// Keychain only), sending them to the core, the live checks the views draw,
-// the event log's calls, and the status lines. One per app, owned by
-// `AppModel`.
+// Keychain only), the live checks the views draw, the event log's calls, and
+// the status lines. One per app, owned by `AppModel`.
 //
-// For the other app-side parts (the detector, desktop notifications), the
-// seams are: `settings` (what the user chose), `secret(_:)` (the Keychain
-// items), `request(_:)` (a `verify_request` by key), `recordDetections`
-// (the boxes the detector answered, so the live view draws them), and
-// `subscribeEvents` (every smart-alert event, after the views took it).
+// The host (`AlertHost.SmartAlertsController`, `AppModel.smartAlerts`)
+// configures the core: it reads `storedData` (the settings' stored form,
+// also written to `alerts.json`) and the Keychain through `secret(id:)`, and
+// answers verification requests, makes snapshots and raises notifications.
+// Only without a host (the fake core) does this model send the settings
+// itself. Both get every smart-alert event from `AppModel`.
 
 /// The settings file: one JSON document, written atomically; in memory only
 /// when `file` is nil. Beside it, `stored` gets the document's stored form
@@ -76,6 +77,11 @@ final class SmartAlertsModel {
     @ObservationIgnored private(set) var pictures: [UInt64: [AlertCamera: CGImage]] = [:]
     @ObservationIgnored private var listeners: [UUID: () -> Void] = [:]
     @ObservationIgnored private var eventListeners: [UUID: (SmartAlertEvent) -> Void] = [:]
+    /// The settings' stored form for the host (cameras by device key, no
+    /// secrets); nil until the user has saved settings here, so a
+    /// hand-written `alerts.json` still counts.
+    @ObservationIgnored private(set) var storedData: Data?
+    @ObservationIgnored private var saved: Bool
     /// The device IDs the last document was built with.
     @ObservationIgnored private var sentDevices: [String: UInt64] = [:]
     @ObservationIgnored private var sentOffset: Int?
@@ -91,6 +97,7 @@ final class SmartAlertsModel {
         self.credentials = credentials
         self.file = file
         settings = file.load()
+        saved = file.file.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         board.settings = settings.view
     }
 
@@ -104,14 +111,31 @@ final class SmartAlertsModel {
         settings = s
         board.settings = s.view
         file.save(s)
+        saved = true
         apply(force: true)
         updatePanel()
         changed()
     }
 
-    /// Sends the settings when something they are built from changed (the
-    /// devices' IDs, the UTC offset), or always with `force`.
+    /// Hands the settings to the host (or, without one, sends them) when
+    /// something they are built from changed (the devices' IDs, the UTC
+    /// offset), or always with `force`.
     func apply(force: Bool = false) {
+        if model.smartAlerts != nil {
+            guard saved else { return }
+            let data = settings.storedJSON(
+                name: { [model] in model.name(of: $0) }, allCameras: model.allCameras,
+                entrance: { [model] in model.cameraOptions($0).entrance })
+            file.saveStored(data)
+            guard force || data != storedData else { return }
+            storedData = data
+            sendError = nil
+            // The host builds the core's document from it (several changes in
+            // a row make one call).
+            model.smartAlertsNeedConfigure()
+            changed()
+            return
+        }
         let ids = Dictionary(model.devices.compactMap { d in d.deviceID.map { (d.key, $0) } }, uniquingKeysWith: { a, _ in a })
         let offset = TimeZone.current.secondsFromGMT() / 60
         guard force || ids != sentDevices || offset != sentOffset else { return }
@@ -141,6 +165,14 @@ final class SmartAlertsModel {
     // MARK: Secrets (the Keychain only)
 
     func secret(_ s: SmartAlertSecret) -> String? { credentials.password(for: s.account) }
+    /// By the `id` of the input or output entry (the host's lookup).
+    func secret(id: String) -> String? { credentials.password(for: "alerts.\(id)") }
+
+    /// The host's trouble with the settings, if it has some.
+    var hostProblem: String? {
+        if case .failed(let why)? = model.smartAlerts?.state { return why }
+        return nil
+    }
     func hasSecret(_ s: SmartAlertSecret) -> Bool { credentials.hasPassword(for: s.account) }
 
     /// Saves a secret (an empty one deletes it) and sends the settings again.

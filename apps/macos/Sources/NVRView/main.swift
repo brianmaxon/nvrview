@@ -1,3 +1,4 @@
+import AlertHost
 import AppKit
 import FakeCore
 import Foundation
@@ -59,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         startCallWindows(model)
         startCapture(model)
         startSmartAlerts(model)
+        startAlertHost(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
@@ -182,6 +184,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         windows.first { $0.window?.isKeyWindow == true } ?? windows.first { $0.window?.isMainWindow == true } ?? windows.first
     }
 
+    // MARK: Smart alerts
+
+    /// Smart alerts on this computer (docs/NOTIFICATIONS.md): off unless
+    /// `alerts.json` (Application Support, or the `--data-dir`) says
+    /// `"enabled": true`. The MQTT password and the Home Assistant token
+    /// are read from the Keychain at startup and passed to the core in
+    /// memory with the settings. Not with `--fake` (the fake core has no
+    /// outputs); a self-test builds its own.
+    ///
+    /// The settings are what Settings > Smart Alerts saved (its stored form,
+    /// also written to `alerts.json`); until the user saved there, a
+    /// hand-written `alerts.json`. Credentials are read from the Keychain
+    /// each time the settings are sent, so a password saved in Settings
+    /// counts at once.
+    private func startAlertHost(_ model: AppModel) {
+        guard !options.fake else { return }
+        let file =
+            options.dataDirectory?.appendingPathComponent("alerts.json")
+            ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("alerts.json") : nil)
+        let bridge = model.bridge
+        let secrets = ModelAlertSecrets(model: model)
+        let environment = SmartAlertsController.Environment(
+            core: { try bridge.smartAlerts() },
+            storedSettings: { [weak model] in
+                model?.alertsModel.storedData ?? file.flatMap { try? Data(contentsOf: $0) }
+            },
+            deviceID: { [weak model] key in model?.runtime(key)?.deviceID },
+            updateSource: { [weak model] in model?.updater?.settings.effectiveSource },
+            secrets: secrets)
+        model.smartAlerts = SmartAlertsController(
+            environment: environment, installer: ModelInstaller(manifest: ModelManifest.bundled()),
+            notifier: SystemNotifier())
+        model.alertsModel.apply(force: true)
+    }
+
     // MARK: Updates
 
     /// Self-update (docs/UPDATES.md). Its settings live with the others; in
@@ -290,11 +327,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 file: options.dataDirectory?.appendingPathComponent("recordings-cameras.json")
                     ?? JSONFileStore<RecordingsEnablement>.appSupport("recordings-cameras.json")),
             // No secret in either: those are Keychain items.
+            // A self-test without a --data-dir keeps them in memory.
             smartAlertsFile: SmartAlertSettingsFile(
                 file: options.dataDirectory?.appendingPathComponent("smart-alerts.json")
-                    ?? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json"),
+                    ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("smart-alerts.json") : nil),
                 stored: options.dataDirectory?.appendingPathComponent("alerts.json")
-                    ?? JSONFileStore<DeviceConfig>.appSupport("alerts.json")),
+                    ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("alerts.json") : nil)),
             clock: testClock ?? SystemViewerClock(),
             callServices: options.selfTestSeconds != nil ? .fakes() : nil)
     }

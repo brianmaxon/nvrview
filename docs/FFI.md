@@ -719,6 +719,33 @@ NOTIFICATIONS.md ("Settings": `cameras`, `always_alert`, `mode`,
 - `inputs`: trigger input modules (for example MQTT), each `{"kind":...}`
   plus its own settings, built by the module registered for that kind
   (Rust: `Core::alerts_register_input`).
+- `secrets`: credentials the app read from its keychain (macOS Keychain,
+  Windows Credential Manager) and passes **in memory with every call**:
+  `{"<id>": "<text>"}`, keyed by the `id` of the `inputs[]` or `outputs[]`
+  entry it belongs to (outputs without an `id`: their `kind`). Values must
+  be strings. The core keeps them in memory only; they are not part of the
+  settings the engine keeps and never appear in events, logs, the alert log,
+  or `nv_alerts_get`. An input or output whose entry and secret are both
+  unchanged keeps running; a changed or missing secret rebuilds it.
+
+The core ships two modules, registered when it starts:
+
+- `{"kind":"mqtt","id":"sensor-1","trigger_kind":"sensor_motion",
+  "username":"example-user","broker":{"host":"192.0.2.20","port":1883,
+  "tls":null},"topic":"example/topic", ...}`: the `mqtt-triggers` source
+  settings (`allow_wildcards`, `mapping`, `limits`, ...). `id` is the
+  `sources[].key` it feeds; the password is `secrets["sensor-1"]`. Its
+  status (connection state and the audit counters) is `status.input_status`
+  of `nv_alerts_get`; connection problems also arrive as
+  `{"type":"alerts_input_status","index":0,"kind":"mqtt","status":{"log":"..."}}`.
+  A login the broker rejects shows `"status":"auth_failed"` and is not
+  retried until the settings are sent again.
+- `{"kind":"home_assistant","id":"ha","endpoint":"http://192.0.2.10:8123",
+  "min_severity":"normal","rules":[{"action":{"kind":"pulse",
+  "entity_id":"input_boolean.example_alert"}}], ...}`: the `ha-output`
+  settings; the access token is `secrets["ha"]` (no token: the output is
+  left out with an error in `alerts_configured`). Each result is a
+  `delivery` step whose `summary` is a short generic line.
 
 Cameras are named by this run's device IDs (the IDs of `nv_device_add` and
 of the events); the app sends the settings after adding its devices. Until
@@ -795,7 +822,11 @@ picture of an alerted camera (every `timing.recheck_period_s`, for at most
 Bounds: at most 64 requests and 64 MiB of held frames at once (more
 pictures are skipped), a GOP of at most 300 access units or 24 MiB per
 woken stream, cameras woken per device and in all (more wait, the
-always-alert candidates first). A woken stream stops when its checks end
+always-alert candidates first). After an alert, the re-checks of its
+camera read the camera's low-quality stream (`sub`; `mobile` for a second
+lens) instead of the main one; a refused one falls back to the main stream,
+and a new check on the camera switches it back to the main stream. A woken
+stream stops when its checks end
 and, after an alert, when the episode settles or its re-checks run out; a
 device's streams stop when it is removed, all of them at shutdown. A
 reconnect does not end a check: the session restarts the stream.
@@ -813,7 +844,9 @@ alert's end when its episode settles:
 {"type":"trigger_rejected","source":"external","reason":"rate_limit"}
 ```
 
-`state` is `new` (revision 1), `update` (a higher revision of the same
+Only alerts (`new`, `update`) carry the full `trace` in events. A `logged`
+decision (quiet or suppressed) carries a short `summary` instead and no
+`trace`; its full trace is in the log (`nv_alerts_get`). `state` is `new` (revision 1), `update` (a higher revision of the same
 alert), `logged` (quiet or suppressed), or `settled`. Alert IDs are unique
 across runs while the data directory is kept. An output's result is a
 `verify_step` with `"step":"delivery"` (`output` is its index in
