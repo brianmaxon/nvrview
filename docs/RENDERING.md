@@ -229,8 +229,9 @@ pairs over two and a half refreshes (one late picture, or one stall of any
 length, makes two; there is no bound on the single largest jitter); at least
 90% of the released pictures shown; at most two decoded pictures never
 shown. The
-playback step measures 40 shown pairs (about four seconds at the mock's
-10 fps) and the live step 30 pictures per tile, each waiting for those
+playback step measures 40 shown pairs (about two seconds of the self-test
+mock's 20 fps recordings, `--recordings-fps 20`; three 60 Hz refreshes a
+picture) and the live step 30 pictures per tile, each waiting for those
 counts, not for a fixed time.
 
 Each part is proven where it is cheapest: the core's release pacing on a
