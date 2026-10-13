@@ -1123,12 +1123,45 @@ public sealed partial class RecordingsService
         Playback.Released([tile]);
     }
 
-    /// <summary>Adds a camera to a playback; its tile, or null (with <see cref="Notice"/> set).</summary>
-    public ulong? AddPlaybackCamera(ulong playback, RecordingCamera camera)
+    /// <summary>Restarts a playback camera's play at the position in <paramref name="tier"/> (Main or Sub).</summary>
+    public void SetPlaybackTier(ulong tile, NvStreamTier tier)
+    {
+        if (_closed)
+        {
+            return;
+        }
+        try
+        {
+            Playback.Playback.SetTier(tile, tier);
+        }
+        catch (NvException e)
+        {
+            if (e.Status != NvStatus.UnknownId)
+            {
+                Notice = $"The player could not change the quality {StatusText(e)}";
+            }
+        }
+    }
+
+    /// <summary>The playback's details as the core reports them (JSON), or null when it cannot answer.</summary>
+    public string? PlaybackStatus(ulong playback)
     {
         try
         {
-            return Playback.AddCamera(playback, new PlaybackCamera(camera).Json);
+            return _closed ? null : Playback.Playback.PlaybackStatus(playback);
+        }
+        catch (NvException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Adds a camera to a playback; its tile, or null (with <see cref="Notice"/> set).</summary>
+    public ulong? AddPlaybackCamera(ulong playback, RecordingCamera camera, NvStreamTier tier = NvStreamTier.Sub)
+    {
+        try
+        {
+            return Playback.AddCamera(playback, new PlaybackCamera(camera, tier == NvStreamTier.Main ? "main" : "sub").Json);
         }
         catch (NvException e)
         {

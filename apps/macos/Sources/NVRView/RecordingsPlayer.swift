@@ -248,7 +248,11 @@ final class RecordingsPlayer {
         streams.retain(cameras)
         mode = PlayerGrid.normalized(mode, count: cells.count)
         model.removePlaybackCamera(p, tile: tile)
-        if cells.isEmpty { close() } else { updateAudio() }
+        if cells.isEmpty { close() } else {
+            updateAudio()
+            // The camera left may be the only one now: Auto asks for its main stream.
+            refreshStreams()
+        }
     }
 
     /// Adds a camera to the player (at most four), joining at the position.
@@ -263,6 +267,8 @@ final class RecordingsPlayer {
             streams = joining
             cells.append(Cell(camera: camera, tile: tile))
             updateAudio()
+            // The cameras already there are no longer alone: Auto goes back to their sub-stream.
+            refreshStreams()
         }
     }
 

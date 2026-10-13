@@ -210,7 +210,7 @@ WINDOWS_OWNED = {
                    _S + "EditPlan.cs", _S + "EditPlayer.cs", _S + "ExportController.cs", _S + "ExportPlan.cs",
                    _S + "FakePlayback.cs", _S + "FakeRecordings.Export.cs", _S + "FakeRecordings.Sound.cs",
                    _S + "FakeRecordings.cs", _S + "Mp4Index.cs", _S + "Mp4Inspector.cs", _S + "Mp4ShareSafe.cs",
-                   _S + "Playback.cs", _S + "PlayerRules.cs", _S + "PlayerTileViews.cs", _S + "Recordings.cs", _S + "RecordingsBrowse.cs",
+                   _S + "Playback.cs", _S + "PlayerRules.cs", _S + "PlayerStreams.cs", _S + "PlayerTileViews.cs", _S + "Recordings.cs", _S + "RecordingsBrowse.cs",
                    _S + "RecordingsBrowser.cs", _S + "RecordingsPlayer.cs", _S + "RecordingsService.Export.cs",
                    _S + "RecordingsService.cs", _S + "RecordingsSound.cs", _S + "SoundAnalysis.cs",
                    _S + "ThumbnailDecoding.cs", _S + "ToneCheck.cs",

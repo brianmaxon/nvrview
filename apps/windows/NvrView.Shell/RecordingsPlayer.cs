@@ -96,6 +96,15 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
     /// </summary>
     public PlayerTileViews Views { get; } = new();
 
+    /// <summary>
+    /// Each camera's stream choice (Auto, High, Low) and what plays now (docs/UX.md "Recordings", "Quality"). A change
+    /// restarts only that camera's play at the position; the zoom above is kept.
+    /// </summary>
+    public PlayerStreams Streams { get; } = new();
+
+    /// <summary>How many stream changes this player asked the core for (self-test).</summary>
+    public int StreamChanges { get; private set; }
+
     /// <summary>How many playbacks this player opened (self-test).</summary>
     public int Opens { get; private set; }
 
@@ -112,6 +121,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
             {
                 _mode = value;
                 UpdateAudio();
+                RefreshStreams();
                 Changed?.Invoke();
             }
         }
@@ -216,7 +226,10 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
     {
         long start = day * 1000, end = (day + DeviceTime.Day) * 1000;
         long position = Math.Min(Math.Max(atMs, start), end);
-        string request = PlaybackRequest.Range(start, end, cameras.Select(c => new PlaybackCamera(c)), position, Rate);
+        Streams.Retain(cameras);
+        List<NvStreamTier> tiers = Streams.Opening(cameras, PlayerGrid.Normalized(_mode, cameras.Count), Rate, c => Views.Zoom(c).Scale);
+        string request = PlaybackRequest.Range(
+            start, end, cameras.Zip(tiers, (c, t) => new PlaybackCamera(c, t == NvStreamTier.Main ? "main" : "sub")), position, Rate);
         try
         {
             OpenedPlayback opened = model.OpenPlayback(request, this);
@@ -325,6 +338,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         }
         Rate = rate;
         UpdateAudio();
+        RefreshStreams();
         if (Playback is { } p)
         {
             model.PlaybackCall(c => c.PlaybackSetRate(p, rate));
@@ -343,6 +357,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         PlayerCell cell = Cells[i];
         Cells.RemoveAt(i);
         Views.Retain(Cameras);
+        Streams.Retain(Cameras);
         _mode = PlayerGrid.Normalized(_mode, Cells.Count);
         model.RemovePlaybackCamera(p, cell.Tile);
         if (Cells.Count == 0)
@@ -352,6 +367,8 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         else
         {
             UpdateAudio();
+            // The camera left may be the only one now: Auto asks for its main stream.
+            RefreshStreams();
             Changed?.Invoke();
         }
     }
@@ -363,12 +380,71 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         {
             return;
         }
-        if (model.AddPlaybackCamera(p, camera) is { } tile)
+        // The stream is decided on a copy of the choices' memory only when the camera really joins.
+        List<RecordingCamera> after = [.. Cameras, camera];
+        NvStreamTier tier = Streams.Wanted(camera, after, PlayerGrid.Normalized(_mode, after.Count), Rate, Views.Zoom(camera).Scale);
+        if (model.AddPlaybackCamera(p, camera, tier) is { } tile)
         {
+            Streams.Joined(camera, tier);
             Cells.Add(new PlayerCell(camera, tile));
             UpdateAudio();
+            // The cameras already there are no longer alone: Auto goes back to their sub-stream.
+            RefreshStreams();
             Changed?.Invoke();
         }
+    }
+
+    // ---- quality ----
+
+    /// <summary>The camera's choice: Auto, High (main stream) or Low (sub-stream).</summary>
+    public void SetQuality(RecordingCamera camera, PlayerQuality quality)
+    {
+        if (Streams.Quality(camera) == quality)
+        {
+            return;
+        }
+        Streams.SetQuality(camera, quality);
+        RefreshStreams();
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Asks the core for the stream of every camera whose stream is not the one wanted now (the layout, the speed, the zoom
+    /// and the choice decide: <see cref="PlayerStreams"/>). The core restarts that camera's play at the position, in the
+    /// group-start rules; the picture and zoom stay. Called on every change that matters, and from <see cref="Tick"/> for the
+    /// zoom (the view state has no event of its own).
+    /// </summary>
+    public void RefreshStreams()
+    {
+        if (Playback is null)
+        {
+            return;
+        }
+        List<(RecordingCamera Camera, NvStreamTier Tier)> changes =
+            Streams.Changes(Cameras, PlayerGrid.Normalized(_mode, Cells.Count), Rate, c => Views.Zoom(c).Scale);
+        StreamChanges += changes.Count;
+        foreach ((RecordingCamera camera, NvStreamTier tier) in changes)
+        {
+            if (Cells.FirstOrDefault(c => c.Camera == camera) is { } cell)
+            {
+                model.SetPlaybackTier(cell.Tile, tier);
+            }
+        }
+        if (changes.Count > 0)
+        {
+            Changed?.Invoke();
+        }
+    }
+
+    /// <summary>The tier the core reports for each camera, in the player's order (self-test); empty when it cannot say.</summary>
+    public List<string> ReportedTiers()
+    {
+        if (Playback is not { } p || model.PlaybackStatus(p) is not { } json ||
+            System.Text.Json.Nodes.JsonNode.Parse(json)?["cameras"] is not System.Text.Json.Nodes.JsonArray list)
+        {
+            return [];
+        }
+        return [.. Cells.Select(cell => list.FirstOrDefault(c => (ulong?)c?["tile"] == cell.Tile)?["tier"]?.GetValue<string>() ?? "?")];
     }
 
     /// <summary>A click on camera <paramref name="i"/>.</summary>
@@ -404,6 +480,7 @@ public sealed class RecordingsPlayer(RecordingsService model) : IPlayerTransport
         {
             return;
         }
+        RefreshStreams();
         if (now.PositionMs != PositionMs || now.State != State)
         {
             PositionMs = now.PositionMs;
