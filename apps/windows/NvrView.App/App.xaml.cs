@@ -184,9 +184,11 @@ public partial class App : Application
             }
             if (o.SelfTest)
             {
-                // Today is recorded on every channel, so the playback pacing step plays real recordings through the core.
+                // Every channel is recorded, so the playback pacing step plays real recordings through the core. The mock
+                // records whole days by UTC date, so two days hold this computer's today west of UTC (where the UTC date
+                // runs ahead in the evening) and yesterday east of it (the step falls back to yesterday).
                 // Live pictures go out in pairs, as devices bunch them, so the live pacing step sees them paced.
-                mockArgs.AddRange(["--recordings", "1", "--video-burst", "2"]);
+                mockArgs.AddRange(["--recordings", "2", "--video-burst", "2"]);
             }
             if (o.SelfTest)
             {

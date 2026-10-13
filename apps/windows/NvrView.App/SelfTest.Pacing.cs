@@ -70,6 +70,13 @@ internal sealed partial class SelfTest
         // The owner's path: an incident selected on the day's timeline opens a playback from its start less its
         // margin (the Incident scrubber), here a finished one of the one enabled camera.
         bool listed = await Until(() => b.DayIncidents.Any(i => !i.Growing) && !service.Searching.Busy, 30);
+        if (!listed)
+        {
+            // The mock records days by UTC date; just after midnight east of UTC its newest day is this computer's
+            // yesterday.
+            b.PreviousDay();
+            listed = await Until(() => b.DayIncidents.Any(i => !i.Growing) && !service.Searching.Busy, 30);
+        }
         Incident? incident = b.DayIncidents.Where(i => !i.Growing).OrderBy(i => i.Start).FirstOrDefault();
         if (!listed || incident is null)
         {
