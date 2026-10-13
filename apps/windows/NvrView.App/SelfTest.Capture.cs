@@ -156,7 +156,11 @@ internal sealed partial class SelfTest
     // Checks one finished save: a file with the naming rule's shape and extension, the "Picture saved" toast with its button, the
     // dimensions (size, within a pixel, when given), and, when the picture is a copy of the decoded one (yuv given), its pixels
     // (a JPEG against the same encoder's JPEG of the picture, CompareEncoded).
-    private async Task<RenderedImage?> CheckSaved(StageView stage, PictureSaveRecord? rec, string what, string ext, string nameEnds, (int W, int H)? size, int tolerance, Yuv? yuv, PixelRegion? region = null, int minPercent = 95)
+    private Task<RenderedImage?> CheckSaved(StageView stage, PictureSaveRecord? rec, string what, string ext, string nameEnds, (int W, int H)? size, int tolerance, Yuv? yuv, PixelRegion? region = null, int minPercent = 95) =>
+        CheckSavedFile(stage.ToastText, stage.ToastActionTitle, rec, what, ext, nameEnds, size, tolerance, yuv, region, minPercent);
+
+    // The same for a save made from any window: the message over that window's picture is given.
+    private async Task<RenderedImage?> CheckSavedFile(string? toast, string? toastAction, PictureSaveRecord? rec, string what, string ext, string nameEnds, (int W, int H)? size, int tolerance, Yuv? yuv, PixelRegion? region = null, int minPercent = 95)
     {
         if (rec is null)
         {
@@ -178,13 +182,12 @@ internal sealed partial class SelfTest
         }
         bool named = PictureNameShape.IsMatch(name) && name.EndsWith($"{nameEnds}.{ext}", StringComparison.Ordinal);
         bool sized = size is not { } s || (Math.Abs(image.Width - s.W) <= 1 && Math.Abs(image.Height - s.H) <= 1);
-        string? toast = stage.ToastText;
         Say($"{what}: {name}, {image.Width}x{image.Height}, {fileSize} bytes, toast {toast ?? "none"}");
         Expect(named, $"{what}: the file name {name} does not follow the rule");
         Expect(fileSize == saved.Bytes && fileSize > 100, $"{what}: the file has {fileSize} bytes, wrote {saved.Bytes}");
         Expect(sized, $"{what}: {image.Width}x{image.Height}, expected {size?.W}x{size?.H}");
         Expect(image.Width == saved.Width && image.Height == saved.Height, $"{what}: the file is {image.Width}x{image.Height}, not the rendered {saved.Width}x{saved.Height}");
-        Expect(toast == "Picture saved" && stage.ToastActionTitle == "Show in folder", $"{what}: the confirmation toast said {toast ?? "nothing"}");
+        Expect(toast == "Picture saved" && toastAction == "Show in folder", $"{what}: the confirmation toast said {toast ?? "nothing"}");
         if (yuv is not null)
         {
             // A JPEG is compared with the same encoder's JPEG of the drawn picture: its losses (far off on a sharp color

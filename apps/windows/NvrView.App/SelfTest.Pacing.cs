@@ -133,6 +133,8 @@ internal sealed partial class SelfTest
             _problems.Add($"playback pacing (simulated 60 Hz display): {problem}");
         }
         Expect(report.ShownRatio >= RealShownRatio, $"playback pacing: the display drew {report.Shown.Pictures} of {report.Released.Pictures} released pictures");
+        // The same playback, after the verdict: the player's picture features (zoom, pan, Fill, Save Picture).
+        await PlaybackZoomStep(v, w, p);
         w.Close();
         await Until(() => w.IsClosed, 5);
         service.SetEnabled(camera, false);
