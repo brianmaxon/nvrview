@@ -315,8 +315,10 @@ release_second() {
 }
 trap 'finish_cache --failed "Windows worker"; release_second; rm -rf "$logs"; windows_unlock' EXIT
 split_plan() { # HOST SECOND
-  "$py" -I scripts/windows-split.py plan --hosts "$1" "$2" --rust "$rust_halves" --suites "$NVRVIEW_SUITES"
+  "$py" -I scripts/windows-split.py plan --explain --hosts "$1" "$2" --rust "$rust_halves" --suites "$NVRVIEW_SUITES" 2>"$logs/plan.detail"
 }
+# Every run says whether it splits, and why or why not, on one line.
+decision() { echo "split decision: $*"; }
 rust_halves=""
 for kv in clippy:NVRVIEW_CLIPPY_CRATES test:NVRVIEW_TEST_CRATES doctest:NVRVIEW_DOCTEST_CRATES; do
   eval "val=\${${kv#*:}:-none}"
@@ -326,41 +328,57 @@ rust_halves=${rust_halves:-none}
 parts="all"
 host_rust=""
 host_rest=""
-if [ -z "$only" ] && [ "${NVRVIEW_WINDOWS_SPLIT:-1}" != 0 ] && [ "$rust_halves" != none ] && [ "$NVRVIEW_SUITES" != none ]; then
+if [ -n "$only" ]; then
+  decision "whole on $host (NVRVIEW_WINDOWS_ONLY is set)"
+elif [ "${NVRVIEW_WINDOWS_SPLIT:-1}" = 0 ]; then
+  decision "whole on $host (NVRVIEW_WINDOWS_SPLIT=0)"
+elif [ "$rust_halves" = none ] || [ "$NVRVIEW_SUITES" = none ]; then
+  decision "whole on $host (nothing to run in one half: Rust work $rust_halves, other suites $NVRVIEW_SUITES)"
+else
   candidate=$(windows_hosts | grep -vx "$host" | head -n 1 || true)
-  if [ -n "$candidate" ]; then
+  if [ -z "$candidate" ]; then
+    decision "whole on $host (only one Windows host is configured)"
+  else
     plan=$(split_plan "$host" "$candidate" || true)
+    detail=$(cat "$logs/plan.detail" 2>/dev/null || true)
     case "$plan" in
       split*)
-        second=$(scripts/windows-lock.sh acquire --try --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid "$lock_owner" --exclude "$host" 2>/dev/null) || second=""
+        if second=$(scripts/windows-lock.sh acquire --try --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid "$lock_owner" --exclude "$host" 2>/dev/null); then
+          :
+        else
+          second=""
+          decision "whole on $host ($candidate is not free right now, or a waiting merge goes first there; the plan was: $plan)"
+        fi
         ;;
-      *) echo "not splitting: ${plan#single }" ;;
+      *) decision "whole on $host (${plan#single }; $detail)" ;;
     esac
-  fi
-  if [ -n "$second" ]; then
-    # The same toolchain on both computers, or the results would not be the
-    # same as a one-computer run's.
-    # shellcheck disable=SC2086,SC2029
-    ssh $ssh_opts "$second" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
-      </dev/null 2>/dev/null | tr -d '\r' >"$logs/tools2" || true
-    plan=$(split_plan "$host" "$second" || true)
-    if ! cmp -s "$logs/tools" "$logs/tools2"; then
-      echo "not splitting: $second has other tool versions than $host"
-      release_second
-    else
-      case "$plan" in
-        split*)
-          if sync_tree "$second"; then
-            parts="rust rest"
-            host_rust=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rust$/\1/p')
-            host_rest=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rest$/\1/p')
-          else
-            echo "not splitting: sending the tree to $second failed"
-            release_second
-          fi
-          ;;
-        *) echo "not splitting: ${plan#single }"; release_second ;;
-      esac
+    if [ -n "$second" ]; then
+      # The same toolchain on both computers, or the results would not be the
+      # same as a one-computer run's.
+      # shellcheck disable=SC2086,SC2029
+      ssh $ssh_opts "$second" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
+        </dev/null 2>/dev/null | tr -d '\r' >"$logs/tools2" || true
+      plan=$(split_plan "$host" "$second" || true)
+      detail=$(cat "$logs/plan.detail" 2>/dev/null || true)
+      if ! cmp -s "$logs/tools" "$logs/tools2"; then
+        decision "whole on $host ($second has other tool versions: $(diff "$logs/tools" "$logs/tools2" | grep '^[<>]' | head -n 3 | tr '\n' ' '))"
+        release_second
+      else
+        case "$plan" in
+          split*)
+            if sync_tree "$second"; then
+              parts="rust rest"
+              host_rust=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rust$/\1/p')
+              host_rest=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rest$/\1/p')
+              decision "split ($plan; $detail)"
+            else
+              decision "whole on $host (sending the tree to $second failed)"
+              release_second
+            fi
+            ;;
+          *) decision "whole on $host (${plan#single }; $detail)"; release_second ;;
+        esac
+      fi
     fi
   fi
 fi

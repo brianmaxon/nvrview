@@ -173,6 +173,7 @@ if run_check "$r" "$work/two.out"; then pass "a check on two free hosts passes";
 hosts_free "$r" && pass "...and both locks given back" || fail "...and both locks given back"
 ls "$FS_DIR"/sync.* | wc -l | grep -q 2 && pass "...each host got the tree" || fail "...each host got the tree"
 grep -q 'splitting the check' "$work/two.out" && pass "...and the output says so" || fail "...and the output says so"
+grep -q '^split decision: split (split .*plan inputs: Rust half about' "$work/two.out" && pass "...and logs the split decision with the plan's numbers" || fail "...and logs the split decision with the plan's numbers"
 two_stamp=$(stamp_of "$r")
 two_entries=$(entries_of "$r")
 check "...and leaves a Windows stamp" ls "$r"/.git/nvrview-checks/*.windows
@@ -186,6 +187,7 @@ if run_check "$r" "$work/one.out"; then pass "a check on one host passes"; else 
 [ "$(wc -l <"$FS_DIR/worker.log" | tr -d ' ')" = 1 ] && grep -q '^all win-a$' "$FS_DIR/worker.log" && pass "...in one whole run on that host" || fail "...in one whole run on that host"
 hosts_free "$r" && pass "...and its lock given back" || fail "...and its lock given back"
 ! grep -q 'splitting the check' "$work/one.out" && pass "...without a split" || fail "...without a split"
+grep -q '^split decision: whole on win-a (only one Windows host is configured)' "$work/one.out" && pass "...and logs why it did not split" || fail "...and logs why it did not split"
 [ "$(stamp_of "$r")" = "$two_stamp" ] && pass "the stamp is the same as the split run's" || { fail "the stamp is the same as the split run's"; echo "$two_stamp"; stamp_of "$r"; }
 [ "$(entries_of "$r")" = "$two_entries" ] && pass "the test result cache entries are the same as the split run's" || { fail "the test result cache entries are the same as the split run's"; echo "$two_entries"; entries_of "$r"; }
 
@@ -197,13 +199,14 @@ printf 'pid=%s\nmachine=%s\nstart=1\npriority=agent\nhost=win-b\n' "$$" "$(hostn
 if run_check "$r" "$work/busy.out"; then pass "a check with the second host busy passes"; else cat "$work/busy.out"; fail "a check with the second host busy passes"; fi
 grep -q '^all win-a$' "$FS_DIR/worker.log" && [ "$(wc -l <"$FS_DIR/worker.log" | tr -d ' ')" = 1 ] && pass "...whole, on the free host" || fail "...whole, on the free host"
 check "...and the busy host's lock is not touched" test -f "$r.lock-win-b/owner"
+grep -q '^split decision: whole on win-a (win-b is not free right now' "$work/busy.out" && pass "...and logs that the second host was busy" || fail "...and logs that the second host was busy"
 rm -rf "$r.lock-win-b"
 
 # Different tool versions on the second host: no split.
 fresh odd
 export NVRVIEW_WINDOWS_HOSTS="win-a win-b" FS_ODD_HOST=win-b
 if run_check "$r" "$work/odd.out"; then pass "a check with differing toolchains passes"; else cat "$work/odd.out"; fail "a check with differing toolchains passes"; fi
-grep -q '^all win-a$' "$FS_DIR/worker.log" && grep -q 'not splitting: win-b has other tool versions' "$work/odd.out" && pass "...whole on one host, and says why" || fail "...whole on one host, and says why"
+grep -q '^all win-a$' "$FS_DIR/worker.log" && grep -q 'split decision: whole on win-a (win-b has other tool versions' "$work/odd.out" && pass "...whole on one host, and says why" || fail "...whole on one host, and says why"
 hosts_free "$r" && pass "...with the second lock given back" || fail "...with the second lock given back"
 unset FS_ODD_HOST
 
@@ -212,6 +215,7 @@ fresh off
 export NVRVIEW_WINDOWS_HOSTS="win-a win-b" NVRVIEW_WINDOWS_SPLIT=0
 run_check "$r" "$work/off.out" || true
 grep -q '^all win-a$' "$FS_DIR/worker.log" && pass "NVRVIEW_WINDOWS_SPLIT=0 runs the check whole" || fail "NVRVIEW_WINDOWS_SPLIT=0 runs the check whole"
+grep -q '^split decision: whole on win-a (NVRVIEW_WINDOWS_SPLIT=0)' "$work/off.out" && pass "...and logs that it was turned off" || fail "...and logs that it was turned off"
 unset NVRVIEW_WINDOWS_SPLIT
 
 # A failure in either half fails the check, names the half, the suite and the
