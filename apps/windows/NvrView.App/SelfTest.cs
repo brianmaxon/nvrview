@@ -200,43 +200,18 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         app.Windows[0].Show(new WindowContent.Scratch("Self-test", LayoutNode.Balanced(
             mockDevice.Channels.Keys.Order().Select(c => new CameraRef(mockDevice.Key, c)))));
 
-        // parity: grid-plays
-        // 1. Tiles play.
-        bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
-            Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
+        // The tiles start; the last channel (a third-party camera behind the NVR) is refused first and waits for the
+        // core's preview retry (6 s, preview_retry_interval; the retry itself is tested in the core's third_party
+        // tests), so the steps that need no picture of it run while it waits.
+        int ready = options.MockChannels >= 2 ? options.MockChannels - 1 : options.MockChannels;
+        bool started = await Until(() => Tiles.Length >= options.MockChannels &&
+            Tiles.Take(ready).All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
         Say($"devices {v.Devices.Count} ({string.Join(", ", v.Devices.Select(d => d.State))}), tiles {Tiles.Length}, " +
             $"first picture {Ms(v.Timings.GetValueOrDefault("first_picture"))}");
-        if (!playing)
+        if (!started)
         {
-            _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
+            _problems.Add($"tiles did not play: {string.Join("; ", Tiles.Select(Describe))}");
             return;
-        }
-        long memoryBefore = PrivateBytes();
-        await CheckFrame("grid", Tiles);
-        if (Runs("viewer"))
-        {
-            await LivePacingStep(r);
-        }
-        // parity: third-party-channel
-        if (options.MockChannels >= 2)
-        {
-            StageTile last = Tiles[^1];
-            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {app.Stage!.StatusText(last) ?? "playing"}");
-            if (!v.WaitedTiles.Contains(last.Id))
-            {
-                _problems.Add("the third-party channel never reported waiting for the camera");
-            }
-        }
-
-        // parity: render-no-alloc
-        // Steady state: the render thread allocates nothing per frame.
-        long bytes = r.AllocatedBytes, framesBefore = r.Frames;
-        await Until(() => r.Frames - framesBefore >= 30, 10);
-        long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
-        Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
-        if (allocated > 0)
-        {
-            _problems.Add($"the render thread allocated {allocated} bytes in steady state");
         }
 
         // parity: wrong-password
@@ -312,6 +287,45 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             {
                 _problems.Add("arrow-key selection found no tile to the right of the first");
             }
+        }
+
+        // parity: grid-plays
+        // 1. Tiles play.
+        var gridWait = Stopwatch.StartNew();
+        bool playing = await Until(() => Tiles.Length >= options.MockChannels &&
+            Tiles.All(t => (t.Video?.Counters.Decoded ?? 0) > 5 && t.PictureWidth > 0 && t.Shown > 2), 30);
+        Say($"grid: every tile plays (waited {gridWait.Elapsed.TotalSeconds:0.00} s more for the third-party channel)");
+        if (!playing)
+        {
+            _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
+            return;
+        }
+        long memoryBefore = PrivateBytes();
+        await CheckFrame("grid", Tiles);
+        if (Runs("viewer"))
+        {
+            await LivePacingStep(r);
+        }
+        // parity: third-party-channel
+        if (options.MockChannels >= 2)
+        {
+            StageTile last = Tiles[^1];
+            Say($"third-party channel: waited {v.WaitedTiles.Contains(last.Id)}, now {app.Stage!.StatusText(last) ?? "playing"}");
+            if (!v.WaitedTiles.Contains(last.Id))
+            {
+                _problems.Add("the third-party channel never reported waiting for the camera");
+            }
+        }
+
+        // parity: render-no-alloc
+        // Steady state: the render thread allocates nothing per frame.
+        long bytes = r.AllocatedBytes, framesBefore = r.Frames;
+        await Until(() => r.Frames - framesBefore >= 30, 10);
+        long allocated = r.AllocatedBytes - bytes, framesDrawn = r.Frames - framesBefore;
+        Say($"render thread: {allocated} bytes allocated over {framesDrawn} frames");
+        if (allocated > 0)
+        {
+            _problems.Add($"the render thread allocated {allocated} bytes in steady state");
         }
 
         if (Runs("viewer"))
