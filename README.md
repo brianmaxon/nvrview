@@ -177,7 +177,7 @@ at the end shows each suite as ran or cached, with its time.
   header, and the fixtures; the C# and Windows app suites `apps/windows/`, the
   core crates they load, and the fixtures. The Windows app self-test is split
   into areas (startup, viewer, tiles, layouts, header, settings, calls,
-  recordings, capture, ptz), each cached for the debug and the publish build:
+  recordings, capture, ptz), each cached on its own for the debug build:
   `scripts/windows-selftest-areas.txt` maps every `// parity:` step to one
   area (`scripts/check-selftest-areas.py` fails otherwise), the app runs only
   the areas asked for with `--areas a,b` (starting once), and an area's
@@ -193,13 +193,17 @@ at the end shows each suite as ran or cached, with its time.
   project table in `scripts/suite-cache.py` is checked against the project
   files by `suite-cache.py check-projects`). Sanitization, self-test parity,
   the secret scan, and `cargo fmt` always run.
-- **Trimmed build.** The trimmed publish and its app self-test
-  (`app-publish.*`) and the update test run in full runs (releases) and when
-  the last passing trimmed run on Windows is more than 24 hours old
-  (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs print them as `deferred` and count
-  them like cached suites (merge stamps, never a release). The trade-off: a
-  problem that only trimming causes shows at the daily run or the release, not
-  at the merge that introduced it.
+- **Trimmed build.** Trimming is checked statically on every build (the trim
+  analyzer, warnings as errors) and at publish (the app's own assemblies must
+  reach the output unchanged). The trimmed publish with its plain start and a
+  short self-test (`app-publish`: `--smoke`, the startup area and one wiring
+  check per area; the whole self-test runs on the debug build) and the update
+  test run in full runs (releases) and when the last passing trimmed run on
+  Windows is more than 24 hours old (`NVRVIEW_TRIMMED_MAX_AGE_H`); other runs
+  print them as `deferred` and count them like cached suites (merge stamps,
+  never a release). The trade-off: a problem that only trimming causes at run
+  time shows at the daily run or the release, not at the merge that
+  introduced it.
 - **Secret scan.** Normal checks scan the commits not yet covered by a clean
   scan (`scripts/secret-scan.sh` records them in the git directory) and the
   staged and unstaged changes; the whole history is scanned when the last full

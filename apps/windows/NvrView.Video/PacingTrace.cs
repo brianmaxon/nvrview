@@ -21,11 +21,19 @@ namespace NvrView.Video;
 /// <param name="DecodeMaxMs">Longest such time.</param>
 /// <param name="Decoded">Pictures answered decoded.</param>
 /// <param name="Skipped">Pictures decoded but never drawn (overwritten before a frame took them).</param>
-public sealed record PacingReport(PacingSummary Released, PacingSummary Shown, double DecodeP50Ms, double DecodeMaxMs, int Decoded, int Skipped)
+/// <param name="Simulated">The decoded pictures as an ideal 60 Hz display shows them (<see cref="PacingRefresh"/>).</param>
+/// <param name="SimulatedSkipped">Pictures that display never drew (replaced before its next refresh).</param>
+/// <param name="Problems">What <see cref="PacingVerdict"/> finds wrong with <paramref name="Simulated"/> (empty when it passes).</param>
+public sealed record PacingReport(PacingSummary Released, PacingSummary Shown, double DecodeP50Ms, double DecodeMaxMs, int Decoded, int Skipped,
+    PacingSummary Simulated, int SimulatedSkipped, IReadOnlyList<string> Problems)
 {
+    /// <summary>Share of the released pictures the real display drew.</summary>
+    public double ShownRatio => Released.Pictures > 0 ? (double)Shown.Pictures / Released.Pictures : 0;
+
     /// <inheritdoc/>
     public override string ToString() =>
-        FormattableString.Invariant($"released: {Released}; shown: {Shown}; decode p50 {DecodeP50Ms:0.0} max {DecodeMaxMs:0.0} ms; decoded {Decoded}, skipped {Skipped}");
+        FormattableString.Invariant($"released: {Released}; shown: {Shown}; decode p50 {DecodeP50Ms:0.0} max {DecodeMaxMs:0.0} ms; decoded {Decoded}, skipped {Skipped}; ") +
+        FormattableString.Invariant($"simulated 60 Hz: {Simulated}, skipped {SimulatedSkipped}");
 }
 
 /// <summary>Records one tile's picture timings (see the file comment).</summary>
@@ -89,6 +97,18 @@ public sealed class PacingTrace
         }
     }
 
+    /// <summary>Pictures that arrived, were decoded, and were shown since the last reset (up to <see cref="Capacity"/> each).</summary>
+    public (int Arrived, int Decoded, int Shown) Counts
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return (_arrived.Count, _decoded.Count, _shown.Count);
+            }
+        }
+    }
+
     /// <summary>Forgets everything recorded so far.</summary>
     public void Reset()
     {
@@ -100,8 +120,11 @@ public sealed class PacingTrace
         }
     }
 
-    /// <summary>The pacing measured since the last reset (allocates; not for a hot path).</summary>
-    public PacingReport Report()
+    /// <summary>
+    /// The pacing measured since the last reset (allocates; not for a hot
+    /// path). The verdict needs <paramref name="minPairs"/> shown pairs.
+    /// </summary>
+    public PacingReport Report(int minPairs = 0)
     {
         long[] aT, aP, dT, dP, sT, sP;
         lock (_lock)
@@ -126,13 +149,20 @@ public sealed class PacingTrace
         }
         decodeMs.Sort();
         double[] decode = [.. decodeMs];
+        // The display stage on simulated time: what the real display drew depends on how many refreshes a window
+        // behind others or a busy machine got; the verdict does not.
+        RefreshShown sim = PacingRefresh.Show(Micros(dT), dP);
+        List<string> problems = PacingVerdict.Problems(sim.AtUs, sim.PtsUs, aP.Length, sim.Skipped, PacingRefresh.Refresh60HzUs / 1000.0, minPairs);
         return new PacingReport(
             PacingStats.Of(Micros(aT), aP),
             PacingStats.Of(Micros(sT), sP),
             PacingStats.Percentile(decode, 50),
             decode.Length == 0 ? 0 : decode[^1],
             dP.Length,
-            PacingStats.Skipped(dP, sP));
+            PacingStats.Skipped(dP, sP),
+            PacingStats.Of(sim.AtUs, sim.PtsUs),
+            sim.Skipped,
+            problems);
     }
 
     private static long[] Micros(long[] ticks)
@@ -160,6 +190,8 @@ public sealed class PacingTrace
             _next = (_next + 1) % Capacity;
             _count = Math.Min(_count + 1, Capacity);
         }
+
+        public int Count => _count;
 
         public void Clear() => _next = _count = 0;
 

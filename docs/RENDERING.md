@@ -215,6 +215,36 @@ first drew it, and summarizes intervals against timestamp spacing (jitter
 p50, p95, max) every ten seconds. The `live-pacing` and `playback-pacing`
 self-test steps run the same measurement on both apps.
 
+**How the verdict is taken.** A display draws pictures on its refresh grid,
+and a window behind others on a busy machine misses refreshes now and then,
+so a bound on the real display's timing either flakes (a single missed
+refresh at 60 Hz is 33.4 ms) or is too loose to mean anything. The
+self-tests therefore judge the decode times the trace recorded as an ideal
+60 Hz display shows them (`PacingRefresh`: at each refresh the newest decoded
+picture is drawn, as both renderers do), and check the real display only as
+wiring (at least 80% of the released pictures drawn). The bounds
+(`PacingVerdict`, the same constants and test vectors in `PacingStats.cs` and
+`PacingStats.swift`): shown pairs' jitter p95 at most 20 ms; no pair over
+three refreshes plus half a refresh of noise; at most four pairs over two
+and a half refreshes (one late picture makes two); at least 90% of the
+released pictures shown; at most two decoded pictures never shown. The
+playback step measures 40 shown pairs (about four seconds at the mock's
+10 fps) and the live step 30 pictures per tile, each waiting for those
+counts, not for a fixed time.
+
+Each part is proven where it is cheapest: the core's release pacing on a
+simulated clock (`crates/viewer-core/tests/core.rs`,
+`live_pictures_delivered_in_groups_are_decoded_at_their_own_pace`, and
+`tests/playback.rs`,
+`pictures_are_released_evenly_when_the_given_utc_offset_is_not_the_devices`);
+the display stage and the bounds in the shell and NVRCore tests, which also
+inject the old bugs: pictures a device sends in pairs decoded on arrival
+(without the live pacer) show 30 of 60 pictures with 30 never shown, and a
+recording released in one-second bursts (the wrong UTC offset) shows 12 of
+60 with a 483 ms jitter, both failing; one picture 50 ms late passes. The
+apps' steps keep the end to end path: the real core against the mock, the
+real decoder, the real renderer.
+
 ## Fisheye dewarping
 
 A fisheye camera (docs/protocol.md, "Fisheye cameras"; `fisheye` in the

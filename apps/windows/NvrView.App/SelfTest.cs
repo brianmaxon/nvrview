@@ -176,7 +176,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         StageView stage = app.Stage!;
         StageRenderer r = app.Renderer!;
         Say($"GPU: {v.Host.Gpu.Describe()}");
-        Say($"areas: {(options.Areas is null ? "all" : string.Join(", ", AreaNames.Where(Runs)))}");
+        Say($"areas: {(options.Areas is null ? "all" : string.Join(", ", AreaNames.Where(Runs)))}{(options.Smoke ? " and one wiring check per area (smoke)" : "")}");
 
         // parity: credential-store
         if (options.CredentialTest)
@@ -211,7 +211,6 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             _problems.Add($"tiles did not all play: {string.Join("; ", Tiles.Select(Describe))}");
             return;
         }
-        await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.SelfTestSeconds * 0.2)));
         long memoryBefore = PrivateBytes();
         await CheckFrame("grid", Tiles);
         if (Runs("viewer"))
@@ -344,7 +343,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         }
         else
         {
-            await Task.Delay(500);
+            // Every tile has drawn a picture of its rebuilt decoder before the frame is read back.
+            long[] shownBefore = [.. Tiles.Select(t => t.Shown)];
+            await Until(() => Tiles.Select((t, i) => t.Shown > shownBefore[i] + 2).All(x => x), 5);
             await CheckFrame("after device loss", Tiles);
         }
 
@@ -386,6 +387,11 @@ internal sealed partial class SelfTest(App app, AppOptions options)
             {
                 _problems.Add("no detection events arrived");
             }
+        }
+
+        if (options.Smoke)
+        {
+            await SmokeSteps(v, stage);
         }
 
         // parity: tile-retry
@@ -560,7 +566,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         };
         var rtb = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
         stage.HostTemporarily(ground, true);
-        await Task.Delay(300);
+        await Until(() => ground.IsLoaded && ground.ActualWidth > 0 && strip.ActualWidth > 0, 5);
         await rtb.RenderAsync(ground);
         stage.HostTemporarily(ground, false);
         byte[] pixels = System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(await rtb.GetPixelsAsync());
@@ -632,11 +638,12 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         }
     }
 
+    // The tile's audio peak, read until it is above zero or `seconds` have passed (a condition, not a fixed wait).
     private static async Task<float> MaxLevel(Viewer v, StageTile t, double seconds)
     {
         float max = 0;
         var sw = Stopwatch.StartNew();
-        while (sw.Elapsed.TotalSeconds < seconds)
+        while (sw.Elapsed.TotalSeconds < seconds && max <= 0)
         {
             max = Math.Max(max, v.Core.TileAudioLevel(t.Id).Peak);
             await Task.Delay(10);
@@ -655,9 +662,19 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             double t = i / (double)steps;
             w.Resize(new SizeInt32(start.Width + (int)(240 * t), start.Height + (int)(135 * t)));
+            // One step per 60 Hz refresh: a live resize is real time (the window manager and the swap chain).
             await Task.Delay(16);
         }
-        await Task.Delay(400);
+        // The buffers settle at the panel's final size.
+        (uint, uint) last = (0, 0);
+        int still = 0;
+        await Until(() =>
+        {
+            (uint, uint) now = r.WantedSize;
+            still = now == last && r.BufferSize == now ? still + 1 : 0;
+            last = now;
+            return still >= 3;
+        }, 2);
         double elapsed = sw.Elapsed.TotalSeconds;
         long made = r.Frames - frames, resized = r.TotalResizes - resizes;
         (uint bw, uint bh) = r.BufferSize;
@@ -675,8 +692,9 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         {
             _problems.Add($"the grid stopped presenting during the resize ({made} frames in {elapsed:0.00} s)");
         }
+        (uint, uint) grown = r.WantedSize;
         w.Resize(start);
-        await Task.Delay(400);
+        await Until(() => r.WantedSize != grown && r.BufferSize == r.WantedSize, 3);
     }
 
     private async Task CheckFrame(string what, IReadOnlyList<StageTile> tiles, StageRenderer? renderer = null)

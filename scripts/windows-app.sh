@@ -61,6 +61,7 @@ publish() {
   dotnet publish apps/windows/NvrView.App -c Release --artifacts-path "$out" -v quiet -clp:ErrorsOnly -nologo \
     -p:DebugType=none -p:DebugSymbols=false
   cp target/release/nvrview.dll "$(dirname "$exe")/"
+  kept_whole
   find "$(dirname "$exe")" -type f | wc -l
   du -sk "$(dirname "$exe")"
   ls -l "$exe"
@@ -70,6 +71,27 @@ publish() {
   if tree_known; then
     publish_fingerprint >"$out/publish.pending"
   fi
+}
+
+# Partial trimming keeps the app's own assemblies whole (NvrView.App.csproj), so
+# nothing they reflect on can be removed: each must reach the publish output
+# exactly as it was compiled. A static check, so the trimmed build needs only a
+# short run of its own (`selftest ... --smoke`).
+kept_whole() {
+  local dir name built status=0
+  dir=$(dirname "$exe")
+  for name in NvrView.App NvrView.Interop NvrView.Video NvrView.Tiles NvrView.Shell; do
+    built=$(find "$out/obj/$name" -path '*release*' -name "$name.dll" -not -path '*/ref/*' -not -path '*/refint/*' 2>/dev/null | head -1)
+    if [ -z "$built" ] || [ ! -f "$dir/$name.dll" ]; then
+      echo "trim check: $name.dll is missing from the build or the publish output" >&2
+      status=1
+    elif ! cmp -s "$built" "$dir/$name.dll"; then
+      echo "trim check: $name.dll in the publish output differs from the compiled one (trimmed?)" >&2
+      status=1
+    fi
+  done
+  [ "$status" = 0 ] && echo "trim check: the app's assemblies are kept whole"
+  return "$status"
 }
 
 tree_known() {

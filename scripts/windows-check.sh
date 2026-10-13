@@ -209,11 +209,13 @@ NVRVIEW_SUITES=""
 wanted="shell-tests"
 if [ "$only" != app ]; then wanted="csharp-smoke tiles-tests video-selftest $wanted"; fi
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ]; then
-  # The app self-test is cached by area (scripts/windows-selftest-areas.txt), for the debug and the publish build.
-  # NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no stamp, not a full pass).
+  # The debug build's app self-test is cached by area (scripts/windows-selftest-areas.txt); the trimmed publish
+  # build runs a short smoke (app-publish). NVRVIEW_APP_AREAS=a,b asks for those areas only (a partial run: no
+  # stamp, not a full pass, no trimmed build).
   for a in $(cache_areas); do
-    case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a app-publish.$a" ;; esac
+    case ",${NVRVIEW_APP_AREAS:-$a}," in *",$a,"*) wanted="$wanted app-debug.$a" ;; esac
   done
+  if [ -z "${NVRVIEW_APP_AREAS:-}" ]; then wanted="$wanted app-publish"; fi
   wanted="$wanted app-update"
 fi
 for s in $wanted; do

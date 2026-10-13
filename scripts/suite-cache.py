@@ -43,8 +43,8 @@ Commands (RUN is the path that `plan` prints):
                         as the platform's full pass only with --ok and without
                         --partial (steps were skipped)
   full-due PLATFORM     exit 0 when the next run on PLATFORM would be full
-  areas windows         the Windows app self-test areas (suites app-debug.AREA
-                        and app-publish.AREA; see WINDOWS_OWNED below)
+  areas windows         the Windows app self-test areas (suites app-debug.AREA;
+                        see WINDOWS_OWNED below)
   check-projects        fails when DOTNET_REFS differs from the C# project files
 
 The scripts call Python twice per run (plan, finish), not once per suite. The
@@ -60,7 +60,8 @@ the suites that had completed. In RUN.plan, `want SUITE run` means run it,
 ARGS LIST` the cargo arguments and the --list form (`cmsg` lines are the
 cached-crate messages for stderr). A suite not in the plan runs.
 
-The trimmed publish build and what runs on it (app-publish.AREA) are deferred
+The trimmed publish build and what runs on it (app-publish: the plain start and
+the short self-test, `--smoke`, startup and one wiring check per area) are deferred
 in ordinary runs ("deferred ...", counted like cached suites: a stamp with them
 serves merges, not a release); they run in full runs and when the last passing
 trimmed run on the platform is older than NVRVIEW_TRIMMED_MAX_AGE_H (24). app-update
@@ -154,13 +155,15 @@ SUITES = {
         # updater and start-up handling, the packaging script, and the
         # signing tool's crates. The rest of the app is the self-test areas'.
         "app-update": (UPDATE_FILES + ["scripts/windows-app.sh", "VERSION"], ["viewer-ffi", "sign-update"], ["rust"]),
-        # app-debug.AREA and app-publish.AREA are added below (WINDOWS_AREAS).
+        # app-debug.AREA and app-publish are added below (WINDOWS_AREAS).
     },
 }
 
 # The Windows app self-test runs by area (scripts/windows-selftest-areas.txt;
-# SelfTest.AreaNames in the app). Each area is cached on its own, for the debug
-# build (app-debug.AREA) and for the trimmed publish build (app-publish.AREA).
+# SelfTest.AreaNames in the app). Each area of the debug build is cached on its
+# own (app-debug.AREA). The trimmed publish build runs only a short smoke
+# (app-publish: startup and one wiring check per area, SelfTest.Smoke.cs; the
+# trimming itself is checked statically), so it is one suite over the whole app.
 # An area's inputs are all of apps/windows/ except the projects that are not
 # part of the app and the files that only some other area exercises
 # (WINDOWS_OWNED), so a file nobody owns and every shared one (App.xaml.cs,
@@ -223,10 +226,11 @@ def windows_area_excludes(area):
     return out
 
 
-for _prefix in ("app-debug", "app-publish"):
-    for _area in WINDOWS_AREAS:
-        SUITES["windows"]["%s.%s" % (_prefix, _area)] = (
-            ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
+for _area in WINDOWS_AREAS:
+    SUITES["windows"]["app-debug.%s" % _area] = (
+        ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes(_area))
+SUITES["windows"]["app-publish"] = (
+    ["apps/windows/"] + WINDOWS_APP_EXTRA, ["viewer-ffi", "mock-nvr"], ["rust"], windows_area_excludes("startup"))
 
 RUST_FAMILIES = {"mac": FAMILIES, "windows": ("clippy", "test", "doctest")}
 
@@ -413,7 +417,7 @@ def entry_path(base, platform, suite, key, retried=False):
 
 def is_trimmed(suite):
     """The suites that need the trimmed publish build."""
-    return suite.startswith("app-publish.") or suite == "app-update"
+    return suite in ("app-publish", "app-update")
 
 
 def trimmed_reason(base, platform, full):
