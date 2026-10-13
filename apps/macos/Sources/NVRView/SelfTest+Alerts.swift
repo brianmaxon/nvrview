@@ -280,8 +280,147 @@ extension SelfTest {
                 _ = t1
                 stage.unfocus()
                 advance(StageView.focusDuration)
-                eventsLogStep()
+                verifyStickStep()
             }
+        }
+    }
+
+    /// A mouse event through the window's real routing, at a point in the
+    /// stage's overlay (top-left origin).
+    func stageMouse(_ type: NSEvent.EventType, _ p: CGPoint, in controller: ViewerWindowController) {
+        guard let nsWindow = controller.window else { return }
+        let at = controller.stage.tileOverlay.convert(p, to: nil)
+        guard
+            let e = NSEvent.mouseEvent(
+                with: type, location: at, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: nsWindow.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1)
+        else { return }
+        nsWindow.sendEvent(e)
+    }
+
+    /// The view the window's content view hands a point in the stage's
+    /// overlay (what a click there would reach).
+    func stageHit(_ p: CGPoint, in controller: ViewerWindowController) -> NSView? {
+        guard let content = controller.window?.contentView, let frameView = content.superview else { return nil }
+        return content.hitTest(frameView.convert(controller.stage.tileOverlay.convert(p, to: nil), from: nil))
+    }
+
+    func verifyStickStep() {
+        guard let model = app.model, let window else { return checkLog() }
+        let alerts = model.alertsModel!
+        let stage = window.stage
+        let leaves = stage.frames.leaves
+        guard leaves.count >= 3, let a = leaves[1].camera, let b = leaves[2].camera else { return checkLog() }
+        // parity: verify-view-stick
+        // Clicking a verification inset puts its camera on the stage, and it
+        // stays there through the checks' refreshes (the next step of a
+        // check, the window's slow timer) until the user swaps back.
+        // parity: verify-view-order
+        // With two insets up, each inset's overlay is directly above its own
+        // inset, and refreshes do not move the views.
+        stage.focus(leaves[0].path)
+        advance(StageView.focusDuration)
+        scriptedCheck(a) { [self] _ in
+            scriptedCheck(b) { [self] _ in
+                @MainActor func tail() -> [ObjectIdentifier] {
+                    stage.insetBoard.shown.reversed().flatMap { item -> [NSView] in
+                        [stage.alertInsetViews[item.camera], stage.verificationInsetOverlay(for: item.camera)].compactMap { $0 }
+                    }.map(ObjectIdentifier.init)
+                }
+                let subviews = { @MainActor in stage.insetLayer.subviews.map(ObjectIdentifier.init) }
+                let expected = tail()
+                let overlays = [a, b].compactMap { stage.verificationInsetOverlay(for: $0) }
+                let moves = overlays.map(\.reparentCount)
+                var orderOK = overlays.count == 2 && expected.count == 4
+                for _ in 0..<5 {
+                    advance(2)
+                    stage.syncVerification()
+                    stage.refreshChrome()
+                    stage.relayoutChrome()
+                    stage.layoutInsetViews()
+                    let now = subviews()
+                    if let first = now.firstIndex(of: expected[0]), Array(now[first...].prefix(4)) != expected { orderOK = false }
+                }
+                let stable = overlays.map(\.reparentCount) == moves
+                print("verify view order: stack \(orderOK), views left in place \(stable)")
+                if !orderOK { problems.append("the insets and their overlays are not stacked each overlay above its inset") }
+                if !stable { problems.append("a refresh re-added the verification overlays") }
+
+                // Click the top inset (real events), then refresh.
+                guard let top = stage.insetBoard.shown.first?.camera, let rect = stage.insetVideoRects[top] else {
+                    problems.append("no verification inset to click")
+                    return verifyBandStep()
+                }
+                mouse(.leftMouseDown, CGPoint(x: rect.midX, y: rect.midY), in: window)
+                mouse(.leftMouseUp, CGPoint(x: rect.midX, y: rect.midY), in: window)
+                let swapped = stage.insetBoard.swap?.shown == top
+                var kept = true
+                for _ in 0..<5 {
+                    advance(2)
+                    stage.syncVerification()
+                    stage.refreshChrome()
+                    if stage.insetBoard.swap?.shown != top { kept = false }
+                }
+                print("verify view stick: swapped \(swapped), still enlarged after refreshes \(kept)")
+                if !swapped { problems.append("clicking a verification inset did not enlarge it") }
+                if !kept { problems.append("an enlarged verification inset went back on a refresh") }
+                // The user's way back.
+                _ = stage.handleInsetKey(.swap)
+                if stage.insetBoard.swap != nil { problems.append("Tab did not swap the enlarged inset back") }
+                alerts.dismissAll()
+                stage.unfocus()
+                advance(StageView.focusDuration)
+                verifyBandStep()
+            }
+        }
+    }
+
+    func verifyBandStep() {
+        guard let model = app.model, let window else { return checkLog() }
+        let alerts = model.alertsModel!
+        let stage = window.stage
+        // A tile whose drag pans once zoomed (not a fisheye one, which aims).
+        let pannable = stage.frames.leaves.first { leaf in
+            stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 3, eased: false)
+            let kind = stage.dragKind(at: CGPoint(x: leaf.rect.minX + 40, y: leaf.rect.maxY - 8))
+            stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 1.0 / 3, eased: false)
+            return kind == "pan"
+        }
+        guard let leaf = pannable, let camera = leaf.camera else { return checkLog() }
+        // parity: verify-view-passthrough
+        // A band over a tile lets the mouse through except on its own
+        // buttons: through the window's real event routing, a drag that
+        // starts on the band pans the zoomed tile, and the close button
+        // is still the band's.
+        scriptedCheck(camera) { [self] _ in
+            stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 3, eased: false)
+            guard let band = stage.verificationBand(for: camera) else {
+                problems.append("no band to test the pass-through on")
+                return eventsLogStep()
+            }
+            let onBand = CGPoint(x: leaf.rect.minX + 40, y: leaf.rect.maxY - 8)
+            let closeFrame = band.closeButtonFrameForTest
+            let onClose = CGPoint(x: leaf.rect.minX + closeFrame.midX, y: leaf.rect.minY + closeFrame.midY)
+            let hit = stageHit(onBand, in: window)
+            let throughBand = hit.map { !($0 === band || $0.isDescendant(of: band)) } ?? false
+            let hitClose = stageHit(onClose, in: window).map { $0.isDescendant(of: band) } ?? false
+            let before = stage.zoom(atTile: leaf.path)
+            stageMouse(.leftMouseDown, onBand, in: window)
+            for i in 1...4 {
+                stageMouse(.leftMouseDragged, CGPoint(x: onBand.x + CGFloat(i) * 12, y: onBand.y - CGFloat(i) * 6), in: window)
+            }
+            stageMouse(.leftMouseUp, CGPoint(x: onBand.x + 48, y: onBand.y - 24), in: window)
+            let panned = stage.zoom(atTile: leaf.path) != before
+            print("verify view passthrough: mouse reaches the tile \(throughBand), close button kept \(hitClose), drag pans \(panned)")
+            if !throughBand { problems.append("the band took a click that is not on its buttons: \(String(describing: hit))") }
+            if !hitClose { problems.append("the band's close button is not reachable") }
+            if !panned { problems.append("a drag starting on a band did not pan the tile") }
+            alerts.dismissAll()
+            stage.zoom(at: CGPoint(x: leaf.rect.midX, y: leaf.rect.midY), by: 1.0 / 3, eased: false)
+            let gone = stage.verificationBand(for: camera) == nil
+            if !gone { problems.append("a band outlived its dismissed check") }
+            eventsLogStep()
         }
     }
 

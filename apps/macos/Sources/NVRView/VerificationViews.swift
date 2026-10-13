@@ -184,6 +184,15 @@ final class VerificationOverlayView: PassThroughView {
 
     /// The self-test's click on the close button.
     func clickCloseForTest() { closeClicked() }
+
+    /// Self-test: how often AppKit re-parented this view (a stable stack
+    /// adds it once).
+    private(set) var reparentCount = 0
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        reparentCount += 1
+    }
+    var closeButtonFrameForTest: CGRect { close.frame }
 }
 
 // MARK: The verification window

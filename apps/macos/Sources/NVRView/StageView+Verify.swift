@@ -55,7 +55,17 @@ extension StageView {
         let places = verificationPlaces()
         let wanted = Set(places.insets.keys)
         let before = insetBoard
-        insetBoard.remove { $0.kind == .verification && !wanted.contains($0.camera) }
+        // An inset the user enlarged (swapped onto the stage) is on screen,
+        // so its check is placed in the tile and is no longer "wanted" as an
+        // inset; it stays enlarged until the user swaps back or its check
+        // ends, not until the next refresh.
+        var enlarged: CameraRef?
+        if let s = insetBoard.swap, s.item.kind == .verification,
+            model.alertsModel.board.shown.contains(where: { ref($0) == s.shown })
+        {
+            enlarged = s.shown
+        }
+        insetBoard.remove { $0.kind == .verification && !wanted.contains($0.camera) && $0.camera != enlarged }
         let now = clock.now
         for cam in wanted where insetBoard.item(for: cam) == nil && insetBoard.swap?.shown != cam {
             insetBoard.started(.verification, camera: cam, visible: false, now: now, at: Date())
@@ -88,7 +98,6 @@ extension StageView {
             view.apply(
                 VerifyOverlayContent(
                     check: top, camera: model.alertCamera(cam), model: model, lines: 4, others: checks.count - 1))
-            tileOverlay.addSubview(view, positioned: .above, relativeTo: nil)
         }
         for (path, view) in verifyBands where !used.contains(path) {
             view.removeFromSuperview()
@@ -117,11 +126,35 @@ extension StageView {
             view.apply(
                 VerifyOverlayContent(
                     check: top, camera: model.alertCamera(cam), model: model, lines: 5, others: checks.count - 1))
-            insetLayer.addSubview(view, positioned: .above, relativeTo: inset)
         }
         for (cam, view) in verifyInsetOverlays where !used.contains(cam) {
             view.removeFromSuperview()
             verifyInsetOverlays[cam] = nil
+        }
+        restackInsetLayer()
+    }
+
+    /// The inset layer's order, bottom to top: the stage's own controls, then
+    /// each inset (oldest first) with its verification overlay directly above
+    /// it. Views are moved only when the order is wrong (the set of insets
+    /// changed), never on every refresh.
+    func restackInsetLayer() {
+        var wanted: [NSView] = []
+        for item in insetBoard.shown.reversed() {
+            guard let v = alertInsetViews[item.camera], v.superview === insetLayer else { continue }
+            wanted.append(v)
+            if let o = verifyInsetOverlays[item.camera], o.superview === insetLayer { wanted.append(o) }
+        }
+        let subviews = insetLayer.subviews
+        let base = subviews.firstIndex { $0 === stageCall } ?? -1
+        let indices = wanted.map { w in subviews.firstIndex { $0 === w } ?? -1 }
+        var ordered = indices.first.map { $0 > base } ?? true
+        for (a, b) in zip(indices, indices.dropFirst()) where b <= a { ordered = false }
+        if ordered { return }
+        var below: NSView = stageCall
+        for v in wanted {
+            insetLayer.addSubview(v, positioned: .above, relativeTo: below)
+            below = v
         }
     }
 

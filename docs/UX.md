@@ -1649,7 +1649,10 @@ events and the boxes the app's detector answered:
   a verification inset: the alert insets' column (draggable, snapping,
   stacking newest first with "+N more", Tab swaps it with the stage), with
   the same boxes and steps over its picture. Esc or its × closes it and its
-  checks.
+  checks. Clicking the inset puts its camera on the stage; it stays there
+  (refreshes of the check do not undo it) until the user swaps back (click
+  the return inset, Tab) or the check ends. Bands and overlays let the mouse
+  through to the tile (pan, fisheye aim) except on their own buttons.
 - **In a small window.** "Smart Alert Checks", a floating panel that never
   activates the app or takes the keyboard (it becomes key only if a control
   in it needs typing). It lists the checks (at most three, "+N more"), each

@@ -531,12 +531,11 @@ extension StageView {
             let y = anchor.growsUpward ? last.y - 6 - 20 : last.y + last.height + 6
             moreChip.frame = CGRect(x: last.x, y: y, width: 90, height: 20)
         }
-        // Keep the insets above the stage's call controls.
-        for view in alertInsetViews.values where view.superview === insetLayer {
-            insetLayer.addSubview(view, positioned: .above, relativeTo: stageCall)
-        }
-        // A live check's boxes and steps ride on its inset.
+        // A live check's boxes and steps ride on its inset (this also keeps
+        // the insets, each with its overlay, above the stage's call controls
+        // in a stable order).
         layoutVerificationInsets()
+        restackInsetLayer()
     }
 
     // MARK: Self-test
