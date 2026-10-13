@@ -108,6 +108,7 @@ internal static class Program
         ExportTests.Run();
         PtzTests.Run();
         PacingTests.Run();
+        PlayerTileViewsTests.Run();
         return T.Summary();
     }
 }
