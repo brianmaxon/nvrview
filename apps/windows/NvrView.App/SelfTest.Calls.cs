@@ -97,10 +97,11 @@ internal sealed partial class SelfTest
         Expect(v.Settings.TalkAllowed(camera), "Allow did not keep the permission");
         bool active = await Until(() => call.Talk.IsActive, 10);
         Expect(active && mic.Running, "Talk did not become active with the microphone running");
+        // A second of microphone blocks at once: the core sends them at the mock's speedup (MockSpeedup), so the step
+        // checks the wiring, not the real-time pace (the core's talk tests prove that on a simulated clock).
         for (int i = 0; i < 10; i++)
         {
             mic.Speak(1600);
-            await Task.Delay(100);
         }
         bool youListening = engines.Count > 1 && engines[1].Source == TranscriptSource.You;
         // What the call took from the (fake) microphone's echo cancellation, checked below.
@@ -126,7 +127,6 @@ internal sealed partial class SelfTest
         for (int i = 0; i < 5; i++)
         {
             mic.Speak(1600);
-            await Task.Delay(100);
         }
         v.Calls.StopTalking(camera);
         bool gatedStopped = await Until(() => call.Talk.Current == TalkState.Phase.Stopped, 10);

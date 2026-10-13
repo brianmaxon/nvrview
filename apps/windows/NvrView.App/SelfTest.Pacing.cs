@@ -27,7 +27,7 @@ internal sealed partial class SelfTest
     /// <summary>Live pictures each tile must deliver before the live verdict.</summary>
     internal const int LivePictures = 30;
 
-    /// <summary>Shown picture pairs the playback verdict needs (about four seconds at the mock's 10 fps).</summary>
+    /// <summary>Shown picture pairs the playback verdict needs (about two seconds at the self-test mock's 20 fps).</summary>
     internal const int PlaybackPairs = 40;
 
     /// <summary>

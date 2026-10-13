@@ -110,6 +110,12 @@ internal sealed partial class SelfTest(App app, AppOptions options)
     internal static readonly string[] AreaNames =
         ["startup", "viewer", "tiles", "layouts", "header", "settings", "calls", "recordings", "capture", "ptz"];
 
+    /// <summary>
+    /// The core's NVRVIEW_MOCK_SPEEDUP while the self-test runs against the mock it starts (docs/FFI.md "Self-tests"):
+    /// talk-back and play starts skip a real device's pauses, so the steps check the wiring without waiting on them.
+    /// </summary>
+    internal const int MockSpeedup = 16;
+
     /// <summary>True when the run covers the area (without --areas, all of them).</summary>
     private bool Runs(string area) => area == "startup" || options.Areas is null || options.Areas.Contains(area);
 
