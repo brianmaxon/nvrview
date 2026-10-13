@@ -992,12 +992,14 @@ search typed at a time. Viewing tier.
 ### Playback
 
 The client's playback commands. 5, 7, 123, 143, 144, 298 and 382 were
-observed (client capture); the rest are reported (client) and did not appear.
+observed (client capture), and 13 on older firmware (see "Plays on older
+firmware"); the rest are reported (client) and did not appear.
 
 | Command | Use | Body | Provenance |
 | --- | --- | --- | --- |
 | 5 / 7 | play a recording file / stop | 5: `FileInfo` with `channelId`, `Id`, `uid`, `supportSub` (0 for a main-stream play, 1 for a sub-stream play), `playSpeed` (1, 2, 4, 8 or 16), `streamType`; no `startTime` was sent. 7: `FileInfo` with `channelId`, `name`, `streamType` | observed |
 | 123 | set the start position of the next play | `ReplaySeek` with `channelId`, `seq`, `seekTime` (a time block) | observed |
+| 13 | one file's details by `name`; on older firmware, sent before every play, which goes out on its message ID | `FileInfo` with `channelId`, `name`, `supportSub`, `playSpeed`, `streamType` (see "Plays on older firmware") | observed (client capture) |
 | 298 | cover images for the timeline | `CoverPreview` with `channelId`, `uid`, `logicChnBitmap`, `desc` (0), `streamType`, `startTime`, `endTime`, `frameList/frameNo` (1) | observed (client capture) |
 | 382 | stop a play by time range | empty; sent once per NVR session just before the logout when the client quit | observed (client capture) |
 | 150 | keyframe-only playback | not traced | reported (client) |
@@ -1044,18 +1046,21 @@ sequence: 123 with a `seq` and the start time, its empty status-200 reply,
 then 5 naming the file by `Id`, with `playSpeed` 1, 2, 4, 8 or 16 (the
 observed values; no other is sent); 7 on every exit path, naming the file. `seq` numbers increase
 from the current Unix time, as the client's did; 123's `channelId` is 0, as
-the client sent it. With no observation of how a play ends or is refused,
-`bc-session` takes an empty message as the end and a non-200 reply without
-the play's `seq` as a refusal (the probe's one reported refusal turned out to
-be a misread media header, see "Live view and plays on one session"; the
-device refused nothing); `supportSub` is 1 on a sub-stream play and 0 on
+the client sent it. With no observation of how a play ends, `bc-session`
+takes an empty message as the end; a non-200 reply without the play's `seq`
+is a refusal (the probe's one reported refusal turned out to be a misread
+media header, see "Live view and plays on one session"; the one refusal
+seen since is older firmware's status 400 with an empty body, see "Plays on
+older firmware"); `supportSub` is 1 on a sub-stream play and 0 on
 a main-stream play, as the client sent it. To start several plays together
 nvrview follows the client's recipe (see "Four plays at once"): all seeks
 back to back with consecutive `seq` numbers and one `seekTime`, a pause of
 about 0.5 s, then all plays back to back (`DeviceSession::play_group`). The
 number of plays per device is capped by `max_plays` (default 4, see "Live
 view and plays on one session"). Not sent: 150, 381–383 (not observed in
-use), and any `playSpeed` other than the five observed.
+use), and any `playSpeed` other than the five observed. On a device whose
+file search lists no `Id` (older firmware) every play takes the by-name
+form instead (see "Plays on older firmware").
 
 #### Speed, file boundaries, and concurrent plays
 
@@ -1171,6 +1176,44 @@ tried.) nvrview now routes a play's media by message ID and accepts the
 | **Four plays at one seek time, all delivered** (tenth run: `supportSub` 1, `--no-live`, `--batched`, four cameras' recordings that all held the seek time). Stages of one to four plays all delivered fully; with four, each play gave 11.9 to 16.0 s of video in 7.2 s, first pictures 0.75 to 0.79 s after the plays, no stall, no refusal. This supports the inference above: the earlier "third/fourth play stalls" came from plays whose recordings did not hold the session's (latest) seek position, not from a play limit. | observed |
 | **Four plays at one seek time beside live view, all delivered** (eleventh run: as the tenth, with one live sub-stream preview running). Every stage up to four plays delivered fully (11.9 to 16.0 s of video in 7.3 s each with four), first pictures 0.72 to 0.74 s after the plays, and live view held its rate (10.0 frames per second against 9.8 alone, 9.5 after). So the "two plays beside live view" of the sixth run was the same seek-position effect (its third play's recording did not hold the seek time), not a limit. | observed |
 
+#### Plays on older firmware
+
+Everything above was measured on NVRs with recent firmware. On an NVR with
+older firmware nvrview's play was refused: every 5 was answered at once
+with status **400** and an empty body (observed with nvrview's own client:
+its log showed each play of that NVR's session ending on such a reply right
+after the plays started; plays on a recent-firmware NVR worked). A decrypted
+capture of the official client on that NVR (login included, one session,
+nothing lost) then showed how that firmware plays: one camera at a time,
+main stream at 1x, sub-stream at 1x, then 2x, 4x, 8x and 16x, a switch to
+the main stream at 16x, another camera at 1x, a short download, and the
+quit. All observed (client capture) unless marked otherwise.
+
+| Fact | Provenance |
+| --- | --- |
+| **The file search lists no `Id`.** The 15 reply's `FileInfo` entries carry `channelId`, `handle`, `name`, `streamType`, `containsAudio`, `recordType`, `sizeL`, `sizeH`, `supportSub`, `encrypt`, `startTime` and `endTime`, but no `Id` (recent firmware lists `name` and `Id`). A sub-stream search (`streamType` subStream) lists the sub-stream's own files, whose `name` differs from the main stream's file of the same time. The 14, 15, 16 and 142 bodies the client sent match recent firmware's. | observed (client capture) |
+| **A play is 123, then 13, then 5 on the 13's message ID.** Every play (nine, at every speed and both tiers): 123 `ReplaySeek` (`channelId` 0, `seq`, `seekTime`; the same body as on recent firmware), answered empty, status 200, within 35 ms; 0.53 to 0.56 s later a **13** (`FileInfoList`/`FileInfo` with `channelId`, `name`, `supportSub`, `playSpeed`, `streamType`, in that order), answered status 200 within 25 to 65 ms with one `FileInfo`: `channelId`, `handle` 0, `name`, `containsAudio`, `recordType`, `supportSub`, `sizeL`, `sizeH`, `startTime`, `endTime` of that file; then, 15 to 30 ms after that answer, the **5 with the same message ID as the 13**. | observed (client capture) |
+| **The 5 names no file.** Its `FileInfo` holds `channelId`, `supportSub`, `streamType`, `startTime` and `playSpeed`, in that order; no `Id`, `uid` or `name`. `startTime` is the **file's** start time (as the search and the 13 answer gave it), not the seek time. `supportSub` is 0 on a main-stream play and 1 on a sub-stream play, in both the 13 and the 5 (the rule recent firmware's 5 follows); `playSpeed` took 1, 2, 4, 8 and 16. | observed (client capture) |
+| The play's replies match recent firmware's: a first reply with status 200, a `binaryData` extension and a 32-byte stream-info payload, 40 to 140 ms after the 5, then media on the 5's message ID whose header bytes 16–19 carry the seek's `seq`. No play was refused or ended by the device; each ended with the client's 7. | observed (client capture) |
+| **The stop (7) is the same** as on recent firmware: `FileInfo` with `channelId`, `name` and `streamType`, its own message ID, answered empty with status 200. | observed (client capture) |
+| **Speed, tier and camera changes** are 7, 123, 13, 5 again with the new `playSpeed`, stream (the 13 naming that tier's file) or camera; nothing else is sent. | observed (client capture) |
+| Data per play (bytes only; frames were not decoded): main stream 1x about 0.6 MB/s; sub-stream 1x 0.09, 2x 0.08, 4x 0.18, 8x 0.34, and 16x 0.07 MB/s (34 messages in 12 s, consistent with a thinned stream); main stream 16x about 0.6 MB/s. | observed (client capture) |
+| **The download is the same as recent firmware's** (and as nvrview's for a first lens): 143 with `logicChnBitmap` 255, `channelId`, `supportSub` 0, `streamType` mainStream, `startTime`, `endTime` and no `uid`; a first reply (status 200) with `sizeL`, `sizeH` and `FileCount` 1; media; an empty status-300 end about 1 s later for a 16 s window. The client then sent 144 (empty) on a new message ID, answered 200. | observed (client capture) |
+| 298 cover requests had no `uid`; each was answered empty with status 200, media, then an empty status-300 end, as on recent firmware. | observed (client capture) |
+| 382 (sent at quit, as on recent firmware) was answered **405** with an empty body. | observed (client capture) |
+| No 150, 381 or 383, and no other non-200 status on 5, 7, 13 or 123. | observed (client capture) |
+
+**How nvrview chooses the form.** The device tells it in its own file
+search: a file listed with an `Id` is played as on recent firmware (5 naming
+the `Id`); a file listed without one is played by name (13 naming the file,
+its 200 answer, then 5 on the 13's message ID naming the file's start time),
+per file and so per device, with no model or version table. 13 is on the
+allowlist, viewing tier: it reads one file's details and changes nothing. A
+13 answered with another status ends the start as a refusal, and no 5 is
+sent. Not verified on that hardware with nvrview's own client yet (the
+mock's older mode reproduces the observed answers: `tools/mock-nvr
+--older-playback`).
+
 ### Cover images: command 298
 
 Observed (client capture). While a download ran, the client asked for one
@@ -1222,7 +1265,7 @@ Request, class `0x1464`, payload offset 0, body encrypted like any other:
 | Second-lens streams carry audio as `15wb`; any `..wb` record is audio. | observed |
 | Cost, for a 5 s window: about 1.5 MB read for a high-resolution H.265 main stream and 0.42 MB for its H.264 sub-stream, about 2 s per fetch including login. One session served several such downloads one after another. | observed |
 | A download can be stopped early with command 144 (empty body). | reported (client); 144 itself observed |
-| Other projects report command 13 for downloads and 14–16 as a download path; in the client, 14–16 are the file search above and 13 is not sent. | reported |
+| Other projects report command 13 for downloads and 14–16 as a download path; in the client, 14–16 are the file search above, and 13 reads one file's details before a play on older firmware (see "Plays on older firmware"); it was not seen in a download. | reported; 13 observed (client capture) |
 
 **Why not the HTTP API.** The same NVR's HTTP API was measured as a
 download path and rejected: its file download always streams a whole

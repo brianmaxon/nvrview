@@ -182,6 +182,8 @@ pub(crate) struct TransferReq {
     pub(crate) sink: Arc<TransferSink>,
     /// For a play: what its stop (7) names.
     pub(crate) play: Option<PlayRequest>,
+    /// Only on this connection generation (see [`Pending::Call`]).
+    pub(crate) conn: Option<u64>,
 }
 
 pub(crate) enum Request {
@@ -1624,6 +1626,10 @@ async fn sync_transfers<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     while let Some(t) = ctx.transfers.waiting.pop_front() {
         if t.sink.is_cancelled() {
             t.sink.fail(TransferItem::Cancelled);
+            continue;
+        }
+        if t.conn.is_some_and(|g| g != ctx.conn_gen) {
+            t.sink.fail(TransferItem::ConnectionLost);
             continue;
         }
         match (t.build)(&mut c.session) {

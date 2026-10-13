@@ -925,6 +925,10 @@ struct Conn {
     downloads: HashMap<u32, Stream>,
     /// Open file searches: handle to (files, next index).
     file_searches: HashMap<u32, (Vec<FileEntry>, usize)>,
+    /// File-information requests (13) answered, by message ID: the file's
+    /// channel and start. A by-name play (older firmware) goes out on the
+    /// same message ID and plays that file.
+    file_infos: HashMap<u32, (u8, bc_protocol::archive::DateTime)>,
     /// Open event searches: handle to (channel, events, next index).
     event_searches: HashMap<u32, (u8, Vec<MockEvent>, usize)>,
     next_event_handle: u32,
@@ -954,6 +958,7 @@ where
         latest_seq: Arc::new(AtomicU32::new(0)),
         plays: HashMap::new(),
         file_searches: HashMap::new(),
+        file_infos: HashMap::new(),
         event_searches: HashMap::new(),
         next_event_handle: 1,
         open_talks: HashMap::new(),
@@ -1175,7 +1180,7 @@ impl Conn {
             .or_insert(0) += 1;
         if matches!(
             m.header.command,
-            5 | 7 | 14 | 15 | 16 | 123 | 142 | 143 | 144 | 272 | 273 | 274 | 298
+            5 | 7 | 13 | 14 | 15 | 16 | 123 | 142 | 143 | 144 | 272 | 273 | 274 | 298
         ) {
             return self.archive_command(m).await;
         }
@@ -1822,7 +1827,7 @@ impl Conn {
                 let end = next.saturating_add(cfg.file_page.max(1)).min(files.len());
                 let page = files[*next..end].to_vec();
                 *next = end;
-                let body = archive::file_page(r.handle.unwrap_or(0), &page);
+                let body = archive::file_page(r.handle.unwrap_or(0), &page, !cfg.older_playback);
                 self.reply_xml(15, id, 200, &body).await
             }
             16 => {
@@ -1893,6 +1898,31 @@ impl Conn {
                         self.reply_xml(123, id, 200, "").await
                     }
                     _ => self.reply_xml(123, id, 400, "").await,
+                }
+            }
+            13 => {
+                // A file's details by `name` (observed before every play on
+                // older firmware): 200 with the file, 400 for a name the
+                // store does not hold.
+                let text = self.request_text(m);
+                let root = bc_protocol::archive::Element::parse(&text).unwrap_or_default();
+                let el = root.find("FileInfo").unwrap_or(&root);
+                let name = el.text_of("name").unwrap_or_default();
+                let file = el
+                    .num::<u8>("channelId")
+                    .ok()
+                    .flatten()
+                    .and_then(|ch| archive::file_by_name(&cfg, ch, name));
+                match file {
+                    Some(f) => {
+                        if self.file_infos.len() >= 64 {
+                            self.file_infos.clear();
+                        }
+                        self.file_infos.insert(id, (f.channel, f.start));
+                        let body = archive::file_info_reply(&f);
+                        self.reply_xml(13, id, 200, &body).await
+                    }
+                    None => self.reply_xml(13, id, 400, "").await,
                 }
             }
             5 => self.start_play(m, cfg).await,
@@ -2054,14 +2084,44 @@ impl Conn {
     /// [`ArchiveConfig::play_end_message`] (the mock's choice: a device was
     /// never seen ending a play). A play whose file does not hold the seek
     /// time gets nothing at all (observed).
+    ///
+    /// With [`ArchiveConfig::older_playback`] the play takes the by-name
+    /// form observed on older firmware: a 5 without `Id`, naming the file's
+    /// start time, on the message ID of a 13 that named the file. A 5 that
+    /// names an `Id` (the newer form) is answered 400 with an empty body, as
+    /// such a device answered it (observed). A 5 at
+    /// [`ArchiveConfig::refuse_play_speed`] is answered the same way (a
+    /// refusal for tests of how one is shown).
     async fn start_play(&mut self, m: &RawMessage, cfg: ArchiveConfig) -> io::Result<()> {
         let id = m.header.message_id;
         let text = self.request_text(m);
         let root = bc_protocol::archive::Element::parse(&text).unwrap_or_default();
         let el = root.find("FileInfo").unwrap_or(&root);
         let ch = el.num::<u8>("channelId").ok().flatten();
-        let file_id = el.text_of("Id").unwrap_or_default().to_owned();
         let speed = el.num::<u32>("playSpeed").ok().flatten();
+        let by_name = el.text_of("Id").is_none();
+        let info = self.file_infos.remove(&id);
+        let file_id = if cfg.older_playback {
+            if !by_name {
+                return self.reply_xml(5, id, 400, "").await;
+            }
+            match (info, archive::time_of(el, "startTime")) {
+                (Some((c, start)), Some(named)) if Some(c) == ch && start == named => {
+                    archive::FileEntry {
+                        channel: c,
+                        start,
+                        end: start,
+                    }
+                    .id()
+                }
+                _ => return self.reply_xml(5, id, 400, "").await,
+            }
+        } else {
+            el.text_of("Id").unwrap_or_default().to_owned()
+        };
+        if cfg.refuse_play_speed.is_some() && speed == cfg.refuse_play_speed {
+            return self.reply_xml(5, id, 400, "").await;
+        }
         let support_sub = el.num::<u8>("supportSub").ok().flatten();
         let stream = el.text_of("streamType").and_then(StreamTier::from_name);
         let Some(ch) = ch.filter(|c| *c < self.shared.config.channels) else {
@@ -2085,6 +2145,7 @@ impl Conn {
             }
             log.push_back(PlayLog {
                 channel: ch,
+                by_name,
                 file_id,
                 at,
                 seq,

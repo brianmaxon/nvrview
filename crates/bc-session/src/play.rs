@@ -1,7 +1,9 @@
 //! Plays of recordings on the device's session (docs/protocol.md,
 //! "Playback"): a seek (123) to the starting time, then a play (5) of the
 //! recording file, its media routed by message ID; a stop (7) on every exit
-//! path.
+//! path. On older firmware, whose file search gives no `Id`, the play is
+//! preceded by a file-information request (13) and goes out on its message
+//! ID ("Plays on older firmware").
 //!
 //! The rate is the request's `playSpeed` (1, 2, 4, 8, or 16, as observed).
 //! A play continues across recording files by itself (observed); the device
@@ -170,6 +172,43 @@ async fn join_in_order<T>(mut futs: Vec<Boxed<'_, T>>) -> Vec<T> {
 }
 
 impl DeviceSession {
+    /// Sends one play (5) after its seek. A by-name play
+    /// ([`PlayRequest::by_name`], older firmware) first asks for the file
+    /// (13), waits for its answer, and plays on the 13's message ID, as the
+    /// official client did (docs/protocol.md, "Plays on older firmware"); a
+    /// 13 answered with another status than 200 is
+    /// [`SearchError::Refused`] and no play is sent.
+    async fn send_play(&self, q: &PlayRequest, seq: u32) -> Result<Arc<TransferSink>, SearchError> {
+        let req = q.clone();
+        if !q.by_name() {
+            return self
+                .transfer_with(
+                    TransferKind::Play,
+                    Box::new(move |s| s.start_play(&req, seq)),
+                    Some(q.clone()),
+                    self.play_buffer_bytes,
+                    None,
+                )
+                .await;
+        }
+        let info = q.clone();
+        let reply = self
+            .call(Box::new(move |s| s.play_file_info(&info)), None)
+            .await?;
+        if reply.status != 200 {
+            return Err(SearchError::Refused(reply.status));
+        }
+        let id = reply.message_id;
+        self.transfer_with(
+            TransferKind::Play,
+            Box::new(move |s| s.start_play_after_file_info(id, &req, seq)),
+            Some(q.clone()),
+            self.play_buffer_bytes,
+            Some(reply.conn),
+        )
+        .await
+    }
+
     /// Starts a play: seeks (123), then plays (5) at the request's speed. Refused
     /// at once with [`QueryError::Busy`] when
     /// [`crate::SessionConfig::max_plays`] plays already run; the seek's
@@ -191,15 +230,7 @@ impl DeviceSession {
         if reply.status != 200 {
             return Err(SearchError::Refused(reply.status));
         }
-        let req = q.request.clone();
-        let sink = self
-            .transfer_with(
-                TransferKind::Play,
-                Box::new(move |s| s.start_play(&req, seq)),
-                Some(q.request.clone()),
-                self.play_buffer_bytes,
-            )
-            .await?;
+        let sink = self.send_play(&q.request, seq).await?;
         Ok(Play {
             sink,
             shared: self.shared.clone(),
@@ -269,17 +300,9 @@ impl DeviceSession {
         let mut plays = Vec::with_capacity(starts.len());
         for (i, (q, permit)) in starts.iter().zip(permits).enumerate() {
             let seq = base.wrapping_add(i as u32);
-            let req = q.request.clone();
             // On an error the plays already sent are dropped with `plays`,
             // which stops them.
-            let sink = self
-                .transfer_with(
-                    TransferKind::Play,
-                    Box::new(move |s| s.start_play(&req, seq)),
-                    Some(q.request.clone()),
-                    self.play_buffer_bytes,
-                )
-                .await?;
+            let sink = self.send_play(&q.request, seq).await?;
             plays.push(Play {
                 sink,
                 shared: self.shared.clone(),

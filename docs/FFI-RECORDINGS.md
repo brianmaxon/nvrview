@@ -840,7 +840,7 @@ with camera time.
 {"type": "playback_state", "playback": 3, "state": "playing", "position_ms": 1791618127000, "rate": 1.0}
 {"type": "playback_camera", "playback": 3, "tile": 11, "state": "buffering"}
 {"type": "playback_camera", "playback": 3, "tile": 11, "state": "no_recording"}
-{"type": "playback_camera", "playback": 3, "tile": 12, "state": "failed", "reason": "start_rejected"}
+{"type": "playback_camera", "playback": 3, "tile": 12, "state": "failed", "reason": "start_rejected", "status": 400}
 {"type": "playback_seek", "playback": 3, "position_ms": 1791618130000, "generation": 4, "state": "active"}
 {"type": "playback_closed", "playback": 3, "reason": "closed"}
 ```
@@ -852,7 +852,13 @@ with camera time.
   `no_recording`, `ended`, `failed` (`reason`: `start_rejected`,
   `stream_ended`, `undecodable`, `session_closed`, `limit`,
   `device_in_use`: a newer playback took the device, see the C10
-  clarifications).
+  clarifications). With `start_rejected`, `status` is the status the device
+  refused the play with, when it answered one (for example 400); without
+  it the core refused before asking the device. Apps show such a camera as
+  refused ("The NVR refused this playback (status 400)") rather than as an
+  empty tile. `nv_playback_status` carries the same `status` on the
+  camera. The field only adds to the JSON (apps that do not know it ignore
+  it), so it takes no ABI minor.
 - `playback_seek` `state`: `starting`, `active`, `failed`, with the seek's
   generation (the same for every tile of the playback).
 - `playback_closed` `reason`: `closed`, `device_removed` (the playback had

@@ -4,10 +4,12 @@
 //! choice, not a device fact; see docs/MILESTONE-P.md, B5 and B6.
 
 use crate::common::mock_connector;
-use bc_protocol::archive::{DateTime, PlayRequest};
+use bc_protocol::archive::{DateTime, FileSearch, PlayRequest};
 use bc_protocol::media::{Record, wall_clock_secs};
 use bc_protocol::stream::StreamTier;
-use bc_session::{DeviceSession, Item, Play, PlayStart, QueryError, SearchError, SessionConfig};
+use bc_session::{
+    DeviceSession, DownloadError, Item, Play, PlayStart, QueryError, SearchError, SessionConfig,
+};
 use mock_nvr::archive::ArchiveConfig;
 use mock_nvr::fixture::Fixture;
 use std::path::PathBuf;
@@ -47,6 +49,7 @@ fn start(ch: u8, at: DateTime) -> PlayStart {
             stream: StreamTier::Sub,
             file_id: format!("mock-file-{ch}-{}", hour.to_naive_secs()),
             file_name: format!("file-{ch}"),
+            file_start: hour,
             speed: 1,
         },
         at,
@@ -394,5 +397,100 @@ async fn a_play_whose_file_does_not_hold_the_seek_gets_nothing() {
     assert!(p.next().await.is_err());
     assert!(!nvr.play_log()[0].served);
     drop(p);
+    s.close().await;
+}
+
+/// A play of the file the device's own search lists for `at` on channel
+/// `ch` (as the playback engine builds it): with the file's `Id` when the
+/// search gave one, by name when it did not (older firmware).
+async fn searched_start(s: &DeviceSession, ch: u8, at: DateTime, speed: u32) -> PlayStart {
+    let files = s
+        .search_files(&FileSearch {
+            channel: ch,
+            uid: None,
+            stream: StreamTier::Sub,
+            start: at.start_of_day(),
+            end: at.end_of_day(),
+        })
+        .await
+        .unwrap();
+    let f = files
+        .iter()
+        .find(|f| f.start <= at && at <= f.end)
+        .expect("a file holds the time");
+    PlayStart {
+        request: PlayRequest {
+            channel: ch,
+            uid: None,
+            stream: StreamTier::Sub,
+            file_id: f.id.clone(),
+            file_name: f.name.clone(),
+            file_start: f.start,
+            speed,
+        },
+        at,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn older_firmware_plays_by_name_after_a_file_information_request() {
+    // Older firmware lists files without an `Id` and answers a play that
+    // names one with 400 (observed); the play is a 13 by name, then a 5 by
+    // the file's start time on the 13's message ID.
+    let nvr = spawn_mock(|a| a.older_playback = true);
+    let s = session(&nvr, |_| {});
+    let at = d(8, 7, 41, 41);
+    let q = searched_start(&s, 1, at, 1).await;
+    assert!(q.request.by_name(), "the older search gives no Id");
+    let mut p = s.play(&q).await.unwrap();
+    let (wall, _, _) = read_video(&mut p, 3).await;
+    assert_eq!(wall, Some(at.to_naive_secs() as u32 - 1));
+    let log = nvr.play_log();
+    assert_eq!(log.len(), 1);
+    assert!(log[0].by_name && log[0].served);
+    assert_eq!(nvr.command_count(13), 1);
+    drop(p);
+
+    // A group: every play gets its own 13, then its 5.
+    let starts = [
+        searched_start(&s, 0, at, 4).await,
+        searched_start(&s, 2, at, 4).await,
+    ];
+    let mut plays = s.play_group(&starts, Some(at)).await.unwrap();
+    for p in &mut plays {
+        let (wall, _, _) = read_video(p, 4).await;
+        assert!(wall.is_some());
+    }
+    assert_eq!(nvr.command_count(13), 3);
+    assert!(nvr.play_log().iter().all(|l| l.by_name && l.served));
+    drop(plays);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn older_firmware_refuses_a_play_that_names_an_id() {
+    // The request nvrview sent before: an `Id` (here the newer firmware's)
+    // in the 5. The older device answers 400 with an empty body, and the
+    // play ends with that status.
+    let nvr = spawn_mock(|a| a.older_playback = true);
+    let s = session(&nvr, |_| {});
+    let mut p = s.play(&start(1, d(8, 7, 41, 41))).await.unwrap();
+    assert!(matches!(p.next().await, Err(DownloadError::Refused(400))));
+    assert_eq!(nvr.command_count(13), 0);
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_play_ends_with_the_device_status() {
+    let nvr = spawn_mock(|a| a.refuse_play_speed = Some(16));
+    let s = session(&nvr, |_| {});
+    let mut q = start(1, d(8, 7, 41, 41));
+    q.request.speed = 16;
+    let mut p = s.play(&q).await.unwrap();
+    assert!(matches!(p.next().await, Err(DownloadError::Refused(400))));
+    // Other speeds play.
+    q.request.speed = 2;
+    let mut p = s.play(&q).await.unwrap();
+    assert!(read_video(&mut p, 2).await.0.is_some());
     s.close().await;
 }
