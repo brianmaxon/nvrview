@@ -95,6 +95,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         model.useCallDefaults(defaults)
         model.useCaptureDefaults(defaults)
+        if !options.fake {
+            model.coreDataDirectory =
+                options.dataDirectory?.appendingPathComponent("core") ?? JSONFileStore<DeviceConfig>.appSupport("core")
+        }
+        EvidenceTempSweeper.start()
         if let data = options.dataDirectory { model.transcripts.folder = data.appendingPathComponent("Transcripts") }
         let calls = CallWindows(model: model, defaults: defaults, keepsBehind: test)
         calls.activeScreen = { [weak self] in self?.activeViewerWindow?.window?.screen ?? NSScreen.screens.first }

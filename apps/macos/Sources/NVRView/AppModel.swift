@@ -217,6 +217,9 @@ final class AppModel {
     @ObservationIgnored private(set) var captureDefaults = UserDefaults.standard
     /// Renders and encodes saved pictures, off the main thread.
     @ObservationIgnored let pictureRenderer = PictureRenderer()
+    /// The real core's data directory (nil with the fake core): where kept
+    /// pictures of pinned sets live, under `alerts/evidence/pinned/`.
+    @ObservationIgnored var coreDataDirectory: URL?
     static let picturesFolderKey = "picturesFolder"
     static let pictureFormatKey = "pictureFormat"
     static let shareSafeNamesKey = "shareSafeNames"
