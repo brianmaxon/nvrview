@@ -1689,6 +1689,30 @@ sentence; "Older…" pages back.
   pictures will be deleted; Keep saves them for 7 days. Below the list, a short
   summary counts per class how often the camera's AI and our detector agreed,
   over the kept checks.
+- **Layout.** The list and the detail pane sit either side of a divider, and in
+  the detail pane the picture (with its frame picker and method switches) sits
+  above the text (the scores per method, then the steps) with a divider of its
+  own. Both dividers are remembered across launches. The picture scales to the
+  space it has, aspect kept, and the boxes follow it.
+- **Large viewer.** Clicking the picture opens it in a window of its own
+  (resizable, size remembered), with the same method switches. Left and right
+  arrow keys step through the set's frames, Esc closes, a mouse wheel or a pinch
+  zooms around the pointer (up to 8x, the live tiles' zoom), a drag pans, and a
+  double-click returns to the whole picture.
+- **Picture menu** (right-click, in the pane and in the viewer): Open in Preview
+  (a temporary file under the app's caches, removed after 24 hours and at
+  launch), Save Picture With Detection Boxes As… and Save Picture Only As…
+  (the Save Picture panel, the frame's own size, named like a saved tile
+  picture, `Camera A` with share-safe names; the file holds nothing but the
+  picture), Copy (the picture as shown: boxes when any method is switched on),
+  and, for a kept set, Show in Finder (its folder under `evidence/pinned/`).
+- **Drag out.** Dragging the picture to the Finder or another app gives a file
+  made when it is dropped, named as above, with the boxes when they are shown.
+- **Picture icon.** A row whose pictures are still kept shows a small picture
+  icon (a check mark when the set was kept with Keep). Its tooltip gives the
+  count and when the pictures will be deleted (or how long a kept set has
+  left); an expired set has no icon. The filter "With pictures" lists only
+  those rows.
 - **Tests** carry "Test:" before the decision in the list and the notification
   title.
 - **Sensor Messages…** on an entry caused by a sensor opens the sensor's

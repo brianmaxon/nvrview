@@ -191,7 +191,8 @@ final class SmartAlertEventsModel {
     func keepEvidence() {
         guard let e = selected else { return }
         note = app.alertsModel.pinEvidence(trigger: e.triggerID) ? "Kept for 7 days." : "The pictures are gone."
-        loadEvidence()
+        // The list's icon follows (kept, not expiring).
+        reload()
     }
 
     /// Opens the sensor's message log (the messages around the decision).
