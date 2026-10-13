@@ -405,6 +405,53 @@ async fn a_finished_talk_sends_a_silent_tail_before_the_close() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_faster_pace_sends_the_same_records_and_tail_sooner() {
+    // Self-tests against the mock shorten the pace and the tail together
+    // (viewer_core::CoreConfig::mock_speedup): the device hears the same
+    // records, the tail keeps its number of records, and only the spacing
+    // changes.
+    let nvr = spawn_mock();
+    let pace = Duration::from_millis(4);
+    let s = session(&nvr, |c| {
+        c.talk_pace = pace;
+        c.talk_tail /= 16;
+    });
+    s.set_motion_allowed(BELL, true);
+    let mut talk = s.talk(BELL).await.unwrap();
+    let src = tone(56_000);
+    assert_eq!(talk.push(&src), src.len());
+    talk.finish();
+    assert_eq!(
+        ended(&mut talk).await,
+        TalkState::Stopped(StopReason::Finished)
+    );
+    wait_log(&nvr, "talk closed", |l| {
+        l.len() == 1 && l[0].end == TalkEnd::Closed
+    })
+    .await;
+    let log = &nvr.talk_log()[0];
+    let audio = src.len().div_ceil(SAMPLES_PER_RECORD);
+    let tail = 24;
+    assert_eq!(log.records.len(), audio + tail);
+    assert_eq!(talk.stats().tail_records, tail as u64);
+    let mut with_tail = src.clone();
+    with_tail.resize((audio + tail) * SAMPLES_PER_RECORD, 0);
+    assert_eq!(log.samples().unwrap(), expected(&with_tail));
+    // Spaced by the pace, never closer.
+    let t0 = log.records[0].at;
+    for (i, r) in log.records.iter().enumerate() {
+        let at = r.at.duration_since(t0);
+        assert!(at >= pace * i as u32, "record {i} at {at:?}");
+    }
+    let span = log.records[audio + tail - 1].at.duration_since(t0);
+    assert!(
+        span < pace * (audio + tail) as u32 + Duration::from_millis(50),
+        "{span:?}"
+    );
+    s.close().await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_push_during_the_tail_continues_the_same_talk() {
     let nvr = spawn_mock();
     let s = session(&nvr, |_| {});

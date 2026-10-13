@@ -144,6 +144,61 @@ fn talk_back_needs_the_permission_and_reaches_the_doorbell() {
     sim.run_free(|| core.shutdown());
 }
 
+/// Self-tests against the mock (`mock_speedup`): the talk sends the same
+/// records and reports the same `sent_ms` and `tail_ms`, sixteen times
+/// sooner; the app's wiring is all a self-test step then waits for.
+#[test]
+fn the_mock_speedup_sends_the_same_talk_sooner() {
+    let sim = SimRuntime::new();
+    let nvr = mock(&sim);
+    let mut cfg = fast_config();
+    cfg.mock_speedup = 16;
+    let (core, rec) = start(on_sim(&sim, cfg));
+    let dev = core
+        .add_device("127.0.0.1", nvr.addr().port(), USER, PASSWORD)
+        .unwrap();
+    let tile = core.open_tile(dev, BELL, StreamTier::Sub).unwrap();
+    core.set_talk_permission(dev, BELL, true).unwrap();
+    core.talk_start(tile).unwrap();
+    sim_until(&sim, &core, "active", 10, || {
+        states(&rec, tile).last().map(String::as_str) == Some("active")
+    });
+    // A second of audio pushed at once, as a typed reply is.
+    core.talk_push(tile, &tone(48_000, 500.0, 48_000), 48_000)
+        .unwrap();
+    core.talk_stop(tile, true).unwrap();
+    sim_until(&sim, &core, "stopped", 10, || {
+        states(&rec, tile).last().map(String::as_str) == Some("stopped")
+    });
+    let last = talk_events(&rec, tile).pop().unwrap();
+    assert_eq!(last["reason"], "finished");
+    assert_eq!(last["tail_ms"], 24 * 64);
+    sim_until(&sim, &core, "closed at the device", 5, || {
+        nvr.talk_log()
+            .first()
+            .is_some_and(|t| t.end == TalkEnd::Closed)
+    });
+    let log = &nvr.talk_log()[0];
+    let n = log.records.len() - 24;
+    assert!((15..=16).contains(&n), "{n} records");
+    assert_eq!(last["sent_ms"], (n * 64) as u64);
+    // 4 ms apart instead of 64: the whole talk, tail included, in well
+    // under the 2.5 s it takes a real device.
+    let span = log
+        .records
+        .last()
+        .unwrap()
+        .at
+        .duration_since(log.records[0].at);
+    let pace = std::time::Duration::from_millis(4);
+    assert!(
+        span >= pace * (log.records.len() as u32 - 1)
+            && span < std::time::Duration::from_millis(400),
+        "{span:?}"
+    );
+    sim.run_free(|| core.shutdown());
+}
+
 #[test]
 fn closing_the_tile_or_withdrawing_permission_closes_the_talk() {
     let sim = SimRuntime::new();

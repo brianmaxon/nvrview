@@ -167,6 +167,11 @@ pub struct SessionConfig {
     /// pushed meanwhile continues the same talk. Zero closes right after
     /// the audio. Default 1.5 s.
     pub talk_tail: Duration,
+    /// How often a talk sends one record (1024 samples, 64 ms of audio):
+    /// the device plays them at that rate. Default 64 ms. Only tests
+    /// against tools/mock-nvr shorten it (with [`SessionConfig::talk_tail`]
+    /// in proportion, the tail keeps its number of records).
+    pub talk_pace: Duration,
     /// Camera motion control: the dead-man and hold timers and the rate
     /// limits ([`PtzConfig`]).
     pub ptz: PtzConfig,
@@ -277,6 +282,7 @@ impl SessionConfig {
             talk_max_duration: Duration::from_secs(300),
             talk_catch_up: Duration::from_millis(200),
             talk_tail: Duration::from_millis(1500),
+            talk_pace: Duration::from_micros(bc_protocol::talk::RECORD_DURATION_US),
             ptz: PtzConfig::default(),
         }
     }

@@ -110,6 +110,12 @@ public partial class App : Application
     private void Start(AppOptions o, string dataDir)
     {
         var ui = Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        if (o.SelfTest && o.MockNvr is not null)
+        {
+            // The self-test's device is the mock it starts below: talk-back and play starts skip a real device's
+            // pauses (docs/FFI.md "Self-tests"; their timing is proven in the core's tests on a simulated clock).
+            Environment.SetEnvironmentVariable("NVRVIEW_MOCK_SPEEDUP", SelfTest.MockSpeedup.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
         _host = new CoreHost(ui, new NvCoreOptions
         {
             LogDir = Path.Combine(dataDir, "logs", "core"),
@@ -189,8 +195,9 @@ public partial class App : Application
                 // runs ahead in the evening) and yesterday east of it (the step falls back to yesterday).
                 // Live pictures go out in pairs, as devices bunch them, so the live pacing step sees them paced.
                 // Plays at 16x are refused with status 400, so the playback-refused step sees a refusal (no other
-                // step plays at 16x).
-                mockArgs.AddRange(["--recordings", "2", "--video-burst", "2", "--refuse-play-speed", "16"]);
+                // step plays at 16x). The recordings are at 20 fps, so the pacing step's pictures take half the time of the
+                // default 10 fps (a whole number of 60 Hz refreshes each, as at 10 fps).
+                mockArgs.AddRange(["--recordings", "2", "--recordings-fps", "20", "--video-burst", "2", "--refuse-play-speed", "16"]);
             }
             if (o.SelfTest)
             {

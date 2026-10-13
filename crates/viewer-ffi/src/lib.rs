@@ -619,7 +619,10 @@ pub unsafe extern "C" fn nv_core_new(
         let (Some(on_action), Some(on_event)) = (callbacks.on_action, callbacks.on_event) else {
             return NvStatus::NV_ERR_INVALID_ARGUMENT;
         };
-        let mut cfg = CoreConfig::default();
+        let mut cfg = CoreConfig {
+            mock_speedup: mock_speedup(std::env::var("NVRVIEW_MOCK_SPEEDUP").ok().as_deref()),
+            ..CoreConfig::default()
+        };
         // SAFETY: the caller promises `config` is null or valid to read.
         if let Some(c) = unsafe { config.as_ref() }
             && !c.data_dir.is_null()
@@ -654,6 +657,15 @@ pub unsafe extern "C" fn nv_core_new(
             Err(e) => e,
         }
     })
+}
+
+/// `NVRVIEW_MOCK_SPEEDUP` (docs/FFI.md, "Self-tests"): a whole number from
+/// 1 to 64, set by self-tests against tools/mock-nvr; anything else is 1.
+fn mock_speedup(value: Option<&str>) -> u32 {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|n| (1..=64).contains(n))
+        .unwrap_or(1)
 }
 
 type OnAction = unsafe extern "C" fn(*mut c_void, u64, *const NvAction);
@@ -3647,6 +3659,16 @@ pub unsafe extern "C" fn nv_alert_mute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mock_speedup_is_a_small_whole_number_or_one() {
+        assert_eq!(mock_speedup(None), 1);
+        assert_eq!(mock_speedup(Some("16")), 16);
+        assert_eq!(mock_speedup(Some(" 8\n")), 8);
+        for bad in ["", "0", "65", "-2", "1.5", "fast"] {
+            assert_eq!(mock_speedup(Some(bad)), 1, "{bad:?}");
+        }
+    }
 
     #[test]
     fn values_match_the_pipeline() {

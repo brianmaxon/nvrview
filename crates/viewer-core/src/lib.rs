@@ -227,6 +227,14 @@ pub struct CoreConfig {
     /// starts, instead of the real time, so recordings tests know which day
     /// is "today". `None` (the default) in apps.
     pub test_wall_clock_start_us: Option<i64>,
+    /// Test support for self-tests against tools/mock-nvr, which needs none
+    /// of the pauses a real device does: talk-back records go out this many
+    /// times faster (its silent tail too, with the same number of records)
+    /// and a play group's pause between its seeks and its plays is this many
+    /// times shorter. Their timing on a real device is proven in the
+    /// session's tests on a simulated clock. 1 (the default) in apps; the
+    /// C interface reads `NVRVIEW_MOCK_SPEEDUP` (docs/FFI.md, "Self-tests").
+    pub mock_speedup: u32,
 }
 
 /// Test support ([`CoreConfig::test_runtime`]): the core runs every task,
@@ -276,6 +284,7 @@ impl Default for CoreConfig {
             sound: sound::SoundSettings::default(),
             test_runtime: None,
             test_wall_clock_start_us: None,
+            mock_speedup: 1,
         }
     }
 }
@@ -483,6 +492,12 @@ impl Core {
         // Detections, motion, and alarms become smart-alert triggers.
         event_sink.set_tap(alerts.tap());
         info!("core started");
+        if config.mock_speedup > 1 {
+            warn!(
+                speedup = config.mock_speedup,
+                "mock speedup on: talk-back and play starts are timed for tools/mock-nvr, not a real device"
+            );
+        }
         Ok(Core {
             runtime: Mutex::new(runtime),
             handle,
@@ -640,6 +655,10 @@ impl Core {
         cfg.queue_frames = self.config.queue_frames.max(1);
         cfg.preview_retry_interval = self.config.preview_retry_interval;
         cfg.preview_wait_limit = self.config.preview_wait_limit;
+        let speedup = self.config.mock_speedup.max(1);
+        cfg.talk_pace /= speedup;
+        cfg.talk_tail /= speedup;
+        cfg.play_group_delay /= speedup;
         let events = self.event_sink.clone();
         let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
         let handle = {

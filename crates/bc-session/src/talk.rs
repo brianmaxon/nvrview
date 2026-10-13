@@ -19,8 +19,7 @@
 use crate::supervisor::{DeviceSession, QueryError, Request};
 use bc_protocol::session::{Command, Session, SessionError};
 use bc_protocol::talk::{
-    AdpcmEncoder, RECORD_DURATION_US, SAMPLES_PER_RECORD, TalkConfig, parse_talk_ability,
-    parse_talk_channels,
+    AdpcmEncoder, SAMPLES_PER_RECORD, TalkConfig, parse_talk_ability, parse_talk_channels,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -31,8 +30,6 @@ use tokio::sync::watch;
 use tokio::time::{Instant, timeout};
 use tracing::{debug, info, warn};
 
-/// One record's duration.
-pub(crate) const RECORD: Duration = Duration::from_micros(RECORD_DURATION_US);
 /// After the last record of a finishing talk, how long to wait for the
 /// device to acknowledge every record before closing. (The official client
 /// closed about 50 ms after its last record.)
@@ -607,6 +604,8 @@ pub(crate) struct TalkLimits {
     pub(crate) catch_up: Duration,
     pub(crate) reply_timeout: Duration,
     pub(crate) tail: Duration,
+    /// Time between records ([`crate::SessionConfig::talk_pace`]).
+    pub(crate) pace: Duration,
 }
 
 /// A new talk on its way to the supervisor.
@@ -904,7 +903,7 @@ impl Talks {
                     match since {
                         Some(since) if since < limits.tail => {
                             let rest = limits.tail - since;
-                            rest.as_micros().div_ceil(RECORD.as_micros()) as u32
+                            rest.as_micros().div_ceil(limits.pace.as_micros()) as u32
                         }
                         _ => 0,
                     }
@@ -952,7 +951,7 @@ impl Talks {
             } else {
                 e.last_audio = Some(now);
             }
-            e.next_due = Some(due + RECORD);
+            e.next_due = Some(due + limits.pace);
         }
     }
 

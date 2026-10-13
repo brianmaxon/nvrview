@@ -763,13 +763,20 @@ impl Recorder {
         self.drain_units();
         self.advance_mix();
         self.disk_check(false);
-        if now - self.last_status_us >= STATUS_EVERY_US && self.end.is_none() {
+        if self.end.is_none() {
             let state = if self.seg.is_some() {
                 "recording"
             } else {
                 "waiting_keyframe"
             };
-            self.emit(state, None, Priority::Diagnostics);
+            if now - self.last_status_us >= STATUS_EVERY_US {
+                self.emit(state, None, Priority::Diagnostics);
+            } else {
+                // `nv_record_status` is current to the tick; the event
+                // stays once a second.
+                let json = self.status_json(state, None);
+                self.control.set_snapshot(&json);
+            }
         }
     }
 
@@ -945,6 +952,13 @@ impl Recorder {
 
     fn emit(&mut self, state: &str, reason: Option<Reason>, priority: Priority) {
         self.last_status_us = self.now_us();
+        let json = self.status_json(state, reason);
+        self.control.set_snapshot(&json);
+        self.shared.events.send(json, priority);
+    }
+
+    /// The `recording` event's JSON for the recording as it is now.
+    fn status_json(&self, state: &str, reason: Option<Reason>) -> String {
         let seg_dropped = self.seg.as_ref().map_or(0, |s| s.reordered);
         let encode_dropped = self
             .encode_dropped_done
@@ -985,9 +999,7 @@ impl Recorder {
         if reason.is_some() {
             o = o.bool("fragmented", self.fragmented);
         }
-        let json = o.finish();
-        self.control.set_snapshot(&json);
-        self.shared.events.send(json, priority);
+        o.finish()
     }
 }
 

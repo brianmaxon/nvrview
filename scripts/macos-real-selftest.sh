@@ -81,7 +81,7 @@ else
 fi
 cargo build --quiet -p mock-nvr
 
-MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 3 --recordings 3 --multi-lens 2:0,0 --ptz 1,2.1 --video-burst 2 --refuse-play-speed 16 \
+MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 3 --recordings 3 --recordings-fps 20 --multi-lens 2:0,0 --ptz 1,2.1 --video-burst 2 --refuse-play-speed 16 \
   --fixture "$root/fixtures/synthetic/h264-basic.h264" --audio "$root/fixtures/synthetic/aac-smoke-t3.aac" >"$work/mock.log" 2>&1 &
 mock_pid=$!
 for _ in $(seq 1 100); do
@@ -96,7 +96,9 @@ if [ -z "$port" ]; then
 fi
 
 mkdir -p "$work/data"
-NVRVIEW_PASSWORD=example-password "$exe" \
+# The device is the mock: the core skips a real device's pauses (talk-back
+# pacing, a play group's seek-to-play pause; docs/FFI.md "Self-tests").
+NVRVIEW_MOCK_SPEEDUP=16 NVRVIEW_PASSWORD=example-password "$exe" \
   --host 127.0.0.1 --port "$port" --user example-user --data-dir "$work/data" \
   --keychain-service nvrview-selftest-unused --selftest 60
 if [ "$bundle" = 1 ] && [ -n "$tree" ]; then

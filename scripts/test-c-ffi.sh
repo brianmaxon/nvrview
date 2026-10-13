@@ -15,8 +15,8 @@
 # under a running smoke test. The mock streams live video faster than real
 # time (--live-speed, picture times unchanged; NVRVIEW_C_SMOKE_LIVE_SPEED=1
 # for real time): the assertions are the same, the waits on media time are
-# shorter. Measured: at 3 or more the tier switch test fails (the old stream
-# never gets its Reset; not diagnosed), so it stays at 2.
+# shorter. The core runs with NVRVIEW_MOCK_SPEEDUP=16 (docs/FFI.md,
+# "Self-tests"): a play group starts without a real device's pause.
 # NVRVIEW_SMOKE_TIMING=1 prints how long each part of the test took.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
@@ -55,7 +55,7 @@ ${CC:-cc} -std=c11 -Wall -Wextra -Werror -g $asan \
 
 log="$out/mock-nvr.log"
 MOCK_NVR_PASSWORD=example-password "$stage/mock-nvr" --port 0 --channels 2 \
-  --recordings 2 --ptz 0 --live-speed "${NVRVIEW_C_SMOKE_LIVE_SPEED:-2}" \
+  --recordings 2 --ptz 0 --live-speed "${NVRVIEW_C_SMOKE_LIVE_SPEED:-8}" \
   --fixture fixtures/synthetic/h264-basic.h264 >"$log" 2>&1 &
 mock=$!
 trap 'kill "$mock" 2>/dev/null || true' EXIT INT TERM
@@ -77,4 +77,4 @@ rm -rf "$work"
 mkdir -p "$work"
 host=${addr%:*}
 port=${addr##*:}
-NVRVIEW_TEST_PASSWORD=example-password "$out/smoke" "$host" "$port" "$work"
+NVRVIEW_MOCK_SPEEDUP="${NVRVIEW_MOCK_SPEEDUP:-16}" NVRVIEW_TEST_PASSWORD=example-password "$out/smoke" "$host" "$port" "$work"
