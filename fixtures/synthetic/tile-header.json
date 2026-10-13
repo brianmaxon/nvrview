@@ -531,6 +531,94 @@
           ]
         }
       ]
+    },
+    {
+      "name": "recording player, zoomed fisheye: picture actions only",
+      "tile": {
+        "playback": true,
+        "audio": true,
+        "talk": true,
+        "panTilt": true,
+        "fisheye": true,
+        "zoomed": true,
+        "recording": true
+      },
+      "titleWidth": 100,
+      "steps": [
+        {
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["recording-pill", "title", "save-picture", "reset-zoom", "fisheye"],
+          "overflow": [],
+          "menu": [
+            ["save-picture", "Save Picture", "P", "P"],
+            ["reset-zoom", "Reset Zoom", "0", "0"],
+            ["fisheye", "Fisheye View", "", ""],
+            ["fill-tile", "Fill Tile", "", ""],
+            ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
+            ["save-zoomed-area", "Save Zoomed Area", "", ""],
+            ["save-original-fisheye", "Save Original Fisheye Picture", "", ""]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "recording player, narrowing",
+      "tile": {
+        "playback": true,
+        "fisheye": true,
+        "zoomed": true
+      },
+      "titleWidth": 100,
+      "steps": [
+        {
+          "width": 600,
+          "anchor": 600,
+          "titleTruncated": false,
+          "visible": ["title", "save-picture", "reset-zoom", "fisheye"],
+          "overflow": []
+        },
+        {
+          "width": 130,
+          "anchor": 130,
+          "titleTruncated": true,
+          "visible": ["title", "save-picture", "more"],
+          "overflow": ["reset-zoom", "fisheye"],
+          "moreMenu": ["reset-zoom", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
+        },
+        {
+          "width": 110,
+          "anchor": 110,
+          "titleTruncated": true,
+          "visible": ["title", "more"],
+          "overflow": ["save-picture", "reset-zoom", "fisheye"],
+          "moreMenu": ["save-picture", "reset-zoom", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
+        }
+      ]
+    },
+    {
+      "name": "recording player, filled crop moved at 1x",
+      "tile": {
+        "playback": true,
+        "panned": true
+      },
+      "titleWidth": 80,
+      "steps": [
+        {
+          "width": 400,
+          "anchor": 400,
+          "titleTruncated": false,
+          "visible": ["title", "save-picture"],
+          "overflow": [],
+          "menu": [
+            ["save-picture", "Save Picture", "P", "P"],
+            ["reset-position", "Reset Position", "0", "0"],
+            ["fill-tile", "Fill Tile", "", ""],
+            ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"]
+          ]
+        }
+      ]
     }
   ]
 }

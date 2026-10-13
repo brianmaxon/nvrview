@@ -106,6 +106,9 @@ public sealed record TileHeaderTile
     /// <summary>The camera's call is open (End Conversation).</summary>
     public bool Conversation { get; init; }
     public TileHeaderCall Call { get; init; } = TileHeaderCall.None;
+    /// <summary>A recording player's tile (docs/UX.md "Recordings"): only what applies to a picture is offered (Save Picture,
+    /// Reset Zoom, Fisheye View, Fill Tile, Reset Position, the Save items); no Record, Speaker, Quality, talk-back, PTZ or call items.</summary>
+    public bool Playback { get; init; }
 }
 
 /// <summary>Widths in DIPs (points on macOS).</summary>
@@ -186,8 +189,21 @@ public sealed class TileHeaderLayout
         return new TileHeaderLayout(width, width, titleWidth, tile, metrics, visible, overflow);
     }
 
+    /// <summary>What a recording player's tile offers: the picture's own actions.</summary>
+    public static readonly IReadOnlySet<TileHeaderItem> PlaybackItems = new HashSet<TileHeaderItem>
+    {
+        TileHeaderItem.SavePicture, TileHeaderItem.ResetZoom, TileHeaderItem.ResetPosition, TileHeaderItem.Fisheye,
+        TileHeaderItem.FillTile, TileHeaderItem.SavePictureAs, TileHeaderItem.SaveZoomedArea, TileHeaderItem.SaveOriginalFisheye,
+    };
+
     /// <summary>The full menu for a tile, in header order, then the long tail.</summary>
     public static IReadOnlyList<TileHeaderMenuEntry> Menu(TileHeaderTile tile)
+    {
+        IReadOnlyList<TileHeaderMenuEntry> all = FullMenu(tile);
+        return tile.Playback ? all.Where(e => PlaybackItems.Contains(e.Item)).ToList() : all;
+    }
+
+    private static List<TileHeaderMenuEntry> FullMenu(TileHeaderTile tile)
     {
         bool inWindow = tile.Call == TileHeaderCall.Window;
         var m = new List<TileHeaderMenuEntry>();
@@ -270,6 +286,12 @@ public sealed class TileHeaderLayout
 
     /// <summary>The header buttons that apply to a tile, by priority (the pill, the title and Dismiss excluded).</summary>
     public static IReadOnlyList<TileHeaderItem> Buttons(TileHeaderTile tile)
+    {
+        IReadOnlyList<TileHeaderItem> all = FullButtons(tile);
+        return tile.Playback ? all.Where(PlaybackItems.Contains).ToList() : all;
+    }
+
+    private static List<TileHeaderItem> FullButtons(TileHeaderTile tile)
     {
         var b = new List<TileHeaderItem>();
         if (tile.Audio)
