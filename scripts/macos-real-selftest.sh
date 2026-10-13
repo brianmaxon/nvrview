@@ -66,7 +66,7 @@ if [ "$bundle" = 1 ]; then
   fi
   grep -E '^reusing|signing' "$work/package.log" || true
   app=build/NVRView.app
-  files=$(cat "$app/Contents/Resources/update-defaults.json" "$app/Contents/Resources/release-notes.json" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+  files=$( (cat "$app/Contents/Resources/update-defaults.json" "$app/Contents/Resources/release-notes.json" 2>/dev/null || true) | shasum -a 256 | cut -d' ' -f1)
   if [ -n "$tree" ] && [ "$(sed -n 's/^tree=//p' build/NVRView.app.tested 2>/dev/null)" = "$tree" ] &&
     [ "$(sed -n 's/^files=//p' build/NVRView.app.tested 2>/dev/null)" = "$files" ]; then
     echo "selftest: the shipped app bundle already passed for this tree and these bundled files; not run again"
