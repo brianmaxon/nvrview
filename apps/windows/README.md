@@ -936,15 +936,25 @@ parallel checks and merges finish sooner. To add one:
 
    ```powershell
    Set-ExecutionPolicy -Scope Process Bypass
-   .\setup-windows.ps1 -Optional -EnableSsh -AuthorizedKey "ssh-ed25519 AAAA... name"
+   .\setup-windows.ps1 -EnableSsh -AuthorizedKey "ssh-ed25519 AAAA... name"
    ```
 
-   It installs the toolchain and the OpenSSH server (key only, local subnet
-   only) and adds the key to
+   It installs the toolchain (Git, the Visual Studio build tools, Rust, .NET,
+   LLVM, Python, cbindgen, sccache, cargo-nextest), clones the repository,
+   runs the Rust tests (`-SkipTests` skips them), turns on the OpenSSH server
+   (key only, local subnet only), and adds the key to
    `C:\ProgramData\ssh\administrators_authorized_keys`, the one file Windows
    reads for an administrator's keys (so `ssh-copy-id` does not work here).
-   If the toolchain is already installed, the same command with `-SkipTests`
-   just adds SSH and the key; installed packages are skipped.
+   `-Optional` also installs ffmpeg (a few comparison tests run instead of
+   skipping) and gitleaks (the secret scan runs on the Mac); a test computer
+   needs neither.
+
+   To add or replace a key on a computer that is already set up, install
+   nothing else:
+
+   ```powershell
+   .\setup-windows.ps1 -SshOnly -AuthorizedKey "ssh-ed25519 AAAA... name"
+   ```
 2. On the Mac, add an alias with that key to `~/.ssh/config`:
 
    ```
