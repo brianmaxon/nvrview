@@ -43,8 +43,9 @@ pub const NV_ABI_VERSION: u32 = 3;
 /// out_ms of nv_edit_compute, and dest and share_safe on export requests.
 /// Minor 11: camera motion (nv_ptz_info, nv_ptz_move, nv_ptz_stop,
 /// nv_ptz_lens, nv_ptz_preset, nv_motion_grant). Minor 12: smart alerts
-/// (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times.
-pub const NV_ABI_MINOR: u32 = 13;
+/// (docs/FFI.md, "Smart alerts"). Minor 13: nv_alerts_sun_times. Minor 14: smart-alert debugging and
+/// review (nv_alerts_messages, nv_alerts_output_test, nv_alert_evidence_*).
+pub const NV_ABI_MINOR: u32 = 14;
 
 /// Return codes. Every function that can fail returns one.
 #[repr(C)]
@@ -3654,6 +3655,144 @@ pub unsafe extern "C" fn nv_alert_mute(
 ) -> NvStatus {
     // SAFETY: per the caller.
     unsafe { rec_call(core, |c| Ok(c.alert_mute(arg(camera)?, seconds)?)) }
+}
+
+/// A trigger input's message log (docs/FFI.md, "Smart alerts", minor 14):
+/// `request` is {"input":"<id>","after":0,"limit":100,"clear":false};
+/// answers a page of entries into `out` like nv_alerts_get. In memory only.
+/// NV_ERR_UNKNOWN_ID for no input with that id.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string; `out` is
+/// null or valid for writing `cap` bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_messages(
+    core: *mut NvCore,
+    request: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.alerts_messages(arg(request)?)?)
+        })
+    }
+}
+
+/// Sends one test alert through a configured output (minor 14): `request`
+/// is {"output":<index in outputs[]>,"rule":n?,"camera":{...}?,"class":"person"?}.
+/// Returns at once; the result arrives as an `alerts_output_test` event.
+/// NV_ERR_UNKNOWN_ID for no such output, NV_ERR_NOT_CONFIGURED before the
+/// first nv_alerts_configure.
+///
+/// # Safety
+/// `core` is a live handle; `request` is a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alerts_output_test(
+    core: *mut NvCore,
+    request: *const c_char,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alerts_output_test(arg(request)?)?)) }
+}
+
+/// Stores evidence of a check (minor 14): `json` is {"trigger_id":N,
+/// "frame":k?,"at_ms":ms?,"doc":{...}?}, `data` the JPEG for frame `k`
+/// (copied; NULL and 0 when only `doc` is given). NV_ERR_UNKNOWN_ID for a
+/// trigger never given, NV_ERR_LIMIT above 1 MiB or a ninth frame.
+///
+/// # Safety
+/// `core` is a live handle; `json` is a NUL-terminated string; `data` is
+/// null or valid for reading `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_evidence_put(
+    core: *mut NvCore,
+    json: *const c_char,
+    data: *const u8,
+    len: usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_call(core, |c| {
+            let bytes: &[u8] = if data.is_null() || len == 0 {
+                &[]
+            } else {
+                // SAFETY: valid for reading `len` bytes per the caller.
+                std::slice::from_raw_parts(data, len)
+            };
+            Ok(c.alert_evidence_put(arg(json)?, bytes)?)
+        })
+    }
+}
+
+/// Evidence as JSON (minor 14): {"trigger_id":N} answers one set, NULL or
+/// "{}" (or {"since_ms":ms}) answers {"sets":[...],"retention_min":n}, into
+/// `out` like nv_alerts_get. NV_ERR_UNKNOWN_ID for a set that is gone.
+///
+/// # Safety
+/// `core` is a live handle; `query` is null or a NUL-terminated string;
+/// `out` is null or valid for writing `cap` bytes; `len` is valid for one
+/// write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_evidence_get(
+    core: *mut NvCore,
+    query: *const c_char,
+    out: *mut c_char,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe {
+        rec_answer(core, out, cap, len, |c| {
+            Ok(c.alert_evidence_get(opt_arg(query)?.unwrap_or(""))?)
+        })
+    }
+}
+
+/// Copies one kept frame (JPEG) into `out` (*len gets its size; minor 14).
+/// NV_ERR_UNKNOWN_ID when the set or frame is gone; NV_ERR_BUFFER_TOO_SMALL
+/// with *len set.
+///
+/// # Safety
+/// `core` is a live handle; `out` is null or valid for writing `cap`
+/// bytes; `len` is valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_evidence_frame_get(
+    core: *mut NvCore,
+    trigger_id: u64,
+    index: u32,
+    out: *mut u8,
+    cap: usize,
+    len: *mut usize,
+) -> NvStatus {
+    guarded(|| {
+        // SAFETY: per the caller.
+        let Some(c) = (unsafe { core_ref(core) }) else {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        };
+        if len.is_null() {
+            return NvStatus::NV_ERR_INVALID_ARGUMENT;
+        }
+        match c.alert_evidence_frame_get(trigger_id, index) {
+            // SAFETY: per the caller.
+            Ok(data) => unsafe { copy_bytes(&data, out, cap, len) },
+            Err(e) => e.into(),
+        }
+    })
+}
+
+/// Keeps a set of evidence (minor 14): it leaves the short-lived store and
+/// keeps the per-alert snapshot limits. NV_ERR_UNKNOWN_ID for a set that is
+/// gone.
+///
+/// # Safety
+/// `core` is a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nv_alert_evidence_pin(core: *mut NvCore, trigger_id: u64) -> NvStatus {
+    // SAFETY: per the caller.
+    unsafe { rec_call(core, |c| Ok(c.alert_evidence_pin(trigger_id)?)) }
 }
 
 #[cfg(test)]
