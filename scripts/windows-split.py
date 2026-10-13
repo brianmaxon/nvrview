@@ -4,7 +4,7 @@ which half runs where (scripts/windows-check.sh).
 
     windows-split.py plan --hosts PRIMARY SECOND --rust clippy,test,doctest|none
                           --suites a,b,c|none [--speeds "host=weight ..."]
-                          [--timings FILE] [--min-seconds N]
+                          [--timings FILE] [--min-seconds N] [--explain]
 
 The check has two halves that need nothing from each other: "rust" (clippy,
 the tests and the doctests) and "rest" (the C# builds and tests, the video
@@ -119,12 +119,16 @@ def main(argv):
         return 2
     opts = {"--hosts": None, "--rust": "none", "--suites": "none", "--speeds": os.environ.get("NVRVIEW_WINDOWS_SPEEDS", ""),
             "--timings": None, "--min-seconds": os.environ.get("NVRVIEW_SPLIT_MIN_SECONDS", "30")}
+    explain = False
     args = argv[1:]
     i = 0
     hosts = []
     while i < len(args):
         a = args[i]
-        if a == "--hosts":
+        if a == "--explain":
+            explain = True
+            i += 1
+        elif a == "--hosts":
             hosts = args[i + 1:i + 3]
             i += 3
         elif a in opts:
@@ -174,6 +178,13 @@ def main(argv):
     best = min(options[::-1], key=lambda o: o[0])
     rust_host = best[1]
     rest_host = best[2]
+    if explain:
+        # The numbers behind the decision, for the log (standard error keeps
+        # the one-line answer on standard output parseable).
+        print("plan inputs: Rust half about %ds (%s), other half about %ds (%s) at weight 1; "
+              "weights %s=%g %s=%g; one computer (%s) about %ds, best split about %ds"
+              % (rust_t, "from history" if rust_known else "a guess", rest_t, "from history" if rest_known else "a guess",
+                 prim, sp[prim], second, sp[second], prim, single, best[0]), file=sys.stderr)
     if min(rust_t, rest_t) < float(opts["--min-seconds"]):
         print("single the smaller half is about %ds, not worth a second computer" % min(rust_t, rest_t))
         return 0

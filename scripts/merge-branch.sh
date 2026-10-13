@@ -3,7 +3,7 @@
 # that holds main), checks the result, and skips the Windows check when the
 # branch's own Windows result already covers it.
 #
-#   scripts/merge-branch.sh BRANCH "merge commit message"
+#   scripts/merge-branch.sh [--full-check-after | --no-full-check-after] BRANCH "merge commit message"
 #
 # 1. git merge --no-commit --no-ff BRANCH, then the Windows decision (step 3)
 #    on the merged tree.
@@ -46,6 +46,13 @@
 #    with the total time and the slowest three steps (scripts/timing.py), and
 #    adds a line to the timing log.
 #
+# 5. After the merge, a full check (NVRVIEW_FULL_CHECK=1, Mac and Windows) of the
+#    new main starts in the background (scripts/full-check-bg.sh), at low
+#    Windows priority, so that scripts/release.sh finds full stamps for main
+#    and only packages. On by default when two or more Windows computers are
+#    configured; --full-check-after / --no-full-check-after or
+#    NVRVIEW_BACKGROUND_FULL_CHECK=1|0 decide. The next merge supersedes it.
+#
 # Environment: NVRVIEW_WINDOWS_HOST or NVRVIEW_WINDOWS_HOSTS (needed when
 # Windows runs), NVRVIEW_WINDOWS_WORKER, NVRVIEW_WINDOWS_LOCK (see
 # scripts/windows-lock.sh; merges take the lock at priority "merge"),
@@ -61,7 +68,15 @@ die() { echo "merge-branch: $*" >&2; exit 1; }
 NVRVIEW_WINDOWS_PRIORITY=merge
 export NVRVIEW_WINDOWS_PRIORITY
 
-[ $# -eq 2 ] || { echo "usage: $0 BRANCH \"merge commit message\"" >&2; exit 2; }
+after_flag=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --full-check-after) after_flag=1; shift ;;
+    --no-full-check-after) after_flag=0; shift ;;
+    *) break ;;
+  esac
+done
+[ $# -eq 2 ] || { echo "usage: $0 [--full-check-after | --no-full-check-after] BRANCH \"merge commit message\"" >&2; exit 2; }
 branch="$1"
 message="$2"
 every="${NVRVIEW_FULL_WINDOWS_EVERY:-0}"
@@ -197,3 +212,4 @@ git branch -q -D "$tmpb"
 total=$(($(date +%s) - start))
 report_timings merge "$total" "$tree" "$logs/mac.log" "$logs/windows.log"
 echo "Merged $branch as $(git rev-parse --short HEAD)."
+if background_full_check_wanted "$after_flag"; then start_background_full_check; fi

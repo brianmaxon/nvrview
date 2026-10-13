@@ -105,12 +105,31 @@ elif [ $# -gt 0 ]; then
   echo "usage: $0 [--clean <worker name> | --package <directory> [--trusted-key-file FILE]... [--update-source SOURCE]]" >&2
   exit 2
 fi
-if [ -n "$package_to" ] && [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then
-  # Package from the worker whose full check stamped HEAD's tree, so its
-  # tested publish output can be reused (the stamp's steps end "worker <name>").
+if [ -n "$package_to" ]; then
+  # Package from the worker and the host whose full check stamped HEAD's tree,
+  # so its tested publish output can be reused: the stamp's steps end
+  # "worker <name>; host <host>" (the host that ran the app half, which may be
+  # either one after a split run). Without a usable stamp the app is built on
+  # whichever host is free.
   stamp="$(cd "$(git rev-parse --git-common-dir)" && pwd)/nvrview-checks/$(git rev-parse 'HEAD^{tree}').windows"
   if [ -f "$stamp" ]; then
-    NVRVIEW_WINDOWS_WORKER=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)$/\1/p' "$stamp")
+    stamp_worker=$(sed -n 's/^steps=.*worker \([A-Za-z0-9_-]*\)\(; host .*\)\{0,1\}$/\1/p' "$stamp")
+    stamp_host=$(sed -n 's/^steps=.*; host \([A-Za-z0-9_.-]*\)$/\1/p' "$stamp")
+    if [ -z "${NVRVIEW_WINDOWS_WORKER:-}" ]; then NVRVIEW_WINDOWS_WORKER=$stamp_worker; fi
+    if [ "$NVRVIEW_WINDOWS_WORKER" = "$stamp_worker" ] && [ -n "$stamp_host" ]; then
+      if [ "${NVRVIEW_WINDOWS_LOCK_HELD:-0}" = 1 ]; then
+        echo "the lock is already held (host ${NVRVIEW_WINDOWS_HOST:-?}); the stamp names $stamp_host"
+      elif windows_hosts | grep -qx "$stamp_host"; then
+        echo "packaging on $stamp_host, where the checks built and tested the publish output (worker $stamp_worker)"
+        NVRVIEW_WINDOWS_HOSTS=$stamp_host
+        export NVRVIEW_WINDOWS_HOSTS
+        unset NVRVIEW_WINDOWS_HOST
+      else
+        echo "the checks tested the publish output on $stamp_host, which is not in the configured hosts; it will be built again"
+      fi
+    fi
+  else
+    echo "no Windows check stamp for this tree; the app will be built again"
   fi
 fi
 worker="${NVRVIEW_WINDOWS_WORKER:-main}"
@@ -315,8 +334,10 @@ release_second() {
 }
 trap 'finish_cache --failed "Windows worker"; release_second; rm -rf "$logs"; windows_unlock' EXIT
 split_plan() { # HOST SECOND
-  "$py" -I scripts/windows-split.py plan --hosts "$1" "$2" --rust "$rust_halves" --suites "$NVRVIEW_SUITES"
+  "$py" -I scripts/windows-split.py plan --explain --hosts "$1" "$2" --rust "$rust_halves" --suites "$NVRVIEW_SUITES" 2>"$logs/plan.detail"
 }
+# Every run says whether it splits, and why or why not, on one line.
+decision() { echo "split decision: $*"; }
 rust_halves=""
 for kv in clippy:NVRVIEW_CLIPPY_CRATES test:NVRVIEW_TEST_CRATES doctest:NVRVIEW_DOCTEST_CRATES; do
   eval "val=\${${kv#*:}:-none}"
@@ -326,41 +347,57 @@ rust_halves=${rust_halves:-none}
 parts="all"
 host_rust=""
 host_rest=""
-if [ -z "$only" ] && [ "${NVRVIEW_WINDOWS_SPLIT:-1}" != 0 ] && [ "$rust_halves" != none ] && [ "$NVRVIEW_SUITES" != none ]; then
+if [ -n "$only" ]; then
+  decision "whole on $host (NVRVIEW_WINDOWS_ONLY is set)"
+elif [ "${NVRVIEW_WINDOWS_SPLIT:-1}" = 0 ]; then
+  decision "whole on $host (NVRVIEW_WINDOWS_SPLIT=0)"
+elif [ "$rust_halves" = none ] || [ "$NVRVIEW_SUITES" = none ]; then
+  decision "whole on $host (nothing to run in one half: Rust work $rust_halves, other suites $NVRVIEW_SUITES)"
+else
   candidate=$(windows_hosts | grep -vx "$host" | head -n 1 || true)
-  if [ -n "$candidate" ]; then
+  if [ -z "$candidate" ]; then
+    decision "whole on $host (only one Windows host is configured)"
+  else
     plan=$(split_plan "$host" "$candidate" || true)
+    detail=$(cat "$logs/plan.detail" 2>/dev/null || true)
     case "$plan" in
       split*)
-        second=$(scripts/windows-lock.sh acquire --try --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid "$lock_owner" --exclude "$host" 2>/dev/null) || second=""
+        if second=$(scripts/windows-lock.sh acquire --try --priority "${NVRVIEW_WINDOWS_PRIORITY:-agent}" --owner-pid "$lock_owner" --exclude "$host" 2>/dev/null); then
+          :
+        else
+          second=""
+          decision "whole on $host ($candidate is not free right now, or a waiting merge goes first there; the plan was: $plan)"
+        fi
         ;;
-      *) echo "not splitting: ${plan#single }" ;;
+      *) decision "whole on $host (${plan#single }; $detail)" ;;
     esac
-  fi
-  if [ -n "$second" ]; then
-    # The same toolchain on both computers, or the results would not be the
-    # same as a one-computer run's.
-    # shellcheck disable=SC2086,SC2029
-    ssh $ssh_opts "$second" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
-      </dev/null 2>/dev/null | tr -d '\r' >"$logs/tools2" || true
-    plan=$(split_plan "$host" "$second" || true)
-    if ! cmp -s "$logs/tools" "$logs/tools2"; then
-      echo "not splitting: $second has other tool versions than $host"
-      release_second
-    else
-      case "$plan" in
-        split*)
-          if sync_tree "$second"; then
-            parts="rust rest"
-            host_rust=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rust$/\1/p')
-            host_rest=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rest$/\1/p')
-          else
-            echo "not splitting: sending the tree to $second failed"
-            release_second
-          fi
-          ;;
-        *) echo "not splitting: ${plan#single }"; release_second ;;
-      esac
+    if [ -n "$second" ]; then
+      # The same toolchain on both computers, or the results would not be the
+      # same as a one-computer run's.
+      # shellcheck disable=SC2086,SC2029
+      ssh $ssh_opts "$second" "$gitbash -lc \"rustc -vV; cargo nextest --version; cargo clippy --version; dotnet --version\"" \
+        </dev/null 2>/dev/null | tr -d '\r' >"$logs/tools2" || true
+      plan=$(split_plan "$host" "$second" || true)
+      detail=$(cat "$logs/plan.detail" 2>/dev/null || true)
+      if ! cmp -s "$logs/tools" "$logs/tools2"; then
+        decision "whole on $host ($second has other tool versions: $(diff "$logs/tools" "$logs/tools2" | grep '^[<>]' | head -n 3 | tr '\n' ' '))"
+        release_second
+      else
+        case "$plan" in
+          split*)
+            if sync_tree "$second"; then
+              parts="rust rest"
+              host_rust=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rust$/\1/p')
+              host_rest=$(printf '%s\n' "$plan" | tr ' ' '\n' | sed -n 's/^\(.*\)=rest$/\1/p')
+              decision "split ($plan; $detail)"
+            else
+              decision "whole on $host (sending the tree to $second failed)"
+              release_second
+            fi
+            ;;
+          *) decision "whole on $host (${plan#single }; $detail)"; release_second ;;
+        esac
+      fi
     fi
   fi
 fi
@@ -435,7 +472,7 @@ now=$(date +%s)
 # cached suites it serves merges, and scripts/release.sh needs a full one.
 if [ "${NVRVIEW_APP_SELFTEST:-}" = 1 ] && [ -z "${NVRVIEW_WINDOWS_ONLY:-}" ] && [ -z "${NVRVIEW_APP_AREAS:-}" ] &&
   [ -z "$(git status --porcelain)" ] && [ "$tree_sent" = "$(git rev-parse 'HEAD^{tree}')" ]; then
-  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker" "${cached:-none}"
+  scripts/checked.sh --record windows "$((now - check_start))" "app self-tests${NVRVIEW_MIC_TEST:+ with the real microphone}; worker $worker; host ${host_rest:-$host}" "${cached:-none}"
 else
   echo "no check stamp written (needs NVRVIEW_APP_SELFTEST=1, no NVRVIEW_WINDOWS_ONLY, and a clean tree)"
 fi

@@ -232,6 +232,32 @@ at the end shows each suite as ran or cached, with its time.
 - **Parallel merges.** `scripts/merge-branch.sh` and `scripts/merge-train.sh`
   run the Mac check and the Windows check at the same time, each with its own
   log; the merge reaches main only when both pass.
+- **A full check after every merge.** With two or more Windows computers
+  configured (`NVRVIEW_WINDOWS_HOSTS`), a merge ends by starting a full check
+  (`NVRVIEW_FULL_CHECK=1`, Mac and Windows) of the new main in the background
+  (`scripts/full-check-bg.sh`; `--full-check-after` / `--no-full-check-after`
+  or `NVRVIEW_BACKGROUND_FULL_CHECK=1|0` override the default). It runs in its
+  own worktree (`.worktrees/fullcheck`, build output kept between runs) with
+  its own Windows worker, at the lock priority `background`, below merges and
+  agents: it takes a computer only when none of them is waiting for it (one
+  that already started is not interrupted, so an agent waits at most one
+  check). A later merge supersedes it: the older check's process group is
+  stopped and its locks given back. A tree that already has full stamps starts
+  nothing. When it passes, `scripts/release.sh` (without `--full-check`) finds
+  full stamps for main and only packages. `scripts/full-check-bg.sh status`
+  shows it; a stopped or failed one leaves no stamps.
+- **Releases ship what was tested.** The full Mac check runs the real-core
+  self-test on the shipped app: the release build as the signed bundle
+  `build/NVRView.app` (`scripts/macos-real-selftest.sh --bundle`), with the
+  release's bundled files when `scripts/release.sh` runs the check. A pass on a
+  clean tree leaves `build/NVRView.app.tested` (tree hash and a hash of the
+  bundled files); `scripts/package-macos.sh` then zips that bundle, redoing only
+  the bundled files and the signature (`--rebuild` forces a build). The core
+  framework is built once per tree (`scripts/build-xcframework.sh`). On Windows
+  the stamp records the host that ran the app half (`; host NAME`), and
+  `scripts/windows-check.sh --package` builds the package on that host, where
+  the tested publish output is. Every Windows run prints a `split decision:`
+  line saying whether the check was split over two computers and why not.
 - **Named failures, narrow retries.** A failed Mac or Windows check (merges,
   trains, `scripts/release-check.sh`, `scripts/windows-check.sh`) prints the
   suite or self-test area that was running and the failing step's lines, for
@@ -271,7 +297,8 @@ at the end shows each suite as ran or cached, with its time.
 - **Tests.** `scripts/test_suite_cache.py` tests the decision rules in one
   process; `scripts/test-suite-cache.sh` tests the shell wiring (plan file,
   run log, finish, interrupted and retried runs). `scripts/run-script-tests.sh`
-  runs them with the stamp and merge-train tests at the same time, printing
+  runs them with the stamp, merge-train, Windows split, macOS package and
+  background full check tests at the same time, printing
   each file's output in order.
 
 ## Versions
