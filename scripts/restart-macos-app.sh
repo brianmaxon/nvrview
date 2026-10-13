@@ -27,6 +27,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$build" = 1 ]; then
+  scripts/package-macos.sh
+fi
+[ -x "$exe" ] || { echo "no app at $app: run scripts/package-macos.sh (or pass --build)" >&2; exit 1; }
+
 running() { pgrep -f "^$exe( |\$)" || true; }
 
 pids=$(running)
@@ -47,11 +52,6 @@ if [ -n "$pids" ]; then
     waited=$((waited + 1))
   done
 fi
-
-if [ "$build" = 1 ]; then
-  scripts/package-macos.sh
-fi
-[ -x "$exe" ] || { echo "no app at $app: run scripts/package-macos.sh (or pass --build)" >&2; exit 1; }
 
 echo "opening $app"
 # -n: this copy, even if an installed release with the same identifier runs.
