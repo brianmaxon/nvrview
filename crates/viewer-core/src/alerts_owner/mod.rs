@@ -26,13 +26,15 @@
 
 mod api;
 mod frames;
+mod modules;
 mod seams;
 mod store;
 
+pub use modules::{home_assistant_factory, mqtt_factory};
 pub use seams::{
     AlertError, AlertFrames, AlertInput, AlertNotice, AlertOutput, DeliveryDone, ExternalTrigger,
     ExternalTriggers, InputContext, InputFactory, NoticeState, OutputContext, OutputFactory,
-    RecordingOutput, TriggerRejected,
+    RecordingOutput, Secret, TriggerRejected,
 };
 
 use crate::clock::HostClock;
@@ -46,6 +48,7 @@ use alerts::trace::{GateResult, Step, StepKind};
 use alerts::trigger::{ExternalBody, Trigger, TriggerState, from_detection, from_external};
 use alerts::verify::{Detection, Sample};
 use alerts::zone::BBox;
+use bc_protocol::stream::StreamTier;
 use bc_session::DeviceSession;
 use frames::{Bundle, Note, Want};
 use serde_json::{Value, json};
@@ -80,6 +83,10 @@ const RATE_PER_MS: f64 = 10.0 / 60_000.0;
 const TICK: Duration = Duration::from_secs(1);
 /// Most detections taken from one answer.
 const MAX_DETECTIONS: usize = 256;
+/// Longest result line an output may add to a `delivery` step.
+const SUMMARY_MAX: usize = 200;
+/// Longest summary of a quiet or suppressed decision in an `alert` event.
+const EVENT_SUMMARY_MAX: usize = 200;
 /// Most trigger inputs and outputs configured.
 const MAX_PLUGINS: usize = 16;
 
@@ -179,6 +186,11 @@ struct WakeRun {
     cover_tried: bool,
     checks: BTreeSet<u64>,
     hold: Option<Hold>,
+    /// The stream this wake reads: the camera's main stream for checks,
+    /// the low-quality one for the re-checks of an alerted camera.
+    tier: StreamTier,
+    /// The low-quality stream was refused: re-checks stay on the main one.
+    low_failed: bool,
     want: Want,
     last_pts: Option<u64>,
     pictures: u32,
@@ -205,12 +217,14 @@ struct OutputSlot {
     index: u32,
     kind: OutputKind,
     raw: Value,
+    secret: Option<Secret>,
     output: Arc<dyn AlertOutput>,
 }
 
 /// One configured input.
 struct InputSlot {
     raw: Value,
+    secret: Option<Secret>,
     input: Box<dyn AlertInput>,
 }
 
@@ -303,6 +317,17 @@ enum Effect {
     Deliver(Arc<dyn AlertOutput>, AlertNotice, DeliveryDone),
 }
 
+/// A result line from an output, cleaned for the trace: control characters
+/// removed, at most [`SUMMARY_MAX`] characters.
+fn clean_summary(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(SUMMARY_MAX)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 fn camera_json(c: CameraId) -> Value {
     json!({"device": c.device, "channel": c.channel, "lens": c.lens})
 }
@@ -372,7 +397,7 @@ impl AlertHub {
             intake: tx,
             next_trigger: AtomicU64::new(high_trigger + 1),
             closed: AtomicBool::new(false),
-            factories: Mutex::new(Factories::default()),
+            factories: Mutex::new(modules::builtin()),
         });
         let (stop_tx, stop_rx) = oneshot::channel();
         let join = runtime.spawn(service(inner.clone(), rx, stop_rx));
@@ -720,6 +745,14 @@ impl Inner {
             }
             return;
         }
+        // A check needs the main stream's pictures, not a re-check's.
+        if st
+            .wakes
+            .get(&cam)
+            .is_some_and(|w| w.tier != frames::tier_of(cam))
+        {
+            self.restart_wake(st, cam, frames::tier_of(cam));
+        }
         if let Some(w) = st.wakes.get_mut(&cam) {
             w.checks.insert(check);
             if let Some(t) = w.first_picture {
@@ -783,9 +816,13 @@ impl Inner {
         let generation = st.next_generation;
         st.next_generation += 1;
         let inner = self.self_arc();
-        let task = self
-            .runtime
-            .spawn(frames::run_wake(inner, session, cam, generation));
+        let task = self.runtime.spawn(frames::run_wake(
+            inner,
+            session,
+            cam,
+            generation,
+            frames::tier_of(cam),
+        ));
         debug!(
             device = cam.device,
             channel = cam.channel,
@@ -804,10 +841,50 @@ impl Inner {
                 cover_tried: false,
                 checks: BTreeSet::from([check]),
                 hold: None,
+                tier: frames::tier_of(cam),
+                low_failed: false,
                 want: Want::Keyframe,
                 last_pts: None,
                 pictures: 0,
             },
+        );
+    }
+
+    /// Reads a woken camera's other stream from now on: the old task ends
+    /// (dropping its subscription), a new one starts on `tier`, and the next
+    /// picture comes from its first keyframe.
+    fn restart_wake(&self, st: &mut State, cam: CameraId, tier: StreamTier) {
+        let Some((session, _)) = st.sessions.get(&u64::from(cam.device)).cloned() else {
+            return;
+        };
+        let generation = st.next_generation;
+        st.next_generation += 1;
+        let inner = self.self_arc();
+        let Some(w) = st.wakes.get_mut(&cam) else {
+            return;
+        };
+        w.task.abort();
+        if let Some(c) = w.cover.take() {
+            c.abort();
+        }
+        w.task = self
+            .runtime
+            .spawn(frames::run_wake(inner, session, cam, generation, tier));
+        w.generation = generation;
+        w.tier = tier;
+        w.started = Instant::now();
+        w.first_picture = None;
+        w.failed = false;
+        w.cover_tried = false;
+        w.last_pts = None;
+        w.pictures = 0;
+        w.want = Want::Keyframe;
+        debug!(
+            device = cam.device,
+            channel = cam.channel,
+            lens = cam.lens,
+            low = tier != frames::tier_of(cam),
+            "woken camera changed stream"
         );
     }
 
@@ -1125,8 +1202,18 @@ impl Inner {
             line["device_key"] = json!(k);
         }
         st.log.append(&line.to_string(), now.ms);
-        let mut ev =
-            json!({"type": "alert", "state": state, "source": source_name, "decision": decision});
+        // Only alerts carry the full trace in events (it stays in the log and
+        // in `alerts_get`); quiet and suppressed decisions carry a summary.
+        let mut event_decision = decision.clone();
+        if state == "logged"
+            && let Some(o) = event_decision.as_object_mut()
+        {
+            o.remove("trace");
+            let summary: String = d.explanation.chars().take(EVENT_SUMMARY_MAX).collect();
+            o.insert("summary".to_owned(), json!(summary));
+        }
+        let mut ev = json!({"type": "alert", "state": state, "source": source_name,
+                            "decision": event_decision});
         if let Some(k) = &device_key {
             ev["device_key"] = json!(k);
         }
@@ -1163,7 +1250,26 @@ impl Inner {
                     self.hold(st, cam, d.class, instant);
                 }
             }
+            let (camera_name, source_key, offset_min) = {
+                let settings = st.engine.as_ref().map(Engine::settings);
+                let name = match (settings, d.camera) {
+                    (Some(s), Some(c)) => s.camera(c).display_name(),
+                    _ => String::new(),
+                };
+                let key = settings.and_then(|s| {
+                    d.trace.steps.iter().find_map(|step| match &step.kind {
+                        StepKind::TriggerReceived {
+                            sensor: Some(i), ..
+                        } => s.sources.get(*i as usize).map(|m| m.key.clone()),
+                        _ => None,
+                    })
+                });
+                (name, key, st.offset_min)
+            };
             let notice = AlertNotice {
+                camera_name,
+                source: source_key,
+                utc_offset_min: offset_min,
                 state: if *rev == 1 {
                     NoticeState::New
                 } else {
@@ -1267,8 +1373,8 @@ impl Inner {
             notice.snapshot = snapshot;
             let (trigger_id, done) = (d.trigger_id, d.done.clone());
             let me = me.clone();
-            let report: Box<dyn FnOnce(bool) + Send> =
-                Box::new(move |ok| me.delivered(trigger_id, index, kind, ok));
+            let report: Box<dyn FnOnce(bool, Option<String>) + Send> =
+                Box::new(move |ok, summary| me.delivered(trigger_id, index, kind, ok, summary));
             fx.push(Effect::Deliver(
                 output,
                 notice,
@@ -1281,7 +1387,14 @@ impl Inner {
     }
 
     /// An output's result: a `delivery` step, logged and reported.
-    fn delivered(&self, trigger_id: u64, index: u32, kind: OutputKind, ok: bool) {
+    fn delivered(
+        &self,
+        trigger_id: u64,
+        index: u32,
+        kind: OutputKind,
+        ok: bool,
+        summary: Option<String>,
+    ) {
         let mut st = lock(&self.state);
         let (_, now) = self.now(&st);
         let step = Step {
@@ -1290,6 +1403,7 @@ impl Inner {
                 output: index,
                 kind,
                 ok,
+                summary: summary.map(|t| clean_summary(&t)).filter(|t| !t.is_empty()),
             },
         };
         let s = serde_json::to_value(&step).unwrap_or(Value::Null);
@@ -1491,6 +1605,35 @@ impl Inner {
             }
         }
 
+        // Re-checks of an alerted camera read the low-quality stream (a
+        // refused one falls back to the main stream, once).
+        let to_low: Vec<CameraId> = st
+            .wakes
+            .iter()
+            .filter(|(c, w)| {
+                w.checks.is_empty()
+                    && w.hold.is_some()
+                    && !w.low_failed
+                    && w.tier == frames::tier_of(**c)
+            })
+            .map(|(c, _)| *c)
+            .collect();
+        for c in to_low {
+            self.restart_wake(st, c, frames::recheck_tier_of(c));
+        }
+        let back: Vec<CameraId> = st
+            .wakes
+            .iter()
+            .filter(|(c, w)| w.failed && w.hold.is_some() && w.tier != frames::tier_of(**c))
+            .map(|(c, _)| *c)
+            .collect();
+        for c in back {
+            if let Some(w) = st.wakes.get_mut(&c) {
+                w.low_failed = true;
+            }
+            self.restart_wake(st, c, frames::tier_of(c));
+        }
+
         // What each wake wants next, and cover fallbacks.
         let acq = st.acq;
         let cams: Vec<CameraId> = st.wakes.keys().copied().collect();
@@ -1570,7 +1713,7 @@ impl Inner {
                 let me = self.self_arc();
                 // Recorded outside this lock by the service's next turn.
                 self.runtime
-                    .spawn(async move { me.delivered(trigger_id, index, kind, false) });
+                    .spawn(async move { me.delivered(trigger_id, index, kind, false, None) });
             }
         }
     }
@@ -1601,6 +1744,13 @@ impl Inner {
             alert_id: a.alert_id,
             rev: a.rev,
             camera: Some(key.camera),
+            camera_name: st
+                .engine
+                .as_ref()
+                .map(|e| e.settings().camera(key.camera).display_name())
+                .unwrap_or_default(),
+            source: None,
+            utc_offset_min: st.offset_min,
             class: key.class,
             severity: None,
             unverified: false,

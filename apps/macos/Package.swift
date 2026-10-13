@@ -25,7 +25,7 @@ let cInterface: Target =
     : .target(name: "NVRViewCore")
 
 let appDependencies: [Target.Dependency] =
-    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit"] + (realCore ? ["NVRCoreC"] : [])
+    ["VideoKit", "NVRCore", "FakeCore", "DetectorKit", "AlertHost"] + (realCore ? ["NVRCoreC"] : [])
 
 let package = Package(
     name: "NVRView",
@@ -41,6 +41,11 @@ let package = Package(
         // The on-device object detector (RT-DETR on Core ML): crops of a
         // decoded picture in, raw boxes out. Knows nothing of alerts or the core.
         .target(name: "DetectorKit"),
+        // Smart alerts on this computer: answers the core's verification
+        // requests with the detector, makes snapshots, fetches the model on
+        // first use, builds the settings document with the Keychain's
+        // credentials, and raises notifications. Calls no C function.
+        .target(name: "AlertHost", dependencies: ["NVRCore", "VideoKit", "DetectorKit"]),
         // The bridge between the C core's actions and events and VideoKit.
         // Calls no C function, so it links without the library.
         .target(name: "NVRCore", dependencies: ["VideoKit", "NVRViewCore"]),
@@ -56,6 +61,7 @@ let package = Package(
             swiftSettings: realCore ? [.define("NVRVIEW_REAL_CORE")] : []),
         .executableTarget(name: "NVRViewDemo", dependencies: ["VideoKit", "NVRCore", "FakeCore"]),
         .testTarget(name: "DetectorKitTests", dependencies: ["DetectorKit"]),
+        .testTarget(name: "AlertHostTests", dependencies: ["AlertHost", "NVRCore", "DetectorKit", "VideoKit"]),
         .testTarget(name: "VideoKitTests",dependencies: ["VideoKit", "FakeCore"]),
         // With the real core, the tests also run it end to end (against a
         // spawned mock-nvr; see RealCoreAudioTests).

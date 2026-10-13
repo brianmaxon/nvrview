@@ -1,3 +1,4 @@
+import AlertHost
 import AppKit
 import FakeCore
 import Foundation
@@ -55,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         model.openWindow = { [weak self] content in self?.openWindow(content) }
         startCallWindows(model)
         startCapture(model)
+        startSmartAlerts(model)
         model.start(extraDevices: commandLineDevice(), muted: options.selfTestSeconds != nil)
         model.recordings.start(downloads: recordingsDownloads())
         startUpdater(model)
@@ -123,6 +125,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The key viewer window, else the main one, else the first.
     var activeViewerWindow: ViewerWindowController? {
         windows.first { $0.window?.isKeyWindow == true } ?? windows.first { $0.window?.isMainWindow == true } ?? windows.first
+    }
+
+    // MARK: Smart alerts
+
+    /// Smart alerts on this computer (docs/NOTIFICATIONS.md): off unless
+    /// `alerts.json` (Application Support, or the `--data-dir`) says
+    /// `"enabled": true`. The MQTT password and the Home Assistant token
+    /// are read from the Keychain at startup and passed to the core in
+    /// memory with the settings. Not with `--fake` (the fake core has no
+    /// outputs); a self-test builds its own.
+    private func startSmartAlerts(_ model: AppModel) {
+        guard !options.fake else { return }
+        let file =
+            options.dataDirectory?.appendingPathComponent("alerts.json")
+            ?? (options.selfTestSeconds == nil ? JSONFileStore<DeviceConfig>.appSupport("alerts.json") : nil)
+        let bridge = model.bridge
+        let secrets = KeychainAlertSecrets(service: options.keychainService)
+        let environment = SmartAlertsController.Environment(
+            core: { try bridge.smartAlerts() },
+            storedSettings: { file.flatMap { try? Data(contentsOf: $0) } },
+            deviceID: { [weak model] key in model?.runtime(key)?.deviceID },
+            updateSource: { [weak model] in model?.updater?.settings.effectiveSource },
+            secrets: secrets)
+        model.smartAlerts = SmartAlertsController(
+            environment: environment, installer: ModelInstaller(manifest: ModelManifest.bundled()),
+            notifier: SystemNotifier())
     }
 
     // MARK: Updates

@@ -26,17 +26,24 @@ internal interface ICredentialStore
 /// <summary>Credential Manager (see the file comment).</summary>
 internal sealed unsafe class WindowsCredentials : ICredentialStore
 {
-    private const string Prefix = "nvrview/device/";
+    private const string DevicePrefix = "nvrview/device/";
     private const uint CRED_TYPE_GENERIC = 1;
     private const uint CRED_PERSIST_LOCAL_MACHINE = 2;
 
+    private readonly string _prefix;
+
+    /// <summary>Device passwords by default; smart alerts use their own prefix.</summary>
+    public WindowsCredentials(string prefix = DevicePrefix) => _prefix = prefix;
+
     /// <summary>The credential's target name for a device key.</summary>
-    public static string Target(string key) => Prefix + key;
+    public static string Target(string key) => DevicePrefix + key;
+
+    private string TargetFor(string key) => _prefix + key;
 
     public string? Read(string key)
     {
         CREDENTIALW* credential = null;
-        fixed (char* target = Target(key))
+        fixed (char* target = TargetFor(key))
         {
             if (!CredReadW(target, CRED_TYPE_GENERIC, 0, &credential))
             {
@@ -62,7 +69,7 @@ internal sealed unsafe class WindowsCredentials : ICredentialStore
         byte[] blob = Encoding.Unicode.GetBytes(password);
         try
         {
-            fixed (char* target = Target(key))
+            fixed (char* target = TargetFor(key))
             fixed (char* userName = user)
             fixed (char* comment = "nvrview device password")
             fixed (byte* b = blob)
@@ -93,7 +100,7 @@ internal sealed unsafe class WindowsCredentials : ICredentialStore
 
     public void Delete(string key)
     {
-        fixed (char* target = Target(key))
+        fixed (char* target = TargetFor(key))
         {
             _ = CredDeleteW(target, CRED_TYPE_GENERIC, 0);
         }

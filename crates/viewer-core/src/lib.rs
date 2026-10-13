@@ -68,7 +68,7 @@ pub mod update;
 pub use alerts_owner::{
     AlertError, AlertFrames, AlertInput, AlertNotice, AlertOutput, DeliveryDone, ExternalTrigger,
     ExternalTriggers, InputContext, InputFactory, NoticeState, OutputContext, OutputFactory,
-    RecordingOutput, TriggerRejected,
+    RecordingOutput, Secret, TriggerRejected, home_assistant_factory, mqtt_factory,
 };
 pub use bc_protocol::ptz::{Direction as PtzDirection, LensAxis};
 pub use bc_protocol::stream::StreamTier;

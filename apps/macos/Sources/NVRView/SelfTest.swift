@@ -4586,7 +4586,22 @@ final class SelfTest {
     private func awaitDetector(_ detector: DetectorSelfTest) {
         guard detector.finished else { return after(0.05) { [self] in awaitDetector(detector) } }
         problems += detector.problems
-        checkLogRest()
+        alertsEndToEndStep()
+    }
+
+    /// Smart alerts end to end on the real core (`AlertsSelfTest`).
+    private func alertsEndToEndStep() {
+        guard let model = app.model else { return checkLogRest() }
+        if let why = AlertsSelfTest.unavailable(model) {
+            print("alerts end to end: skipped (\(why))")
+            return checkLogRest()
+        }
+        // parity: alerts-e2e-verified
+        // parity: alerts-e2e-not-confirmed
+        Task { @MainActor [self] in
+            problems += await AlertsSelfTest(model: model).run()
+            checkLogRest()
+        }
     }
 
     private func checkLogRest() {

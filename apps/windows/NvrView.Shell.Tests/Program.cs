@@ -97,6 +97,7 @@ internal static class Program
         PlaybackTests.Run();
         CaptureTests.Run();
         SmartAlertsTests.Run();
+        AlertSettingsTests.Run();
         CaptureRecordingsTests.Run();
         RecordingsBrowseTests.Run();
         RecordingsModelTests.Run();

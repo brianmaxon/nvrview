@@ -5,8 +5,12 @@
 //! episodes settle. Nothing here waits on real time.
 
 mod common;
+mod mock_ha;
+#[allow(unused_imports)]
+#[path = "../../mqtt-triggers/tests/common/mod.rs"]
+mod mqtt_broker;
 
-use common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, start};
+use common::{PASSWORD, Recorder, USER, fast_config, on_sim, sim_spawn, start, wait_until};
 use serde_json::{Value, json};
 use simtime::SimRuntime;
 use std::collections::{HashMap, HashSet};
@@ -599,7 +603,15 @@ fn a_cover_image_stands_in_when_the_stream_is_silent() {
     let req = &h.rec.events_of("verify_request")[0];
     assert_eq!(req["from_cover"], true, "{req}");
     assert_eq!(h.nvr.command_count(298), 1);
-    let steps = step_names(&h.decisions()[0]);
+    // Quiet decisions carry only a summary in events; the trace is in the log.
+    let d = h.decisions()[0].clone();
+    if d["decision"] != "alert" {
+        assert!(d.get("trace").is_none(), "{d}");
+        assert!(d["summary"].as_str().is_some_and(|t| !t.is_empty()), "{d}");
+    }
+    let q = json!({"trigger_id": d["trigger_id"]}).to_string();
+    let log: Value = serde_json::from_str(&h.core.alerts_get(&q).unwrap()).unwrap();
+    let steps = step_names(&log["entries"][0]["decision"]);
     assert!(steps.contains(&"frame_sampled".to_owned()), "{steps:?}");
 }
 
@@ -628,6 +640,268 @@ fn idle_until_configured_and_off_stops_everything() {
     h.configure(json!({"enabled": false}));
     h.run_until("stopped", 5, |h| h.main_previews() == 0);
     assert!(h.core.alerts_woken().is_empty());
+}
+
+// ---- The shipped modules: MQTT input and Home Assistant output ----
+
+const MQTT_USER: &str = "example-user";
+const MQTT_SECRET: &str = "example-mqtt-secret-0123";
+const HA_SECRET: &str = "example-ha-token-0123456789";
+const HELPER: &str = "input_boolean.example_alert";
+
+/// Settings with an MQTT input on `broker` and a Home Assistant output on
+/// `ha_url` that pulses `HELPER` for any alert (no cooldown, no pulse gap).
+fn glue_settings(h: &Harness, broker_port: u16, ha_url: &str) -> Value {
+    json!({
+        "sources": [{"key": "sensor-1", "name": "Sensor 1",
+                     "cameras": [{"camera": h.cam(0)}, {"camera": h.cam(1)}]}],
+        "outputs": [{"kind": "desktop"},
+                    {"kind": "home_assistant", "id": "ha", "endpoint": ha_url,
+                     "min_severity": "low", "pulse_gap_ms": 0, "cooldown_ms": 0,
+                     "rules": [{"action": {"kind": "pulse", "entity_id": HELPER}}]}],
+        "inputs": [{"kind": "mqtt", "id": "sensor-1", "trigger_kind": "sensor_motion",
+                    "username": MQTT_USER, "topic": "example/topic",
+                    "broker": {"host": "127.0.0.1", "port": broker_port, "tls": null}}],
+        "secrets": {"sensor-1": MQTT_SECRET, "ha": HA_SECRET},
+    })
+}
+
+fn broker_with_login() -> mqtt_broker::Broker {
+    mqtt_broker::Broker::start(mqtt_broker::BrokerOpts {
+        auth: Some((MQTT_USER.to_owned(), MQTT_SECRET.to_owned())),
+        ..mqtt_broker::BrokerOpts::default()
+    })
+}
+
+impl Harness {
+    /// Waits (in real time, for threads doing real I/O; the simulated clock
+    /// stands still) until `cond` holds.
+    fn wait_real(&self, what: &str, mut cond: impl FnMut(&Harness) -> bool) {
+        wait_until(what, 30, || {
+            self.core.flush_events();
+            cond(self)
+        });
+    }
+
+    fn mqtt_status(&self) -> Value {
+        let log: Value =
+            serde_json::from_str(&self.core.alerts_get(r#"{"limit":1}"#).unwrap()).unwrap();
+        log["status"]["input_status"][0]["status"].clone()
+    }
+
+    fn delivery_steps(&self) -> Vec<Value> {
+        self.rec
+            .events_of("verify_step")
+            .into_iter()
+            .map(|e| e["step"].clone())
+            .filter(|s| s["step"] == "delivery")
+            .collect()
+    }
+
+    fn sub_previews(&self) -> usize {
+        self.nvr
+            .active_previews()
+            .iter()
+            .filter(|(_, t)| *t == StreamTier::Sub)
+            .count()
+    }
+
+    /// Every event, the alert log answer, and every file the core wrote,
+    /// as one text.
+    fn everything_written(&self) -> String {
+        let mut all = String::new();
+        for e in self.rec.events() {
+            all.push_str(&e.to_string());
+        }
+        all.push_str(&self.core.alerts_get("{}").unwrap());
+        if let Some(dir) = &self._dir {
+            let mut stack = vec![dir.path().to_path_buf()];
+            while let Some(p) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&p) else {
+                    continue;
+                };
+                for e in rd.flatten() {
+                    let path = e.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Ok(text) = std::fs::read(&path) {
+                        all.push_str(&String::from_utf8_lossy(&text));
+                    }
+                }
+            }
+        }
+        all
+    }
+}
+
+/// An MQTT "ON" wakes the mapped cameras, the scripted detector confirms a
+/// person, the alert is delivered to Home Assistant (the helper is pulsed
+/// over the real HTTP client with the token from the secrets), the
+/// re-checks run on the sub stream, and no credential leaks anywhere.
+#[test]
+fn mqtt_on_confirmed_pulses_home_assistant() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.set(HELPER, "off");
+    let mut h = Harness::new(2, NOON_S, true);
+    h.configure(glue_settings(&h, broker.port, &ha.url()));
+    h.core.flush_events();
+    let configured = h.rec.events_of("alerts_configured");
+    assert_eq!(configured[0]["inputs"][0]["ok"], true, "{configured:?}");
+    assert_eq!(configured[0]["outputs"][0]["ok"], true, "{configured:?}");
+
+    // The client logged in with the secret (the broker checks it).
+    let connected = broker.wait(|e| matches!(e, mqtt_broker::Event::Connected { .. }));
+    assert!(matches!(
+        connected,
+        mqtt_broker::Event::Connected { username: Some(ref u), .. } if u == MQTT_USER
+    ));
+    broker.wait_subscribed();
+    broker.publish("example/topic", b"ON", false);
+    h.wait_real("the trigger to arrive", |h| {
+        h.mqtt_status()["triggers"] == 1
+    });
+    assert_eq!(h.mqtt_status()["status"], "connected");
+
+    h.run_until_with("a decision", 20, &mut |_, _| Answer::Person, |h| {
+        !h.decisions().is_empty()
+    });
+    let d = h.decisions()[0].clone();
+    assert_eq!(d["decision"], "alert", "{d}");
+    assert_eq!(d["unverified"], false);
+    assert!(d["explanation"].as_str().unwrap().contains("Sensor 1"));
+    h.wait_real("the Home Assistant delivery", |h| {
+        !h.delivery_steps().is_empty()
+    });
+    let step = h.delivery_steps()[0].clone();
+    assert_eq!(step["ok"], true, "{step}");
+    assert_eq!(step["kind"], "home_assistant");
+    assert!(step["summary"].as_str().unwrap().contains(HELPER), "{step}");
+    // One pulse: read, on, off, with the token accepted.
+    assert_eq!(ha.turn_ons(HELPER), 1, "{:?}", ha.log());
+    assert_eq!(ha.state_of(HELPER).as_deref(), Some("off"));
+    assert!(
+        ha.log().iter().all(|l| !l.contains("bad token")),
+        "{:?}",
+        ha.log()
+    );
+    // The result is in the log with the decision.
+    let log: Value =
+        serde_json::from_str(&h.core.alerts_get(r#"{"decision":["alert"]}"#).unwrap()).unwrap();
+    assert_eq!(log["entries"][0]["deliveries"][0]["ok"], true);
+    assert_eq!(log["entries"][0]["source"], "external");
+
+    // Re-checks of the alerted camera read the sub stream, not the main one.
+    h.step = Duration::from_millis(250);
+    h.run_until_with(
+        "re-checks on the sub stream",
+        120,
+        &mut |_, _| Answer::Person,
+        |h| h.sub_previews() >= 1 && h.main_previews() == 0,
+    );
+    h.run_until_with("a re-check request", 60, &mut |_, _| Answer::Person, |h| {
+        h.rec
+            .events_of("verify_request")
+            .iter()
+            .any(|e| e["purpose"] == "recheck")
+    });
+
+    // No credential in any event, the log, or any file.
+    let all = h.everything_written();
+    for secret in [MQTT_SECRET, HA_SECRET] {
+        assert!(!all.contains(secret), "a credential was written out");
+    }
+    h.shutdown();
+    broker.wait(|e| matches!(e, mqtt_broker::Event::Disconnected));
+}
+
+/// The detector sees nothing: a quiet decision and no pulse. A later,
+/// confirmed alert pulses exactly once, so the first did not.
+#[test]
+fn mqtt_on_not_confirmed_does_not_pulse() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    ha.set(HELPER, "off");
+    let mut h = Harness::new(2, NOON_S, false);
+    let mut settings = glue_settings(&h, broker.port, &ha.url());
+    settings["cameras"] = json!([{"camera": h.cam(0)}, {"camera": h.cam(1)}]);
+    h.configure(settings.clone());
+    broker.wait_subscribed();
+    broker.publish("example/topic", b"ON", false);
+    h.wait_real("the trigger to arrive", |h| {
+        h.mqtt_status()["triggers"] == 1
+    });
+    h.run_until_with("a decision", 20, &mut |_, _| Answer::Nothing, |h| {
+        !h.decisions().is_empty()
+    });
+    let d = h.decisions()[0].clone();
+    assert_eq!(d["decision"], "quiet", "{d}");
+    assert!(
+        d.get("trace").is_none(),
+        "quiet events carry a summary only: {d}"
+    );
+    assert!(d["summary"].as_str().unwrap().contains("Sensor 1"), "{d}");
+    h.core.flush_events();
+    assert!(h.delivery_steps().is_empty());
+
+    // A confirmed alert afterwards is the only pulse.
+    h.core
+        .alerts_trigger_put(
+            &json!({"source": "device", "camera": h.cam(0), "kind": "people"}).to_string(),
+        )
+        .unwrap();
+    h.run_until_with("a second decision", 30, &mut |_, _| Answer::Person, |h| {
+        h.decisions().len() == 2
+    });
+    assert_eq!(
+        h.decisions()[1]["decision"],
+        "alert",
+        "{}",
+        h.decisions()[1]
+    );
+    h.wait_real("the delivery", |h| !h.delivery_steps().is_empty());
+    assert_eq!(h.delivery_steps().len(), 1);
+    assert_eq!(ha.turn_ons(HELPER), 1, "{:?}", ha.log());
+
+    // Reconfiguring without the input stops it (the broker sees the
+    // disconnect); the output, given its secret again, keeps working.
+    let mut without = settings;
+    without["inputs"] = json!([]);
+    h.configure(without);
+    broker.wait(|e| matches!(e, mqtt_broker::Event::Disconnected));
+    h.shutdown();
+}
+
+/// A broker that rejects the login is not retried; the status says so and
+/// nothing about the credential appears.
+#[test]
+fn mqtt_login_rejected_is_reported_and_not_retried() {
+    let broker = broker_with_login();
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    let h = Harness::new(1, NOON_S, false);
+    let mut settings = glue_settings(&h, broker.port, &ha.url());
+    settings["secrets"] = json!({"sensor-1": "example-wrong-secret", "ha": HA_SECRET});
+    h.configure(settings);
+    broker.wait(|e| matches!(e, mqtt_broker::Event::Rejected));
+    h.wait_real("the status", |h| h.mqtt_status()["status"] == "auth_failed");
+    assert_eq!(h.mqtt_status()["auth_failures"], 1);
+    assert!(!h.everything_written().contains("example-wrong-secret"));
+}
+
+/// An output with no token is left out with a clear message.
+#[test]
+fn home_assistant_without_a_token_is_reported() {
+    let ha = mock_ha::MockHa::start(HA_SECRET);
+    let h = Harness::new(1, NOON_S, false);
+    let mut settings = glue_settings(&h, 1, &ha.url());
+    settings["inputs"] = json!([]);
+    settings["secrets"] = json!({});
+    h.configure(settings);
+    h.core.flush_events();
+    let configured = h.rec.events_of("alerts_configured");
+    let out = &configured[0]["outputs"][0];
+    assert_eq!(out["ok"], false, "{configured:?}");
+    assert!(out["error"].as_str().unwrap().contains("token"));
 }
 
 mod property {
