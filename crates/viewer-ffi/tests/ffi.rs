@@ -617,6 +617,12 @@ fn talk_back_through_the_c_interface() {
     let nvr = mock_nvr::spawn(cfg).unwrap();
     let ctx = leaked_ctx();
     let mut core: *mut NvCore = ptr::null_mut();
+    // The self-tests' speedup (docs/FFI.md "Self-tests"), read by
+    // nv_core_new: the same records reach the device, sixteen times sooner
+    // (a device's pace is proven in bc-session's tests on a simulated clock).
+    // SAFETY: cargo nextest runs each test in a process of its own, and no
+    // other thread of this one reads the environment yet.
+    unsafe { std::env::set_var("NVRVIEW_MOCK_SPEEDUP", "16") };
     // SAFETY: valid callbacks and out pointer; `ctx` outlives the core.
     assert_eq!(
         unsafe { nv_core_new(ptr::null(), callbacks(ctx), &mut core) },
@@ -720,6 +726,10 @@ fn talk_back_through_the_c_interface() {
             .iter()
             .any(|j| j.contains("\"sent_ms\":1024") && j.contains("\"tail_ms\":1536"))
     );
+    // 40 records take 2.56 s on a device; at 16x about 0.16 s.
+    let records = nvr.talk_log()[0].records.clone();
+    let span = records[39].at.duration_since(records[0].at);
+    assert!(span < Duration::from_millis(1000), "{span:?}");
     assert!(!ctx.bad.load(Ordering::SeqCst));
     // SAFETY: live core, freed once.
     unsafe { nv_core_free(core) };
