@@ -52,6 +52,10 @@ import Testing
         #expect(
             parse(#"{"type":"playback_camera","playback":3,"tile":12,"state":"failed","reason":"start_rejected"}"#)
                 == .camera(playback: 3, tile: 12, state: "failed", reason: "start_rejected"))
+        // A play the device refused carries its status.
+        #expect(
+            parse(#"{"type":"playback_camera","playback":3,"tile":12,"state":"failed","reason":"start_rejected","status":400}"#)
+                == .camera(playback: 3, tile: 12, state: "failed", reason: "start_rejected", status: 400))
         #expect(
             parse(
                 #"{"type":"playback_seek","playback":3,"position_ms":1791618130000,"generation":4,"state":"active","future":1}"#

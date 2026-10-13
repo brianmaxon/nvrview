@@ -36,7 +36,7 @@ trap cleanup EXIT
 
 (cd apps/macos && NVRVIEW_REAL_CORE=1 swift build --scratch-path .build-real-core)
 
-MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 3 --recordings 3 --multi-lens 2:0,0 --ptz 1,2.1 --video-burst 2 \
+MOCK_NVR_PASSWORD=example-password target/debug/mock-nvr --port 0 --channels 3 --recordings 3 --multi-lens 2:0,0 --ptz 1,2.1 --video-burst 2 --refuse-play-speed 16 \
   --fixture "$root/fixtures/synthetic/h264-basic.h264" --audio "$root/fixtures/synthetic/aac-smoke-t3.aac" >"$work/mock.log" 2>&1 &
 mock_pid=$!
 for _ in $(seq 1 100); do

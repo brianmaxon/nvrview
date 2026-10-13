@@ -196,8 +196,9 @@ struct PlayerCellOverlay: View {
                 }
             }
             .padding(6)
-            if cell.state == "no_recording" {
-                Text("No recording at this time").font(.callout).foregroundStyle(.white.opacity(0.8))
+            if let message = Self.message(cell) {
+                Text(message).font(.callout).foregroundStyle(.white.opacity(0.8))
+                    .multilineTextAlignment(.center).padding(.horizontal, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -249,13 +250,28 @@ struct PlayerCellOverlay: View {
         return mode.dewarps ? mode.title : nil
     }
 
+    /// The message across a cell without a picture: no recording, or the
+    /// device refused the play (with its status, FFI-RECORDINGS.md).
+    static func message(_ c: RecordingsPlayer.Cell) -> String? {
+        switch c.state {
+        case "no_recording": "No recording at this time"
+        case "failed" where c.reason == "start_rejected":
+            c.status.map { "The NVR refused this playback (status \($0))" }
+        default: nil
+        }
+    }
+
     static func stateText(_ c: RecordingsPlayer.Cell) -> String? {
         switch c.state {
         case "", "buffering": c.tile.latestPicture() == nil ? "Loading" : nil
         case "late": "Catching up"
         case "ended": "End of recording"
         case "failed":
-            c.reason == "device_in_use" ? "Playing in another window" : "Unavailable"
+            switch c.reason {
+            case "device_in_use": "Playing in another window"
+            case "start_rejected" where c.status != nil: "Refused"
+            default: "Unavailable"
+            }
         default: nil
         }
     }

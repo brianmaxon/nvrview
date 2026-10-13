@@ -54,9 +54,10 @@ public abstract record PlaybackEvent
     /// <summary>
     /// One camera: <c>buffering</c>, <c>playing</c>, <c>late</c>, <c>no_recording</c>, <c>ended</c>,
     /// <c>failed</c> (Reason: <c>start_rejected</c>, <c>stream_ended</c>, <c>undecodable</c>,
-    /// <c>session_closed</c>, <c>limit</c>, <c>device_in_use</c>).
+    /// <c>session_closed</c>, <c>limit</c>, <c>device_in_use</c>), and with <c>start_rejected</c> the status the
+    /// device refused the play with, when it answered one.
     /// </summary>
-    public sealed record Camera(ulong Playback, ulong Tile, string Value, string? Reason) : PlaybackEvent;
+    public sealed record Camera(ulong Playback, ulong Tile, string Value, string? Reason, int? Status = null) : PlaybackEvent;
 
     /// <summary>A seek's progress: <c>starting</c>, <c>active</c>, <c>failed</c>, with its generation.</summary>
     public sealed record Seek(ulong Playback, long PositionMs, uint Generation, string Value) : PlaybackEvent;
@@ -111,7 +112,8 @@ public abstract record PlaybackEvent
                 "playback_state" when StateOf(state) is { } s && position is { } p =>
                     new State(pb, s, p, e.TryGetProperty("rate", out JsonElement r) && r.TryGetDouble(out double rate) ? rate : 1),
                 "playback_camera" when U64(e, "tile") is { } tile && state is not null =>
-                    new Camera(pb, tile, state, DownloadProgress.Str(e, "reason")),
+                    new Camera(pb, tile, state, DownloadProgress.Str(e, "reason"),
+                        e.TryGetProperty("status", out JsonElement st) && st.TryGetInt32(out int status) ? status : null),
                 "playback_seek" when position is { } p && state is not null &&
                     e.TryGetProperty("generation", out JsonElement g) && g.TryGetUInt32(out uint generation) =>
                     new Seek(pb, p, generation, state),

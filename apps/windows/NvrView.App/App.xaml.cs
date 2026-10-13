@@ -188,7 +188,9 @@ public partial class App : Application
                 // records whole days by UTC date, so two days hold this computer's today west of UTC (where the UTC date
                 // runs ahead in the evening) and yesterday east of it (the step falls back to yesterday).
                 // Live pictures go out in pairs, as devices bunch them, so the live pacing step sees them paced.
-                mockArgs.AddRange(["--recordings", "2", "--video-burst", "2"]);
+                // Plays at 16x are refused with status 400, so the playback-refused step sees a refusal (no other
+                // step plays at 16x).
+                mockArgs.AddRange(["--recordings", "2", "--video-burst", "2", "--refuse-play-speed", "16"]);
             }
             if (o.SelfTest)
             {

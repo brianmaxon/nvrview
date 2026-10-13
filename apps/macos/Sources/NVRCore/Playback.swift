@@ -122,8 +122,9 @@ public enum PlaybackEvent: Sendable, Equatable {
     case state(playback: UInt64, state: PlaybackState, positionMs: Int64, rate: Double)
     /// One camera: `buffering`, `playing`, `late`, `no_recording`, `ended`,
     /// `failed` (`reason`: `start_rejected`, `stream_ended`, `undecodable`,
-    /// `session_closed`, `limit`, `device_in_use`).
-    case camera(playback: UInt64, tile: UInt64, state: String, reason: String?)
+    /// `session_closed`, `limit`, `device_in_use`), and with `start_rejected`
+    /// the status the device refused the play with, when it answered one.
+    case camera(playback: UInt64, tile: UInt64, state: String, reason: String?, status: Int? = nil)
     /// A seek's progress: `starting`, `active`, `failed`, with its generation.
     case seek(playback: UInt64, positionMs: Int64, generation: UInt32, state: String)
     /// `closed`, `device_removed`, `login_failed`, `core_shutdown`.
@@ -138,6 +139,7 @@ public enum PlaybackEvent: Sendable, Equatable {
         var tile: UInt64?
         var state: String?
         var reason: String?
+        var status: Int?
         var position_ms: Int64?
         var rate: Double?
         var generation: UInt32?
@@ -153,7 +155,7 @@ public enum PlaybackEvent: Sendable, Equatable {
             return .state(playback: w.playback, state: state, positionMs: position, rate: w.rate ?? 1)
         case "playback_camera":
             guard let tile = w.tile, let state = w.state else { return nil }
-            return .camera(playback: w.playback, tile: tile, state: state, reason: w.reason)
+            return .camera(playback: w.playback, tile: tile, state: state, reason: w.reason, status: w.status)
         case "playback_seek":
             guard let position = w.position_ms, let generation = w.generation, let state = w.state else { return nil }
             return .seek(playback: w.playback, positionMs: position, generation: generation, state: state)
