@@ -19,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var settings: SettingsWindowController?
     /// Smart alerts: the event log's window and the live checks' window.
     private(set) var eventsWindow: SmartAlertEventsWindowController?
+    /// Sensor message logs, one window per sensor key.
+    private(set) var sensorMessageWindows: [String: SensorMessagesWindowController] = [:]
     private(set) var verificationPanel: VerificationPanelController?
     /// Open recordings windows (docs/UX.md "Recordings").
     private(set) var recordingsWindows: [RecordingsWindowController] = []
@@ -110,6 +112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func startSmartAlerts(_ model: AppModel) {
         let alerts = model.alertsModel!
         alerts.isOnScreen = { [weak self] camera in self?.windows.contains { $0.stage.showsCamera(camera) } ?? false }
+        alerts.showSensorMessages = { [weak self] key in
+            let c = self?.openSensorMessages(key)
+            c?.showWindow(nil)
+            if self?.options.selfTestSeconds != nil { c?.window?.orderBack(nil) } else { c?.window?.makeKeyAndOrderFront(nil) }
+        }
         alerts.showPanel = { [weak self, weak model] show in
             guard let self, let model else { return }
             if show {
@@ -144,6 +151,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         c.events.jump = { [weak self] camera, ms in self?.openRecording(camera, atMs: ms) }
         eventsWindow = c
         if options.selfTestSeconds != nil { c.window?.orderBack(nil) }
+        return c
+    }
+
+    /// A sensor's message log window, opened if need be.
+    @discardableResult
+    func openSensorMessages(_ key: String) -> SensorMessagesWindowController? {
+        guard let model else { return nil }
+        if let open = sensorMessageWindows[key] { return open }
+        let c = SensorMessagesWindowController(app: model, key: key)
+        c.onClose = { [weak self] _ in self?.sensorMessageWindows[key] = nil }
+        sensorMessageWindows[key] = c
         return c
     }
 

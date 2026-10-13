@@ -27,6 +27,15 @@ final class SmartAlertEventsModel {
     var selection: SmartAlertLogEntry.ID?
     /// The opened entry's snapshot.
     private(set) var snapshot: NSImage?
+    /// The opened entry's kept evidence (frames and every method's boxes),
+    /// the frames as pictures, which frame is shown, and which methods'
+    /// boxes are drawn.
+    private(set) var evidence: AlertEvidence?
+    private(set) var evidenceImages: [Int: NSImage] = [:]
+    var frame = 0
+    var visibleMethods: Set<String> = []
+    /// Camera AI against our detector over the kept pictures.
+    private(set) var comparison = EvidenceComparison([])
     /// What the last action did, in words.
     var note: String?
     /// Opens the recordings window at a camera and time (set by the app
@@ -88,6 +97,7 @@ final class SmartAlertEventsModel {
         more = page.more
         if let s = selection, !entries.contains(where: { $0.id == s }) { selection = nil }
         loadSnapshot()
+        comparison = EvidenceComparison(app.alertsModel.evidenceList()?.sets ?? [])
     }
 
     /// The next page (older entries).
@@ -107,7 +117,45 @@ final class SmartAlertEventsModel {
 
     private func loadSnapshot() {
         snapshot = selected.flatMap { e in e.hasSnapshot ? e.alertID.flatMap { app.alertsModel.snapshot(alertID: $0) } : nil }
+        loadEvidence()
     }
+
+    /// The kept set of the opened entry, if the core still has it.
+    private func loadEvidence() {
+        guard let e = selected, let set = app.alertsModel.evidence(trigger: e.triggerID) else {
+            evidence = nil
+            evidenceImages = [:]
+            return
+        }
+        if evidence?.triggerID != set.triggerID {
+            frame = set.frames.first?.index ?? 0
+            visibleMethods = Set(set.methods.map(\.name))
+        }
+        evidence = set
+        evidenceImages = Dictionary(
+            uniqueKeysWithValues: set.frames.compactMap { f in
+                app.alertsModel.evidenceFrame(trigger: set.triggerID, index: f.index).map { (f.index, $0) }
+            })
+    }
+
+    func toggleMethod(_ name: String) {
+        if visibleMethods.contains(name) { visibleMethods.remove(name) } else { visibleMethods.insert(name) }
+    }
+
+    /// Keeps the opened entry's evidence for 7 days.
+    func keepEvidence() {
+        guard let e = selected else { return }
+        note = app.alertsModel.pinEvidence(trigger: e.triggerID) ? "Kept for 7 days." : "The pictures are gone."
+        loadEvidence()
+    }
+
+    /// Opens the sensor's message log (the messages around the decision).
+    func openSensorMessages(_ e: SmartAlertLogEntry) {
+        guard let key = e.sensor else { return }
+        app.alertsModel.showSensorMessages(key)
+    }
+
+    var sensors: [MQTTSensor] { app.alertsModel.settings.sensors }
 
     func cameraName(_ c: AlertCamera) -> String { app.cameraRef(c).map(app.name(of:)) ?? "Camera \(c.channel + 1)" }
 
@@ -181,6 +229,7 @@ struct SmartAlertEventsView: View {
                 filters.padding(8)
                 Divider()
                 list
+                comparisonSummary
             }
             .frame(minWidth: 440)
             detail.frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
@@ -226,6 +275,14 @@ struct SmartAlertEventsView: View {
                     }
                 }
                 .fixedSize()
+                if !events.sensors.isEmpty {
+                    Picker("Sensor", selection: $events.filter.sensor) {
+                        Text("Any sensor").tag(String?.none)
+                        ForEach(events.sensors) { s in Text(s.name.isEmpty ? s.key : s.name).tag(String?.some(s.key)) }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
             }
             .controlSize(.small)
         }
@@ -242,8 +299,24 @@ struct SmartAlertEventsView: View {
     static func decisionTitle(_ d: String) -> String {
         switch d {
         case "alert": "Alerts"
+        case "not_confirmed": "Not confirmed"
         case "quiet": "Quiet"
+        case "test": "Tests"
         default: "Suppressed"
+        }
+    }
+
+    /// How the camera's AI and our detector agreed over the kept pictures.
+    @ViewBuilder
+    private var comparisonSummary: some View {
+        let c = events.comparison
+        if c.compared > 0 {
+            Divider()
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Camera AI against our detector, \(c.compared) kept checks").font(.caption.bold())
+                ForEach(c.rows, id: \.cls) { r in Text(c.line(r)).font(.caption).foregroundStyle(.secondary) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
         }
     }
 
@@ -270,18 +343,21 @@ struct SmartAlertEventsView: View {
             Text(Self.time(e.decidedMs)).font(.caption.monospacedDigit()).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
             Text(events.place(e)).frame(width: 110, alignment: .leading).lineLimit(1)
             Text(e.className ?? "—").frame(width: 60, alignment: .leading)
-            Text(Self.decisionLabel(e)).foregroundStyle(e.decision == "alert" ? .primary : .secondary).frame(width: 90, alignment: .leading)
+            Text(Self.decisionLabel(e)).foregroundStyle(e.decision == "alert" ? .primary : .secondary).frame(width: 120, alignment: .leading)
             Text(e.firstSentence).lineLimit(1).foregroundStyle(.secondary)
         }
         .font(.callout)
     }
 
     static func decisionLabel(_ e: SmartAlertLogEntry) -> String {
-        switch e.decision {
-        case "alert": "Alert" + (e.severity.map { " (\($0))" } ?? "")
-        case "quiet": "Quiet"
-        default: "Suppressed"
-        }
+        let base: String =
+            switch e.category == "test" ? e.decision : e.category {
+            case "alert": "Alert" + (e.severity.map { " (\($0))" } ?? "")
+            case "not_confirmed": "Not confirmed"
+            case "quiet": "Quiet"
+            default: "Suppressed"
+            }
+        return e.isTest ? "Test: \(base)" : base
     }
 
     static func time(_ ms: Int64) -> String {
@@ -340,6 +416,13 @@ struct SmartAlertEventsView: View {
                         }
                     }
                     if let note = events.note { Text(note).font(.caption).foregroundStyle(.secondary) }
+                    if e.sensor != nil {
+                        Button("Sensor Messages…") { events.openSensorMessages(e) }
+                    }
+                    if let ev = events.evidence {
+                        Divider()
+                        EvidenceView(events: events, evidence: ev)
+                    }
                     Divider()
                     Text("Steps").font(.subheadline.bold())
                     TraceLogView(steps: e.allSteps, cameraName: events.cameraName)
@@ -351,5 +434,117 @@ struct SmartAlertEventsView: View {
             Text("Choose a decision to see its steps.").foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+/// The kept frames of a check with every method's boxes over them (colors and
+/// labels, not color alone), a switch per method, the scores, and Keep.
+struct EvidenceView: View {
+    @Bindable var events: SmartAlertEventsModel
+    let evidence: AlertEvidence
+
+    static let colors: [Color] = [.orange, .cyan, .pink, .yellow, .mint]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Kept pictures").font(.subheadline.bold())
+                if evidence.methodsDisagree {
+                    Label("Methods disagree", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityLabel("The camera's AI and our detector disagree")
+                }
+                Spacer()
+                if evidence.pinned {
+                    Text("Kept until \(Self.day(evidence.expiresMs))").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Deleted \(Self.time(evidence.expiresMs))").font(.caption).foregroundStyle(.secondary)
+                    Button("Keep") { events.keepEvidence() }
+                        .help("Saves these pictures for 7 days.")
+                }
+            }
+            if let image = events.evidenceImages[events.frame] {
+                EvidenceOverlayView(image: image, evidence: evidence, frame: events.frame, visible: events.visibleMethods)
+                    .frame(maxWidth: .infinity).frame(height: 240)
+            } else {
+                Text("This picture is gone.").foregroundStyle(.secondary)
+            }
+            if evidence.frames.count > 1 {
+                Picker("Picture", selection: $events.frame) {
+                    ForEach(evidence.frames, id: \.index) { f in Text("Picture \(f.index + 1)").tag(f.index) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            ForEach(Array(evidence.methods.enumerated()), id: \.element.name) { i, m in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Toggle(isOn: Binding(get: { events.visibleMethods.contains(m.name) }, set: { _ in events.toggleMethod(m.name) })) {
+                        HStack(spacing: 4) {
+                            Image(systemName: Self.symbols[i % Self.symbols.count])
+                                .foregroundStyle(Self.colors[i % Self.colors.count])
+                            Text(m.title)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    Text(Self.summary(m, evidence: evidence)).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    static let symbols = ["square", "circle", "triangle", "diamond", "star"]
+
+    static func summary(_ m: EvidenceMethod, evidence: AlertEvidence) -> String {
+        var parts: [String] = []
+        if m.name == "camera_ai", let c = evidence.cameraClaim { parts.append("claimed \(c)") }
+        let all = m.boxes.values.flatMap { $0 }.sorted { $0.score > $1.score }
+        if all.isEmpty, m.name != "camera_ai" { parts.append("found nothing") }
+        parts += all.prefix(4).map { "\($0.label) \(Int(($0.score * 100).rounded()))%" }
+        return parts.joined(separator: ", ")
+    }
+
+    static func time(_ ms: Int64?) -> String {
+        guard let ms else { return "soon" }
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return "at " + f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+
+    static func day(_ ms: Int64?) -> String {
+        guard let ms else { return "7 days" }
+        let f = DateFormatter()
+        f.timeStyle = .none
+        f.dateStyle = .medium
+        return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+    }
+}
+
+/// A picture with boxes over it, placed by `EvidenceOverlay`.
+struct EvidenceOverlayView: View {
+    let image: NSImage
+    let evidence: AlertEvidence
+    let frame: Int
+    let visible: Set<String>
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .topLeading) {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                let drawn = EvidenceOverlay.layout(evidence, frame: frame, visible: visible, picture: image.size, in: geo.size)
+                ForEach(Array(drawn.enumerated()), id: \.offset) { _, d in
+                    let color = EvidenceView.colors[d.colorIndex % EvidenceView.colors.count]
+                    Rectangle().strokeBorder(color, style: StrokeStyle(lineWidth: 2, dash: d.colorIndex % 2 == 0 ? [] : [6, 3]))
+                        .frame(width: d.rect.width, height: d.rect.height)
+                        .overlay(alignment: .topLeading) {
+                            Text(d.caption).font(.caption2.bold()).padding(.horizontal, 3)
+                                .background(color).foregroundStyle(.black)
+                                .offset(y: -14)
+                        }
+                        .offset(x: d.rect.minX, y: d.rect.minY)
+                }
+            }
+        }
+        .accessibilityLabel("Kept picture with detection boxes")
     }
 }

@@ -95,6 +95,11 @@ final class SmartAlertsModel {
     @ObservationIgnored var isOnScreen: (CameraRef) -> Bool = { _ in false }
     /// Shows or hides the verification window (set by the app delegate).
     @ObservationIgnored var showPanel: (Bool) -> Void = { _ in }
+    /// Opens a sensor's message log window (set by the app delegate).
+    @ObservationIgnored var showSensorMessages: (String) -> Void = { _ in }
+    /// Simulate trigger: also send the test to Home Assistant (off unless
+    /// ticked, each time).
+    var simulateToHomeAssistant = false
 
     init(model: AppModel, bridge: CoreBridge, credentials: any CredentialStore, file: SmartAlertSettingsFile) {
         self.model = model
