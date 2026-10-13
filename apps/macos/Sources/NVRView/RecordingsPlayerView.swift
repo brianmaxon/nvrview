@@ -48,10 +48,10 @@ struct PlayerArea: View {
             let bounds = CGRect(origin: .zero, size: geo.size).insetBy(dx: 4, dy: 4)
             let cells = PlayerGrid.cells(count: player.cells.count, mode: player.mode, in: bounds, gap: 4)
             let items: [PlayerStageView.Item] = zip(player.cells, cells).compactMap { c, r in
-                r.map { PlayerStageView.Item(tile: c.tile, rect: $0) }
+                r.map { PlayerStageView.Item(tile: c.tile, rect: $0, camera: c.camera) }
             }
             ZStack(alignment: .topLeading) {
-                PlayerStage(items: items, onView: onStage)
+                PlayerStage(items: items, player: player, onView: onStage)
                 if player.cells.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: "play.rectangle").font(.system(size: 34))
@@ -71,9 +71,15 @@ struct PlayerArea: View {
                     }
                 }
             }
+            .overlay(alignment: .bottom) {
+                if let toast = player.toast {
+                    PlayerToastView(player: player, toast: toast).padding(.bottom, 14)
+                }
+            }
             .frame(width: geo.size.width, height: geo.size.height)
             .background(Color.black)
             .clipped()
+            .simultaneousGesture(TapGesture().onEnded { focused = true })
         }
         .focusable()
         .focusEffectDisabled()
@@ -90,17 +96,62 @@ struct PlayerArea: View {
             browser.markOut()
             return .handled
         }
+        // The tile keys act on the cell under the pointer, else the large
+        // one (docs/UX.md "Keyboard"): 0 resets the view, P saves the
+        // picture, Shift+P asks where.
+        .onKeyPress("0") {
+            guard player.selectedIndex != nil else { return .ignored }
+            player.resetSelectedView()
+            return .handled
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "pP"), phases: .down) { press in
+            guard let i = player.selectedIndex else { return .ignored }
+            player.perform(press.modifiers.contains(.shift) || press.characters == "P" ? .savePictureAs : .savePicture, at: i)
+            return .handled
+        }
     }
 }
 
-/// One camera's cell over the picture: its name and state, a click to make
-/// it large, a double click to show it alone, and its menu.
+/// The message over the player: a saved picture, with Show in Finder. It
+/// goes away by itself.
+struct PlayerToastView: View {
+    let player: RecordingsPlayer
+    let toast: PlayerToast
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(toast.text)
+            if let title = toast.actionTitle, let url = toast.url {
+                Button(title) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                    .buttonStyle(.link)
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(Color.black.opacity(0.75), in: Capsule())
+        .accessibilityElement(children: .combine)
+        .task(id: toast.id) {
+            try? await Task.sleep(for: .seconds(toast.url == nil ? 2.5 : 5))
+            if player.toast?.id == toast.id { player.toast = nil }
+        }
+    }
+}
+
+/// One camera's cell over the picture: its name and state, its picture
+/// buttons (the tile header model, `TileHeaderLayout`, with the live tiles'
+/// order and overflow), a click to make it large, a double click to show it
+/// alone, a drag that moves a zoomed or filled picture, and its menu.
 struct PlayerCellOverlay: View {
     let browser: RecordingsBrowser
     let player: RecordingsPlayer
     let index: Int
     let cell: RecordingsPlayer.Cell
     let rect: CGRect
+    @State private var hovering = false
+    @State private var lastDrag = CGSize.zero
+    @State private var flash = 0.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let large: Bool = {
@@ -110,20 +161,40 @@ struct PlayerCellOverlay: View {
             }
         }()
         let incident = browser.playingIncident
+        let camera = cell.camera
+        let title = browser.cameraName(camera)
+        let tile = player.headerTile(index)
+        let titleWidth = Double((title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11, weight: .medium)]).width) + 14
+        let layout = TileHeaderLayout.compute(width: Double(rect.width), titleWidth: titleWidth, tile: tile)
         ZStack(alignment: .topLeading) {
             Rectangle().fill(Color.clear).contentShape(Rectangle())
-            HStack(spacing: 4) {
-                Text(browser.cameraName(cell.camera)).font(.caption.weight(.medium)).lineLimit(1)
-                if player.audibleCamera == cell.camera {
-                    Image(systemName: "speaker.wave.2.fill").font(.caption2).help("Its sound plays")
+            HStack(spacing: 6) {
+                HStack(spacing: 4) {
+                    Text(title).font(.caption.weight(.medium)).lineLimit(1)
+                    if player.audibleCamera == camera {
+                        Image(systemName: "speaker.wave.2.fill").font(.caption2).help("Its sound plays")
+                    }
+                    if let mode = Self.viewName(player, camera) {
+                        Text(mode).font(.caption2).foregroundStyle(.white.opacity(0.8))
+                    }
+                    if let state = Self.stateText(cell) {
+                        Text(state).font(.caption2).foregroundStyle(.white.opacity(0.8))
+                    }
                 }
-                if let state = Self.stateText(cell) {
-                    Text(state).font(.caption2).foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6).padding(.vertical, 3)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
+                Spacer(minLength: 0)
+                if hovering {
+                    HStack(spacing: 0) {
+                        ForEach(layout.visible.filter { $0 != .title && $0 != .recordingPill }, id: \.rawValue) { item in
+                            PlayerHeaderButton(player: player, index: index, item: item, layout: layout)
+                        }
+                    }
+                    .padding(.horizontal, 2)
+                    .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
                 }
             }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 6).padding(.vertical, 3)
-            .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4))
             .padding(6)
             if cell.state == "no_recording" {
                 Text("No recording at this time").font(.callout).foregroundStyle(.white.opacity(0.8))
@@ -131,8 +202,27 @@ struct PlayerCellOverlay: View {
             }
         }
         .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(large ? Color.accentColor : Color.clear, lineWidth: 2))
+        .overlay(Color.white.opacity(flash).allowsHitTesting(false))
         .onTapGesture(count: 2) { player.doubleClick(index) }
         .onTapGesture { player.click(index) }
+        .gesture(
+            DragGesture(minimumDistance: 3)
+                .onChanged { v in
+                    let delta = CGVector(dx: v.translation.width - lastDrag.width, dy: v.translation.height - lastDrag.height)
+                    lastDrag = v.translation
+                    player.stage?.pan(camera: camera, by: delta)
+                }
+                .onEnded { _ in lastDrag = .zero })
+        .pointerStyle(player.stage?.picturePans(camera) == true ? .grabIdle : nil)
+        .onHover { inside in
+            hovering = inside
+            if inside { player.hovered = index } else if player.hovered == index { player.hovered = nil }
+        }
+        .onChange(of: player.flashCount) {
+            guard player.flashCamera == camera, !reduceMotion else { return }
+            flash = 0.55
+            withAnimation(.easeOut(duration: 0.25)) { flash = 0 }
+        }
         .contextMenu {
             if player.cells.count > 1 {
                 if case .single(let i) = PlayerGrid.normalized(player.mode, count: player.cells.count), i == index {
@@ -143,12 +233,20 @@ struct PlayerCellOverlay: View {
                 }
                 Divider()
             }
-            if let incident, incident.involves(cell.camera) {
-                Button("Remove from Incident") { browser.remove(cell.camera, from: incident.key) }
+            PlayerTileMenu(player: player, index: index, entries: layout.contextMenu)
+            if let incident, incident.involves(camera) {
+                Divider()
+                Button("Remove from Incident") { browser.remove(camera, from: incident.key) }
                     .disabled(incident.cameras.count < 2)
             }
         }
         .help("Click to make it large, double-click to show it alone")
+    }
+
+    /// The dewarped view's name, as a live tile's header names it.
+    static func viewName(_ player: RecordingsPlayer, _ camera: RecordingCamera) -> String? {
+        let mode = player.tileViews.fisheyeSetting(camera).mode
+        return mode.dewarps ? mode.title : nil
     }
 
     static func stateText(_ c: RecordingsPlayer.Cell) -> String? {
@@ -1025,5 +1123,104 @@ struct RangeDownloadSheet: View {
         }
         .padding(16)
         .frame(width: 400)
+    }
+}
+
+/// One header button of a player cell: Save Picture, Reset Zoom, the Fisheye
+/// View menu, or "…" with what did not fit.
+struct PlayerHeaderButton: View {
+    let player: RecordingsPlayer
+    let index: Int
+    let item: TileHeaderItem
+    let layout: TileHeaderLayout
+
+    var body: some View {
+        switch item {
+        case .fisheye:
+            Menu {
+                PlayerFisheyeMenu(player: player, index: index)
+            } label: {
+                Image(systemName: "pano")
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .frame(width: 26, height: 22)
+            .help("Fisheye View")
+            .accessibilityLabel("Fisheye View")
+        case .more:
+            Menu {
+                PlayerTileMenu(player: player, index: index, entries: layout.moreMenu)
+            } label: {
+                Image(systemName: "ellipsis")
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .frame(width: 26, height: 22)
+            .help("More")
+            .accessibilityLabel("More")
+        default:
+            let label = TileHeaderLayout.menu(for: layout.tile).first { $0.item == item }?.label ?? ""
+            Button { player.perform(item, at: index) } label: {
+                Image(systemName: Self.symbol(item)).frame(width: 26, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.white)
+            .help(label)
+            .accessibilityLabel(label)
+        }
+    }
+
+    static func symbol(_ item: TileHeaderItem) -> String {
+        switch item {
+        case .savePicture: "camera"
+        case .resetZoom: "1.magnifyingglass"
+        default: "questionmark"
+        }
+    }
+}
+
+/// The Fisheye View menu of a player cell: the view, then the camera's mount.
+struct PlayerFisheyeMenu: View {
+    let player: RecordingsPlayer
+    let index: Int
+
+    var body: some View {
+        if player.cells.indices.contains(index) {
+            let camera = player.cells[index].camera
+            let current = player.tileViews.fisheyeSetting(camera).mode
+            ForEach(FisheyeViewMode.allCases, id: \.rawValue) { mode in
+                Toggle(mode.title, isOn: Binding(get: { mode == current }, set: { _ in player.setFisheyeMode(mode, for: camera) }))
+            }
+            Divider()
+            Text("Mount")
+            let mount = player.mount(of: camera)
+            ForEach(FisheyeMount.allCases, id: \.rawValue) { m in
+                Toggle(m.title, isOn: Binding(get: { m == mount }, set: { _ in player.setFisheyeMount(m, for: camera) }))
+            }
+        }
+    }
+}
+
+/// The picture items of a player cell's menu (the right-click menu, or the
+/// "…" menu): the live tiles' list and wording (`TileHeaderLayout.menu`).
+struct PlayerTileMenu: View {
+    let player: RecordingsPlayer
+    let index: Int
+    let entries: [TileHeaderMenuEntry]
+
+    var body: some View {
+        ForEach(entries, id: \.item.rawValue) { entry in
+            switch entry.item {
+            case .fisheye:
+                Menu(entry.label) { PlayerFisheyeMenu(player: player, index: index) }
+            case .fillTile:
+                if player.cells.indices.contains(index) {
+                    let camera = player.cells[index].camera
+                    Toggle(entry.label, isOn: Binding(
+                        get: { player.tileViews.fills(camera) },
+                        set: { player.setFill($0, for: camera) }))
+                }
+            default:
+                Button(entry.label) { player.perform(entry.item, at: index) }
+            }
+        }
     }
 }
