@@ -21,14 +21,14 @@ use tracing::info;
 /// Most entries `alerts_get` answers with.
 const MAX_QUERY_LIMIT: usize = 1000;
 
-fn core_err(e: CoreError) -> AlertError {
+pub(super) fn core_err(e: CoreError) -> AlertError {
     match e {
         CoreError::Closed => AlertError::Closed,
         _ => AlertError::InvalidArgument,
     }
 }
 
-fn parse_object(text: &str) -> Result<Value, AlertError> {
+pub(super) fn parse_object(text: &str) -> Result<Value, AlertError> {
     let v: Value = serde_json::from_str(text).map_err(|_| AlertError::InvalidArgument)?;
     if v.is_object() {
         Ok(v)
@@ -38,7 +38,7 @@ fn parse_object(text: &str) -> Result<Value, AlertError> {
 }
 
 /// A camera object `{"device","channel","lens"}` (lens optional).
-fn parse_camera(v: &Value) -> Result<CameraId, AlertError> {
+pub(super) fn parse_camera(v: &Value) -> Result<CameraId, AlertError> {
     let bad = AlertError::InvalidArgument;
     let device = u32::try_from(v["device"].as_u64().ok_or(bad)?).map_err(|_| bad)?;
     let channel = u16::try_from(v["channel"].as_u64().ok_or(bad)?).map_err(|_| bad)?;
@@ -204,6 +204,12 @@ impl crate::Core {
             }
         };
         let acq = parse_acquisition(v.get("acquisition").unwrap_or(&Value::Null))?;
+        let evidence_min = match v.pointer("/evidence/retention_min") {
+            None | Some(Value::Null) => None,
+            Some(m) => Some(super::evidence::clamp_retention_min(
+                m.as_i64().ok_or(AlertError::InvalidArgument)?,
+            )),
+        };
         let mut issues: Vec<String> = Vec::new();
 
         // Outputs the engine knows; others are reported and left out.
@@ -379,6 +385,13 @@ impl crate::Core {
         st.enabled = enabled;
         st.offset_min = offset_min;
         st.acq = acq;
+        {
+            let now_ms = inner.clock.wall_now_us().div_euclid(1000);
+            st.evidence.set_retention_min(
+                evidence_min.unwrap_or(super::evidence::DEFAULT_RETENTION_MIN),
+                now_ms,
+            );
+        }
         st.outputs = outputs;
         st.inputs = inputs;
         if !enabled {
@@ -446,8 +459,15 @@ impl crate::Core {
             None | Some(Value::Null) => None,
             Some(t) => Some(t.as_i64().ok_or(AlertError::InvalidArgument)?),
         };
+        let test = v["test"].as_bool().unwrap_or(false);
+        let to_ha = test && v["send_to_home_assistant"].as_bool().unwrap_or(false);
+        let only_camera = match v.get("only_camera") {
+            None | Some(Value::Null) => None,
+            Some(c) if test => Some(parse_camera(c)?),
+            Some(_) => return Err(AlertError::InvalidArgument),
+        };
         let id = inner.new_trigger_id();
-        let trigger = if source == Source::External {
+        let mut trigger = if source == Source::External {
             let origin = v["origin"].as_str().ok_or(AlertError::InvalidArgument)?;
             let body = ExternalBody {
                 kind: kind.to_owned(),
@@ -468,8 +488,17 @@ impl crate::Core {
                 at_ms: at_ms.map_or(now_ms, |t| t.min(now_ms)),
                 received_ms: now_ms,
                 catch_up: v["catch_up"].as_bool().unwrap_or(false),
+                only_camera: None,
             }
         };
+        trigger.only_camera = only_camera;
+        if test {
+            let mut st = lock(&inner.state);
+            st.tests.insert(id, to_ha);
+            while st.tests.len() > super::MAX_TESTS {
+                st.tests.pop_first();
+            }
+        }
         inner
             .intake
             .try_send(Intake::Full(trigger))
@@ -856,8 +885,15 @@ impl crate::Core {
             "rechecks": st.requests.values().filter(|r| r.purpose == Purpose::Recheck).count(),
             "outputs": st.outputs.len(),
             "inputs": st.inputs.len(),
+            "evidence": {
+                "sets": st.evidence.counts().0,
+                "pinned": st.evidence.counts().1,
+                "bytes": st.evidence.counts().2,
+                "retention_min": st.evidence.retention_min(),
+            },
             "input_status": st.inputs.iter().enumerate().map(|(i, s)| json!({
                 "index": i,
+                "id": s.raw["id"],
                 "kind": s.raw["kind"],
                 "status": s.input.status(),
             })).collect::<Vec<_>>(),
