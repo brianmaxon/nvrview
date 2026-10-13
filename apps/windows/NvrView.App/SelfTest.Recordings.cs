@@ -250,6 +250,88 @@ internal sealed partial class SelfTest
             await Until(() => w.CellRects.Count(r => r is not null) == 3, 5);
             Expect(w.CellRects.Count(r => r is not null) == 3 && w.LabelTexts().Count >= 3, "recordings: the player's cells or labels are missing");
 
+            // parity: playback-quality
+            {
+                // Auto in the grid is the sub-stream, the single view makes Auto pick the main stream, Low and High are forced
+                // during playback and at speed, a zoom past 2x raises a grid tile, and the core reports each camera's tier while
+                // the playback is never reopened, the position never goes back, and the zoom is kept. The macOS step of the same
+                // ID is SelfTest+PlayerQuality.swift.
+                RecordingCamera a = p.Cells[0].Camera, c = p.Cells[1].Camera;
+                int count = p.Cells.Count;
+                List<string> sub = [.. Enumerable.Repeat("sub", count)];
+                List<string> Only(int i, string tier = "main")
+                {
+                    List<string> t = [.. sub];
+                    t[i] = tier;
+                    return t;
+                }
+                void ExpectTiers(string what, List<string> tiers)
+                {
+                    List<string> got = p.ReportedTiers();
+                    Say($"player quality: {what}: {string.Join(", ", got)}");
+                    Expect(got.SequenceEqual(tiers), $"player quality: {what}: the core reports {string.Join(", ", got)}, not {string.Join(", ", tiers)}");
+                }
+                long Position() => p.PositionMs;
+
+                p.Mode = PlayerGridMode.Tiled;
+                p.SetRate(1);
+                foreach (PlayerCell cell in p.Cells)
+                {
+                    p.SetQuality(cell.Camera, PlayerQuality.Auto);
+                }
+                ExpectTiers("Auto in the grid", sub);
+                Expect(p.Cells.All(cell => p.Streams.Label(cell.Camera) == "sub stream"), "player quality: the header does not say sub stream in the grid");
+
+                // The zoom is kept across every change below.
+                p.Views.ZoomAround(a, 0.5, 0.5, 1.5, ZoomBase.Whole);
+                TileZoom zoom = p.Views.Zoom(a);
+                int changes = p.StreamChanges;
+                long last = Position();
+
+                // The single view: Auto asks for the main stream of that camera only.
+                p.DoubleClick(0);
+                ExpectTiers("Auto in the single view", Only(0));
+                Expect(p.Streams.Label(a) == "main stream", $"player quality: the header says {p.Streams.Label(a)} for the main stream");
+                Expect(Position() >= last, "player quality: the position went back at the single view");
+                last = Position();
+
+                // Low during playback, then High on the other camera while it is hidden.
+                p.SetQuality(a, PlayerQuality.Low);
+                ExpectTiers("Low in the single view", sub);
+                p.SetQuality(c, PlayerQuality.High);
+                ExpectTiers("High on another camera", Only(1));
+                Expect(p.Streams.Label(a) == "Low · sub stream", $"player quality: the header says {p.Streams.Label(a)} for Low");
+
+                // At speed: Auto goes to the sub-stream, forced choices stay.
+                p.SetQuality(a, PlayerQuality.Auto);
+                List<string> both = [.. sub];
+                both[0] = "main";
+                both[1] = "main";
+                ExpectTiers("Auto in the single view again", both);
+                p.SetRate(4);
+                ExpectTiers("4x: Auto is the sub-stream, High stays", Only(1));
+                p.SetQuality(c, PlayerQuality.Auto);
+                ExpectTiers("4x: all Auto", sub);
+                p.SetRate(1);
+                ExpectTiers("1x again: the single view's camera is main", Only(0));
+
+                // Zoomed past 2x in the grid raises that tile.
+                p.Mode = PlayerGridMode.Tiled;
+                ExpectTiers("back to the grid", sub);
+                p.Views.ZoomAround(c, 0.5, 0.5, 2.1, ZoomBase.Whole);
+                p.RefreshStreams();
+                ExpectTiers("zoomed past 2x in the grid", Only(1));
+                p.Views.SetZoom(c, TileZoom.None);
+                p.RefreshStreams();
+                ExpectTiers("zoom reset", sub);
+
+                Expect(p.Views.Zoom(a) == zoom, $"player quality: the zoom changed from {zoom} to {p.Views.Zoom(a)}");
+                Expect(p.Opens == opens, "player quality: the playback was reopened");
+                Expect(Position() >= last, "player quality: the position went back");
+                Expect(p.StreamChanges > changes, "player quality: no stream change reached the core");
+                p.Views.SetZoom(a, TileZoom.None);
+            }
+
             // parity: playback-scrub
             Incident? playing = b.PlayingIncident;
             TimelineLane? lane = b.Lanes.FirstOrDefault(l => p.Cameras.Contains(l.Camera));

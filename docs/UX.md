@@ -1308,10 +1308,13 @@ grids on both (M3 and W3); exports on both (M4 and W4).
     its camera and the moment it is saved, not the recording's time).
   - **Header and menus:** a hover header on each cell with the camera name
     and the picture buttons the header model gives a playback tile
-    (`TileHeaderTile.Playback`: Save Picture, Reset Zoom, Fisheye View, then
-    "…" for what does not fit); the right-click menu holds the same items
-    after Show Alone, Make Large and Show All Cameras. Record, Speaker,
-    Quality, talk-back, PTZ and calls are live-only and are not offered.
+    (`TileHeaderTile.Playback`: Save Picture, Reset Zoom, Quality, Fisheye
+    View, then "…" for what does not fit); the right-click menu holds the
+    same items after Show Alone, Make Large and Show All Cameras. Record,
+    Speaker, talk-back, PTZ and calls are live-only and are not offered.
+    While the pointer is over a cell, its header also says which stream
+    plays ("main stream", "sub stream"; a forced choice reads "High · main
+    stream"), as a live tile's does.
     The keys 0, P and Shift+P act on the cell under the pointer, else the
     large (or first) one.
   - **Kept per tile:** the zoom, the crop, the Fill choice and the fisheye
@@ -1325,10 +1328,32 @@ grids on both (M3 and W3); exports on both (M4 and W4).
     played, downloaded or exported (exports and stills are full frame; the
     export has no zoomed area, and the Save items above are the way to keep
     a region), and it adds no decoding, so playback pacing is unchanged.
-  - **Not here:** the zoom-driven switch to the main stream
-    ("Stream quality per tile"): a playback's streams are fixed for the
-    play, so zooming shows the picture's own detail enlarged. The follow cut
-    and the grids are one composed picture and do not zoom.
+  - **Quality** (per camera, in the tile's header and menu, as the live
+    tiles' Quality menu): **Auto**, **High** (the main stream) and **Low**
+    (the sub-stream). It can change during playback, also at speed; the
+    core restarts only that camera's play at the current position (the
+    other cameras keep playing; the device keeps one seek position per
+    session, so the restart follows the group-start rules of PLAYBACK.md),
+    and the picture and the zoom stay. Auto (`PlayerStreams`, the rule of
+    both apps, with tests):
+    - the sub-stream in the grid and in the large-and-small layout;
+    - the main stream in the single view, and for a lone camera, at 1x and
+      slower;
+    - the sub-stream at 2x and faster, whatever the layout or zoom (the
+      device sends keyframes only from 2x, so the main stream buys
+      nothing);
+    - the main stream for a tile zoomed to 2x or more (the live tiles' rule,
+      with its hysteresis: back to the sub-stream below 1.6x).
+    High and Low hold whatever the layout, speed or zoom. The choice
+    belongs to the camera's tile and is kept with the zoom: seeks, speed
+    changes and layout changes keep it, and a camera that leaves the player
+    forgets it. It is not saved with the window (a new playback starts on
+    Auto). It only chooses what plays: downloads and exports choose their
+    own stream per request (the Export panel). A stream that plays the
+    device's main stream costs it more than the sub-stream, so only the
+    large camera of a single view is raised by Auto.
+  - **Not here:** The follow cut and the grids are one composed picture of
+    downloaded files and do not zoom or have a Quality choice.
 - **Transport:** back and forward 10 s, play and pause, the device time at
   the playhead, the speed (0.25×, 0.5×, 1×, 2×, 4×, 8×, 16×; from 2× up
   "Keyframes only, no sound", below 1× "No sound below 1×"), Split Here,

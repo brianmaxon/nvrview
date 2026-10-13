@@ -54,7 +54,9 @@ final class RecordingsPlayer {
     /// The incident the playback was last positioned for.
     private(set) var incidentKey: String?
     /// How the cameras share the player.
-    var mode: PlayerGridMode = .grid { didSet { if mode != oldValue { updateAudio() } } }
+    var mode: PlayerGridMode = .grid {
+        didSet { if mode != oldValue { updateAudio(); refreshStreams() } }
+    }
     var muted = false { didSet { if muted != oldValue { updateAudio() } } }
     /// 0...1.
     var volume: Float = 1 { didSet { if volume != oldValue { updateAudio() } } }
@@ -65,7 +67,11 @@ final class RecordingsPlayer {
     /// speed changes, another incident of the same cameras and the grid,
     /// large and single views keep it; a camera that leaves the player
     /// forgets it. Nothing downloaded, exported or edited reads it.
-    var tileViews = PlayerTileViews()
+    var tileViews = PlayerTileViews() { didSet { if tileViews != oldValue { refreshStreams() } } }
+    /// Each camera's stream choice (Auto, High, Low) and what plays now
+    /// (docs/UX.md "Recordings", "Quality"). A change restarts only that
+    /// camera's play at the position; the zoom above is kept.
+    private(set) var streams = PlayerStreams()
     /// The view that draws the cells (it takes the pointer's zoom and pan).
     @ObservationIgnored weak var stage: PlayerStageView?
     /// The cell under the pointer, if any (the keys act on it).
@@ -81,6 +87,8 @@ final class RecordingsPlayer {
     /// How many playbacks this player opened and seeks it sent (self-test).
     @ObservationIgnored private(set) var opens = 0
     @ObservationIgnored private(set) var seeks = 0
+    /// How many stream changes this player asked the core for (self-test).
+    @ObservationIgnored private(set) var streamChanges = 0
 
     init(model: RecordingsModel) {
         self.model = model
@@ -144,11 +152,16 @@ final class RecordingsPlayer {
     private func open(cameras: [RecordingCamera], day: Int64, at: Int64) {
         let start = day * 1000, end = (day + DeviceTime.day) * 1000
         let position = min(max(at, start), end)
+        streams.retain(cameras)
+        let views = tileViews
+        let tiers = streams.opening(
+            cameras, mode: PlayerGrid.normalized(mode, count: cameras.count), rate: rate,
+            zoom: { views.zoom($0).scale })
         let request = PlaybackRequest.range(
             startMs: start, endMs: end, positionMs: position, rate: rate,
-            cameras: cameras.map { PlaybackCamera(camera: $0) })
+            cameras: zip(cameras, tiers).map { PlaybackCamera(camera: $0, tier: $1 == .main ? "main" : "sub") })
         do throws(CoreStatus) {
-            let opened = try model.openPlayback(json: request, cameras: cameras, player: self)
+            let opened = try model.openPlayback(json: request, cameras: cameras, tiers: tiers, player: self)
             opens += 1
             playback = opened.id
             cells = zip(cameras, opened.tiles).map { Cell(camera: $0, tile: $1) }
@@ -221,6 +234,7 @@ final class RecordingsPlayer {
         guard PlaybackSpeed.all.contains(new), new != rate else { return }
         rate = new
         updateAudio()
+        refreshStreams()
         guard let p = playback else { return }
         model.playbackCall { core throws(CoreStatus) in try core.playbackSetRate(p, rate: new) }
     }
@@ -231,17 +245,56 @@ final class RecordingsPlayer {
         let tile = cells[i].tile
         cells.remove(at: i)
         tileViews.retain(cameras)
+        streams.retain(cameras)
         mode = PlayerGrid.normalized(mode, count: cells.count)
         model.removePlaybackCamera(p, tile: tile)
-        if cells.isEmpty { close() } else { updateAudio() }
+        if cells.isEmpty { close() } else {
+            updateAudio()
+            // The camera left may be the only one now: Auto asks for its main stream.
+            refreshStreams()
+        }
     }
 
     /// Adds a camera to the player (at most four), joining at the position.
     func add(_ camera: RecordingCamera) {
         guard let p = playback, cells.count < PlayerGrid.maxCameras, !cameras.contains(camera) else { return }
-        if let tile = model.addPlaybackCamera(p, camera: camera) {
+        var joining = streams
+        let tier = joining.wanted(
+            camera, cameras: cameras + [camera], mode: PlayerGrid.normalized(mode, count: cells.count + 1), rate: rate,
+            zoomScale: tileViews.zoom(camera).scale)
+        if let tile = model.addPlaybackCamera(p, camera: camera, tier: tier) {
+            joining.joined(camera, tier: tier)
+            streams = joining
             cells.append(Cell(camera: camera, tile: tile))
             updateAudio()
+            // The cameras already there are no longer alone: Auto goes back to their sub-stream.
+            refreshStreams()
+        }
+    }
+
+    // MARK: Quality
+
+    /// The camera's choice: Auto, High (main stream) or Low (sub-stream).
+    func setQuality(_ quality: PlayerQuality, for camera: RecordingCamera) {
+        guard streams.quality(camera) != quality else { return }
+        streams.setQuality(quality, for: camera)
+        refreshStreams()
+    }
+
+    /// Asks the core for the stream of every camera whose stream is not the
+    /// one wanted now (the layout, the speed, the zoom and the choice
+    /// decide: `PlayerStreams`). The core restarts that camera's play at the
+    /// position, in the group-start rules; the picture and zoom stay.
+    func refreshStreams() {
+        guard playback != nil else { return }
+        let views = tileViews
+        let wanted = streams.changes(
+            cameras, mode: PlayerGrid.normalized(mode, count: cells.count), rate: rate,
+            zoom: { views.zoom($0).scale })
+        streamChanges += wanted.count
+        for change in wanted {
+            guard let cell = cells.first(where: { $0.camera == change.camera }) else { continue }
+            model.setPlaybackTier(cell.tile, change.tier)
         }
     }
 

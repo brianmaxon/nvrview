@@ -51,6 +51,12 @@ public interface IPlayback
 
     /// <summary><c>nv_playback_close</c>: every tile closes, then <c>playback_closed</c>.</summary>
     void PlaybackClose(ulong playback);
+
+    /// <summary>
+    /// <c>nv_tile_set_tier</c> on a playback tile (Main or Sub): that camera's play restarts at the playback's position
+    /// in the new tier, as a new generation (no <c>tile_tier</c> event); <see cref="PlaybackStatus"/> reports the tier.
+    /// </summary>
+    void SetTier(ulong tile, NvStreamTier tier);
 }
 
 public sealed unsafe partial class NvCore : IPlayback

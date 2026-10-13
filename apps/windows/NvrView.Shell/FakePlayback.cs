@@ -288,6 +288,33 @@ public sealed class FakePlayback(Action<string> sink, FakeRecordings recordings,
     }
 
     /// <inheritdoc/>
+    public void SetTier(ulong tile, NvStreamTier tier)
+    {
+        if (tier is not (NvStreamTier.Main or NvStreamTier.Sub))
+        {
+            throw Error(NvStatus.InvalidArgument, "nv_tile_set_tier");
+        }
+        ulong? found = null;
+        lock (_gate)
+        {
+            foreach ((ulong id, Pb p) in _playbacks)
+            {
+                if (p.Cameras.FirstOrDefault(c => c.Tile == tile) is { } cam)
+                {
+                    cam.Tier = tier == NvStreamTier.Main ? "main" : "sub";
+                    found = id;
+                    break;
+                }
+            }
+        }
+        if (found is null)
+        {
+            throw Error(NvStatus.UnknownId, "nv_tile_set_tier");
+        }
+        ScheduleWork();
+    }
+
+    /// <inheritdoc/>
     public void PlaybackPlay(ulong playback) =>
         With(playback, "nv_playback_play", p =>
         {

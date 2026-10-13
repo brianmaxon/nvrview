@@ -189,10 +189,10 @@ public sealed class TileHeaderLayout
         return new TileHeaderLayout(width, width, titleWidth, tile, metrics, visible, overflow);
     }
 
-    /// <summary>What a recording player's tile offers: the picture's own actions.</summary>
+    /// <summary>What a recording player's tile offers: the picture's own actions and its Quality (Auto, High, Low).</summary>
     public static readonly IReadOnlySet<TileHeaderItem> PlaybackItems = new HashSet<TileHeaderItem>
     {
-        TileHeaderItem.SavePicture, TileHeaderItem.ResetZoom, TileHeaderItem.ResetPosition, TileHeaderItem.Fisheye,
+        TileHeaderItem.SavePicture, TileHeaderItem.ResetZoom, TileHeaderItem.ResetPosition, TileHeaderItem.Quality, TileHeaderItem.Fisheye,
         TileHeaderItem.FillTile, TileHeaderItem.SavePictureAs, TileHeaderItem.SaveZoomedArea, TileHeaderItem.SaveOriginalFisheye,
     };
 

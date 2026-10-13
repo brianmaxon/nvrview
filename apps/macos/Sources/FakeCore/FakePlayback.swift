@@ -299,6 +299,21 @@ extension FakeCore {
         }
     }
 
+    /// A tier switch of a playback tile (`nv_tile_set_tier`): the camera plays
+    /// the new tier from the position; `playbackStatus` reports it.
+    func setPlaybackTier(tile: UInt64, tier: StreamTier) throws(CoreStatus) {
+        try playbackWorld.locked { w throws(CoreStatus) in
+            for (id, var p) in w.playbacks {
+                guard let i = p.cameras.firstIndex(where: { $0.tile == tile }) else { continue }
+                p.cameras[i].tier = tier == .main ? "main" : "sub"
+                w.playbacks[id] = p
+                return
+            }
+            throw .unknownID
+        }
+        schedulePlaybackWork()
+    }
+
     /// Any thread, also inside callbacks.
     public func playbackPosition(_ playback: UInt64) throws(CoreStatus) -> PlaybackPosition {
         try withPlayback(playback) { p, _ in PlaybackPosition(positionMs: p.positionMs, state: p.state) }

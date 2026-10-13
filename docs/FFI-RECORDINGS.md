@@ -796,6 +796,12 @@ shown. A newer seek replaces one still starting (the superseded generation
 ends with its final Reset). Tier switches on a playback tile restart that
 tile's play at the current position in the new tier, also as a new
 generation.
+The recording players use this for their Quality choice (`main` or `sub`,
+changeable during playback, also at speed): `nv_tile_set_tier` with
+`NV_TIER_MAIN` or `NV_TIER_SUB` on one camera's tile; `nv_playback_status`
+reports each camera's `tier` after the switch, and no `tile_tier` event is
+sent. A download or an export names its stream per request and per camera
+(`"tier": "main"|"sub"`, default `main`), so nothing here changes requests.
 
 - **Generation 0 of a playback tile carries no `Decode`**: it is an empty
   placeholder that ends with a final Reset when the opening seek's

@@ -373,9 +373,14 @@ costs no decode work.
   leaves the player forgets it. Nothing in a download, an export or an edit
   reads it (exports are full frame; the core has no region in `nv_still_plan`
   or the edit requests), and it never reaches the device.
-- A playback's streams are fixed for the play (the tier is chosen at open), so
-  the live tiles' "zoomed past 2x asks for the main stream" has no playback
-  counterpart. A zoomed playback tile shows its stream's own detail enlarged.
+- A camera's stream (main or sub) is chosen per camera and can change during
+  the play: Auto picks it by layout, speed and zoom, and High or Low force it
+  (docs/UX.md "Recordings", Quality). A change restarts only that camera's
+  play at the current position (on older firmware: stop, seek, 13, play, as
+  any restart; the device keeps one seek position per session, so the
+  camera's device-mates restart with it as a group). The zoom is the player's
+  and stays. A zoomed tile on the sub-stream shows that stream's detail
+  enlarged until Auto (zoomed to 2x) or High asks for the main stream.
 - Save Picture saves the picture the tile shows now, at the stream's size, with
   the live tiles' naming (the camera and the moment of saving).
 

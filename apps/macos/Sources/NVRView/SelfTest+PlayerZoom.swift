@@ -255,7 +255,7 @@ extension SelfTest {
         let p = b.player
         guard let ref = model.allCameras.first(where: { model.isFisheye($0) }) else {
             print("player fisheye: no fisheye camera (run with the fisheye fixture), skipped")
-            return playbackEdits(b, fake, rec)
+            return playbackQuality(b, fake, rec)
         }
         let camera = RecordingCamera(device: ref.device, channel: ref.channel, lens: ref.lens)
         // The fake core lets a playback add only a camera of a device whose
@@ -271,7 +271,7 @@ extension SelfTest {
                 print("player fisheye: the fisheye camera has no recording picture here, skipped (cameras \(p.cameras.count), items \(stage.items.count), states \(p.cells.map(\.state)))")
                 p.remove(camera)
                 try? fake.recordingsEnable(deviceKey: camera.device, json: nil)
-                return playbackEdits(b, fake, rec)
+                return playbackQuality(b, fake, rec)
             }
             stage.drawNow()
             if !stage.isFisheye(camera) { problems.append("player fisheye: the camera is not a fisheye camera to the player") }
@@ -328,7 +328,7 @@ extension SelfTest {
                     if p.tileViews.fisheyeSetting(camera) != .original { problems.append("player fisheye: the removed camera kept its view") }
                     try? FileManager.default.removeItem(at: folder)
                     try? fake.recordingsEnable(deviceKey: camera.device, json: nil)
-                    playbackEdits(b, fake, rec)
+                    playbackQuality(b, fake, rec)
                 }
             }
         }

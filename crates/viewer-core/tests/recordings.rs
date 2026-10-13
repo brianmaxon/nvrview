@@ -962,3 +962,75 @@ fn months_alone_fill_the_calendar_and_cameras_carry_reported_names() {
     );
     sim.run_free(|| core.shutdown());
 }
+
+/// The stream of each download request is chosen per request and per
+/// camera: main when the request names none, and sub when it says so, for
+/// incident downloads and range downloads alike.
+#[test]
+fn a_downloads_stream_is_chosen_per_request_and_camera() {
+    use viewer_core::StreamTier;
+    let sim = SimRuntime::new();
+    let nvr = archive_mock(&sim, None, None);
+    let (core, rec) = start(config(&sim, None));
+    let out = tempfile::tempdir().unwrap();
+    core.recordings_configure(
+        &json!({"downloads_dir": out.path(), "downloads": {"chunk_s": 5}}).to_string(),
+    )
+    .unwrap();
+    let (_, key) = add(&core, &nvr);
+    core.recordings_enable(&key, Some(r#"{"channels":[{"channel":0},{"channel":1}]}"#))
+        .unwrap();
+    let want = json!({"cameras": [cam(&key, 0), cam(&key, 1)], "days": [day(8), day(9)]});
+    core.recordings_want(&want.to_string()).unwrap();
+    sim_until(&sim, &core, "the fill", 20, || {
+        idle_with_nothing_pending(&rec, &key) && incident_keys(&core).len() == 2
+    });
+    let incidents = incident_keys(&core);
+    let (key9, key8) = (incidents[0].0.clone(), incidents[1].0.clone());
+    let streams = |channel: u8| -> Vec<Option<StreamTier>> {
+        nvr.download_log()
+            .iter()
+            .filter(|l| l.channel == channel)
+            .map(|l| l.stream)
+            .collect()
+    };
+
+    // An incident on camera 1 alone, in the sub-stream.
+    let sub = json!({"incident": key9,
+        "cameras": [{"camera": cam(&key, 1), "tier": "sub"}]});
+    parse(core.download_incident(&sub.to_string()));
+    sim_until(&sim, &core, "the sub-stream download", 30, || {
+        !streams(1).is_empty()
+    });
+    assert!(streams(1).iter().all(|s| *s == Some(StreamTier::Sub)));
+    assert!(streams(0).is_empty(), "only the chosen camera");
+
+    // The same without naming a tier is the main stream.
+    parse(core.download_incident(&json!({"incident": key8}).to_string()));
+    sim_until(&sim, &core, "the main-stream download", 30, || {
+        !streams(0).is_empty()
+    });
+    assert!(streams(0).iter().all(|s| *s == Some(StreamTier::Main)));
+
+    // A range: one camera in each stream.
+    let range = json!({"start": t(9, 7, 42, 0), "end": t(9, 7, 42, 30),
+        "cameras": [{"camera": cam(&key, 1), "tier": "main"},
+                    {"camera": cam(&key, 0), "tier": "sub"}]});
+    let before = (streams(0).len(), streams(1).len());
+    parse(core.download_range(&range.to_string()));
+    sim_until(&sim, &core, "the range download", 30, || {
+        streams(0).len() > before.0 && streams(1).len() > before.1
+    });
+    assert_eq!(streams(0).last(), Some(&Some(StreamTier::Sub)));
+    assert_eq!(streams(1).last(), Some(&Some(StreamTier::Main)));
+    // The tier is part of the range download's identity.
+    let again = parse(core.download_range(&range.to_string()));
+    assert_eq!(again["existing"], true);
+    let flipped = json!({"start": t(9, 7, 42, 0), "end": t(9, 7, 42, 30),
+        "cameras": [{"camera": cam(&key, 1), "tier": "sub"},
+                    {"camera": cam(&key, 0), "tier": "sub"}]});
+    assert_eq!(
+        parse(core.download_range(&flipped.to_string()))["existing"],
+        false
+    );
+}

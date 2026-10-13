@@ -780,11 +780,12 @@ final class RecordingsModel {
     func makePlayer() -> RecordingsPlayer { RecordingsPlayer(model: self) }
 
     /// Opens a playback for `player` (its events go to it).
-    func openPlayback(json: String, cameras: [RecordingCamera], player: RecordingsPlayer) throws(CoreStatus)
-        -> CoreBridge.OpenedTiles
+    func openPlayback(json: String, cameras: [RecordingCamera], tiers: [StreamTier], player: RecordingsPlayer)
+        throws(CoreStatus) -> CoreBridge.OpenedTiles
     {
         guard available, !closed else { throw .unsupported }
-        let opened = try bridge.openPlayback(json: json, cameras: cameras.map { (UInt8($0.channel), .sub) })
+        let opened = try bridge.openPlayback(
+            json: json, cameras: cameras.enumerated().map { (UInt8($1.channel), tiers[$0]) })
         players[opened.id] = PlayerRef(player)
         return opened
     }
@@ -800,10 +801,19 @@ final class RecordingsModel {
         bridge.removePlaybackCamera(playback, tile: tile)
     }
 
-    func addPlaybackCamera(_ playback: UInt64, camera: RecordingCamera) -> CoreTile? {
+    /// Restarts a playback camera's play at the position in `tier`.
+    func setPlaybackTier(_ tile: CoreTile, _ tier: StreamTier) {
+        guard !closed else { return }
+        do throws(CoreStatus) { try bridge.setPlaybackTileTier(tile, tier) } catch {
+            if error != .unknownID { notice = "The player could not change the quality (status \(error.code))" }
+        }
+    }
+
+    func addPlaybackCamera(_ playback: UInt64, camera: RecordingCamera, tier: StreamTier = .sub) -> CoreTile? {
         do throws(CoreStatus) {
             return try bridge.addPlaybackCamera(
-                playback, json: PlaybackCamera(camera: camera).json, channel: UInt8(camera.channel), tier: .sub)
+                playback, json: PlaybackCamera(camera: camera, tier: tier == .main ? "main" : "sub").json,
+                channel: UInt8(camera.channel), tier: tier)
         } catch {
             notice = error == .limit ? "At most four cameras play at once" : "Could not add the camera (status \(error.code))"
             return nil

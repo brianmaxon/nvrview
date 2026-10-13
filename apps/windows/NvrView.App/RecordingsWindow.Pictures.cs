@@ -322,7 +322,7 @@ internal sealed partial class RecordingsWindow
         if (_chromes.GetValueOrDefault(t) is { } chrome)
         {
             _hadPicture[t] = t.PictureWidth > 0 && t.PictureHeight > 0;
-            chrome.Refresh(StageView.TitleOf(t), null, false, null, PlayerHeaderTile(t));
+            chrome.Refresh($"{StageView.TitleOf(t)} · {Browser.Player.Streams.Label(CameraOf(t))}", null, false, null, PlayerHeaderTile(t));
         }
     }
 
@@ -615,7 +615,7 @@ internal sealed partial class RecordingsWindow
             case TileHeaderItem.FillTile:
                 SetPlayerFill(t, !PlayerFills(t));
                 break;
-            case TileHeaderItem.Fisheye or TileHeaderItem.More:
+            case TileHeaderItem.Quality or TileHeaderItem.Fisheye or TileHeaderItem.More:
                 if (PlayerMenuFor(t, item) is { } menu)
                 {
                     if (from is not null)
@@ -664,6 +664,24 @@ internal sealed partial class RecordingsWindow
     {
         switch (entry.Item)
         {
+            case TileHeaderItem.Quality:
+                {
+                    // Auto, High (main stream), Low (sub-stream), as the live tiles' Quality menu; what plays now follows.
+                    RecordingsPlayer player = Browser.Player;
+                    RecordingCamera camera = CameraOf(t);
+                    var quality = new MenuFlyoutSubItem { Text = entry.Label };
+                    foreach (PlayerQuality q in Enum.GetValues<PlayerQuality>())
+                    {
+                        var item = new RadioMenuFlyoutItem { Text = q.Title(), GroupName = "player-quality", IsChecked = q == player.Streams.Quality(camera) };
+                        ToolTipService.SetToolTip(item, q.Detail());
+                        PlayerQuality choice = q;
+                        item.Click += (_, _) => player.SetQuality(camera, choice);
+                        quality.Items.Add(item);
+                    }
+                    quality.Items.Add(new MenuFlyoutSeparator());
+                    quality.Items.Add(new MenuFlyoutItem { Text = $"Playing the {player.Streams.Label(camera)}", IsEnabled = false });
+                    return quality;
+                }
             case TileHeaderItem.Fisheye:
                 {
                     var view = new MenuFlyoutSubItem { Text = entry.Label };

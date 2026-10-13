@@ -549,11 +549,12 @@
           "width": 600,
           "anchor": 600,
           "titleTruncated": false,
-          "visible": ["recording-pill", "title", "save-picture", "reset-zoom", "fisheye"],
+          "visible": ["recording-pill", "title", "save-picture", "reset-zoom", "quality", "fisheye"],
           "overflow": [],
           "menu": [
             ["save-picture", "Save Picture", "P", "P"],
             ["reset-zoom", "Reset Zoom", "0", "0"],
+            ["quality", "Quality", "", ""],
             ["fisheye", "Fisheye View", "", ""],
             ["fill-tile", "Fill Tile", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"],
@@ -576,7 +577,7 @@
           "width": 600,
           "anchor": 600,
           "titleTruncated": false,
-          "visible": ["title", "save-picture", "reset-zoom", "fisheye"],
+          "visible": ["title", "save-picture", "reset-zoom", "quality", "fisheye"],
           "overflow": []
         },
         {
@@ -584,16 +585,16 @@
           "anchor": 130,
           "titleTruncated": true,
           "visible": ["title", "save-picture", "more"],
-          "overflow": ["reset-zoom", "fisheye"],
-          "moreMenu": ["reset-zoom", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
+          "overflow": ["reset-zoom", "quality", "fisheye"],
+          "moreMenu": ["reset-zoom", "quality", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
         },
         {
           "width": 110,
           "anchor": 110,
           "titleTruncated": true,
           "visible": ["title", "more"],
-          "overflow": ["save-picture", "reset-zoom", "fisheye"],
-          "moreMenu": ["save-picture", "reset-zoom", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
+          "overflow": ["save-picture", "reset-zoom", "quality", "fisheye"],
+          "moreMenu": ["save-picture", "reset-zoom", "quality", "fisheye", "fill-tile", "save-picture-as", "save-zoomed-area", "save-original-fisheye"]
         }
       ]
     },
@@ -609,10 +610,11 @@
           "width": 400,
           "anchor": 400,
           "titleTruncated": false,
-          "visible": ["title", "save-picture"],
+          "visible": ["title", "save-picture", "quality"],
           "overflow": [],
           "menu": [
             ["save-picture", "Save Picture", "P", "P"],
+            ["quality", "Quality", "", ""],
             ["reset-position", "Reset Position", "0", "0"],
             ["fill-tile", "Fill Tile", "", ""],
             ["save-picture-as", "Save Picture As…", "⇧P", "Shift+P"]
