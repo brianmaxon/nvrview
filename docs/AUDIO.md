@@ -150,6 +150,22 @@ the crate's `Renderer`.
   delay of 256 ms. The rate estimate at the end of every pass is
   16,000.12 Hz; a run that ends seconds after a restart reports the young
   estimate of the new epoch (16,009 Hz), which is not a bias.
+- **Sync tests** (`crates/audio-pipeline/tests/sim.rs`, a simulated
+  camera, network, and device on a simulated clock): long-run behavior is
+  proven directly in minutes of simulated time, a few seconds each. The
+  timestamper and the presentation estimator land on exact, known clock
+  ratios; with exactly linear clocks and no jitter the whole loop settles
+  and stays stationary (every click within 5 ms, the rate estimate right,
+  the correction equal to the true skew, so the error cannot grow), for the
+  measured clocks and for the worst case (800 ppm audio, 30 ppm camera to
+  host, 50 ppm device); with the measured jitter every click stays within
+  ±40 ms and jitter does not swing the correction; after one stall and
+  after several in a row the latency equals that of the same run without
+  them; the same checks pass with every clock and counter started 3 hours
+  and a week in; and the adaptive delay settles on its target and stays.
+  The original 3-hour runs are one ignored test, run by hand only when a
+  sync problem is suspected:
+  `cargo nextest run -p audio-pipeline --test sim --run-ignored only --no-capture`.
 - **Tap**: the decoded samples before playout resampling, as 16 kHz mono
   (downmixed, and resampled when the source is not 16 kHz, as for 8 kHz
   ADPCM), with each block's camera time, the arrival wall-clock time of the

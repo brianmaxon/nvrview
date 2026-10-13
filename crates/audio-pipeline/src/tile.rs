@@ -106,6 +106,8 @@ pub struct TileAudio {
     stats: AudioStats,
     owner: u64,
     level: Option<std::sync::Arc<crate::DecodeLevel>>,
+    /// Number of the first sample of every epoch (0 except in tests).
+    sample_base: u64,
 }
 
 impl std::fmt::Debug for TileAudio {
@@ -140,7 +142,16 @@ impl TileAudio {
             stats: AudioStats::default(),
             owner: 0,
             level: None,
+            sample_base: 0,
         }
+    }
+
+    /// Numbers the samples of every epoch from `base` instead of 0, as if
+    /// the counters had run for a long time. For tests of long-running
+    /// numerics; call before the first record.
+    #[doc(hidden)]
+    pub fn set_sample_base(&mut self, base: u64) {
+        self.sample_base = base;
     }
 
     /// Tags the playout slots this tile claims from now on, so the
@@ -244,13 +255,18 @@ impl TileAudio {
             self.format = Some(format);
             match self.timestamper.as_mut() {
                 Some(t) => t.reset_with_rate(format.sample_rate),
-                None => self.timestamper = Some(Timestamper::new(format.sample_rate)),
+                None => {
+                    self.timestamper =
+                        Some(Timestamper::with_base(format.sample_rate, self.sample_base));
+                }
             }
         }
         let Some(ts) = self.timestamper.as_mut() else {
             return;
         };
         let stamp = ts.push(frames, after_video_pts_us);
+        // Samples since the epoch started.
+        let into_epoch = stamp.first_sample - ts.base();
         self.stats.format = Some(format);
         self.stats.epoch = stamp.epoch;
         self.stats.timestamps = ts.stats();
@@ -265,7 +281,7 @@ impl TileAudio {
         if let Some(tl) = stamp.timeline {
             // The first second's timeline is rough; start the delay envelope
             // over once it has settled.
-            if !self.estimator_settled && stamp.first_sample >= u64::from(format.sample_rate) * 2 {
+            if !self.estimator_settled && into_epoch >= u64::from(format.sample_rate) * 2 {
                 self.estimator.reset();
                 self.estimator_settled = true;
             }
@@ -302,7 +318,7 @@ impl TileAudio {
                 map: map.filter(|_| {
                     self.explicit_map.is_some()
                         || (self.estimator_settled
-                            && stamp.first_sample >= u64::from(format.sample_rate) * 3)
+                            && into_epoch >= u64::from(format.sample_rate) * 3)
                 }),
                 playout_delay_us: delay.us,
                 delay_rate: delay.rate,

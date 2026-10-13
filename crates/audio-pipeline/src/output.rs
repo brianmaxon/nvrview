@@ -105,14 +105,15 @@ pub(crate) struct Ring {
 }
 
 impl Ring {
-    fn new(frames: usize, channels: usize) -> Ring {
+    /// A ring whose frame counters start at `first` (0 except in tests).
+    fn new(frames: usize, channels: usize, first: u64) -> Ring {
         let frames = frames.next_power_of_two().max(1024);
         Ring {
             buf: (0..frames * channels).map(|_| AtomicU32::new(0)).collect(),
             mask: frames as u64 - 1,
             channels,
-            write: AtomicU64::new(0),
-            read: AtomicU64::new(0),
+            write: AtomicU64::new(first),
+            read: AtomicU64::new(first),
         }
     }
 
@@ -255,6 +256,8 @@ impl Slot {
 struct Shared {
     format: OutputFormat,
     ring_frames: usize,
+    /// Where the rings' frame counters start (0 except in tests).
+    first_frame: u64,
     slots: Box<[Slot]>,
     calls: AtomicU64,
     frames: AtomicU64,
@@ -278,6 +281,18 @@ impl std::fmt::Debug for AudioOutput {
 /// callback and the [`AudioOutput`] to the tiles. To change the format, make
 /// a new output and hand it to the tiles again.
 pub fn output(format: OutputFormat, config: OutputConfig) -> (AudioOutput, Renderer) {
+    output_at_frame(format, config, 0)
+}
+
+/// Like [`output()`], with every ring's frame counters starting at
+/// `first_frame` instead of 0, as if the output had played for a long time.
+/// For tests of long-running numerics.
+#[doc(hidden)]
+pub fn output_at_frame(
+    format: OutputFormat,
+    config: OutputConfig,
+    first_frame: u64,
+) -> (AudioOutput, Renderer) {
     let format = OutputFormat {
         sample_rate: format.sample_rate.max(1),
         channels: format.channels.clamp(1, 2),
@@ -287,6 +302,7 @@ pub fn output(format: OutputFormat, config: OutputConfig) -> (AudioOutput, Rende
     let shared = Arc::new(Shared {
         format,
         ring_frames,
+        first_frame,
         slots: (0..config.max_tiles.max(1)).map(|_| Slot::new()).collect(),
         calls: AtomicU64::new(0),
         frames: AtomicU64::new(0),
@@ -330,9 +346,13 @@ impl AudioOutput {
         })?;
         let slot = &self.shared.slots[index];
         slot.owner.store(owner, Ordering::Release);
-        let ring = slot
-            .ring
-            .get_or_init(|| Ring::new(self.shared.ring_frames, self.shared.format.channels));
+        let ring = slot.ring.get_or_init(|| {
+            Ring::new(
+                self.shared.ring_frames,
+                self.shared.format.channels,
+                self.shared.first_frame,
+            )
+        });
         // Start from an empty ring: drop whatever a previous owner left.
         let gen_ = (slot.skip_gen.fetch_add(1, Ordering::Relaxed) + 1) & 0xFFFF;
         slot.skip_to.store(
