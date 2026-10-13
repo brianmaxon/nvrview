@@ -109,7 +109,8 @@ internal sealed class CoreEvent
                 case "tier": e.Tier = v.GetString(); break;
                 case "name": e.Name = v.GetString(); break;
                 case "model": e.Model = v.GetString(); break;
-                case "key": e.Key = v.GetString(); break;
+                // A thumbnail event's key is an object (the recordings model takes those events above).
+                case "key" when v.ValueKind == JsonValueKind.String: e.Key = v.GetString(); break;
                 case "what": e.What = v.GetString(); break;
                 case "action": e.Action = v.GetString(); break;
                 case "position" when v.ValueKind == JsonValueKind.Number: e.Position = (int)Long(v); break;
@@ -327,7 +328,7 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
                 OpenedPlayback opened = Core.PlaybackOpen(json);
                 foreach (ulong id in opened.Tiles)
                 {
-                    _byId[id] = new VideoTile(Gpu, Core, id, _allowHardware);
+                    _byId[id] = PlaybackTile(id);
                 }
                 return opened;
             }
@@ -338,6 +339,13 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
         }
     }
 
+    // A playback tile's decoder; with NVRVIEW_PACING_TRACE=1 it traces its pacing into the log (docs/RENDERING.md
+    // "Playback pacing").
+    private VideoTile PlaybackTile(ulong id) => new(Gpu, Core, id, _allowHardware)
+    {
+        Pacing = PacingTrace.FromEnvironment ? new PacingTrace(line => AppLog.Info($"pacing: tile {id}: {line}")) : null,
+    };
+
     /// <summary>Adds a camera to a playback, with its tile's decoder made first.</summary>
     public ulong AddPlaybackCamera(ulong playback, string json)
     {
@@ -347,7 +355,7 @@ internal sealed class CoreHost : NvCoreCallbacks, IDisposable
             lock (_tilesLock)
             {
                 ulong id = Core.PlaybackAddCamera(playback, json);
-                _byId[id] = new VideoTile(Gpu, Core, id, _allowHardware);
+                _byId[id] = PlaybackTile(id);
                 return id;
             }
         }

@@ -536,3 +536,60 @@ fn arguments_and_limits() {
         Err(CoreError::Closed)
     );
 }
+
+/// The live pictures one tile was asked to decode after `from`: how many,
+/// and the largest difference between their spacing in time and in
+/// timestamps (ms).
+fn worst_decode_jitter_ms(rec: &Recorder, tile: u64, from: tokio::time::Instant) -> (usize, i64) {
+    let d: Vec<_> = rec
+        .decode_times(tile)
+        .into_iter()
+        .filter(|(_, _, at)| *at >= from)
+        .collect();
+    let worst = d
+        .windows(2)
+        .map(|w| {
+            let wall = (w[1].2 - w[0].2).as_millis() as i64;
+            let media = (w[1].1 as i64 - w[0].1 as i64) / 1000;
+            (wall - media).abs()
+        })
+        .max()
+        .unwrap_or(0);
+    (d.len(), worst)
+}
+
+#[test]
+fn live_pictures_delivered_in_groups_are_decoded_at_their_own_pace() {
+    // A device that sends its 15 fps pictures in pairs (live_pacer.rs):
+    // without pacing every other picture would be decoded together with the
+    // next one, and a renderer showing the newest per refresh would show
+    // half of them. Paced, each is decoded at its own time; an evenly sent
+    // stream is paced too.
+    for burst in [2u32, 1] {
+        let sim = SimRuntime::new();
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/synthetic/h264-basic.h264");
+        let mut cfg = mock_nvr::Config::new(mock_nvr::fixture::Fixture::load(&path).unwrap());
+        cfg.channels = 1;
+        cfg.fps = 15;
+        cfg.video_burst = burst;
+        let nvr = sim_spawn(&sim, cfg);
+        let (core, rec) = start(on_sim(&sim, fast_config()));
+        let addr = nvr.addr();
+        let dev = core
+            .add_device(&addr.ip().to_string(), addr.port(), USER, PASSWORD)
+            .unwrap();
+        let tile = core.open_tile(dev, 0, StreamTier::Sub).unwrap();
+        sim_until(&sim, &core, "decodes", 10, || rec.decodes(tile) >= 10);
+        sim.advance(Duration::from_secs(2));
+        let from = sim.now();
+        sim.advance(Duration::from_secs(6));
+        let (n, worst) = worst_decode_jitter_ms(&rec, tile, from);
+        assert!(n >= 85, "burst {burst}: {n} decodes in 6 s");
+        assert!(
+            worst <= 15,
+            "burst {burst}: a decode {worst} ms off its spacing"
+        );
+        core.close_tile(tile).unwrap();
+    }
+}

@@ -366,6 +366,10 @@ struct State {
     stores: Option<Stores>,
     devices: HashMap<String, Dev>,
     sessions: HashMap<String, Added>,
+    /// Sessions of devices added earlier under a key a later device took
+    /// (two entries for one address), oldest first: when the later device
+    /// is removed, the newest of these serves the key again.
+    shadowed: HashMap<String, Vec<Added>>,
     /// The app's today holds: hold number to cameras.
     holds: HashMap<u64, Vec<(String, DeviceCamera)>>,
     incidents: Incidents,
@@ -480,13 +484,16 @@ impl RecordingsHub {
         let h = &self.hub;
         let old = {
             let mut st = lock(&h.state);
-            st.sessions.insert(
+            let previous = st.sessions.insert(
                 key.to_owned(),
                 Added {
                     id,
                     session: session.clone(),
                 },
             );
+            if let Some(p) = previous.filter(|p| p.id != id) {
+                st.shadowed.entry(key.to_owned()).or_default().push(p);
+            }
             if let Some(d) = st.stores.as_ref().and_then(|s| s.downloads.as_ref()) {
                 d.scheduler.add_device(key, session);
             }
@@ -508,9 +515,37 @@ impl RecordingsHub {
         let lane = {
             let mut st = lock(&h.state);
             if st.sessions.get(key).is_none_or(|a| a.id != id) {
+                // A shadowed device leaves; the key's session stays.
+                if let Some(v) = st.shadowed.get_mut(key) {
+                    v.retain(|a| a.id != id);
+                    if v.is_empty() {
+                        st.shadowed.remove(key);
+                    }
+                }
                 return;
             }
             st.sessions.remove(key);
+            let earlier = st.shadowed.get_mut(key).and_then(Vec::pop);
+            if st.shadowed.get(key).is_some_and(Vec::is_empty) {
+                st.shadowed.remove(key);
+            }
+            if let Some(earlier) = earlier {
+                // The device added earlier under this key serves it again:
+                // its lane starts on that session, and holds stay.
+                let session = earlier.session.clone();
+                st.sessions.insert(key.to_owned(), earlier);
+                if let Some(d) = st.stores.as_ref().and_then(|s| s.downloads.as_ref()) {
+                    d.scheduler.remove_device(key);
+                    d.scheduler.add_device(key, session);
+                }
+                let lane = h.start_lane(&mut st, key);
+                drop(st);
+                h.sound_device_added(key);
+                if let Some(l) = lane {
+                    h.rt.block_on(l.stop());
+                }
+                return;
+            }
             if let Some(d) = st.stores.as_ref().and_then(|s| s.downloads.as_ref()) {
                 d.scheduler.remove_device(key);
             }
@@ -547,6 +582,7 @@ impl RecordingsHub {
             st.holds.clear();
             // The core closes the sessions next: hold none of them.
             st.sessions.clear();
+            st.shadowed.clear();
             let lanes: Vec<DeviceLane> = st
                 .devices
                 .values_mut()

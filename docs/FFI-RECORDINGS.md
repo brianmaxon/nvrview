@@ -105,6 +105,10 @@ NvStatus nv_recordings_enable(NvCore *core, const char *device_key, const char *
 - `utc_offset_s` is the device's offset from UTC, used only to know which
   day is "today" on the device; the app passes the computer's current
   offset (Decision 6). The core has no time-zone database: absent means 0.
+  Playback does not depend on it being right: a play's first keyframe
+  (within seconds of its seek, observed) that lies half a quarter hour or
+  more from the seek shows the device's own offset, which the playback then
+  uses (rounded to a quarter hour) to place its pictures in time.
 - `device_info` gains `"recordings": {"search": true, "playback": true,
   "download": true, "thumbnails": true}` so an app can hide what a backend
   cannot do.
@@ -1163,7 +1167,10 @@ fields must be ignored.
   (`LaneState`): `idle` (nothing waiting), `busy` (working through
   requests), `waiting_device` (not connected; requests stay queued),
   `ended` (login refused or session closed: every waiting request failed,
-  and nothing is searched until the app adds the device again).
+  and nothing is searched until the app adds the device again). Two
+  devices added for one address share a key; the lane uses the newest
+  one's session, and when that device is removed, the lane goes back to
+  the session of the one added before it.
   `pending_days` is the number of camera-days still queued. Sent on state
   changes and at most once a second while busy.
 - `recordings_day_failed`: one camera-day (or its month's calendar) could

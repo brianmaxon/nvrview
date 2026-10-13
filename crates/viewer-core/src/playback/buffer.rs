@@ -11,6 +11,17 @@
 //! local time, the clock of the index, the seek, and the playback position.
 //! A stream without those seconds is anchored at its seek time instead.
 //!
+//! **The device's offset.** The app passes the computer's UTC offset, which
+//! need not be the device's (a device set to another zone, or one that does
+//! not follow daylight saving time). A play's first keyframe lies within
+//! seconds of its seek time (observed, docs/protocol.md), so a first keyframe
+//! of a fresh run that is half a quarter hour or more away from the seek in
+//! local time shows the offset is wrong: the offset is then taken from the
+//! keyframe, rounded to a quarter hour, and kept. Without this every picture
+//! would be hours before (or after) its target, released as fast as the
+//! decoder answers as each group of pictures arrives (or never), and
+//! playback stutters.
+//!
 //! **Bounds.** The reader that fills the buffer stops its play once the
 //! buffer holds more than its limit of media time or bytes
 //! ([`Push::Full`]); the engine starts the play again from the newest
@@ -21,6 +32,9 @@
 use bc_protocol::media::{Record, wall_clock_secs};
 use recordings::recorded_time::{Anchor, refine};
 use std::collections::VecDeque;
+
+/// UTC offsets come in quarter hours.
+const OFFSET_STEP_S: i64 = 900;
 
 /// Keyframes kept for refining the anchor.
 const ANCHOR_KEYFRAMES: usize = 64;
@@ -70,6 +84,8 @@ pub(crate) struct CamBuf {
     /// seconds.
     fallback_us: Option<i64>,
     utc_offset_s: i64,
+    /// The offset was checked against this run's first keyframe.
+    offset_checked: bool,
     /// The run's seek time (device-local ms), for the fallback.
     seek_ms: i64,
     /// Newest picture received (pts).
@@ -95,6 +111,7 @@ impl CamBuf {
             anchor: None,
             fallback_us: None,
             utc_offset_s,
+            offset_checked: false,
             seek_ms: 0,
             newest_pts: None,
             skip_through: None,
@@ -112,6 +129,7 @@ impl CamBuf {
         self.bytes = 0;
         self.newest_pts = None;
         self.skip_through = None;
+        self.offset_checked = false;
         self.begin(run, seek_ms);
     }
 
@@ -154,6 +172,7 @@ impl CamBuf {
                 if *keyframe {
                     self.gated = false;
                     if let Some(s) = wall_clock_secs(extra_header) {
+                        self.check_offset(s);
                         if self.keyframes.len() == ANCHOR_KEYFRAMES {
                             self.keyframes.pop_front();
                         }
@@ -181,6 +200,30 @@ impl CamBuf {
         } else {
             Push::Kept
         }
+    }
+
+    /// Checks the offset against a fresh run's first keyframe (UTC seconds
+    /// `s`; see the module comment).
+    fn check_offset(&mut self, s: u32) {
+        if std::mem::replace(&mut self.offset_checked, true) {
+            return;
+        }
+        let seen = self.seek_ms.div_euclid(1000) - i64::from(s);
+        if (seen - self.utc_offset_s).abs() >= OFFSET_STEP_S / 2 {
+            let offset = (seen as f64 / OFFSET_STEP_S as f64).round() as i64 * OFFSET_STEP_S;
+            tracing::warn!(
+                given = self.utc_offset_s,
+                seen = offset,
+                "the device's UTC offset differs from the one given; using the device's"
+            );
+            self.utc_offset_s = offset;
+        }
+    }
+
+    /// The device's UTC offset in use (seconds east).
+    #[cfg(test)]
+    fn utc_offset_s(&self) -> i64 {
+        self.utc_offset_s
     }
 
     fn over(&self, ms: i64, bytes: usize) -> bool {
@@ -300,6 +343,26 @@ mod tests {
         assert_eq!(b.entries.len(), n);
         assert_eq!(b.push(2, video(1005, 200, false, 10)), Push::Kept);
         assert_eq!(b.entries.len(), n + 1);
+    }
+
+    #[test]
+    fn a_wrong_offset_is_corrected_from_the_first_keyframe() {
+        // Given the computer's offset (four hours west) for a device one
+        // hour west; the first keyframe is a second before the seek.
+        let mut b = CamBuf::new(-4 * 3600, 10_000, 1 << 20);
+        b.restart(1, 1_001 * 1000);
+        b.push(1, video(1000, 0, true, 10));
+        assert_eq!(b.utc_offset_s(), -3600);
+        let t = b.recorded_ms(1_000_000 * 1000).unwrap();
+        assert!((1_000_000..1_001_000).contains(&t), "{t}");
+        // Kept for later runs; a right offset is left alone.
+        b.restart(2, 2_000 * 1000);
+        b.push(2, video(1998, 0, true, 10));
+        assert_eq!(b.utc_offset_s(), -3600);
+        let mut ok = CamBuf::new(-3600, 10_000, 1 << 20);
+        ok.restart(1, 1_005 * 1000);
+        ok.push(1, video(1000, 0, true, 10));
+        assert_eq!(ok.utc_offset_s(), -3600);
     }
 
     #[test]

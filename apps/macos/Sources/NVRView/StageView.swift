@@ -260,6 +260,34 @@ final class StageView: NSView {
         grid.prepare = { [weak self] renderer, size in
             MainActor.assumeIsolated { self?.prepare(renderer: renderer, drawable: size) }
         }
+        if PacingRecorder.traceFromEnvironment {
+            grid.renderer.onNewPicture = { [weak self] _, _, _ in
+                MainActor.assumeIsolated { self?.trace.drawn += 1 }
+            }
+        }
+    }
+
+    /// NVRVIEW_PACING_TRACE=1: what the window's live tiles delivered and drew, logged every ten seconds.
+    private var trace = (since: 0.0, drawn: 0, refreshes: 0, busy: Int64(0))
+
+    private func tracePacing(now: Double) {
+        guard PacingRecorder.traceFromEnvironment else { return }
+        if trace.since == 0 { trace.since = now }
+        guard now - trace.since >= 10 else { return }
+        let tiles = state.tree.cameras.compactMap { model.leases.tile(for: $0) }
+        let reports = tiles.map { t in
+            defer { t.pacing.reset() }
+            return t.pacing.report()
+        }
+        let delivered = reports.map(\.released.pictures).reduce(0, +)
+        let seconds = now - trace.since
+        let refreshes = grid.refreshes - trace.refreshes, busy = grid.refreshBusyMicros - trace.busy
+        NSLog(
+            "pacing: %d tiles, delivered %.1f/s, drawn %.1f/s (%.2f), %.1f refreshes/s, %.1f ms of main thread per refresh; first tile %@",
+            tiles.count, Double(delivered) / seconds, Double(trace.drawn) / seconds,
+            delivered > 0 ? Double(trace.drawn) / Double(delivered) : 0, Double(refreshes) / seconds,
+            refreshes > 0 ? Double(busy) / Double(refreshes) / 1000 : 0, reports.first.map { String(describing: $0) } ?? "none")
+        trace = (now, 0, grid.refreshes, grid.refreshBusyMicros)
     }
 
     @available(*, unavailable)
@@ -613,6 +641,7 @@ final class StageView: NSView {
         if idle.tick(now: now) { hideChrome() }
         for view in chromes.values { view.tick(now: now) }
         model.ptz.tick(now: now)
+        tracePacing(now: now)
     }
 
     /// `tick(now:)` at the clock's time.

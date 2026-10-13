@@ -33,6 +33,7 @@ viewer  zoom-*
 viewer  fill-*
 viewer  pan-*
 viewer  tile-frame-*
+viewer  live-pacing
 
 # Tile features: alerts, indicators, quality, second lens, fisheye, detections.
 tiles  zoom-auto-quality

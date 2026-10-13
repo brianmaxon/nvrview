@@ -94,6 +94,9 @@ public final class CoreTile: TilePictureSource {
         init(generation: UInt32) { self.generation = generation }
     }
 
+    /// Playback pacing trace (off unless enabled; docs/RENDERING.md "Playback pacing").
+    public let pacing = PacingRecorder()
+
     init(router: CoreBridge.Router, device: UInt64, channel: UInt8, tier: StreamTier) {
         self.device = device
         self.channel = channel
@@ -107,12 +110,14 @@ public final class CoreTile: TilePictureSource {
         let link = TileLink(generation: number)
         let router = routerRef
         let tileID = self.tileID
+        let pacing = self.pacing
         let decoder = TileDecoder { [link] event in
             guard !link.closed.load(ordering: .acquiring), let router = router.value else { return }
             let id = tileID.value.load(ordering: .acquiring)
             switch event {
             case .decoded(let pts):
                 router.reportDecoded(link: link, tile: id, ptsMicros: pts)
+                pacing.decoded(pts)
             case .failed(let failure):
                 router.reportFailed(link: link, tile: id, CoreDecodeFailure(failure))
             }
@@ -323,6 +328,7 @@ public final class CoreTile: TilePictureSource {
                 codec: c.codec, parameterSets: c.parameterSets.map { Data($0) },
                 fullRange: c.color.fullRange)
         case .decode(let d):
+            pacing.arrived(d.ptsMicros)
             decoder.decode(annexB: d.accessUnit, keyframe: d.keyframe, ptsMicros: d.ptsMicros)
         case .flush:
             decoder.flush()

@@ -214,6 +214,10 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, options.SelfTestSeconds * 0.2)));
         long memoryBefore = PrivateBytes();
         await CheckFrame("grid", Tiles);
+        if (Runs("viewer"))
+        {
+            await LivePacingStep(r);
+        }
         // parity: third-party-channel
         if (options.MockChannels >= 2)
         {
@@ -369,6 +373,7 @@ internal sealed partial class SelfTest(App app, AppOptions options)
         if (Runs("recordings"))
         {
             await RecordingsSteps(v);
+            await PlaybackPacingStep(v);
         }
 
         if (Runs("tiles"))

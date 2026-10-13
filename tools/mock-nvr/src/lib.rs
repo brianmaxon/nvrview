@@ -134,6 +134,11 @@ pub struct Config {
     pub max_failed_logins: u32,
     /// Frames per second of the video stream.
     pub fps: u32,
+    /// Live video goes out in groups of this many pictures, each group sent
+    /// when its last picture exists (1: every picture on its own), as
+    /// devices were seen to bunch pictures on the network (the mock's
+    /// model of that; for tests of live pacing).
+    pub video_burst: u32,
     /// Width advertised in the info record and stream info.
     pub width: u32,
     /// Height advertised in the info record and stream info.
@@ -293,6 +298,7 @@ impl Config {
             max_logins: 4,
             max_failed_logins: 3,
             fps: 25,
+            video_burst: 1,
             width: 320,
             height: 240,
             fixture: Arc::new(fixture),
@@ -1687,8 +1693,18 @@ async fn stream_media(
             }
         };
         media_message(key, id, &record, &mut out)?;
-        // Send when the item exists, plus jitter; never before the previous
-        // message (one TCP stream keeps its order).
+        // Send when the item exists (a video group when its last picture
+        // does), plus jitter; never before the previous message (one TCP
+        // stream keeps its order).
+        let burst = f64::from(cfg.video_burst.max(1));
+        let frame_us = 1_000_000.0 / f64::from(fps);
+        let send_us = match item {
+            Item::Video { .. } if burst > 1.0 => {
+                let group = burst * frame_us;
+                (send_us / group + 1e-6).floor() * group + (burst - 1.0) * frame_us
+            }
+            _ => send_us,
+        };
         let at =
             start + Duration::from_micros(send_us as u64) + Duration::from_micros(jitter.next_us());
         due = due.max(at);

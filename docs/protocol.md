@@ -166,6 +166,7 @@ reported (client).
 | Switching a tile to full screen: the client starts the high tier for that channel, then stops the low-tier streams it no longer shows. | observed |
 | Audio is interleaved in every live stream; unmuting in the client sends nothing to the device. | observed |
 | Observed concurrency: 6 sub-streams on one session, and 2 high-tier H.265 4K streams on one session. | observed |
+| Live pictures arrive unevenly: in a two-minute recording of a 20 fps sub-stream, the arrival intervals had a median of 45 ms but a 95th percentile of about 118 ms and gaps up to about 300 ms, the pictures of a gap then arriving together, while the timestamps were evenly 50 ms apart. Decoded on arrival, such pictures land within one display refresh: a tile showed about half the device's frame rate. | observed |
 
 ## Media records (BCMEDIA)
 

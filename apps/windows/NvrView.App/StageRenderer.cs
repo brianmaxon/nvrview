@@ -340,6 +340,7 @@ internal sealed unsafe class StageRenderer : IDisposable
                 int placed = Place(layout, dipW, dipH, now, target.Width / dipW, target.Height / dipH);
                 PlaceOverlays(overlays, placed, target.Width / dipW, target.Height / dipH);
                 _renderer!.Draw(target.View, target.Width, target.Height, _draws.AsSpan(0, count), _sequences);
+                NotePacing(count, now);
             }
             for (int i = 0; i < count; i++)
             {
@@ -382,6 +383,21 @@ internal sealed unsafe class StageRenderer : IDisposable
         {
             _simulateLoss = false;
             _recover = "simulated device loss";
+        }
+    }
+
+    // Under the device lock, right after drawing: the pictures drawn for the first time go to their tiles' pacing
+    // traces (docs/RENDERING.md "Playback pacing"), timed at the frame's start.
+    private void NotePacing(int count, long frameStart)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            ulong seq = _sequences[i];
+            if (seq != 0 && _draws[i].Tile is { Pacing: { } pacing, ShownPicture: { } picture } &&
+                _draws[i].Tag is StageTile t && seq != t.LastSequence)
+            {
+                pacing.Presented(picture.PtsUs, frameStart);
+            }
         }
     }
 
