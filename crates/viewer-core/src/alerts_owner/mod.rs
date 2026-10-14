@@ -280,6 +280,8 @@ struct State {
     next_generation: u64,
     next_order: u64,
     alerted: BTreeMap<EpisodeKey, Alerted>,
+    /// The same for simulated triggers (their own episodes; no re-checks).
+    test_alerted: BTreeMap<EpisodeKey, Alerted>,
     deliveries: Vec<Delivery>,
     outputs: Vec<OutputSlot>,
     inputs: Vec<InputSlot>,
@@ -393,6 +395,7 @@ impl AlertHub {
                 next_generation: 1,
                 next_order: 0,
                 alerted: BTreeMap::new(),
+                test_alerted: BTreeMap::new(),
                 deliveries: Vec::new(),
                 outputs: Vec::new(),
                 inputs: Vec::new(),
@@ -1312,7 +1315,12 @@ impl Inner {
                 }
             }
             if let Some(cam) = d.camera {
-                st.alerted.insert(
+                let book = if test_flag.is_some() {
+                    &mut st.test_alerted
+                } else {
+                    &mut st.alerted
+                };
+                book.insert(
                     EpisodeKey {
                         camera: cam,
                         class: d.class,
@@ -1324,7 +1332,7 @@ impl Inner {
                         trigger_id: d.trigger_id,
                     },
                 );
-                if st.acq.recheck && d.class.is_detector_class() {
+                if st.acq.recheck && d.class.is_detector_class() && test_flag.is_none() {
                     self.hold(st, cam, d.class, instant);
                 }
             }
@@ -1622,7 +1630,10 @@ impl Inner {
                     self.record(st, d, true, fx);
                 }
                 for key in tick.settled {
-                    self.settled(st, key, instant, fx);
+                    self.settled(st, key, false, instant, fx);
+                }
+                for key in tick.settled_tests {
+                    self.settled(st, key, true, instant, fx);
                 }
             }
         }
@@ -1806,13 +1817,26 @@ impl Inner {
     }
 
     /// An episode settled: report it, deliver "settled", end its re-checks.
-    fn settled(&self, st: &mut State, key: EpisodeKey, instant: Instant, fx: &mut Vec<Effect>) {
-        if let Some(w) = st.wakes.get_mut(&key.camera)
+    fn settled(
+        &self,
+        st: &mut State,
+        key: EpisodeKey,
+        test: bool,
+        instant: Instant,
+        fx: &mut Vec<Effect>,
+    ) {
+        if !test
+            && let Some(w) = st.wakes.get_mut(&key.camera)
             && let Some(h) = w.hold.as_mut()
         {
             h.classes.remove(&key.class);
         }
-        let Some(a) = st.alerted.remove(&key) else {
+        let book = if test {
+            &mut st.test_alerted
+        } else {
+            &mut st.alerted
+        };
+        let Some(a) = book.remove(&key) else {
             return;
         };
         let (_, now) = self.now(st);

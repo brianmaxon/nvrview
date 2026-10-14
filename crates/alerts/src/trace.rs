@@ -157,6 +157,16 @@ pub enum StepKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         incident: Option<String>,
     },
+    /// For a simulated trigger only: what a real trigger for the same
+    /// camera and class would have met right now (real episodes untouched).
+    RealPreview {
+        /// When the real cooldown ends, if one is running.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cooldown_until_ms: Option<Millis>,
+        /// What the real timeliness would have done with this decision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        admission: Option<Admission>,
+    },
     Decision {
         #[serde(flatten)]
         outcome: Outcome,

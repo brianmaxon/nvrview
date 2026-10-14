@@ -100,6 +100,8 @@ pub struct DecideInputs {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Tick {
     pub settled: Vec<EpisodeKey>,
+    /// The same for simulated triggers' own episodes.
+    pub settled_tests: Vec<EpisodeKey>,
     /// Checks the host never finished, decided now.
     pub decided: Vec<Decision>,
 }
@@ -122,9 +124,24 @@ pub const MAX_OPEN: usize = 256;
 /// The longest mute.
 pub const MAX_MUTE_MS: Millis = 24 * HOUR_MS;
 
+/// The timeliness a trigger belongs to: simulated ones have their own.
+macro_rules! tl {
+    ($s:expr, $test:expr) => {
+        if $test {
+            &mut $s.test_timeliness
+        } else {
+            &mut $s.timeliness
+        }
+    };
+}
+
 pub struct Engine {
     settings: AlertSettings,
     timeliness: Timeliness,
+    /// Episodes and cooldowns of simulated triggers, kept apart so a test
+    /// never touches a real one (and real activity never quiets a test).
+    /// Same rules, so repeated tests behave like repeated real triggers.
+    test_timeliness: Timeliness,
     health: BTreeMap<String, SourceHealth>,
     mutes: BTreeMap<CameraId, Millis>,
     open: BTreeMap<u64, Open>,
@@ -147,6 +164,7 @@ impl Engine {
             Engine {
                 settings,
                 timeliness: Timeliness::new(),
+                test_timeliness: Timeliness::new(),
                 health: BTreeMap::new(),
                 mutes: BTreeMap::new(),
                 open: BTreeMap::new(),
@@ -300,8 +318,12 @@ impl Engine {
 
         if trigger.state == TriggerState::Stop {
             if let Some(cam) = trigger.camera {
-                self.timeliness
-                    .device_stop(&EpisodeKey { camera: cam, class }, &self.settings.timing);
+                let tl = if trigger.test {
+                    &mut self.test_timeliness
+                } else {
+                    &mut self.timeliness
+                };
+                tl.device_stop(&EpisodeKey { camera: cam, class }, &self.settings.timing);
             }
             return Intake {
                 trigger_id: id,
@@ -324,7 +346,8 @@ impl Engine {
         // Retriggers of an open external check join it.
         if let Some((idx, mapping)) = &sensor
             && let Some((&open_id, open)) = self.open.iter_mut().find(|(_, o)| {
-                o.sensor.as_ref().is_some_and(|(i, _)| i == idx)
+                o.trigger.test == trigger.test
+                    && o.sensor.as_ref().is_some_and(|(i, _)| i == idx)
                     && o.window.is_some_and(|w| w.is_open(trigger.at_ms))
             })
         {
@@ -543,6 +566,7 @@ impl Engine {
         let ctx = context(&self.settings, trigger.at_ms, now.utc_offset_min);
         let could = could_be_always(class, cs.exposure, ctx.night, &self.settings.always_alert);
         let key = EpisodeKey { camera: cam, class };
+        let test = trigger.test;
 
         let gate: Option<(GateResult, Outcome)> = if let Some(until) = self.muted_until(cam, now.ms)
         {
@@ -582,20 +606,17 @@ impl Engine {
                     reason: SuppressReason::ClassOff,
                 },
             ))
-        } else if let Some(left) = self.timeliness.cooldown_left(&key, now.ms)
-            && !self
-                .timeliness
-                .probe_due(&key, now.ms, self.settings.timing.check_spacing_ms())
+        } else if let Some(left) = tl!(self, test).cooldown_left(&key, now.ms)
+            && !tl!(self, test).probe_due(&key, now.ms, self.settings.timing.check_spacing_ms())
         {
             // Inside the cooldown, and a check for this camera and class
             // started moments ago: a repeat of the same event. (Later ones
             // are looked at and logged; see `probe_due`.)
-            let since = self
-                .timeliness
+            let since = tl!(self, test)
                 .get(&key)
                 .and_then(|e| e.last_alert_ms)
                 .map_or(0, |t| now.ms - t);
-            self.timeliness.touch(key, now.ms);
+            tl!(self, test).touch(key, now.ms);
             Some((
                 GateResult::Cooldown { left_ms: left },
                 Outcome::Suppress {
@@ -610,6 +631,19 @@ impl Engine {
         };
         if let Some((result, outcome)) = gate {
             steps.push(trace.push(now.ms, StepKind::Gate { result }));
+            if test {
+                let until = self
+                    .timeliness
+                    .cooldown_left(&key, now.ms)
+                    .map(|l| now.ms + l);
+                steps.push(trace.push(
+                    now.ms,
+                    StepKind::RealPreview {
+                        cooldown_until_ms: until,
+                        admission: None,
+                    },
+                ));
+            }
             let next = self.done_at_gate(trace, &mut steps, Some(cam), class, outcome, now);
             return Intake {
                 trigger_id: id,
@@ -617,10 +651,10 @@ impl Engine {
                 next,
             };
         }
-        let result = match (could, self.timeliness.cooldown_left(&key, now.ms)) {
+        let result = match (could, tl!(self, test).cooldown_left(&key, now.ms)) {
             (Some(rule), _) => GateResult::PassAlways { rule },
             (None, Some(left_ms)) => {
-                self.timeliness.note_probe(&key, now.ms);
+                tl!(self, test).note_probe(&key, now.ms);
                 GateResult::PassCooldown { left_ms }
             }
             (None, None) => GateResult::Pass,
@@ -660,7 +694,7 @@ impl Engine {
             };
         }
         if class.is_detector_class() {
-            self.timeliness.touch(key, now.ms);
+            tl!(self, test).touch(key, now.ms);
         }
         let v = self.settings.verification;
         let from = trigger.at_ms - Millis::from(v.window_before_s) * SECOND_MS;
@@ -924,11 +958,12 @@ impl Engine {
             },
         );
         let key = EpisodeKey { camera: cam, class };
+        let test = trigger.test;
         let quiet = |reason| Outcome::Quiet { reason };
 
         // A mute stops everything, always-alert included.
         if let Some(until) = self.muted_until(cam, now.ms) {
-            self.timeliness.discard(&key);
+            tl!(self, test).discard(&key);
             let o = Outcome::Suppress {
                 reason: SuppressReason::Muted { until_ms: until },
             };
@@ -936,7 +971,7 @@ impl Engine {
         }
 
         let Some(mut severity) = rules.severity else {
-            self.timeliness.discard(&key);
+            tl!(self, test).discard(&key);
             let reason = match check {
                 Some(Check::NotSeen {
                     outside_region: true,
@@ -952,14 +987,14 @@ impl Engine {
             // The gate let it through as a possible always-alert case, or it
             // came from a sensor: the camera's own settings apply now.
             if !schedule_allows(&cs.schedule, &ctx) {
-                self.timeliness.discard(&key);
+                tl!(self, test).discard(&key);
                 let o = Outcome::Suppress {
                     reason: SuppressReason::Schedule,
                 };
                 return self.finish(trace, Some(cam), class, o, incident, now);
             }
             if class != Class::Sensor && !cs.class_enabled(class) {
-                self.timeliness.discard(&key);
+                tl!(self, test).discard(&key);
                 let o = Outcome::Suppress {
                     reason: SuppressReason::ClassOff,
                 };
@@ -998,12 +1033,12 @@ impl Engine {
 
         if rules.always.is_none() {
             if severity < self.settings.min_alert_severity {
-                self.timeliness.discard(&key);
+                tl!(self, test).discard(&key);
                 let o = quiet(QuietReason::LowSeverity { severity });
                 return self.finish(trace, Some(cam), class, o, incident, now);
             }
             if late {
-                self.timeliness.discard(&key);
+                tl!(self, test).discard(&key);
                 let o = quiet(QuietReason::Late {
                     age_ms: trigger.age_ms(),
                 });
@@ -1011,7 +1046,30 @@ impl Engine {
             }
         }
 
-        let admission = self.timeliness.admit(
+        if test {
+            // What a real trigger would meet right now, without touching
+            // any real episode.
+            let real = &self.timeliness;
+            let would = real.preview_admit(
+                key,
+                severity,
+                rules.always.is_some(),
+                incident.as_deref(),
+                now.ms,
+                &self.settings.timing,
+            );
+            trace.push(
+                now.ms,
+                StepKind::RealPreview {
+                    cooldown_until_ms: real.cooldown_left(&key, now.ms).map(|l| now.ms + l),
+                    admission: Some(would),
+                },
+            );
+            // Alert IDs stay unique across both books.
+            self.test_timeliness
+                .set_next_alert_id(self.timeliness.next_alert_id());
+        }
+        let admission = tl!(self, test).admit(
             key,
             severity,
             rules.always.is_some(),
@@ -1019,6 +1077,10 @@ impl Engine {
             now.ms,
             &self.settings.timing,
         );
+        if test {
+            self.timeliness
+                .set_next_alert_id(self.test_timeliness.next_alert_id());
+        }
         trace.push(
             now.ms,
             StepKind::Timeliness {
@@ -1097,7 +1159,12 @@ impl Engine {
                 decided.push(self.decide_open(open, DecideInputs::default(), now));
             }
         }
+        let settled_tests = self.test_timeliness.tick(now.ms, &self.settings.timing);
         let settled = self.timeliness.tick(now.ms, &self.settings.timing);
-        Tick { settled, decided }
+        Tick {
+            settled,
+            settled_tests,
+            decided,
+        }
     }
 }

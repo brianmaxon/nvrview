@@ -239,6 +239,27 @@ pub fn explain(trace: &Trace, settings: &AlertSettings, offset_min: i32) -> Stri
         }
     }
 
+    // A simulated trigger also says what a real one would meet right now.
+    if let Some((until, admission)) = trace.find_last(|k| match k {
+        StepKind::RealPreview {
+            cooldown_until_ms,
+            admission,
+        } => Some((*cooldown_until_ms, *admission)),
+        _ => None,
+    }) {
+        let until_words = |ms: i64| hhmm(local(ms, offset_min).minute_of_day);
+        out.push(match (admission, until) {
+            (Some(Admission::Cooldown { .. }), Some(u)) | (None, Some(u)) => format!(
+                "A real trigger now would be in cooldown until {}.",
+                until_words(u)
+            ),
+            (Some(Admission::Update { .. }), _) => {
+                "A real trigger now would update the open alert.".into()
+            }
+            _ => "A real trigger now would alert normally.".into(),
+        });
+    }
+
     out.join(" ")
 }
 

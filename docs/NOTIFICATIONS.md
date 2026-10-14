@@ -429,7 +429,8 @@ Pending ──alert──► Active ──seen again──► Lingering ──mi
   Checks inside a cooldown are bounded: triggers for one camera and class
   closer than `check_spacing_s` (default 5, 0 to 60) to the alert or the
   last such check are repeats and are dropped at the gate; the engine's
-  bounded open-check count applies as always.
+  bounded open-check count applies as always. A simulated trigger (see
+  "Simulate trigger") has a separate set of episodes with the same rules.
 - **Updates, not new alerts:** "still present" after the cooldown, a higher
   severity, the same class on another camera of the same incident ("Also seen
   after Camera 1"), each raises the alert's revision.
@@ -646,9 +647,18 @@ state (docs/FFI.md, "Debugging and review (minor 14)").
 - **Simulate trigger.** A test runs the whole chain as if a sensor (or one of
   its mapped cameras) fired. The decision, its log entry, and the notification
   are marked Test. Home Assistant receives it only if the person ticks "also
-  send to Home Assistant" (off by default, each time). A test uses the same
-  cooldowns as a real trigger, so it can suppress a real alert for that camera
-  and class for the cooldown.
+  send to Home Assistant" (off by default, each time). A test has its own
+  episodes and cooldowns (the trigger's `test` flag; same rules, kept apart):
+  it never opens, extends, or uses a real episode, and real alerts never quiet
+  a test. It runs the full chain (gate, verification, rules), and a repeated
+  test inside the test cooldown is quieted like a repeated real trigger, so
+  rapid tests stay sane. Its trace carries a `real_preview` step
+  (`cooldown_until_ms`, and the `admission` a real trigger would have got,
+  computed without changing anything) and its explanation ends with what a
+  real trigger would do now: "A real trigger now would be in cooldown until
+  14:32." or "... would alert normally." A test's episode settles on its own
+  (with a settled event marked test) and starts no "still present" re-checks.
+  Alert IDs come from one counter, so they stay unique across both.
 - **Send test alert.** After a confirmation, one test alert is delivered through
   the Home Assistant output (its rules' entities are pulsed or notified, ignoring
   matching and cooldown) and the result is shown: delivered or not, the HTTP

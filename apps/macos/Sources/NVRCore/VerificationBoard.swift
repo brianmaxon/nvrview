@@ -560,6 +560,13 @@ public enum TraceText {
             }
             if f["incident"]?.string != nil { t += ", same incident" }
             return t
+        case "real_preview":
+            // A test only: what a real trigger would meet right now.
+            if let until = f["cooldown_until_ms"]?.int64 {
+                return "A real trigger now would be in cooldown until \(time(until))"
+            }
+            if f["admission"]?.string == "update" { return "A real trigger now would update the open alert" }
+            return "A real trigger now would alert normally"
         case "decision":
             switch f["decision"]?.string {
             case "alert":
