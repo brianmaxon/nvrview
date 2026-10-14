@@ -42,7 +42,7 @@ internal sealed partial class SelfTest
     {
         export.KindChoice = kind;
         export.CameraChoice = cameras.Length > 0 ? [.. cameras] : null;
-        Expect(export.Kind == kind, $"export: the tab does not offer {kind.Title()}");
+        Expect(export.Kind == kind, $"export: the tab does not offer {kind.Title()} (kinds [{string.Join(", ", export.Kinds.Select(k => k.Id()))}], {export.SourceCameras.Count} source cameras, view {export.Context})");
         if (export.Problem is { } why)
         {
             _problems.Add($"export: the tab would not start {kind.Title()}: {why}");
